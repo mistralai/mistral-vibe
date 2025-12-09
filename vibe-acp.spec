@@ -9,6 +9,8 @@ a = Analysis(
         # By default, pyinstaller doesn't include the .md files
         ('vibe/core/prompts/*.md', 'vibe/core/prompts'),
         ('vibe/core/tools/builtins/prompts/*.md', 'vibe/core/tools/builtins/prompts'),
+        # We also need to add all setup files
+        ('vibe/setup/*', 'vibe/setup'),
         # This is necessary because tools are dynamically called in vibe, meaning there is no static reference to those files
         ('vibe/core/tools/builtins/*.py', 'vibe/core/tools/builtins'),
         ('vibe/acp/tools/builtins/*.py', 'vibe/acp/tools/builtins'),
