@@ -148,8 +148,9 @@ class ToolManager:
         
         if not self._config.mcp_servers:
             return
-            
-        logger.info("Loading %d MCP servers...", len(self._config.mcp_servers))
+        
+        total = len(self._config.mcp_servers)
+        logger.info("Loading %d MCP servers in parallel...", total)
         
         # Load servers in parallel with timeout
         tasks = []
@@ -179,8 +180,9 @@ class ToolManager:
 
         if http_count + stdio_count > 0:
             logger.info(
-                "MCP integration registered %d tools (http=%d, stdio=%d)",
+                "Loaded %d tools from %d servers (http=%d, stdio=%d)",
                 http_count + stdio_count,
+                total - len(failed_servers),
                 http_count,
                 stdio_count,
             )
