@@ -14,7 +14,7 @@ body:
       placeholder: I'm always frustrated when...
     validations:
       required: true
-  - type: textarea
+  - type: markdown
     id: solution
     attributes:
       label: Describe the proposed solution / functionality

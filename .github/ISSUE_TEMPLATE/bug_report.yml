@@ -14,7 +14,7 @@ body:
       placeholder: Bug description
     validations:
       required: true
-  - type: textarea
+  - type: markdown
     id: logs
     attributes:
       label: Logs
