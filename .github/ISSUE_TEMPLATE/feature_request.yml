@@ -1,0 +1,31 @@
+name: "Feature Request"
+description: Request a new Mistral Vibe feature
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to request this feature!
+  - type: textarea
+    id: problem
+    attributes:
+      label: Describe the problem
+      description: Please provide a clear and concise description of the problem this feature would solve. The more information you can provide here, the better.
+      placeholder: I'm always frustrated when...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Describe the proposed solution / functionality
+      description: Please provide a clear and concise description of what you would like to happen / How you would expect the feature to function.
+      placeholder: I would like to see...
+  - type: dropdown
+    id: importance
+    attributes:
+      label: Importance
+      description: How important is this feature to you?
+      options:
+        - would be nice to have
+        - would make my workflow easier
+        - it's blocking my usage of Mistral Vibe as a CLI tool
