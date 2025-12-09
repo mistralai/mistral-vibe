@@ -20,3 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## v1.0.3
 
 - Add LICENCE symlink in distribution/zed for compatibility with zed extension release process
+
+## v1.0.4
+
+- Remove .envrc file
+- Rename agent in distribution/zed/extension.toml to mistral-vibe, fix icon and description
