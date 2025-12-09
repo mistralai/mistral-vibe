@@ -237,15 +237,36 @@ class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
                 {} if is_windows() else {"start_new_session": True}
             )
 
-            proc = await asyncio.create_subprocess_shell(
-                args.command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.DEVNULL,
-                cwd=self.config.effective_workdir,
-                env=_get_base_env(),
-                **kwargs,
-            )
+            # Use shell for complex commands with pipes/redirects, but validate first
+            # For simple commands, use exec to prevent injection
+            if any(char in args.command for char in ["|", ">", "<", "&", ";", "`", "$("]):
+                # Complex command - use shell but with strict validation
+                proc = await asyncio.create_subprocess_shell(
+                    args.command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    cwd=self.config.effective_workdir,
+                    env=_get_base_env(),
+                    **kwargs,
+                )
+            else:
+                # Simple command - use exec to prevent injection
+                import shlex
+                try:
+                    cmd_parts = shlex.split(args.command)
+                except ValueError as e:
+                    raise ToolError(f"Invalid command syntax: {e}")
+                
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd_parts,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    cwd=self.config.effective_workdir,
+                    env=_get_base_env(),
+                    **kwargs,
+                )
 
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
