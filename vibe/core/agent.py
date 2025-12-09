@@ -352,6 +352,7 @@ class Agent:
         chunks: list[LLMChunk] = []
         content_buffer = ""
         chunks_with_content = 0
+        last_emitted_length = 0
         BATCH_SIZE = 5
 
         async for chunk in self._chat_streaming():
@@ -363,8 +364,9 @@ class Agent:
                     chunks_with_content += 1
 
                 if content_buffer:
-                    yield self._create_assistant_event(content_buffer, chunk)
-                    content_buffer = ""
+                    delta = content_buffer[last_emitted_length:]
+                    yield self._create_assistant_event(delta, chunk)
+                    last_emitted_length = len(content_buffer)
                     chunks_with_content = 0
                 continue
 
@@ -373,13 +375,16 @@ class Agent:
                 chunks_with_content += 1
 
                 if chunks_with_content >= BATCH_SIZE:
-                    yield self._create_assistant_event(content_buffer, chunk)
-                    content_buffer = ""
+                    delta = content_buffer[last_emitted_length:]
+                    yield self._create_assistant_event(delta, chunk)
+                    last_emitted_length = len(content_buffer)
                     chunks_with_content = 0
 
         if content_buffer:
             last_chunk = chunks[-1] if chunks else None
-            yield self._create_assistant_event(content_buffer, last_chunk)
+            delta = content_buffer[last_emitted_length:]
+            if delta:
+                yield self._create_assistant_event(delta, last_chunk)
 
         full_content = ""
         full_tool_calls_map = OrderedDict[int, ToolCall]()
