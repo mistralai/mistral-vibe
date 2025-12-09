@@ -12,3 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## v1.0.1
 
 - Fix update notification
+
+## v1.0.2
+
+- Fix setup flow for vibe-acp builds
