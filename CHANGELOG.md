@@ -16,3 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## v1.0.2
 
 - Fix setup flow for vibe-acp builds
+
+## v1.0.3
+
+- Add LICENCE symlink in distribution/zed for compatibility with zed extension release process
