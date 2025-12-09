@@ -244,6 +244,17 @@ Key fields:
 - `command`: Command to run for stdio transport
 - `args`: Additional arguments for stdio transport
 
+MCP tools are named using the pattern `{server_name}_{tool_name}` and can be configured with permissions like built-in tools:
+
+```toml
+# Configure permissions for specific MCP tools
+[tools.fetch_server_get]
+permission = "always"
+
+[tools.my_http_server_query]
+permission = "ask"
+```
+
 ### Enable/disable tools with patterns
 
 You can control which tools are active using `enabled_tools` and `disabled_tools`.
