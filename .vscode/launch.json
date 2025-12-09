@@ -1,12 +1,15 @@
 {
-  "version": "1.0.4",
+  "version": "1.0.5",
   "configurations": [
     {
       "name": "ACP Server",
       "type": "debugpy",
       "request": "launch",
       "program": "vibe/acp/entrypoint.py",
-      "args": ["--workdir", "${workspaceFolder}"],
+      "args": [
+        "--workdir",
+        "${workspaceFolder}"
+      ],
       "console": "integratedTerminal",
       "justMyCode": false
     },
@@ -15,7 +18,10 @@
       "type": "debugpy",
       "request": "launch",
       "module": "pytest",
-      "args": ["-v", "-s"],
+      "args": [
+        "-v",
+        "-s"
+      ],
       "console": "integratedTerminal",
       "justMyCode": false,
       "cwd": "${workspaceFolder}",
@@ -28,7 +34,13 @@
       "type": "debugpy",
       "request": "launch",
       "module": "pytest",
-      "args": ["-k", "${input:test_identifier}", "-vvv", "-s", "--no-header"],
+      "args": [
+        "-k",
+        "${input:test_identifier}",
+        "-vvv",
+        "-s",
+        "--no-header"
+      ],
       "console": "integratedTerminal",
       "justMyCode": false,
       "cwd": "${workspaceFolder}",
