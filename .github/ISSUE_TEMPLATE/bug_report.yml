@@ -15,8 +15,7 @@ body:
     validations:
       required: true
   - type: markdown
-    id: logs
     attributes:
-      label: Logs
-      description: "Please provide additional logs or screenshots."
-      render: shell
+      value: |
+        ## Logs
+        Please provide additional logs or screenshots.

@@ -15,11 +15,10 @@ body:
     validations:
       required: true
   - type: markdown
-    id: solution
     attributes:
-      label: Describe the proposed solution / functionality
-      description: Please provide a clear and concise description of what you would like to happen / How you would expect the feature to function.
-      placeholder: I would like to see...
+      value: |
+        ## Describe the proposed solution / functionality
+        Please provide a clear and concise description of what you would like to happen / How you would expect the feature to function.
   - type: dropdown
     id: importance
     attributes:
