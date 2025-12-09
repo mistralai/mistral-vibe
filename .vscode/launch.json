@@ -1,0 +1,59 @@
+{
+  "version": "0.1.0",
+  "configurations": [
+    {
+      "name": "ACP Server",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "vibe/acp/entrypoint.py",
+      "args": ["--workdir", "${workspaceFolder}"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Tests",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-v", "-s"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Single Test",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-k", "${input:test_identifier}", "-vvv", "-s", "--no-header"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "stopOnEntry": false,
+      "subProcess": true
+    },
+    {
+      "name": "CLI",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "vibe/cli/entrypoint.py",
+      "args": [],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ],
+  "inputs": [
+    {
+      "id": "test_identifier",
+      "description": "Enter the test identifier (file, class, or function)",
+      "default": "TestInitialization",
+      "type": "promptString"
+    }
+  ]
+}

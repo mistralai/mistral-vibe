@@ -1,0 +1,26 @@
+{
+  "[python]": {
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    },
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true
+  },
+  "cursorpyright.analysis.typeCheckingMode": "strict",
+  "editor.formatOnSave": true,
+  "files.exclude": {
+    ".pytest_cache/**": true,
+    ".venv/**": true,
+    "**/__pycache__": true,
+    "dist/**": true,
+    "build/**": true
+  },
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "python.analysis.typeCheckingMode": "strict",
+  "python.testing.pytestArgs": ["tests"],
+  "python.testing.pytestEnabled": true,
+  "ruff.enable": true,
+  "ruff.organizeImports": true
+}

@@ -1,0 +1,681 @@
+Screen {
+    background: $background;
+}
+
+#chat {
+    height: 1fr;
+    width: 100%;
+    background: $background;
+    padding: 0 2 0 2;
+}
+
+#loading-area {
+    height: auto;
+    width: 100%;
+    background: $background;
+    padding: 1 2 0 2;
+    layout: horizontal;
+    align: left middle;
+}
+
+#loading-area-content {
+    width: 1fr;
+    height: auto;
+    align: left middle;
+}
+
+#todo-area {
+    height: auto;
+    max-height: 8;
+    width: 100%;
+    background: $background;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    text-align: left;
+    margin-top: 0;
+}
+
+#bottom-app-container {
+    height: auto;
+    width: 100%;
+    background: $background;
+}
+
+#bottom-bar {
+    height: auto;
+    width: 100%;
+    background: $background;
+    padding: 0 2 1 2;
+    align: left middle;
+    layout: horizontal;
+}
+
+#spacer {
+    width: 1fr;
+    height: auto;
+    background: transparent;
+}
+
+#messages {
+    width: 100%;
+    height: auto;
+    text-align: left;
+    margin-top: 1;
+    margin-bottom: 0;
+}
+
+#input-container {
+    height: auto;
+    width: 100%;
+    background: $background;
+    padding: 0;
+    margin: 0 2 1 2;
+}
+
+#completion-popup {
+    width: 100%;
+    padding: 1 1 1 1;
+    color: $text;
+}
+
+#input-box {
+    height: auto;
+    width: 100%;
+    background: $background;
+    border: round $foreground-muted;
+    padding: 0 1;
+
+    &.border-warning {
+        border: round $warning;
+    }
+}
+
+#input-body {
+    height: auto;
+}
+
+#prompt {
+    width: auto;
+    background: transparent;
+    color: $primary;
+    text-style: bold;
+    padding: 0 1 0 0;
+}
+
+#input {
+    width: 1fr;
+    height: auto;
+    max-height: 16;
+    background: transparent;
+    color: $text;
+    border: none;
+    padding: 0;
+}
+
+ToastRack {
+    align: left bottom;
+    padding: 0 2;
+    margin: 0 2 6 2;
+}
+
+Markdown MarkdownFence {
+    overflow-x: auto;
+    scrollbar-size-horizontal: 1;
+    max-width: 95%;
+}
+
+.user-message {
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+
+    &:first-child {
+        margin-top: 0;
+    }
+
+    &.pending {
+        .user-message-prompt,
+        .user-message-content {
+            opacity: 0.7;
+            text-style: italic;
+        }
+    }
+}
+
+.user-message-container {
+    width: 100%;
+    height: auto;
+}
+
+.user-message-prompt {
+    width: auto;
+    height: auto;
+    color: $primary;
+    text-style: bold;
+}
+
+.user-message-content {
+    width: 1fr;
+    height: auto;
+    color: $foreground;
+    text-style: bold;
+}
+
+.assistant-message {
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+}
+
+.assistant-message-container {
+    width: 100%;
+    height: auto;
+    align: left top;
+}
+
+.assistant-message-dot {
+    width: auto;
+    height: auto;
+    color: $foreground;
+}
+
+.assistant-message-content {
+    width: 1fr;
+    height: auto;
+    padding: 0;
+
+    Markdown {
+        width: 100%;
+        height: auto;
+        padding: 0;
+        margin: 0;
+    }
+}
+
+.interrupt-message {
+    margin-top: 0;
+    margin-bottom: 0;
+    margin-left: 2;
+    height: auto;
+    padding: 1 2;
+    background: $warning 10%;
+    color: $text-warning;
+}
+
+.error-message {
+    margin-top: 1;
+    height: auto;
+    padding: 1 2;
+    background: $error 10%;
+    color: $error;
+    text-style: bold;
+}
+
+.bash-output-message {
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+}
+
+.bash-output-container {
+    width: 100%;
+    height: auto;
+    padding: 1 2;
+    background: $surface;
+}
+
+.bash-cwd-line,
+.bash-command-line {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    align: left middle;
+}
+
+.bash-cwd {
+    width: auto;
+    color: $text-muted;
+}
+
+.bash-cwd-spacer,
+.bash-command-spacer {
+    width: 1fr;
+}
+
+.bash-chevron {
+    width: auto;
+    color: $primary;
+    text-style: bold;
+}
+
+.bash-command {
+    width: auto;
+    color: $foreground;
+}
+
+.bash-output {
+    width: 100%;
+    color: $foreground;
+}
+
+.bash-exit-success {
+    width: auto;
+    color: $text-success;
+}
+
+.bash-exit-failure {
+    width: auto;
+    color: $text-error;
+}
+
+.bash-exit-code {
+    width: auto;
+    color: $text-muted;
+}
+
+.unknown-event {
+    height: auto;
+    color: $text-muted;
+}
+
+BlinkingMessage {
+    width: 100%;
+    height: auto;
+
+    Horizontal {
+        width: 100%;
+        height: auto;
+    }
+}
+
+.blink-dot {
+    width: auto;
+    height: auto;
+    color: $foreground;
+
+    &.success {
+        color: $text-success;
+    }
+
+    &.error {
+        color: $text-error;
+    }
+}
+
+.blink-text {
+    width: 1fr;
+    height: auto;
+    color: $foreground;
+}
+
+.compact-message {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+}
+
+.tool-call {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+}
+
+.tool-result {
+    width: 100%;
+    height: auto;
+    margin-top: 0;
+    margin-left: 2;
+    padding: 1 2;
+    background: $surface;
+    color: $foreground;
+
+    &.error-text {
+        background: $error 10%;
+        color: $text-error;
+    }
+
+    &.warning-text {
+        background: $warning 10%;
+        color: $text-warning;
+    }
+}
+
+.tool-call-widget {
+    width: 100%;
+    height: auto;
+    color: $foreground;
+}
+
+.tool-call-detail {
+    height: auto;
+    color: $text-muted;
+}
+
+.tool-result-widget {
+    width: 100%;
+    height: auto;
+    color: $foreground;
+
+    Static {
+        height: auto;
+    }
+}
+
+.tool-result-detail {
+    height: auto;
+    margin-top: 0;
+    color: $text-muted;
+}
+
+.tool-result-error {
+    color: $text-error;
+}
+
+.tool-result-warning {
+    color: $text-warning;
+}
+
+.diff-header {
+    height: auto;
+    color: $text-muted;
+    text-style: bold;
+}
+
+.diff-removed {
+    height: auto;
+    color: $text-error;
+}
+
+.diff-added {
+    height: auto;
+    color: $text-success;
+}
+
+.diff-range {
+    height: auto;
+    color: $primary;
+}
+
+.diff-context {
+    height: auto;
+    color: $text-muted;
+}
+
+.todo-empty {
+    height: auto;
+    color: $text-muted;
+}
+
+.todo-pending {
+    height: auto;
+    color: $foreground;
+}
+
+.todo-in_progress {
+    height: auto;
+    color: $warning;
+}
+
+.todo-completed {
+    height: auto;
+    color: $success;
+}
+
+.todo-cancelled {
+    height: auto;
+    color: $text-muted;
+}
+
+#todo-area .tool-result {
+    margin-left: 0;
+    background: $surface;
+}
+
+.loading-widget {
+    width: 100%;
+    height: auto;
+}
+
+.loading-container {
+    width: auto;
+    height: auto;
+}
+
+.loading-star {
+    width: auto;
+    height: auto;
+    color: $warning;
+}
+
+.loading-status {
+    width: auto;
+    height: auto;
+}
+
+.loading-char {
+    width: auto;
+    height: auto;
+}
+
+.loading-ellipsis {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+}
+
+.loading-hint {
+    width: auto;
+    height: auto;
+    color: $foreground;
+}
+
+WelcomeBanner {
+    width: 100%;
+    height: auto;
+    border: round $surface;
+    border-title-align: center;
+    text-align: center;
+    content-align: center middle;
+    padding: 2 4;
+    margin: 1 1 0 1;
+    color: $foreground;
+
+    .muted {
+        color: $text-muted;
+    }
+}
+
+#config-app {
+    width: 100%;
+    height: auto;
+    background: $background;
+    border: round $foreground-muted;
+    padding: 0 1;
+    margin: 0 2 1 2;
+}
+
+#config-content {
+    width: 100%;
+    height: auto;
+}
+
+.settings-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+}
+
+.settings-option {
+    height: auto;
+    color: $foreground;
+}
+
+.settings-cursor-selected {
+    color: $primary;
+    text-style: bold;
+}
+
+.settings-label-selected {
+    color: $text;
+    text-style: bold;
+}
+
+.settings-value-toggle-on-selected {
+    color: $text-success;
+    text-style: bold;
+}
+
+.settings-value-toggle-on-unselected {
+    color: $success;
+}
+
+.settings-value-toggle-off {
+    color: $text-muted;
+}
+
+.settings-value-cycle-selected {
+    color: $primary;
+    text-style: bold;
+}
+
+.settings-value-cycle-unselected {
+    color: $primary;
+}
+
+.settings-help {
+    height: auto;
+    color: $text-muted;
+}
+
+#approval-app {
+    width: 100%;
+    height: auto;
+    max-height: 16;
+    background: $background;
+    border: round $foreground-muted;
+    padding: 0 1;
+    margin: 0 2 1 2;
+}
+
+#approval-content {
+    width: 100%;
+    height: auto;
+}
+
+.approval-tool-info-scroll {
+    width: 100%;
+    height: auto;
+    max-height: 8;
+}
+
+.approval-title {
+    height: auto;
+    text-style: bold;
+    color: $warning;
+}
+
+.approval-tool-info-container {
+    width: 100%;
+    height: auto;
+}
+
+.tool-approval-widget {
+    width: 100%;
+    height: auto;
+
+    Static {
+        width: 100%;
+        height: auto;
+    }
+
+    Vertical {
+        width: 100%;
+        height: auto;
+    }
+}
+
+.approval-option {
+    height: auto;
+    color: $foreground;
+}
+
+.approval-cursor-selected {
+    &.approval-option-yes {
+        color: $text-success;
+        text-style: bold;
+    }
+
+    &.approval-option-no {
+        color: $text-error;
+        text-style: bold;
+    }
+}
+
+.approval-option-selected {
+    &.approval-option-yes {
+        color: $success;
+    }
+
+    &.approval-option-no {
+        color: $error;
+    }
+}
+
+.approval-help {
+    height: auto;
+    color: $text-muted;
+}
+
+.approval-description {
+    height: auto;
+    color: $foreground;
+}
+
+.code-block {
+    height: auto;
+    color: $foreground;
+    background: $surface;
+    padding: 1;
+}
+
+Horizontal {
+    width: 100%;
+    height: auto;
+}
+
+ModeIndicator {
+    width: auto;
+    height: auto;
+    background: transparent;
+    padding: 0;
+    margin: 0 0 0 1;
+    color: $warning;
+    align: left middle;
+
+    &.mode-on {
+        color: $warning;
+    }
+
+    &.mode-off {
+        color: $text-muted;
+    }
+}
+
+PathDisplay {
+    width: auto;
+    height: auto;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    color: $primary;
+}
+
+ContextProgress {
+    width: auto;
+    height: auto;
+    background: transparent;
+    padding: 0;
+    margin: 0;
+    color: $foreground;
+}

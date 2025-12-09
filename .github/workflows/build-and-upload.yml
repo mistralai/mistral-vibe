@@ -1,0 +1,86 @@
+name: Build and upload
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-upload:
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - runner: ubuntu-22.04
+            os: linux
+            arch: x86_64
+          # - runner: ubuntu-22.04-arm # ubuntu-22.04-arm, ubuntu-24.04-arm and windows-11-arm are not supported yet for private repositories
+          #   os: linux
+          #   arch: aarch64
+
+          # macOS
+          - runner: macos-15-intel
+            os: darwin
+            arch: x86_64
+          - runner: macos-14
+            os: darwin
+            arch: aarch64
+
+          # Windows
+          - runner: windows-2022
+            os: windows
+            arch: x86_64
+          # - runner: windows-11-arm # ubuntu-22.04-arm, ubuntu-24.04-arm and windows-11-arm are not supported yet for private repositories
+          #   os: windows
+          #   arch: aarch64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+
+      - name: Install uv with caching
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --all-extras
+
+      - name: Build with PyInstaller
+        run: uv run pyinstaller vibe-acp.spec
+
+      - name: Get package version with uv (Unix)
+        id: get_version_unix
+        if: ${{ matrix.os != 'windows' }}
+        run: python -c "import subprocess; version = subprocess.check_output(['uv', 'version']).decode().split()[1]; print(f'version={version}')" >> $GITHUB_OUTPUT
+
+      - name: Get package version with uv (Windows)
+        id: get_version_windows
+        if: ${{ matrix.os == 'windows' }}
+        shell: pwsh
+        run: python -c "import subprocess; version = subprocess.check_output(['uv', 'version']).decode().split()[1]; print(f'version={version}')" >> $env:GITHUB_OUTPUT
+
+      - name: Upload binary as artifact (Unix)
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: ${{ matrix.os != 'windows' }}
+        with:
+          name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version_unix.outputs.version }}
+          path: dist/vibe-acp
+
+      - name: Upload binary as artifact (Windows)
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: ${{ matrix.os == 'windows' }}
+        with:
+          name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version_windows.outputs.version }}
+          path: dist/vibe-acp.exe

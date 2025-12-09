@@ -1,0 +1,7 @@
+# CODEOWNERS
+
+# Default owners for everything in the repo
+* @mistralai/mistral-vibe
+
+# Owners for specific directories
+# Not needed for now, can be filled later

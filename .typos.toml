@@ -1,0 +1,2 @@
+[default]
+extend-ignore-re = ["(?m)^.*(#|//)\\s*typos:disable-line$", "datas"]

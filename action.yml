@@ -1,0 +1,64 @@
+---
+name: Mistral Vibe
+description: "Download, install, and run Mistral Vibe"
+author: Mistral AI
+
+inputs:
+  prompt:
+    description: The prompt to pass to the agent
+    required: true
+    default: |
+      You are a helpful assistant
+  MISTRAL_API_KEY:
+    description: API Key for AI Studio
+    required: true
+  install_python:
+    description: |
+      Whether or not to install Python
+    required: true
+    default: "true"
+  python_version:
+    description: |
+      Version of Python to install. Warning: Unsupported.
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Required Python Version
+      if: inputs.install_python == true
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version-file: ${{ github.action_path }}/.python-version
+
+    - name: Install Requested Python Version
+      if: inputs.install_python && inputs.python_version
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
+    - name: Install Mistral Vibe
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        uv sync --locked --all-extras --dev
+
+    - name: Run Mistral Vibe
+      id: run-mistral-vibe
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        MISTRAL_API_KEY: "${{ inputs.MISTRAL_API_KEY }}"
+      run: |
+        # We want to make sure that any text passed in here
+        # doesn't have special bash characters (<, >, &, etc...)
+        ESCAPED_PROMPT=$(printf '%q' "${{ inputs.prompt }}")
+
+        # Change back to the original working directory for the tool to work
+        cd "${{ github.workspace }}"
+        uv run --directory "${{ github.action_path }}" vibe \
+          --auto-approve \
+          -p "${ESCAPED_PROMPT}"

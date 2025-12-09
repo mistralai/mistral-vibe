@@ -1,0 +1,157 @@
+[project]
+name = "mistral-vibe"
+version = "1.0.0"
+description = "Minimal CLI coding agent by Mistral"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Mistral AI" }]
+keywords = [
+    "ai",
+    "cli",
+    "coding-assistant",
+    "mistral",
+    "llm",
+    "developer-tools",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "agent-client-protocol==0.6.3",
+    "aiofiles>=24.1.0",
+    "httpx>=0.28.1",
+    "mcp>=1.14.0",
+    "mistralai==1.9.11",
+    "pexpect>=4.9.0",
+    "packaging>=24.1",
+    "pydantic>=2.12.4",
+    "pydantic-settings>=2.12.0",
+    "python-dotenv>=1.0.0",
+    "pytest-xdist>=3.8.0",
+    "rich>=14.0.0",
+    "textual>=1.0.0",
+    "tomli-w>=1.2.0",
+    "watchfiles>=1.1.1",
+    "pyperclip>=1.11.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/mistralai/mistral-vibe"
+Repository = "https://github.com/mistralai/mistral-vibe"
+Issues = "https://github.com/mistralai/mistral-vibe/issues"
+Documentation = "https://github.com/mistralai/mistral-vibe#readme"
+
+
+[build-system]
+requires = ["hatchling", "hatch-vcs", "editables"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+include = ["vibe/"]
+
+
+[project.scripts]
+vibe = "vibe.cli.entrypoint:main"
+vibe-acp = "vibe.acp.entrypoint:main"
+
+
+[tool.uv]
+package = true
+required-version = ">=0.8.0"
+
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.2.0",
+    "pyright>=1.1.403",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=1.2.0",
+    "pytest-timeout>=2.4.0",
+    "pytest-textual-snapshot>=1.1.0",
+    "respx>=0.22.0",
+    "ruff>=0.14.5",
+    "twine>=5.0.0",
+    "typos>=1.34.0",
+    "vulture>=2.14",
+    "pyinstaller>=6.17.0",
+]
+
+[tool.pyright]
+pythonVersion = "3.12"
+reportMissingTypeStubs = false
+reportPrivateImportUsage = false
+include = ["vibe/**/*.py", "tests/**/*.py"]
+venvPath = "."
+venv = ".venv"
+
+[tool.ruff]
+include = ["vibe/**/*.py", "tests/**/*.py"]
+line-length = 88
+target-version = "py312"
+preview = true
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+
+[tool.ruff.lint]
+select = [
+    "F",
+    "I",
+    "D2",
+    "UP",
+    "TID",
+    "ANN",
+    "PLR",
+    "B0",
+    "B905",
+    "DOC102",
+    "RUF022",
+    "RUF010",
+    "RUF012",
+    "RUF019",
+    "RUF100",
+]
+ignore = ["D203", "D205", "D213", "ANN401", "PLR6301"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "PLR"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+known-first-party = ["vibe"]
+force-sort-within-sections = true
+split-on-trailing-comma = true
+combine-as-imports = true
+force-wrap-aliases = false
+order-by-type = true
+required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.pylint]
+max-statements = 50
+max-branches = 15
+max-locals = 15
+max-args = 9
+max-returns = 6
+max-nested-blocks = 4
+
+[tool.vulture]
+ignore_decorators = ["@*"]
+
+[tool.pytest.ini_options]
+addopts = "-vvvv -q -n auto --durations=5 --import-mode=importlib"
+timeout = 10
