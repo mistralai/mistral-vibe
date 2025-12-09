@@ -19,6 +19,11 @@ body:
       value: |
         ## Describe the proposed solution / functionality
         Please provide a clear and concise description of what you would like to happen / How you would expect the feature to function.
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      placeholder: I would like to see...
   - type: dropdown
     id: importance
     attributes:
