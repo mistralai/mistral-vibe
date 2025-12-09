@@ -138,6 +138,19 @@ class WriteFile(
         file_path = Path(args.path).expanduser()
         if not file_path.is_absolute():
             file_path = self.config.effective_workdir / file_path
+        
+        # Validate path traversal BEFORE resolve
+        if ".." in file_path.parts:
+            raise ToolError("Path traversal (..) not allowed")
+        
+        # Check if it's a symlink and validate target
+        if file_path.is_symlink():
+            real_path = file_path.resolve()
+            try:
+                real_path.relative_to(self.config.effective_workdir.resolve())
+            except ValueError:
+                raise ToolError(f"Symlink points outside project: {file_path}")
+        
         file_path = file_path.resolve()
 
         try:
