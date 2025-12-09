@@ -14,12 +14,9 @@ body:
       placeholder: Bug description
     validations:
       required: true
-  - type: markdown
-    attributes:
-      value: |
-        ## Logs
-        Please provide additional logs or screenshots.
   - type: textarea
-    id: logs
+    id: expected-behaviour
     attributes:
-      label: Logs
+      label: Expected behaviour
+      description: What did you expect to happen? Describe the correct behaviour you anticipated.
+      placeholder: I expected the Vibe to...

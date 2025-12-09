@@ -14,15 +14,11 @@ body:
       placeholder: I'm always frustrated when...
     validations:
       required: true
-  - type: markdown
-    attributes:
-      value: |
-        ## Describe the proposed solution / functionality
-        Please provide a clear and concise description of what you would like to happen / How you would expect the feature to function.
   - type: textarea
     id: solution
     attributes:
-      label: Proposed solution
+      label: Describe the proposed solution / functionality
+      description: Please provide a clear and concise description of what you would like to happen / How you would expect the feature to function.
       placeholder: I would like to see...
   - type: dropdown
     id: importance
@@ -30,6 +26,6 @@ body:
       label: Importance
       description: How important is this feature to you?
       options:
-        - would be nice to have
-        - would make my workflow easier
-        - it's blocking my usage of Mistral Vibe as a CLI tool
+        - nice to have
+        - would make my life easier
+        - blocks me from using Mistral Vibe
