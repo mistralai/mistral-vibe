@@ -12,7 +12,7 @@ class SnapshotTestAppWithUpdate(BaseSnapshotTestApp):
         config = default_config()
         config.enable_update_checks = True
         version_update_notifier = FakeVersionUpdateGateway(
-            update=VersionUpdate(latest_version="0.2.0")
+            update=VersionUpdate(latest_version="1000.2.0")
         )
         super().__init__(config=config, version_update_notifier=version_update_notifier)
 

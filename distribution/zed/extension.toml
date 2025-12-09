@@ -1,7 +1,7 @@
 id = "mistral-vibe"
 name = "Mistral Vibe"
 description = "Lightning-fast AI agent that actually gets things done"
-version = "1.0.0"
+version = "1.0.1"
 schema_version = 1
 authors = ["Mistral AI"]
 repository = "https://github.com/mistralai/mistral-vibe"
@@ -11,25 +11,25 @@ name = "Mistral Vibe"
 icon = "./icons/mistral_vibe.svg"
 
 [agent_servers.mistral-vibe-agent.targets.darwin-aarch64]
-archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.0/vibe-acp-darwin-aarch64-1.0.0.zip"
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.1/vibe-acp-darwin-aarch64-1.0.1.zip"
 cmd = "./vibe-acp"
 
 [agent_servers.mistral-vibe-agent.targets.darwin-x86_64]
-archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.0/vibe-acp-darwin-x86_64-1.0.0.zip"
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.1/vibe-acp-darwin-x86_64-1.0.1.zip"
 cmd = "./vibe-acp"
 
 # [agent_servers.mistral-vibe-agent.targets.linux-aarch64]
-# archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.0/vibe-acp-linux-aarch64-1.0.0.zip"
+# archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.1/vibe-acp-linux-aarch64-1.0.1.zip"
 # cmd = "./vibe-acp"
 
 [agent_servers.mistral-vibe-agent.targets.linux-x86_64]
-archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.0/vibe-acp-linux-x86_64-1.0.0.zip"
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.1/vibe-acp-linux-x86_64-1.0.1.zip"
 cmd = "./vibe-acp"
 
 # [agent_servers.mistral-vibe-agent.targets.windows-aarch64]
-# archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.0/vibe-acp-windows-aarch64-1.0.0.zip"
+# archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.1/vibe-acp-windows-aarch64-1.0.1.zip"
 # cmd = "./vibe-acp.exe"
 
 [agent_servers.mistral-vibe-agent.targets.windows-x86_64]
-archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.0/vibe-acp-windows-x86_64-1.0.0.zip"
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.0.1/vibe-acp-windows-x86_64-1.0.1.zip"
 cmd = "./vibe-acp.exe"

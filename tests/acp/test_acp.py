@@ -351,7 +351,7 @@ class TestInitialization:
                 mcpCapabilities=McpCapabilities(http=False, sse=False),
             )
             assert response.result.agentInfo == Implementation(
-                name="@mistralai/mistral-vibe", title="Mistral Vibe", version="0.1.0"
+                name="@mistralai/mistral-vibe", title="Mistral Vibe", version="1.0.1"
             )
             vibe_setup_method = next(
                 (
