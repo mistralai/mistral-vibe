@@ -122,6 +122,11 @@ class OpenAIAdapter(APIAdapter):
             model_name, converted_messages, temperature, tools, max_tokens, tool_choice
         )
 
+        if enable_streaming:
+            payload["stream"] = True
+            if provider.name == "mistral":
+                payload["stream_options"] = {"stream_tool_calls": True}
+
         headers = self.build_headers(api_key)
 
         body = json.dumps(payload).encode("utf-8")

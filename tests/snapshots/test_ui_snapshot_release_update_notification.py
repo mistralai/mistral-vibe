@@ -14,7 +14,11 @@ class SnapshotTestAppWithUpdate(BaseSnapshotTestApp):
         version_update_notifier = FakeVersionUpdateGateway(
             update=VersionUpdate(latest_version="1000.2.0")
         )
-        super().__init__(config=config, version_update_notifier=version_update_notifier)
+        super().__init__(
+            config=config,
+            version_update_notifier=version_update_notifier,
+            current_version="1.0.4",
+        )
 
 
 def test_snapshot_shows_release_update_notification(snap_compare: SnapCompare) -> None:

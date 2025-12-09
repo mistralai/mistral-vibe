@@ -25,3 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Remove .envrc file
 - Rename agent in distribution/zed/extension.toml to mistral-vibe, fix icon and description
+
+## v1.0.5
+
+- Fix streaming with OpenAI adapter

@@ -23,6 +23,7 @@ def default_config() -> VibeConfig:
         textual_theme="gruvbox",
         disable_welcome_banner_animation=True,
         displayed_workdir="/test/workdir",
+        enable_update_checks=False,
     )
 
 
