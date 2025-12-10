@@ -21,6 +21,7 @@ import tomli_w
 
 from vibe.core.config_path import (
     AGENT_DIR,
+    COMMAND_DIR,
     CONFIG_DIR,
     CONFIG_FILE,
     GLOBAL_ENV_FILE,

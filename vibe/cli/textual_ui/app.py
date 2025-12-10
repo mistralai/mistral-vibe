@@ -13,7 +13,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from vibe.cli.clipboard import copy_selection_to_clipboard
-from vibe.cli.commands import CommandRegistry
+from vibe.cli.commands import CommandRegistry, CustomCommand
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
@@ -306,14 +306,24 @@ class VibeApp(App):
             VibeConfig.save_updates(updates)
 
     async def _handle_command(self, user_input: str) -> bool:
-        if command := self.commands.find_command(user_input):
-            handler = getattr(self, command.handler)
-            if asyncio.iscoroutinefunction(handler):
-                await handler()
-            else:
-                handler()
+        command, args = self.commands.find_command_with_args(user_input)
+
+        if command is None:
+            return False
+
+        # Handle custom commands (template-based)
+        if isinstance(command, CustomCommand):
+            rendered = command.render(args)
+            await self._handle_user_message(rendered)
             return True
-        return False
+
+        # Handle built-in commands
+        handler = getattr(self, command.handler)
+        if asyncio.iscoroutinefunction(handler):
+            await handler()
+        else:
+            handler()
+        return True
 
     async def _handle_bash_command(self, command: str) -> None:
         if not command:
