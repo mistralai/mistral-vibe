@@ -157,7 +157,7 @@ Vibe supports multiple ways to configure your API keys:
 
 ### Custom System Prompts
 
-You can create custom system prompts to replace the default one (`prompts/core.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
+You can create custom system prompts to replace the default one (`prompts/cli.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
 
 To use a custom system prompt, set the `system_prompt_id` in your configuration to match the filename (without the `.md` extension):
 
