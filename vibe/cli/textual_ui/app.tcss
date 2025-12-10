@@ -58,6 +58,7 @@ Screen {
 }
 
 #messages {
+    layout: stream;
     width: 100%;
     height: auto;
     text-align: left;

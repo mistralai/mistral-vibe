@@ -61,6 +61,8 @@ class BaseToolConfig(BaseModel):
         denylist: Patterns that automatically deny tool execution.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     permission: ToolPermission = ToolPermission.ASK
     workdir: Path | None = Field(default=None, exclude=True)
     allowlist: list[str] = Field(default_factory=list)

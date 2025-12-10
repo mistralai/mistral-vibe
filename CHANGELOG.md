@@ -5,27 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v1.0.0
+## [1.0.6] - 2025-12-10
 
-- Initial release
+### Fixed
 
-## v1.0.1
+- add missing steps in bump_version script
+- move `pytest-xdist` to dev dependencies
+- take into account config for bash timeout
 
-- Fix update notification
+### Changed
 
-## v1.0.2
+- improve textual performance
+- improve README:
+  - improve windows installation instructions
+  - update default system prompt reference
+  - document MCP tool permission configuration
 
-- Fix setup flow for vibe-acp builds
+## [1.0.5] - 2025-12-10
 
-## v1.0.3
+### Fixed
+
+- Fix streaming with OpenAI adapter
+
+## [1.0.4] - 2025-12-09
+
+### Changed
+
+- Rename agent in distribution/zed/extension.toml to mistral-vibe
+
+### Fixed
+
+- Fix icon and description in distribution/zed/extension.toml
+
+### Removed
+
+- Remove .envrc file
+
+## [1.0.3] - 2025-12-09
+
+### Added
 
 - Add LICENCE symlink in distribution/zed for compatibility with zed extension release process
 
-## v1.0.4
+## [1.0.2] - 2025-12-09
 
-- Remove .envrc file
-- Rename agent in distribution/zed/extension.toml to mistral-vibe, fix icon and description
+### Fixed
 
-## v1.0.5
+- Fix setup flow for vibe-acp builds
 
-- Fix streaming with OpenAI adapter
+## [1.0.1] - 2025-12-09
+
+### Fixed
+
+- Fix update notification
+
+## [1.0.0] - 2025-12-09
+
+### Added
+
+- Initial release
