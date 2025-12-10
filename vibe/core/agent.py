@@ -3,7 +3,16 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable
-from enum import StrEnum, auto
+
+try:
+    from enum import StrEnum, auto
+except ImportError:
+    from enum import Enum, auto
+
+    class StrEnum(str, Enum):
+        pass
+
+
 import time
 
 # Import ModeManager for type checking only to avoid circular imports
@@ -108,21 +117,16 @@ class Agent:
         self.backend_factory = lambda: backend or self._select_backend()
         self.backend = self.backend_factory()
 
-        self.message_observer = message_observer
-        self._last_observed_message_index: int = 0
         self.middleware_pipeline = MiddlewarePipeline()
         self.enable_streaming = enable_streaming
         self._setup_middleware(max_turns, max_price)
 
-        system_prompt = get_universal_system_prompt(
-            self.tool_manager, config, mode_manager
+        # Initialize MessageManager (Refactor B.1)
+        from vibe.core.message_manager import MessageManager
+
+        self.message_manager = MessageManager(
+            config, self.tool_manager, mode_manager, message_observer
         )
-
-        self.messages = [LLMMessage(role=Role.system, content=system_prompt)]
-
-        if self.message_observer:
-            self.message_observer(self.messages[0])
-            self._last_observed_message_index = 1
 
         self.stats = AgentStats()
         try:
@@ -149,6 +153,14 @@ class Agent:
 
         self._last_chunk: LLMChunk | None = None
 
+    @property
+    def messages(self) -> list[LLMMessage]:
+        return self.message_manager.messages
+
+    @messages.setter
+    def messages(self, value: list[LLMMessage]) -> None:
+        self.message_manager.messages = value
+
     def _select_backend(self) -> BackendLike:
         active_model = self.config.get_active_model()
         provider = self.config.get_provider_for_model(active_model)
@@ -156,18 +168,10 @@ class Agent:
         return BACKEND_FACTORY[provider.backend](provider=provider, timeout=timeout)
 
     def add_message(self, message: LLMMessage) -> None:
-        self.messages.append(message)
+        self.message_manager.add_message(message)
 
     def _flush_new_messages(self) -> None:
-        if not self.message_observer:
-            return
-
-        if self._last_observed_message_index >= len(self.messages):
-            return
-
-        for msg in self.messages[self._last_observed_message_index :]:
-            self.message_observer(msg)
-        self._last_observed_message_index = len(self.messages)
+        self.message_manager.flush_new_messages()
 
     async def act(self, msg: str) -> AsyncGenerator[BaseEvent]:
         self._clean_message_history()
@@ -737,7 +741,36 @@ class Agent:
         if self.mode_manager is not None:
             blocked, reason = self.mode_manager.should_block_tool(tool.get_name(), args)
             if blocked:
-                return ToolDecision(verdict=ToolExecutionResponse.SKIP, feedback=reason)
+                # ═══════════════════════════════════════════════════════════════
+                # FIX A.5: Educational feedback to prevent LLM from retrying
+                # The LLM was ignoring simple block messages and retrying 10+ times
+                # This stronger message teaches it to adapt its strategy
+                # ═══════════════════════════════════════════════════════════════
+                mode_name = self.mode_manager.current_mode.value.upper()
+                educational_feedback = f"""⛔ BLOCKED: Tool '{tool.get_name()}' is a WRITE operation.
+
+Current mode: 📋 {mode_name} (READ-ONLY)
+
+🚫 CRITICAL INSTRUCTION:
+You are FORBIDDEN from executing write operations in this mode.
+This tool call has been BLOCKED and will NOT be executed.
+
+❌ DO NOT:
+- Retry this tool or similar write tools (write_file, search_replace, bash with >, rm, mv, etc.)
+- Attempt workarounds or alternative write methods
+- Keep trying the same operation
+
+✅ INSTEAD, YOU MUST:
+1. Use ONLY read-only tools: read_file, grep, bash (ls/cat/find/git status)
+2. Analyze the codebase thoroughly
+3. Create a detailed PLAN describing what changes you WOULD make
+4. Tell the user: "I've created a plan. Switch to NORMAL or AUTO mode to execute."
+
+⚠️ This is your instruction. Acknowledge and adapt your strategy NOW.
+Original block reason: {reason}"""
+                return ToolDecision(
+                    verdict=ToolExecutionResponse.SKIP, feedback=educational_feedback
+                )
 
         # Auto-approve if enabled (AUTO or YOLO mode)
         if self.auto_approve:
@@ -802,63 +835,7 @@ class Agent:
                 )
 
     def _clean_message_history(self) -> None:
-        ACCEPTABLE_HISTORY_SIZE = 2
-        if len(self.messages) < ACCEPTABLE_HISTORY_SIZE:
-            return
-        self._fill_missing_tool_responses()
-        self._ensure_assistant_after_tools()
-
-    def _fill_missing_tool_responses(self) -> None:
-        i = 1
-        while i < len(self.messages):  # noqa: PLR1702
-            msg = self.messages[i]
-
-            if msg.role == "assistant" and msg.tool_calls:
-                expected_responses = len(msg.tool_calls)
-
-                if expected_responses > 0:
-                    actual_responses = 0
-                    j = i + 1
-                    while j < len(self.messages) and self.messages[j].role == "tool":
-                        actual_responses += 1
-                        j += 1
-
-                    if actual_responses < expected_responses:
-                        insertion_point = i + 1 + actual_responses
-
-                        for call_idx in range(actual_responses, expected_responses):
-                            tool_call_data = msg.tool_calls[call_idx]
-
-                            empty_response = LLMMessage(
-                                role=Role.tool,
-                                tool_call_id=tool_call_data.id or "",
-                                name=(tool_call_data.function.name or "")
-                                if tool_call_data.function
-                                else "",
-                                content=str(
-                                    get_user_cancellation_message(
-                                        CancellationReason.TOOL_NO_RESPONSE
-                                    )
-                                ),
-                            )
-
-                            self.messages.insert(insertion_point, empty_response)
-                            insertion_point += 1
-
-                    i = i + 1 + expected_responses
-                    continue
-
-            i += 1
-
-    def _ensure_assistant_after_tools(self) -> None:
-        MIN_MESSAGE_SIZE = 2
-        if len(self.messages) < MIN_MESSAGE_SIZE:
-            return
-
-        last_msg = self.messages[-1]
-        if last_msg.role is Role.tool:
-            empty_assistant_msg = LLMMessage(role=Role.assistant, content="Understood.")
-            self.messages.append(empty_assistant_msg)
+        self.message_manager.clean_history()
 
     def _reset_session(self) -> None:
         self.session_id = str(uuid4())

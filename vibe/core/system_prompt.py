@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from vibe.core.config import INSTRUCTIONS_FILE, PROJECT_DOC_FILENAMES
 from vibe.core.llm.format import get_active_tool_classes
@@ -198,7 +198,20 @@ class ProjectContextProvider:
 
         return structure
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # FIX D.5: Git Context Caching (60s TTL)
+    # Prevents 150-300ms latency per turn by caching git status
+    # ═══════════════════════════════════════════════════════════════════════
+    _git_cache: ClassVar[tuple[str, float] | None] = None
+    _GIT_CACHE_TTL: ClassVar[float] = 60.0
+
     def get_git_status(self) -> str:
+        # Check cache first
+        if ProjectContextProvider._git_cache:
+            cached_status, timestamp = ProjectContextProvider._git_cache
+            if (time.time() - timestamp) < ProjectContextProvider._GIT_CACHE_TTL:
+                return cached_status
+
         try:
             timeout = min(self.config.timeout_seconds, 10.0)
             num_commits = self.config.default_commit_count
@@ -288,7 +301,12 @@ class ProjectContextProvider:
                 git_info_parts.append("Recent commits:")
                 git_info_parts.extend(recent_commits)
 
-            return "\n".join(git_info_parts)
+            result = "\n".join(git_info_parts)
+
+            # Update cache
+            ProjectContextProvider._git_cache = (result, time.time())
+
+            return result
 
         except subprocess.TimeoutExpired:
             return "Git operations timed out (large repository)"

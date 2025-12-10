@@ -2,6 +2,23 @@ from __future__ import annotations
 
 import sys
 from typing import Any
+from unittest.mock import MagicMock
+
+# Mock tomli_w for tests environment
+sys.modules["tomli_w"] = MagicMock()
+
+# Mock aiofiles for tests environment
+sys.modules["aiofiles"] = MagicMock()
+sys.modules["aiofiles.os"] = MagicMock()
+
+import enum
+
+if not hasattr(enum, "StrEnum"):
+
+    class StrEnum(str, enum.Enum):
+        pass
+
+    enum.StrEnum = StrEnum
 
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource

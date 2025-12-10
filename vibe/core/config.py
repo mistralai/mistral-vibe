@@ -1,11 +1,23 @@
 from __future__ import annotations
 
-from enum import StrEnum, auto
+try:
+    from enum import StrEnum, auto
+except ImportError:
+    from enum import Enum, auto
+
+    class StrEnum(str, Enum):
+        pass
+
+
 import os
 from pathlib import Path
 import re
 import shlex
-import tomllib
+
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 from typing import Annotated, Any, Literal
 
 from dotenv import dotenv_values

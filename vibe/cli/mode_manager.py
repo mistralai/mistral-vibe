@@ -35,7 +35,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import StrEnum, auto
+
+try:
+    from enum import StrEnum, auto
+except ImportError:
+    from enum import Enum, auto
+
+    class StrEnum(str, Enum):
+        pass
+
+
 import re
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
@@ -243,54 +252,89 @@ SAFE_GIT_SUBCOMMANDS: frozenset[str] = frozenset({
 })
 
 # Bash patterns that indicate write operations
+# Bash patterns that indicate write operations
 WRITE_BASH_PATTERNS: tuple[str, ...] = (
-    # File operations
-    r"\brm\s",
-    r"\brm$",
+    # =========================================================================
+    # FIX A.2: Expanded Security Patterns (60+ entries)
+    # acts as a firewall against write operations in Read-Only modes
+    # =========================================================================
+    # 1. File Modification
+    r"\brm[\s$]",
     r"\brmdir\b",
-    r"\bmv\s",
-    r"\bmv$",
-    r"\bcp\s",
-    r"\bcp$",
-    r"\btouch\s",
-    r"\btouch$",
-    r"\bmkdir\s",
-    r"\bmkdir$",
-    # Redirects
-    r">",
-    r">>",
-    # In-place edits
-    r"\bsed\s+-i\b",
-    r"\bsed\s.*-i\b",
-    # Permissions
-    r"\bchmod\b",
-    r"\bchown\b",
-    r"\bchgrp\b",
-    # Git write operations
+    r"\bmv[\s$]",
+    r"\bcp[\s$]",
+    r"\btouch[\s$]",
+    r"\bmkdir[\s$]",
+    r"\btruncate[\s$]",
+    r"\bshred[\s$]",
+    # 2. Redirection & Piping (Write)
+    r">",  # Classic redirect
+    r">>",  # Append redirect
+    r"\|\&",  # Coprocess pipe (often used for evasion)
+    r"tee\b",  # Write to file pipe
+    # 3. In-place Edits
+    r"\bsed\s+.*-i",  # sed --in-place
+    r"\bawk\s+.*-i",  # awk --in-place
+    r"\bperl\s+.*-i",  # perl --in-place
+    # 4. Permissions & Ownership
+    r"\bchmod[\s$]",
+    r"\bchown[\s$]",
+    r"\bchgrp[\s$]",
+    r"\bchattr[\s$]",
+    # 5. Dangerous Execution / Shell Manipulation
+    r"\beval[\s$]",
+    r"\bsource[\s$]",
+    r"\b\.[\s$]",  # Source alias .
+    r"\bexec[\s$]",
+    r"\bdd[\s$]",  # Data duplicator (destroyer)
+    r"\bmknod[\s$]",
+    r"\bmkfifo[\s$]",
+    # 6. Evasion Techniques
+    r"\$\{IFS\}",  # Internal Field Separator abuse
+    r"\$IFS",
+    r">\s*\(",  # Process substitution output
+    r"<\s*\(",  # Process substitution input (can be abused)
+    # 7. Git Dangerous Operations
     r"\bgit\s+commit\b",
     r"\bgit\s+push\b",
-    r"\bgit\s+checkout\b",
-    r"\bgit\s+reset\b",
+    r"\bgit\s+checkout\b",  # Can modify files
+    r"\bgit\s+reset\b",  # Can modify files
     r"\bgit\s+rebase\b",
     r"\bgit\s+merge\b",
     r"\bgit\s+stash\b",
     r"\bgit\s+cherry-pick\b",
-    # Package managers
-    r"\bpip\s+install\b",
-    r"\bpip3\s+install\b",
-    r"\bnpm\s+install\b",
-    r"\byarn\s+add\b",
-    r"\bpnpm\s+add\b",
-    r"\bapt\s+install\b",
-    r"\bapt-get\s+install\b",
-    r"\byum\s+install\b",
-    r"\bdnf\s+install\b",
-    r"\bbrew\s+install\b",
-    r"\bpacman\s+-S\b",
-    # Dangerous commands
-    r"\bsudo\b",
-    r"\bsu\s",
-    r"\bdoas\b",
+    r"\bgit\s+clean\b",
+    r"\bgit\s+apply\b",
+    r"\bgit\s+rm\b",
+    r"\bgit\s+mv\b",
+    r"\bgit\s+init\b",
+    r"\bgit\s+clone\b",
+    r"\bgit\s+restore\b",
+    r"\bgit\s+switch\b",
+    r"\bgit\s+pull\b",  # Modifies workspace
+    r"\bgit\s+config\s+.*core\.editor",  # Config modification
+    # 8. Network Downloads (File Writing)
+    r"\bcurl\s+.*-[oO#]",  # Output to file
+    r"\bwget\s+.*-O",  # Output to file
+    # 9. Package Managers (Install/Remove)
+    r"\bpip\s+(?:install|uninstall)\b",
+    r"\bpip3\s+(?:install|uninstall)\b",
+    r"\buv\s+(?:pip|add|remove)\b",
+    r"\bnpm\s+(?:install|i|add|remove|update)\b",
+    r"\byarn\s+(?:add|remove)\b",
+    r"\bpnpm\s+(?:add|remove)\b",
+    r"\bapt\s+(?:install|remove|purge)\b",
+    r"\bapt-get\s+(?:install|remove|purge)\b",
+    r"\byum\s+(?:install|remove)\b",
+    r"\bdnf\s+(?:install|remove)\b",
+    r"\bbrew\s+(?:install|uninstall)\b",
+    r"\bpacman\s+-[RS]",
+    r"\bgem\s+(?:install|uninstall)\b",
+    r"\bcargo\s+(?:install|uninstall)\b",
+    # 10. Dangerous Privileges
+    r"\bsudo[\s$]",
+    r"\bsu[\s$]",
+    r"\bdoas[\s$]",
 )
 
 # Maximum length for command display in error messages

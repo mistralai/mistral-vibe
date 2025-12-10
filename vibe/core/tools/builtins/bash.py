@@ -5,7 +5,7 @@ import os
 import re
 import signal
 import sys
-from typing import ClassVar, Literal, final
+from typing import ClassVar, final
 
 from pydantic import BaseModel, Field
 
@@ -230,44 +230,27 @@ class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
 
-        proc = None
+        # Use Central Secure Command Executor
+        # This handles:
+        # 1. Safe argument parsing (shlex)
+        # 2. Safe environment (A.3: No API keys)
+        # 3. Execution (create_subprocess_exec)
+        # 4. Whitelist checks (A.1)
+
+        from vibe.core.tools.executor import SecureCommandExecutor
+
+        executor = SecureCommandExecutor(workdir=self.config.effective_workdir)
+
         try:
-            # start_new_session is Unix-only, on Windows it's ignored
-            kwargs: dict[Literal["start_new_session"], bool] = (
-                {} if is_windows() else {"start_new_session": True}
+            stdout, stderr, returncode = await executor.execute(
+                command=args.command, timeout=timeout
             )
 
-            proc = await asyncio.create_subprocess_shell(
-                args.command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.DEVNULL,
-                cwd=self.config.effective_workdir,
-                env=_get_base_env(),
-                **kwargs,
-            )
-
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
-            except TimeoutError:
-                await _kill_process_tree(proc)
-                raise self._build_timeout_error(args.command, timeout)
-
-            encoding = _get_subprocess_encoding()
-            stdout = (
-                stdout_bytes.decode(encoding, errors="replace")[:max_bytes]
-                if stdout_bytes
-                else ""
-            )
-            stderr = (
-                stderr_bytes.decode(encoding, errors="replace")[:max_bytes]
-                if stderr_bytes
-                else ""
-            )
-
-            returncode = proc.returncode or 0
+            # Truncate output if needed
+            if len(stdout) > max_bytes:
+                stdout = stdout[:max_bytes] + "... (truncated)"
+            if len(stderr) > max_bytes:
+                stderr = stderr[:max_bytes] + "... (truncated)"
 
             return self._build_result(
                 command=args.command,
@@ -276,10 +259,7 @@ class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
                 returncode=returncode,
             )
 
-        except (ToolError, asyncio.CancelledError):
+        except ToolError:
             raise
-        except Exception as exc:
-            raise ToolError(f"Error running command {args.command!r}: {exc}") from exc
-        finally:
-            if proc is not None:
-                await _kill_process_tree(proc)
+        except Exception as e:
+            raise ToolError(f"Error running command {args.command!r}: {e}") from e

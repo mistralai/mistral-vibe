@@ -34,6 +34,7 @@ from rich.syntax import Syntax
 
 # Easter Eggs Integration
 from vibe.cli.easter_eggs import (
+    get_dev_fortune,
     get_kitchen_status,
     get_modes_display,
     get_random_roast,
@@ -138,23 +139,20 @@ class ChefChatREPL:
             new_emoji = self.mode_manager.config.emoji
             description = self.mode_manager.config.description
 
-            # Use prompt_toolkit's native output (no Rich - avoids ANSI corruption)
-            output = event.app.output
-            output.write("\n\n")
-            output.write(f"╭{'─' * 56}╮\n")
-            output.write(
-                f"│ 🔄 {old_mode.value.upper()} → {new_mode.value.upper():<47}│\n"
+            # ═══════════════════════════════════════════════════════════════
+            # FIX D.4: Use Rich console.print() instead of output.write()
+            # output.write() is append-only, causing mode transitions to stack
+            # console.print() renders cleanly without stacking issues
+            # ═══════════════════════════════════════════════════════════════
+            panel = ModeTransitionDisplay.render(
+                old_mode=old_mode.value.upper(),
+                new_mode=new_mode.value.upper(),
+                new_emoji=new_emoji,
+                description=description,
+                tips=tips,
             )
-            output.write(f"│ {new_emoji} {description:<53}│\n")
-            output.write(f"├{'─' * 56}┤\n")
-
-            for tip in tips[:3]:
-                # Strip Rich markup for plain text output
-                clean_tip = tip.replace("[", "").replace("]", "")
-                output.write(f"│   {clean_tip:<53}│\n")
-
-            output.write(f"╰{'─' * 56}╯\n\n")
-            output.flush()
+            self.console.print()
+            self.console.print(panel)
 
             # Force the prompt to refresh with new mode
             event.app.invalidate()
@@ -469,9 +467,22 @@ class ChefChatREPL:
             roast = get_random_roast()
             self.console.print(
                 Panel(
-                    roast,
+                    Markdown(roast),
                     title=f"[{COLORS['error']}]🔥 Chef Ramsay Says[/{COLORS['error']}]",
                     border_style=COLORS["error"],
+                )
+            )
+            self.console.print()
+
+        elif cmd == "/fortune":
+            # Developer fortune cookie - Feature 3.2
+            self.console.print()
+            fortune = get_dev_fortune()
+            self.console.print(
+                Panel(
+                    Markdown(fortune),
+                    title=f"[{COLORS['primary']}]🥠 Fortune Cookie[/{COLORS['primary']}]",
+                    border_style=COLORS["secondary"],
                 )
             )
             self.console.print()
@@ -574,6 +585,7 @@ class ChefChatREPL:
         table.add_row("/chef", "🍳 Kitchen status report")
         table.add_row("/wisdom", "🧠 Random chef wisdom")
         table.add_row("/roast", "🔥 Get roasted by Chef Ramsay")
+        table.add_row("/fortune", "🥠 Open a fortune cookie")
         table.add_row("/plate", "🍽️ Present your work beautifully")
         table.add_row("/stats", "📊 Session statistics")
         table.add_row("", "")

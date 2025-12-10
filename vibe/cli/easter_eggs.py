@@ -271,3 +271,45 @@ def get_random_wisdom() -> str:
 ---
 *Type `/roast` if you need some aggressive motivation.*
 """
+
+
+# =============================================================================
+# DEVELOPER FORTUNES - Tech mysticism and buggy prophecies
+# =============================================================================
+
+DEVELOPER_FORTUNES: tuple[str, ...] = (
+    "🥠 **Your next pull request will be merged without comments.**\n"
+    "   Lucky numbers: 42, 404, 200",
+    "🥠 **A bug you thought was fixed will return... in production.**\n"
+    "   Lucky numbers: 500, 503, NaN",
+    "🥠 **You will solve that tricky bug at 3 AM in the shower.**\n"
+    "   Lucky numbers: 127, 255, 0",
+    "🥠 **The rubber duck on your desk holds the answer you seek.**\n"
+    "   Lucky numbers: π, e, ∞",
+    "🥠 **YOLO mode will be your downfall... or your triumph.**\n"
+    "   Lucky numbers: 🎲 YOLO, 🚀 SHIP IT",
+    "🥠 **Your code will compile on the first try. Be suspicious.**\n"
+    "   Lucky numbers: 1, 0, -1",
+    "🥠 **A merge conflict is in your future. Resolve it with patience.**\n"
+    "   Lucky numbers: <<<<<<<, =======, >>>>>>>",
+    "🥠 **Someone will star your repo today.**\n   Lucky numbers: ⭐, 🌟, ✨",
+    "🥠 **You will discover a new library that solves all your problems.**\n"
+    "   Lucky numbers: npm, pip, cargo",
+    "🥠 **The missing semicolon is on line 42.**\n   Lucky numbers: ;",
+)
+
+
+def get_dev_fortune() -> str:
+    """Get a random developer fortune cookie."""
+    fortune = random.choice(DEVELOPER_FORTUNES)
+    now = datetime.now(UTC)
+    timestamp = now.strftime("%Y-%m-%d %H:%M UTC")
+
+    return f"""## 🥠 Developer Fortune Cookie
+
+{fortune}
+
+---
+*Fortune generated on {timestamp}*
+*Your lucky bug: Off-by-one error*
+"""
