@@ -9,7 +9,7 @@ import sys
 import time
 from typing import TYPE_CHECKING
 
-from vibe.core.config import INSTRUCTIONS_FILE, PROJECT_DOC_FILENAMES
+from vibe.core.config import INSTRUCTIONS_FILE, PROJECT_DOC_FILENAMES, AGENT_MD_FILENAMES
 from vibe.core.llm.format import get_active_tool_classes
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.utils import is_dangerous_directory, is_windows
@@ -28,6 +28,27 @@ def _load_user_instructions() -> str:
 
 def _load_project_doc(workdir: Path, max_bytes: int) -> str:
     for name in PROJECT_DOC_FILENAMES:
+        path = workdir / name
+        try:
+            return path.read_text("utf-8", errors="ignore")[:max_bytes]
+        except (FileNotFoundError, OSError):
+            continue
+    return ""
+
+
+def _load_agent_md(workdir: Path, max_bytes: int, enabled: bool, filename: str | None = None) -> str:
+    """Load AGENT.md or agent.md content from the project root if enabled."""
+    if not enabled:
+        return ""
+
+    # If a specific filename is provided in configuration, check it first
+    filenames_to_check = []
+    if filename:
+        filenames_to_check.append(filename)
+    # Always check the default filenames
+    filenames_to_check.extend(AGENT_MD_FILENAMES)
+
+    for name in filenames_to_check:
         path = workdir / name
         try:
             return path.read_text("utf-8", errors="ignore")[:max_bytes]
@@ -394,6 +415,17 @@ def get_universal_system_prompt(tool_manager: ToolManager, config: VibeConfig) -
             ).get_full_context()
 
         sections.append(context)
+
+        # Load AGENT.md content if enabled in configuration
+        agent_md_content = _load_agent_md(
+            config.effective_workdir,
+            config.project_context.max_doc_bytes,
+            config.agent_md.enabled,
+            config.agent_md.filename
+        )
+        if agent_md_content.strip():
+            sections.append("## Project Coding Conventions (from AGENT.md)")
+            sections.append(agent_md_content)
 
         project_doc = _load_project_doc(
             config.effective_workdir, config.project_context.max_doc_bytes

@@ -56,6 +56,7 @@ PROMPT_DIR = CONFIG_DIR / "prompts"
 INSTRUCTIONS_FILE = CONFIG_DIR / "instructions.md"
 HISTORY_FILE = CONFIG_DIR / "vibehistory"
 PROJECT_DOC_FILENAMES = ["AGENTS.md", "VIBE.md", ".vibe.md"]
+AGENT_MD_FILENAMES = ["AGENT.md", "agent.md"]
 
 
 class MissingAPIKeyError(RuntimeError):
@@ -112,6 +113,11 @@ class TomlFileSettingsSource(PydanticBaseSettingsSource):
 
     def __call__(self) -> dict[str, Any]:
         return self.toml_data
+
+
+class AgentMdConfig(BaseSettings):
+    enabled: bool = True
+    filename: str = "AGENT.md"
 
 
 class ProjectContextConfig(BaseSettings):
@@ -316,6 +322,7 @@ class VibeConfig(BaseSettings):
     models: list[ModelConfig] = Field(default_factory=lambda: list(DEFAULT_MODELS))
 
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
+    agent_md: AgentMdConfig = Field(default_factory=AgentMdConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
     tools: dict[str, BaseToolConfig] = Field(default_factory=dict)
     tool_paths: list[str] = Field(

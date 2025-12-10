@@ -168,6 +168,20 @@ system_prompt_id = "my_custom_prompt"
 
 This will load the prompt from `~/.vibe/prompts/my_custom_prompt.md`.
 
+### Project Conventions with AGENT.md
+
+Mistral Vibe automatically detects and incorporates project-specific coding conventions from an `AGENT.md` or `agent.md` file in your project's root directory. This file can contain any coding guidelines, style preferences, or project-specific instructions that should be followed by the AI assistant.
+
+To enable or configure AGENT.md behavior, you can modify the `agent_md` section in your config.toml:
+
+```toml
+[agent_md]
+enabled = true  # Set to false to disable the feature
+filename = "AGENT.md"  # Specify the filename to look for (default: "AGENT.md")
+```
+
+When enabled, Vibe will automatically load the content from `AGENT.md` (or `agent.md`) and append it to the system prompt as "Project Coding Conventions". This allows the AI to learn and follow your project's specific coding standards and practices.
+
 ### Custom Agent Configurations
 
 You can create custom agent configurations for specific use cases (e.g., red-teaming, specialized tasks) by adding agent-specific TOML files in the `~/.vibe/agents/` directory.
