@@ -299,7 +299,7 @@ class VibeConfig(BaseSettings):
     vim_keybindings: bool = False
     disable_welcome_banner_animation: bool = False
     displayed_workdir: str = ""
-    auto_compact_threshold: int = 100_000
+    auto_compact_threshold: int = 200_000
     context_warnings: bool = False
     textual_theme: str = "textual-dark"
     instructions: str = ""
@@ -539,7 +539,26 @@ class VibeConfig(BaseSettings):
 
     @classmethod
     def _migrate(cls) -> None:
-        pass
+        if not CONFIG_FILE.exists():
+            return
+
+        try:
+            with CONFIG_FILE.open("rb") as f:
+                config = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            return
+
+        needs_save = False
+
+        if (
+            "auto_compact_threshold" not in config
+            or config["auto_compact_threshold"] == 100_000  # noqa: PLR2004
+        ):
+            config["auto_compact_threshold"] = 200_000
+            needs_save = True
+
+        if needs_save:
+            cls.dump_config(config)
 
     @classmethod
     def load(cls, agent: str | None = None, **overrides: Any) -> VibeConfig:

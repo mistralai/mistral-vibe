@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2025-12-10
+
+### Fixed
+
+- fixed crash in some rare instances when copy-pasting
+
+### Changed
+
+- improved context length from 100k to 200k
+
 ## [1.0.6] - 2025-12-10
 
 ### Fixed
