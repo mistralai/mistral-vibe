@@ -30,10 +30,22 @@ Vibe requires Python 3.12 or higher.
 
 ### One-line install (recommended)
 
+**Linux and macOS**
+
 ```bash
 # On Linux and macOS
 curl -LsSf https://mistral.ai/vibe/install.sh | bash
 ```
+
+**Windows**
+
+First, install uv
+```bash
+# On Windows.
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Then, use uv command below.
 
 ### Using uv
 
