@@ -47,6 +47,7 @@ def test_run_programmatic_preload_streaming_is_batched(
             include_project_context=False,
             include_prompt_detail=False,
             include_model_info=False,
+            include_commit_signature=False,
         )
 
         previous = [
@@ -107,6 +108,7 @@ def test_run_programmatic_ignores_system_messages_in_previous(
             include_project_context=False,
             include_prompt_detail=False,
             include_model_info=False,
+            include_commit_signature=False,
         )
 
         run_programmatic(

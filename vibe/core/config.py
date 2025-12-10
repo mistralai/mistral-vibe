@@ -305,6 +305,7 @@ class VibeConfig(BaseSettings):
     instructions: str = ""
     workdir: Path | None = Field(default=None, exclude=True)
     system_prompt_id: str = "cli"
+    include_commit_signature: bool = True
     include_model_info: bool = True
     include_project_context: bool = True
     include_prompt_detail: bool = True

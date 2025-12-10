@@ -20,6 +20,7 @@ def test_get_universal_system_prompt_includes_windows_prompt_on_windows(
         include_project_context=False,
         include_prompt_detail=True,
         include_model_info=False,
+        include_commit_signature=False,
     )
     tool_manager = ToolManager(config)
 
