@@ -12,7 +12,12 @@ def copy_selection_to_clipboard(app: App) -> None:
             continue
 
         selection = widget.text_selection
-        result = widget.get_selection(selection)
+
+        try:
+            result = widget.get_selection(selection)
+        except Exception:
+            continue
+
         if not result:
             continue
 
