@@ -66,6 +66,7 @@ def make_config(
         include_project_context=False,
         include_prompt_detail=False,
         include_model_info=False,
+        include_commit_signature=False,
         enabled_tools=enabled_tools or [],
         tools=tools or {},
     )
