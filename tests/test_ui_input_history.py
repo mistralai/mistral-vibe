@@ -40,33 +40,47 @@ def inject_history_file(vibe_app: VibeApp, history_file: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("up_key", "down_key"),
+    [
+        pytest.param("up", "down", id="arrow-keys"),
+        pytest.param("ctrl+p", "ctrl+n", id="emacs-keys"),
+    ],
+)
 async def test_ui_navigation_through_input_history(
-    vibe_app: VibeApp, history_file: Path
+    vibe_app: VibeApp, history_file: Path, up_key: str, down_key: str
 ) -> None:
     async with vibe_app.run_test() as pilot:
         inject_history_file(vibe_app, history_file)
         chat_input = vibe_app.query_one(ChatInputContainer)
 
-        await pilot.press("up")
+        await pilot.press(up_key)
         assert chat_input.value == "how are you?"
-        await pilot.press("up")
+        await pilot.press(up_key)
         assert chat_input.value == "hi there"
-        await pilot.press("up")
+        await pilot.press(up_key)
         assert chat_input.value == "hello"
-        await pilot.press("up")
+        await pilot.press(up_key)
         # cannot go further up
         assert chat_input.value == "hello"
-        await pilot.press("down")
+        await pilot.press(down_key)
         assert chat_input.value == "hi there"
-        await pilot.press("down")
+        await pilot.press(down_key)
         assert chat_input.value == "how are you?"
-        await pilot.press("down")
+        await pilot.press(down_key)
         assert chat_input.value == ""
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("up_key", "down_key"),
+    [
+        pytest.param("up", "down", id="arrow-keys"),
+        pytest.param("ctrl+p", "ctrl+n", id="emacs-keys"),
+    ],
+)
 async def test_ui_does_nothing_if_command_completion_is_active(
-    vibe_app: VibeApp, history_file: Path
+    vibe_app: VibeApp, history_file: Path, up_key: str, down_key: str
 ) -> None:
     async with vibe_app.run_test() as pilot:
         inject_history_file(vibe_app, history_file)
@@ -74,9 +88,9 @@ async def test_ui_does_nothing_if_command_completion_is_active(
 
         await pilot.press("/")
         assert chat_input.value == "/"
-        await pilot.press("up")
+        await pilot.press(up_key)
         assert chat_input.value == "/"
-        await pilot.press("down")
+        await pilot.press(down_key)
         assert chat_input.value == "/"
 
 
