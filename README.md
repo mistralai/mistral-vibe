@@ -24,16 +24,22 @@ Mistral Vibe is a command-line coding assistant powered by Mistral's models. It 
 > [!WARNING]
 > Mistral Vibe works on Windows, but we officially support and target UNIX environments.
 
-## Installation
-
-Vibe requires Python 3.12 or higher.
-
 ### One-line install (recommended)
 
+**Linux and macOS**
+
 ```bash
-# On Linux and macOS
 curl -LsSf https://mistral.ai/vibe/install.sh | bash
 ```
+
+**Windows**
+
+First, install uv
+```bash
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Then, use uv command below.
 
 ### Using uv
 
@@ -157,7 +163,7 @@ Vibe supports multiple ways to configure your API keys:
 
 ### Custom System Prompts
 
-You can create custom system prompts to replace the default one (`prompts/core.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
+You can create custom system prompts to replace the default one (`prompts/cli.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
 
 To use a custom system prompt, set the `system_prompt_id` in your configuration to match the filename (without the `.md` extension):
 
@@ -243,6 +249,17 @@ Key fields:
 - `api_key_env`: Environment variable containing the API key
 - `command`: Command to run for stdio transport
 - `args`: Additional arguments for stdio transport
+
+MCP tools are named using the pattern `{server_name}_{tool_name}` and can be configured with permissions like built-in tools:
+
+```toml
+# Configure permissions for specific MCP tools
+[tools.fetch_server_get]
+permission = "always"
+
+[tools.my_http_server_query]
+permission = "ask"
+```
 
 ### Enable/disable tools with patterns
 

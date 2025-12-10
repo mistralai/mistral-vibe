@@ -124,10 +124,25 @@ Examples:
                 (f"-{current_version}.zip", f"-{new_version}.zip"),
             ],
         )
+        # Update .vscode/launch.json
+        update_hard_values_files(
+            ".vscode/launch.json",
+            [(f'"version": "{current_version}"', f'"version": "{new_version}"')],
+        )
+        # Update vibe/core/__init__.py
+        update_hard_values_files(
+            "vibe/core/__init__.py",
+            [(f'__version__ = "{current_version}"', f'__version__ = "{new_version}"')],
+        )
+        # Update tests/acp/test_acp.py
+        update_hard_values_files(
+            "tests/acp/test_acp.py",
+            [(f'version="{current_version}"', f'version="{new_version}"')],
+        )
 
         subprocess.run(["uv", "lock"], check=True)
 
-        print(f"Successfully bumped version from {current_version} to {new_version}")
+        print(f"\nSuccessfully bumped version from {current_version} to {new_version}")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
