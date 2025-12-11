@@ -134,9 +134,9 @@ Examples:
             "vibe/core/__init__.py",
             [(f'__version__ = "{current_version}"', f'__version__ = "{new_version}"')],
         )
-        # Update tests/acp/test_acp.py
+        # Update tests/acp/test_initialize.py
         update_hard_values_files(
-            "tests/acp/test_acp.py",
+            "tests/acp/test_initialize.py",
             [(f'version="{current_version}"', f'version="{new_version}"')],
         )
 

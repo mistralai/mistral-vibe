@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from vibe.core import __version__
-from vibe.core.config import CONFIG_DIR, CONFIG_FILE, GLOBAL_CONFIG_FILE
+from vibe.core.config import CONFIG_DIR, CONFIG_FILE, GLOBAL_CONFIG_FILE, Backend
 from vibe.core.types import BaseEvent, ToolResultEvent
 
 
@@ -160,8 +160,12 @@ if CONFIG_FILE != GLOBAL_CONFIG_FILE and GLOBAL_CONFIG_FILE.is_file():
     )
 
 
-def get_user_agent() -> str:
-    return f"Mistral-Vibe/{__version__}"
+def get_user_agent(backend: Backend) -> str:
+    user_agent = f"Mistral-Vibe/{__version__}"
+    if backend == Backend.MISTRAL:
+        mistral_sdk_prefix = "mistral-client-python/"
+        user_agent = f"{mistral_sdk_prefix}{user_agent}"
+    return user_agent
 
 
 def _is_retryable_http_error(e: Exception) -> bool:
