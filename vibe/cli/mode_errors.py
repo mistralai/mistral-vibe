@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from vibe.core.compatibility import StrEnum
 
 if TYPE_CHECKING:
-    from vibe.cli.mode_manager import ModeManager, VibeMode
+    from vibe.modes import ModeManager, VibeMode
 
 # Configure module logger
 logger = logging.getLogger("chefchat.modes")
@@ -113,7 +113,7 @@ def create_write_blocked_error(
     tool_name: str, mode: VibeMode, args: dict[str, Any] | None = None
 ) -> ModeError:
     """Create error for write operation blocked in read-only mode."""
-    from vibe.cli.mode_manager import MODE_CONFIGS
+    from vibe.modes import MODE_CONFIGS
 
     config = MODE_CONFIGS[mode]
 
@@ -136,7 +136,7 @@ This mode is **read-only** to protect your codebase while you're planning or des
 
 def create_tool_blocked_error(tool_name: str, mode: VibeMode, reason: str) -> ModeError:
     """Create error for any tool blocking scenario."""
-    from vibe.cli.mode_manager import MODE_CONFIGS
+    from vibe.modes import MODE_CONFIGS
 
     config = MODE_CONFIGS[mode]
 
@@ -262,7 +262,7 @@ def reset_to_safe_mode(mode_manager: ModeManager) -> VibeMode:
     Returns:
         The new mode (NORMAL)
     """
-    from vibe.cli.mode_manager import VibeMode
+    from vibe.modes import VibeMode
 
     logger.warning(
         "Resetting to NORMAL mode from %s due to error", mode_manager.current_mode.value
@@ -280,7 +280,7 @@ def validate_mode_state(mode_manager: ModeManager) -> tuple[bool, ModeError | No
     Returns:
         Tuple of (is_valid, error_if_invalid)
     """
-    from vibe.cli.mode_manager import MODE_CONFIGS, VibeMode
+    from vibe.modes import MODE_CONFIGS, VibeMode
 
     try:
         state = mode_manager.state
@@ -337,7 +337,7 @@ def safe_mode_operation(
         def risky_mode_function(self):
             ...
     """
-    from vibe.cli.mode_manager import VibeMode
+    from vibe.modes import VibeMode
 
     _fallback = fallback_mode or VibeMode.NORMAL
 
@@ -455,7 +455,7 @@ def create_fallback_mode_manager() -> ModeManager:
     Returns:
         A basic ModeManager in NORMAL mode
     """
-    from vibe.cli.mode_manager import ModeManager, VibeMode
+    from vibe.modes import ModeManager, VibeMode
 
     logger.warning("Creating fallback ModeManager due to initialization failure")
     return ModeManager(initial_mode=VibeMode.NORMAL)
@@ -511,7 +511,7 @@ def explain_current_mode(mode_manager: ModeManager) -> str:
 
     Useful when user seems confused about why something isn't working.
     """
-    from vibe.cli.mode_manager import MODE_CONFIGS
+    from vibe.modes import MODE_CONFIGS
 
     mode = mode_manager.current_mode
     config = MODE_CONFIGS[mode]

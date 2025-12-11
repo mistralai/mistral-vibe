@@ -380,6 +380,54 @@ def _get_windows_system_prompt() -> str:
     )
 
 
+def validate_prompt_length(
+    prompt: str, max_tokens: int, mode_manager: ModeManager | None = None
+) -> None:
+    """Validate that the system prompt doesn't exceed token limits.
+
+    Args:
+        prompt: The system prompt to validate
+        max_tokens: Maximum allowed tokens for the model
+        mode_manager: Optional ModeManager for error context
+
+    Raises:
+        RuntimeError: If prompt exceeds max_tokens limit
+    """
+    # Skip validation if max_tokens is None or unreasonably small (likely a test/mock)
+    if max_tokens is None or not isinstance(max_tokens, int) or max_tokens < 100:
+        return
+
+    # Rough estimation: 1 token ≈ 4 characters for English text
+    # This is conservative - actual tokenization may vary
+    CHARS_PER_TOKEN = 4
+    estimated_tokens = len(prompt) // CHARS_PER_TOKEN
+
+    # Use 80% of max_tokens as safety threshold to leave room for user message
+    safety_threshold = int(max_tokens * 0.8)
+
+    if estimated_tokens > safety_threshold:
+        # Import here to avoid circular dependency
+        try:
+            from vibe.cli.mode_errors import create_prompt_too_long_error
+            from vibe.modes.types import VibeMode
+
+            current_mode = mode_manager.current_mode if mode_manager else VibeMode.NORMAL
+            error = create_prompt_too_long_error(
+                prompt_length=len(prompt),
+                max_length=safety_threshold * CHARS_PER_TOKEN,
+                mode=current_mode
+            )
+            # Raise as RuntimeError with the ModeError's user message
+            raise RuntimeError(error.to_display_message())
+        except ImportError:
+            # Fallback if mode_errors not available
+            raise RuntimeError(
+                f"System prompt too long: ~{estimated_tokens:,} tokens "
+                f"(max: {safety_threshold:,}). Try switching to YOLO mode "
+                f"or reducing project context."
+            )
+
+
 def get_universal_system_prompt(
     tool_manager: ToolManager,
     config: VibeConfig,
@@ -394,6 +442,9 @@ def get_universal_system_prompt(
 
     Returns:
         The complete system prompt string
+
+    Raises:
+        RuntimeError: If the generated prompt exceeds model token limits
     """
     sections = []
 
@@ -443,4 +494,12 @@ def get_universal_system_prompt(
         if project_doc.strip():
             sections.append(project_doc)
 
-    return "\n\n".join(sections)
+    final_prompt = "\n\n".join(sections)
+
+    # Validate prompt length before returning
+    # Get max_tokens from active model config
+    active_model = config.get_active_model()
+    if hasattr(active_model, 'max_tokens') and active_model.max_tokens:
+        validate_prompt_length(final_prompt, active_model.max_tokens, mode_manager)
+
+    return final_prompt

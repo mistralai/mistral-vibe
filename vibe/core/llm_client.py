@@ -10,7 +10,7 @@ from vibe.core.config import VibeConfig
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.format import APIToolFormatHandler
 from vibe.core.llm.types import BackendLike
-from vibe.core.middleware import MiddlewareAction, MiddlewarePipeline
+from vibe.core.middleware import MiddlewarePipeline
 from vibe.core.types import (
     AgentStats,
     AssistantEvent,
@@ -84,20 +84,6 @@ class LLMClient:
         active_model = self.config.get_active_model()
         provider = self.config.get_provider_for_model(active_model)
 
-        # Before middleware
-        for middleware in self.middleware_pipeline.middlewares:
-            before_result = await middleware.before_chat_completion(
-                messages, self.tool_manager, self.config
-            )
-            if before_result.action == MiddlewareAction.STOP:
-                return LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant, content=before_result.message
-                    ),
-                    finish_reason="stop",
-                    usage=LLMUsage(prompt_tokens=0, completion_tokens=0),
-                )
-
         try:
             start_time = time.perf_counter()
             available_tools = self.format_handler.get_available_tools(
@@ -134,6 +120,31 @@ class LLMClient:
             return result
 
         except Exception as e:
+            # Check if this is a BackendError with context-too-long
+            from vibe.core.llm.exceptions import BackendError
+
+            if isinstance(e, BackendError) and e.is_context_too_long():
+                # Convert to user-friendly error with recovery hints
+                error_msg = f"""**Prompt Too Long Error**
+
+The system prompt exceeded the model's token limit.
+
+**Details:**
+- Model: {e.model}
+- Approximate size: {e.payload_summary.approx_chars:,} characters
+- Provider message: {e.parsed_error or 'N/A'}
+
+**Recovery Options:**
+1. **Switch to YOLO mode** (🚀) - Uses minimal prompts
+2. **Clear conversation** with `/clear`
+3. **Reduce project context** in configuration
+4. **Use a model with larger context window**
+
+Press `Shift+Tab` to cycle modes or type `/modes` for options.
+"""
+                raise RuntimeError(error_msg) from e
+
+            # For other errors, use the original error message
             raise RuntimeError(
                 f"API error from {provider.name} (model: {active_model.name}): {e}"
             ) from e
@@ -186,6 +197,31 @@ class LLMClient:
                 )
 
         except Exception as e:
+            # Check if this is a BackendError with context-too-long
+            from vibe.core.llm.exceptions import BackendError
+
+            if isinstance(e, BackendError) and e.is_context_too_long():
+                # Convert to user-friendly error with recovery hints
+                error_msg = f"""**Prompt Too Long Error**
+
+The system prompt exceeded the model's token limit.
+
+**Details:**
+- Model: {e.model}
+- Approximate size: {e.payload_summary.approx_chars:,} characters
+- Provider message: {e.parsed_error or 'N/A'}
+
+**Recovery Options:**
+1. **Switch to YOLO mode** (🚀) - Uses minimal prompts
+2. **Clear conversation** with `/clear`
+3. **Reduce project context** in configuration
+4. **Use a model with larger context window**
+
+Press `Shift+Tab` to cycle modes or type `/modes` for options.
+"""
+                raise RuntimeError(error_msg) from e
+
+            # For other errors, use the original error message
             raise RuntimeError(
                 f"API error from {provider.name} (model: {active_model.name}): {e}"
             ) from e

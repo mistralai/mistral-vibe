@@ -74,7 +74,51 @@ class ChefErrorHandler:
         # Build error content
         content = Text()
         content.append(f"{type(error).__name__}\n", style=f"bold {COLORS['error']}")
-        content.append(str(error), style=COLORS["muted"])
+
+        # Check if this is a BackendError for special formatting
+        try:
+            from vibe.core.llm.exceptions import BackendError
+
+            if isinstance(error, BackendError):
+                # Format BackendError with structured details
+                content.append("API Error Details:\n\n", style=f"bold {COLORS['warning']}")
+
+                # Status and basic info
+                if error.status:
+                    content.append(f"Status: ", style=COLORS["muted"])
+                    content.append(f"{error.status}\n", style=COLORS["error"])
+
+                content.append(f"Model: ", style=COLORS["muted"])
+                content.append(f"{error.model}\n", style="bold")
+
+                content.append(f"Provider: ", style=COLORS["muted"])
+                content.append(f"{error.provider}\n\n", style="bold")
+
+                # Provider message
+                if error.parsed_error:
+                    content.append(f"Message: ", style=COLORS["muted"])
+                    content.append(f"{error.parsed_error}\n\n", style=COLORS["error"])
+
+                # Payload summary
+                content.append("Request Summary:\n", style=f"bold {COLORS['info']}")
+                content.append(f"  Messages: ", style=COLORS["muted"])
+                content.append(f"{error.payload_summary.message_count}\n")
+                content.append(f"  Approx chars: ", style=COLORS["muted"])
+                content.append(f"{error.payload_summary.approx_chars:,}\n")
+                content.append(f"  Temperature: ", style=COLORS["muted"])
+                content.append(f"{error.payload_summary.temperature}\n")
+
+                # Body excerpt if available
+                if error.body_text:
+                    content.append(f"\nResponse excerpt:\n", style=COLORS["muted"])
+                    excerpt = error._excerpt(error.body_text, n=200)
+                    content.append(f"{excerpt}\n", style="dim")
+            else:
+                # Standard error formatting
+                content.append(str(error), style=COLORS["muted"])
+        except ImportError:
+            # Fallback if BackendError not available
+            content.append(str(error), style=COLORS["muted"])
 
         # Create panel
         error_panel = Panel(

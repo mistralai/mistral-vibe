@@ -33,8 +33,6 @@
   "python.testing.pytestEnabled": true,
   "python.testing.autoTestDiscoverOnSaveEnabled": true, // <-- Nieuw: sneller testen na opslaan
   "files.watcherExclude": {
-    "**/.git/objects/**": true,
-    "**/.git/subtree-cache/**": true,
     "**/node_modules/*/**": true,
     "**/.hg/store/**": true,
     "**/.venv/**": true,

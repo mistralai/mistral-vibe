@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 # =============================================================================
 
 COLORS = {
+    # Technical names
     "primary": "#FF7000",  # Mistral Orange - accents, active elements
     "secondary": "#404040",  # Dark Grey - borders, inactive
     "text": "#E0E0E0",  # Off-white - readable text
@@ -40,6 +41,17 @@ COLORS = {
     "error": "#FF4444",  # Red - errors
     "bg_dark": "#1A1A1A",  # Dark background
     "bg_subtle": "#252525",  # Slightly lighter bg
+
+    # Kitchen-themed aliases (for repl.py compatibility)
+    "fire": "#FF7000",  # Same as primary - the flame of the kitchen
+    "charcoal": "#1A1A1A",  # Same as bg_dark - the grill
+    "silver": "#E0E0E0",  # Same as text - polished steel
+    "smoke": "#666666",  # Same as muted - subtle smoke
+    "sage": "#00D26A",  # Same as success - fresh herbs
+    "honey": "#FFB800",  # Same as warning - golden honey
+    "ember": "#FF4444",  # Same as error - hot embers
+    "cream": "#F5F5DC",  # Cream color for highlights
+    "ash": "#404040",  # Same as secondary - cool ash
 }
 
 
@@ -429,3 +441,24 @@ def create_mode_transition(
         description=mode_manager.config.description,
         tips=tips,
     )
+
+
+def get_greeting() -> tuple[str, str]:
+    """Get a time-appropriate greeting.
+
+    Returns:
+        Tuple of (greeting_text, greeting_emoji)
+    """
+    from datetime import datetime
+
+    hour = datetime.now().hour
+
+    if 5 <= hour < 12:
+        return ("Good morning", "☀️")
+    elif 12 <= hour < 17:
+        return ("Good afternoon", "🌤️")
+    elif 17 <= hour < 21:
+        return ("Good evening", "🌆")
+    else:
+        return ("Welcome back", "🌙")
+

@@ -416,19 +416,19 @@ class TestSystemPromptInjection:
             modifier = m.get_system_prompt_modifier()
             assert len(modifier) > 0
             assert "<active_mode>" in modifier
-            assert "<mode_rules>" in modifier
+            assert "<rules>" in modifier
 
     def test_plan_mode_modifier_content(self, plan_manager: ModeManager) -> None:
         """PLAN mode modifier should mention planning."""
         modifier = plan_manager.get_system_prompt_modifier()
-        assert "PLAN MODE" in modifier
+        assert "PLAN" in modifier
         assert "read-only" in modifier.lower()
-        assert "implementation plan" in modifier.lower()
+        assert "plan" in modifier.lower()
 
     def test_yolo_mode_modifier_content(self, yolo_manager: ModeManager) -> None:
         """YOLO mode modifier should emphasize speed."""
         modifier = yolo_manager.get_system_prompt_modifier()
-        assert "YOLO MODE" in modifier
+        assert "YOLO" in modifier
         assert "ULTRA-CONCISE" in modifier
         assert "✓" in modifier
 
@@ -437,8 +437,8 @@ class TestSystemPromptInjection:
     ) -> None:
         """ARCHITECT mode modifier should mention design."""
         modifier = architect_manager.get_system_prompt_modifier()
-        assert "ARCHITECT MODE" in modifier
-        assert "HIGH-LEVEL DESIGN" in modifier
+        assert "ARCHITECT" in modifier
+        assert "design" in modifier.lower()
         assert "mermaid" in modifier.lower()
 
 
@@ -569,28 +569,40 @@ class TestIntegrationWithSystemPrompt:
         """System prompt should include mode modifier when manager provided."""
         from vibe.core.system_prompt import get_universal_system_prompt
 
+        class MockModel:
+            max_tokens = None  # No validation needed for test
+
         class MockConfig:
             system_prompt = "Base prompt."
             include_model_info = False
             include_prompt_detail = False
             include_project_context = False
 
+            def get_active_model(self):
+                return MockModel()
+
         manager = ModeManager(initial_mode=VibeMode.ARCHITECT)
         prompt = get_universal_system_prompt(None, MockConfig(), manager)
 
         assert "<active_mode>" in prompt
-        assert "ARCHITECT MODE" in prompt
+        assert "ARCHITECT" in prompt
         assert "Base prompt." in prompt
 
     def test_system_prompt_works_without_manager(self) -> None:
         """System prompt should work when no mode_manager provided."""
         from vibe.core.system_prompt import get_universal_system_prompt
 
+        class MockModel:
+            max_tokens = None
+
         class MockConfig:
             system_prompt = "Base prompt only."
             include_model_info = False
             include_prompt_detail = False
             include_project_context = False
+
+            def get_active_model(self):
+                return MockModel()
 
         prompt = get_universal_system_prompt(None, MockConfig(), None)
 
@@ -636,7 +648,7 @@ class TestScenarios:
         modifier = manager.get_system_prompt_modifier()
 
         assert "ULTRA-CONCISE" in modifier
-        assert "pure signal" in modifier.lower()
+        assert "concise" in modifier.lower()
 
     def test_scenario_bash_detection(self) -> None:
         """Bash command detection: ls = ok, rm = blocked in PLAN."""

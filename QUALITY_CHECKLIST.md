@@ -89,20 +89,6 @@ Use this checklist before releases to ensure production readiness.
 # Run all tests
 pytest tests/ -v
 
-# Check code quality
-ruff check vibe/
-ruff format --check vibe/
-
-# Run benchmark
-python scripts/benchmark.py
-
-# Launch REPL and manually test
-uv run vibe
-
-# Test specific modes
-# In REPL: Shift+Tab to cycle, verify /chef command
-```
-
 ---
 
 ## Sign-off
