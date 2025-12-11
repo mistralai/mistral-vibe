@@ -1,0 +1,54 @@
+name: refactor
+description: Refactor code to improve quality and readability
+author: ChefChat
+version: 1.0.0
+
+# What context/files does this recipe need?
+ingredients:
+  - "{{file_path}}"
+
+# Variables that can be used in step prompts
+variables:
+  file_path: ""
+  style_guide: "PEP 8"
+
+# The cooking steps
+steps:
+  - name: Analyze Current Code
+    type: analyze
+    station: sous_chef
+    prompt: "Analyze the code in {{file_path}} for improvement opportunities"
+    inputs:
+      file: "{{file_path}}"
+    outputs:
+      - analysis_result
+
+  - name: Generate Refactored Code
+    type: refactor
+    station: line_cook
+    prompt: "Refactor following {{style_guide}} guidelines:\n{{analysis_result}}"
+    inputs:
+      original_file: "{{file_path}}"
+    outputs:
+      - refactored_code
+
+  - name: Run Tests
+    type: test
+    station: line_cook
+    prompt: "Run tests to verify refactoring didn't break functionality"
+    inputs:
+      code: "{{refactored_code}}"
+    outputs:
+      - test_results
+    on_error: continue
+
+  - name: Review Changes
+    type: review
+    station: sous_chef
+    prompt: "Review the refactored code and confirm quality"
+    inputs:
+      original: "{{file_path}}"
+      refactored: "{{refactored_code}}"
+      tests: "{{test_results}}"
+    outputs:
+      - review_approved

@@ -46,6 +46,7 @@ dependencies = [
     "prompt_toolkit>=3.0.0",
     "typing_extensions>=4.0.0",
     "networkx>=3.2.0",
+    "pyyaml>=6.0.0",
 ]
 [project.urls]
 Homepage = "https://github.com/mistralai/mistral-vibe"
@@ -92,7 +93,7 @@ dev = [
 ]
 
 [tool.pyright]
-pythonVersion = "3.12"
+pythonVersion = "3.10"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
 include = ["vibe/**/*.py", "tests/**/*.py"]
@@ -102,7 +103,7 @@ venv = ".venv"
 [tool.ruff]
 include = ["vibe/**/*.py", "tests/**/*.py"]
 line-length = 88
-target-version = "py312"
+target-version = "py310"
 preview = true
 
 [tool.ruff.format]

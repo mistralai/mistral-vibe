@@ -1,0 +1,35 @@
+# ChefChat Palate Configuration
+# ==============================
+# Customize your kitchen's flavor profile.
+# Copy this file to `.chef/palate.toml` in your project.
+
+[kitchen]
+# Test framework: pytest | unittest
+framework = "pytest"
+
+# Linter: ruff | flake8 | pylint
+linter = "ruff"
+
+# Strictness level:
+#   - michelin: Maximum quality, all checks enabled
+#   - bistro: Balanced, reasonable defaults
+#   - fast_food: Quick and dirty, minimal checks
+strictness = "michelin"
+
+[healing]
+# Self-healing loop settings
+max_attempts = 3
+timeout_seconds = 60
+
+[llm]
+# LLM provider: openai | anthropic
+provider = "openai"
+
+# Model to use
+model = "gpt-4"
+
+# Temperature (0.0 = deterministic, 1.0 = creative)
+temperature = 0.7
+
+# Maximum tokens for response
+max_tokens = 4096

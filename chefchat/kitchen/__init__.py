@@ -2,4 +2,6 @@
 
 from __future__ import annotations
 
-__all__ = ["BaseStation", "ChefMessage", "KitchenBus"]
+from chefchat.kitchen.bus import BaseStation, ChefMessage, KitchenBus, MessagePriority
+
+__all__ = ["BaseStation", "ChefMessage", "KitchenBus", "MessagePriority"]
