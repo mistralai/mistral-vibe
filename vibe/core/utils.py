@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 import concurrent.futures
-from enum import Enum, StrEnum, auto
+from enum import Enum, auto
 import functools
 import logging
 from pathlib import Path
@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from vibe.core import __version__
+from vibe.core.compatibility import StrEnum
 from vibe.core.config import CONFIG_DIR, CONFIG_FILE, GLOBAL_CONFIG_FILE
 from vibe.core.types import BaseEvent, ToolResultEvent
 
@@ -170,7 +171,16 @@ def _is_retryable_http_error(e: Exception) -> bool:
     return False
 
 
-def async_retry[T, **P](
+try:
+    from typing import ParamSpec, TypeVar
+except ImportError:
+    from typing_extensions import ParamSpec, TypeVar
+
+T = TypeVar("T")
+P = ParamSpec("P")
+
+
+def async_retry(
     tries: int = 3,
     delay_seconds: float = 0.5,
     backoff_factor: float = 2.0,
@@ -212,7 +222,7 @@ def async_retry[T, **P](
     return decorator
 
 
-def async_generator_retry[T, **P](
+def async_generator_retry(
     tries: int = 3,
     delay_seconds: float = 0.5,
     backoff_factor: float = 2.0,
@@ -264,7 +274,7 @@ class ConversationLimitException(Exception):
     pass
 
 
-def run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
+def run_sync(coro: Coroutine[Any, Any, T]) -> T:
     """Run an async coroutine synchronously, handling nested event loops.
 
     If called from within an async context (running event loop), runs the

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from enum import StrEnum, auto
+from enum import auto
 from pathlib import Path
 import shutil
 from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel, Field
 
+from vibe.core.compatibility import StrEnum
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -15,7 +16,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -95,10 +96,7 @@ class GrepResult(BaseModel):
     )
 
 
-class Grep(
-    BaseTool[GrepArgs, GrepResult, GrepToolConfig, GrepState],
-    ToolUIData[GrepArgs, GrepResult],
-):
+class Grep(BaseTool[GrepArgs, GrepResult, GrepToolConfig, GrepState]):
     description: ClassVar[str] = (
         "Recursively search files for a regex pattern using ripgrep (rg) or grep. "
         "Respects .gitignore and .codeignore files by default when using ripgrep."

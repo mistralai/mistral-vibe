@@ -69,6 +69,19 @@ def register_adapter(
 class OpenAIAdapter(APIAdapter):
     endpoint: ClassVar[str] = "/chat/completions"
 
+    def _map_role(self, role: str) -> str:
+        # Maps internal Role enum values to OpenAI role strings
+        # Role.system='1', Role.user='2', Role.assistant='3', Role.tool='4'
+        mapping = {"1": "system", "2": "user", "3": "assistant", "4": "tool"}
+        return mapping.get(role, "user")
+
+    def _map_role_reverse(self, role: str | None) -> str:
+        # Maps OpenAI role strings back to internal Role enum values
+        if not role:
+            return "3" # Default to assistant
+        mapping = {"system": "1", "user": "2", "assistant": "3", "tool": "4"}
+        return mapping.get(role, "3")
+
     def build_payload(
         self,
         model_name: str,
@@ -80,7 +93,13 @@ class OpenAIAdapter(APIAdapter):
     ) -> dict[str, Any]:
         payload = {
             "model": model_name,
-            "messages": converted_messages,
+            "messages": [
+                {
+                    **msg,
+                    "role": self._map_role(msg["role"])
+                }
+                for msg in converted_messages
+            ],
             "temperature": temperature,
         }
 
@@ -135,19 +154,24 @@ class OpenAIAdapter(APIAdapter):
 
     def parse_response(self, data: dict[str, Any]) -> LLMChunk:
         if data.get("choices"):
-            if "message" in data["choices"][0]:
-                message = LLMMessage.model_validate(data["choices"][0]["message"])
-            elif "delta" in data["choices"][0]:
-                message = LLMMessage.model_validate(data["choices"][0]["delta"])
+            choice = data["choices"][0]
+            if "message" in choice:
+                role = self._map_role_reverse(choice["message"].get("role"))
+                message = LLMMessage.model_validate({**choice["message"], "role": role})
+            elif "delta" in choice:
+                role = self._map_role_reverse(choice["delta"].get("role"))
+                message = LLMMessage.model_validate({**choice["delta"], "role": role})
             else:
                 raise ValueError("Invalid response data")
-            finish_reason = data["choices"][0]["finish_reason"]
+            finish_reason = choice.get("finish_reason")
 
         elif "message" in data:
-            message = LLMMessage.model_validate(data["message"])
-            finish_reason = data["finish_reason"]
+            role = self._map_role_reverse(data["message"].get("role"))
+            message = LLMMessage.model_validate({**data["message"], "role": role})
+            finish_reason = data.get("finish_reason")
         elif "delta" in data:
-            message = LLMMessage.model_validate(data["delta"])
+            role = self._map_role_reverse(data["delta"].get("role"))
+            message = LLMMessage.model_validate({**data["delta"], "role": role})
             finish_reason = None
         else:
             message = LLMMessage(role=Role.assistant, content="")

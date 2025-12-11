@@ -47,7 +47,9 @@ class ApiKeyScreen(OnboardingScreen):
             return
 
         help_url, help_name = PROVIDER_HELP[self.provider.name]
-        yield Static(f"Grab your {provider_name} API key from the {help_name}:")
+        yield Static(
+            f"Procure your [orange1]Secret Ingredients[/] from the {help_name}:"
+        )
         yield Center(
             Horizontal(
                 Static("→ ", classes="link-chevron"),
@@ -70,19 +72,19 @@ class ApiKeyScreen(OnboardingScreen):
         self.input_widget = Input(
             password=True,
             id="key",
-            placeholder="Paste your API key here",
-            validators=[Length(minimum=1, failure_description="No API key provided.")],
+            placeholder="Add your Secret Sauce here...",
+            validators=[
+                Length(minimum=1, failure_description="No Secret Sauce provided.")
+            ],
         )
 
         with Vertical(id="api-key-outer"):
             yield Static("", classes="spacer")
-            yield Center(Static("One last thing...", id="api-key-title"))
+            yield Center(Static("[orange1]🧂 The Secret Sauce[/]", id="api-key-title"))
             with Center():
                 with Vertical(id="api-key-content"):
                     yield from self._compose_provider_link(provider_name)
-                    yield Static(
-                        "...and paste it below to finish the setup:", id="paste-hint"
-                    )
+                    yield Static("...and add it to your pantry below:", id="paste-hint")
                     yield Center(Horizontal(self.input_widget, id="input-box"))
                     yield Static("", id="feedback")
             yield Static("", classes="spacer")

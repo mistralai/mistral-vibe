@@ -42,6 +42,31 @@ def greet(name: str = "World") -> str:
 | Item 1   | Item 2   |
 """
 
+# 🍳 Culinary theme display names for ChefChat branding
+CULINARY_THEME_NAMES = {
+    "textual-dark": "Sous-Vide Dark",
+    "textual-light": "Meringue Light",
+    "tokyo-night": "Midnight Ramen",
+    "monokai": "Charcoal Grill",
+    "dracula": "Vampire Bisque",
+    "nord": "Nordic Frost",
+    "gruvbox": "Smoked Paprika",
+    "catppuccin-latte": "Catppuccino Latte",
+    "catppuccin-frappe": "Catppuccino Frappé",
+    "catppuccin-macchiato": "Catppuccino Macchiato",
+    "catppuccin-mocha": "Catppuccino Mocha",
+    "solarized-light": "Lemon Zest",
+    "solarized-dark": "Aged Balsamic",
+    "github-light": "Vanilla Bean",
+    "github-dark": "Dark Chocolate",
+    "flexoki": "Umami Gold",
+}
+
+
+def get_culinary_name(theme: str) -> str:
+    """Get the culinary-themed display name for a theme."""
+    return CULINARY_THEME_NAMES.get(theme, theme.replace("-", " ").title())
+
 
 class ThemeSelectionScreen(OnboardingScreen):
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -68,7 +93,10 @@ class ThemeSelectionScreen(OnboardingScreen):
     def compose(self) -> ComposeResult:
         with Center(id="theme-outer"):
             with Vertical(id="theme-content"):
-                yield Static("Select your preferred theme", id="theme-title")
+                yield Static(
+                    "[orange1]🍳 Mise en Place[/] — Select Your Kitchen Aesthetic",
+                    id="theme-title",
+                )
                 yield Center(
                     Horizontal(
                         Static("Navigate ↑ ↓", id="nav-hint"),
@@ -109,15 +137,16 @@ class ThemeSelectionScreen(OnboardingScreen):
         for i, widget in enumerate(self._theme_widgets):
             offset = i - VISIBLE_NEIGHBORS
             theme = self._get_theme_at_offset(offset)
+            culinary_name = get_culinary_name(theme)
 
             widget.remove_class("selected", *FADE_CLASSES)
 
             if offset == 0:
-                widget.update(f" {theme} ")
+                widget.update(f" {culinary_name} ")
                 widget.add_class("selected")
             else:
                 distance = min(abs(offset) - 1, len(FADE_CLASSES) - 1)
-                widget.update(theme)
+                widget.update(culinary_name)
                 widget.add_class(FADE_CLASSES[distance])
 
     def _navigate(self, direction: int) -> None:

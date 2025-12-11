@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 import json
 import os
-from typing import Any
+from typing import Any, Union
 
 from acp import (
     InitializeRequest,
@@ -68,7 +68,7 @@ class JsonRpcNotification(BaseModel):
     params: Any | None = None
 
 
-type JsonRpcMessage = JsonRpcResponse | JsonRpcNotification | JsonRpcRequest
+JsonRpcMessage = Union[JsonRpcResponse, JsonRpcNotification, JsonRpcRequest]
 
 
 class InitializeJsonRpcRequest(JsonRpcRequest):

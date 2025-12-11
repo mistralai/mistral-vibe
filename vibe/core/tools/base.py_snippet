@@ -1,0 +1,12 @@
+    # ---------------------------------------------------
+    # Safety Checks
+    # ---------------------------------------------------
+    def check_allowlist_denylist(self, args: ArgsT) -> ToolPermission:
+        """
+        Check if the arguments are allowed or denied by the configuration.
+        Default implementation returns ASK (neutral).
+        Subclasses can override this to implement granular checks.
+        """
+        # TODO: Implement generic check against config.allowlist/denylist
+        # for now, we return ASK to fallback to tool-level permission.
+        return ToolPermission.ASK

@@ -50,6 +50,49 @@ class BackendError(RuntimeError):
         self.payload_summary = payload_summary
         super().__init__(self._fmt())
 
+    def is_context_too_long(self) -> bool:
+        """Check if this error is due to context/prompt being too long.
+
+        Returns:
+            True if the error indicates the prompt exceeded token limits
+        """
+        # Check status code (400 Bad Request is common for this)
+        if self.status != HTTPStatus.BAD_REQUEST:
+            return False
+
+        # Check for common "context too long" indicators in error messages
+        error_indicators = [
+            "context",
+            "too long",
+            "too large",
+            "exceeds",
+            "maximum",
+            "token",
+            "limit",
+            "max_tokens",
+        ]
+
+        # Check parsed error message
+        if self.parsed_error:
+            msg_lower = self.parsed_error.lower()
+            if any(indicator in msg_lower for indicator in error_indicators):
+                # More specific check: must have both "context"/"token" AND "long"/"exceed"/"limit"
+                has_context_ref = any(word in msg_lower for word in ["context", "token", "prompt"])
+                has_size_ref = any(word in msg_lower for word in ["long", "large", "exceed", "limit", "maximum"])
+                if has_context_ref and has_size_ref:
+                    return True
+
+        # Check body text as fallback
+        if self.body_text:
+            body_lower = self.body_text.lower()
+            if any(indicator in body_lower for indicator in error_indicators):
+                has_context_ref = any(word in body_lower for word in ["context", "token", "prompt"])
+                has_size_ref = any(word in body_lower for word in ["long", "large", "exceed", "limit", "maximum"])
+                if has_context_ref and has_size_ref:
+                    return True
+
+        return False
+
     def _fmt(self) -> str:
         if self.status == HTTPStatus.UNAUTHORIZED:
             return "Invalid API key. Please check your API key and try again."

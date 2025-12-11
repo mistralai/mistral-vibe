@@ -57,6 +57,44 @@ class CommandRegistry:
                 handler="_exit_app",
                 exits=True,
             ),
+            # ═══════════════════════════════════════════════════════
+            # 🍳 CHEFCHAT EASTER EGGS
+            # ═══════════════════════════════════════════════════════
+            "chef": Command(
+                aliases=frozenset(["/chef", "/kitchen", "/🍳"]),
+                description="🍳 Chef's kitchen status",
+                handler="_chef_status",
+            ),
+            "wisdom": Command(
+                aliases=frozenset(["/wisdom", "/quote", "/inspire"]),
+                description="💡 Cooking wisdom from the chef",
+                handler="_chef_wisdom",
+            ),
+            "modes": Command(
+                aliases=frozenset(["/modes", "/mode", "/m"]),
+                description="🔄 Show all modes with descriptions",
+                handler="_show_modes",
+            ),
+            "roast": Command(
+                aliases=frozenset(["/roast", "/ramsay", "/gordon"]),
+                description="🔥 Get roasted by Chef Ramsay",
+                handler="_chef_roast",
+            ),
+            "plate": Command(
+                aliases=frozenset(["/plate", "/present", "/serve"]),
+                description="🍽️ Present your work beautifully",
+                handler="_chef_plate",
+            ),
+            "taste": Command(
+                aliases=frozenset(["/taste", "/review", "/lgtm"]),
+                description="👅 Quick taste test (code review)",
+                handler="_chef_taste",
+            ),
+            "timer": Command(
+                aliases=frozenset(["/timer", "/estimate", "/time"]),
+                description="⏱️ Kitchen timer (time estimates)",
+                handler="_chef_timer",
+            ),
         }
 
         for command in excluded_commands:
@@ -81,7 +119,7 @@ class CommandRegistry:
             "- `Ctrl+C` Quit (or clear input if text present)",
             "- `Ctrl+O` Toggle tool output view",
             "- `Ctrl+T` Toggle todo view",
-            "- `Shift+Tab` Toggle auto-approve mode",
+            "- `Shift+Tab` Cycle modes: NORMAL → AUTO → PLAN → YOLO → ARCHITECT",
             "",
             "### Special Features",
             "",
@@ -92,7 +130,32 @@ class CommandRegistry:
             "",
         ]
 
-        for cmd in self.commands.values():
+        # Separate regular commands from easter eggs
+        regular_cmds = []
+        easter_eggs = []
+        easter_egg_names = {
+            "chef",
+            "wisdom",
+            "modes",
+            "roast",
+            "plate",
+            "taste",
+            "timer",
+        }
+        for name, cmd in self.commands.items():
+            if name in easter_egg_names:
+                easter_eggs.append(cmd)
+            else:
+                regular_cmds.append(cmd)
+
+        for cmd in regular_cmds:
             aliases = ", ".join(f"`{alias}`" for alias in sorted(cmd.aliases))
             lines.append(f"- {aliases}: {cmd.description}")
+
+        if easter_eggs:
+            lines.extend(["", "### 🍳 ChefChat Specials", ""])
+            for cmd in easter_eggs:
+                aliases = ", ".join(f"`{alias}`" for alias in sorted(cmd.aliases))
+                lines.append(f"- {aliases}: {cmd.description}")
+
         return "\n".join(lines)

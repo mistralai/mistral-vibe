@@ -1,325 +1,385 @@
-# Mistral Vibe
+# 👨‍🍳 ChefChat CLI - The Tastiest AI Agent CLI
 
-[![PyPI Version](https://img.shields.io/pypi/v/mistral-vibe)](https://pypi.org/project/mistral-vibe)
-[![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/release/python-3120/)
-[![CI Status](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml/badge.svg)](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/mistralai/mistral-vibe)](https://github.com/mistralai/mistral-vibe/blob/main/LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Mistral Vibe Fork](https://img.shields.io/badge/Fork-Mistral_Vibe-orange.svg)](https://github.com/mistralai/mistral-vibe)
 
-```
-██████████████████░░
-██████████████████░░
-████  ██████  ████░░
-████    ██    ████░░
-████          ████░░
-████  ██  ██  ████░░
-██      ██      ██░░
-██████████████████░░
-██████████████████░░
-```
+**ChefChat CLI** is a **fork of Mistral Vibe** with significant enhancements that transform it into a premium, culinary-themed AI coding assistant. We've taken the solid foundation of Mistral Vibe and added a **comprehensive mode system**, **enhanced safety features**, **rich UI improvements**, and **delightful easter eggs** to create a truly unique development experience.
 
-**Mistral's open-source CLI coding assistant.**
+---
 
-Mistral Vibe is a command-line coding assistant powered by Mistral's models. It provides a conversational interface to your codebase, allowing you to use natural language to explore, modify, and interact with your projects through a powerful set of tools.
+## 🍳 Why ChefChat? The Mistral Vibe Evolution
 
-> [!WARNING]
-> Mistral Vibe works on Windows, but we officially support and target UNIX environments.
+ChefChat builds upon Mistral Vibe's excellent foundation with these **key improvements**:
 
-### One-line install (recommended)
+### ✨ **1. Advanced Mode System** - "The Right Tool for Every Job"
+Unlike the original Mistral Vibe, ChefChat features **5 distinct operating modes** that adapt to your workflow:
 
-**Linux and macOS**
+- **📋 PLAN Mode** - Read-only exploration and planning
+- **✋ NORMAL Mode** - Safe daily development (default)
+- **⚡ AUTO Mode** - Trusted automation for experts
+- **🚀 YOLO Mode** - Maximum speed for deadlines
+- **🏛️ ARCHITECT Mode** - High-level design thinking
+
+### 🔒 **2. Enhanced Safety & Permission System**
+Our **ModeManager** provides granular control over tool execution:
+- **Read-only modes** (PLAN, ARCHITECT) block destructive operations
+- **Permission-based tool access** per mode
+- **No bypasses** - strict enforcement of safety rules
+- **Visual mode indicators** for clear context
+
+### 🎨 **3. Premium REPL Interface**
+Replaced the original Textual UI with a **Rich + prompt_toolkit** based interface:
+- **Beautiful formatting** with culinary theme (#FF7000)
+- **Real-time mode switching** with Shift+Tab
+- **Enhanced visual feedback** for all operations
+- **Streaming responses** with live updates
+
+### 👨‍🍳 **4. Culinary Personality & Easter Eggs**
+ChefChat brings **fun and personality** to your terminal:
+- **/chef** - Kitchen status report with session stats
+- **/wisdom** - Culinary-inspired programming wisdom
+- **/roast** - Gordon Ramsay style motivational burns
+- **/fortune** - Developer fortune cookies
+- **/plate** - Beautiful work presentation
+
+### 🔧 **5. Additional Improvements**
+- **Enhanced error handling** with centralized system
+- **Better project context** management
+- **Improved configuration** options
+- **Comprehensive testing** suite for safety features
+
+---
+
+## 📋 Comparison: ChefChat vs Mistral Vibe
+
+| Feature | Mistral Vibe | ChefChat |
+|---------|-------------|----------|
+| **Mode System** | ❌ Single mode | ✅ 5 distinct modes |
+| **Safety Features** | ❌ Basic permissions | ✅ ModeManager with strict enforcement |
+| **UI Framework** | ❌ Textual | ✅ Rich + prompt_toolkit |
+| **Easter Eggs** | ❌ None | ✅ /chef, /wisdom, /roast, etc. |
+| **Visual Feedback** | ❌ Basic | ✅ Enhanced with culinary theme |
+| **Error Handling** | ❌ Basic | ✅ Centralized system |
+| **Configuration** | ✅ Good | ✅ Enhanced with mode support |
+
+---
+
+## 🚀 Installation
+
+### Prerequisites
+- Python 3.12 or higher
+- `uv` or `pip` package manager
+- API key for your preferred AI provider (Mistral, OpenAI, etc.)
+
+### Install ChefChat
 
 ```bash
-curl -LsSf https://mistral.ai/vibe/install.sh | bash
-```
+# Using uv (recommended)
+uv add mistral-vibe
 
-**Windows**
-
-First, install uv
-```bash
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-Then, use uv command below.
-
-### Using uv
-
-```bash
-uv tool install mistral-vibe
-```
-
-### Using pip
-
-```bash
+# Using pip
 pip install mistral-vibe
 ```
 
-## Features
-
-- **Interactive Chat**: A conversational AI agent that understands your requests and breaks down complex tasks.
-- **Powerful Toolset**: A suite of tools for file manipulation, code searching, version control, and command execution, right from the chat prompt.
-  - Read, write, and patch files (`read_file`, `write_file`, `search_replace`).
-  - Execute shell commands in a stateful terminal (`bash`).
-  - Recursively search code with `grep` (with `ripgrep` support).
-  - Manage a `todo` list to track the agent's work.
-- **Project-Aware Context**: Vibe automatically scans your project's file structure and Git status to provide relevant context to the agent, improving its understanding of your codebase.
-- **Advanced CLI Experience**: Built with modern libraries for a smooth and efficient workflow.
-  - Autocompletion for slash commands (`/`) and file paths (`@`).
-  - Persistent command history.
-  - Beautiful Themes.
-- **Highly Configurable**: Customize models, providers, tool permissions, and UI preferences through a simple `config.toml` file.
-- **Safety First**: Features tool execution approval.
-
-## Quick Start
-
-1. Navigate to your project's root directory:
-
-   ```bash
-   cd /path/to/your/project
-   ```
-
-2. Run Vibe:
-
-   ```bash
-   vibe
-   ```
-
-3. If this is your first time running Vibe, it will:
-
-   - Create a default configuration file at `~/.vibe/config.toml`
-   - Prompt you to enter your API key if it's not already configured
-   - Save your API key to `~/.vibe/.env` for future use
-
-4. Start interacting with the agent!
-
-   ```
-   > Can you find all instances of the word "TODO" in the project?
-
-   🤖 The user wants to find all instances of "TODO". The `grep` tool is perfect for this. I will use it to search the current directory.
-
-   > grep(pattern="TODO", path=".")
-
-   ... (grep tool output) ...
-
-   🤖 I found the following "TODO" comments in your project.
-   ```
-
-## Usage
-
-### Interactive Mode
-
-Simply run `vibe` to enter the interactive chat loop.
-
-- **Multi-line Input**: Press `Ctrl+J` or `Shift+Enter` for select terminals to insert a newline.
-- **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`).
-- **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
-
-You can start Vibe with a prompt with the following command:
-
+### First Run Setup
 ```bash
-vibe "Refactor the main function in cli/main.py to be more modular."
+# Start the setup wizard
+vibe --setup
+
+# Follow the onboarding to:
+# 1. Configure your API keys
+# 2. Set your preferences
+# 3. Test the connection
 ```
 
-**Note**: The `--auto-approve` flag automatically approves all tool executions without prompting. In interactive mode, you can also toggle auto-approve on/off using `Shift+Tab`.
+---
 
-### Programmatic Mode
-
-You can run Vibe non-interactively by piping input or using the `--prompt` flag. This is useful for scripting.
+## 🎯 Quick Start
 
 ```bash
-vibe --prompt "Refactor the main function in cli/main.py to be more modular."
+# Start interactive REPL
+vibe
+
+# Start with a specific prompt
+vibe "Help me refactor this Python function"
+
+# Continue from last session
+vibe --continue
+
+# Resume a specific session
+vibe --resume session_123
 ```
 
-by default it will use `auto-approve` mode.
+---
 
-### Slash Commands
+## 📚 Mode System Deep Dive
 
-Use slash commands for meta-actions and configuration changes during a session.
+### 📋 PLAN Mode - "Measure Twice, Cut Once"
+**The Wise Mentor** - Read-only exploration and planning
+- ✅ Safe for codebase exploration
+- ✅ Creates detailed plans and analysis
+- ❌ No file modifications allowed
+- ❌ Tool execution requires approval
 
-## Configuration
+**Perfect for**: Codebase exploration, architecture planning, security reviews
 
-Vibe is configured via a `config.toml` file. It looks for this file first in `./.vibe/config.toml` and then falls back to `~/.vibe/config.toml`.
+### ✋ NORMAL Mode - "Safe and Steady"
+**The Professional** - Default mode for daily development
+- ✅ Read operations automatically approved
+- ✅ Write operations require confirmation
+- ✅ Balances safety and efficiency
+- ✅ Visual feedback for all actions
 
-### API Key Configuration
+**Perfect for**: Daily coding, code reviews, feature development
 
-Vibe supports multiple ways to configure your API keys:
+### ⚡ AUTO Mode - "Trust and Execute"
+**The Expert** - For when you trust ChefChat's capabilities
+- ✅ All tools automatically approved
+- ✅ Faster execution workflow
+- ✅ Still provides explanations
+- ✅ Proactive problem solving
 
-1. **Interactive Setup (Recommended for first-time users)**: When you run Vibe for the first time or if your API key is missing, Vibe will prompt you to enter it. The key will be securely saved to `~/.vibe/.env` for future sessions.
+**Perfect for**: Repetitive tasks, trusted workflows, batch operations
 
-2. **Environment Variables**: Set your API key as an environment variable:
+### 🚀 YOLO Mode - "Move Fast, Ship Faster"
+**The Speedrunner** - Maximum velocity under deadline pressure
+- ✅ Minimal output, maximum speed
+- ✅ Instant tool approval
+- ✅ Pure efficiency focus
+- ❌ No time for detailed explanations
 
-   ```bash
-   export MISTRAL_API_KEY="your_mistral_api_key"
-   ```
+**Perfect for**: Deadline-driven development, quick fixes, prototyping
 
-3. **`.env` File**: Create a `.env` file in `~/.vibe/` and add your API keys:
+### 🏛️ ARCHITECT Mode - "Design the Cathedral"
+**The Visionary** - High-level design and architecture
+- ✅ Read-only design focus
+- ✅ System and pattern thinking
+- ✅ Creates diagrams and architectures
+- ✅ Abstract and conceptual
 
-   ```bash
-   MISTRAL_API_KEY=your_mistral_api_key
-   ```
+**Perfect for**: System design, architecture reviews, technical planning
 
-   Vibe automatically loads API keys from `~/.vibe/.env` on startup. Environment variables take precedence over the `.env` file if both are set.
+---
 
-**Note**: The `.env` file is specifically for API keys and other provider credentials. General Vibe configuration should be done in `config.toml`.
+## 🎨 ChefChat's Culinary Experience
 
-### Custom System Prompts
+### 👨‍🍳 The Chef's Mental Model
+ChefChat brings the **precision and passion of a professional kitchen** to software development:
+- **Mise en place** - Get organized before coding
+- **Sharp tools** - Keep dependencies updated
+- **Low and slow** - Take time for quality refactoring
+- **Teamwork** - Collaborate effectively
 
-You can create custom system prompts to replace the default one (`prompts/cli.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
+### 🍽️ Easter Eggs & Fun Features
 
-To use a custom system prompt, set the `system_prompt_id` in your configuration to match the filename (without the `.md` extension):
+```bash
+# Kitchen status report
+/chef
 
+# Culinary wisdom
+/wisdom
+
+# Motivational roast
+/roast
+
+# Developer fortune
+/fortune
+
+# Beautiful presentation
+/plate
+```
+
+---
+
+## 🔧 Configuration
+
+ChefChat uses a hierarchical configuration system:
+
+1. **Project-level**: `./.vibe/config.toml`
+2. **User-level**: `~/.vibe/config.toml`
+3. **Environment variables**: `.env` files
+
+### Example Configuration
 ```toml
-# Use a custom system prompt
-system_prompt_id = "my_custom_prompt"
-```
-
-This will load the prompt from `~/.vibe/prompts/my_custom_prompt.md`.
-
-### Custom Agent Configurations
-
-You can create custom agent configurations for specific use cases (e.g., red-teaming, specialized tasks) by adding agent-specific TOML files in the `~/.vibe/agents/` directory.
-
-To use a custom agent, run Vibe with the `--agent` flag:
-
-```bash
-vibe --agent my_custom_agent
-```
-
-Vibe will look for a file named `my_custom_agent.toml` in the agents directory and apply its configuration.
-
-Example custom agent configuration (`~/.vibe/agents/redteam.toml`):
-
-```toml
-# Custom agent configuration for red-teaming
+# Model settings
 active_model = "devstral-2"
-system_prompt_id = "redteam"
+system_prompt_id = "cli"
 
-# Disable some tools for this agent
-disabled_tools = ["search_replace", "write_file"]
+# Mode-specific settings
+default_mode = "NORMAL"
 
-# Override tool permissions for this agent
+# Tool permissions
 [tools.bash]
-permission = "always"
+permission = "ask"
 
 [tools.read_file]
 permission = "always"
+
+# UI settings
+vim_keybindings = false
+textual_theme = "textual-dark"
 ```
 
-Note: this implies that you have setup a redteam prompt names `~/.vibe/prompts/redteam.md`
+### OpenAI Configuration
 
-### MCP Server Configuration
+To use OpenAI models with ChefChat:
 
-You can configure MCP (Model Context Protocol) servers to extend Vibe's capabilities. Add MCP server configurations under the `mcp_servers` section:
+1. **Set your API key**:
+   ```bash
+   export OPENAI_API_KEY="sk-..."
+   ```
+
+2. **Update your config** (`~/.vibe/config.toml`):
+   ```toml
+   # Use GPT-4o (recommended)
+   active_model = "gpt4o"
+
+   # Or use the cost-effective GPT-4o-mini
+   active_model = "gpt4o-mini"
+   ```
+
+3. **Verify the configuration**:
+   ```bash
+   vibe --setup
+   ```
+
+#### Available OpenAI Models
+
+| Model | Alias | Use Case | Input Price | Output Price |
+|-------|-------|----------|-------------|--------------|
+| `gpt-4o` | `gpt4o` | Most capable, multimodal | $2.50/1M | $10.00/1M |
+| `gpt-4o-mini` | `gpt4o-mini` | Fast and affordable | $0.15/1M | $0.60/1M |
+| `gpt-4-turbo` | `gpt4-turbo` | Advanced reasoning | $10.00/1M | $30.00/1M |
+| `gpt-3.5-turbo` | `gpt35` | Legacy model | $0.50/1M | $1.50/1M |
+
+> **Chef's Tip**: GPT-4o-mini is 93% cheaper than GPT-4-turbo and works great for most coding tasks!
+
+#### Azure OpenAI and OpenAI-Compatible APIs
+
+ChefChat also supports Azure OpenAI and other OpenAI-compatible providers. Add this to your `~/.vibe/config.toml`:
 
 ```toml
-# Example MCP server configurations
-[[mcp_servers]]
-name = "my_http_server"
-transport = "http"
-url = "http://localhost:8000"
-headers = { "Authorization" = "Bearer my_token" }
-api_key_env = "MY_API_KEY_ENV_VAR"
-api_key_header = "Authorization"
-api_key_format = "Bearer {token}"
+[[providers]]
+name = "azure-openai"
+api_base = "https://YOUR_RESOURCE.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT"
+api_key_env_var = "AZURE_OPENAI_API_KEY"
+api_style = "openai"
+backend = "generic"
 
-[[mcp_servers]]
-name = "my_streamable_server"
-transport = "streamable-http"
-url = "http://localhost:8001"
-headers = { "X-API-Key" = "my_api_key" }
+[[models]]
+name = "gpt-4"
+provider = "azure-openai"
+alias = "azure-gpt4"
+temperature = 0.2
+```
 
+---
+
+## 🛡️ Safety Features
+
+### Mode-Based Permissions
+Each mode has strict permission rules:
+- **PLAN/ARCHITECT**: Read-only, no destructive operations
+- **NORMAL**: Safe defaults with confirmation prompts
+- **AUTO/YOLO**: Full access with different output verbosity
+
+### Command Validation
+- Suspicious commands are blocked
+- File operations are validated
+- API key management is secure
+
+---
+
+## 📊 Advanced Features
+
+### MCP Server Integration
+ChefChat supports the **Model Context Protocol** for external tool integration:
+
+```toml
 [[mcp_servers]]
-name = "fetch_server"
+name = "filesystem"
 transport = "stdio"
-command = "uvx"
-args = ["mcp-server-fetch"]
+command = "mcp-server-fs"
+
+[[mcp_servers]]
+name = "git"
+transport = "http"
+url = "http://localhost:3000"
 ```
 
-Supported transports:
+### Session Management
+```bash
+# Continue last session
+vibe --continue
 
-- `http`: Standard HTTP transport
-- `streamable-http`: HTTP transport with streaming support
-- `stdio`: Standard input/output transport (for local processes)
+# Resume specific session
+vibe --resume morning_work
 
-Key fields:
-
-- `name`: A short alias for the server (used in tool names)
-- `transport`: The transport type
-- `url`: Base URL for HTTP transports
-- `headers`: Additional HTTP headers
-- `api_key_env`: Environment variable containing the API key
-- `command`: Command to run for stdio transport
-- `args`: Additional arguments for stdio transport
-
-MCP tools are named using the pattern `{server_name}_{tool_name}` and can be configured with permissions like built-in tools:
-
-```toml
-# Configure permissions for specific MCP tools
-[tools.fetch_server_get]
-permission = "always"
-
-[tools.my_http_server_query]
-permission = "ask"
+# Programmatic usage
+vibe --prompt "Add tests" --output streaming
 ```
 
-### Enable/disable tools with patterns
+---
 
-You can control which tools are active using `enabled_tools` and `disabled_tools`.
-These fields support exact names, glob patterns, and regular expressions.
+## 🤝 Community & Contributing
 
-Examples:
+ChefChat is **open source** and welcomes contributions!
 
-```toml
-# Only enable tools that start with "serena_" (glob)
-enabled_tools = ["serena_*"]
+### Ways to Contribute
+- **Report bugs** via GitHub Issues
+- **Suggest features** and improvements
+- **Submit pull requests** with enhancements
+- **Improve documentation**
+- **Share custom agents and prompts**
 
-# Regex (prefix with re:) — matches full tool name (case-insensitive)
-enabled_tools = ["re:^serena_.*$"]
+### Development Setup
+```bash
+# Clone the repository
+git clone https://github.com/your-repo/chefchat.git
+cd chefchat
 
-# Heuristic regex support (patterns like `serena.*` are treated as regex)
-enabled_tools = ["serena.*"]
+# Install development dependencies
+uv sync
 
-# Disable a group with glob; everything else stays enabled
-disabled_tools = ["mcp_*", "grep"]
+# Run tests
+pytest
 ```
 
-Notes:
+---
 
-- MCP tool names use underscores, e.g., `serena_list` not `serena.list`.
-- Regex patterns are matched against the full tool name using fullmatch.
+## 📜 License
 
-### Custom Vibe Home Directory
+ChefChat is licensed under the **Apache License 2.0**, maintaining compatibility with the original Mistral Vibe license.
 
-By default, Vibe stores its configuration in `~/.vibe/`. You can override this by setting the `VIBE_HOME` environment variable:
+---
+
+## 🚀 Ready to Cook?
+
+Start your journey in the ChefChat kitchen:
 
 ```bash
-export VIBE_HOME="/path/to/custom/vibe/home"
+vibe
 ```
 
-This affects where Vibe looks for:
+**Welcome to the kitchen! 👨‍🍳**
 
-- `config.toml` - Main configuration
-- `.env` - API keys
-- `agents/` - Custom agent configurations
-- `prompts/` - Custom system prompts
-- `tools/` - Custom tools
-- `logs/` - Session logsRetryTo run code, enable code execution and file creation in Settings > Capabilities.
+---
 
-## Resources
+### 📚 Documentation
 
-- [CHANGELOG](CHANGELOG.md) - See what's new in each version
-- [CONTRIBUTING](CONTRIBUTING.md) - Guidelines for feedback and bug reports
+- [Complete Dutch Documentation](CHEFCHAT_CLI_DOCUMENTATIE.md)
+- [Technical Architecture](docs/ARCHITECTURE.md)
+- [Upstream Divergence](docs/UPSTREAM_DIVERGENCE.md)
+- [Contributing Guide](CONTRIBUTING.md)
 
-## License
+### 🔗 Links
 
-Copyright 2025 Mistral AI
+- **Original Mistral Vibe**: [https://github.com/mistralai/mistral-vibe](https://github.com/mistralai/mistral-vibe)
+- **Mistral AI**: [https://mistral.ai](https://mistral.ai)
+- **Documentation**: [https://github.com/mistralai/mistral-vibe#readme](https://github.com/mistralai/mistral-vibe#readme)
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+---
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the [LICENSE](LICENSE) file for the full license text.
+*ChefChat CLI v1.0.5-dev | Built with ❤️ on Mistral Vibe foundation*
+*Type `/chef` in ChefChat for culinary inspiration!*

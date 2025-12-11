@@ -1,0 +1,61 @@
+feat: Add ChefChat multi-mode system with 5 operational modes 🍳
+
+This PR introduces a comprehensive multi-mode system for ChefChat,
+providing granular control over AI behavior and tool execution.
+
+## New Features
+
+### Multi-Mode System
+- **PLAN** (📋): Read-only planning mode for research without changes
+- **NORMAL** (✋): Standard mode with tool confirmation
+- **AUTO** (⚡): Auto-approve all tool executions
+- **YOLO** (🚀): Maximum speed, minimal output
+- **ARCHITECT** (🏛️): High-level design mode, read-only
+
+Press `Shift+Tab` to cycle through modes.
+
+### Smart Tool Blocking
+- Read-only modes block write operations automatically
+- Intelligent bash command analysis (detects redirects, git writes)
+- User can override with "approved" in message
+
+### Easter Egg Commands
+- `/chef` - Kitchen status
+- `/wisdom` - Coding wisdom
+- `/roast` - Chef Ramsay roasts
+- `/modes` - Mode display
+- `/plate` - Present work beautifully
+- `/taste` - Fun code review
+- `/timer` - Time estimates
+
+### Error Handling
+- Comprehensive error types and recovery strategies
+- User-friendly error messages with solutions
+- Graceful degradation and fallbacks
+
+## Technical Details
+
+**New Modules:**
+- `vibe/cli/mode_manager.py` - Core mode management (~970 lines)
+- `vibe/cli/mode_errors.py` - Error handling (~690 lines)
+- `vibe/cli/easter_eggs.py` - Fun content (~270 lines)
+- `vibe/cli/plating.py` - Plating feature (~455 lines)
+
+**Modified:**
+- `app.py` - ModeManager integration
+- `agent.py` - Mode-aware tool blocking
+- `system_prompt.py` - Mode prompt injection
+- `mode_indicator.py` - 5-mode display
+- `commands.py` - 7 new easter egg commands
+
+**Tests:**
+- 85 comprehensive tests in `test_mode_system.py`
+- All tests passing ✅
+
+## Breaking Changes
+
+None. Fully backwards compatible with existing `--auto-approve` flag.
+
+---
+
+Bon appétit, coders! 🍳

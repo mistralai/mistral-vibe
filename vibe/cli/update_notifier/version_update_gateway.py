@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum, auto
+from enum import auto
 from typing import Protocol, runtime_checkable
+
+from vibe.core.compatibility import StrEnum
 
 
 @dataclass(frozen=True, slots=True)

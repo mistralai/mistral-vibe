@@ -10,7 +10,7 @@ import aiofiles
 from pydantic import BaseModel, Field
 
 from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolError
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
 _BLOCK_RE = re.compile(
@@ -68,8 +68,7 @@ class SearchReplaceState(BaseToolState):
 class SearchReplace(
     BaseTool[
         SearchReplaceArgs, SearchReplaceResult, SearchReplaceConfig, SearchReplaceState
-    ],
-    ToolUIData[SearchReplaceArgs, SearchReplaceResult],
+    ]
 ):
     description: ClassVar[str] = (
         "Replace sections of files using SEARCH/REPLACE blocks. "

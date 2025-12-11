@@ -5,7 +5,9 @@ import sys
 
 from rich import print as rprint
 
-from vibe.cli.textual_ui.app import run_textual_ui
+# NOTE: Legacy textual_ui removed — REPL is now the only interactive mode
+from vibe.cli.mode_manager import mode_from_auto_approve
+from vibe.cli.repl import run_repl
 from vibe.core.config import (
     CONFIG_FILE,
     HISTORY_FILE,
@@ -98,6 +100,14 @@ def parse_arguments() -> argparse.Namespace:
         metavar="SESSION_ID",
         help="Resume a specific session by its ID (supports partial matching)",
     )
+
+    # --repl flag kept for backward compatibility (REPL is now always used)
+    parser.add_argument(
+        "--repl",
+        action="store_true",
+        help="(Default) Launch the ChefChat REPL interface",
+    )
+
     return parser.parse_args()
 
 
@@ -243,14 +253,9 @@ def main() -> None:  # noqa: PLR0912, PLR0915
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(1)
         else:
-            run_textual_ui(
-                config,
-                auto_approve=args.auto_approve,
-                enable_streaming=True,
-                initial_prompt=args.initial_prompt or stdin_prompt,
-                loaded_messages=loaded_messages,
-                session_info=session_info,
-            )
+            # REPL is now the only interactive mode (textual_ui removed)
+            initial_mode = mode_from_auto_approve(args.auto_approve)
+            run_repl(config, initial_mode=initial_mode)
 
     except (KeyboardInterrupt, EOFError):
         rprint("\n[dim]Bye![/]")

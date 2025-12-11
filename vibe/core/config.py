@@ -1,11 +1,25 @@
 from __future__ import annotations
 
-from enum import StrEnum, auto
+try:
+    from enum import auto
+
+    from vibe.core.compatibility import StrEnum
+except ImportError:
+    from enum import Enum, auto
+
+    class StrEnum(str, Enum):
+        pass
+
+
 import os
 from pathlib import Path
 import re
 import shlex
-import tomllib
+
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 from typing import Annotated, Any, Literal
 
 from dotenv import dotenv_values
@@ -263,6 +277,13 @@ DEFAULT_PROVIDERS = [
         backend=Backend.MISTRAL,
     ),
     ProviderConfig(
+        name="openai",
+        api_base="https://api.openai.com/v1",
+        api_key_env_var="OPENAI_API_KEY",
+        api_style="openai",
+        backend=Backend.GENERIC,
+    ),
+    ProviderConfig(
         name="llamacpp",
         api_base="http://127.0.0.1:8080/v1",
         api_key_env_var="",  # NOTE: if you wish to use --api-key in llama-server, change this value
@@ -283,6 +304,38 @@ DEFAULT_MODELS = [
         alias="devstral-small",
         input_price=0.1,
         output_price=0.3,
+    ),
+    ModelConfig(
+        name="gpt-4o",
+        provider="openai",
+        alias="gpt4o",
+        temperature=0.2,
+        input_price=2.5,
+        output_price=10.0,
+    ),
+    ModelConfig(
+        name="gpt-4o-mini",
+        provider="openai",
+        alias="gpt4o-mini",
+        temperature=0.2,
+        input_price=0.15,
+        output_price=0.60,
+    ),
+    ModelConfig(
+        name="gpt-4-turbo",
+        provider="openai",
+        alias="gpt4-turbo",
+        temperature=0.2,
+        input_price=10.0,
+        output_price=30.0,
+    ),
+    ModelConfig(
+        name="gpt-3.5-turbo",
+        provider="openai",
+        alias="gpt35",
+        temperature=0.2,
+        input_price=0.5,
+        output_price=1.5,
     ),
     ModelConfig(
         name="devstral",
@@ -584,3 +637,42 @@ class VibeConfig(BaseSettings):
             config_dict["tools"] = tool_defaults
 
         return config_dict
+
+
+# =============================================================================
+# SINGLETON ACCESSOR
+# =============================================================================
+
+_cached_config: VibeConfig | None = None
+
+
+def get_config(agent: str | None = None, force_reload: bool = False) -> VibeConfig:
+    """Get the global config (cached singleton).
+
+    This provides efficient access to the config from anywhere in the codebase,
+    avoiding redundant file reads and parsing.
+
+    Args:
+        agent: Optional agent name to load config for
+        force_reload: If True, reload config even if cached
+
+    Returns:
+        The global VibeConfig instance
+
+    Example:
+        >>> from vibe.core.config import get_config
+        >>> config = get_config()
+        >>> print(config.active_model)
+    """
+    global _cached_config
+
+    if _cached_config is None or force_reload:
+        _cached_config = VibeConfig.load(agent)
+
+    return _cached_config
+
+
+def clear_config_cache() -> None:
+    """Clear the cached config, forcing a reload on next access."""
+    global _cached_config
+    _cached_config = None

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
-from typing import override
+
+try:
+    from typing import override
+except ImportError:
+    from typing_extensions import override
 
 import pytest
 from textual.app import App

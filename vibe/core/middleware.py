@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum, auto
+from enum import auto
 from typing import TYPE_CHECKING, Any, Protocol
 
+from vibe.core.compatibility import StrEnum
 from vibe.core.utils import VIBE_WARNING_TAG
 
 if TYPE_CHECKING:

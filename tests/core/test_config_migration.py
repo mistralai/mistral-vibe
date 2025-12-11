@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-import tomllib
 
+import tomli as tomllib
 import tomli_w
 
 from vibe.core import config

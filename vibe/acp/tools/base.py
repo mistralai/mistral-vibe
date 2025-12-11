@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Protocol, cast, runtime_checkable
+from typing import Any, Generic, Protocol, TypeVar, cast, runtime_checkable
 
 from acp import AgentSideConnection, SessionNotification
 from acp.helpers import SessionUpdate, ToolCallContentVariant
 from acp.schema import ToolCallProgress
 from pydantic import Field
 
-from vibe.core.tools.base import BaseTool, ToolError
+from vibe.core.tools.base import BaseTool, BaseToolConfig, ToolError
 from vibe.core.tools.manager import ToolManager
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 from vibe.core.utils import logger
@@ -38,7 +38,13 @@ class AcpToolState:
     )
 
 
-class BaseAcpTool[ToolState: AcpToolState](BaseTool):
+ToolState = TypeVar("ToolState", bound=AcpToolState)
+
+
+class BaseAcpTool(
+    BaseTool[dict[str, Any], dict[str, Any], BaseToolConfig, ToolState],
+    Generic[ToolState],
+):
     state: ToolState
 
     @classmethod

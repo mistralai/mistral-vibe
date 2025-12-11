@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from abc import abstractmethod
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel, Field
+
+# BaseTool import removed as it is no longer needed for inheritance
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -21,15 +24,24 @@ class ToolResultDisplay(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)  # Tool-specific data
 
 
+TArgs = TypeVar("TArgs", bound=BaseModel)
+TResult = TypeVar("TResult", bound=BaseModel)
+
+
 @runtime_checkable
-class ToolUIData[TArgs: BaseModel, TResult: BaseModel](Protocol):
+class ToolUIData(Protocol[TArgs, TResult]):
+    # Inherits Generic functionality from BaseTool, so subscripting works.
+
     @classmethod
+    @abstractmethod
     def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay: ...
 
     @classmethod
+    @abstractmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay: ...
 
     @classmethod
+    @abstractmethod
     def get_status_text(cls) -> str: ...
 
 

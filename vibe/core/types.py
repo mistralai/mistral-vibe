@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from enum import StrEnum, auto
+from enum import auto
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -15,6 +15,7 @@ from pydantic import (
     model_validator,
 )
 
+from vibe.core.compatibility import StrEnum
 from vibe.core.tools.base import BaseTool
 
 
@@ -262,10 +263,27 @@ class OutputFormat(StrEnum):
     STREAMING = auto()
 
 
-type AsyncApprovalCallback = Callable[
+try:
+    from typing import TypeAlias
+except ImportError:
+    from typing import TypeAlias
+
+AsyncApprovalCallback: TypeAlias = Callable[
     [str, dict[str, Any], str], Awaitable[tuple[str, str | None]]
 ]
 
-type SyncApprovalCallback = Callable[[str, dict[str, Any], str], tuple[str, str | None]]
+SyncApprovalCallback: TypeAlias = Callable[
+    [str, dict[str, Any], str], tuple[str, str | None]
+]
 
-type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
+ApprovalCallback: TypeAlias = AsyncApprovalCallback | SyncApprovalCallback
+
+
+class ToolExecutionResponse(StrEnum):
+    SKIP = auto()
+    EXECUTE = auto()
+
+
+class ToolDecision(BaseModel):
+    verdict: ToolExecutionResponse
+    feedback: str | None = None

@@ -8,7 +8,7 @@ repository = "https://github.com/mistralai/mistral-vibe"
 
 [agent_servers.mistral-vibe]
 name = "Mistral Vibe"
-icon = "./icons/mistral_vibe.svg"
+icon = "./icons/chef.svg"
 
 [agent_servers.mistral-vibe.targets.darwin-aarch64]
 archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.1.1/vibe-acp-darwin-aarch64-1.1.1.zip"

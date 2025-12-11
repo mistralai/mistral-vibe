@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import Protocol
+
+from vibe.core.compatibility import StrEnum
 
 
 class CompletionResult(StrEnum):

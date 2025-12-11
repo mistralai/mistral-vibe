@@ -227,7 +227,7 @@ class APIToolFormatHandler:
                 )
                 continue
 
-            args_model, _ = tool_class._get_tool_args_results()
+            args_model, _ = tool_class._get_args_and_result_models()
             try:
                 validated_args = args_model.model_validate(parsed_call.raw_args)
                 resolved_calls.append(

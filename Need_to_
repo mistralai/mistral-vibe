@@ -1,0 +1,297 @@
+Hier is de volledig herziene versie van `opus_prompts.md`.
+
+Ik heb het strikt omgebouwd naar een XML-driven structuur. Dit werkt extreem goed met Claude (Opus/Sonnet) omdat het dubbelzinnigheid wegneemt. Daarnaast heb ik de "Chef" metafoor er diep in verwerkt en de **Multi-Mode** logica (vanuit je andere bestanden) centraal gesteld.
+
+Dit bestand is klaar om op te slaan als `opus_prompts.md`.
+
+-----
+
+# 👨‍🍳 ChefChat Development Menu (XML Edition)
+
+Dit is het masterplan voor de ontwikkeling van ChefChat.
+**Instructie:** Kopieer en plak deze prompts één voor één in je chat met Claude Opus of Sonnet 3.5. Wacht tot de implementatie van een prompt compleet is voordat je de volgende serveert.
+
+-----
+
+## 🥗 PROMPT 1: Mise-en-place (Foundation & Architecture)
+
+```xml
+<instruction>
+    <role>
+        Je bent een Elite Python Architect en Chef de Cuisine. Je bouwt "ChefChat": een Mistral AI-powered CLI tool die voelt als een Michelin-sterren restaurant.
+    </role>
+
+    <objective>
+        Zet de robuuste fundering en projectstructuur op. Geen "spaghetti code", alleen strakke, modulaire architectuur.
+    </objective>
+
+    <requirements>
+        <tech_stack>
+            - Python 3.10+ (Modern typing)
+            - mistralai (Async client)
+            - rich (UI/Console, GEEN ASCII art, strakke panels)
+            - prompt_toolkit (Input & Keybindings)
+            - typer (CLI commands)
+        </tech_stack>
+        <style>
+            - Primary Color: #FF7000 (Mistral Orange)
+            - Theme: Monokai voor code, Clean professional voor UI.
+            - Config: Persistente opslag in ~/.chefchat/config.toml
+        </style>
+    </requirements>
+
+    <architecture_blueprint>
+        chefchat/
+        ├── __init__.py
+        ├── main.py             # Entry point
+        ├── core/
+        │   ├── client.py       # Async Mistral Wrapper
+        │   ├── state.py        # Global Application State
+        │   └── config.py       # Pydantic Settings
+        ├── ui/
+        │   ├── console.py      # Global Rich Console setup
+        │   ├── style.py        # Color palette & Themes
+        │   └── spinner.py      # Custom loading indicators
+        └── utils/
+            └── fs.py           # Safe filesystem operations
+    </architecture_blueprint>
+
+    <task>
+        1. Genereer de directory structuur.
+        2. Implementeer `core/config.py` met Pydantic.
+        3. Implementeer `ui/console.py` met een custom Rich theme.
+        4. Maak een `main.py` "Hello World" die de config laadt en een welkom-panel toont.
+    </task>
+</instruction>
+```
+
+-----
+
+## 🍲 PROMPT 2: The Base Stock (Client & Streaming)
+
+```xml
+<instruction>
+    <context>
+        De keuken staat. Nu gaan we de bouillon trekken: de verbinding met Mistral AI.
+    </context>
+
+    <objective>
+        Implementeer de Mistral Client met focus op Streaming en Context Management.
+    </objective>
+
+    <specifications>
+        <streaming>
+            Gebruik `rich.Live` om tokens real-time te streamen. Het moet eruit zien alsof het getypt wordt.
+            Implementeer graceful handling van Ctrl+C (stop stream, crash niet).
+        </streaming>
+        <context_management>
+            Houd een lokale chat-history bij in `core/state.py`.
+            Implementeer een Token Counter die waarschuwt als we de context-limiet naderen.
+        </context_management>
+    </specifications>
+
+    <code_style>
+        Gebruik Async/Await voor alles.
+        Error handling moet "Chef-waardig" zijn: duidelijke, rode panels bij API errors, geen stacktraces voor de gebruiker.
+    </code_style>
+
+    <task>
+        Implementeer `core/client.py` volledig met streaming support en update `main.py` om een simpele chat-loop te draaien.
+    </task>
+</instruction>
+```
+
+-----
+
+## 🥘 PROMPT 3: The Multi-Course Menu (Mode System Architecture)
+
+```xml
+<instruction>
+    <critical_feature>
+        Dit is de kern van ChefChat. We implementeren een "Multi-Mode" systeem. De gebruiker moet kunnen schakelen tussen verschillende gedragingen.
+    </critical_feature>
+
+    <modes_definition>
+        Implementeer een Enum `ChefMode` met deze 5 statussen:
+
+        1. PLAN (🔍)
+           - Behavior: Read-only. Mag NIET schrijven.
+           - Goal: Research & Planning.
+
+        2. NORMAL (🛡️)
+           - Behavior: Vraagt bevestiging voor elke tool/actie.
+           - Goal: Veiligheid en controle.
+
+        3. AUTO (⚡)
+           - Behavior: Keurt tools automatisch goed (behalve destructieve).
+           - Goal: Snelheid.
+
+        4. YOLO (🤠)
+           - Behavior: Ultra-snel, minimale output, auto-approve alles.
+           - Goal: "Just fix it".
+
+        5. ARCHITECT (🏗️)
+           - Behavior: High-level design, diagrammen, read-only.
+           - Goal: Structuur en overzicht.
+    </modes_definition>
+
+    <requirements>
+        <class_structure>
+            Maak `core/modes.py`:
+            - `ModeManager` class (Singleton pattern).
+            - Functie `cycle_mode()` om door de lijst te loopen.
+            - Functie `should_approve_tool(tool_name, mode)` -> bool.
+        </class_structure>
+
+        <ui_integration>
+            De huidige modus moet ALTIJD zichtbaar zijn in de UI (bv. in een header of status bar).
+            Koppel een keybinding (Shift+Tab) in `prompt_toolkit` om te cyclen.
+        </ui_integration>
+    </requirements>
+
+    <task>
+        Schrijf de volledige `core/modes.py` module en laat zien hoe we de `ModeManager` initialiseren in `main.py`.
+    </task>
+</instruction>
+```
+
+-----
+
+## 📜 PROMPT 4: The Secret Sauce (Dynamic System Prompts)
+
+```xml
+<instruction>
+    <context>
+        De ModeManager werkt, maar Mistral weet nog van niets. We moeten de System Prompt dynamisch injecteren op basis van de geselecteerde modus.
+    </context>
+
+    <objective>
+        Creëer een geavanceerde Prompt Generator die XML-instructies bouwt voor het AI model.
+    </objective>
+
+    <prompt_logic>
+        Base Prompt: "Je bent ChefChat, een expert coding assistant..."
+
+        + IF MODE == PLAN:
+          Injecteer: "Je bent nu in PLAN MODE.
+          1. Je mag alleen LEZEN (read_file, ls).
+          2. Je mag NOOIT schrijven.
+          3. Maak eerst een gedetailleerd plan in Markdown.
+          4. Wacht op het woord 'approved' van de gebruiker."
+
+        + IF MODE == YOLO:
+          Injecteer: "YOLO MODE ACTIEF. Wees extreem kort. Geen uitleg. Fix de code. Antwoord alleen met: '✓ Done'."
+
+        + IF MODE == ARCHITECT:
+          Injecteer: "Focus op high-level design. Gebruik Mermaid diagrammen voor structuur."
+    </prompt_logic>
+
+    <easter_eggs>
+        Als de gebruiker /chef typt, activeer de "Gordon Ramsay" persona (streng maar rechtvaardig).
+    </easter_eggs>
+
+    <task>
+        Maak `core/prompts.py`. Implementeer de functie `get_system_prompt(mode: ChefMode) -> str`.
+        Zorg dat de output structured XML gebruikt (zoals <instructions>...</instructions>) zodat Mistral dit goed begrijpt.
+    </task>
+</instruction>
+```
+
+-----
+
+## 🍽️ PROMPT 5: The Tools of the Trade (File Operations & Safety)
+
+```xml
+<instruction>
+    <objective>
+        Implementeer de tools (functies) die Mistral kan aanroepen, en beveilig ze met de ModeManager.
+    </objective>
+
+    <tools_implementation>
+        Implementeer deze functies in `core/tools.py`:
+        1. `read_file(path)`
+        2. `write_file(path, content)`
+        3. `list_dir(path)`
+        4. `search_replace(path, old, new)`
+    </tools_implementation>
+
+    <safety_layer>
+        Maak een `ToolExecutor` class.
+        VOORDAT een tool wordt uitgevoerd:
+        1. Check `ModeManager.current_mode`.
+        2. Als Mode == PLAN/ARCHITECT en tool is schrijvend (write/replace) -> BLOKKEER en throw error: "Mode violation: Switch to Normal/Auto to execute."
+        3. Als Mode == NORMAL -> Toon diff aan gebruiker en vraag [Y/n].
+    </safety_layer>
+
+    <visuals>
+        Gebruik `rich.syntax` om previews van files te tonen met syntax highlighting.
+    </visuals>
+
+    <task>
+        Implementeer de tools en de beveiligde `ToolExecutor`.
+    </task>
+</instruction>
+```
+
+-----
+
+## 🍰 PROMPT 6: The Taste Test (Testing & Integration)
+
+```xml
+<instruction>
+    <role>
+        De Health Inspector. Tijd om te proeven.
+    </role>
+
+    <objective>
+        Maak een test suite en integreer alles in de main loop.
+    </objective>
+
+    <task_list>
+        1. **Integration**: Update `main.py` om alles samen te binden:
+           - Init `ModeManager`
+           - Init `ToolExecutor`
+           - Bind Shift+Tab aan `mode_manager.cycle()`
+           - Update de chat loop om de dynamische system prompt te gebruiken.
+
+        2. **Testing**: Maak `tests/test_modes.py`:
+           - Test: Kan PLAN mode schrijven? (Moet falen)
+           - Test: Werkt cycle() correct door alle 5 de modi?
+           - Test: Genereert `get_system_prompt` de juiste XML tags?
+    </task_list>
+
+    <output_requirement>
+        Lever de volledige, geüpdatete code voor `main.py` die klaar is voor productie.
+    </output_requirement>
+</instruction>
+```
+
+-----
+
+## 🍹 PROMPT 7: Digestif (Documentation & User Guide)
+
+```xml
+<instruction>
+    <objective>
+        Schrijf de handleiding voor de gebruiker, volledig in stijl.
+    </objective>
+
+    <content>
+        Maak een `README.md` en een `MODES.md`.
+
+        Leg uit:
+        - Hoe de installatie werkt.
+        - Wat de 5 modi doen (gebruik de emoji's!).
+        - Hoe je Shift+Tab gebruikt.
+        - De speciale commando's (/clear, /chef, /config).
+    </content>
+
+    <style>
+        Gebruik badges, emoji's en heldere voorbeelden. Het moet eruit zien als een menukaart van een top-restaurant.
+    </style>
+
+    <task>
+        Genereer de content voor deze markdown bestanden.
+    </task>
+</instruction>
+```

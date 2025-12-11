@@ -13,7 +13,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -61,8 +61,7 @@ class ReadFileState(BaseToolState):
 
 
 class ReadFile(
-    BaseTool[ReadFileArgs, ReadFileResult, ReadFileToolConfig, ReadFileState],
-    ToolUIData[ReadFileArgs, ReadFileResult],
+    BaseTool[ReadFileArgs, ReadFileResult, ReadFileToolConfig, ReadFileState]
 ):
     description: ClassVar[str] = (
         "Read a UTF-8 file, returning content from a specific line range. "

@@ -1,0 +1,17 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g clip-path="url(#clip0_1_2)">
+    <!-- Main Chef Hat Shape -->
+    <path d="M34 84V104H94V84C94 80 106 80 106 64C106 48 94 48 94 44C94 24 74 16 64 16C54 16 34 24 34 44C34 48 22 48 22 64C22 80 34 80 34 84Z" fill="#F5F5F5" stroke="#333333" stroke-width="6" stroke-linejoin="round"/>
+    <!-- Hat Band -->
+    <rect x="34" y="90" width="60" height="14" fill="#E0E0E0" stroke="#333333" stroke-width="4" rx="2"/>
+    <!-- Hat Pleat details -->
+    <path d="M44 44C44 44 48 28 64 28" stroke="#DDDDDD" stroke-width="4" stroke-linecap="round"/>
+    <path d="M84 44C84 44 80 28 64 28" stroke="#DDDDDD" stroke-width="4" stroke-linecap="round"/>
+    <path d="M64 40V28" stroke="#DDDDDD" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <defs>
+    <clipPath id="clip0_1_2">
+      <rect width="128" height="128" fill="white"/>
+    </clipPath>
+  </defs>
+</svg>

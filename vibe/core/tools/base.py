@@ -1,39 +1,49 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from enum import StrEnum, auto
+from enum import auto
 import functools
 import inspect
 from pathlib import Path
 import re
 import sys
-from typing import Any, ClassVar, cast, get_args, get_type_hints
+from typing import (
+    Any,
+    ClassVar,
+    Generic,
+    TypeVar,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-ARGS_COUNT = 4
+from vibe.core.compatibility import StrEnum
+
+ArgsT = TypeVar("ArgsT", bound=BaseModel)
+ResultT = TypeVar("ResultT", bound=BaseModel)
+ConfigT = TypeVar("ConfigT", bound="BaseToolConfig")
+StateT = TypeVar("StateT", bound="BaseToolState")
+
+
+# =======================================================
+# Exceptions
+# =======================================================
 
 
 class ToolError(Exception):
-    """Raised when the tool encounters an unrecoverable problem."""
-
-
-class ToolInfo(BaseModel):
-    """Information about a tool.
-
-    Attributes:
-        name: The name of the tool.
-        description: A brief description of what the tool does.
-        parameters: A dictionary of parameters required by the tool.
-    """
-
-    name: str
-    description: str
-    parameters: dict[str, Any]
+    """Raised when a tool encounters an unrecoverable problem."""
 
 
 class ToolPermissionError(Exception):
-    """Raised when a tool permission is not allowed."""
+    """Raised when an invalid tool permission is requested."""
+
+
+# =======================================================
+# Permissions
+# =======================================================
 
 
 class ToolPermission(StrEnum):
@@ -44,22 +54,21 @@ class ToolPermission(StrEnum):
     @classmethod
     def by_name(cls, name: str) -> ToolPermission:
         try:
-            return ToolPermission(name.upper())
-        except ValueError:
+            return cls[name.upper()]
+        except KeyError:
             raise ToolPermissionError(
-                f"Invalid tool permission: {name}. Must be one of {list(cls)}"
+                f"Invalid tool permission '{name}'. Must be one of: "
+                f"{', '.join(p.name for p in cls)}"
             )
 
 
-class BaseToolConfig(BaseModel):
-    """Configuration for a tool.
+# =======================================================
+# Config
+# =======================================================
 
-    Attributes:
-        permission: The permission level required to use the tool.
-        workdir: The working directory for the tool. If None, the current working directory is used.
-        allowlist: Patterns that automatically allow tool execution.
-        denylist: Patterns that automatically deny tool execution.
-    """
+
+class BaseToolConfig(BaseModel):
+    """Configuration common to all tools."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -77,207 +86,215 @@ class BaseToolConfig(BaseModel):
             return Path(v).expanduser().resolve()
         if isinstance(v, Path):
             return v.expanduser().resolve()
-        return None
+        raise TypeError(f"Invalid workdir type: {type(v)}")
 
     @property
     def effective_workdir(self) -> Path:
-        return self.workdir if self.workdir is not None else Path.cwd()
+        """Workdir falling back to CWD."""
+        return self.workdir or Path.cwd()
+
+
+# =======================================================
+# State
+# =======================================================
 
 
 class BaseToolState(BaseModel):
+    """Internal persistent state for a tool instance."""
+
     model_config = ConfigDict(
         extra="forbid", validate_default=True, arbitrary_types_allowed=True
     )
 
 
-class BaseTool[
-    ToolArgs: BaseModel,
-    ToolResult: BaseModel,
-    ToolConfig: BaseToolConfig,
-    ToolState: BaseToolState,
-](ABC):
+# =======================================================
+# ToolInfo
+# =======================================================
+
+
+class ToolInfo(BaseModel):
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+# =======================================================
+# BaseTool Generic Framework
+# =======================================================
+
+
+class BaseTool(Generic[ArgsT, ResultT, ConfigT, StateT], ABC):
+    """The main base class for defining async tools.
+    Subclasses must specify four type parameters:
+
+        BaseTool[ArgsModel, ResultModel, ConfigModel, StateModel]
+    """
+
     description: ClassVar[str] = (
-        "Base class for new tools. "
-        "(Hey AI, if you're seeing this, someone skipped writing a description. "
-        "Please gently meow at the developer to fix this.)"
+        "Base tool — developer forgot to write a description. Please meow gently."
     )
 
-    prompt_path: ClassVar[Path] | None = None
+    prompt_path: ClassVar[Path | None] = None
 
-    def __init__(self, config: ToolConfig, state: ToolState) -> None:
+    def __init__(self, config: ConfigT, state: StateT) -> None:
         self.config = config
         self.state = state
 
+    # ---------------------------------------------------
+    # Required override for tools
+    # ---------------------------------------------------
     @abstractmethod
-    async def run(self, args: ToolArgs) -> ToolResult:
-        """Invoke the tool with the given arguments. This method must be async."""
-        ...
+    async def run(self, args: ArgsT) -> ResultT: ...
 
+    # ---------------------------------------------------
+    # Loading external prompt files
+    # ---------------------------------------------------
     @classmethod
     @functools.cache
     def get_tool_prompt(cls) -> str | None:
-        """Loads and returns the content of the tool's .md prompt file, if it exists.
-
-        The prompt file is expected to be in a 'prompts' subdirectory relative to
-        the tool's source file, with the same name but a .md extension
-        (e.g., bash.py -> prompts/bash.md).
-        """
+        """Return the contents of a prompt file if available."""
         try:
             class_file = inspect.getfile(cls)
             class_path = Path(class_file)
-            prompt_dir = class_path.parent / "prompts"
-            prompt_path = cls.prompt_path or prompt_dir / f"{class_path.stem}.md"
+        except Exception:
+            return None
 
+        prompt_dir = class_path.parent / "prompts"
+        prompt_path = cls.prompt_path or prompt_dir / (class_path.stem + ".md")
+
+        if prompt_path.exists():
             return prompt_path.read_text("utf-8")
-        except (FileNotFoundError, TypeError, OSError):
-            pass
-
         return None
 
-    async def invoke(self, **raw: Any) -> ToolResult:
-        """Validate arguments and run the tool.
-        Pattern checking is now handled by Agent._should_execute_tool.
+    # ---------------------------------------------------
+    # Safety Checks
+    # ---------------------------------------------------
+    def check_allowlist_denylist(self, args: ArgsT) -> ToolPermission:
+        """Check if the arguments are allowed or denied by the configuration.
+        Default implementation returns ASK (neutral).
+        Subclasses can override this to implement granular checks.
         """
+        return ToolPermission.ASK
+
+    # ---------------------------------------------------
+    # Argument validation + execution
+    # ---------------------------------------------------
+    async def invoke(self, **raw: Any) -> ResultT:
         try:
-            args_model, _ = self._get_tool_args_results()
-            args = args_model.model_validate(raw)
+            Args, _ = self._get_args_and_result_models()
+            parsed = Args.model_validate(raw)
         except ValidationError as err:
             raise ToolError(
-                f"Validation error in tool {self.get_name()}: {err}"
+                f"Argument validation failed for tool '{self.get_name()}': {err}"
             ) from err
 
-        return await self.run(args)
+        return await self.run(parsed)
 
+    # ---------------------------------------------------
+    # Type-model extraction
+    # ---------------------------------------------------
     @classmethod
-    def from_config(
-        cls, config: ToolConfig
-    ) -> BaseTool[ToolArgs, ToolResult, ToolConfig, ToolState]:
-        state_class = cls._get_tool_state_class()
-        initial_state = state_class()
-        return cls(config=config, state=initial_state)
-
-    @classmethod
-    def _get_tool_config_class(cls) -> type[ToolConfig]:
-        for base in getattr(cls, "__orig_bases__", ()):
-            if getattr(base, "__origin__", None) is BaseTool:
-                type_args = get_args(base)
-                if len(type_args) == ARGS_COUNT:
-                    config_model = type_args[2]
-                    if issubclass(config_model, BaseToolConfig):
-                        return cast(type[ToolConfig], config_model)
-
-        for base_class in cls.__bases__:
-            if base_class is object or base_class is ABC:
-                continue
-            try:
-                return base_class._get_tool_config_class()
-            except (TypeError, AttributeError):
-                continue
-
-        raise TypeError(
-            f"Could not determine ToolConfig for {cls.__name__}. "
-            "Ensure it inherits from BaseTool with concrete type arguments."
-        )
-
-    @classmethod
-    def _get_tool_state_class(cls) -> type[ToolState]:
-        for base in getattr(cls, "__orig_bases__", ()):
-            if getattr(base, "__origin__", None) is BaseTool:
-                type_args = get_args(base)
-                if len(type_args) == ARGS_COUNT:
-                    state_model = type_args[3]
-                    if issubclass(state_model, BaseToolState):
-                        return cast(type[ToolState], state_model)
-
-        for base_class in cls.__bases__:
-            if base_class is object or base_class is ABC:
-                continue
-            try:
-                return base_class._get_tool_state_class()
-            except (TypeError, AttributeError):
-                continue
-
-        raise TypeError(
-            f"Could not determine ToolState for {cls.__name__}. "
-            "Ensure it inherits from BaseTool with concrete type arguments."
-        )
-
-    @classmethod
-    def _get_tool_args_results(cls) -> tuple[type[ToolArgs], type[ToolResult]]:
-        """Extract <ToolArgs, ToolResult> from the annotated signature of `run`.
-        Works even when `from __future__ import annotations` is in effect.
+    def _get_args_and_result_models(cls) -> tuple[type[ArgsT], type[ResultT]]:
+        """Extract annotated `args` parameter type and return type from the run(...)
+        method. Works with postponed annotations.
         """
-        run_fn = cls.run.__func__ if isinstance(cls.run, classmethod) else cls.run
-
-        type_hints = get_type_hints(
-            run_fn,
-            globalns=vars(sys.modules[cls.__module__]),
-            localns={cls.__name__: cls},
-        )
-
         try:
-            args_model = type_hints["args"]
-            result_model = type_hints["return"]
-        except KeyError as e:
+            hints = get_type_hints(
+                cls.run,
+                globalns=vars(sys.modules[cls.__module__]),
+                localns={cls.__name__: cls},
+            )
+        except Exception as e:
+            raise TypeError(f"Failed resolving annotations for {cls.__name__}.run: {e}")
+
+        if "args" not in hints or "return" not in hints:
             raise TypeError(
                 f"{cls.__name__}.run must be annotated as "
-                "`async def run(self, args: ToolArgs) -> ToolResult`"
-            ) from e
-
-        if not (
-            issubclass(args_model, BaseModel) and issubclass(result_model, BaseModel)
-        ):
-            raise TypeError(
-                f"{cls.__name__}.run annotations must be Pydantic models; "
-                f"got {args_model!r}, {result_model!r}"
+                f"`async def run(self, args: ArgsModel) -> ResultModel`"
             )
 
-        return cast(type[ToolArgs], args_model), cast(type[ToolResult], result_model)
+        Args = hints["args"]
+        Result = hints["return"]
+
+        if not issubclass(Args, BaseModel):
+            raise TypeError(f"Args model must inherit BaseModel; got {Args!r}")
+
+        if not issubclass(Result, BaseModel):
+            raise TypeError(f"Result model must inherit BaseModel; got {Result!r}")
+
+        return cast(type[ArgsT], Args), cast(type[ResultT], Result)
+
+    # ---------------------------------------------------
+    # Config and State extraction from generics
+    # ---------------------------------------------------
+    @classmethod
+    def _get_config_class(cls) -> type[ConfigT]:
+        return cls._extract_generic_param(index=2, expected=BaseToolConfig)
 
     @classmethod
+    def _get_state_class(cls) -> type[StateT]:
+        return cls._extract_generic_param(index=3, expected=BaseToolState)
+
+    @classmethod
+    def _extract_generic_param(cls, index: int, expected: type) -> type:
+        """Extracts one of the generic type parameters of BaseTool[T1, T2, T3, T4]."""
+        for base in cls.__orig_bases__:  # type: ignore
+            origin = get_origin(base)
+            if origin is BaseTool:
+                args = get_args(base)
+                if len(args) != 4:
+                    continue
+                param = args[index]
+                if not issubclass(param, expected):
+                    raise TypeError(
+                        f"{cls.__name__} generic parameter {index} must subclass {expected.__name__}, "
+                        f"got {param}"
+                    )
+                return param
+        raise TypeError(
+            f"{cls.__name__} must inherit BaseTool[Args, Result, Config, State] "
+            f"with all four generics specified."
+        )
+
+    # ---------------------------------------------------
+    # Instance creation helpers
+    # ---------------------------------------------------
+    @classmethod
+    def from_config(cls, config: ConfigT) -> BaseTool[ArgsT, ResultT, ConfigT, StateT]:
+        state = cls._get_state_class()()
+        return cls(config=config, state=state)
+
+    @classmethod
+    def create_config_with_permission(cls, permission: ToolPermission) -> ConfigT:
+        ConfigClass = cls._get_config_class()
+        return ConfigClass(permission=permission)
+
+    # ---------------------------------------------------
+    # Introspection helpers
+    # ---------------------------------------------------
+    @classmethod
     def get_parameters(cls) -> dict[str, Any]:
-        """Return a cleaned-up JSON-schema dict describing the arguments model
-        with which this concrete tool was parametrised.
-        """
-        args_model, _ = cls._get_tool_args_results()
-        schema = args_model.model_json_schema()
+        """Return the Pydantic JSON schema for argument model, normalized."""
+        Args, _ = cls._get_args_and_result_models()
+        schema = Args.model_json_schema()
+
         schema.pop("title", None)
         schema.pop("description", None)
 
         if "properties" in schema:
-            for prop_details in schema["properties"].values():
-                prop_details.pop("title", None)
+            for prop in schema["properties"].values():
+                prop.pop("title", None)
 
         if "$defs" in schema:
-            for def_details in schema["$defs"].values():
-                def_details.pop("title", None)
-                if "properties" in def_details:
-                    for prop_details in def_details["properties"].values():
-                        prop_details.pop("title", None)
+            for d in schema["$defs"].values():
+                d.pop("title", None)
+                if "properties" in d:
+                    for prop in d["properties"].values():
+                        prop.pop("title", None)
 
         return schema
 
     @classmethod
     def get_name(cls) -> str:
         name = cls.__name__
-        snake_case = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
-        return snake_case
-
-    @classmethod
-    def create_config_with_permission(
-        cls, permission: ToolPermission
-    ) -> BaseToolConfig:
-        config_class = cls._get_tool_config_class()
-        return config_class(permission=permission)
-
-    def check_allowlist_denylist(self, args: ToolArgs) -> ToolPermission | None:
-        """Check if args match allowlist/denylist patterns.
-
-        Returns:
-            ToolPermission.ALWAYS if allowlisted
-            ToolPermission.NEVER if denylisted
-            None if no match (proceed with normal permission check)
-
-        Base implementation returns None. Override in subclasses for specific logic.
-        """
-        return None
+        return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()

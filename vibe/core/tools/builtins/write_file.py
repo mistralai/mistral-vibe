@@ -13,7 +13,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
 
@@ -43,8 +43,7 @@ class WriteFileState(BaseToolState):
 
 
 class WriteFile(
-    BaseTool[WriteFileArgs, WriteFileResult, WriteFileConfig, WriteFileState],
-    ToolUIData[WriteFileArgs, WriteFileResult],
+    BaseTool[WriteFileArgs, WriteFileResult, WriteFileConfig, WriteFileState]
 ):
     description: ClassVar[str] = (
         "Create or overwrite a UTF-8 file. Fails if file exists unless 'overwrite=True'."

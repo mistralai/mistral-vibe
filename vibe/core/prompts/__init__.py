@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from enum import StrEnum, auto
+from enum import auto
 from pathlib import Path
 
 from vibe import VIBE_ROOT
+from vibe.core.compatibility import StrEnum
 
 _PROMPTS_DIR = VIBE_ROOT / "core" / "prompts"
 
@@ -18,14 +19,15 @@ class Prompt(StrEnum):
 
 
 class SystemPrompt(Prompt):
-    CLI = auto()
-    TESTS = auto()
+    CLI = "cli"
+    TESTS = "tests"
+    STRICT_JUGGERNAUT = "strict_juggernaut"
 
 
 class UtilityPrompt(Prompt):
-    COMPACT = auto()
-    DANGEROUS_DIRECTORY = auto()
-    PROJECT_CONTEXT = auto()
+    COMPACT = "compact"
+    DANGEROUS_DIRECTORY = "dangerous_directory"
+    PROJECT_CONTEXT = "project_context"
 
 
 __all__ = ["SystemPrompt", "UtilityPrompt"]

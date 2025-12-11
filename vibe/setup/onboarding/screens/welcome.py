@@ -11,8 +11,8 @@ from textual.widgets import Static
 from vibe.setup.onboarding.base import OnboardingScreen
 
 WELCOME_PREFIX = "Welcome to "
-WELCOME_HIGHLIGHT = "Mistral Vibe"
-WELCOME_SUFFIX = " - Let's get you started!"
+WELCOME_HIGHLIGHT = "ChefChat"
+WELCOME_SUFFIX = " — Welcome to the Kitchen. Let's get cooking!"
 WELCOME_TEXT = WELCOME_PREFIX + WELCOME_HIGHLIGHT + WELCOME_SUFFIX
 
 HIGHLIGHT_START = len(WELCOME_PREFIX)

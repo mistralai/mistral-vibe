@@ -126,7 +126,7 @@ class ToolManager:
         for cls in ToolManager._iter_tool_classes(search_paths):
             try:
                 tool_name = cls.get_name()
-                config_class = cls._get_tool_config_class()
+                config_class = cls._get_config_class()
                 defaults[tool_name] = config_class().model_dump(exclude_none=True)
             except Exception as e:
                 logger.warning(
@@ -233,7 +233,7 @@ class ToolManager:
         tool_class = self._available.get(tool_name)
 
         if tool_class:
-            config_class = tool_class._get_tool_config_class()
+            config_class = tool_class._get_config_class()
             default_config = config_class()
         else:
             config_class = BaseToolConfig

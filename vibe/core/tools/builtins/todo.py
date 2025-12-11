@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from enum import StrEnum, auto
+from enum import auto
 from typing import ClassVar
 
 from pydantic import BaseModel, Field
 
+from vibe.core.compatibility import StrEnum
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -12,7 +13,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
 
@@ -58,10 +59,7 @@ class TodoState(BaseToolState):
     todos: list[TodoItem] = Field(default_factory=list)
 
 
-class Todo(
-    BaseTool[TodoArgs, TodoResult, TodoConfig, TodoState],
-    ToolUIData[TodoArgs, TodoResult],
-):
+class Todo(BaseTool[TodoArgs, TodoResult, TodoConfig, TodoState]):
     description: ClassVar[str] = (
         "Manage todos. Use action='read' to view, action='write' with complete list to update."
     )

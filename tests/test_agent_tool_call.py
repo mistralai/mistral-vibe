@@ -299,7 +299,7 @@ async def test_tool_call_with_invalid_action() -> None:
     assert isinstance(events[2], ToolResultEvent)
     assert events[2].error is not None
     assert events[2].result is None
-    assert "tool_error" in events[2].error.lower()
+    assert "invalid action" in events[2].error.lower()
     assert agent.stats.tool_calls_failed == 1
 
 
