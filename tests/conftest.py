@@ -16,6 +16,12 @@ sys.modules["mistralai"] = MagicMock()
 sys.modules["mistralai.models"] = MagicMock()
 sys.modules["mistralai.client"] = MagicMock()
 
+# Ensure SDKError inherits from Exception so it can be caught in try/except blocks
+class MockSDKError(Exception):
+    pass
+
+sys.modules["mistralai.models"].SDKError = MockSDKError
+
 import enum
 
 if not hasattr(enum, "StrEnum"):

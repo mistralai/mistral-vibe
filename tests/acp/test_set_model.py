@@ -52,8 +52,15 @@ def acp_agent(backend: FakeBackend) -> VibeAcpAgent:
 
     class PatchedAgent(Agent):
         def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **{**kwargs, "backend": backend})
+            # Ensure backend is passed in kwargs for super().__init__
+            kwargs["backend"] = backend
+            super().__init__(*args, **kwargs)
             self.config = config
+            
+            # Explicitly set message_observer if it wasn't set by super
+            if not hasattr(self, "message_observer"):
+                 self.message_observer = kwargs.get("message_observer")
+
             try:
                 active_model = config.get_active_model()
                 self.stats.input_price_per_million = active_model.input_price
