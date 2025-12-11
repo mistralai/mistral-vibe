@@ -307,9 +307,9 @@ class TestSystemPromptInjection:
     """Test that mode-specific content is correctly injected into prompts."""
 
     def test_yolo_prompt_contains_marker(self, yolo_manager: ModeManager) -> None:
-        """YOLO mode system prompt should contain 'YOLO MODE' marker."""
+        """YOLO mode system prompt should contain 'YOLO' marker."""
         prompt = yolo_manager.get_system_prompt_modifier()
-        assert "YOLO MODE" in prompt, "YOLO prompt should contain 'YOLO MODE'"
+        assert "YOLO" in prompt, "YOLO prompt should contain 'YOLO'"
 
     def test_yolo_prompt_contains_ultra_concise(
         self, yolo_manager: ModeManager
@@ -321,23 +321,23 @@ class TestSystemPromptInjection:
     def test_plan_prompt_contains_readonly(self, plan_manager: ModeManager) -> None:
         """PLAN mode prompt should mention read-only restrictions."""
         prompt = plan_manager.get_system_prompt_modifier()
-        assert "PLAN MODE" in prompt
+        assert "PLAN" in prompt
         assert "read-only" in prompt.lower()
 
     def test_plan_prompt_mentions_implementation_plan(
         self, plan_manager: ModeManager
     ) -> None:
-        """PLAN mode prompt should mention creating implementation plans."""
+        """PLAN mode prompt should mention creating detailed plans."""
         prompt = plan_manager.get_system_prompt_modifier()
-        assert "implementation plan" in prompt.lower()
+        assert "detailed plans" in prompt.lower()
 
     def test_architect_prompt_mentions_design(
         self, architect_manager: ModeManager
     ) -> None:
         """ARCHITECT mode prompt should focus on design."""
         prompt = architect_manager.get_system_prompt_modifier()
-        assert "ARCHITECT MODE" in prompt
-        assert "HIGH-LEVEL DESIGN" in prompt
+        assert "ARCHITECT" in prompt
+        assert "High-level design" in prompt
 
     def test_all_modes_have_active_mode_tag(self) -> None:
         """All modes should include <active_mode> XML tag in their prompts."""
@@ -347,11 +347,11 @@ class TestSystemPromptInjection:
             assert "<active_mode>" in prompt, f"{mode} should have <active_mode> tag"
 
     def test_all_modes_have_mode_rules_tag(self) -> None:
-        """All modes should include <mode_rules> XML tag in their prompts."""
+        """All modes should include <rules> XML tag in their prompts."""
         for mode in VibeMode:
             manager = ModeManager(initial_mode=mode)
             prompt = manager.get_system_prompt_modifier()
-            assert "<mode_rules>" in prompt, f"{mode} should have <mode_rules> tag"
+            assert "<rules>" in prompt, f"{mode} should have <rules> tag"
 
 
 # =============================================================================

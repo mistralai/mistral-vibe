@@ -133,11 +133,20 @@ class WriteTextFileJsonRpcResponse(JsonRpcResponse):
 async def get_acp_agent_process(
     mock: bool = True, mock_env: dict[str, str] | None = None
 ) -> AsyncGenerator[asyncio.subprocess.Process]:
+    import sys
     current_env = os.environ.copy()
+    
+    # Ensure the current project root is in PYTHONPATH
+    project_root = str(TESTS_ROOT.parent)
+    current_env["PYTHONPATH"] = project_root + os.pathsep + current_env.get("PYTHONPATH", "")
+
     if mock:
-        cmd = ["uv", "run", "python", MOCK_ENTRYPOINT_PATH]
+        # Use the current python executable to run the mock entrypoint
+        cmd = [sys.executable, MOCK_ENTRYPOINT_PATH]
     else:
-        cmd = ["uv", "run", "vibe-acp"]
+        # For real runs, try to use the installed script or module
+        # Using sys.executable -m vibe.acp.entrypoint is safer than 'uv run vibe-acp'
+        cmd = [sys.executable, "-m", "vibe.acp.entrypoint"]
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -163,6 +172,14 @@ async def get_acp_agent_process(
             except TimeoutError:
                 process.kill()
                 await process.wait()
+        
+        # Log stderr if process failed to help debug
+        if process.returncode is not None and process.returncode != 0 and process.stderr:
+            stderr_data = await process.stderr.read()
+            if stderr_data:
+                print(f"\n--- Subprocess STDERR (Code: {process.returncode}) ---")
+                print(stderr_data.decode())
+                print("-------------------------------------------\n")
 
 
 async def send_json_rpc(

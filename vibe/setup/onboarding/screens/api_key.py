@@ -11,7 +11,7 @@ from textual.events import MouseUp
 from textual.validation import Length
 from textual.widgets import Input, Link, Static
 
-from vibe.cli.clipboard import copy_selection_to_clipboard
+# from vibe.cli.clipboard import copy_selection_to_clipboard # REMOVED: Circular import
 from vibe.core.config import GLOBAL_ENV_FILE, VibeConfig
 from vibe.setup.onboarding.base import OnboardingScreen
 
@@ -132,4 +132,4 @@ class ApiKeyScreen(OnboardingScreen):
         self.app.exit("completed")
 
     def on_mouse_up(self, event: MouseUp) -> None:
-        copy_selection_to_clipboard(self.app)
+        pass # Removed copy_selection_to_clipboard to break circular import

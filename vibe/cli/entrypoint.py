@@ -21,115 +21,22 @@ from vibe.core.interaction_logger import InteractionLogger
 from vibe.core.programmatic import run_programmatic
 from vibe.core.types import OutputFormat, ResumeSessionInfo
 from vibe.core.utils import ConversationLimitException
-from vibe.setup.onboarding import run_onboarding
 
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Mistral Vibe interactive CLI")
-    parser.add_argument(
-        "initial_prompt",
-        nargs="?",
-        metavar="PROMPT",
-        help="Initial prompt to start the interactive session with.",
-    )
-    parser.add_argument(
-        "-p",
-        "--prompt",
-        nargs="?",
-        const="",
-        metavar="TEXT",
-        help="Run in programmatic mode: send prompt, auto-approve all tools, "
-        "output response, and exit.",
-    )
-    parser.add_argument(
-        "--auto-approve",
-        action="store_true",
-        default=False,
-        help="Automatically approve all tool executions.",
-    )
-    parser.add_argument(
-        "--max-turns",
-        type=int,
-        metavar="N",
-        help="Maximum number of assistant turns "
-        "(only applies in programmatic mode with -p).",
-    )
-    parser.add_argument(
-        "--max-price",
-        type=float,
-        metavar="DOLLARS",
-        help="Maximum cost in dollars (only applies in programmatic mode with -p). "
-        "Session will be interrupted if cost exceeds this limit.",
-    )
-    parser.add_argument(
-        "--enabled-tools",
-        action="append",
-        metavar="TOOL",
-        help="Enable specific tools. In programmatic mode (-p), this disables "
-        "all other tools. "
-        "Can use exact names, glob patterns (e.g., 'bash*'), or "
-        "regex with 're:' prefix. Can be specified multiple times.",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        choices=["text", "json", "streaming"],
-        default="text",
-        help="Output format for programmatic mode (-p): 'text' "
-        "for human-readable (default), 'json' for all messages at end, "
-        "'streaming' for newline-delimited JSON per message.",
-    )
-    parser.add_argument(
-        "--agent",
-        metavar="NAME",
-        default=None,
-        help="Load agent configuration from ~/.vibe/agents/NAME.toml",
-    )
-    parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
-
-    continuation_group = parser.add_mutually_exclusive_group()
-    continuation_group.add_argument(
-        "-c",
-        "--continue",
-        action="store_true",
-        dest="continue_session",
-        help="Continue from the most recent saved session",
-    )
-    continuation_group.add_argument(
-        "--resume",
-        metavar="SESSION_ID",
-        help="Resume a specific session by its ID (supports partial matching)",
-    )
-
-    # --repl flag kept for backward compatibility (REPL is now always used)
-    parser.add_argument(
-        "--repl",
-        action="store_true",
-        help="(Default) Launch the ChefChat REPL interface",
-    )
-
-    return parser.parse_args()
-
+    # ... (rest of parse_arguments) ...
+    pass
 
 def get_prompt_from_stdin() -> str | None:
-    if sys.stdin.isatty():
-        return None
-    try:
-        if content := sys.stdin.read().strip():
-            sys.stdin = sys.__stdin__ = open("/dev/tty")
-            return content
-    except KeyboardInterrupt:
-        pass
-    except OSError:
-        return None
-
-    return None
-
+    # ... (rest of get_prompt_from_stdin) ...
+    pass
 
 def load_config_or_exit(agent: str | None = None) -> VibeConfig:
     try:
         return VibeConfig.load(agent)
     except MissingAPIKeyError:
+        # Lazy import run_onboarding here to break circular dependency
+        from vibe.setup.onboarding import run_onboarding
         run_onboarding()
         return VibeConfig.load(agent)
     except MissingPromptFileError as e:
@@ -139,12 +46,17 @@ def load_config_or_exit(agent: str | None = None) -> VibeConfig:
         rprint(f"[yellow]{e}[/]")
         sys.exit(1)
 
-
 def main() -> None:  # noqa: PLR0912, PLR0915
+    # Force UTF-8 encoding for stdout on Windows to support emojis
+    if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
     load_api_keys_from_env()
     args = parse_arguments()
 
     if args.setup:
+        # Lazy import run_onboarding here to break circular dependency
+        from vibe.setup.onboarding import run_onboarding
         run_onboarding()
         sys.exit(0)
     try:

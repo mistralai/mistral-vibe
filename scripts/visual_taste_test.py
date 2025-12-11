@@ -305,7 +305,7 @@ def test_taste_test() -> None:
         severity=4,  # Good rating
     )
 
-    console.print(Panel(Markdown(taste), border_style=COLORS["secondary"]))
+    console.print(taste)
 
 
 def main() -> None:

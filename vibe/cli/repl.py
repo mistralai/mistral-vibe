@@ -93,7 +93,11 @@ class ChefChatREPL:
         """Initialize the REPL with premium dark UI."""
         self.config = config
         self.mode_manager = ModeManager(initial_mode=initial_mode)
-        self.console = Console()
+        
+        # Configure Console for better Windows compatibility
+        # Force terminal ensures colors are rendered even if detection fails
+        self.console = Console(force_terminal=True, force_interactive=True)
+        
         self.agent: Agent | None = None
         self._last_mode = initial_mode
 

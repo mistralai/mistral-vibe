@@ -49,9 +49,11 @@ COLORS = {
     "smoke": "#666666",  # Same as muted - subtle smoke
     "sage": "#00D26A",  # Same as success - fresh herbs
     "honey": "#FFB800",  # Same as warning - golden honey
-    "ember": "#FF4444",  # Same as error - hot embers
+    "ember": "#FF4444",  # Hot embers
     "cream": "#F5F5DC",  # Cream color for highlights
-    "ash": "#404040",  # Same as secondary - cool ash
+    "ash": "#404040",  # Cool ash
+    "gold": "#FFD700",  # Gold for highlights
+    "lavender": "#E6E6FA", # Lavender for subtle accents
 }
 
 

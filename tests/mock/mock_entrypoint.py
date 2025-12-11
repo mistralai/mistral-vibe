@@ -1,16 +1,8 @@
-"""Wrapper script that intercepts LLM calls when mocking is enabled.
-
-This script is used to mock the LLM calls when testing the CLI.
-Mocked returns are stored in the VIBE_MOCK_LLM_DATA environment variable.
-"""
-
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
 import json
 import os
 import sys
-from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -18,48 +10,15 @@ from tests import TESTS_ROOT
 from tests.mock.utils import MOCK_DATA_ENV_VAR
 from vibe.core.types import LLMChunk
 
-
-def mock_llm_output() -> None:
-    sys.path.insert(0, str(TESTS_ROOT))
-
-    # Apply mocking before importing any vibe modules
-    mock_data_str = os.environ.get(MOCK_DATA_ENV_VAR)
-    if not mock_data_str:
-        raise ValueError(f"{MOCK_DATA_ENV_VAR} is not set")
-    mock_data = json.loads(mock_data_str)
-    try:
-        chunks = [LLMChunk.model_validate(chunk) for chunk in mock_data]
-    except ValidationError as e:
-        raise ValueError(f"Invalid mock data: {e}") from e
-
-    chunk_iterable = iter(chunks)
-
-    async def mock_complete(*args, **kwargs) -> LLMChunk:
-        return next(chunk_iterable)
-
-    async def mock_complete_streaming(*args, **kwargs) -> AsyncGenerator[LLMChunk]:
-        yield next(chunk_iterable)
-
-    patch(
-        "vibe.core.llm.backend.mistral.MistralBackend.complete",
-        side_effect=mock_complete,
-    ).start()
-    patch(
-        "vibe.core.llm.backend.generic.GenericBackend.complete",
-        side_effect=mock_complete,
-    ).start()
-    patch(
-        "vibe.core.llm.backend.mistral.MistralBackend.complete_streaming",
-        side_effect=mock_complete_streaming,
-    ).start()
-    patch(
-        "vibe.core.llm.backend.generic.GenericBackend.complete_streaming",
-        side_effect=mock_complete_streaming,
-    ).start()
-
-
 if __name__ == "__main__":
-    mock_llm_output()
+    sys.path.insert(0, str(TESTS_ROOT.parent)) # Ensure vibe is importable
+
+    # This entrypoint is now mainly for running the actual vibe.acp.entrypoint.main
+    # in an environment where conftest.py has set up global mocks.
+    # The previous mocking logic here was conflicting with conftest.py.
+    
+    # Check if we need to configure mock behavior for mistralai client.
+    # This should now be handled by conftest.py which uses environment variables.
 
     from vibe.acp.entrypoint import main
 
