@@ -5,6 +5,8 @@
 [![CI Status](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml/badge.svg)](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/mistralai/mistral-vibe)](https://github.com/mistralai/mistral-vibe/blob/main/LICENSE)
 
+<!-- CI test trigger comment -->
+
 ```
 ██████████████████░░
 ██████████████████░░
