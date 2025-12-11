@@ -297,6 +297,31 @@ DEFAULT_MODELS = [
         output_price=0.0,
     ),
     # Ollama models - run `ollama pull <model>` to download
+    # Vision & Architecture - thinking + vision combo
+    ModelConfig(
+        name="qwen3-next:80b-cloud",
+        provider="ollama",
+        alias="ollama-qwen3-vision",
+        input_price=0.0,
+        output_price=0.0,
+    ),
+    # Code, Reasoning, Security, Performance - DeepSeek with thinking mode
+    ModelConfig(
+        name="deepseek-v3.2:cloud",
+        provider="ollama",
+        alias="ollama-deepseek",
+        input_price=0.0,
+        output_price=0.0,
+    ),
+    # General purpose - 675B powerhouse
+    ModelConfig(
+        name="mistral-large-3:675b-cloud",
+        provider="ollama",
+        alias="ollama-mistral-large",
+        input_price=0.0,
+        output_price=0.0,
+    ),
+    # Common local models
     ModelConfig(
         name="codestral:latest",
         provider="ollama",
@@ -308,34 +333,6 @@ DEFAULT_MODELS = [
         name="qwen2.5-coder:latest",
         provider="ollama",
         alias="ollama-qwen-coder",
-        input_price=0.0,
-        output_price=0.0,
-    ),
-    ModelConfig(
-        name="qwen2.5-coder:32b",
-        provider="ollama",
-        alias="ollama-qwen-coder-32b",
-        input_price=0.0,
-        output_price=0.0,
-    ),
-    ModelConfig(
-        name="deepseek-coder-v2:latest",
-        provider="ollama",
-        alias="ollama-deepseek-coder",
-        input_price=0.0,
-        output_price=0.0,
-    ),
-    ModelConfig(
-        name="llama3.1:latest",
-        provider="ollama",
-        alias="ollama-llama3",
-        input_price=0.0,
-        output_price=0.0,
-    ),
-    ModelConfig(
-        name="mistral:latest",
-        provider="ollama",
-        alias="ollama-mistral",
         input_price=0.0,
         output_price=0.0,
     ),
