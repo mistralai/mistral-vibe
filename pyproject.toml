@@ -156,3 +156,4 @@ ignore_decorators = ["@*"]
 [tool.pytest.ini_options]
 addopts = "-vvvv -q --durations=5 --import-mode=importlib"
 timeout = 10
+norecursedirs = "_archived"

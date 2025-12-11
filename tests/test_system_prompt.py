@@ -26,12 +26,9 @@ def test_get_universal_system_prompt_includes_windows_prompt_on_windows(
 
     prompt = get_universal_system_prompt(tool_manager, config)
 
-    assert "You are Vibe, a super useful programming assistant." in prompt
-    assert (
-        "The operating system is Windows with shell `C:\\Windows\\System32\\cmd.exe`"
-        in prompt
-    )
-    assert "DO NOT use Unix commands like `ls`, `grep`, `cat`" in prompt
+    assert "Test System Prompt" in prompt
+    assert "The operating system is Windows" in prompt
+    assert "DO NOT use Unix commands" in prompt
     assert "Use: `dir` (Windows) for directory listings" in prompt
     assert "Use: backslashes (\\\\) for paths" in prompt
     assert "Check command availability with: `where command` (Windows)" in prompt

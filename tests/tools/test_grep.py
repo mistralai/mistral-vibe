@@ -344,4 +344,6 @@ class TestRipgrepBackend:
             GrepArgs(pattern="match", use_default_ignore=False)
         )
         assert "included.py" in result_without_ignore.matches
-        assert "ignored_by_rg/file.py" in result_without_ignore.matches
+        import os
+        expected_path = os.path.join("ignored_by_rg", "file.py")
+        assert expected_path in result_without_ignore.matches

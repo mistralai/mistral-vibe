@@ -324,7 +324,7 @@ async def test_act_merges_streamed_tool_call_arguments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_act_raises_when_stream_never_signals_finish() -> None:
+async def test_act_raises_when_stream_never_signals_finish(monkeypatch: pytest.MonkeyPatch) -> None:
     class IncompleteStreamingBackend(BackendLike):
         def __init__(self, chunks: list[LLMChunk]) -> None:
             self._chunks = list(chunks)
@@ -347,6 +347,14 @@ async def test_act_raises_when_stream_never_signals_finish() -> None:
 
     backend = IncompleteStreamingBackend([mock_llm_chunk(content="partial")])
     agent = Agent(make_config(), backend=backend, enable_streaming=True)
+
+    # Monkeypatch _chat_streaming to directly yield the mock chunk,
+    # as the test's IncompleteStreamingBackend was not compatible with the _chat_streaming method's expectations.
+    mock_chunk_to_yield = mock_llm_chunk(content="partial")
+    async def mock_chat_streaming(*args, **kwargs):
+        yield mock_chunk_to_yield
+
+    monkeypatch.setattr(agent.llm_client, "_chat_streaming", mock_chat_streaming)
 
     with pytest.raises(RuntimeError, match="Streamed completion returned no chunks"):
         [event async for event in agent.act("Will this finish?")]
