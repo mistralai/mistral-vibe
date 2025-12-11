@@ -1,3 +1,3 @@
-from .adapter import CompleterAdapter, PromptToolkitCompleter
-from .path_completion import PathCompleter
-from .slash_command import SlashCommandCompleter
+from .adapter import PromptToolkitCompleterAdapter
+from .path_completion import PathCompletionController
+from .slash_command import SlashCommandController

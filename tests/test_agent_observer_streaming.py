@@ -100,7 +100,7 @@ async def test_act_flushes_batched_messages_with_injection_middleware(
 
     assert len(observed) == 3
     assert [r for r, _ in observed] == [Role.system, Role.user, Role.assistant]
-    assert observed[0][1] == "You are Vibe, a super useful programming assistant."
+    assert observed[0][1] == "Test System Prompt"
     # injected content should be appended to the user's message before emission
     assert (
         observed[1][1]
@@ -127,7 +127,7 @@ async def test_stop_action_flushes_user_msg_before_returning(observer_capture) -
     assert len(observed) == 2
     # user's message should have been flushed before returning
     assert [r for r, _ in observed] == [Role.system, Role.user]
-    assert observed[0][1] == "You are Vibe, a super useful programming assistant."
+    assert observed[0][1] == "Test System Prompt"
     assert observed[1][1] == "Greet."
 
 

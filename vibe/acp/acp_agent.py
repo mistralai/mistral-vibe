@@ -443,3 +443,6 @@ def run_acp_server() -> None:
         # Log any unexpected errors
         print(f"ACP Agent Server error: {e}", file=sys.stderr)
         raise
+
+
+ACPAgent = VibeAcpAgent

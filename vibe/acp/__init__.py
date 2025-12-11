@@ -1,2 +1,1 @@
-from .acp_agent import ACPAgent
-from .utils import ACPSession
+from .acp_agent import ACPAgent, AcpSession as ACPSession

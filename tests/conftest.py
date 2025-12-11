@@ -16,9 +16,6 @@ sys.modules["mistralai"] = MagicMock()
 sys.modules["mistralai.models"] = MagicMock()
 sys.modules["mistralai.client"] = MagicMock()
 
-# Mock UI to avoid Python 3.12 syntax in vibe/core/tools/ui.py
-sys.modules["vibe.core.tools.ui"] = MagicMock()
-
 import enum
 
 if not hasattr(enum, "StrEnum"):
@@ -99,14 +96,3 @@ def _reset_in_mem_config() -> None:
 @pytest.fixture(autouse=True)
 def _mock_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "mock")
-
-
-@pytest.fixture(autouse=True)
-def _mock_platform(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mock platform to be Linux with /bin/sh shell for consistent test behavior.
-
-    This ensures that platform-specific system prompt generation is consistent
-    across all tests regardless of the actual platform running the tests.
-    """
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setenv("SHELL", "/bin/sh")

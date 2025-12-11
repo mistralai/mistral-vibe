@@ -115,6 +115,7 @@ class Agent:
 
         # Store mode_manager for mode-aware tool execution
         self.mode_manager: ModeManager | None = mode_manager
+        self.message_observer = message_observer
 
         self.session_id = str(uuid4())
 

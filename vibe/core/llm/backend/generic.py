@@ -71,17 +71,14 @@ class OpenAIAdapter(APIAdapter):
     endpoint: ClassVar[str] = "/chat/completions"
 
     def _map_role(self, role: str) -> str:
-        # Maps internal Role enum values to OpenAI role strings
-        # Role.system='1', Role.user='2', Role.assistant='3', Role.tool='4'
-        mapping = {"1": "system", "2": "user", "3": "assistant", "4": "tool"}
-        return mapping.get(role, "user")
+        # OpenAI uses the same role strings as our internal enum
+        return role
 
     def _map_role_reverse(self, role: str | None) -> str:
-        # Maps OpenAI role strings back to internal Role enum values
+        # OpenAI uses the same role strings as our internal enum
         if not role:
-            return "3" # Default to assistant
-        mapping = {"system": "1", "user": "2", "assistant": "3", "tool": "4"}
-        return mapping.get(role, "3")
+            return "assistant"
+        return role
 
     def build_payload(
         self,

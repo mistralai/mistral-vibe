@@ -13,6 +13,8 @@ from vibe.core.tools.manager import ToolManager
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 from vibe.core.utils import logger
 
+ToolResult = dict[str, Any]
+
 
 @runtime_checkable
 class ToolCallSessionUpdateProtocol(Protocol):

@@ -134,7 +134,10 @@ async def get_acp_agent_process(
     mock: bool = True, mock_env: dict[str, str] | None = None
 ) -> AsyncGenerator[asyncio.subprocess.Process]:
     current_env = os.environ.copy()
-    cmd = ["uv", "run", MOCK_ENTRYPOINT_PATH if mock else "vibe-acp"]
+    if mock:
+        cmd = ["uv", "run", "python", MOCK_ENTRYPOINT_PATH]
+    else:
+        cmd = ["uv", "run", "vibe-acp"]
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
