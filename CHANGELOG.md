@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Version bump to 1.1.3
+- Version bump to 1.1.3 (no functional changes, version synchronization)
 
 ## [1.1.2] - 2025-12-11
 
