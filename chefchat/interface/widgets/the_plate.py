@@ -6,6 +6,7 @@ This widget displays syntax-highlighted code output from the Line Cook.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from rich.console import RenderableType
@@ -13,11 +14,14 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
+from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import Static
+from textual.widgets import RichLog, Static, TabbedContent, TabPane, TextArea
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
 
 
 class CodeBlock(Static):
@@ -75,11 +79,13 @@ class CodeBlock(Static):
         return syntax
 
 
-class ThePlate(VerticalScroll):
+class ThePlate(TabbedContent):
     """The code output panel showing generated/modified code.
 
-    Supports multiple code blocks with different languages
-    and optional file path indicators.
+    Organized into tabs:
+    - Code: The generated/modified code
+    - Terminal: Output of execution/tests
+    - Notes: Scratchpad or implementation notes
     """
 
     DEFAULT_CSS = """
@@ -88,21 +94,26 @@ class ThePlate(VerticalScroll):
         border: solid $panel-border;
         border-title-color: $accent;
         border-title-style: bold;
-        padding: 1 2;
+        padding: 0;
     }
 
     ThePlate:focus {
         border: solid $accent;
     }
 
-    ThePlate #plate-empty {
+    #plate-code-scroll {
+        padding: 1 2;
+        background: $secondary-bg;
+    }
+
+    #plate-empty {
         color: $text-muted;
         text-style: italic;
         text-align: center;
         padding-top: 2;
     }
 
-    ThePlate .file-path {
+    .file-path {
         color: $info;
         text-style: bold;
         margin-bottom: 0;
@@ -116,8 +127,18 @@ class ThePlate(VerticalScroll):
     current_language: reactive[str] = reactive("python", init=False)
 
     def compose(self) -> ComposeResult:
-        """Compose the initial empty state."""
-        yield Static("🍽️ Waiting for the dish to be plated...", id="plate-empty")
+        """Compose the tabbed interface."""
+        with TabPane("Code", id="tab-code"):
+            yield VerticalScroll(
+                Static("🍽️ Waiting for the dish to be plated...", id="plate-empty"),
+                id="plate-code-scroll",
+            )
+
+        with TabPane("Terminal", id="tab-terminal"):
+            yield RichLog(id="plate-terminal", highlight=True, markup=True)
+
+        with TabPane("Notes", id="tab-notes"):
+            yield TextArea(language="markdown", id="plate-notes")
 
     def plate_code(
         self,
@@ -126,7 +147,10 @@ class ThePlate(VerticalScroll):
         file_path: str | None = None,
         append: bool = False,
     ) -> CodeBlock:
-        """Display code on the plate.
+        """Display code on the plate (Code Tab).
+
+        Uses batch operations for better performance when clearing
+        existing content.
 
         Args:
             code: The source code to display
@@ -137,53 +161,123 @@ class ThePlate(VerticalScroll):
         Returns:
             The created CodeBlock widget
         """
-        # Remove empty state if present
-        try:
-            empty = self.query_one("#plate-empty", Static)
-            empty.remove()
-        except Exception:
-            pass
+        scroll_container = self.query_one("#plate-code-scroll", VerticalScroll)
 
-        # If not appending, clear existing code blocks
-        if not append:
-            for block in self.query(CodeBlock):
-                block.remove()
-            for label in self.query(".file-path"):
-                label.remove()
+        with self.app.batch_update():
+            # Remove empty state if present (using NoMatches exception)
+            try:
+                empty = scroll_container.query_one("#plate-empty", Static)
+                empty.remove()
+            except NoMatches:
+                pass
 
-        # Add file path label if provided
-        if file_path:
-            self.mount(Static(f"📄 {file_path}", classes="file-path"))
+            # If not appending, clear existing code blocks using batch operation
+            if not append:
+                # Collect all widgets to remove first (batch operation)
+                widgets_to_remove: list[Static | CodeBlock] = []
+                widgets_to_remove.extend(scroll_container.query(CodeBlock))
+                widgets_to_remove.extend(scroll_container.query(".file-path"))
 
-        # Create and mount the code block
-        title = file_path.split("/")[-1] if file_path else None
-        block = CodeBlock(code=code, language=language, title=title)
-        self.mount(block)
+                # Then remove them all
+                for widget in widgets_to_remove:
+                    widget.remove()
 
-        # Update reactive properties
-        self.current_code = code
-        self.current_language = language
+            # Add file path label if provided
+            if file_path:
+                scroll_container.mount(Static(f"📄 {file_path}", classes="file-path"))
 
-        # Scroll to show new content
-        self.scroll_end(animate=True)
+            # Create and mount the code block
+            # Guard against empty file_path before string operations
+            title: str | None = None
+            if file_path:
+                title = file_path.split("/")[-1] if "/" in file_path else file_path
+
+            block = CodeBlock(code=code, language=language, title=title)
+            scroll_container.mount(block)
+
+            # Update reactive properties
+            self.current_code = code
+            self.current_language = language
+
+            # Scroll to show new content
+            scroll_container.scroll_end(animate=True)
+
+        # Switch to Code tab
+        self.active = "tab-code"
 
         return block
 
     def clear_plate(self) -> None:
-        """Clear all code from the plate."""
-        # Remove all code blocks and file paths
-        for block in self.query(CodeBlock):
-            block.remove()
-        for label in self.query(".file-path"):
-            label.remove()
+        """Clear all code from the plate.
 
-        # Restore empty state
-        self.mount(Static("🍽️ Waiting for the dish to be plated...", id="plate-empty"))
+        Uses batch operations for better performance.
+        """
+        scroll_container = self.query_one("#plate-code-scroll", VerticalScroll)
 
-        # Reset reactive properties
-        self.current_code = ""
-        self.current_language = "python"
+        with self.app.batch_update():
+            # Batch collect widgets to remove
+            widgets_to_remove: list[Static | CodeBlock] = []
+            widgets_to_remove.extend(scroll_container.query(CodeBlock))
+            widgets_to_remove.extend(scroll_container.query(".file-path"))
+
+            # Batch remove
+            for widget in widgets_to_remove:
+                widget.remove()
+
+            # Restore empty state
+            scroll_container.mount(
+                Static("🍽️ Waiting for the dish to be plated...", id="plate-empty")
+            )
+
+            # Reset reactive properties
+            self.current_code = ""
+            self.current_language = "python"
+
+            # Also clear terminal
+            try:
+                terminal = self.query_one("#plate-terminal", RichLog)
+                terminal.clear()
+            except NoMatches:
+                logger.warning("Terminal widget not found during clear")
+
+    def log_message(self, message: str) -> None:
+        """Log a message to the Terminal tab.
+
+        Args:
+            message: The message to log
+        """
+        try:
+            terminal = self.query_one("#plate-terminal", RichLog)
+            terminal.write(message)
+        except NoMatches:
+            logger.warning("Terminal widget not found for logging")
+
+    def get_notes(self) -> str:
+        """Get the content of the Notes tab.
+
+        Returns:
+            The note content as a string
+        """
+        try:
+            return self.query_one("#plate-notes", TextArea).text
+        except NoMatches:
+            return ""
+
+    def set_notes(self, text: str) -> None:
+        """Set the content of the Notes tab.
+
+        Args:
+            text: The text to set
+        """
+        try:
+            self.query_one("#plate-notes", TextArea).text = text
+        except NoMatches:
+            logger.warning("Notes widget not found")
 
     def get_current_code(self) -> str:
-        """Get the currently displayed code."""
+        """Get the currently displayed code.
+
+        Returns:
+            The current code content
+        """
         return self.current_code

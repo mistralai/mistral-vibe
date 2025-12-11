@@ -417,7 +417,7 @@ class VibeConfig(BaseSettings):
 
     def get_active_model(self) -> ModelConfig:
         for model in self.models:
-            if model.alias == self.active_model:
+            if model.alias == self.active_model or model.name == self.active_model:
                 return model
         raise ValueError(
             f"Active model '{self.active_model}' not found in configuration."

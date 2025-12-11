@@ -228,3 +228,44 @@ ThemeSelectionScreen #enter-hint {
 #config-docs-group .link-row {
     margin-top: 0;
 }
+
+/* =============================================================================
+   Provider Selection Screen
+   ============================================================================= */
+
+#provider-select-container {
+    width: 100%;
+    height: 100%;
+    align: center middle;
+}
+
+#provider-title {
+    text-align: center;
+    text-style: bold;
+    color: #FF7000;
+    margin-bottom: 1;
+}
+
+#provider-subtitle {
+    text-align: center;
+    color: $text-muted;
+    margin-bottom: 2;
+}
+
+#provider-grid {
+    layout: grid;
+    grid-size: 3;
+    grid-gutter: 2;
+    width: auto;
+    height: auto;
+    margin-bottom: 2;
+}
+
+#provider-grid Button {
+    width: 20;
+}
+
+.dim {
+    color: $text-muted;
+    text-style: italic;
+}

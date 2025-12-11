@@ -12,10 +12,10 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from chefchat.kitchen.bus import BaseStation, KitchenBus
+from chefchat.kitchen.bus import BaseStation, ChefMessage, KitchenBus
 
 if TYPE_CHECKING:
-    pass
+    from chefchat.kitchen.brain import KitchenBrain
 
 
 class LineCook(BaseStation):
@@ -38,6 +38,30 @@ class LineCook(BaseStation):
         super().__init__("line_cook", bus)
         self.brain = brain
         self._current_task: str | None = None
+
+    async def handle(self, message: ChefMessage) -> None:
+        """Process incoming messages.
+
+        Args:
+            message: The message to process
+        """
+        action = message.action
+
+        if action == "PLAN":
+            # Implementation request from Sous Chef
+            await self._execute_plan(message.payload)
+
+        elif action == "test":
+            # Run tests on code
+            await self._run_tests(message.payload)
+
+        elif action == "refactor":
+            # Refactor existing code
+            await self._refactor(message.payload)
+
+        elif action == "FIX_ERRORS":
+            # Fix errors from Expeditor (self-healing loop)
+            await self._fix_errors(message.payload)
 
     async def _execute_plan(self, plan: dict) -> None:
         """Execute the implementation plan.

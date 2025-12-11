@@ -1,7 +1,10 @@
-"""ChefChat Interface - Textual TUI application."""
+"""ChefChat Interface Package.
+
+Provides the Textual-based TUI interface for ChefChat.
+"""
 
 from __future__ import annotations
 
-from chefchat.interface.tui import ChefChatApp
+from chefchat.interface.tui import ChefChatApp, run
 
-__all__ = ["ChefChatApp"]
+__all__ = ["ChefChatApp", "run"]

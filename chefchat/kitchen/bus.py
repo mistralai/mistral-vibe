@@ -12,13 +12,17 @@ from abc import ABC, abstractmethod
 import asyncio
 from dataclasses import dataclass, field
 from enum import IntEnum
+import logging
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+import pydantic
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 class MessagePriority(IntEnum):
@@ -49,6 +53,24 @@ class ChefMessage(BaseModel):
     action: str = Field(description="The action to perform")
     payload: dict[str, Any] = Field(default_factory=dict)
     priority: MessagePriority = Field(default=MessagePriority.NORMAL)
+
+    @pydantic.validator("payload", pre=True)
+    def validate_payload(cls, v: Any) -> dict[str, Any]:
+        """Ensure payload is always a dictionary.
+
+        If None is passed, convert to empty dict.
+        If non-dict is passed, wrap in 'content' key or raise error?
+        For safety in kitchen, we coerce None->dict and error on others.
+        """
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            # Attempt to coerce or fail?
+            # Let's be strict but helpful - if it's a string, maybe it's meant to be a simple message?
+            # But bus.py logic expects structured data.
+            # Let's raise ValueError to catch bad code early.
+            raise ValueError(f"Payload must be a dictionary, got {type(v).__name__}")
+        return v
 
     class Config:
         """Pydantic config."""
@@ -132,8 +154,12 @@ class KitchenBus:
                         await result
                 except Exception as e:
                     # Log but don't crash the bus
-                    # TODO: Implement proper error handling/logging
-                    print(f"[KitchenBus] Error in {station}: {e}")
+                    logger.exception(
+                        "Error dispatching message %s to station %s: %s",
+                        message.id,
+                        station,
+                        e,
+                    )
 
     async def start(self) -> None:
         """Start the bus message loop."""

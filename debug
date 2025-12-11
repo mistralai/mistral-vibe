@@ -1,0 +1,30 @@
+---
+loop=<_UnixSelectorEventLoop running=True closed=False debug=False>
+features=frozenset()
+Writing logs to '/home/chef/chefchat/ChefChat/debug'
+Load() >>> ChefChatApp(title='ChefChat', classes={'-dark-mode'}, pseudo_classes={'focus', 'dark'}) method=None
+driver=<LinuxDriver ChefChatApp(title='ChefChat', classes={'-dark-mode'}, pseudo_classes={'focus', 'dark'})>
+Compose() >>> Screen(id='_default') method=<Widget.on_compose>
+Compose() >>> ToastRack(id='textual-toastrack', classes='-textual-system') method=<Widget.on_compose>
+Mount() >>> ToastRack(id='textual-toastrack', classes='-textual-system') method=<Widget.on_mount>
+Compose() >>> Tooltip(id='textual-tooltip', classes='-textual-system') method=<Widget.on_compose>
+Mount() >>> Tooltip(id='textual-tooltip', classes='-textual-system') method=<Widget.on_mount>
+Compose() >>> ChefChatApp(title='ChefChat', classes={'-dark-mode'}, pseudo_classes={'focus', 'dark'}) method=<App.on_compose>
+ready in 20 milliseconds
+Unmount() >>> ToastRack(id='textual-toastrack', classes='-textual-system') method=<Widget.on_unmount>
+Unmount() >>> Tooltip(id='textual-tooltip', classes='-textual-system') method=<Widget.on_unmount>
+---
+loop=<_UnixSelectorEventLoop running=True closed=False debug=False>
+features=frozenset()
+Writing logs to '/home/chef/chefchat/ChefChat/debug'
+Load() >>> ChefChatApp(title='ChefChat', classes={'-dark-mode'}, pseudo_classes={'focus', 'dark'}) method=None
+driver=<LinuxDriver ChefChatApp(title='ChefChat', classes={'-dark-mode'}, pseudo_classes={'focus', 'dark'})>
+Compose() >>> Screen(id='_default') method=<Widget.on_compose>
+Compose() >>> ToastRack(id='textual-toastrack', classes='-textual-system') method=<Widget.on_compose>
+Mount() >>> ToastRack(id='textual-toastrack', classes='-textual-system') method=<Widget.on_mount>
+Compose() >>> Tooltip(id='textual-tooltip', classes='-textual-system') method=<Widget.on_compose>
+Mount() >>> Tooltip(id='textual-tooltip', classes='-textual-system') method=<Widget.on_mount>
+Compose() >>> ChefChatApp(title='ChefChat', classes={'-dark-mode'}, pseudo_classes={'focus', 'dark'}) method=<App.on_compose>
+ready in 19 milliseconds
+Unmount() >>> ToastRack(id='textual-toastrack', classes='-textual-system') method=<Widget.on_unmount>
+Unmount() >>> Tooltip(id='textual-tooltip', classes='-textual-system') method=<Widget.on_unmount>

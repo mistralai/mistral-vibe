@@ -16,7 +16,9 @@ from chefchat.core.config import GLOBAL_ENV_FILE, VibeConfig
 from chefchat.setup.onboarding.base import OnboardingScreen
 
 PROVIDER_HELP = {
-    "mistral": ("https://console.mistral.ai/codestral/vibe", "Mistral AI Studio")
+    "mistral": ("https://console.mistral.ai/codestral/vibe", "Mistral AI Studio"),
+    "openai": ("https://platform.openai.com/api-keys", "OpenAI Platform"),
+    "anthropic": ("https://console.anthropic.com/settings/keys", "Anthropic Console"),
 }
 CONFIG_DOCS_URL = (
     "https://github.com/mistralai/mistral-vibe?tab=readme-ov-file#configuration"
@@ -38,15 +40,14 @@ class ApiKeyScreen(OnboardingScreen):
 
     def __init__(self) -> None:
         super().__init__()
-        config = VibeConfig.model_construct()
-        active_model = config.get_active_model()
-        self.provider = config.get_provider_for_model(active_model)
+        self.provider_name = "mistral"
+        self.env_var = "MISTRAL_API_KEY"
 
     def _compose_provider_link(self, provider_name: str) -> ComposeResult:
-        if self.provider.name not in PROVIDER_HELP:
+        if self.provider_name not in PROVIDER_HELP:
             return
 
-        help_url, help_name = PROVIDER_HELP[self.provider.name]
+        help_url, help_name = PROVIDER_HELP[self.provider_name]
         yield Static(
             f"Procure your [orange1]Secret Ingredients[/] from the {help_name}:"
         )
@@ -59,7 +60,7 @@ class ApiKeyScreen(OnboardingScreen):
         )
 
     def _compose_config_docs(self) -> ComposeResult:
-        yield Static("[dim]Learn more about Vibe configuration:[/]")
+        yield Static("[dim]Learn more about ChefChat configuration:[/]")
         yield Horizontal(
             Static("→ ", classes="link-chevron"),
             Link(CONFIG_DOCS_URL, url=CONFIG_DOCS_URL),
@@ -67,12 +68,24 @@ class ApiKeyScreen(OnboardingScreen):
         )
 
     def compose(self) -> ComposeResult:
-        provider_name = self.provider.name.capitalize()
+        # Get selected provider from app
+        if hasattr(self.app, "selected_provider"):
+            self.provider_name = self.app.selected_provider
+
+        # Setenv vars mapping
+        env_map = {
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "mistral": "MISTRAL_API_KEY",
+        }
+        self.env_var = env_map.get(self.provider_name, "MISTRAL_API_KEY")
+
+        provider_display = self.provider_name.capitalize()
 
         self.input_widget = Input(
             password=True,
             id="key",
-            placeholder="Add your Secret Sauce here...",
+            placeholder=f"Add your {provider_display} API Key...",
             validators=[
                 Length(minimum=1, failure_description="No Secret Sauce provided.")
             ],
@@ -80,10 +93,15 @@ class ApiKeyScreen(OnboardingScreen):
 
         with Vertical(id="api-key-outer"):
             yield Static("", classes="spacer")
-            yield Center(Static("[orange1]🧂 The Secret Sauce[/]", id="api-key-title"))
+            yield Center(
+                Static(
+                    f"[orange1]🧂 The Secret Sauce ({provider_display})[/]",
+                    id="api-key-title",
+                )
+            )
             with Center():
                 with Vertical(id="api-key-content"):
-                    yield from self._compose_provider_link(provider_name)
+                    yield from self._compose_provider_link(self.provider_name)
                     yield Static("...and add it to your pantry below:", id="paste-hint")
                     yield Center(Horizontal(self.input_widget, id="input-box"))
                     yield Static("", id="feedback")
@@ -122,14 +140,26 @@ class ApiKeyScreen(OnboardingScreen):
             self._save_and_finish(event.value)
 
     def _save_and_finish(self, api_key: str) -> None:
-        env_key = self.provider.api_key_env_var
-        os.environ[env_key] = api_key
+        # Save to .env
+        os.environ[self.env_var] = api_key
         try:
-            _save_api_key_to_env_file(env_key, api_key)
+            _save_api_key_to_env_file(self.env_var, api_key)
+
+            # Also update local config to use this provider's model as active
+            active_model = "devstral-2"  # Default fallback
+            if self.provider_name == "openai":
+                active_model = "gpt4o"
+            elif self.provider_name == "anthropic":
+                active_model = "claude-3-5-sonnet-20240620"
+
+            updates = {"active_model": active_model}
+
+            VibeConfig.save_updates(updates)
+
         except OSError as err:
             self.app.exit(f"save_error:{err}")
             return
         self.app.exit("completed")
 
     def on_mouse_up(self, event: MouseUp) -> None:
-        pass # Removed copy_selection_to_clipboard to break circular import
+        pass  # Removed copy_selection_to_clipboard to break circular import

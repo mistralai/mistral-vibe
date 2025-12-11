@@ -7,46 +7,29 @@ of each kitchen station (agent) with progress bars.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum, auto
+import logging
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import Label, ProgressBar, Static
 
 if TYPE_CHECKING:
     pass
 
-
-class StationStatus(Enum):
-    """Status of a kitchen station."""
-
-    IDLE = auto()  # "At ease" - waiting for orders
-    WORKING = auto()  # "Firing" - actively cooking
-    COMPLETE = auto()  # "Plated" - finished the order
-    ERROR = auto()  # "86'd" - something went wrong
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class StationState:
-    """Current state of a station."""
+from chefchat.interface.constants import DEFAULT_STATIONS, StationStatus
 
-    name: str
-    display_name: str
-    status: StationStatus = StationStatus.IDLE
-    progress: float = 0.0
-    message: str = ""
-
-    @property
-    def status_emoji(self) -> str:
-        """Get emoji for current status."""
-        return {
-            StationStatus.IDLE: "⚪",
-            StationStatus.WORKING: "🔥",
-            StationStatus.COMPLETE: "✅",
-            StationStatus.ERROR: "❌",
-        }.get(self.status, "⚪")
+# Status emoji mapping - static to avoid creating StationState objects
+STATUS_EMOJI: dict[StationStatus, str] = {
+    StationStatus.IDLE: "⚪",
+    StationStatus.WORKING: "🔥",
+    StationStatus.COMPLETE: "✅",
+    StationStatus.ERROR: "❌",
+}
 
 
 class StationRow(Horizontal):
@@ -119,7 +102,8 @@ class StationRow(Horizontal):
 
     def compose(self) -> ComposeResult:
         """Compose the station row."""
-        yield Label(f"⚪ {self.display_name}", classes="station-name")
+        emoji = STATUS_EMOJI.get(StationStatus.IDLE, "⚪")
+        yield Label(f"{emoji} {self.display_name}", classes="station-name")
         yield ProgressBar(total=100, show_eta=False, classes="station-progress")
         yield Static("Ready", classes="station-status muted")
 
@@ -141,29 +125,34 @@ class StationRow(Horizontal):
         self.remove_class("idle", "working", "complete", "error")
         self.add_class(status.name.lower())
 
-        # Update name label with emoji
-        name_label = self.query_one(".station-name", Label)
-        emoji = StationState(
-            name=self.station_id, display_name=self.display_name, status=status
-        ).status_emoji
-        name_label.update(f"{emoji} {self.display_name}")
+        # Update name label with emoji using static mapping
+        try:
+            name_label = self.query_one(".station-name", Label)
+            emoji = STATUS_EMOJI.get(status, "⚪")
+            name_label.update(f"{emoji} {self.display_name}")
+        except NoMatches:
+            logger.warning("Name label not found for station %s", self.station_id)
 
         # Update progress bar
-        progress_bar = self.query_one(".station-progress", ProgressBar)
-        progress_bar.update(progress=progress)
+        try:
+            progress_bar = self.query_one(".station-progress", ProgressBar)
+            progress_bar.update(progress=progress)
+        except NoMatches:
+            logger.warning("Progress bar not found for station %s", self.station_id)
 
         # Update status text
-        status_label = self.query_one(".station-status", Static)
-        status_label.update(message or status.name.capitalize())
+        try:
+            status_label = self.query_one(".station-status", Static)
+            status_label.update(message or status.name.capitalize())
+        except NoMatches:
+            logger.warning("Status label not found for station %s", self.station_id)
 
 
 class ThePass(Container):
     """The agent status panel showing all kitchen stations.
 
-    Displays progress bars and status for each station:
-    - Sous Chef (planning)
-    - Line Cook (implementation)
-    - Sommelier (dependencies)
+    Displays progress bars and status for each station.
+    Stations can be configured via constructor or use defaults.
     """
 
     DEFAULT_CSS = """
@@ -193,19 +182,31 @@ class ThePass(Container):
 
     BORDER_TITLE = "🍳 The Pass"
 
-    # Default stations
-    DEFAULT_STATIONS = [
-        ("sous_chef", "Sous Chef"),
-        ("line_cook", "Line Cook"),
-        ("sommelier", "Sommelier"),
-        ("expeditor", "Expeditor"),
-    ]
+    def __init__(
+        self,
+        stations: list[tuple[str, str]] | None = None,
+        *,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+    ) -> None:
+        """Initialize The Pass.
+
+        Args:
+            stations: Optional list of (station_id, display_name) tuples.
+                     Defaults to DEFAULT_STATIONS if not provided.
+            name: Widget name
+            id: Widget ID
+            classes: CSS classes
+        """
+        super().__init__(name=name, id=id, classes=classes)
+        self._stations = stations if stations is not None else DEFAULT_STATIONS
 
     def compose(self) -> ComposeResult:
         """Compose the pass with station rows."""
         yield Static("[bold]Brigade Status[/]", id="pass-header")
 
-        for station_id, display_name in self.DEFAULT_STATIONS:
+        for station_id, display_name in self._stations:
             yield StationRow(
                 station_id=station_id,
                 display_name=display_name,
@@ -230,27 +231,56 @@ class ThePass(Container):
         try:
             row = self.query_one(f"#station-{station_id}", StationRow)
             row.update_status(status, progress, message)
-        except Exception:
-            # Station not found - silently ignore
-            pass
+        except NoMatches:
+            logger.warning(
+                "Station '%s' not found in The Pass. Available stations: %s",
+                station_id,
+                [s[0] for s in self._stations],
+            )
 
     def set_idle(self, station_id: str) -> None:
-        """Set a station to idle."""
+        """Set a station to idle.
+
+        Args:
+            station_id: The station to update
+        """
         self.update_station(station_id, StationStatus.IDLE, 0.0, "Ready")
 
     def set_working(self, station_id: str, message: str = "Working...") -> None:
-        """Set a station to working with optional message."""
+        """Set a station to working with optional message.
+
+        Args:
+            station_id: The station to update
+            message: Status message to display
+        """
         self.update_station(station_id, StationStatus.WORKING, 50.0, message)
 
     def set_complete(self, station_id: str) -> None:
-        """Set a station to complete."""
+        """Set a station to complete.
+
+        Args:
+            station_id: The station to update
+        """
         self.update_station(station_id, StationStatus.COMPLETE, 100.0, "Done")
 
     def set_error(self, station_id: str, message: str = "Error") -> None:
-        """Set a station to error state."""
+        """Set a station to error state.
+
+        Args:
+            station_id: The station to update
+            message: Error message
+        """
         self.update_station(station_id, StationStatus.ERROR, 0.0, message)
 
     def reset_all(self) -> None:
         """Reset all stations to idle."""
-        for station_id, _ in self.DEFAULT_STATIONS:
+        for station_id, _ in self._stations:
             self.set_idle(station_id)
+
+    def get_station_ids(self) -> list[str]:
+        """Get list of configured station IDs.
+
+        Returns:
+            List of station identifiers
+        """
+        return [s[0] for s in self._stations]

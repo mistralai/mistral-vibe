@@ -8,23 +8,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum, auto
+import logging
+from typing import TYPE_CHECKING
 
-from rich.console import RenderableType
+from rich.console import Group, RenderableType
 from rich.markdown import Markdown
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import Static
 
+if TYPE_CHECKING:
+    pass
 
-class TicketType(Enum):
-    """Type of message in the ticket rail."""
+logger = logging.getLogger(__name__)
 
-    USER = auto()  # Head Chef's order
-    ASSISTANT = auto()  # Kitchen's response
-    SYSTEM = auto()  # Kitchen announcements
+
+from chefchat.interface.constants import MessageType
+
+# Emoji mapping for ticket types
+TICKET_EMOJI: dict[MessageType, str] = {
+    MessageType.USER: "👨‍🍳",
+    MessageType.ASSISTANT: "🍳",
+    MessageType.SYSTEM: "📋",
+}
 
 
 @dataclass
@@ -32,7 +41,7 @@ class TicketMessage:
     """A single message in the ticket rail."""
 
     content: str
-    ticket_type: TicketType
+    ticket_type: MessageType
     timestamp: datetime | None = None
 
     def __post_init__(self) -> None:
@@ -70,8 +79,12 @@ class Ticket(Static):
     def __init__(
         self,
         content: str,
-        ticket_type: TicketType = TicketType.USER,
+        ticket_type: MessageType = MessageType.USER,
         timestamp: datetime | None = None,
+        *,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
     ) -> None:
         """Initialize a ticket.
 
@@ -79,37 +92,43 @@ class Ticket(Static):
             content: The message content (supports markdown)
             ticket_type: Type of ticket (user/assistant/system)
             timestamp: When the message was sent
+            name: Widget name
+            id: Widget ID
+            classes: CSS classes
         """
-        super().__init__()
+        super().__init__(name=name, id=id, classes=classes)
         self.content = content
         self.ticket_type = ticket_type
         self.timestamp = timestamp or datetime.now()
 
-        # Apply CSS class based on type
-        self.add_class(ticket_type.name.lower())
+        # Apply CSS class based on type - use value (lower case string)
+        self.add_class(ticket_type.value)
+        # Add generic ticket class for querying
+        self.add_class("ticket")
 
     def render(self) -> RenderableType:
         """Render the ticket content."""
         time_str = self.timestamp.strftime("%H:%M")
 
-        # Create header
-        type_emoji = {
-            TicketType.USER: "👨‍🍳",
-            TicketType.ASSISTANT: "🍳",
-            TicketType.SYSTEM: "📋",
-        }
-
+        # Create header with emoji and timestamp
         header = Text()
-        header.append(f"{type_emoji.get(self.ticket_type, '')} ", style="bold")
+        emoji = TICKET_EMOJI.get(self.ticket_type, "📋")
+        header.append(f"{emoji} ", style="bold")
         header.append(f"[{time_str}]", style="dim")
 
-        # Try to render as markdown, fall back to plain text
+        # Try to render as markdown, fall back to plain text on specific errors
         try:
             content = Markdown(self.content)
-        except Exception:
+        except (ValueError, TypeError) as e:
+            # Specific exceptions for markdown parsing issues
+            logger.debug("Markdown rendering failed, using plain text: %s", e)
+            content = Text(self.content)
+        except Exception as e:
+            # Catch-all for unexpected errors, but log them
+            logger.warning("Unexpected error rendering markdown: %s", e)
             content = Text(self.content)
 
-        return content
+        return Group(header, content)
 
 
 class TicketRail(VerticalScroll):
@@ -161,8 +180,19 @@ class TicketRail(VerticalScroll):
             "[dim italic]Waiting for orders...[/]", id="empty-state", classes="muted"
         )
 
+    def _update_empty_state(self) -> None:
+        """Update visibility of empty state message."""
+        try:
+            empty_state = self.query_one("#empty-state", Static)
+            if self._messages:
+                empty_state.add_class("hidden")
+            else:
+                empty_state.remove_class("hidden")
+        except NoMatches:
+            pass
+
     def add_ticket(
-        self, content: str, ticket_type: TicketType = TicketType.USER
+        self, content: str, ticket_type: MessageType = MessageType.USER
     ) -> Ticket:
         """Add a new ticket to the rail.
 
@@ -173,13 +203,13 @@ class TicketRail(VerticalScroll):
         Returns:
             The created Ticket widget
         """
-        # Remove empty state on first message
-        empty_state = self.query_one("#empty-state", Static)
-        if empty_state:
-            empty_state.remove()
+        # Remove empty state on first message via update logic
 
         message = TicketMessage(content=content, ticket_type=ticket_type)
         self._messages.append(message)
+
+        # Update empty state
+        self._update_empty_state()
 
         ticket = Ticket(
             content=content, ticket_type=ticket_type, timestamp=message.timestamp
@@ -200,7 +230,7 @@ class TicketRail(VerticalScroll):
         Returns:
             The created Ticket widget
         """
-        return self.add_ticket(content, TicketType.USER)
+        return self.add_ticket(content, MessageType.USER)
 
     def add_assistant_message(self, content: str) -> Ticket:
         """Add an assistant message (Kitchen's response).
@@ -211,7 +241,7 @@ class TicketRail(VerticalScroll):
         Returns:
             The created Ticket widget
         """
-        return self.add_ticket(content, TicketType.ASSISTANT)
+        return self.add_ticket(content, MessageType.ASSISTANT)
 
     def add_system_message(self, content: str) -> Ticket:
         """Add a system message (Kitchen announcement).
@@ -222,14 +252,26 @@ class TicketRail(VerticalScroll):
         Returns:
             The created Ticket widget
         """
-        return self.add_ticket(content, TicketType.SYSTEM)
+        return self.add_ticket(content, MessageType.SYSTEM)
 
     def clear_tickets(self) -> None:
-        """Clear all tickets from the rail."""
+        """Clear all tickets from the rail.
+
+        Properly cleans up both the internal message list and
+        all mounted Ticket widgets to prevent memory leaks.
+        """
+        # Clear internal message list
         self._messages.clear()
-        # Remove all ticket widgets
-        for ticket in self.query(Ticket):
-            ticket.remove()
+
+        # Batch remove all Ticket widgets using Textual's query batch removal
+        self.query(Ticket).remove()
+
+        # Remove empty state if stuck
+        try:
+            self.query_one("#empty-state").remove()
+        except NoMatches:
+            pass
+
         # Restore empty state
         self.mount(
             Static(
@@ -238,3 +280,11 @@ class TicketRail(VerticalScroll):
                 classes="muted",
             )
         )
+
+    def get_message_count(self) -> int:
+        """Get the number of messages in the rail.
+
+        Returns:
+            Number of messages stored
+        """
+        return len(self._messages)

@@ -16,10 +16,20 @@ from chefchat.setup.onboarding.screens import (
 class OnboardingApp(App[str | None]):
     CSS_PATH = "onboarding.tcss"
 
+    selected_provider: str = "openai"  # Default
+
     def on_mount(self) -> None:
         self.install_screen(WelcomeScreen(), "welcome")
         self.install_screen(ThemeSelectionScreen(), "theme_selection")
+
+        # Lazy import to avoid circular dependencies
+        from chefchat.setup.onboarding.screens.provider_selection import (
+            ProviderSelectionScreen,
+        )
+
+        self.install_screen(ProviderSelectionScreen(), "provider_selection")
         self.install_screen(ApiKeyScreen(), "api_key")
+
         self.push_screen("welcome")
 
 

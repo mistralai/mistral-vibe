@@ -30,26 +30,27 @@ Screen {
 #kitchen-grid {
     layout: grid;
     grid-size: 2 2;
-    grid-columns: 2fr 1fr;
-    grid-rows: 2fr 1fr;
-    padding: 1;
+    grid-columns: 2fr 3fr;  /* Left 40%, Right 60% */
+    grid-rows: 1fr 4fr;     /* Status top, Plate bottom */
+    padding: 0;
     grid-gutter: 1;
 }
 
 /* ===================================================================
-   The Ticket Rail - Chat History (Top Left)
+   The Ticket Rail - Chat History (Left Side)
    Where orders come in from the Head Chef
    =================================================================== */
 
 #ticket-rail {
     column-span: 1;
-    row-span: 1;
+    row-span: 2;
     background: $secondary-bg;
     border: solid $panel-border;
     border-title-color: $accent;
     border-title-style: bold;
     padding: 1 2;
     overflow-y: auto;
+    margin-bottom: 3; /* Room for input */
 }
 
 #ticket-rail:focus {
@@ -72,8 +73,8 @@ Screen {
 }
 
 /* ===================================================================
-   The Pass - Agent Status Panel (Top Right)
-   Where the Brigade reports their progress
+   The Pass - Brigade Status (Top Right)
+   Where the chefs report their status
    =================================================================== */
 
 #the-pass {
@@ -84,7 +85,6 @@ Screen {
     border-title-color: $accent;
     border-title-style: bold;
     padding: 1 2;
-    overflow-y: auto;
 }
 
 #the-pass:focus {
@@ -107,34 +107,17 @@ Screen {
     margin: 0 1;
 }
 
-ProgressBar > .bar--bar {
-    color: $accent;
-}
 
-ProgressBar > .bar--complete {
-    color: $success;
-}
+/* Station-specific colors - Temporarily disabled due to Textual changes */
 
-/* Station-specific colors */
-.sous-chef-bar > .bar--bar {
-    color: $info;
-}
-
-.line-cook-bar > .bar--bar {
-    color: $warning;
-}
-
-.sommelier-bar > .bar--bar {
-    color: #bb9af7;  /* Purple for sommelier */
-}
 
 /* ===================================================================
-   The Plate - Code Output (Bottom, Full Width)
+   The Plate - Code Output (Bottom Right)
    Where the final dish is presented
    =================================================================== */
 
 #the-plate {
-    column-span: 2;
+    column-span: 1;
     row-span: 1;
     background: $secondary-bg;
     border: solid $panel-border;
@@ -153,6 +136,15 @@ ProgressBar > .bar--complete {
     border: round $panel-border;
     padding: 1;
     margin: 1 0;
+}
+
+CommandInput {
+    dock: bottom;
+    height: 3;
+    width: 40%; /* Match left column width roughly */
+    background: $primary-bg;
+    border: solid $panel-border;
+    padding: 0 1;
 }
 
 /* ===================================================================
@@ -226,37 +218,6 @@ ProgressBar > .bar--complete {
     border: none;
 }
 
-/* ===================================================================
-   Utility Classes
-   =================================================================== */
+/* Remaining blocks removed for debug */
 
-.success {
-    color: $success;
-}
-
-.warning {
-    color: $warning;
-}
-
-.error {
-    color: $error;
-}
-
-.muted {
-    color: $text-muted;
-}
-
-.accent {
-    color: $accent;
-}
-
-/* Message styling */
-.mise-en-place {
-    color: $info;
-    text-style: italic;
-}
-
-/* Hidden elements */
-.hidden {
-    display: none;
-}
+/* TabbedContent removed for debug */
