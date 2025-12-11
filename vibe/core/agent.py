@@ -625,7 +625,7 @@ class Agent:
                     tools=available_tools,
                     tool_choice=tool_choice,
                     extra_headers={
-                        "User-Agent": get_user_agent(),
+                        "user-agent": get_user_agent(provider.backend),
                         "x-affinity": self.session_id,
                     },
                     max_tokens=max_tokens,
@@ -682,7 +682,7 @@ class Agent:
                     tools=available_tools,
                     tool_choice=tool_choice,
                     extra_headers={
-                        "User-Agent": get_user_agent(),
+                        "user-agent": get_user_agent(provider.backend),
                         "x-affinity": self.session_id,
                     },
                     max_tokens=max_tokens,
@@ -903,6 +903,7 @@ class Agent:
             self.messages = [system_message, summary_message]
 
             active_model = self.config.get_active_model()
+            provider = self.config.get_provider_for_model(active_model)
 
             async with self.backend as backend:
                 actual_context_tokens = await backend.count_tokens(
@@ -911,7 +912,7 @@ class Agent:
                     tools=self.format_handler.get_available_tools(
                         self.tool_manager, self.config
                     ),
-                    extra_headers={"User-Agent": get_user_agent()},
+                    extra_headers={"user-agent": get_user_agent(provider.backend)},
                 )
 
             self.stats.context_tokens = actual_context_tokens

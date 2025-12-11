@@ -29,12 +29,14 @@ from tests.backend.data.mistral import (
     STREAMED_TOOL_CONVERSATION_PARAMS as MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS as MISTRAL_TOOL_CONVERSATION_PARAMS,
 )
-from vibe.core.config import ModelConfig, ProviderConfig
+from vibe.core.config import Backend, ModelConfig, ProviderConfig
+from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.backend.generic import GenericBackend
 from vibe.core.llm.backend.mistral import MistralBackend
 from vibe.core.llm.exceptions import BackendError
 from vibe.core.llm.types import BackendLike
 from vibe.core.types import LLMChunk, LLMMessage, Role, ToolCall
+from vibe.core.utils import get_user_agent
 
 
 class TestBackend:
@@ -246,3 +248,99 @@ class TestBackend:
             assert e.value.status == response.status_code
             assert e.value.reason == response.reason_phrase
             assert e.value.parsed_error is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("backend_type", [Backend.MISTRAL, Backend.GENERIC])
+    async def test_backend_user_agent(self, backend_type: Backend):
+        user_agent = get_user_agent(backend_type)
+        base_url = "https://api.example.com"
+        json_response = {
+            "id": "fake_id_1234",
+            "created": 1234567890,
+            "model": "devstral-latest",
+            "usage": {
+                "prompt_tokens": 100,
+                "total_tokens": 300,
+                "completion_tokens": 200,
+            },
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": None,
+                        "content": "Hey",
+                    },
+                }
+            ],
+        }
+        with respx.mock(base_url=base_url) as mock_api:
+            mock_api.post("/v1/chat/completions").mock(
+                return_value=httpx.Response(status_code=200, json=json_response)
+            )
+
+            provider = ProviderConfig(
+                name="provider_name",
+                api_base=f"{base_url}/v1",
+                api_key_env_var="API_KEY",
+            )
+            backend = BACKEND_FACTORY[backend_type](provider=provider)
+            model = ModelConfig(
+                name="model_name", provider="provider_name", alias="model_alias"
+            )
+            messages = [LLMMessage(role=Role.user, content="Just say hi")]
+
+            await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers={"user-agent": user_agent},
+            )
+
+            assert mock_api.calls.last.request.headers["user-agent"] == user_agent
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("backend_type", [Backend.MISTRAL, Backend.GENERIC])
+    async def test_backend_user_agent_when_streaming(self, backend_type: Backend):
+        user_agent = get_user_agent(backend_type)
+
+        base_url = "https://api.example.com"
+        with respx.mock(base_url=base_url) as mock_api:
+            chunks = [
+                rb'data: {"id":"fake_id_1234","object":"chat.completion.chunk","created":1234567890,"model":"devstral-latest","choices":[{"index":0,"delta":{"role":"assistant","content":"Hey"},"finish_reason":"stop"}]}'
+            ]
+            mock_response = httpx.Response(
+                status_code=200,
+                stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
+                headers={"Content-Type": "text/event-stream"},
+            )
+            mock_api.post("/v1/chat/completions").mock(return_value=mock_response)
+
+            provider = ProviderConfig(
+                name="provider_name",
+                api_base=f"{base_url}/v1",
+                api_key_env_var="API_KEY",
+            )
+            backend = BACKEND_FACTORY[backend_type](provider=provider)
+            model = ModelConfig(
+                name="model_name", provider="provider_name", alias="model_alias"
+            )
+            messages = [LLMMessage(role=Role.user, content="Just say hi")]
+
+            async for _ in backend.complete_streaming(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers={"user-agent": user_agent},
+            ):
+                pass
+
+            assert mock_api.calls.last.request.headers["user-agent"] == user_agent

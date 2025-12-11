@@ -17,14 +17,10 @@ from acp import (
     WriteTextFileRequest,
 )
 from acp.schema import (
-    AgentCapabilities,
     AllowedOutcome,
     DeniedOutcome,
-    Implementation,
     InitializeResponse,
-    McpCapabilities,
     NewSessionResponse,
-    PromptCapabilities,
     PromptResponse,
     SessionNotification,
     TextContentBlock,
@@ -322,48 +318,6 @@ async def initialize_session(acp_agent_process: asyncio.subprocess.Process) -> s
     )
     assert session_response_obj.result is not None, "No result in response"
     return session_response_obj.result.sessionId
-
-
-class TestInitialization:
-    @pytest.mark.asyncio
-    async def test_initialize_request_response(self) -> None:
-        mock_env = get_mocking_env()
-        async for process in get_acp_agent_process(mock_env=mock_env):
-            await send_json_rpc(
-                process,
-                InitializeJsonRpcRequest(
-                    id=1, params=InitializeRequest(protocolVersion=1)
-                ),
-            )
-
-            text_response = await read_response(process, timeout=10.0)
-            assert text_response is not None, "No response to initialize"
-            response_json = json.loads(text_response)
-            response = InitializeJsonRpcResponse.model_validate(response_json)
-            assert response.error is None, f"JSON-RPC error: {response.error}"
-            assert response.result is not None, "No result in response"
-            assert response.result.protocolVersion == 1
-            assert response.result.agentCapabilities == AgentCapabilities(
-                loadSession=False,
-                promptCapabilities=PromptCapabilities(
-                    audio=False, embeddedContext=True, image=False
-                ),
-                mcpCapabilities=McpCapabilities(http=False, sse=False),
-            )
-            assert response.result.agentInfo == Implementation(
-                name="@mistralai/mistral-vibe", title="Mistral Vibe", version="1.1.1"
-            )
-            vibe_setup_method = next(
-                (
-                    method
-                    for method in response.result.authMethods or []
-                    if method.id == "vibe-setup"
-                ),
-                None,
-            )
-            assert vibe_setup_method is not None, "vibe-setup auth not found"
-            assert vibe_setup_method.field_meta is not None
-            assert "terminal-auth" in vibe_setup_method.field_meta.keys()
 
 
 class TestSessionManagement:

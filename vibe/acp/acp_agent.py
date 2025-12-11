@@ -100,20 +100,30 @@ class VibeAcpAgent(AcpAgent):
             script_name = sys.argv[0]
             args = [script_name, "--setup"]
 
-        auth_methods = [
-            AuthMethod(
-                id="vibe-setup",
-                name="Register your API Key",
-                description="Register your API Key inside Mistral Vibe",
-                field_meta={
-                    "terminal-auth": {
-                        "command": command,
-                        "args": args,
-                        "label": "Mistral Vibe Setup",
-                    }
-                },
-            )
-        ]
+        supports_terminal_auth = (
+            self.client_capabilities
+            and self.client_capabilities.field_meta
+            and self.client_capabilities.field_meta.get("terminal-auth") is True
+        )
+
+        auth_methods = (
+            [
+                AuthMethod(
+                    id="vibe-setup",
+                    name="Register your API Key",
+                    description="Register your API Key inside Mistral Vibe",
+                    field_meta={
+                        "terminal-auth": {
+                            "command": command,
+                            "args": args,
+                            "label": "Mistral Vibe Setup",
+                        }
+                    },
+                )
+            ]
+            if supports_terminal_auth
+            else []
+        )
 
         response = InitializeResponse(
             agentCapabilities=AgentCapabilities(
