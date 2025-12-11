@@ -127,6 +127,7 @@ class ChefChatREPL:
             ("/plate", "Show plating"),
             ("/mode", "Current mode info"),
             ("/modes", "List modes"),
+            ("/compact", "Compact conversation history"),
             ("/clear", "Clear history"),
             ("/status", "Show status"),
             ("/stats", "Show statistics"),
@@ -647,6 +648,38 @@ class ChefChatREPL:
             else:
                 self.console.print(
                     f"  [{COLORS['honey']}]No active session to clear[/{COLORS['honey']}]\n"
+                )
+
+        elif cmd in {"/compact", "/summarize"}:
+            if self.agent:
+                with Live(
+                    Spinner(
+                        "dots",
+                        text=f"[{COLORS['fire']}] Compacting history...[/{COLORS['fire']}]",
+                    ),
+                    console=self.console,
+                    refresh_per_second=10,
+                    transient=True,
+                ):
+                    try:
+                        summary = await self.agent.compact()
+                        self.console.print(
+                            f"  [{COLORS['sage']}]✓ Conversation compacted![/{COLORS['sage']}]"
+                        )
+                        # Show a preview of the summary
+                        preview = (
+                            summary[:200] + "..." if len(summary) > 200 else summary
+                        )
+                        self.console.print(
+                            f"  [{COLORS['silver']}]Summary preview: {preview}[/{COLORS['silver']}]\n"
+                        )
+                    except Exception as e:
+                        self.console.print(
+                            f"  [{COLORS['ember']}]Failed to compact history: {e}[/{COLORS['ember']}]\n"
+                        )
+            else:
+                self.console.print(
+                    f"  [{COLORS['honey']}]No active session to compact[/{COLORS['honey']}]\n"
                 )
 
         elif cmd == "/status":
