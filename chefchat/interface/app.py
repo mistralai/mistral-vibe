@@ -334,7 +334,7 @@ class ChefChatApp(App):
 
     @work(exclusive=True)
     async def _run_agent_loop(self, request: str) -> None:
-        """Run the agent interaction loop in a worker thread."""
+        """Run the agent interaction loop in a worker (main thread async)."""
         if not self._agent:
             return
 
@@ -342,44 +342,40 @@ class ChefChatApp(App):
         plate = self.query_one("#the-plate", ThePlate)
         loader = self.query_one(WhiskLoader)
 
-        # UI Updates must be scheduled on the main thread
-        self.call_from_thread(loader.start, "Thinking...")
-        self.call_from_thread(ticket_rail.start_streaming_message)
+        # UI Updates directly (we are on main loop)
+        loader.start("Thinking...")
+        ticket_rail.start_streaming_message()
 
         try:
             async for event in self._agent.act(request):
                 if isinstance(event, AssistantEvent):
                     if event.content:
-                        self.call_from_thread(ticket_rail.stream_token, event.content)
+                        ticket_rail.stream_token(event.content)
                 
                 elif isinstance(event, ToolCallEvent):
-                    self.call_from_thread(
-                        plate.log_message, 
+                    plate.log_message( 
                         f"[bold blue]🛠️ Calling Tool:[/] {event.tool_name}\n"
                     )
-                    self.call_from_thread(loader.start, f"Running {event.tool_name}...")
+                    loader.start(f"Running {event.tool_name}...")
                 
                 elif isinstance(event, ToolResultEvent):
                     status = "[green]Success[/]" if not event.is_error else "[red]Error[/]"
-                    self.call_from_thread(
-                        plate.log_message,
+                    plate.log_message(
                         f"[bold]Result:[/] {status}\n"
                     )
                 
                 elif isinstance(event, (CompactStartEvent, CompactEndEvent)):
-                    self.call_from_thread(
-                        plate.log_message,
+                    plate.log_message(
                         "[dim]Compacting conversation history...[/]\n"
                     )
 
         except Exception as e:
-            self.call_from_thread(self.notify, f"Agent Error: {e}", severity="error")
-            self.call_from_thread(
-                plate.log_message, f"[bold red]Error:[/] {e}\n"
-            )
+            self.notify(f"Agent Error: {e}", severity="error")
+            plate.log_message(f"[bold red]Error:[/] {e}\n")
+            traceback.print_exc()  # Print stack trace to stderr
         finally:
-            self.call_from_thread(ticket_rail.finish_streaming_message)
-            self.call_from_thread(loader.stop)
+            ticket_rail.finish_streaming_message()
+            loader.stop()
             self._processing = False
 
     async def _submit_ticket(self, request: str) -> None:
