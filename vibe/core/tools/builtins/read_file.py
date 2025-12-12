@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, NamedTuple, final
 
-import aiofiles
+import anyio
 from pydantic import BaseModel, Field
 
 from vibe.core.tools.base import (
@@ -118,7 +118,7 @@ class ReadFile(
             bytes_read = 0
             was_truncated = False
 
-            async with aiofiles.open(file_path, encoding="utf-8", errors="ignore") as f:
+            async with await anyio.open_file(file_path, encoding="utf-8", errors="ignore") as f:
                 line_index = 0
                 async for line in f:
                     if line_index < args.offset:

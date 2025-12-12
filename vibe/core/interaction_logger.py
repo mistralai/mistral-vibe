@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 from typing import TYPE_CHECKING, Any
 
-import aiofiles
+import anyio
 
 from vibe.core.llm.format import get_active_tool_classes
 from vibe.core.types import AgentStats, LLMMessage, SessionInfo, SessionMetadata
@@ -155,7 +155,7 @@ class InteractionLogger:
         try:
             json_content = json.dumps(interaction_data, indent=2, ensure_ascii=False)
 
-            async with aiofiles.open(self.filepath, "w", encoding="utf-8") as f:
+            async with await anyio.open_file(self.filepath, "w", encoding="utf-8") as f:
                 await f.write(json_content)
 
             return str(self.filepath)
