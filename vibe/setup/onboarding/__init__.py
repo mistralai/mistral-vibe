@@ -5,7 +5,7 @@ import sys
 from rich import print as rprint
 from textual.app import App
 
-from vibe.core.config import GLOBAL_ENV_FILE
+from vibe.core.config_path import GLOBAL_ENV_FILE
 from vibe.setup.onboarding.screens import (
     ApiKeyScreen,
     ThemeSelectionScreen,
@@ -34,7 +34,7 @@ def run_onboarding(app: App | None = None) -> None:
             rprint(
                 f"\n[yellow]Warning: Could not save API key to .env file: {err}[/]"
                 "\n[dim]The API key is set for this session only. "
-                f"You may need to set it manually in {GLOBAL_ENV_FILE}[/]\n"
+                f"You may need to set it manually in {GLOBAL_ENV_FILE.path}[/]\n"
             )
         case "completed":
             pass

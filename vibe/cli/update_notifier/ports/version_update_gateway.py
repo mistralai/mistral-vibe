@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum, auto
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +49,5 @@ class VersionUpdateGatewayError(Exception):
         super().__init__(detail)
 
 
-@runtime_checkable
 class VersionUpdateGateway(Protocol):
     async def fetch_update(self) -> VersionUpdate | None: ...

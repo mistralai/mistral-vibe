@@ -14,6 +14,7 @@ from vibe.core.config import SessionLoggingConfig, VibeConfig
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tools.builtins.todo import TodoItem
 from vibe.core.types import (
+    ApprovalResponse,
     AssistantEvent,
     BaseEvent,
     FunctionCall,
@@ -24,7 +25,6 @@ from vibe.core.types import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from vibe.core.utils import ApprovalResponse
 
 
 async def act_and_collect_events(agent: Agent, prompt: str) -> list[BaseEvent]:
@@ -140,7 +140,7 @@ async def test_tool_call_requires_approval_if_not_auto_approved() -> None:
 async def test_tool_call_approved_by_callback() -> None:
     def approval_callback(
         _tool_name: str, _args: dict[str, Any], _tool_call_id: str
-    ) -> tuple[str, str | None]:
+    ) -> tuple[ApprovalResponse, str | None]:
         return (ApprovalResponse.YES, None)
 
     agent = make_agent(
@@ -175,7 +175,7 @@ async def test_tool_call_rejected_when_auto_approve_disabled_and_rejected_by_cal
 
     def approval_callback(
         _tool_name: str, _args: dict[str, Any], _tool_call_id: str
-    ) -> tuple[str, str | None]:
+    ) -> tuple[ApprovalResponse, str | None]:
         return (ApprovalResponse.NO, custom_feedback)
 
     agent = make_agent(
@@ -237,14 +237,20 @@ async def test_tool_call_skipped_when_permission_is_never() -> None:
 
 
 @pytest.mark.asyncio
-async def test_approval_always_flips_auto_approve_for_subsequent_calls() -> None:
+async def test_approval_always_sets_tool_permission_for_subsequent_calls() -> None:
     callback_invocations = []
+    agent_ref: Agent | None = None
 
     def approval_callback(
         tool_name: str, _args: dict[str, Any], _tool_call_id: str
-    ) -> tuple[str, str | None]:
+    ) -> tuple[ApprovalResponse, str | None]:
         callback_invocations.append(tool_name)
-        return (ApprovalResponse.ALWAYS, None)
+        # Set permission to ALWAYS for this tool (simulating the new behavior)
+        assert agent_ref is not None
+        if tool_name not in agent_ref.config.tools:
+            agent_ref.config.tools[tool_name] = BaseToolConfig()
+        agent_ref.config.tools[tool_name].permission = ToolPermission.ALWAYS
+        return (ApprovalResponse.YES, None)
 
     agent = make_agent(
         auto_approve=False,
@@ -261,11 +267,16 @@ async def test_approval_always_flips_auto_approve_for_subsequent_calls() -> None
             mock_llm_chunk(content="Second done.", finish_reason="stop"),
         ]),
     )
+    agent_ref = agent
 
     events1 = await act_and_collect_events(agent, "First request")
     events2 = await act_and_collect_events(agent, "Second request")
 
-    assert agent.auto_approve is True
+    tool_config_todo = agent.tool_manager.get_tool_config("todo")
+    assert tool_config_todo.permission is ToolPermission.ALWAYS
+    tool_config_help = agent.tool_manager.get_tool_config("bash")
+    assert tool_config_help.permission is not ToolPermission.ALWAYS
+    assert agent.auto_approve is False
     assert len(callback_invocations) == 1
     assert callback_invocations[0] == "todo"
     assert isinstance(events1[2], ToolResultEvent)

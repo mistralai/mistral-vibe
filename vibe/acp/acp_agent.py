@@ -57,7 +57,9 @@ from vibe.core import __version__
 from vibe.core.agent import Agent as VibeAgent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import MissingAPIKeyError, VibeConfig, load_api_keys_from_env
+from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
+    ApprovalResponse,
     AssistantEvent,
     AsyncApprovalCallback,
     ToolCallEvent,
@@ -211,10 +213,32 @@ class VibeAcpAgent(AcpAgent):
         return disabled
 
     def _create_approval_callback(self, session_id: str) -> AsyncApprovalCallback:
+        session = self._get_session(session_id)
+
+        def _handle_permission_selection(
+            option_id: str, tool_name: str
+        ) -> tuple[ApprovalResponse, str | None]:
+            match option_id:
+                case ToolOption.ALLOW_ONCE:
+                    return (ApprovalResponse.YES, None)
+                case ToolOption.ALLOW_ALWAYS:
+                    if tool_name not in session.agent.config.tools:
+                        session.agent.config.tools[tool_name] = BaseToolConfig()
+                    session.agent.config.tools[
+                        tool_name
+                    ].permission = ToolPermission.ALWAYS
+                    return (ApprovalResponse.YES, None)
+                case ToolOption.REJECT_ONCE:
+                    return (
+                        ApprovalResponse.NO,
+                        "User rejected the tool call, provide an alternative plan",
+                    )
+                case _:
+                    return (ApprovalResponse.NO, f"Unknown option: {option_id}")
 
         async def approval_callback(
             tool_name: str, args: dict[str, Any], tool_call_id: str
-        ) -> tuple[str, str | None]:
+        ) -> tuple[ApprovalResponse, str | None]:
             # Create the tool call update
             tool_call = ToolCall(toolCallId=tool_call_id)
 
@@ -228,10 +252,10 @@ class VibeAcpAgent(AcpAgent):
             # Parse the response using isinstance for proper type narrowing
             if response.outcome.outcome == "selected":
                 outcome = cast(AllowedOutcome, response.outcome)
-                return self._handle_permission_selection(outcome.optionId)
+                return _handle_permission_selection(outcome.optionId, tool_name)
             else:
                 return (
-                    "n",
+                    ApprovalResponse.NO,
                     str(
                         get_user_cancellation_message(
                             CancellationReason.OPERATION_CANCELLED
@@ -240,18 +264,6 @@ class VibeAcpAgent(AcpAgent):
                 )
 
         return approval_callback
-
-    @staticmethod
-    def _handle_permission_selection(option_id: str) -> tuple[str, str | None]:
-        match option_id:
-            case ToolOption.ALLOW_ONCE:
-                return ("y", None)
-            case ToolOption.ALLOW_ALWAYS:
-                return ("a", None)
-            case ToolOption.REJECT_ONCE:
-                return ("n", "User rejected the tool call, provide an alternative plan")
-            case _:
-                return ("n", f"Unknown option: {option_id}")
 
     def _get_session(self, session_id: str) -> AcpSession:
         if session_id not in self.sessions:

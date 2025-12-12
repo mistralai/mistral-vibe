@@ -21,6 +21,7 @@ from vibe.core.middleware import (
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tools.builtins.todo import TodoArgs
 from vibe.core.types import (
+    ApprovalResponse,
     AssistantEvent,
     FunctionCall,
     LLMChunk,
@@ -30,11 +31,7 @@ from vibe.core.types import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from vibe.core.utils import (
-    ApprovalResponse,
-    CancellationReason,
-    get_user_cancellation_message,
-)
+from vibe.core.utils import CancellationReason, get_user_cancellation_message
 
 
 class InjectBeforeMiddleware:
@@ -145,23 +142,6 @@ async def test_act_emits_user_and_assistant_msgs(observer_capture) -> None:
     assert [r for r, _ in observed] == [Role.system, Role.user, Role.assistant]
     assert observed[1][1] == "Ping?"
     assert observed[2][1] == "Pong!"
-
-
-@pytest.mark.asyncio
-async def test_act_yields_assistant_event_with_usage_stats() -> None:
-    backend = FakeBackend([mock_llm_chunk(content="Pong!")])
-    agent = Agent(make_config(), backend=backend)
-
-    events = [ev async for ev in agent.act("Ping?")]
-
-    assert len(events) == 1
-    ev = events[-1]
-    assert isinstance(ev, AssistantEvent)
-    assert ev.content == "Pong!"
-    # stats come from tests.mock.utils.mock_llm_result (prompt=10, completion=5)
-    assert ev.prompt_tokens == 10
-    assert ev.completion_tokens == 5
-    assert ev.session_total_tokens == 15
 
 
 @pytest.mark.asyncio

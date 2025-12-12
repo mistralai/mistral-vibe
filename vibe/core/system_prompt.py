@@ -9,7 +9,8 @@ import sys
 import time
 from typing import TYPE_CHECKING
 
-from vibe.core.config import INSTRUCTIONS_FILE, PROJECT_DOC_FILENAMES
+from vibe.core.config import PROJECT_DOC_FILENAMES
+from vibe.core.config_path import INSTRUCTIONS_FILE
 from vibe.core.llm.format import get_active_tool_classes
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.utils import is_dangerous_directory, is_windows
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 
 def _load_user_instructions() -> str:
     try:
-        return INSTRUCTIONS_FILE.read_text("utf-8", errors="ignore")
+        return INSTRUCTIONS_FILE.path.read_text("utf-8", errors="ignore")
     except (FileNotFoundError, OSError):
         return ""
 

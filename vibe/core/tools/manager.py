@@ -10,7 +10,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 from vibe import VIBE_ROOT
-from vibe.core.config import get_vibe_home
+from vibe.core.config_path import GLOBAL_TOOLS_DIR, resolve_local_tools_dir
 from vibe.core.tools.base import BaseTool, BaseToolConfig
 from vibe.core.tools.mcp import (
     RemoteTool,
@@ -60,16 +60,11 @@ class ToolManager:
             if path.is_dir():
                 paths.append(path)
 
-        cwd = config.effective_workdir
-        for directory in (cwd, *cwd.parents):
-            tools_dir = directory / ".vibe" / "tools"
-            if tools_dir.is_dir():
-                paths.append(tools_dir)
-                break
+        if (tools_dir := resolve_local_tools_dir(config.effective_workdir)) is not None:
+            paths.append(tools_dir)
 
-        global_tools = get_vibe_home() / "tools"
-        if global_tools.is_dir():
-            paths.append(global_tools)
+        if GLOBAL_TOOLS_DIR.path.is_dir():
+            paths.append(GLOBAL_TOOLS_DIR.path)
 
         unique: list[Path] = []
         seen: set[Path] = set()

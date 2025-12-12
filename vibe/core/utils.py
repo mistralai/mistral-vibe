@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 import concurrent.futures
-from enum import Enum, StrEnum, auto
+from enum import Enum, auto
 import functools
 import logging
 from pathlib import Path
@@ -14,15 +14,9 @@ from typing import Any
 import httpx
 
 from vibe.core import __version__
-from vibe.core.config import CONFIG_DIR, CONFIG_FILE, GLOBAL_CONFIG_FILE, Backend
+from vibe.core.config import Backend
+from vibe.core.config_path import CONFIG_FILE, GLOBAL_CONFIG_FILE, LOG_DIR, LOG_FILE
 from vibe.core.types import BaseEvent, ToolResultEvent
-
-
-class ApprovalResponse(StrEnum):
-    YES = "y"
-    NO = "n"
-    ALWAYS = "a"
-
 
 CANCELLATION_TAG = "user_cancellation"
 TOOL_ERROR_TAG = "tool_error"
@@ -141,22 +135,21 @@ def is_dangerous_directory(path: Path | str = ".") -> tuple[bool, str]:
     return False, ""
 
 
-LOG_DIR = CONFIG_DIR
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "vibe.log"
+LOG_DIR.path.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE, "a", "utf-8")],
+    handlers=[logging.FileHandler(LOG_FILE.path, "a", "utf-8")],
 )
+
 logger = logging.getLogger("vibe")
-logger.info("Using config: %s", CONFIG_FILE)
-if CONFIG_FILE != GLOBAL_CONFIG_FILE and GLOBAL_CONFIG_FILE.is_file():
+logger.info("Using config: %s", CONFIG_FILE.path)
+if CONFIG_FILE.path != GLOBAL_CONFIG_FILE.path and GLOBAL_CONFIG_FILE.path.is_file():
     logger.warning(
         "Project config active (%s); ignoring global config (%s)",
-        CONFIG_FILE,
-        GLOBAL_CONFIG_FILE,
+        CONFIG_FILE.path,
+        GLOBAL_CONFIG_FILE.path,
     )
 
 

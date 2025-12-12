@@ -4,7 +4,13 @@ from textual.pilot import Pilot
 
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
-from vibe.cli.update_notifier import FakeVersionUpdateGateway, VersionUpdate
+from tests.update_notifier.adapters.fake_update_cache_repository import (
+    FakeUpdateCacheRepository,
+)
+from tests.update_notifier.adapters.fake_version_update_gateway import (
+    FakeVersionUpdateGateway,
+)
+from vibe.cli.update_notifier import VersionUpdate
 
 
 class SnapshotTestAppWithUpdate(BaseSnapshotTestApp):
@@ -14,9 +20,11 @@ class SnapshotTestAppWithUpdate(BaseSnapshotTestApp):
         version_update_notifier = FakeVersionUpdateGateway(
             update=VersionUpdate(latest_version="1000.2.0")
         )
+        update_cache_repository = FakeUpdateCacheRepository()
         super().__init__(
             config=config,
             version_update_notifier=version_update_notifier,
+            update_cache_repository=update_cache_repository,
             current_version="1.0.4",
         )
 

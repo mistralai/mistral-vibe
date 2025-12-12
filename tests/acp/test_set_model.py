@@ -50,6 +50,8 @@ def acp_agent(backend: FakeBackend) -> VibeAcpAgent:
         ],
     )
 
+    VibeConfig.dump_config(config.model_dump())
+
     class PatchedAgent(Agent):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})

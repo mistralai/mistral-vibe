@@ -20,12 +20,6 @@ class StubApp(App[str | None]):
         return self._return_value
 
 
-def _patch_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    env_file = tmp_path / ".env"
-    monkeypatch.setattr(onboarding, "GLOBAL_ENV_FILE", env_file, raising=False)
-    return env_file
-
-
 def _exit_raiser(code: int = 0) -> None:
     raise SystemExit(code)
 
@@ -33,7 +27,6 @@ def _exit_raiser(code: int = 0) -> None:
 def test_exits_on_cancel(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    _patch_env_file(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "exit", _exit_raiser)
 
     with pytest.raises(SystemExit) as excinfo:
@@ -47,7 +40,6 @@ def test_exits_on_cancel(
 def test_warns_on_save_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    _patch_env_file(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "exit", _exit_raiser)
 
     onboarding.run_onboarding(StubApp("save_error:disk full"))
@@ -60,7 +52,6 @@ def test_warns_on_save_error(
 def test_successfully_completes(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    _patch_env_file(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "exit", _exit_raiser)
 
     onboarding.run_onboarding(StubApp("completed"))

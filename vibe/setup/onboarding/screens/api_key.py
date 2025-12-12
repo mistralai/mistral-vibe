@@ -12,7 +12,8 @@ from textual.validation import Length
 from textual.widgets import Input, Link, Static
 
 from vibe.cli.clipboard import copy_selection_to_clipboard
-from vibe.core.config import GLOBAL_ENV_FILE, VibeConfig
+from vibe.core.config import VibeConfig
+from vibe.core.config_path import GLOBAL_ENV_FILE
 from vibe.setup.onboarding.base import OnboardingScreen
 
 PROVIDER_HELP = {
@@ -24,8 +25,8 @@ CONFIG_DOCS_URL = (
 
 
 def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
-    GLOBAL_ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    set_key(GLOBAL_ENV_FILE, env_key, api_key)
+    GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+    set_key(GLOBAL_ENV_FILE.path, env_key, api_key)
 
 
 class ApiKeyScreen(OnboardingScreen):
