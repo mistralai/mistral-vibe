@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Misc
 - Add integration guide to use `vibe` with `zed` editor in the Github README.md file.
 
+### Added
+
+- One liner about the addition.
+
+
+### Changed
+
+- One liner about the change.
+
+
+### Fixed
+
+- One liner about the fix.
+
+
 ## [1.1.3] - 2025-12-12
 
 ### Added
