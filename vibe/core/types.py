@@ -114,6 +114,7 @@ class SessionInfo(BaseModel):
 
 class SessionMetadata(BaseModel):
     session_id: str
+    name: str | None = None
     start_time: str
     end_time: str | None
     git_commit: str | None

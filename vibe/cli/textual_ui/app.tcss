@@ -680,3 +680,102 @@ ContextProgress {
     margin: 0;
     color: $foreground;
 }
+
+#session-manager-app {
+    width: 100%;
+    height: auto;
+    max-height: 30;
+    background: $background;
+    border: round $primary;
+    padding: 1 2;
+    margin: 0 2 1 2;
+}
+
+#session-manager-content {
+    width: 100%;
+    height: auto;
+}
+
+.session-manager-title {
+    width: 100%;
+    height: auto;
+    text-align: center;
+    text-style: bold;
+    color: $primary;
+    margin-bottom: 1;
+}
+
+.session-search {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+
+    &.active {
+        color: $accent;
+        text-style: bold;
+    }
+}
+
+.session-item {
+    width: 100%;
+    height: auto;
+    padding: 0 1;
+    margin: 0;
+
+    &.current {
+        color: $success;
+        text-style: bold;
+    }
+
+    &.selected {
+        background: $warning 20%;
+        color: $warning;
+        text-style: bold;
+    }
+
+    &.current.selected {
+        background: $success 20%;
+        color: $success;
+        text-style: bold;
+    }
+}
+
+.session-status {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    margin-top: 1;
+    margin-bottom: 1;
+    text-align: center;
+}
+
+.session-manager-help {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    text-align: center;
+    border-top: solid $surface;
+    padding-top: 1;
+}
+
+.session-rename-input {
+    width: 100%;
+    height: auto;
+    background: $surface;
+    border: round $primary;
+    padding: 0 1;
+    margin: 1 0;
+}
+
+.session-delete-confirm {
+    width: 100%;
+    height: auto;
+    background: $error 10%;
+    border: round $error;
+    padding: 1;
+    margin: 1 0;
+    color: $error;
+    text-align: center;
+    text-style: bold;
+}

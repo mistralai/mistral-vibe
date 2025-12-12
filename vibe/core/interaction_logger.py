@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 import aiofiles
 
 from vibe.core.llm.format import get_active_tool_classes
-from vibe.core.types import AgentStats, LLMMessage, SessionInfo, SessionMetadata
+from vibe.core.types import AgentStats, LLMMessage, Role, SessionInfo, SessionMetadata
 from vibe.core.utils import is_windows
 
 if TYPE_CHECKING:
@@ -25,6 +25,7 @@ class InteractionLogger:
         session_id: str,
         auto_approve: bool = False,
         workdir: Path | None = None,
+        session_name: str | None = None,
     ) -> None:
         if workdir is None:
             workdir = Path.cwd()
@@ -32,6 +33,7 @@ class InteractionLogger:
         self.enabled = session_config.enabled
         self.auto_approve = auto_approve
         self.workdir = workdir
+        self.session_name = session_name
 
         if not self.enabled:
             self.save_dir: Path | None = None
@@ -104,6 +106,7 @@ class InteractionLogger:
 
         return SessionMetadata(
             session_id=self.session_id,
+            name=self.session_name,
             start_time=self.session_start_time,
             end_time=None,
             git_commit=git_commit,
@@ -112,6 +115,18 @@ class InteractionLogger:
             username=user_name,
             environment={"working_directory": str(self.workdir)},
         )
+
+    def generate_session_name(self, messages: list[LLMMessage]) -> str:
+        MAX_SESSION_NAME_LENGTH = 50
+        for message in messages:
+            if message.role == Role.user and message.content:
+                content = message.content.strip()
+                return (
+                    f"{content[:47]}..."
+                    if len(content) > MAX_SESSION_NAME_LENGTH
+                    else content
+                )
+        return f"Session {datetime.now().strftime('%b %d %H:%M')}"
 
     async def save_interaction(
         self,
@@ -125,6 +140,10 @@ class InteractionLogger:
 
         if self.session_metadata is None:
             return None
+
+        if self.session_name is None and messages:
+            self.session_name = self.generate_session_name(messages)
+            self.session_metadata.name = self.session_name
 
         active_tools = get_active_tool_classes(tool_manager, config)
 
@@ -162,14 +181,33 @@ class InteractionLogger:
         except Exception:
             return None
 
-    def reset_session(self, session_id: str) -> None:
+    def reset_session(
+        self,
+        session_id: str,
+        filepath: Path | None = None,
+        start_time: str | None = None,
+    ) -> None:
         if not self.enabled:
             return
 
         self.session_id = session_id
-        self.session_start_time = datetime.now().isoformat()
-        self.filepath = self._get_save_filepath()
+        self.session_start_time = start_time or datetime.now().isoformat()
+        self.session_name = None  # Reset session name for new session
+
+        if filepath:
+            self.filepath = filepath
+        else:
+            self.filepath = self._get_save_filepath()
+
         self.session_metadata = self._initialize_session_metadata()
+
+    def update_session_name(self, name: str | None) -> None:
+        if not self.enabled:
+            return
+
+        self.session_name = name
+        if self.session_metadata is not None:
+            self.session_metadata.name = name
 
     def get_session_info(
         self, messages: list[dict[str, Any]], stats: AgentStats
@@ -232,6 +270,49 @@ class InteractionLogger:
                 )
 
         return None
+
+    @staticmethod
+    def get_all_sessions(config: SessionLoggingConfig) -> list[dict[str, Any]]:
+        save_dir = Path(config.save_dir)
+        if not save_dir.exists():
+            return []
+
+        session_files = sorted(
+            save_dir.glob(f"{config.session_prefix}_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+        sessions = []
+        for filepath in session_files:
+            try:
+                messages, metadata = InteractionLogger.load_session(filepath)
+                sessions.append({
+                    "filepath": str(filepath),
+                    "metadata": metadata,
+                    "message_count": len(messages),
+                })
+            except Exception:
+                continue
+
+        return sessions
+
+    @staticmethod
+    def rename_session_file(filepath: Path, new_name: str) -> bool:
+        try:
+            messages, metadata = InteractionLogger.load_session(filepath)
+            metadata["name"] = new_name
+
+            interaction_data = {
+                "metadata": metadata,
+                "messages": [m.model_dump(exclude_none=True) for m in messages],
+            }
+
+            json_content = json.dumps(interaction_data, indent=2, ensure_ascii=False)
+            filepath.write_text(json_content, encoding="utf-8")
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def load_session(filepath: Path) -> tuple[list[LLMMessage], dict[str, Any]]:

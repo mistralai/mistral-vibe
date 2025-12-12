@@ -31,6 +31,7 @@ from vibe.cli.textual_ui.widgets.messages import (
 )
 from vibe.cli.textual_ui.widgets.mode_indicator import ModeIndicator
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
+from vibe.cli.textual_ui.widgets.session_manager_app import SessionManagerApp
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.cli.textual_ui.widgets.welcome import WelcomeBanner
 from vibe.cli.update_notifier import (
@@ -47,6 +48,7 @@ from vibe.core.agent import Agent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
 from vibe.core.config_path import HISTORY_FILE
+from vibe.core.interaction_logger import InteractionLogger
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import ApprovalResponse, LLMMessage, ResumeSessionInfo, Role
 from vibe.core.utils import (
@@ -61,6 +63,7 @@ class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
     Input = auto()
+    SessionManager = auto()
 
 
 class VibeApp(App):
@@ -595,6 +598,25 @@ class VibeApp(App):
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
+    async def _show_session_manager(self) -> None:
+        if not self.config.session_logging.enabled:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Session logging is disabled. Enable it in config to use session management.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        await self._switch_to_session_manager_app()
+
+    async def _rename_session(self) -> None:
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                "Use `/session` to open the session manager, then press 'r' to rename any session."
+            )
+        )
+
     async def _show_config(self) -> None:
         """Switch to the configuration app in the bottom panel."""
         if self._current_bottom_app == BottomApp.Config:
@@ -802,6 +824,187 @@ class VibeApp(App):
         self.call_after_refresh(approval_app.focus)
         self.call_after_refresh(self._scroll_to_bottom)
 
+    async def _switch_to_session_manager_app(self) -> None:
+        if self._current_bottom_app == BottomApp.SessionManager:
+            return
+
+        # Save current session before opening manager to ensure latest state is visible
+        if self.agent:
+            await self.agent.interaction_logger.save_interaction(
+                self.agent.messages,
+                self.agent.stats,
+                self.config,
+                self.agent.tool_manager,
+            )
+
+        bottom_container = self.query_one("#bottom-app-container")
+        await self._mount_and_scroll(UserCommandMessage("Session Manager opened..."))
+
+        try:
+            chat_input_container = self.query_one(ChatInputContainer)
+            await chat_input_container.remove()
+        except Exception:
+            pass
+
+        if self._mode_indicator:
+            self._mode_indicator.display = False
+
+        current_session_id = self.agent.session_id if self.agent else ""
+        session_manager_app = SessionManagerApp(
+            self.config.session_logging, current_session_id
+        )
+        await bottom_container.mount(session_manager_app)
+        self._current_bottom_app = BottomApp.SessionManager
+
+        self.call_after_refresh(session_manager_app.focus)
+
+    async def on_session_manager_app_session_switched(
+        self, message: SessionManagerApp.SessionSwitched
+    ) -> None:
+        await self._switch_to_input_app()
+        await self._switch_to_session(message.session_id)
+
+    async def on_session_manager_app_manager_closed(
+        self, message: SessionManagerApp.ManagerClosed
+    ) -> None:
+        await self._switch_to_input_app()
+
+    async def _load_session_data(
+        self, session_id: str
+    ) -> tuple[list[LLMMessage], dict[str, Any]] | None:
+        """Load session data from disk."""
+        target_session = InteractionLogger.find_session_by_id(
+            session_id, self.config.session_logging
+        )
+        if not target_session:
+            await self._mount_and_scroll(
+                ErrorMessage("Session not found", collapsed=self._tools_collapsed)
+            )
+            return None
+        return InteractionLogger.load_session(target_session)
+
+    async def _create_agent_for_session(self, metadata: dict[str, Any]) -> Any:
+        """Create a new agent for the loaded session."""
+        from vibe.core.agent import Agent
+
+        new_agent = Agent(
+            config=self.config,
+            auto_approve=self.auto_approve,
+            enable_streaming=self.enable_streaming,
+        )
+
+        if not self.auto_approve:
+            new_agent.approval_callback = self._approval_callback
+
+        target_session_id = metadata.get("session_id", "unknown")
+        session_name = metadata.get("name") or f"Session {target_session_id[:8]}"
+        start_time = metadata.get("start_time")
+
+        # Set the agent to use the target session_id instead of a new one
+        new_agent.session_id = target_session_id
+        new_agent.interaction_logger.reset_session(
+            target_session_id,
+            filepath=InteractionLogger.find_session_by_id(
+                target_session_id, self.config.session_logging
+            ),
+            start_time=start_time,
+        )
+
+        # Update session name from loaded metadata
+        if session_name and session_name != f"Session {target_session_id[:8]}":
+            new_agent.interaction_logger.update_session_name(session_name)
+
+        return new_agent, session_name
+
+    async def _switch_to_session(self, session_id: str) -> None:
+        try:
+            if self.agent:
+                await self.agent.interaction_logger.save_interaction(
+                    self.agent.messages,
+                    self.agent.stats,
+                    self.config,
+                    self.agent.tool_manager,
+                )
+
+            session_data = await self._load_session_data(session_id)
+            if session_data is None:
+                return
+
+            loaded_messages, metadata = session_data
+
+            await self._finalize_current_streaming_message()
+            messages_area = self.query_one("#messages")
+            await messages_area.remove_children()
+
+            new_agent, session_name = await self._create_agent_for_session(metadata)
+
+            if loaded_messages:
+                non_system_messages = [
+                    msg for msg in loaded_messages if not (msg.role == Role.system)
+                ]
+                new_agent.messages.extend(non_system_messages)
+
+            self.agent = new_agent
+
+            # Show the latest interaction from the loaded session
+            await self._show_session_switch_messages(loaded_messages, session_name)
+
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to switch session: {e!s}", collapsed=self._tools_collapsed
+                )
+            )
+            logger.exception("Error switching to session %s", session_id)
+
+    async def _show_session_switch_messages(
+        self, loaded_messages: list[LLMMessage], session_name: str
+    ) -> None:
+        """Display appropriate messages after switching to a session."""
+        if not loaded_messages:
+            await self._mount_and_scroll(
+                UserCommandMessage(f"✓ Switched to: {session_name} (empty session)")
+            )
+            return
+
+        # Find the last user message and its corresponding assistant response
+        last_user_idx = -1
+        for i, msg in enumerate(reversed(loaded_messages)):
+            if msg.role == Role.user:
+                last_user_idx = len(loaded_messages) - 1 - i
+                break
+
+        if last_user_idx == -1:
+            # No user messages found, just show summary
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    f"✓ Switched to: {session_name} ({len(loaded_messages)} messages)"
+                )
+            )
+            return
+
+        # Show the last user message
+        user_msg = loaded_messages[last_user_idx]
+        if user_msg.content:
+            await self._mount_and_scroll(UserMessage(str(user_msg.content)))
+
+        # Show the assistant response if it exists
+        if (
+            last_user_idx + 1 < len(loaded_messages)
+            and loaded_messages[last_user_idx + 1].role == Role.assistant
+        ):
+            assistant_msg = loaded_messages[last_user_idx + 1]
+            if assistant_msg.content:
+                await self._mount_and_scroll(
+                    AssistantMessage(str(assistant_msg.content))
+                )
+
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                f"✓ Switched to: {session_name} ({len(loaded_messages)} messages)"
+            )
+        )
+
     async def _switch_to_input_app(self) -> None:
         bottom_container = self.query_one("#bottom-app-container")
 
@@ -814,6 +1017,12 @@ class VibeApp(App):
         try:
             approval_app = self.query_one("#approval-app")
             await approval_app.remove()
+        except Exception:
+            pass
+
+        try:
+            session_manager_app = self.query_one("#session-manager-app")
+            await session_manager_app.remove()
         except Exception:
             pass
 
@@ -851,6 +1060,8 @@ class VibeApp(App):
                     self.query_one(ConfigApp).focus()
                 case BottomApp.Approval:
                     self.query_one(ApprovalApp).focus()
+                case BottomApp.SessionManager:
+                    self.query_one(SessionManagerApp).focus()
                 case app:
                     assert_never(app)
         except Exception:
@@ -869,6 +1080,14 @@ class VibeApp(App):
             try:
                 approval_app = self.query_one(ApprovalApp)
                 approval_app.action_reject()
+            except Exception:
+                pass
+            return
+
+        if self._current_bottom_app == BottomApp.SessionManager:
+            try:
+                session_manager_app = self.query_one(SessionManagerApp)
+                session_manager_app.action_close()
             except Exception:
                 pass
             return
