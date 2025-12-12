@@ -1,0 +1,7 @@
+contact_links:
+  - name: Discord Chat
+    url: https://discord.gg/mistralai
+    about: Ask questions and discuss with the community.
+  - name: Website
+    url: https://mistral.ai/
+    about: Learn more about Mistral AI.
