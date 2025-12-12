@@ -6,6 +6,7 @@ import sys
 from rich import print as rprint
 
 from vibe.cli.textual_ui.app import run_textual_ui
+from vibe.core import __version__
 from vibe.core.config import (
     MissingAPIKeyError,
     MissingPromptFileError,
@@ -22,6 +23,12 @@ from vibe.setup.onboarding import run_onboarding
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Mistral Vibe interactive CLI")
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="store_true",
+        help="Print version information and exit.",
+    )
     parser.add_argument(
         "initial_prompt",
         nargs="?",
@@ -131,6 +138,10 @@ def load_config_or_exit(agent: str | None = None) -> VibeConfig:
 def main() -> None:  # noqa: PLR0912, PLR0915
     load_api_keys_from_env()
     args = parse_arguments()
+
+    if args.version:
+        print(f"Mistral Vibe v{__version__}")
+        sys.exit(0)
 
     if args.setup:
         run_onboarding()
