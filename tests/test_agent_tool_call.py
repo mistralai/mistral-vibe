@@ -56,11 +56,13 @@ def make_agent(
     todo_permission: ToolPermission = ToolPermission.ALWAYS,
     backend: FakeBackend,
     approval_callback: SyncApprovalCallback | None = None,
+    enable_streaming: bool = False,
 ) -> Agent:
     agent = Agent(
         make_config(todo_permission=todo_permission),
         auto_approve=auto_approve,
         backend=backend,
+        enable_streaming=enable_streaming,
     )
     if approval_callback:
         agent.set_approval_callback(approval_callback)
@@ -486,3 +488,49 @@ async def test_ensure_assistant_after_tool_appends_understood() -> None:
     idx = next(i for i, m in enumerate(agent.messages) if m.role == Role.tool)
     assert agent.messages[idx + 1].role == Role.assistant
     assert agent.messages[idx + 1].content == "Understood."
+
+
+@pytest.mark.asyncio
+async def test_agent_preserves_reasoning_content_between_turns() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(
+            content="Visible answer",
+            reasoning_content="Hidden steps",
+            finish_reason="stop",
+        ),
+        mock_llm_chunk(content="Second turn response", finish_reason="stop"),
+    ])
+    agent = make_agent(auto_approve=True, backend=backend)
+
+    await act_and_collect_events(agent, "First question")
+
+    assistant_msgs = [m for m in agent.messages if m.role == Role.assistant]
+    assert assistant_msgs[-1].reasoning_content == "Hidden steps"
+
+    await act_and_collect_events(agent, "Follow-up question")
+
+    assert len(backend.requests_messages) >= 2
+    prior_assistant = next(
+        msg for msg in backend.requests_messages[1] if msg.role == Role.assistant
+    )
+    assert prior_assistant.reasoning_content == "Hidden steps"
+
+
+@pytest.mark.asyncio
+async def test_agent_streaming_collects_reasoning_content() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(
+            content="", reasoning_content="Hidden step one ", finish_reason=None
+        ),
+        mock_llm_chunk(
+            content="Visible stream response",
+            reasoning_content="hidden step two",
+            finish_reason=None,
+        ),
+    ])
+    agent = make_agent(auto_approve=True, backend=backend, enable_streaming=True)
+
+    await act_and_collect_events(agent, "Streamed question")
+
+    assistant_msgs = [m for m in agent.messages if m.role == Role.assistant]
+    assert assistant_msgs[-1].reasoning_content == "Hidden step one hidden step two"

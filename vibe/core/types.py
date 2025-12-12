@@ -183,6 +183,7 @@ class LLMMessage(BaseModel):
 
     role: Role
     content: Content | None = None
+    reasoning_content: Content | None = None
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
@@ -193,10 +194,12 @@ class LLMMessage(BaseModel):
         if isinstance(v, dict):
             v.setdefault("content", "")
             v.setdefault("role", "assistant")
+            v.setdefault("reasoning_content", None)
             return v
         return {
             "role": str(getattr(v, "role", "assistant")),
             "content": getattr(v, "content", ""),
+            "reasoning_content": getattr(v, "reasoning_content", None),
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),

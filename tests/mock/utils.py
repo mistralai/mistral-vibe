@@ -9,6 +9,7 @@ MOCK_DATA_ENV_VAR = "VIBE_MOCK_LLM_DATA"
 
 def mock_llm_chunk(
     content: str = "Hello!",
+    reasoning_content: str | None = None,
     role: Role = Role.assistant,
     tool_calls: list[ToolCall] | None = None,
     name: str | None = None,
@@ -20,6 +21,7 @@ def mock_llm_chunk(
     message = LLMMessage(
         role=role,
         content=content,
+        reasoning_content=reasoning_content,
         tool_calls=tool_calls,
         name=name,
         tool_call_id=tool_call_id,

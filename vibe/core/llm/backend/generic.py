@@ -97,6 +97,12 @@ class OpenAIAdapter(APIAdapter):
 
         return payload
 
+    def _dump_message(
+        self, message: LLMMessage, provider: ProviderConfig
+    ) -> dict[str, Any]:
+        exclude = None if provider.name == "llamacpp" else {"reasoning_content"}
+        return message.model_dump(exclude_none=True, exclude=exclude)
+
     def build_headers(self, api_key: str | None = None) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -116,7 +122,7 @@ class OpenAIAdapter(APIAdapter):
         provider: ProviderConfig,
         api_key: str | None = None,
     ) -> PreparedRequest:
-        converted_messages = [msg.model_dump(exclude_none=True) for msg in messages]
+        converted_messages = [self._dump_message(msg, provider) for msg in messages]
 
         payload = self.build_payload(
             model_name, converted_messages, temperature, tools, max_tokens, tool_choice
