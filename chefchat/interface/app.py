@@ -332,7 +332,7 @@ class ChefChatApp(App):
         else:
             await self._submit_ticket(user_input)
 
-    @work(exclusive=True, thread=True)
+    @work(exclusive=True)
     async def _run_agent_loop(self, request: str) -> None:
         """Run the agent interaction loop in a worker thread."""
         if not self._agent:
