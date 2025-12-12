@@ -6,7 +6,7 @@ import re
 import shutil
 from typing import ClassVar, NamedTuple, final
 
-import aiofiles
+import anyio
 from pydantic import BaseModel, Field
 
 from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolError
@@ -210,7 +210,7 @@ class SearchReplace(
 
     async def _read_file(self, file_path: Path) -> str:
         try:
-            async with aiofiles.open(file_path, encoding="utf-8") as f:
+            async with await anyio.open_file(file_path, encoding="utf-8") as f:
                 return await f.read()
         except UnicodeDecodeError as e:
             raise ToolError(f"Unicode decode error reading {file_path}: {e}") from e
@@ -224,7 +224,7 @@ class SearchReplace(
 
     async def _write_file(self, file_path: Path, content: str) -> None:
         try:
-            async with aiofiles.open(file_path, mode="w", encoding="utf-8") as f:
+            async with await anyio.open_file(file_path, mode="w", encoding="utf-8") as f:
                 await f.write(content)
         except PermissionError:
             raise ToolError(f"Permission denied writing to file: {file_path}")

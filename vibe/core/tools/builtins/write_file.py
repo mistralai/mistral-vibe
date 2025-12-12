@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import ClassVar, final
 
-import aiofiles
+import anyio
 from pydantic import BaseModel, Field
 
 from vibe.core.tools.base import (
@@ -161,7 +161,7 @@ class WriteFile(
 
     async def _write_file(self, args: WriteFileArgs, file_path: Path) -> None:
         try:
-            async with aiofiles.open(file_path, mode="w", encoding="utf-8") as f:
+            async with await anyio.open_file(file_path, mode="w", encoding="utf-8") as f:
                 await f.write(args.content)
         except Exception as e:
             raise ToolError(f"Error writing {file_path}: {e}") from e
