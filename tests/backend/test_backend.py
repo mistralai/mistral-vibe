@@ -304,6 +304,120 @@ class TestBackend:
             assert payload["stream_options"] == expected_stream_options
 
     @pytest.mark.asyncio
+    async def test_backend_reasoning_content_always_included_for_llamacpp(self):
+        captured_payloads: list[JsonResponse] = []
+
+        async def responder(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            captured_payloads.append(payload)
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "id": "fake_id_1234",
+                    "object": "chat.completion",
+                    "created": 1234567890,
+                    "model": "devstral-latest",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                },
+            )
+
+        base_url = "http://127.0.0.1:8080"
+        with respx.mock(base_url=base_url) as mock_api:
+            mock_api.post("/v1/chat/completions").mock(side_effect=responder)
+
+            provider = ProviderConfig(name="llamacpp", api_base=f"{base_url}/v1")
+            backend = GenericBackend(provider=provider)
+            model = ModelConfig(
+                name="model_name", provider="llamacpp", alias="model_alias"
+            )
+            messages = [
+                LLMMessage(
+                    role=Role.assistant,
+                    content="visible",
+                    reasoning_content="hidden thoughts",
+                )
+            ]
+
+            await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+        assert captured_payloads, "Request payload was not captured"
+        message_payload = captured_payloads[0]["messages"][0]
+        assert message_payload["reasoning_content"] == "hidden thoughts"
+
+    @pytest.mark.asyncio
+    async def test_backend_reasoning_content_excluded_for_non_llamacpp_provider(self):
+        captured_payloads: list[JsonResponse] = []
+
+        async def responder(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            captured_payloads.append(payload)
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "id": "fake_id_1234",
+                    "object": "chat.completion",
+                    "created": 1234567890,
+                    "model": "devstral-latest",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                },
+            )
+
+        base_url = "https://api.fireworks.ai"
+        with respx.mock(base_url=base_url) as mock_api:
+            mock_api.post("/v1/chat/completions").mock(side_effect=responder)
+
+            provider = ProviderConfig(
+                name="fireworks", api_base=f"{base_url}/v1", api_key_env_var="API_KEY"
+            )
+            backend = GenericBackend(provider=provider)
+            model = ModelConfig(
+                name="model_name", provider="fireworks", alias="model_alias"
+            )
+            messages = [
+                LLMMessage(
+                    role=Role.assistant,
+                    content="visible",
+                    reasoning_content="hidden thoughts",
+                )
+            ]
+
+            await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+        assert captured_payloads, "Request payload was not captured"
+        message_payload = captured_payloads[0]["messages"][0]
+        assert "reasoning_content" not in message_payload
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("backend_type", [Backend.MISTRAL, Backend.GENERIC])
     async def test_backend_user_agent(self, backend_type: Backend):
         user_agent = get_user_agent(backend_type)

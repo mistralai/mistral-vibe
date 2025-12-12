@@ -164,7 +164,11 @@ class APIToolFormatHandler:
         return "auto"
 
     def process_api_response_message(self, message: Any) -> LLMMessage:
-        clean_message = {"role": message.role, "content": message.content}
+        clean_message = {
+            "role": message.role,
+            "content": message.content,
+            "reasoning_content": message.reasoning_content,
+        }
 
         if message.tool_calls:
             clean_message["tool_calls"] = [
