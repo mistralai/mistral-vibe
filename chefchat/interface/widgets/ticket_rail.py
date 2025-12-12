@@ -86,9 +86,12 @@ class Ticket(Static):
         self.add_class(ticket_type.value)
         # Add generic ticket class for querying
         self.add_class("ticket")
+        
+        # Perform initial render
+        self._update_renderable()
 
-    def render(self) -> RenderableType:
-        """Render the ticket content."""
+    def _update_renderable(self) -> None:
+        """Update the widget's renderable content."""
         time_str = self.timestamp.strftime("%H:%M")
 
         # Create header with emoji and timestamp
@@ -109,7 +112,11 @@ class Ticket(Static):
             logger.warning("Unexpected error rendering markdown: %s", e)
             content = Text(self.content)
 
-        return Group(header, content)
+        self.update(Group(header, content))
+
+    def watch_content(self, new_content: str) -> None:
+        """Update the renderable when content changes."""
+        self._update_renderable()
 
 
 class TicketRail(VerticalScroll):
@@ -284,31 +291,11 @@ class TicketRail(VerticalScroll):
         # Update the widget
         try:
             # We need to find the last widget.
-            # Ideally we'd keep a reference, but querying is safer for now.
             tickets = self.query(Ticket)
             if tickets:
                 last_ticket = tickets.last()
-                # Update internal state (for history)
+                # Update reactive content, triggering watch_content -> _update_renderable -> self.update()
                 last_ticket.content = last_msg.content
-                # Update the display using Static.update()
-                # We need to manually construct the renderable as Ticket.render() does
-                from rich.console import Group
-                from rich.markdown import Markdown
-                from rich.text import Text
-                from chefchat.interface.widgets.ticket_rail import TICKET_EMOJI
-
-                time_str = last_ticket.timestamp.strftime("%H:%M")
-                header = Text()
-                emoji = TICKET_EMOJI.get(last_ticket.ticket_type, "📋")
-                header.append(f"{emoji} ", style="bold")
-                header.append(f"[{time_str}]", style="dim")
-
-                try:
-                    content_renderable = Markdown(last_ticket.content)
-                except Exception:
-                    content_renderable = Text(last_ticket.content)
-                
-                last_ticket.update(Group(header, content_renderable))
                 last_ticket.scroll_visible()
         except Exception:
             pass
