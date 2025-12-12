@@ -45,6 +45,55 @@ This section is for developers who want to set up the repository for local devel
 
 - Python 3.12 or higher
 - [uv](https://github.com/astral-sh/uv) - Modern Python package manager
+- [Node.js](https://nodejs.org/) (optional, for commitlint)
+
+### Commit Message Format
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) for clear and structured commit messages.
+
+**Format**:
+```
+<type>(<scope>): <subject>
+
+<body>
+
+Closes #<issue>
+```
+
+**Types**:
+- `feat`: New feature
+- `fix`: Bug fix
+- `docs`: Documentation changes
+- `style`: Code style changes (formatting, etc.)
+- `refactor`: Code refactoring
+- `test`: Adding or updating tests
+- `chore`: Maintenance tasks
+- `perf`: Performance improvements
+- `ci`: CI/CD changes
+
+**Examples**:
+```bash
+feat(cli): add new autocompletion feature
+
+Implements fuzzy path completion for @ references.
+
+Closes #123
+```
+
+```bash
+fix(security): mitigar command injection en bash tool
+
+Uses shlex.split for simple commands to prevent injection.
+
+Closes #2
+```
+
+**Setup commitlint** (optional):
+```bash
+npm install -g @commitlint/cli @commitlint/config-conventional
+```
+
+The commit-msg hook will validate your commits automatically.
 
 ### Setup
 

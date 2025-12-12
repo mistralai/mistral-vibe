@@ -27,11 +27,11 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "agent-client-protocol==0.6.3",
+    "agent-client-protocol>=0.6.3,<0.7.0",
     "aiofiles>=24.1.0",
     "httpx>=0.28.1",
     "mcp>=1.14.0",
-    "mistralai==1.9.11",
+    "mistralai>=1.9.11,<2.0.0",
     "pexpect>=4.9.0",
     "packaging>=24.1",
     "pydantic>=2.12.4",

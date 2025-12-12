@@ -416,6 +416,11 @@ class VibeApp(App):
             return
 
         self._agent_initializing = True
+        
+        # Show loading message
+        loading_msg = UserCommandMessage("⏳ Initializing agent and loading MCP tools...")
+        await self._mount_and_scroll(loading_msg)
+        
         try:
             agent = Agent(
                 self.config,
@@ -438,6 +443,11 @@ class VibeApp(App):
                 )
 
             self.agent = agent
+            
+            # Show success message
+            success_msg = UserCommandMessage("✅ Agent ready")
+            await self._mount_and_scroll(success_msg)
+            
         except asyncio.CancelledError:
             self.agent = None
             return

@@ -208,23 +208,29 @@ def create_mcp_http_proxy_tool_class(
 
 
 async def list_tools_stdio(command: list[str]) -> list[RemoteTool]:
+    import os
     params = StdioServerParameters(command=command[0], args=command[1:])
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools_resp = await session.list_tools()
-            return [RemoteTool.model_validate(t) for t in tools_resp.tools]
+    # Suppress stderr from MCP servers
+    with open(os.devnull, 'w') as devnull:
+        async with stdio_client(params, errlog=devnull) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools_resp = await session.list_tools()
+                return [RemoteTool.model_validate(t) for t in tools_resp.tools]
 
 
 async def call_tool_stdio(
     command: list[str], tool_name: str, arguments: dict[str, Any]
 ) -> MCPToolResult:
+    import os
     params = StdioServerParameters(command=command[0], args=command[1:])
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(tool_name, arguments)
-            return _parse_call_result("stdio:" + " ".join(command), tool_name, result)
+    # Suppress stderr from MCP servers
+    with open(os.devnull, 'w') as devnull:
+        async with stdio_client(params, errlog=devnull) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, arguments)
+                return _parse_call_result("stdio:" + " ".join(command), tool_name, result)
 
 
 def create_mcp_stdio_proxy_tool_class(

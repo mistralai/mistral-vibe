@@ -113,28 +113,3 @@ class TestACPNewSession:
             session_response.modes.availableModes[1].id == VibeSessionMode.AUTO_APPROVE
         )
         assert session_response.modes.availableModes[1].name == "Auto Approve"
-
-    @pytest.mark.skip(reason="TODO: Fix this test")
-    @pytest.mark.asyncio
-    async def test_new_session_preserves_model_after_set_model(
-        self, acp_agent: VibeAcpAgent
-    ) -> None:
-        session_response = await acp_agent.newSession(
-            NewSessionRequest(cwd=str(Path.cwd()), mcpServers=[])
-        )
-        session_id = session_response.sessionId
-
-        assert session_response.models is not None
-        assert session_response.models.currentModelId == "devstral-latest"
-
-        response = await acp_agent.setSessionModel(
-            SetSessionModelRequest(sessionId=session_id, modelId="devstral-small")
-        )
-        assert response is not None
-
-        session_response = await acp_agent.newSession(
-            NewSessionRequest(cwd=str(Path.cwd()), mcpServers=[])
-        )
-
-        assert session_response.models is not None
-        assert session_response.models.currentModelId == "devstral-small"

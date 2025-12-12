@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Markdown, Static
 from textual.widgets._markdown import MarkdownStream
+
+from vibe.core.utils import logger
 
 
 class UserMessage(Static):
@@ -63,9 +67,36 @@ class AssistantMessage(Static):
         if not content:
             return
 
+        # Prevent duplicate content
+        if self._content.endswith(content):
+            logger.debug(
+                f"Skipped duplicate content: {len(content)} chars already present"
+            )
+            return
+
+        # Safety limit: 1MB max content
+        MAX_CONTENT_LENGTH = 1_000_000
+        if len(self._content) + len(content) > MAX_CONTENT_LENGTH:
+            logger.warning(
+                f"Content limit exceeded: {len(self._content) + len(content)} > {MAX_CONTENT_LENGTH}"
+            )
+            return
+
+        logger.debug(
+            f"Appending {len(content)} chars. "
+            f"Current: {len(self._content)}, New total: {len(self._content) + len(content)}"
+        )
+
         self._content += content
         stream = self._ensure_stream()
-        await stream.write(content)
+        
+        try:
+            async with asyncio.timeout(5):
+                await stream.write(content)
+        except asyncio.TimeoutError:
+            logger.error(f"Stream write timeout after 5s, rolling back {len(content)} chars")
+            # Rollback on timeout
+            self._content = self._content[:-len(content)]
 
     async def write_initial_content(self) -> None:
         if self._content:
