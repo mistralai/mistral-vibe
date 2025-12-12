@@ -110,7 +110,7 @@ class ApprovalApp(Container):
     def _update_options(self) -> None:
         options = [
             ("Yes", "yes"),
-            (f"Yes and always allow {self.tool_name} this session", "yes"),
+            (f"Yes and always allow {self.tool_name} for this session", "yes"),
             ("No and tell the agent what to do instead", "no"),
         ]
 
