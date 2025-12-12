@@ -304,6 +304,29 @@ This affects where Vibe looks for:
 - `tools/` - Custom tools
 - `logs/` - Session logsRetryTo run code, enable code execution and file creation in Settings > Capabilities.
 
+### Editors/IDEs
+
+`vibe` comes with the `vibe-acp` tool to integrate the agent with text editors and IDEs that support [Agent Client Protocol](https://agentclientprotocol.com/overview/introduction). Once you have set up `vibe` with the API keys, you are ready to use `vibe-acp` (installed when vibe is installed) in your editor. Below are the setup instructions for some editors that support ACP.
+
+#### Zed
+
+1. Go to `~/.config/zed/settings.json` and, under the `agent_servers` JSON object, add the following key-value pair to invoke the `vibe-acp` command. Here is the snippet:
+
+```
+{
+   "agent_servers": {
+      "vibe": { "type": "custom",
+      "command": "/full/path/to/vibe-acp",
+      "args": [],
+      "env": {}
+      }
+   }
+}
+
+```
+2. In the `New Thread` pane on the right, select the `vibe` agent and start the conversation.
+
+
 ## Resources
 
 - [CHANGELOG](CHANGELOG.md) - See what's new in each version
