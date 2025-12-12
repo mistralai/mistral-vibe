@@ -52,13 +52,9 @@ runs:
       working-directory: ${{ github.action_path }}
       env:
         MISTRAL_API_KEY: "${{ inputs.MISTRAL_API_KEY }}"
+        PROMPT_INPUT: "${{ inputs.prompt }}"
       run: |
-        # We want to make sure that any text passed in here
-        # doesn't have special bash characters (<, >, &, etc...)
-        ESCAPED_PROMPT=$(printf '%q' "${{ inputs.prompt }}")
-
-        # Change back to the original working directory for the tool to work
         cd "${{ github.workspace }}"
         uv run --directory "${{ github.action_path }}" vibe \
           --auto-approve \
-          -p "${ESCAPED_PROMPT}"
+          -p "$PROMPT_INPUT"

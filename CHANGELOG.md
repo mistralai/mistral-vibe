@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2025-12-12
+
+### Added
+
+- Add more copy_to_clipboard methods to support all cases
+- Add bindings to scroll chat history
+
+### Changed
+
+- Relax config to accept extra inputs
+- Remove useless stats from assistant events
+- Improve scroll actions while streaming
+- Do not check for updates more than once a day
+- Use PyPI in update notifier
+
+### Fixed
+
+- Fix tool permission handling for "allow always" option in ACP
+- Fix security issue: prevent command injection in GitHub Action prompt handling
+- Fix issues with vLLM
+
 ## [1.1.2] - 2025-12-11
 
 ### Changed

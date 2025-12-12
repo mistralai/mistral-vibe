@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from enum import StrEnum, auto
-import os
 import subprocess
 from typing import Any, ClassVar, assert_never
 
@@ -35,20 +34,22 @@ from vibe.cli.textual_ui.widgets.path_display import PathDisplay
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.cli.textual_ui.widgets.welcome import WelcomeBanner
 from vibe.cli.update_notifier import (
-    GitHubVersionUpdateGateway,
-    VersionUpdate,
+    FileSystemUpdateCacheRepository,
+    PyPIVersionUpdateGateway,
+    UpdateCacheRepository,
+    VersionUpdateAvailability,
     VersionUpdateError,
-    is_version_update_available,
+    VersionUpdateGateway,
+    get_update_if_available,
 )
-from vibe.cli.update_notifier.version_update_gateway import VersionUpdateGateway
 from vibe.core import __version__ as CORE_VERSION
 from vibe.core.agent import Agent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
-from vibe.core.config import HISTORY_FILE, VibeConfig
+from vibe.core.config import VibeConfig
+from vibe.core.config_path import HISTORY_FILE
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.types import LLMMessage, ResumeSessionInfo, Role
+from vibe.core.types import ApprovalResponse, LLMMessage, ResumeSessionInfo, Role
 from vibe.core.utils import (
-    ApprovalResponse,
     CancellationReason,
     get_user_cancellation_message,
     is_dangerous_directory,
@@ -72,6 +73,10 @@ class VibeApp(App):
         Binding("ctrl+o", "toggle_tool", "Toggle Tool", show=False),
         Binding("ctrl+t", "toggle_todo", "Toggle Todo", show=False),
         Binding("shift+tab", "cycle_mode", "Cycle Mode", show=False, priority=True),
+        Binding("shift+up", "scroll_chat_up", "Scroll Up", show=False, priority=True),
+        Binding(
+            "shift+down", "scroll_chat_down", "Scroll Down", show=False, priority=True
+        ),
     ]
 
     def __init__(
@@ -83,6 +88,7 @@ class VibeApp(App):
         loaded_messages: list[LLMMessage] | None = None,
         session_info: ResumeSessionInfo | None = None,
         version_update_notifier: VersionUpdateGateway | None = None,
+        update_cache_repository: UpdateCacheRepository | None = None,
         current_version: str = CORE_VERSION,
         **kwargs: Any,
     ) -> None:
@@ -108,12 +114,13 @@ class VibeApp(App):
         self._current_bottom_app: BottomApp = BottomApp.Input
         self.theme = config.textual_theme
 
-        self.history_file = HISTORY_FILE
+        self.history_file = HISTORY_FILE.path
 
         self._tools_collapsed = True
         self._todos_collapsed = False
         self._current_streaming_message: AssistantMessage | None = None
         self._version_update_notifier = version_update_notifier
+        self._update_cache_repository = update_cache_repository
         self._is_update_check_enabled = config.enable_update_checks
         self._current_version = current_version
         self._update_notification_task: asyncio.Task | None = None
@@ -126,6 +133,7 @@ class VibeApp(App):
         # prevent a race condition where the agent initialization
         # completes exactly at the moment the user interrupts
         self._agent_init_interrupted = False
+        self._auto_scroll = True
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="chat"):
@@ -460,7 +468,7 @@ class VibeApp(App):
 
     async def _approval_callback(
         self, tool: str, args: dict, tool_call_id: str
-    ) -> tuple[str, str | None]:
+    ) -> tuple[ApprovalResponse, str | None]:
         self._pending_approval = asyncio.Future()
         await self._switch_to_approval_app(tool, args)
         result = await self._pending_approval
@@ -955,6 +963,23 @@ class VibeApp(App):
 
         self.exit()
 
+    def action_scroll_chat_up(self) -> None:
+        try:
+            chat = self.query_one("#chat", VerticalScroll)
+            chat.scroll_relative(y=-5, animate=False)
+            self._auto_scroll = False
+        except Exception:
+            pass
+
+    def action_scroll_chat_down(self) -> None:
+        try:
+            chat = self.query_one("#chat", VerticalScroll)
+            chat.scroll_relative(y=5, animate=False)
+            if self._is_scrolled_to_bottom(chat):
+                self._auto_scroll = True
+        except Exception:
+            pass
+
     async def _show_dangerous_directory_warning(self) -> None:
         is_dangerous, reason = is_dangerous_directory()
         if is_dangerous:
@@ -974,6 +999,9 @@ class VibeApp(App):
         messages_area = self.query_one("#messages")
         chat = self.query_one("#chat", VerticalScroll)
         was_at_bottom = self._is_scrolled_to_bottom(chat)
+
+        if was_at_bottom:
+            self._auto_scroll = True
 
         if isinstance(widget, AssistantMessage):
             if self._current_streaming_message is not None:
@@ -1014,6 +1042,8 @@ class VibeApp(App):
         self.call_after_refresh(self._scroll_to_bottom)
 
     def _anchor_if_scrollable(self) -> None:
+        if not self._auto_scroll:
+            return
         try:
             chat = self.query_one("#chat", VerticalScroll)
             if chat.max_scroll_y == 0:
@@ -1036,11 +1066,16 @@ class VibeApp(App):
 
     async def _check_version_update(self) -> None:
         try:
-            if self._version_update_notifier is None:
+            if (
+                self._version_update_notifier is None
+                or self._update_cache_repository is None
+            ):
                 return
 
-            update = await is_version_update_available(
-                self._version_update_notifier, current_version=self._current_version
+            update = await get_update_if_available(
+                version_update_notifier=self._version_update_notifier,
+                current_version=self._current_version,
+                update_cache_repository=self._update_cache_repository,
             )
         except VersionUpdateError as error:
             self.notify(
@@ -1056,12 +1091,12 @@ class VibeApp(App):
         finally:
             self._update_notification_task = None
 
-        if update is None:
+        if update is None or not update.should_notify:
             return
 
         self._display_update_notification(update)
 
-    def _display_update_notification(self, update: VersionUpdate) -> None:
+    def _display_update_notification(self, update: VersionUpdateAvailability) -> None:
         if self._update_notification_shown:
             return
 
@@ -1084,9 +1119,8 @@ def run_textual_ui(
     loaded_messages: list[LLMMessage] | None = None,
     session_info: ResumeSessionInfo | None = None,
 ) -> None:
-    update_notifier = GitHubVersionUpdateGateway(
-        owner="mistralai", repository="mistral-vibe", token=os.getenv("GITHUB_TOKEN")
-    )
+    update_notifier = PyPIVersionUpdateGateway(project_name="mistral-vibe")
+    update_cache_repository = FileSystemUpdateCacheRepository()
     app = VibeApp(
         config=config,
         auto_approve=auto_approve,
@@ -1095,5 +1129,6 @@ def run_textual_ui(
         loaded_messages=loaded_messages,
         session_info=session_info,
         version_update_notifier=update_notifier,
+        update_cache_repository=update_cache_repository,
     )
     app.run()

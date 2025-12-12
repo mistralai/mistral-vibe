@@ -5,10 +5,8 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from vibe.cli.update_notifier.github_version_update_gateway import (
+from vibe.cli.update_notifier import (
     GitHubVersionUpdateGateway,
-)
-from vibe.cli.update_notifier.version_update_gateway import (
     VersionUpdateGatewayCause,
     VersionUpdateGatewayError,
 )

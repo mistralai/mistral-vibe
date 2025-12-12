@@ -173,6 +173,11 @@ class Role(StrEnum):
     tool = auto()
 
 
+class ApprovalResponse(StrEnum):
+    YES = "y"
+    NO = "n"
+
+
 class LLMMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -219,11 +224,6 @@ class BaseEvent(BaseModel, ABC):
 
 class AssistantEvent(BaseEvent):
     content: str
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    session_total_tokens: int = 0
-    last_turn_duration: float = 0.0
-    tokens_per_second: float = 0.0
     stopped_by_middleware: bool = False
 
 
@@ -263,9 +263,11 @@ class OutputFormat(StrEnum):
 
 
 type AsyncApprovalCallback = Callable[
-    [str, dict[str, Any], str], Awaitable[tuple[str, str | None]]
+    [str, dict[str, Any], str], Awaitable[tuple[ApprovalResponse, str | None]]
 ]
 
-type SyncApprovalCallback = Callable[[str, dict[str, Any], str], tuple[str, str | None]]
+type SyncApprovalCallback = Callable[
+    [str, dict[str, Any], str], tuple[ApprovalResponse, str | None]
+]
 
 type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback

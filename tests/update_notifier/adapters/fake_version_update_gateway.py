@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.cli.update_notifier.version_update_gateway import (
+from vibe.cli.update_notifier.ports.version_update_gateway import (
     VersionUpdate,
     VersionUpdateGateway,
     VersionUpdateGatewayError,

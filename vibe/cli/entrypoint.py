@@ -7,14 +7,12 @@ from rich import print as rprint
 
 from vibe.cli.textual_ui.app import run_textual_ui
 from vibe.core.config import (
-    CONFIG_FILE,
-    HISTORY_FILE,
-    INSTRUCTIONS_FILE,
     MissingAPIKeyError,
     MissingPromptFileError,
     VibeConfig,
     load_api_keys_from_env,
 )
+from vibe.core.config_path import CONFIG_FILE, HISTORY_FILE, INSTRUCTIONS_FILE
 from vibe.core.interaction_logger import InteractionLogger
 from vibe.core.programmatic import run_programmatic
 from vibe.core.types import OutputFormat, ResumeSessionInfo
@@ -138,23 +136,23 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         run_onboarding()
         sys.exit(0)
     try:
-        if not CONFIG_FILE.exists():
+        if not CONFIG_FILE.path.exists():
             try:
                 VibeConfig.save_updates(VibeConfig.create_default())
             except Exception as e:
                 rprint(f"[yellow]Could not create default config file: {e}[/]")
 
-        if not INSTRUCTIONS_FILE.exists():
+        if not INSTRUCTIONS_FILE.path.exists():
             try:
-                INSTRUCTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-                INSTRUCTIONS_FILE.touch()
+                INSTRUCTIONS_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+                INSTRUCTIONS_FILE.path.touch()
             except Exception as e:
                 rprint(f"[yellow]Could not create instructions file: {e}[/]")
 
-        if not HISTORY_FILE.exists():
+        if not HISTORY_FILE.path.exists():
             try:
-                HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-                HISTORY_FILE.write_text("Hello Vibe!\n", "utf-8")
+                HISTORY_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+                HISTORY_FILE.path.write_text("Hello Vibe!\n", "utf-8")
             except Exception as e:
                 rprint(f"[yellow]Could not create history file: {e}[/]")
 

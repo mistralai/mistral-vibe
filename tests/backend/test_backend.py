@@ -12,6 +12,8 @@ the tests will be. Always prefer real API data over manually constructed example
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 import respx
@@ -248,6 +250,58 @@ class TestBackend:
             assert e.value.status == response.status_code
             assert e.value.reason == response.reason_phrase
             assert e.value.parsed_error is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "base_url,provider_name,expected_stream_options",
+        [
+            ("https://api.fireworks.ai", "fireworks", {"include_usage": True}),
+            (
+                "https://api.mistral.ai",
+                "mistral",
+                {"include_usage": True, "stream_tool_calls": True},
+            ),
+        ],
+    )
+    async def test_backend_streaming_payload_includes_stream_options(
+        self, base_url: Url, provider_name: str, expected_stream_options: dict
+    ):
+        with respx.mock(base_url=base_url) as mock_api:
+            route = mock_api.post("/v1/chat/completions").mock(
+                return_value=httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(
+                        b'data: {"choices": [{"delta": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}\n\ndata: [DONE]\n\n'
+                    ),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            )
+            provider = ProviderConfig(
+                name=provider_name, api_base=f"{base_url}/v1", api_key_env_var="API_KEY"
+            )
+            backend = GenericBackend(provider=provider)
+            model = ModelConfig(
+                name="model_name", provider=provider_name, alias="model_alias"
+            )
+            messages = [LLMMessage(role=Role.user, content="hi")]
+
+            async for _ in backend.complete_streaming(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            ):
+                pass
+
+            assert route.called
+            request = route.calls.last.request
+            payload = json.loads(request.content)
+
+            assert payload["stream"] is True
+            assert payload["stream_options"] == expected_stream_options
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("backend_type", [Backend.MISTRAL, Backend.GENERIC])

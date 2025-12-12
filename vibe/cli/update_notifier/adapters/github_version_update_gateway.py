@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import httpx
 
-from vibe.cli.update_notifier.version_update_gateway import (
+from vibe.cli.update_notifier.ports.version_update_gateway import (
     VersionUpdate,
     VersionUpdateGateway,
     VersionUpdateGatewayCause,
