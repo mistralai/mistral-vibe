@@ -4,9 +4,9 @@ from typing import NamedTuple
 
 from textual import events
 
-from vibe.cli.autocompletion.base import CompletionResult, CompletionView
-from vibe.cli.autocompletion.slash_command import SlashCommandController
-from vibe.core.autocompletion.completers import CommandCompleter
+from chefchat.cli.autocompletion.base import CompletionResult, CompletionView
+from chefchat.cli.autocompletion.slash_command import SlashCommandController
+from chefchat.core.autocompletion.completers import CommandCompleter
 
 
 class Suggestion(NamedTuple):

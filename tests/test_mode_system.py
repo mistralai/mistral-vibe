@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from vibe.cli.mode_manager import (
+from chefchat.cli.mode_manager import (
     MODE_CONFIGS,
     MODE_CYCLE_ORDER,
     READONLY_TOOLS,
@@ -567,7 +567,7 @@ class TestIntegrationWithSystemPrompt:
 
     def test_system_prompt_includes_mode_injection(self) -> None:
         """System prompt should include mode modifier when manager provided."""
-        from vibe.core.system_prompt import get_universal_system_prompt
+        from chefchat.core.system_prompt import get_universal_system_prompt
 
         class MockModel:
             max_tokens = None  # No validation needed for test
@@ -590,7 +590,7 @@ class TestIntegrationWithSystemPrompt:
 
     def test_system_prompt_works_without_manager(self) -> None:
         """System prompt should work when no mode_manager provided."""
-        from vibe.core.system_prompt import get_universal_system_prompt
+        from chefchat.core.system_prompt import get_universal_system_prompt
 
         class MockModel:
             max_tokens = None

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from vibe.core.config import Backend, ProviderConfig
-from vibe.core.llm.backend.generic import OpenAIAdapter
-from vibe.core.types import AvailableTool, LLMMessage, Role
+from chefchat.core.config import Backend, ProviderConfig
+from chefchat.core.llm.backend.generic import OpenAIAdapter
+from chefchat.core.types import AvailableTool, LLMMessage, Role
 
 
 def test_openai_adapter_prepare_request_basic():
@@ -54,7 +54,7 @@ def test_openai_adapter_prepare_request_with_tools():
     messages = [LLMMessage(role=Role.user, content="Help me")]
 
     # Create a simple fake tool
-    from vibe.core.types import AvailableFunction
+    from chefchat.core.types import AvailableFunction
     tool = AvailableTool(
         function=AvailableFunction(
             name="test_tool",

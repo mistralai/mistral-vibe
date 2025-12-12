@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role, ToolCall
+from chefchat.core.types import LLMChunk, LLMMessage, LLMUsage, Role, ToolCall
 
 MOCK_DATA_ENV_VAR = "VIBE_MOCK_LLM_DATA"
 

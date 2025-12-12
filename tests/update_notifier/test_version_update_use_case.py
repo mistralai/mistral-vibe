@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.cli.update_notifier.fake_version_update_gateway import (
+from chefchat.cli.update_notifier.fake_version_update_gateway import (
     FakeVersionUpdateGateway,
 )
-from vibe.cli.update_notifier.version_update import (
+from chefchat.cli.update_notifier.version_update import (
     VersionUpdateError,
     is_version_update_available,
 )
-from vibe.cli.update_notifier.version_update_gateway import (
+from chefchat.cli.update_notifier.version_update_gateway import (
     VersionUpdate,
     VersionUpdateGatewayCause,
     VersionUpdateGatewayError,

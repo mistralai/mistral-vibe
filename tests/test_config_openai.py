@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.core.config import DEFAULT_MODELS, DEFAULT_PROVIDERS, Backend, VibeConfig
+from chefchat.core.config import DEFAULT_MODELS, DEFAULT_PROVIDERS, Backend, VibeConfig
 
 
 def test_openai_provider_in_defaults():

@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from vibe.core.autocompletion.file_indexer import FileIndexer
+from chefchat.core.autocompletion.file_indexer import FileIndexer
 
 # This suite runs against the real filesystem and watcher. A faked store/watcher
 # split would be faster to unit-test, but given time constraints and the low churn

@@ -20,10 +20,10 @@ from pytest import raises
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_connection import FakeAgentSideConnection
-from vibe.acp.acp_agent import VibeAcpAgent
-from vibe.core.agent import Agent
-from vibe.core.config import ModelConfig, VibeConfig
-from vibe.core.types import Role
+from chefchat.acp.acp_agent import VibeAcpAgent
+from chefchat.core.agent import Agent
+from chefchat.core.config import ModelConfig, VibeConfig
+from chefchat.core.types import Role
 
 
 @pytest.fixture

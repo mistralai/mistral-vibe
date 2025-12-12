@@ -11,7 +11,7 @@ except ImportError:
 import pytest
 from textual.app import App
 
-from vibe.setup import onboarding
+from chefchat.setup import onboarding
 
 
 class StubApp(App[str | None]):

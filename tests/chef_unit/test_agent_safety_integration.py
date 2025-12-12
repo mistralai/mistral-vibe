@@ -5,11 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vibe.cli.mode_manager import ModeManager, VibeMode
-from vibe.core.agent import Agent
-from vibe.core.config import VibeConfig
-from vibe.core.tools.base import BaseTool, ToolPermission
-from vibe.core.types import ToolExecutionResponse
+from chefchat.cli.mode_manager import ModeManager, VibeMode
+from chefchat.core.agent import Agent
+from chefchat.core.config import VibeConfig
+from chefchat.core.tools.base import BaseTool, ToolPermission
+from chefchat.core.types import ToolExecutionResponse
 
 
 # Mock Tool to verify blocking

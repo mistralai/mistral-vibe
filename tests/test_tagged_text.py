@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.core.utils import CANCELLATION_TAG, KNOWN_TAGS, TaggedText
+from chefchat.core.utils import CANCELLATION_TAG, KNOWN_TAGS, TaggedText
 
 
 def test_tagged_text_creation_without_tag() -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
+from chefchat.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
 
 
 class FakeToolArgs(BaseModel):

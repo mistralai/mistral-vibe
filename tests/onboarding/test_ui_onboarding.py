@@ -10,11 +10,11 @@ from textual.geometry import Size
 from textual.pilot import Pilot
 from textual.widgets import Input
 
-from vibe.core import config as core_config
-from vibe.setup.onboarding import OnboardingApp
-import vibe.setup.onboarding.screens.api_key as api_key_module
-from vibe.setup.onboarding.screens.api_key import ApiKeyScreen
-from vibe.setup.onboarding.screens.theme_selection import THEMES, ThemeSelectionScreen
+from chefchat.core import config as core_config
+from chefchat.setup.onboarding import OnboardingApp
+import chefchat.setup.onboarding.screens.api_key as api_key_module
+from chefchat.setup.onboarding.screens.api_key import ApiKeyScreen
+from chefchat.setup.onboarding.screens.theme_selection import THEMES, ThemeSelectionScreen
 
 
 async def _wait_for(

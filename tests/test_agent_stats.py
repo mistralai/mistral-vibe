@@ -6,16 +6,16 @@ import pytest
 
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
-from vibe.core.agent import Agent
-from vibe.core.config import (
+from chefchat.core.agent import Agent
+from chefchat.core.config import (
     Backend,
     ModelConfig,
     ProviderConfig,
     SessionLoggingConfig,
     VibeConfig,
 )
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.types import (
+from chefchat.core.tools.base import BaseToolConfig, ToolPermission
+from chefchat.core.types import (
     AgentStats,
     AssistantEvent,
     CompactEndEvent,

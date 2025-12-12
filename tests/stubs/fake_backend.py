@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable, Iterable
 
 from tests.mock.utils import mock_llm_chunk
-from vibe.core.types import LLMChunk, LLMMessage
+from chefchat.core.types import LLMChunk, LLMMessage
 
 
 class FakeBackend:

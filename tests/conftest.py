@@ -33,7 +33,7 @@ sys.modules["mistralai"].SDKError = MockSDKError
 sys.modules["mistralai.models"].SDKError = MockSDKError
 
 from unittest.mock import AsyncMock, MagicMock
-from vibe.core.types import LLMChunk
+from chefchat.core.types import LLMChunk
 from pydantic import ValidationError
 import json
 import os
@@ -105,7 +105,7 @@ def _patch_vibe_config() -> None:
     will only use init_settings and ignore environment variables and config files.
     Runs once per test session before any tests execute.
     """
-    from vibe.core.config import VibeConfig
+    from chefchat.core.config import VibeConfig
 
     def patched_settings_customise_sources(
         cls,

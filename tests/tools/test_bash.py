@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.core.tools.base import BaseToolState, ToolError, ToolPermission
-from vibe.core.tools.builtins.bash import Bash, BashArgs, BashToolConfig
-from vibe.core.utils import is_windows
+from chefchat.core.tools.base import BaseToolState, ToolError, ToolPermission
+from chefchat.core.tools.builtins.bash import Bash, BashArgs, BashToolConfig
+from chefchat.core.utils import is_windows
 
 
 @pytest.fixture

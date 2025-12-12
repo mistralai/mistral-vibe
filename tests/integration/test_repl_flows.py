@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vibe.cli.mode_manager import ModeManager, VibeMode
+from chefchat.cli.mode_manager import ModeManager, VibeMode
 
 # =============================================================================
 # FIXTURES
@@ -100,7 +100,7 @@ class TestEasterEggCommands:
 
     def test_get_kitchen_status_returns_string(self, mode_manager: ModeManager) -> None:
         """Kitchen status should return a formatted string."""
-        from vibe.cli.easter_eggs import get_kitchen_status
+        from chefchat.cli.easter_eggs import get_kitchen_status
 
         status = get_kitchen_status(mode_manager)
 
@@ -109,7 +109,7 @@ class TestEasterEggCommands:
 
     def test_get_random_wisdom_returns_string(self) -> None:
         """Random wisdom should return a string."""
-        from vibe.cli.easter_eggs import get_random_wisdom
+        from chefchat.cli.easter_eggs import get_random_wisdom
 
         wisdom = get_random_wisdom()
 
@@ -118,7 +118,7 @@ class TestEasterEggCommands:
 
     def test_get_random_roast_returns_string(self) -> None:
         """Random roast should return a string."""
-        from vibe.cli.easter_eggs import get_random_roast
+        from chefchat.cli.easter_eggs import get_random_roast
 
         roast = get_random_roast()
 
@@ -127,7 +127,7 @@ class TestEasterEggCommands:
 
     def test_get_modes_display_returns_string(self, mode_manager: ModeManager) -> None:
         """Modes display should return a formatted string."""
-        from vibe.cli.easter_eggs import get_modes_display
+        from chefchat.cli.easter_eggs import get_modes_display
 
         display = get_modes_display(mode_manager)
 
@@ -145,7 +145,7 @@ class TestErrorHandler:
 
     def test_display_error_does_not_raise(self) -> None:
         """display_error should not raise on valid input."""
-        from vibe.core.error_handler import ChefErrorHandler
+        from chefchat.core.error_handler import ChefErrorHandler
 
         try:
             ChefErrorHandler.display_error(
@@ -156,7 +156,7 @@ class TestErrorHandler:
 
     def test_display_warning_does_not_raise(self) -> None:
         """display_warning should not raise on valid input."""
-        from vibe.core.error_handler import ChefErrorHandler
+        from chefchat.core.error_handler import ChefErrorHandler
 
         try:
             ChefErrorHandler.display_warning("Test warning", context="Test")
@@ -165,7 +165,7 @@ class TestErrorHandler:
 
     def test_format_error_message_returns_string(self) -> None:
         """format_error_message should return a formatted string."""
-        from vibe.core.error_handler import ChefErrorHandler
+        from chefchat.core.error_handler import ChefErrorHandler
 
         result = ChefErrorHandler.format_error_message(
             ValueError("Test"), context="Testing"
@@ -216,7 +216,7 @@ class TestConfigSingleton:
 
     def test_get_config_returns_vibeconfig(self) -> None:
         """get_config should return a VibeConfig instance."""
-        from vibe.core.config import VibeConfig, clear_config_cache, get_config
+        from chefchat.core.config import VibeConfig, clear_config_cache, get_config
 
         clear_config_cache()
 
@@ -226,7 +226,7 @@ class TestConfigSingleton:
 
     def test_get_config_caches_result(self) -> None:
         """get_config should return the same instance on subsequent calls."""
-        from vibe.core.config import VibeConfig, clear_config_cache, get_config
+        from chefchat.core.config import VibeConfig, clear_config_cache, get_config
 
         clear_config_cache()
 
@@ -251,7 +251,7 @@ class TestAsyncHelpers:
     @pytest.mark.asyncio
     async def test_run_with_spinner_executes_coroutine(self) -> None:
         """run_with_spinner should execute the provided coroutine."""
-        from vibe.utils.async_helpers import run_with_spinner
+        from chefchat.utils.async_helpers import run_with_spinner
 
         async def sample_coro() -> str:
             return "success"
@@ -263,7 +263,7 @@ class TestAsyncHelpers:
     @pytest.mark.asyncio
     async def test_batch_execute_runs_all_tasks(self) -> None:
         """batch_execute should run all provided tasks."""
-        from vibe.utils.async_helpers import batch_execute
+        from chefchat.utils.async_helpers import batch_execute
 
         results_tracker = []
 

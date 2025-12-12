@@ -4,9 +4,9 @@ import sys
 
 import pytest
 
-from vibe.core.config import VibeConfig
-from vibe.core.system_prompt import get_universal_system_prompt
-from vibe.core.tools.manager import ToolManager
+from chefchat.core.config import VibeConfig
+from chefchat.core.system_prompt import get_universal_system_prompt
+from chefchat.core.tools.manager import ToolManager
 
 
 def test_get_universal_system_prompt_includes_windows_prompt_on_windows(

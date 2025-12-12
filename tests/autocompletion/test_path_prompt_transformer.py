@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vibe.core.autocompletion.path_prompt_adapter import (
+from chefchat.core.autocompletion.path_prompt_adapter import (
     DEFAULT_MAX_EMBED_BYTES,
     render_path_prompt,
 )

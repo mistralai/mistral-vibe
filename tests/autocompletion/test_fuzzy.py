@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.core.autocompletion.fuzzy import fuzzy_match
+from chefchat.core.autocompletion.fuzzy import fuzzy_match
 
 
 def test_empty_pattern_matches_anything() -> None:

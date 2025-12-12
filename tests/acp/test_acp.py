@@ -34,8 +34,8 @@ import pytest
 
 from tests import TESTS_ROOT
 from tests.mock.utils import get_mocking_env, mock_llm_chunk
-from vibe.acp.utils import ToolOption
-from vibe.core.types import FunctionCall, ToolCall
+from chefchat.acp.utils import ToolOption
+from chefchat.core.types import FunctionCall, ToolCall
 
 RESPONSE_TIMEOUT = 2.0
 MOCK_ENTRYPOINT_PATH = "tests/mock/mock_entrypoint.py"

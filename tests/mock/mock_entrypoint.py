@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from tests import TESTS_ROOT
 from tests.mock.utils import MOCK_DATA_ENV_VAR
-from vibe.core.types import LLMChunk
+from chefchat.core.types import LLMChunk
 
 if __name__ == "__main__":
     sys.path.insert(0, str(TESTS_ROOT.parent)) # Ensure vibe is importable
@@ -20,6 +20,6 @@ if __name__ == "__main__":
     # Check if we need to configure mock behavior for mistralai client.
     # This should now be handled by conftest.py which uses environment variables.
 
-    from vibe.acp.entrypoint import main
+    from chefchat.acp.entrypoint import main
 
     main()

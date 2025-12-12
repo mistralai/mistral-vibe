@@ -5,9 +5,9 @@ import asyncio
 from acp.schema import TerminalOutputResponse, WaitForTerminalExitResponse
 import pytest
 
-from vibe.acp.tools.builtins.bash import AcpBashState, Bash
-from vibe.core.tools.base import ToolError
-from vibe.core.tools.builtins.bash import BashArgs, BashResult, BashToolConfig
+from chefchat.acp.tools.builtins.bash import AcpBashState, Bash
+from chefchat.core.tools.base import ToolError
+from chefchat.core.tools.builtins.bash import BashArgs, BashResult, BashToolConfig
 
 
 class MockTerminalHandle:

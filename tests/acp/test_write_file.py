@@ -5,14 +5,14 @@ from pathlib import Path
 from acp import WriteTextFileRequest
 import pytest
 
-from vibe.acp.tools.builtins.write_file import AcpWriteFileState, WriteFile
-from vibe.core.tools.base import ToolError
-from vibe.core.tools.builtins.write_file import (
+from chefchat.acp.tools.builtins.write_file import AcpWriteFileState, WriteFile
+from chefchat.core.tools.base import ToolError
+from chefchat.core.tools.builtins.write_file import (
     WriteFileArgs,
     WriteFileConfig,
     WriteFileResult,
 )
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from chefchat.core.types import ToolCallEvent, ToolResultEvent
 
 
 class MockConnection:
@@ -207,7 +207,7 @@ class TestAcpWriteFileSessionUpdates:
         assert update.locations[0].path == "/tmp/test.txt"
 
     def test_tool_call_session_update_invalid_args(self) -> None:
-        from vibe.core.types import FunctionCall, ToolCall
+        from chefchat.core.types import FunctionCall, ToolCall
 
         class InvalidArgs:
             pass

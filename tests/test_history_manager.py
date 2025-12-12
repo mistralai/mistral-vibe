@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from vibe.cli.history_manager import HistoryManager
+from chefchat.cli.history_manager import HistoryManager
 
 
 def test_history_manager_normalizes_loaded_entries_like_numbers_to_strings(

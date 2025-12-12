@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.core.config import SessionLoggingConfig, VibeConfig
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.tools.manager import ToolManager
+from chefchat.core.config import SessionLoggingConfig, VibeConfig
+from chefchat.core.tools.base import BaseToolConfig, ToolPermission
+from chefchat.core.tools.manager import ToolManager
 
 
 @pytest.fixture

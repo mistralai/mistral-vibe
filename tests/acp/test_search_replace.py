@@ -5,14 +5,14 @@ from pathlib import Path
 from acp import ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest
 import pytest
 
-from vibe.acp.tools.builtins.search_replace import AcpSearchReplaceState, SearchReplace
-from vibe.core.tools.base import ToolError
-from vibe.core.tools.builtins.search_replace import (
+from chefchat.acp.tools.builtins.search_replace import AcpSearchReplaceState, SearchReplace
+from chefchat.core.tools.base import ToolError
+from chefchat.core.tools.builtins.search_replace import (
     SearchReplaceArgs,
     SearchReplaceConfig,
     SearchReplaceResult,
 )
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from chefchat.core.types import ToolCallEvent, ToolResultEvent
 
 
 class MockConnection:

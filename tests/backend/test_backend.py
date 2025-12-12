@@ -29,12 +29,12 @@ from tests.backend.data.mistral import (
     STREAMED_TOOL_CONVERSATION_PARAMS as MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS as MISTRAL_TOOL_CONVERSATION_PARAMS,
 )
-from vibe.core.config import ModelConfig, ProviderConfig
-from vibe.core.llm.backend.generic import GenericBackend
-from vibe.core.llm.backend.mistral import MistralBackend
-from vibe.core.llm.exceptions import BackendError
-from vibe.core.llm.types import BackendLike
-from vibe.core.types import LLMChunk, LLMMessage, Role, ToolCall
+from chefchat.core.config import ModelConfig, ProviderConfig
+from chefchat.core.llm.backend.generic import GenericBackend
+from chefchat.core.llm.backend.mistral import MistralBackend
+from chefchat.core.llm.exceptions import BackendError
+from chefchat.core.llm.types import BackendLike
+from chefchat.core.types import LLMChunk, LLMMessage, Role, ToolCall
 
 
 class TestBackend:

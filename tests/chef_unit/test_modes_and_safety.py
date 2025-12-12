@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.cli.mode_errors import (
+from chefchat.cli.mode_errors import (
     ModeErrorType,
     create_write_blocked_error,
     reset_to_safe_mode,
     validate_mode_state,
 )
-from vibe.cli.mode_manager import MODE_CYCLE_ORDER, ModeManager, VibeMode
+from chefchat.cli.mode_manager import MODE_CYCLE_ORDER, ModeManager, VibeMode
 
 # =============================================================================
 # FIXTURES - Mise en Place

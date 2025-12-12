@@ -4,12 +4,12 @@ import os
 
 import pytest
 
-from vibe.core.config import VibeConfig
-from vibe.core.llm.format import APIToolFormatHandler
-from vibe.core.llm_client import LLMClient
-from vibe.core.middleware import MiddlewarePipeline
-from vibe.core.tools.manager import ToolManager
-from vibe.core.types import AgentStats, LLMMessage, Role
+from chefchat.core.config import VibeConfig
+from chefchat.core.llm.format import APIToolFormatHandler
+from chefchat.core.llm_client import LLMClient
+from chefchat.core.middleware import MiddlewarePipeline
+from chefchat.core.tools.manager import ToolManager
+from chefchat.core.types import AgentStats, LLMMessage, Role
 
 
 @pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="No OPENAI_API_KEY")

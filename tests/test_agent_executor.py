@@ -5,12 +5,12 @@ from unittest.mock import AsyncMock, MagicMock
 from pydantic import BaseModel
 import pytest
 
-from vibe.cli.mode_manager import ModeManager, VibeMode
-from vibe.core.agent_tool_executor import AgentToolExecutor
-from vibe.core.config import VibeConfig
-from vibe.core.tools.base import BaseTool, ToolPermission
-from vibe.core.tools.manager import ToolManager
-from vibe.core.types import Role, ToolCallEvent, ToolResultEvent
+from chefchat.cli.mode_manager import ModeManager, VibeMode
+from chefchat.core.agent_tool_executor import AgentToolExecutor
+from chefchat.core.config import VibeConfig
+from chefchat.core.tools.base import BaseTool, ToolPermission
+from chefchat.core.tools.manager import ToolManager
+from chefchat.core.types import Role, ToolCallEvent, ToolResultEvent
 
 
 # Restrict anyio to asyncio
@@ -185,7 +185,7 @@ async def test_handle_tool_calls_requires_approval(executor_setup):
 
     # Callback approves
     async def approval_cb(name, args, id):
-        from vibe.core.utils import ApprovalResponse
+        from chefchat.core.utils import ApprovalResponse
 
         return ApprovalResponse.YES, "Approved"
 
