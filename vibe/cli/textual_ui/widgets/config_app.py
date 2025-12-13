@@ -261,6 +261,6 @@ class ConfigApp(Container):
 
     def on_blur(self, event: events.Blur) -> None:
         # Don't refocus if we're editing API key
-        if self._editing_api_key and event.widget == self._api_key_input:
+        if self._editing_api_key:
             return
         self.call_after_refresh(self.focus)
