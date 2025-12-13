@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from enum import StrEnum, auto
+import os
 import subprocess
 from typing import Any, ClassVar, assert_never
 
@@ -45,8 +46,8 @@ from vibe.cli.update_notifier import (
 from vibe.core import __version__ as CORE_VERSION
 from vibe.core.agent import Agent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
-from vibe.core.config import VibeConfig
-from vibe.core.config_path import HISTORY_FILE
+from vibe.core.config import VibeConfig, load_api_keys_from_env
+from vibe.core.config_path import GLOBAL_ENV_FILE, HISTORY_FILE
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import ApprovalResponse, LLMMessage, ResumeSessionInfo, Role
 from vibe.core.utils import (
@@ -292,6 +293,8 @@ class VibeApp(App):
             return
 
         updates: dict = {}
+        api_key_changed = False
+        api_key_value: str | None = None
 
         for key, value in changes.items():
             match key:
@@ -301,9 +304,34 @@ class VibeApp(App):
                 case "textual_theme":
                     if value != self.config.textual_theme:
                         updates["textual_theme"] = value
+                case "api_key":
+                    api_key_changed = True
+                    api_key_value = value
 
         if updates:
             VibeConfig.save_updates(updates)
+
+        # Save API key to .env file
+        if api_key_changed:
+            try:
+                active_model = self.config.get_active_model()
+                provider = self.config.get_provider_for_model(active_model)
+                env_key = provider.api_key_env_var
+                if env_key:
+                    from dotenv import set_key
+
+                    GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+                    # Save the API key (even if empty, to clear it)
+                    set_key(GLOBAL_ENV_FILE.path, env_key, api_key_value or "")
+                    # Reload environment variables
+                    load_api_keys_from_env()
+                    # Update os.environ for current session
+                    if api_key_value:
+                        os.environ[env_key] = api_key_value
+                    elif env_key in os.environ:
+                        del os.environ[env_key]
+            except (ValueError, AttributeError, OSError) as e:
+                logger.warning(f"Failed to save API key: {e}")
 
     async def _handle_command(self, user_input: str) -> bool:
         if command := self.commands.find_command(user_input):
