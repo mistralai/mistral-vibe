@@ -224,6 +224,7 @@ class BaseEvent(BaseModel, ABC):
 
 class AssistantEvent(BaseEvent):
     content: str
+    reasoning_content: str | None = None
     stopped_by_middleware: bool = False
 
 

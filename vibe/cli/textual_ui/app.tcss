@@ -194,6 +194,30 @@ Markdown MarkdownFence {
     }
 }
 
+.assistant-reasoning-container {
+    width: 100%;
+    height: auto;
+    margin-top: 1;
+    padding: 1;
+    background: $surface;
+    border: solid $foreground-muted 1px;
+}
+
+.assistant-reasoning-label {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    text-style: bold;
+    margin-bottom: 0;
+}
+
+.assistant-reasoning-markdown {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    margin: 0;
+}
+
 .interrupt-message {
     margin-top: 0;
     margin-bottom: 0;
