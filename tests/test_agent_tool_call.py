@@ -9,7 +9,7 @@ import pytest
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_tool import FakeTool
-from vibe.core.agent import Agent
+from vibe.core.agent import Agent, EMPTY_RESPONSE_FALLBACK
 from vibe.core.config import SessionLoggingConfig, VibeConfig
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tools.builtins.todo import TodoItem
@@ -486,3 +486,31 @@ async def test_ensure_assistant_after_tool_appends_understood() -> None:
     idx = next(i for i, m in enumerate(agent.messages) if m.role == Role.tool)
     assert agent.messages[idx + 1].role == Role.assistant
     assert agent.messages[idx + 1].content == "Understood."
+
+
+@pytest.mark.asyncio
+async def test_agent_falls_back_when_non_streaming_content_empty() -> None:
+    backend = FakeBackend([mock_llm_chunk(content="", finish_reason="stop")])
+    agent = Agent(make_config(), auto_approve=True, backend=backend)
+
+    events = await act_and_collect_events(agent, "Question")
+
+    assistant_events = [ev for ev in events if isinstance(ev, AssistantEvent)]
+    assert assistant_events
+    assert assistant_events[-1].content == EMPTY_RESPONSE_FALLBACK
+    assert agent.messages[-1].content == EMPTY_RESPONSE_FALLBACK
+
+
+@pytest.mark.asyncio
+async def test_agent_falls_back_when_streaming_content_empty() -> None:
+    backend = FakeBackend([mock_llm_chunk(content="", finish_reason=None)])
+    agent = Agent(
+        make_config(), auto_approve=True, backend=backend, enable_streaming=True
+    )
+
+    events = await act_and_collect_events(agent, "Question")
+
+    assistant_events = [ev for ev in events if isinstance(ev, AssistantEvent)]
+    assert assistant_events
+    assert assistant_events[-1].content == EMPTY_RESPONSE_FALLBACK
+    assert agent.messages[-1].content == EMPTY_RESPONSE_FALLBACK
