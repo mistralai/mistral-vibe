@@ -1,11 +1,11 @@
 name: Build and upload
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [main]
+  release:
+    types: [published]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   configure:
@@ -95,3 +95,30 @@ jobs:
         with:
           name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version_windows.outputs.version }}
           path: dist/vibe-acp.exe
+
+  attach-to-release:
+    needs: build-and-upload
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          path: artifacts
+
+      - name: Zip artifacts like GitHub UI
+        run: |
+          mkdir release-assets
+          for dir in artifacts/*; do
+            name=$(basename "$dir")
+            (cd artifacts && zip -r "../release-assets/${name}.zip" "$name")
+          done
+
+      - name: Attach binaries to release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
+        with:
+          files: release-assets/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

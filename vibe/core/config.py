@@ -19,14 +19,8 @@ from pydantic_settings import (
 )
 import tomli_w
 
-from vibe.core.config_path import (
-    AGENT_DIR,
-    CONFIG_DIR,
-    CONFIG_FILE,
-    GLOBAL_ENV_FILE,
-    PROMPT_DIR,
-    SESSION_LOG_DIR,
-)
+from vibe.core.paths.config_paths import AGENT_DIR, CONFIG_DIR, CONFIG_FILE, PROMPT_DIR
+from vibe.core.paths.global_paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
 from vibe.core.prompts import SystemPrompt
 from vibe.core.tools.base import BaseToolConfig
 

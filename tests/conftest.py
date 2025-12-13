@@ -7,7 +7,8 @@ from typing import Any
 import pytest
 import tomli_w
 
-from vibe.core import config_path
+from vibe.core.paths import global_paths
+from vibe.core.paths.config_paths import unlock_config_paths
 
 
 def get_base_config() -> dict[str, Any]:
@@ -32,6 +33,15 @@ def get_base_config() -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
+def tmp_working_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    tmp_working_directory = tmp_path_factory.mktemp("test_cwd")
+    monkeypatch.chdir(tmp_working_directory)
+    return tmp_working_directory
+
+
+@pytest.fixture(autouse=True)
 def config_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> Path:
@@ -41,8 +51,13 @@ def config_dir(
     config_file = config_dir / "config.toml"
     config_file.write_text(tomli_w.dumps(get_base_config()), encoding="utf-8")
 
-    monkeypatch.setattr(config_path, "_DEFAULT_VIBE_HOME", config_dir)
+    monkeypatch.setattr(global_paths, "_DEFAULT_VIBE_HOME", config_dir)
     return config_dir
+
+
+@pytest.fixture(autouse=True)
+def _unlock_config_paths():
+    unlock_config_paths()
 
 
 @pytest.fixture(autouse=True)

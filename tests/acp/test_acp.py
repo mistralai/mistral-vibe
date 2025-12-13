@@ -83,6 +83,9 @@ def _create_vibe_home_dir(tmp_path: Path, *sections: dict[str, Any]) -> Path:
     with config_file.open("wb") as f:
         tomli_w.dump(base_config_dict, f)
 
+    trusted_folters_file = vibe_home / "trusted_folders.toml"
+    trusted_folters_file.write_text("trusted = []\nuntrusted = []", encoding="utf-8")
+
     return vibe_home
 
 

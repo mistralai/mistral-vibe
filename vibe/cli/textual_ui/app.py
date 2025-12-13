@@ -3,17 +3,20 @@ from __future__ import annotations
 import asyncio
 from enum import StrEnum, auto
 import subprocess
+import time
 from typing import Any, ClassVar, assert_never
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalScroll
-from textual.events import MouseUp
+from textual.events import AppBlur, AppFocus, MouseUp
 from textual.widget import Widget
 from textual.widgets import Static
 
+from vibe import __version__ as CORE_VERSION
 from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.commands import CommandRegistry
+from vibe.cli.terminal_setup import setup_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
@@ -28,6 +31,7 @@ from vibe.cli.textual_ui.widgets.messages import (
     InterruptMessage,
     UserCommandMessage,
     UserMessage,
+    WarningMessage,
 )
 from vibe.cli.textual_ui.widgets.mode_indicator import ModeIndicator
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
@@ -42,13 +46,13 @@ from vibe.cli.update_notifier import (
     VersionUpdateGateway,
     get_update_if_available,
 )
-from vibe.core import __version__ as CORE_VERSION
 from vibe.core.agent import Agent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
-from vibe.core.config_path import HISTORY_FILE
+from vibe.core.modes import AgentMode, next_mode
+from vibe.core.paths.config_paths import HISTORY_FILE
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.types import ApprovalResponse, LLMMessage, ResumeSessionInfo, Role
+from vibe.core.types import ApprovalResponse, LLMMessage, Role
 from vibe.core.utils import (
     CancellationReason,
     get_user_cancellation_message,
@@ -68,7 +72,8 @@ class VibeApp(App):
     CSS_PATH = "app.tcss"
 
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("ctrl+c", "force_quit", "Quit", show=False),
+        Binding("ctrl+c", "clear_quit", "Quit", show=False),
+        Binding("ctrl+d", "force_quit", "Quit", show=False, priority=True),
         Binding("escape", "interrupt", "Interrupt", show=False, priority=True),
         Binding("ctrl+o", "toggle_tool", "Toggle Tool", show=False),
         Binding("ctrl+t", "toggle_todo", "Toggle Todo", show=False),
@@ -82,11 +87,10 @@ class VibeApp(App):
     def __init__(
         self,
         config: VibeConfig,
-        auto_approve: bool = False,
+        initial_mode: AgentMode = AgentMode.DEFAULT,
         enable_streaming: bool = False,
         initial_prompt: str | None = None,
         loaded_messages: list[LLMMessage] | None = None,
-        session_info: ResumeSessionInfo | None = None,
         version_update_notifier: VersionUpdateGateway | None = None,
         update_cache_repository: UpdateCacheRepository | None = None,
         current_version: str = CORE_VERSION,
@@ -94,7 +98,7 @@ class VibeApp(App):
     ) -> None:
         super().__init__(**kwargs)
         self.config = config
-        self.auto_approve = auto_approve
+        self._current_agent_mode = initial_mode
         self.enable_streaming = enable_streaming
         self.agent: Agent | None = None
         self._agent_running = False
@@ -128,12 +132,12 @@ class VibeApp(App):
 
         self._initial_prompt = initial_prompt
         self._loaded_messages = loaded_messages
-        self._session_info = session_info
         self._agent_init_task: asyncio.Task | None = None
         # prevent a race condition where the agent initialization
         # completes exactly at the moment the user interrupts
         self._agent_init_interrupted = False
         self._auto_scroll = True
+        self._last_escape_time: float | None = None
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="chat"):
@@ -142,7 +146,7 @@ class VibeApp(App):
 
         with Horizontal(id="loading-area"):
             yield Static(id="loading-area-content")
-            yield ModeIndicator(auto_approve=self.auto_approve)
+            yield ModeIndicator(mode=self._current_agent_mode)
 
         yield Static(id="todo-area")
 
@@ -151,7 +155,7 @@ class VibeApp(App):
                 history_file=self.history_file,
                 command_registry=self.commands,
                 id="input-container",
-                show_warning=self.auto_approve,
+                safety=self._current_agent_mode.safety,
             )
 
         with Horizontal(id="bottom-bar"):
@@ -184,8 +188,8 @@ class VibeApp(App):
         await self._show_dangerous_directory_warning()
         self._schedule_update_notification()
 
-        if self._session_info:
-            await self._mount_and_scroll(AssistantMessage(self._session_info.message()))
+        if self._loaded_messages:
+            await self._rebuild_history_from_messages()
 
         if self._initial_prompt:
             self.call_after_refresh(self._process_initial_prompt)
@@ -258,6 +262,21 @@ class VibeApp(App):
         if self._loading_widget and self._loading_widget.parent:
             await self._loading_widget.remove()
             self._loading_widget = None
+        self._hide_todo_area()
+
+    def _show_todo_area(self) -> None:
+        try:
+            todo_area = self.query_one("#todo-area")
+            todo_area.add_class("loading-active")
+        except Exception:
+            pass
+
+    def _hide_todo_area(self) -> None:
+        try:
+            todo_area = self.query_one("#todo-area")
+            todo_area.remove_class("loading-active")
+        except Exception:
+            pass
 
     def on_config_app_setting_changed(self, message: ConfigApp.SettingChanged) -> None:
         if message.key == "textual_theme":
@@ -307,6 +326,7 @@ class VibeApp(App):
 
     async def _handle_command(self, user_input: str) -> bool:
         if command := self.commands.find_command(user_input):
+            await self._mount_and_scroll(UserMessage(user_input))
             handler = getattr(self, command.handler)
             if asyncio.iscoroutinefunction(handler):
                 await handler()
@@ -419,11 +439,11 @@ class VibeApp(App):
         try:
             agent = Agent(
                 self.config,
-                auto_approve=self.auto_approve,
+                mode=self._current_agent_mode,
                 enable_streaming=self.enable_streaming,
             )
 
-            if not self.auto_approve:
+            if not self._current_agent_mode.auto_approve:
                 agent.approval_callback = self._approval_callback
 
             if self._loaded_messages:
@@ -449,6 +469,58 @@ class VibeApp(App):
         finally:
             self._agent_initializing = False
             self._agent_init_task = None
+
+    async def _rebuild_history_from_messages(self) -> None:
+        if not self._loaded_messages:
+            return
+
+        messages_area = self.query_one("#messages")
+        tool_call_map: dict[str, str] = {}
+
+        for msg in self._loaded_messages:
+            if msg.role == Role.system:
+                continue
+
+            match msg.role:
+                case Role.user:
+                    if msg.content:
+                        await messages_area.mount(UserMessage(msg.content))
+
+                case Role.assistant:
+                    await self._mount_history_assistant_message(
+                        msg, messages_area, tool_call_map
+                    )
+
+                case Role.tool:
+                    tool_name = msg.name or tool_call_map.get(
+                        msg.tool_call_id or "", "tool"
+                    )
+                    await messages_area.mount(
+                        ToolResultMessage(
+                            tool_name=tool_name,
+                            content=msg.content,
+                            collapsed=self._tools_collapsed,
+                        )
+                    )
+
+    async def _mount_history_assistant_message(
+        self, msg: LLMMessage, messages_area: Widget, tool_call_map: dict[str, str]
+    ) -> None:
+        if msg.content:
+            widget = AssistantMessage(msg.content)
+            await messages_area.mount(widget)
+            await widget.write_initial_content()
+            await widget.stop_stream()
+
+        if not msg.tool_calls:
+            return
+
+        for tool_call in msg.tool_calls:
+            tool_name = tool_call.function.name or "unknown"
+            if tool_call.id:
+                tool_call_map[tool_call.id] = tool_name
+
+            await messages_area.mount(ToolCallMessage(tool_name=tool_name))
 
     def _ensure_agent_init_task(self) -> asyncio.Task | None:
         if self.agent:
@@ -486,6 +558,7 @@ class VibeApp(App):
         loading = LoadingWidget()
         self._loading_widget = loading
         await loading_area.mount(loading)
+        self._show_todo_area()
 
         try:
             rendered_prompt = render_path_prompt(
@@ -527,6 +600,7 @@ class VibeApp(App):
             if self._loading_widget:
                 await self._loading_widget.remove()
             self._loading_widget = None
+            self._hide_todo_area()
             await self._finalize_current_streaming_message()
 
     async def _interrupt_agent(self) -> None:
@@ -563,6 +637,8 @@ class VibeApp(App):
         self._agent_running = False
         loading_area = self.query_one("#loading-area-content")
         await loading_area.remove_children()
+        self._loading_widget = None
+        self._hide_todo_area()
 
         await self._finalize_current_streaming_message()
         await self._mount_and_scroll(InterruptMessage())
@@ -603,7 +679,7 @@ class VibeApp(App):
 
     async def _reload_config(self) -> None:
         try:
-            new_config = VibeConfig.load()
+            new_config = VibeConfig.load(**self._current_agent_mode.config_overrides)
 
             if self.agent:
                 await self.agent.reload_with_initial_messages(config=new_config)
@@ -656,6 +732,7 @@ class VibeApp(App):
                     max_tokens=current_state.max_tokens,
                     current_tokens=self.agent.stats.context_tokens,
                 )
+            await messages_area.mount(UserMessage("/clear"))
             await self._mount_and_scroll(
                 UserCommandMessage("Conversation history cleared!")
             )
@@ -738,23 +815,68 @@ class VibeApp(App):
         self.event_handler.current_compact = compact_msg
         await self._mount_and_scroll(compact_msg)
 
+        self._agent_task = asyncio.create_task(
+            self._run_compact(compact_msg, old_tokens)
+        )
+
+    async def _run_compact(self, compact_msg: CompactMessage, old_tokens: int) -> None:
+        self._agent_running = True
         try:
+            if not self.agent:
+                return
+
             await self.agent.compact()
             new_tokens = self.agent.stats.context_tokens
             compact_msg.set_complete(old_tokens=old_tokens, new_tokens=new_tokens)
-            self.event_handler.current_compact = None
 
             if self._context_progress:
                 current_state = self._context_progress.tokens
                 self._context_progress.tokens = TokenState(
                     max_tokens=current_state.max_tokens, current_tokens=new_tokens
                 )
+        except asyncio.CancelledError:
+            compact_msg.set_error("Compaction interrupted")
+            raise
         except Exception as e:
             compact_msg.set_error(str(e))
-            self.event_handler.current_compact = None
+        finally:
+            self._agent_running = False
+            self._agent_task = None
+            if self.event_handler:
+                self.event_handler.current_compact = None
+
+    def _get_session_resume_info(self) -> str | None:
+        if not self.agent:
+            return None
+        if not self.agent.interaction_logger.enabled:
+            return None
+        if not self.agent.interaction_logger.session_id:
+            return None
+        return self.agent.interaction_logger.session_id[:8]
 
     async def _exit_app(self) -> None:
-        self.exit()
+        self.exit(result=self._get_session_resume_info())
+
+    async def _setup_terminal(self) -> None:
+        result = setup_terminal()
+
+        if result.success:
+            if result.requires_restart:
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        f"{result.terminal.value}: Set up Shift+Enter keybind (You may need to restart your terminal.)"
+                    )
+                )
+            else:
+                await self._mount_and_scroll(
+                    WarningMessage(
+                        f"{result.terminal.value}: Shift+Enter keybind already set up"
+                    )
+                )
+        else:
+            await self._mount_and_scroll(
+                ErrorMessage(result.message, collapsed=self._tools_collapsed)
+            )
 
     async def _switch_to_config_app(self) -> None:
         if self._current_bottom_app == BottomApp.Config:
@@ -833,7 +955,7 @@ class VibeApp(App):
             history_file=self.history_file,
             command_registry=self.commands,
             id="input-container",
-            show_warning=self.auto_approve,
+            safety=self._current_agent_mode.safety,
         )
         await bottom_container.mount(chat_input_container)
         self._chat_input_container = chat_input_container
@@ -857,12 +979,15 @@ class VibeApp(App):
             pass
 
     def action_interrupt(self) -> None:
+        current_time = time.monotonic()
+
         if self._current_bottom_app == BottomApp.Config:
             try:
                 config_app = self.query_one(ConfigApp)
                 config_app.action_close()
             except Exception:
                 pass
+            self._last_escape_time = None
             return
 
         if self._current_bottom_app == BottomApp.Approval:
@@ -871,7 +996,22 @@ class VibeApp(App):
                 approval_app.action_reject()
             except Exception:
                 pass
+            self._last_escape_time = None
             return
+
+        if (
+            self._current_bottom_app == BottomApp.Input
+            and self._last_escape_time is not None
+            and (current_time - self._last_escape_time) < 0.2  # noqa: PLR2004
+        ):
+            try:
+                input_widget = self.query_one(ChatInputContainer)
+                if input_widget.value:
+                    input_widget.value = ""
+                    self._last_escape_time = None
+                    return
+            except Exception:
+                pass
 
         has_pending_user_message = any(
             msg.has_class("pending") for msg in self.query(UserMessage)
@@ -886,71 +1026,72 @@ class VibeApp(App):
         if interrupt_needed:
             self.run_worker(self._interrupt_agent(), exclusive=False)
 
+        self._last_escape_time = current_time
         self._scroll_to_bottom()
         self._focus_current_bottom_app()
 
     async def action_toggle_tool(self) -> None:
-        if not self.event_handler:
-            return
-
         self._tools_collapsed = not self._tools_collapsed
 
-        non_todo_results = [
-            result
-            for result in self.event_handler.tool_results
-            if result.event.tool_name != "todo"
-        ]
-
-        for result in non_todo_results:
-            result.collapsed = self._tools_collapsed
-            await result.render_result()
+        for result in self.query(ToolResultMessage):
+            if result.tool_name != "todo":
+                await result.set_collapsed(self._tools_collapsed)
 
         try:
-            error_messages = self.query(ErrorMessage)
-            for error_msg in error_messages:
+            for error_msg in self.query(ErrorMessage):
                 error_msg.set_collapsed(self._tools_collapsed)
         except Exception:
             pass
 
     async def action_toggle_todo(self) -> None:
-        if not self.event_handler:
-            return
-
         self._todos_collapsed = not self._todos_collapsed
 
-        todo_results = [
-            result
-            for result in self.event_handler.tool_results
-            if result.event.tool_name == "todo"
-        ]
-
-        for result in todo_results:
-            result.collapsed = self._todos_collapsed
-            await result.render_result()
+        for result in self.query(ToolResultMessage):
+            if result.tool_name == "todo":
+                await result.set_collapsed(self._todos_collapsed)
 
     def action_cycle_mode(self) -> None:
         if self._current_bottom_app != BottomApp.Input:
             return
 
-        self.auto_approve = not self.auto_approve
+        new_mode = next_mode(self._current_agent_mode)
+        self._switch_mode(new_mode)
+
+    def _switch_mode(self, mode: AgentMode) -> None:
+        if mode == self._current_agent_mode:
+            return
+
+        self._current_agent_mode = mode
 
         if self._mode_indicator:
-            self._mode_indicator.set_auto_approve(self.auto_approve)
-
+            self._mode_indicator.set_mode(mode)
         if self._chat_input_container:
-            self._chat_input_container.set_show_warning(self.auto_approve)
+            self._chat_input_container.set_safety(mode.safety)
 
         if self.agent:
-            self.agent.auto_approve = self.auto_approve
-
-            if self.auto_approve:
+            if mode.auto_approve:
                 self.agent.approval_callback = None
             else:
                 self.agent.approval_callback = self._approval_callback
 
+            self.run_worker(
+                self._do_agent_switch(mode), group="mode_switch", exclusive=True
+            )
+
         self._focus_current_bottom_app()
 
-    def action_force_quit(self) -> None:
+    async def _do_agent_switch(self, mode: AgentMode) -> None:
+        if self.agent:
+            await self.agent.switch_mode(mode)
+
+            if self._context_progress:
+                current_state = self._context_progress.tokens
+                self._context_progress.tokens = TokenState(
+                    max_tokens=current_state.max_tokens,
+                    current_tokens=self.agent.stats.context_tokens,
+                )
+
+    def action_clear_quit(self) -> None:
         input_widgets = self.query(ChatInputContainer)
         if input_widgets:
             input_widget = input_widgets.first()
@@ -958,10 +1099,13 @@ class VibeApp(App):
                 input_widget.value = ""
                 return
 
+        self.action_force_quit()
+
+    def action_force_quit(self) -> None:
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
 
-        self.exit()
+        self.exit(result=self._get_session_resume_info())
 
     def action_scroll_chat_up(self) -> None:
         try:
@@ -984,7 +1128,7 @@ class VibeApp(App):
         is_dangerous, reason = is_dangerous_directory()
         if is_dangerous:
             warning = (
-                f"⚠️ WARNING: {reason}\n\nRunning in this location is not recommended."
+                f"⚠ WARNING: {reason}\n\nRunning in this location is not recommended."
             )
             await self._mount_and_scroll(UserCommandMessage(warning))
 
@@ -1110,25 +1254,42 @@ class VibeApp(App):
     def on_mouse_up(self, event: MouseUp) -> None:
         copy_selection_to_clipboard(self)
 
+    def on_app_blur(self, event: AppBlur) -> None:
+        if self._chat_input_container and self._chat_input_container.input_widget:
+            self._chat_input_container.input_widget.set_app_focus(False)
+
+    def on_app_focus(self, event: AppFocus) -> None:
+        if self._chat_input_container and self._chat_input_container.input_widget:
+            self._chat_input_container.input_widget.set_app_focus(True)
+
+
+def _print_session_resume_message(session_id: str | None) -> None:
+    if not session_id:
+        return
+
+    print()
+    print("To continue this session, run: vibe --continue")
+    print(f"Or: vibe --resume {session_id}")
+
 
 def run_textual_ui(
     config: VibeConfig,
-    auto_approve: bool = False,
+    initial_mode: AgentMode = AgentMode.DEFAULT,
     enable_streaming: bool = False,
     initial_prompt: str | None = None,
     loaded_messages: list[LLMMessage] | None = None,
-    session_info: ResumeSessionInfo | None = None,
 ) -> None:
+    """Run the Textual UI."""
     update_notifier = PyPIVersionUpdateGateway(project_name="mistral-vibe")
     update_cache_repository = FileSystemUpdateCacheRepository()
     app = VibeApp(
         config=config,
-        auto_approve=auto_approve,
+        initial_mode=initial_mode,
         enable_streaming=enable_streaming,
         initial_prompt=initial_prompt,
         loaded_messages=loaded_messages,
-        session_info=session_info,
         version_update_notifier=update_notifier,
         update_cache_repository=update_cache_repository,
     )
-    app.run()
+    session_id = app.run()
+    _print_session_resume_message(session_id)

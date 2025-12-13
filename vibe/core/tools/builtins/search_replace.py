@@ -100,7 +100,7 @@ class SearchReplace(
         if isinstance(event.result, SearchReplaceResult):
             return ToolResultDisplay(
                 success=True,
-                message=f"Applied {event.result.blocks_applied} blocks",
+                message=f"Applied {event.result.blocks_applied} block{'' if event.result.blocks_applied == 1 else 's'}",
                 warnings=event.result.warnings,
                 details={
                     "lines_changed": event.result.lines_changed,

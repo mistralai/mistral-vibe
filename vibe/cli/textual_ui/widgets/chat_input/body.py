@@ -11,7 +11,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from vibe.cli.history_manager import HistoryManager
-from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
+from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea, InputMode
 
 
 class ChatInputBody(Widget):
@@ -44,26 +44,35 @@ class ChatInputBody(Widget):
         if self.input_widget:
             self.input_widget.focus()
 
+    def _parse_mode_and_text(self, text: str) -> tuple[InputMode, str]:
+        if text.startswith("!"):
+            return "!", text[1:]
+        elif text.startswith("/"):
+            return "/", text[1:]
+        else:
+            return ">", text
+
     def _update_prompt(self) -> None:
         if not self.input_widget or not self.prompt_widget:
             return
 
-        text = self.input_widget.text
-        if text.startswith("!"):
-            self.prompt_widget.update("!")
-        elif text.startswith("/"):
-            self.prompt_widget.update("/")
-        else:
-            self.prompt_widget.update(">")
+        self.prompt_widget.update(self.input_widget.input_mode)
+
+    def on_chat_text_area_mode_changed(self, event: ChatTextArea.ModeChanged) -> None:
+        if self.prompt_widget:
+            self.prompt_widget.update(event.mode)
 
     def _load_history_entry(self, text: str, cursor_col: int | None = None) -> None:
         if not self.input_widget:
             return
 
-        self.input_widget._navigating_history = True
-        self.input_widget.load_text(text)
+        mode, display_text = self._parse_mode_and_text(text)
 
-        first_line = text.split("\n")[0] if text else ""
+        self.input_widget._navigating_history = True
+        self.input_widget.set_mode(mode)
+        self.input_widget.load_text(display_text)
+
+        first_line = display_text.split("\n")[0]
         col = cursor_col if cursor_col is not None else len(first_line)
         cursor_pos = (0, col)
 
@@ -137,9 +146,6 @@ class ChatInputBody(Widget):
             self.input_widget._cursor_pos_after_load = None
             self.input_widget._cursor_moved_since_load = False
 
-    def on_text_area_changed(self, event: ChatTextArea.Changed) -> None:
-        self._update_prompt()
-
     def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         event.stop()
 
@@ -161,12 +167,16 @@ class ChatInputBody(Widget):
 
     @property
     def value(self) -> str:
-        return self.input_widget.text if self.input_widget else ""
+        if not self.input_widget:
+            return ""
+        return self.input_widget.get_full_text()
 
     @value.setter
     def value(self, text: str) -> None:
         if self.input_widget:
-            self.input_widget.load_text(text)
+            mode, display_text = self._parse_mode_and_text(text)
+            self.input_widget.set_mode(mode)
+            self.input_widget.load_text(display_text)
             self._update_prompt()
 
     def focus_input(self) -> None:

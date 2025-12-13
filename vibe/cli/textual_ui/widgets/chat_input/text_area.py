@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from textual import events
 from textual.binding import Binding
@@ -11,6 +11,8 @@ from vibe.cli.autocompletion.base import CompletionResult
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
+
+InputMode = Literal["!", "/", ">"]
 
 
 class ChatTextArea(TextArea):
@@ -23,6 +25,9 @@ class ChatTextArea(TextArea):
             priority=True,
         )
     ]
+
+    MODE_CHARACTERS: ClassVar[set[Literal["!", "/"]]] = {"!", "/"}
+    DEFAULT_MODE: ClassVar[Literal[">"]] = ">"
 
     class Submitted(Message):
         def __init__(self, value: str) -> None:
@@ -42,8 +47,16 @@ class ChatTextArea(TextArea):
     class HistoryReset(Message):
         """Message sent when history navigation should be reset."""
 
+    class ModeChanged(Message):
+        """Message sent when the input mode changes (>, !, /)."""
+
+        def __init__(self, mode: InputMode) -> None:
+            self.mode = mode
+            super().__init__()
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self._input_mode: InputMode = self.DEFAULT_MODE
         self._history_prefix: str | None = None
         self._last_text = ""
         self._navigating_history = False
@@ -53,9 +66,17 @@ class ChatTextArea(TextArea):
         self._cursor_pos_after_load: tuple[int, int] | None = None
         self._cursor_moved_since_load: bool = False
         self._completion_manager: MultiCompletionManager | None = None
+        self._app_has_focus: bool = True
 
     def on_blur(self, event: events.Blur) -> None:
-        self.call_after_refresh(self.focus)
+        if self._app_has_focus:
+            self.call_after_refresh(self.focus)
+
+    def set_app_focus(self, has_focus: bool) -> None:
+        self._app_has_focus = has_focus
+        self.cursor_blink = has_focus
+        if has_focus and not self.has_focus:
+            self.call_after_refresh(self.focus)
 
     def on_click(self, event: events.Click) -> None:
         self._mark_cursor_moved_if_needed()
@@ -76,7 +97,7 @@ class ChatTextArea(TextArea):
 
         if self._completion_manager and not was_navigating_history:
             self._completion_manager.on_text_changed(
-                self.text, self.get_cursor_offset()
+                self.get_full_text(), self._get_full_cursor_offset()
             )
 
     def _reset_prefix(self) -> None:
@@ -96,7 +117,10 @@ class ChatTextArea(TextArea):
         cursor_row, cursor_col = self.cursor_location
         lines = self.text.split("\n")
         if cursor_row < len(lines):
-            return lines[cursor_row][:cursor_col]
+            visible_prefix = lines[cursor_row][:cursor_col]
+            if cursor_row == 0 and self._input_mode != self.DEFAULT_MODE:
+                return self._input_mode + visible_prefix
+            return visible_prefix
         return ""
 
     def _handle_history_up(self) -> bool:
@@ -139,12 +163,14 @@ class ChatTextArea(TextArea):
         self.post_message(self.HistoryNext(self._history_prefix))
         return True
 
-    async def _on_key(self, event: events.Key) -> None:
+    async def _on_key(self, event: events.Key) -> None:  # noqa: PLR0911
         self._mark_cursor_moved_if_needed()
 
         manager = self._completion_manager
         if manager:
-            match manager.on_key(event, self.text, self.get_cursor_offset()):
+            match manager.on_key(
+                event, self.get_full_text(), self._get_full_cursor_offset()
+            ):
                 case CompletionResult.HANDLED:
                     event.prevent_default()
                     event.stop()
@@ -152,7 +178,7 @@ class ChatTextArea(TextArea):
                 case CompletionResult.SUBMIT:
                     event.prevent_default()
                     event.stop()
-                    value = self.text.strip()
+                    value = self.get_full_text().strip()
                     if value:
                         self._reset_prefix()
                         self.post_message(self.Submitted(value))
@@ -161,13 +187,30 @@ class ChatTextArea(TextArea):
         if event.key == "enter":
             event.prevent_default()
             event.stop()
-            value = self.text.strip()
+            value = self.get_full_text().strip()
             if value:
                 self._reset_prefix()
                 self.post_message(self.Submitted(value))
             return
 
         if event.key == "shift+enter":
+            event.prevent_default()
+            event.stop()
+            return
+
+        if (
+            event.character
+            and event.character in self.MODE_CHARACTERS
+            and not self.text
+            and self._input_mode == self.DEFAULT_MODE
+        ):
+            self._set_mode(event.character)
+            event.prevent_default()
+            event.stop()
+            return
+
+        if event.key == "backspace" and self._should_reset_mode_on_backspace():
+            self._set_mode(self.DEFAULT_MODE)
             event.prevent_default()
             event.stop()
             return
@@ -189,7 +232,7 @@ class ChatTextArea(TextArea):
         self._completion_manager = manager
         if self._completion_manager:
             self._completion_manager.on_text_changed(
-                self.text, self.get_cursor_offset()
+                self.get_full_text(), self._get_full_cursor_offset()
             )
 
     def get_cursor_offset(self) -> int:
@@ -244,3 +287,59 @@ class ChatTextArea(TextArea):
     def clear_text(self) -> None:
         self.clear()
         self.reset_history_state()
+        self._set_mode(self.DEFAULT_MODE)
+
+    def _set_mode(self, mode: InputMode) -> None:
+        if self._input_mode == mode:
+            return
+        self._input_mode = mode
+        self.post_message(self.ModeChanged(mode))
+        if self._completion_manager:
+            self._completion_manager.on_text_changed(
+                self.get_full_text(), self._get_full_cursor_offset()
+            )
+
+    def _should_reset_mode_on_backspace(self) -> bool:
+        return (
+            self._input_mode != self.DEFAULT_MODE
+            and not self.text
+            and self.get_cursor_offset() == 0
+        )
+
+    def get_full_text(self) -> str:
+        if self._input_mode != self.DEFAULT_MODE:
+            return self._input_mode + self.text
+        return self.text
+
+    def _get_full_cursor_offset(self) -> int:
+        return self.get_cursor_offset() + self._get_mode_prefix_length()
+
+    def _get_mode_prefix_length(self) -> int:
+        return {">": 0, "/": 1, "!": 1}[self._input_mode]
+
+    @property
+    def input_mode(self) -> InputMode:
+        return self._input_mode
+
+    def set_mode(self, mode: InputMode) -> None:
+        if self._input_mode != mode:
+            self._input_mode = mode
+            self.post_message(self.ModeChanged(mode))
+
+    def adjust_from_full_text_coords(
+        self, start: int, end: int, replacement: str
+    ) -> tuple[int, int, str]:
+        """Translate from full-text coordinates to widget coordinates.
+
+        The completion manager works with 'full text' that includes the mode prefix.
+        This adjusts coordinates and replacement text for the actual widget text.
+        """
+        mode_len = self._get_mode_prefix_length()
+
+        adj_start = max(0, start - mode_len)
+        adj_end = max(adj_start, end - mode_len)
+
+        if mode_len > 0 and replacement.startswith(self._input_mode):
+            replacement = replacement[mode_len:]
+
+        return adj_start, adj_end, replacement

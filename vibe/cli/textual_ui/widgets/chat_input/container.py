@@ -17,11 +17,17 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
+from vibe.core.modes import ModeSafety
+
+SAFETY_BORDER_CLASSES: dict[ModeSafety, str] = {
+    ModeSafety.SAFE: "border-safe",
+    ModeSafety.DESTRUCTIVE: "border-warning",
+    ModeSafety.YOLO: "border-error",
+}
 
 
 class ChatInputContainer(Vertical):
     ID_INPUT_BOX = "input-box"
-    BORDER_WARNING_CLASS = "border-warning"
 
     class Submitted(Message):
         def __init__(self, value: str) -> None:
@@ -32,13 +38,13 @@ class ChatInputContainer(Vertical):
         self,
         history_file: Path | None = None,
         command_registry: CommandRegistry | None = None,
-        show_warning: bool = False,
+        safety: ModeSafety = ModeSafety.NEUTRAL,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._history_file = history_file
         self._command_registry = command_registry or CommandRegistry()
-        self._show_warning = show_warning
+        self._safety = safety
 
         command_entries = [
             (alias, command.description)
@@ -57,9 +63,8 @@ class ChatInputContainer(Vertical):
         self._completion_popup = CompletionPopup()
         yield self._completion_popup
 
-        with Vertical(
-            id=self.ID_INPUT_BOX, classes="border-warning" if self._show_warning else ""
-        ):
+        border_class = SAFETY_BORDER_CLASSES.get(self._safety, "")
+        with Vertical(id=self.ID_INPUT_BOX, classes=border_class):
             self._body = ChatInputBody(history_file=self._history_file, id="input-body")
 
             yield self._body
@@ -91,7 +96,7 @@ class ChatInputContainer(Vertical):
         widget = self._body.input_widget
         if widget:
             self._completion_manager.on_text_changed(
-                widget.text, widget.get_cursor_offset()
+                widget.get_full_text(), widget._get_full_cursor_offset()
             )
 
     def focus_input(self) -> None:
@@ -131,6 +136,9 @@ class ChatInputContainer(Vertical):
         widget = self.input_widget
         if not widget or not self._body:
             return
+        start, end, replacement = widget.adjust_from_full_text_coords(
+            start, end, replacement
+        )
 
         text = widget.text
         start = max(0, min(start, len(text)))
@@ -147,11 +155,12 @@ class ChatInputContainer(Vertical):
         event.stop()
         self.post_message(self.Submitted(event.value))
 
-    def set_show_warning(self, show_warning: bool) -> None:
-        self._show_warning = show_warning
+    def set_safety(self, safety: ModeSafety) -> None:
+        self._safety = safety
 
         input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
-        if show_warning:
-            input_box.add_class(self.BORDER_WARNING_CLASS)
-        else:
-            input_box.remove_class(self.BORDER_WARNING_CLASS)
+        for border_class in SAFETY_BORDER_CLASSES.values():
+            input_box.remove_class(border_class)
+
+        if safety in SAFETY_BORDER_CLASSES:
+            input_box.add_class(SAFETY_BORDER_CLASSES[safety])

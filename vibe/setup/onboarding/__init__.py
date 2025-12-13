@@ -5,7 +5,7 @@ import sys
 from rich import print as rprint
 from textual.app import App
 
-from vibe.core.config_path import GLOBAL_ENV_FILE
+from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
 from vibe.setup.onboarding.screens import (
     ApiKeyScreen,
     ThemeSelectionScreen,

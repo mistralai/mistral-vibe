@@ -1,9 +1,33 @@
 from __future__ import annotations
 
+from typing import Any
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Markdown, Static
 from textual.widgets._markdown import MarkdownStream
+
+
+class NonSelectableStatic(Static):
+    @property
+    def text_selection(self) -> None:
+        return None
+
+    @text_selection.setter
+    def text_selection(self, value: Any) -> None:
+        pass
+
+    def get_selection(self, selection: Any) -> None:
+        return None
+
+
+class ExpandingBorder(NonSelectableStatic):
+    def render(self) -> str:
+        height = self.size.height
+        return "\n".join(["⎢"] * (height - 1) + ["⎣"])
+
+    def on_resize(self) -> None:
+        self.refresh()
 
 
 class UserMessage(Static):
@@ -15,7 +39,7 @@ class UserMessage(Static):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="user-message-container"):
-            yield Static("> ", classes="user-message-prompt")
+            yield NonSelectableStatic("> ", classes="user-message-prompt")
             yield Static(self._content, markup=False, classes="user-message-content")
             if self._pending:
                 self.add_class("pending")
@@ -43,7 +67,7 @@ class AssistantMessage(Static):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="assistant-message-container"):
-            yield Static("● ", classes="assistant-message-dot")
+            yield NonSelectableStatic("● ", classes="assistant-message-dot")
             with Vertical(classes="assistant-message-content"):
                 markdown = Markdown("")
                 self._markdown = markdown
@@ -87,14 +111,25 @@ class UserCommandMessage(Static):
         self._content = content
 
     def compose(self) -> ComposeResult:
-        yield Markdown(self._content)
+        with Horizontal(classes="user-command-container"):
+            yield ExpandingBorder(classes="user-command-border")
+            with Vertical(classes="user-command-content"):
+                yield Markdown(self._content)
 
 
 class InterruptMessage(Static):
     def __init__(self) -> None:
-        super().__init__(
-            "Interrupted · What should Vibe do instead?", classes="interrupt-message"
-        )
+        super().__init__()
+        self.add_class("interrupt-message")
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="interrupt-container"):
+            yield ExpandingBorder(classes="interrupt-border")
+            yield Static(
+                "Interrupted · What should Vibe do instead?",
+                markup=False,
+                classes="interrupt-content",
+            )
 
 
 class BashOutputMessage(Static):
@@ -125,24 +160,41 @@ class BashOutputMessage(Static):
 
 class ErrorMessage(Static):
     def __init__(self, error: str, collapsed: bool = True) -> None:
-        super().__init__(classes="error-message")
+        super().__init__()
+        self.add_class("error-message")
         self._error = error
         self.collapsed = collapsed
+        self._content_widget: Static | None = None
 
     def compose(self) -> ComposeResult:
+        with Horizontal(classes="error-container"):
+            yield ExpandingBorder(classes="error-border")
+            self._content_widget = Static(
+                self._get_text(), markup=False, classes="error-content"
+            )
+            yield self._content_widget
+
+    def _get_text(self) -> str:
         if self.collapsed:
-            yield Static("Error. (ctrl+o to expand)", markup=False)
-        else:
-            yield Static(f"Error: {self._error}", markup=False)
+            return "Error. (ctrl+o to expand)"
+        return f"Error: {self._error}"
 
     def set_collapsed(self, collapsed: bool) -> None:
         if self.collapsed == collapsed:
             return
 
         self.collapsed = collapsed
-        self.remove_children()
+        if self._content_widget:
+            self._content_widget.update(self._get_text())
 
-        if self.collapsed:
-            self.mount(Static("Error. (ctrl+o to expand)", markup=False))
-        else:
-            self.mount(Static(f"Error: {self._error}", markup=False))
+
+class WarningMessage(Static):
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.add_class("warning-message")
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="warning-container"):
+            yield ExpandingBorder(classes="warning-border")
+            yield Static(self._message, markup=False, classes="warning-content")

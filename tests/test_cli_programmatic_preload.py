@@ -126,7 +126,6 @@ def test_run_programmatic_ignores_system_messages_in_previous(
                     content="Second system message that should be ignored.",
                 ),
             ],
-            auto_approve=True,
         )
 
         roles = [r for r, _ in spy.emitted]

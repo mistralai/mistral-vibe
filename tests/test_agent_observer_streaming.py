@@ -18,6 +18,7 @@ from vibe.core.middleware import (
     MiddlewareResult,
     ResetReason,
 )
+from vibe.core.modes import AgentMode
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tools.builtins.todo import TodoArgs
 from vibe.core.types import (
@@ -187,7 +188,7 @@ async def test_act_handles_streaming_with_tool_call_events_in_sequence() -> None
             tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
         ),
         backend=backend,
-        auto_approve=True,
+        mode=AgentMode.AUTO_APPROVE,
         enable_streaming=True,
     )
 
@@ -229,7 +230,7 @@ async def test_act_handles_tool_call_chunk_with_content() -> None:
             tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
         ),
         backend=backend,
-        auto_approve=True,
+        mode=AgentMode.AUTO_APPROVE,
         enable_streaming=True,
     )
 
@@ -274,7 +275,7 @@ async def test_act_merges_streamed_tool_call_arguments() -> None:
             tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
         ),
         backend=backend,
-        auto_approve=True,
+        mode=AgentMode.AUTO_APPROVE,
         enable_streaming=True,
     )
 
@@ -366,7 +367,7 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
             tools={"todo": BaseToolConfig(permission=ToolPermission.ASK)},
         ),
         backend=backend,
-        auto_approve=False,
+        mode=AgentMode.DEFAULT,
         enable_streaming=True,
     )
     middleware = CountingMiddleware()
@@ -392,7 +393,7 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     assert events[-1].skipped is True
     assert events[-1].skip_reason is not None
     assert "<user_cancellation>" in events[-1].skip_reason
-    assert agent.interaction_logger.save_interaction.await_count == 2
+    assert agent.interaction_logger.save_interaction.await_count == 1
 
 
 @pytest.mark.asyncio

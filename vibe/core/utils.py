@@ -13,9 +13,9 @@ from typing import Any
 
 import httpx
 
-from vibe.core import __version__
+from vibe import __version__
 from vibe.core.config import Backend
-from vibe.core.config_path import CONFIG_FILE, GLOBAL_CONFIG_FILE, LOG_DIR, LOG_FILE
+from vibe.core.paths.global_paths import LOG_DIR, LOG_FILE
 from vibe.core.types import BaseEvent, ToolResultEvent
 
 CANCELLATION_TAG = "user_cancellation"
@@ -144,13 +144,6 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("vibe")
-logger.info("Using config: %s", CONFIG_FILE.path)
-if CONFIG_FILE.path != GLOBAL_CONFIG_FILE.path and GLOBAL_CONFIG_FILE.path.is_file():
-    logger.warning(
-        "Project config active (%s); ignoring global config (%s)",
-        CONFIG_FILE.path,
-        GLOBAL_CONFIG_FILE.path,
-    )
 
 
 def get_user_agent(backend: Backend) -> str:

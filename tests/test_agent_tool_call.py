@@ -11,6 +11,7 @@ from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_tool import FakeTool
 from vibe.core.agent import Agent
 from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.modes import AgentMode
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tools.builtins.todo import TodoItem
 from vibe.core.types import (
@@ -57,10 +58,9 @@ def make_agent(
     backend: FakeBackend,
     approval_callback: SyncApprovalCallback | None = None,
 ) -> Agent:
+    mode = AgentMode.AUTO_APPROVE if auto_approve else AgentMode.DEFAULT
     agent = Agent(
-        make_config(todo_permission=todo_permission),
-        auto_approve=auto_approve,
-        backend=backend,
+        make_config(todo_permission=todo_permission), mode=mode, backend=backend
     )
     if approval_callback:
         agent.set_approval_callback(approval_callback)
@@ -403,7 +403,7 @@ async def test_tool_call_can_be_interrupted(
     )
     agent = Agent(
         config,
-        auto_approve=True,
+        mode=AgentMode.AUTO_APPROVE,
         backend=FakeBackend([
             mock_llm_chunk(content="Let me use the tool.", tool_calls=[tool_call]),
             mock_llm_chunk(content="Tool execution completed.", finish_reason="stop"),
@@ -432,7 +432,7 @@ async def test_tool_call_can_be_interrupted(
 async def test_fill_missing_tool_responses_inserts_placeholders() -> None:
     agent = Agent(
         make_config(),
-        auto_approve=True,
+        mode=AgentMode.AUTO_APPROVE,
         backend=FakeBackend([mock_llm_chunk(content="ok", finish_reason="stop")]),
     )
     tool_calls_messages = [
@@ -472,7 +472,7 @@ async def test_fill_missing_tool_responses_inserts_placeholders() -> None:
 async def test_ensure_assistant_after_tool_appends_understood() -> None:
     agent = Agent(
         make_config(),
-        auto_approve=True,
+        mode=AgentMode.AUTO_APPROVE,
         backend=FakeBackend([mock_llm_chunk(content="ok", finish_reason="stop")]),
     )
     tool_msg = LLMMessage(

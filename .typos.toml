@@ -1,2 +1,6 @@
 [default]
 extend-ignore-re = ["(?m)^.*(#|//)\\s*typos:disable-line$", "datas"]
+
+[default.extend-words]
+iterm = "iterm"
+ITERM = "ITERM"

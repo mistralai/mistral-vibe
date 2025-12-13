@@ -9,10 +9,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.widgets.spinner import BrailleSpinner
+
 
 class LoadingWidget(Static):
-    BRAILLE_SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-
     TARGET_COLORS = ("#FFD800", "#FFAF00", "#FF8205", "#FA500F", "#E10500")
 
     EASTER_EGGS: ClassVar[list[str]] = [
@@ -51,8 +51,9 @@ class LoadingWidget(Static):
     def __init__(self, status: str | None = None) -> None:
         super().__init__(classes="loading-widget")
         self.status = status or self._get_default_status()
-        self.gradient_offset = 0
-        self.spinner_pos = 0
+        self.current_color_index = 0
+        self.transition_progress = 0
+        self._spinner = BrailleSpinner()
         self.char_widgets: list[Static] = []
         self.spinner_widget: Static | None = None
         self.ellipsis_widget: Static | None = None
@@ -84,13 +85,12 @@ class LoadingWidget(Static):
 
     def set_status(self, status: str) -> None:
         self.status = self._apply_easter_egg(status)
-        self.gradient_offset = 0
         self._rebuild_chars()
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="loading-container"):
             self.spinner_widget = Static(
-                self.BRAILLE_SPINNER[0] + " ", classes="loading-star"
+                self._spinner.current_frame(), classes="loading-indicator"
             )
             yield self.spinner_widget
 
@@ -127,30 +127,40 @@ class LoadingWidget(Static):
         self.update_animation()
         self.set_interval(0.1, self.update_animation)
 
-    def _get_gradient_color(self, position: int) -> str:
-        color_index = (position - self.gradient_offset) % len(self.TARGET_COLORS)
-        return self.TARGET_COLORS[color_index]
+    def _get_color_for_position(self, position: int) -> str:
+        current_color = self.TARGET_COLORS[self.current_color_index]
+        next_color = self.TARGET_COLORS[
+            (self.current_color_index + 1) % len(self.TARGET_COLORS)
+        ]
+        if position < self.transition_progress:
+            return next_color
+        return current_color
 
     def update_animation(self) -> None:
+        total_elements = 1 + len(self.char_widgets) + 2
+
         if self.spinner_widget:
-            spinner_char = self.BRAILLE_SPINNER[self.spinner_pos]
-            color_0 = self._get_gradient_color(0)
-            color_1 = self._get_gradient_color(1)
-            self.spinner_widget.update(f"[{color_0}]{spinner_char}[/][{color_1}] [/]")
-            self.spinner_pos = (self.spinner_pos + 1) % len(self.BRAILLE_SPINNER)
+            spinner_char = self._spinner.next_frame()
+            color = self._get_color_for_position(0)
+            self.spinner_widget.update(f"[{color}]{spinner_char}[/]")
 
         for i, widget in enumerate(self.char_widgets):
-            position = 2 + i
-            color = self._get_gradient_color(position)
+            position = 1 + i
+            color = self._get_color_for_position(position)
             widget.update(f"[{color}]{self.status[i]}[/]")
 
         if self.ellipsis_widget:
-            ellipsis_start = 2 + len(self.status)
-            color_ellipsis = self._get_gradient_color(ellipsis_start)
-            color_space = self._get_gradient_color(ellipsis_start + 1)
+            ellipsis_start = 1 + len(self.status)
+            color_ellipsis = self._get_color_for_position(ellipsis_start)
+            color_space = self._get_color_for_position(ellipsis_start + 1)
             self.ellipsis_widget.update(f"[{color_ellipsis}]…[/][{color_space}] [/]")
 
-        self.gradient_offset = (self.gradient_offset + 1) % len(self.TARGET_COLORS)
+        self.transition_progress += 1
+        if self.transition_progress > total_elements:
+            self.current_color_index = (self.current_color_index + 1) % len(
+                self.TARGET_COLORS
+            )
+            self.transition_progress = 0
 
         if self.hint_widget and self.start_time is not None:
             elapsed = int(time() - self.start_time)

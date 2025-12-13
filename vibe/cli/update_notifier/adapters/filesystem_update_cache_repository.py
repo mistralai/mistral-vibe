@@ -8,7 +8,7 @@ from vibe.cli.update_notifier.ports.update_cache_repository import (
     UpdateCache,
     UpdateCacheRepository,
 )
-from vibe.core.config_path import VIBE_HOME
+from vibe.core.paths.global_paths import VIBE_HOME
 
 
 class FileSystemUpdateCacheRepository(UpdateCacheRepository):

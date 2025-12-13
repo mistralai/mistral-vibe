@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from vibe.cli.textual_ui.widgets.blinking_message import BlinkingMessage
+from vibe.cli.textual_ui.widgets.status_message import StatusMessage
 
 
-class CompactMessage(BlinkingMessage):
+class CompactMessage(StatusMessage):
     def __init__(self) -> None:
         super().__init__()
         self.add_class("compact-message")
@@ -12,7 +12,7 @@ class CompactMessage(BlinkingMessage):
         self.error_message: str | None = None
 
     def get_content(self) -> str:
-        if self._is_blinking:
+        if self._is_spinning:
             return "Compacting conversation history..."
 
         if self.error_message:
@@ -35,8 +35,8 @@ class CompactMessage(BlinkingMessage):
     ) -> None:
         self.old_tokens = old_tokens
         self.new_tokens = new_tokens
-        self.stop_blinking(success=True)
+        self.stop_spinning(success=True)
 
     def set_error(self, error_message: str) -> None:
         self.error_message = error_message
-        self.stop_blinking(success=False)
+        self.stop_spinning(success=False)

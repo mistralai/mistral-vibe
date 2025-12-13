@@ -24,7 +24,7 @@ class SnapshotTestAppWithConversation(BaseSnapshotTestApp):
         super().__init__(config=config)
         self.agent = Agent(
             config,
-            auto_approve=self.auto_approve,
+            mode=self._current_agent_mode,
             enable_streaming=self.enable_streaming,
             backend=fake_backend,
         )

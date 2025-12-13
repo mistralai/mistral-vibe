@@ -14,6 +14,7 @@ from vibe.core.config import (
     SessionLoggingConfig,
     VibeConfig,
 )
+from vibe.core.modes import AgentMode
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
     AgentStats,
@@ -193,7 +194,7 @@ class TestReloadPreservesStats:
             mock_llm_chunk(content="Done", finish_reason="stop"),
         ])
         config = make_config(enabled_tools=["todo"])
-        agent = Agent(config, auto_approve=True, backend=backend)
+        agent = Agent(config, mode=AgentMode.AUTO_APPROVE, backend=backend)
 
         async for _ in agent.act("Check todos"):
             pass
@@ -257,9 +258,7 @@ class TestReloadPreservesStats:
         assert agent.stats.context_tokens == 0
 
     @pytest.mark.asyncio
-    async def test_reload_resets_context_tokens_when_system_prompt_changes(
-        self,
-    ) -> None:
+    async def test_reload_preserves_context_tokens_when_messages_exist(self) -> None:
         backend = FakeBackend([
             mock_llm_chunk(content="Response", finish_reason="stop")
         ])
@@ -267,13 +266,14 @@ class TestReloadPreservesStats:
         config2 = make_config(system_prompt_id="cli")
         agent = Agent(config1, backend=backend)
         [_ async for _ in agent.act("Hello")]
-        assert agent.stats.context_tokens > 0
+        original_context_tokens = agent.stats.context_tokens
+        assert original_context_tokens > 0
         assert len(agent.messages) > 1
 
         await agent.reload_with_initial_messages(config=config2)
 
         assert len(agent.messages) > 1
-        assert agent.stats.context_tokens == 0
+        assert agent.stats.context_tokens == original_context_tokens
 
     @pytest.mark.asyncio
     async def test_reload_updates_pricing_from_new_model(self, monkeypatch) -> None:
@@ -464,7 +464,7 @@ class TestCompactStatsHandling:
             mock_llm_chunk(content="<summary>", finish_reason="stop"),
         ])
         config = make_config(enabled_tools=["todo"])
-        agent = Agent(config, auto_approve=True, backend=backend)
+        agent = Agent(config, mode=AgentMode.AUTO_APPROVE, backend=backend)
 
         async for _ in agent.act("Check todos"):
             pass

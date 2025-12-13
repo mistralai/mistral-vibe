@@ -1,47 +1,11 @@
 from __future__ import annotations
 
-import enum
 from enum import StrEnum
 from typing import Literal, cast
 
 from acp.schema import PermissionOption, SessionMode
 
-
-class VibeSessionMode(enum.StrEnum):
-    APPROVAL_REQUIRED = enum.auto()
-    AUTO_APPROVE = enum.auto()
-
-    def to_acp_session_mode(self) -> SessionMode:
-        match self:
-            case self.APPROVAL_REQUIRED:
-                return SessionMode(
-                    id=VibeSessionMode.APPROVAL_REQUIRED,
-                    name="Approval Required",
-                    description="Requires user approval for tool executions",
-                )
-            case self.AUTO_APPROVE:
-                return SessionMode(
-                    id=VibeSessionMode.AUTO_APPROVE,
-                    name="Auto Approve",
-                    description="Automatically approves all tool executions",
-                )
-
-    @classmethod
-    def from_acp_session_mode(cls, session_mode: SessionMode) -> VibeSessionMode | None:
-        if not cls.is_valid(session_mode.id):
-            return None
-        return cls(session_mode.id)
-
-    @classmethod
-    def is_valid(cls, mode_id: str) -> bool:
-        try:
-            return cls(mode_id).to_acp_session_mode() is not None
-        except (ValueError, KeyError):
-            return False
-
-    @classmethod
-    def get_all_acp_session_modes(cls) -> list[SessionMode]:
-        return [mode.to_acp_session_mode() for mode in cls]
+from vibe.core.modes import MODE_CONFIGS, AgentMode
 
 
 class ToolOption(StrEnum):
@@ -68,3 +32,22 @@ TOOL_OPTIONS = [
         kind=cast(Literal["reject_once"], ToolOption.REJECT_ONCE),
     ),
 ]
+
+
+def agent_mode_to_acp(mode: AgentMode) -> SessionMode:
+    config = MODE_CONFIGS[mode]
+    return SessionMode(
+        id=mode.value, name=config.display_name, description=config.description
+    )
+
+
+def acp_to_agent_mode(mode_id: str) -> AgentMode | None:
+    return AgentMode.from_string(mode_id)
+
+
+def is_valid_acp_mode(mode_id: str) -> bool:
+    return AgentMode.from_string(mode_id) is not None
+
+
+def get_all_acp_session_modes() -> list[SessionMode]:
+    return [agent_mode_to_acp(mode) for mode in AgentMode]

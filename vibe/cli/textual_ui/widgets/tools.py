@@ -1,86 +1,163 @@
 from __future__ import annotations
 
+from textual.app import ComposeResult
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.renderers import get_renderer
-from vibe.cli.textual_ui.widgets.blinking_message import BlinkingMessage
+from vibe.cli.textual_ui.widgets.messages import ExpandingBorder
+from vibe.cli.textual_ui.widgets.status_message import StatusMessage
+from vibe.cli.textual_ui.widgets.utils import DEFAULT_TOOL_SHORTCUT, TOOL_SHORTCUTS
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
 
-class ToolCallMessage(BlinkingMessage):
-    def __init__(self, event: ToolCallEvent) -> None:
-        self.event = event
+class ToolCallMessage(StatusMessage):
+    def __init__(
+        self, event: ToolCallEvent | None = None, *, tool_name: str | None = None
+    ) -> None:
+        if event is None and tool_name is None:
+            raise ValueError("Either event or tool_name must be provided")
+
+        self._event = event
+        self._tool_name = tool_name or (event.tool_name if event else "unknown")
+        self._is_history = event is None
+
         super().__init__()
         self.add_class("tool-call")
 
+        if self._is_history:
+            self._is_spinning = False
+
     def get_content(self) -> str:
-        if not self.event.tool_class:
-            return f"{self.event.tool_name}"
-
-        adapter = ToolUIDataAdapter(self.event.tool_class)
-        display = adapter.get_call_display(self.event)
-
-        return f"{display.summary}"
+        if self._event and self._event.tool_class:
+            adapter = ToolUIDataAdapter(self._event.tool_class)
+            display = adapter.get_call_display(self._event)
+            return display.summary
+        return self._tool_name
 
 
 class ToolResultMessage(Static):
     def __init__(
         self,
-        event: ToolResultEvent,
+        event: ToolResultEvent | None = None,
         call_widget: ToolCallMessage | None = None,
         collapsed: bool = True,
+        *,
+        tool_name: str | None = None,
+        content: str | None = None,
     ) -> None:
-        self.event = event
-        self.call_widget = call_widget
+        if event is None and tool_name is None:
+            raise ValueError("Either event or tool_name must be provided")
+
+        self._event = event
+        self._call_widget = call_widget
+        self._tool_name = tool_name or (event.tool_name if event else "unknown")
+        self._content = content
         self.collapsed = collapsed
+        self._content_container: Vertical | None = None
 
         super().__init__()
         self.add_class("tool-result")
 
+    @property
+    def tool_name(self) -> str:
+        return self._tool_name
+
+    def _shortcut(self) -> str:
+        return TOOL_SHORTCUTS.get(self._tool_name, DEFAULT_TOOL_SHORTCUT)
+
+    def _hint(self) -> str:
+        action = "expand" if self.collapsed else "collapse"
+        return f"({self._shortcut()} to {action})"
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="tool-result-container"):
+            yield ExpandingBorder(classes="tool-result-border")
+            self._content_container = Vertical(classes="tool-result-content")
+            yield self._content_container
+
     async def on_mount(self) -> None:
-        if self.call_widget:
-            success = not self.event.error and not self.event.skipped
-            self.call_widget.stop_blinking(success=success)
-        await self.render_result()
+        if self._call_widget:
+            success = self._event is None or (
+                not self._event.error and not self._event.skipped
+            )
+            self._call_widget.stop_spinning(success=success)
+        await self._render_result()
 
-    async def render_result(self) -> None:
-        await self.remove_children()
-
-        if self.event.error:
-            self.add_class("error-text")
-            if self.collapsed:
-                self.update("Error. (ctrl+o to expand)")
-            else:
-                await self.mount(Static(f"Error: {self.event.error}", markup=False))
+    async def _render_result(self) -> None:
+        if self._content_container is None:
             return
 
-        if self.event.skipped:
-            self.add_class("warning-text")
-            reason = self.event.skip_reason or "User skipped"
+        await self._content_container.remove_children()
+
+        if self._event is None:
+            await self._render_simple()
+            return
+
+        if self._event.error:
+            self.add_class("error-text")
             if self.collapsed:
-                self.update("Skipped. (ctrl+o to expand)")
+                await self._content_container.mount(
+                    Static(f"Error. {self._hint()}", markup=False)
+                )
             else:
-                await self.mount(Static(f"Skipped: {reason}", markup=False))
+                await self._content_container.mount(
+                    Static(f"Error: {self._event.error}", markup=False)
+                )
+            return
+
+        if self._event.skipped:
+            self.add_class("warning-text")
+            reason = self._event.skip_reason or "User skipped"
+            if self.collapsed:
+                await self._content_container.mount(
+                    Static(f"Skipped. {self._hint()}", markup=False)
+                )
+            else:
+                await self._content_container.mount(
+                    Static(f"Skipped: {reason}", markup=False)
+                )
             return
 
         self.remove_class("error-text")
         self.remove_class("warning-text")
 
-        adapter = ToolUIDataAdapter(self.event.tool_class)
-        display = adapter.get_result_display(self.event)
+        if self._event.tool_class is None:
+            await self._render_simple()
+            return
 
-        renderer = get_renderer(self.event.tool_name)
+        adapter = ToolUIDataAdapter(self._event.tool_class)
+        display = adapter.get_result_display(self._event)
+        renderer = get_renderer(self._event.tool_name)
         widget_class, data = renderer.get_result_widget(display, self.collapsed)
+        await self._content_container.mount(
+            widget_class(data, collapsed=self.collapsed)
+        )
 
-        result_widget = widget_class(data, collapsed=self.collapsed)
-        await self.mount(result_widget)
+    async def _render_simple(self) -> None:
+        if self._content_container is None:
+            return
+
+        if self.collapsed:
+            await self._content_container.mount(
+                Static(f"{self._tool_name} completed {self._hint()}", markup=False)
+            )
+            return
+
+        if self._content:
+            await self._content_container.mount(Static(self._content, markup=False))
+        else:
+            await self._content_container.mount(
+                Static(f"{self._tool_name} completed.", markup=False)
+            )
 
     async def set_collapsed(self, collapsed: bool) -> None:
-        if self.collapsed != collapsed:
-            self.collapsed = collapsed
-            await self.render_result()
+        if self.collapsed == collapsed:
+            return
+        self.collapsed = collapsed
+        await self._render_result()
 
     async def toggle_collapsed(self) -> None:
         self.collapsed = not self.collapsed
-        await self.render_result()
+        await self._render_result()

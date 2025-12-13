@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Lock
 
@@ -171,3 +172,6 @@ class PathCompletionController:
         self._view.replace_completion_range(start, end, completion)
         self.reset()
         return True
+
+
+atexit.register(PathCompletionController._executor.shutdown)

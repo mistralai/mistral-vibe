@@ -17,45 +17,50 @@ class CommandRegistry:
             excluded_commands = []
         self.commands = {
             "help": Command(
-                aliases=frozenset(["/help", "/h"]),
+                aliases=frozenset(["/help"]),
                 description="Show help message",
                 handler="_show_help",
             ),
-            "status": Command(
-                aliases=frozenset(["/status", "/stats"]),
-                description="Display agent statistics",
-                handler="_show_status",
-            ),
             "config": Command(
-                aliases=frozenset(["/config", "/cfg", "/theme", "/model"]),
+                aliases=frozenset(["/config", "/theme", "/model"]),
                 description="Edit config settings",
                 handler="_show_config",
             ),
             "reload": Command(
-                aliases=frozenset(["/reload", "/r"]),
+                aliases=frozenset(["/reload"]),
                 description="Reload configuration from disk",
                 handler="_reload_config",
             ),
             "clear": Command(
-                aliases=frozenset(["/clear", "/reset"]),
+                aliases=frozenset(["/clear"]),
                 description="Clear conversation history",
                 handler="_clear_history",
             ),
             "log": Command(
-                aliases=frozenset(["/log", "/logpath"]),
+                aliases=frozenset(["/log"]),
                 description="Show path to current interaction log file",
                 handler="_show_log_path",
             ),
             "compact": Command(
-                aliases=frozenset(["/compact", "/summarize"]),
+                aliases=frozenset(["/compact"]),
                 description="Compact conversation history by summarizing",
                 handler="_compact_history",
             ),
             "exit": Command(
-                aliases=frozenset(["/exit", "/quit", "/q"]),
+                aliases=frozenset(["/exit"]),
                 description="Exit the application",
                 handler="_exit_app",
                 exits=True,
+            ),
+            "terminal-setup": Command(
+                aliases=frozenset(["/terminal-setup"]),
+                description="Configure Shift+Enter for newlines",
+                handler="_setup_terminal",
+            ),
+            "status": Command(
+                aliases=frozenset(["/status"]),
+                description="Display agent statistics",
+                handler="_show_status",
             ),
         }
 

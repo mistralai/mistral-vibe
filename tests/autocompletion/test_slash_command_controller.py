@@ -105,7 +105,7 @@ def test_on_text_change_clears_suggestions_when_no_matches() -> None:
     assert view.reset_count >= 1
 
 
-def test_on_text_change_limits_the_number_of_results_to_five_and_preserve_insertion_order() -> (
+def test_on_text_change_limits_the_number_of_results_and_preserves_insertion_order() -> (
     None
 ):
     controller, view = make_controller(prefix="/")
@@ -113,13 +113,15 @@ def test_on_text_change_limits_the_number_of_results_to_five_and_preserve_insert
     controller.on_text_changed("/", cursor_index=1)
 
     suggestions, selected_index = view.suggestion_events[-1]
-    assert len(suggestions) == 5
+    assert len(suggestions) == 7
     assert [suggestion.alias for suggestion in suggestions] == [
         "/config",
         "/compact",
         "/help",
         "/summarize",
         "/logpath",
+        "/exit",
+        "/vim",
     ]
 
 

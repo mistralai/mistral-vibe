@@ -21,6 +21,7 @@ from vibe.cli.update_notifier import (
     VersionUpdateGatewayError,
 )
 from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.modes import AgentMode
 
 
 async def _wait_for_notification(
@@ -66,7 +67,7 @@ class VibeAppFactory(Protocol):
         notifier: FakeVersionUpdateGateway,
         update_cache_repository: FakeUpdateCacheRepository | None = None,
         config: VibeConfig | None = None,
-        auto_approve: bool = False,
+        initial_mode: AgentMode = AgentMode.DEFAULT,
         current_version: str = "0.1.0",
     ) -> VibeApp: ...
 
@@ -81,12 +82,12 @@ def make_vibe_app(vibe_config_with_update_checks_enabled: VibeConfig) -> VibeApp
         update_cache_repository: FakeUpdateCacheRepository
         | None = update_cache_repository,
         config: VibeConfig | None = None,
-        auto_approve: bool = False,
+        initial_mode: AgentMode = AgentMode.DEFAULT,
         current_version: str = "0.1.0",
     ) -> VibeApp:
         return VibeApp(
             config=config or vibe_config_with_update_checks_enabled,
-            auto_approve=auto_approve,
+            initial_mode=initial_mode,
             version_update_notifier=notifier,
             update_cache_repository=update_cache_repository,
             current_version=current_version,

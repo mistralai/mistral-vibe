@@ -146,12 +146,12 @@ class EventHandler:
 
     def stop_current_tool_call(self) -> None:
         if self.current_tool_call:
-            self.current_tool_call.stop_blinking()
+            self.current_tool_call.stop_spinning()
             self.current_tool_call = None
 
     def stop_current_compact(self) -> None:
         if self.current_compact:
-            self.current_compact.stop_blinking(success=False)
+            self.current_compact.stop_spinning(success=False)
             self.current_compact = None
 
     def get_last_tool_result(self) -> ToolResultMessage | None:

@@ -22,10 +22,12 @@ from vibe.core.middleware import (
     MiddlewareAction,
     MiddlewarePipeline,
     MiddlewareResult,
+    PlanModeMiddleware,
     PriceLimitMiddleware,
     ResetReason,
     TurnLimitMiddleware,
 )
+from vibe.core.modes import AgentMode
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.system_prompt import get_universal_system_prompt
 from vibe.core.tools.base import (
@@ -88,14 +90,18 @@ class Agent:
     def __init__(
         self,
         config: VibeConfig,
-        auto_approve: bool = False,
+        mode: AgentMode = AgentMode.DEFAULT,
         message_observer: Callable[[LLMMessage], None] | None = None,
         max_turns: int | None = None,
         max_price: float | None = None,
         backend: BackendLike | None = None,
         enable_streaming: bool = False,
     ) -> None:
+        """Initialize the agent with configuration and mode."""
         self.config = config
+        self._mode = mode
+        self._max_turns = max_turns
+        self._max_price = max_price
 
         self.tool_manager = ToolManager(config)
         self.format_handler = APIToolFormatHandler()
@@ -107,10 +113,9 @@ class Agent:
         self._last_observed_message_index: int = 0
         self.middleware_pipeline = MiddlewarePipeline()
         self.enable_streaming = enable_streaming
-        self._setup_middleware(max_turns, max_price)
+        self._setup_middleware()
 
         system_prompt = get_universal_system_prompt(self.tool_manager, config)
-
         self.messages = [LLMMessage(role=Role.system, content=system_prompt)]
 
         if self.message_observer:
@@ -125,7 +130,6 @@ class Agent:
         except ValueError:
             pass
 
-        self.auto_approve = auto_approve
         self.approval_callback: ApprovalCallback | None = None
 
         self.session_id = str(uuid4())
@@ -133,11 +137,19 @@ class Agent:
         self.interaction_logger = InteractionLogger(
             config.session_logging,
             self.session_id,
-            auto_approve,
+            self.auto_approve,
             config.effective_workdir,
         )
 
         self._last_chunk: LLMChunk | None = None
+
+    @property
+    def mode(self) -> AgentMode:
+        return self._mode
+
+    @property
+    def auto_approve(self) -> bool:
+        return self._mode.auto_approve
 
     def _select_backend(self) -> BackendLike:
         active_model = self.config.get_active_model()
@@ -164,14 +176,15 @@ class Agent:
         async for event in self._conversation_loop(msg):
             yield event
 
-    def _setup_middleware(self, max_turns: int | None, max_price: float | None) -> None:
+    def _setup_middleware(self) -> None:
+        """Configure middleware pipeline for this conversation."""
         self.middleware_pipeline.clear()
 
-        if max_turns is not None:
-            self.middleware_pipeline.add(TurnLimitMiddleware(max_turns))
+        if self._max_turns is not None:
+            self.middleware_pipeline.add(TurnLimitMiddleware(self._max_turns))
 
-        if max_price is not None:
-            self.middleware_pipeline.add(PriceLimitMiddleware(max_price))
+        if self._max_price is not None:
+            self.middleware_pipeline.add(PriceLimitMiddleware(self._max_price))
 
         if self.config.auto_compact_threshold > 0:
             self.middleware_pipeline.add(
@@ -182,6 +195,8 @@ class Agent:
                     ContextWarningMiddleware(0.5, self.config.auto_compact_threshold)
                 )
 
+        self.middleware_pipeline.add(PlanModeMiddleware(lambda: self._mode))
+
     async def _handle_middleware_result(
         self, result: MiddlewareResult
     ) -> AsyncGenerator[BaseEvent]:
@@ -190,9 +205,6 @@ class Agent:
                 yield AssistantEvent(
                     content=f"<{VIBE_STOP_EVENT_TAG}>{result.reason}</{VIBE_STOP_EVENT_TAG}>",
                     stopped_by_middleware=True,
-                )
-                await self.interaction_logger.save_interaction(
-                    self.messages, self.stats, self.config, self.tool_manager
                 )
 
             case MiddlewareAction.INJECT_MESSAGE:
@@ -241,12 +253,10 @@ class Agent:
                 result = await self.middleware_pipeline.run_before_turn(
                     self._get_context()
                 )
-
                 async for event in self._handle_middleware_result(result):
                     yield event
 
                 if result.action == MiddlewareAction.STOP:
-                    self._flush_new_messages()
                     return
 
                 self.stats.steps += 1
@@ -264,39 +274,24 @@ class Agent:
                 )
 
                 self._flush_new_messages()
-                await self.interaction_logger.save_interaction(
-                    self.messages, self.stats, self.config, self.tool_manager
-                )
 
                 if user_cancelled:
-                    self._flush_new_messages()
-                    await self.interaction_logger.save_interaction(
-                        self.messages, self.stats, self.config, self.tool_manager
-                    )
                     return
 
                 after_result = await self.middleware_pipeline.run_after_turn(
                     self._get_context()
                 )
-
                 async for event in self._handle_middleware_result(after_result):
                     yield event
 
                 if after_result.action == MiddlewareAction.STOP:
-                    self._flush_new_messages()
                     return
 
-                self._flush_new_messages()
-                await self.interaction_logger.save_interaction(
-                    self.messages, self.stats, self.config, self.tool_manager
-                )
-
-        except Exception:
+        finally:
             self._flush_new_messages()
             await self.interaction_logger.save_interaction(
                 self.messages, self.stats, self.config, self.tool_manager
             )
-            raise
 
     async def _perform_llm_turn(
         self,
@@ -410,7 +405,7 @@ class Agent:
 
         return AssistantEvent(content=assistant_msg.content or "")
 
-    async def _handle_tool_calls(  # noqa: PLR0915
+    async def _handle_tool_calls(
         self, resolved: ResolvedMessage
     ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent]:
         for failed in resolved.failed_calls:
@@ -534,9 +529,6 @@ class Agent:
                         )
                     )
                 )
-                await self.interaction_logger.save_interaction(
-                    self.messages, self.stats, self.config, self.tool_manager
-                )
                 raise
 
             except KeyboardInterrupt:
@@ -555,9 +547,6 @@ class Agent:
                             tool_call, cancel
                         )
                     )
-                )
-                await self.interaction_logger.save_interaction(
-                    self.messages, self.stats, self.config, self.tool_manager
                 )
                 raise
 
@@ -844,6 +833,7 @@ class Agent:
         self._reset_session()
 
     async def compact(self) -> str:
+        """Compact the conversation history."""
         try:
             self._clean_message_history()
             await self.interaction_logger.save_interaction(
@@ -906,6 +896,16 @@ class Agent:
             )
             raise
 
+    async def switch_mode(self, new_mode: AgentMode) -> None:
+        if new_mode == self._mode:
+            return
+        new_config = VibeConfig.load(
+            workdir=self.config.workdir, **new_mode.config_overrides
+        )
+
+        await self.reload_with_initial_messages(config=new_config)
+        self._mode = new_mode
+
     async def reload_with_initial_messages(
         self,
         config: VibeConfig | None = None,
@@ -917,22 +917,25 @@ class Agent:
         )
 
         preserved_messages = self.messages[1:] if len(self.messages) > 1 else []
-        old_system_prompt = self.messages[0].content if len(self.messages) > 0 else ""
 
         if config is not None:
             self.config = config
             self.backend = self.backend_factory()
 
+        if max_turns is not None:
+            self._max_turns = max_turns
+        if max_price is not None:
+            self._max_price = max_price
+
         self.tool_manager = ToolManager(self.config)
 
         new_system_prompt = get_universal_system_prompt(self.tool_manager, self.config)
         self.messages = [LLMMessage(role=Role.system, content=new_system_prompt)]
-        did_system_prompt_change = old_system_prompt != new_system_prompt
 
         if preserved_messages:
             self.messages.extend(preserved_messages)
 
-        if len(self.messages) == 1 or did_system_prompt_change:
+        if len(self.messages) == 1:
             self.stats.reset_context_state()
 
         try:
@@ -945,7 +948,7 @@ class Agent:
 
         self._last_observed_message_index = 0
 
-        self._setup_middleware(max_turns, max_price)
+        self._setup_middleware()
 
         if self.message_observer:
             for msg in self.messages:

@@ -304,6 +304,10 @@ This affects where Vibe looks for:
 - `tools/` - Custom tools
 - `logs/` - Session logsRetryTo run code, enable code execution and file creation in Settings > Capabilities.
 
+## Editors/IDEs
+
+Mistral Vibe can be used in text editors and IDEs that support [Agent Client Protocol](https://agentclientprotocol.com/overview/clients). See the [ACP Setup documentation](docs/acp-setup.md) for setup instructions for various editors and IDEs.
+
 ## Resources
 
 - [CHANGELOG](CHANGELOG.md) - See what's new in each version

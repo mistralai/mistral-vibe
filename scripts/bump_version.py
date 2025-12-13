@@ -131,7 +131,7 @@ Examples:
         )
         # Update vibe/core/__init__.py
         update_hard_values_files(
-            "vibe/core/__init__.py",
+            "vibe/__init__.py",
             [(f'__version__ = "{current_version}"', f'__version__ = "{new_version}"')],
         )
         # Update tests/acp/test_initialize.py

@@ -1,27 +1,25 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
 
 from rich import print as rprint
 
-from vibe.cli.textual_ui.app import run_textual_ui
-from vibe.core.config import (
-    MissingAPIKeyError,
-    MissingPromptFileError,
-    VibeConfig,
-    load_api_keys_from_env,
+from vibe import __version__
+from vibe.core.paths.config_paths import unlock_config_paths
+from vibe.core.trusted_folders import trusted_folders_manager
+from vibe.setup.trusted_folders.trust_folder_dialog import (
+    TrustDialogQuitException,
+    ask_trust_folder,
 )
-from vibe.core.config_path import CONFIG_FILE, HISTORY_FILE, INSTRUCTIONS_FILE
-from vibe.core.interaction_logger import InteractionLogger
-from vibe.core.programmatic import run_programmatic
-from vibe.core.types import OutputFormat, ResumeSessionInfo
-from vibe.core.utils import ConversationLimitException
-from vibe.setup.onboarding import run_onboarding
 
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Mistral Vibe interactive CLI")
+    parser.add_argument(
+        "-v", "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     parser.add_argument(
         "initial_prompt",
         nargs="?",
@@ -41,7 +39,13 @@ def parse_arguments() -> argparse.Namespace:
         "--auto-approve",
         action="store_true",
         default=False,
-        help="Automatically approve all tool executions.",
+        help="Start in auto-approve mode: never ask for approval before running tools.",
+    )
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        default=False,
+        help="Start in plan mode: read-only tools for exploration and planning.",
     )
     parser.add_argument(
         "--max-turns",
@@ -99,160 +103,41 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def get_prompt_from_stdin() -> str | None:
-    if sys.stdin.isatty():
-        return None
+def check_and_resolve_trusted_folder() -> None:
+    cwd = Path.cwd()
+    if not (cwd / ".vibe").exists():
+        return
+
+    is_folder_trusted = trusted_folders_manager.is_trusted(cwd)
+
+    if is_folder_trusted is not None:
+        return
+
     try:
-        if content := sys.stdin.read().strip():
-            sys.stdin = sys.__stdin__ = open("/dev/tty")
-            return content
-    except KeyboardInterrupt:
-        pass
-    except OSError:
-        return None
+        is_folder_trusted = ask_trust_folder(cwd)
+    except (KeyboardInterrupt, EOFError, TrustDialogQuitException):
+        sys.exit(0)
+    except Exception as e:
+        rprint(f"[yellow]Error showing trust dialog: {e}[/]")
+        return
 
-    return None
-
-
-def load_config_or_exit(agent: str | None = None) -> VibeConfig:
-    try:
-        return VibeConfig.load(agent)
-    except MissingAPIKeyError:
-        run_onboarding()
-        return VibeConfig.load(agent)
-    except MissingPromptFileError as e:
-        rprint(f"[yellow]Invalid system prompt id: {e}[/]")
-        sys.exit(1)
-    except ValueError as e:
-        rprint(f"[yellow]{e}[/]")
-        sys.exit(1)
+    if is_folder_trusted is True:
+        trusted_folders_manager.add_trusted(cwd)
+    elif is_folder_trusted is False:
+        trusted_folders_manager.add_untrusted(cwd)
 
 
-def main() -> None:  # noqa: PLR0912, PLR0915
-    load_api_keys_from_env()
+def main() -> None:
     args = parse_arguments()
 
-    if args.setup:
-        run_onboarding()
-        sys.exit(0)
-    try:
-        if not CONFIG_FILE.path.exists():
-            try:
-                VibeConfig.save_updates(VibeConfig.create_default())
-            except Exception as e:
-                rprint(f"[yellow]Could not create default config file: {e}[/]")
+    is_interactive = args.prompt is None
+    if is_interactive:
+        check_and_resolve_trusted_folder()
+    unlock_config_paths()
 
-        if not INSTRUCTIONS_FILE.path.exists():
-            try:
-                INSTRUCTIONS_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-                INSTRUCTIONS_FILE.path.touch()
-            except Exception as e:
-                rprint(f"[yellow]Could not create instructions file: {e}[/]")
+    from vibe.cli.cli import run_cli
 
-        if not HISTORY_FILE.path.exists():
-            try:
-                HISTORY_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-                HISTORY_FILE.path.write_text("Hello Vibe!\n", "utf-8")
-            except Exception as e:
-                rprint(f"[yellow]Could not create history file: {e}[/]")
-
-        config = load_config_or_exit(args.agent)
-
-        if args.enabled_tools:
-            config.enabled_tools = args.enabled_tools
-
-        loaded_messages = None
-        session_info = None
-
-        if args.continue_session or args.resume:
-            if not config.session_logging.enabled:
-                rprint(
-                    "[red]Session logging is disabled. "
-                    "Enable it in config to use --continue or --resume[/]"
-                )
-                sys.exit(1)
-
-            session_to_load = None
-            if args.continue_session:
-                session_to_load = InteractionLogger.find_latest_session(
-                    config.session_logging
-                )
-                if not session_to_load:
-                    rprint(
-                        f"[red]No previous sessions found in "
-                        f"{config.session_logging.save_dir}[/]"
-                    )
-                    sys.exit(1)
-            else:
-                session_to_load = InteractionLogger.find_session_by_id(
-                    args.resume, config.session_logging
-                )
-                if not session_to_load:
-                    rprint(
-                        f"[red]Session '{args.resume}' not found in "
-                        f"{config.session_logging.save_dir}[/]"
-                    )
-                    sys.exit(1)
-
-            try:
-                loaded_messages, metadata = InteractionLogger.load_session(
-                    session_to_load
-                )
-                session_id = metadata.get("session_id", "unknown")[:8]
-                session_time = metadata.get("start_time", "unknown time")
-
-                session_info = ResumeSessionInfo(
-                    type="continue" if args.continue_session else "resume",
-                    session_id=session_id,
-                    session_time=session_time,
-                )
-            except Exception as e:
-                rprint(f"[red]Failed to load session: {e}[/]")
-                sys.exit(1)
-
-        stdin_prompt = get_prompt_from_stdin()
-        if args.prompt is not None:
-            programmatic_prompt = args.prompt or stdin_prompt
-            if not programmatic_prompt:
-                print(
-                    "Error: No prompt provided for programmatic mode", file=sys.stderr
-                )
-                sys.exit(1)
-            output_format = OutputFormat(
-                args.output if hasattr(args, "output") else "text"
-            )
-
-            try:
-                final_response = run_programmatic(
-                    config=config,
-                    prompt=programmatic_prompt,
-                    max_turns=args.max_turns,
-                    max_price=args.max_price,
-                    output_format=output_format,
-                    previous_messages=loaded_messages,
-                )
-                if final_response:
-                    print(final_response)
-                sys.exit(0)
-            except ConversationLimitException as e:
-                print(e, file=sys.stderr)
-                sys.exit(1)
-            except RuntimeError as e:
-                print(f"Error: {e}", file=sys.stderr)
-                sys.exit(1)
-        else:
-            run_textual_ui(
-                config,
-                auto_approve=args.auto_approve,
-                enable_streaming=True,
-                initial_prompt=args.initial_prompt or stdin_prompt,
-                loaded_messages=loaded_messages,
-                session_info=session_info,
-            )
-
-    except (KeyboardInterrupt, EOFError):
-        rprint("\n[dim]Bye![/]")
-        sys.exit(0)
+    run_cli(args)
 
 
 if __name__ == "__main__":

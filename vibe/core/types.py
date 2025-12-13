@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from abc import ABC
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from enum import StrEnum, auto
 from typing import Annotated, Any, Literal
 
@@ -16,22 +15,6 @@ from pydantic import (
 )
 
 from vibe.core.tools.base import BaseTool
-
-
-@dataclass
-class ResumeSessionInfo:
-    type: Literal["continue", "resume"]
-    session_id: str
-    session_time: str
-
-    def message(self) -> str:
-        action = None
-        match self.type:
-            case "continue":
-                action = "Continuing"
-            case "resume":
-                action = "Resuming"
-        return f"{action} session `{self.session_id}` from {self.session_time}"
 
 
 class AgentStats(BaseModel):

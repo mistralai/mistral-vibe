@@ -9,8 +9,8 @@ import re
 import sys
 from typing import TYPE_CHECKING, Any
 
-from vibe import VIBE_ROOT
-from vibe.core.config_path import GLOBAL_TOOLS_DIR, resolve_local_tools_dir
+from vibe.core.paths.config_paths import resolve_local_tools_dir
+from vibe.core.paths.global_paths import DEFAULT_TOOL_DIR, GLOBAL_TOOLS_DIR
 from vibe.core.tools.base import BaseTool, BaseToolConfig
 from vibe.core.tools.mcp import (
     RemoteTool,
@@ -19,6 +19,7 @@ from vibe.core.tools.mcp import (
     list_tools_http,
     list_tools_stdio,
 )
+from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.utils import run_sync
 
 logger = getLogger("vibe")
@@ -29,9 +30,6 @@ if TYPE_CHECKING:
 
 class NoSuchToolError(Exception):
     """Exception raised when a tool is not found."""
-
-
-DEFAULT_TOOL_DIR = VIBE_ROOT / "core" / "tools" / "builtins"
 
 
 class ToolManager:
@@ -53,14 +51,19 @@ class ToolManager:
 
     @staticmethod
     def _compute_search_paths(config: VibeConfig) -> list[Path]:
-        paths: list[Path] = [DEFAULT_TOOL_DIR]
+        paths: list[Path] = [DEFAULT_TOOL_DIR.path]
 
         for p in config.tool_paths:
             path = Path(p).expanduser().resolve()
             if path.is_dir():
                 paths.append(path)
 
-        if (tools_dir := resolve_local_tools_dir(config.effective_workdir)) is not None:
+        is_folder_trusted = trusted_folders_manager.is_trusted(config.effective_workdir)
+        if (
+            is_folder_trusted is True
+            and (tools_dir := resolve_local_tools_dir(config.effective_workdir))
+            is not None
+        ):
             paths.append(tools_dir)
 
         if GLOBAL_TOOLS_DIR.path.is_dir():
@@ -115,7 +118,7 @@ class ToolManager:
         search_paths: list[Path] | None = None,
     ) -> dict[str, dict[str, Any]]:
         if search_paths is None:
-            search_paths = [DEFAULT_TOOL_DIR]
+            search_paths = [DEFAULT_TOOL_DIR.path]
 
         defaults: dict[str, dict[str, Any]] = {}
         for cls in ToolManager._iter_tool_classes(search_paths):

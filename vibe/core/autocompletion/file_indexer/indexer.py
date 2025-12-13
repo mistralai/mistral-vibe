@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ class FileIndexer:
         )  # coordinates updates to _active_rebuilds and _target_root.
         self._target_root: Path | None = None
         self._shutdown = False
+
+        atexit.register(self.shutdown)
 
     @property
     def stats(self) -> FileIndexStats:

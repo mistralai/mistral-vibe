@@ -4,6 +4,8 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Markdown, Static
 
+from vibe.cli.textual_ui.widgets.utils import DEFAULT_TOOL_SHORTCUT, TOOL_SHORTCUTS
+
 
 class ToolApprovalWidget(Vertical):
     def __init__(self, data: dict) -> None:
@@ -27,17 +29,23 @@ class ToolApprovalWidget(Vertical):
 
 
 class ToolResultWidget(Static):
+    SHORTCUT = DEFAULT_TOOL_SHORTCUT
+
     def __init__(self, data: dict, collapsed: bool = True) -> None:
         super().__init__()
         self.data = data
         self.collapsed = collapsed
         self.add_class("tool-result-widget")
 
+    def _hint(self) -> str:
+        action = "expand" if self.collapsed else "collapse"
+        return f"({self.SHORTCUT} to {action})"
+
     def compose(self) -> ComposeResult:
         message = self.data.get("message", "")
 
         if self.collapsed:
-            yield Static(f"{message} (ctrl+o to expand.)", markup=False)
+            yield Static(f"{message} {self._hint()}", markup=False)
         else:
             yield Static(message, markup=False)
 
@@ -66,7 +74,7 @@ class BashResultWidget(ToolResultWidget):
         message = self.data.get("message", "")
 
         if self.collapsed:
-            yield Static(f"{message} (ctrl+o to expand.)", markup=False)
+            yield Static(f"{message} {self._hint()}", markup=False)
         else:
             yield Static(message, markup=False)
 
@@ -96,7 +104,7 @@ class WriteFileResultWidget(ToolResultWidget):
         message = self.data.get("message", "")
 
         if self.collapsed:
-            yield Static(f"{message} (ctrl+o to expand.)", markup=False)
+            yield Static(f"{message} {self._hint()}", markup=False)
         else:
             yield Static(message, markup=False)
 
@@ -158,7 +166,7 @@ class SearchReplaceResultWidget(ToolResultWidget):
         message = self.data.get("message", "")
 
         if self.collapsed:
-            yield Static(f"{message} (ctrl+o to expand.)", markup=False)
+            yield Static(f"{message} {self._hint()}", markup=False)
         else:
             yield Static(message, markup=False)
 
@@ -185,13 +193,15 @@ class TodoApprovalWidget(ToolApprovalWidget):
 
 
 class TodoResultWidget(ToolResultWidget):
+    SHORTCUT = TOOL_SHORTCUTS["todo"]
+
     def compose(self) -> ComposeResult:
         message = self.data.get("message", "")
 
         if self.collapsed:
-            yield Static(message, markup=False)
+            yield Static(f"{message} {self._hint()}", markup=False)
         else:
-            yield Static(message, markup=False)
+            yield Static(f"{message} {self._hint()}", markup=False)
             yield Static("")
 
             by_status = self.data.get("todos_by_status", {})
@@ -228,7 +238,7 @@ class ReadFileResultWidget(ToolResultWidget):
         message = self.data.get("message", "")
 
         if self.collapsed:
-            yield Static(f"{message} (ctrl+o to expand.)", markup=False)
+            yield Static(f"{message} {self._hint()}", markup=False)
         else:
             yield Static(message, markup=False)
 
@@ -277,7 +287,7 @@ class GrepResultWidget(ToolResultWidget):
         message = self.data.get("message", "")
 
         if self.collapsed:
-            yield Static(f"{message} (ctrl+o to expand.)", markup=False)
+            yield Static(f"{message} {self._hint()}", markup=False)
         else:
             yield Static(message, markup=False)
 
