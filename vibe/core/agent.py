@@ -331,42 +331,63 @@ class Agent:
             yield event
 
     def _create_assistant_event(
-        self, content: str, chunk: LLMChunk | None
+        self, content: str, chunk: LLMChunk | None, reasoning_content: str | None
     ) -> AssistantEvent:
-        return AssistantEvent(content=content)
+        return AssistantEvent(content=content, reasoning_content=reasoning_content)
 
     async def _stream_assistant_events(self) -> AsyncGenerator[AssistantEvent]:
         chunks: list[LLMChunk] = []
         content_buffer = ""
-        chunks_with_content = 0
+        reasoning_buffer = ""
+        chunks_with_payload = 0
         BATCH_SIZE = 5
 
         async for chunk in self._chat_streaming():
             chunks.append(chunk)
 
+            chunk_has_payload = False
+
             if chunk.message.tool_calls and chunk.finish_reason is None:
                 if chunk.message.content:
                     content_buffer += chunk.message.content
-                    chunks_with_content += 1
+                    chunk_has_payload = True
+                if chunk.message.reasoning_content:
+                    reasoning_buffer += chunk.message.reasoning_content
+                    chunk_has_payload = True
 
-                if content_buffer:
-                    yield self._create_assistant_event(content_buffer, chunk)
+                if chunk_has_payload:
+                    yield self._create_assistant_event(
+                        content_buffer, chunk, reasoning_buffer or None
+                    )
                     content_buffer = ""
-                    chunks_with_content = 0
+                    reasoning_buffer = ""
+                    chunks_with_payload = 0
                 continue
 
             if chunk.message.content:
                 content_buffer += chunk.message.content
-                chunks_with_content += 1
+                chunk_has_payload = True
 
-                if chunks_with_content >= BATCH_SIZE:
-                    yield self._create_assistant_event(content_buffer, chunk)
+            if chunk.message.reasoning_content:
+                reasoning_buffer += chunk.message.reasoning_content
+                chunk_has_payload = True
+
+            if chunk_has_payload:
+                chunks_with_payload += 1
+
+                if chunks_with_payload >= BATCH_SIZE:
+                    yield self._create_assistant_event(
+                        content_buffer, chunk, reasoning_buffer or None
+                    )
                     content_buffer = ""
-                    chunks_with_content = 0
+                    reasoning_buffer = ""
+                    chunks_with_payload = 0
 
-        if content_buffer:
+        if content_buffer or reasoning_buffer:
             last_chunk = chunks[-1] if chunks else None
-            yield self._create_assistant_event(content_buffer, last_chunk)
+            yield self._create_assistant_event(
+                content_buffer, last_chunk, reasoning_buffer or None
+            )
 
         full_content = ""
         full_tool_calls_map = OrderedDict[int, ToolCall]()
@@ -408,7 +429,10 @@ class Agent:
         assistant_msg = llm_result.message
         self.messages.append(assistant_msg)
 
-        return AssistantEvent(content=assistant_msg.content or "")
+        return AssistantEvent(
+            content=assistant_msg.content or "",
+            reasoning_content=assistant_msg.reasoning_content,
+        )
 
     async def _handle_tool_calls(  # noqa: PLR0915
         self, resolved: ResolvedMessage
