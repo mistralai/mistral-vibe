@@ -61,6 +61,8 @@ from vibe.core.utils import (
     is_user_cancellation_event,
 )
 
+EMPTY_RESPONSE_FALLBACK = "No response body returned from the model."
+
 
 class ToolExecutionResponse(StrEnum):
     SKIP = auto()
@@ -333,7 +335,8 @@ class Agent:
     def _create_assistant_event(
         self, content: str, chunk: LLMChunk | None
     ) -> AssistantEvent:
-        return AssistantEvent(content=content)
+        final_content = content or EMPTY_RESPONSE_FALLBACK
+        return AssistantEvent(content=final_content)
 
     async def _stream_assistant_events(self) -> AsyncGenerator[AssistantEvent]:
         chunks: list[LLMChunk] = []
@@ -367,6 +370,9 @@ class Agent:
         if content_buffer:
             last_chunk = chunks[-1] if chunks else None
             yield self._create_assistant_event(content_buffer, last_chunk)
+        elif chunks:
+            last_chunk = chunks[-1]
+            yield self._create_assistant_event("", last_chunk)
 
         full_content = ""
         full_tool_calls_map = OrderedDict[int, ToolCall]()
@@ -385,6 +391,9 @@ class Agent:
                         full_tool_calls_map[tc.index].function.arguments or ""
                     ) + (tc.function.arguments or "")
                     full_tool_calls_map[tc.index].function.arguments = new_args_str
+
+        if not full_content:
+            full_content = EMPTY_RESPONSE_FALLBACK
 
         full_tool_calls = list(full_tool_calls_map.values()) or None
         last_message = LLMMessage(
@@ -406,6 +415,8 @@ class Agent:
             )
         self._last_chunk = llm_result
         assistant_msg = llm_result.message
+        if not assistant_msg.content:
+            assistant_msg.content = EMPTY_RESPONSE_FALLBACK
         self.messages.append(assistant_msg)
 
         return AssistantEvent(content=assistant_msg.content or "")
