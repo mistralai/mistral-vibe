@@ -8,7 +8,15 @@ from vibe.core.output_formatters import create_formatter
 from vibe.core.types import AssistantEvent, LLMMessage, OutputFormat, Role
 from vibe.core.utils import ConversationLimitException, logger
 
+# Import observability components
+try:
+    from vibe.core.observability.tracing import trace_agent_execution
+except ImportError:
+    def trace_agent_execution(func):
+        return func
 
+
+@trace_agent_execution
 def run_programmatic(
     config: VibeConfig,
     prompt: str,
