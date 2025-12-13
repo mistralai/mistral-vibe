@@ -153,7 +153,7 @@ class BashToolConfig(BaseToolConfig):
 class BashArgs(BaseModel):
     command: str
     timeout: int | None = Field(
-        default=None, description="Override the default command timeout."
+        default=None, description="Override the default command timeout in seconds."
     )
 
 
