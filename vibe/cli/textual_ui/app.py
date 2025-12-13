@@ -72,6 +72,7 @@ class VibeApp(App):
         Binding("escape", "interrupt", "Interrupt", show=False, priority=True),
         Binding("ctrl+o", "toggle_tool", "Toggle Tool", show=False),
         Binding("ctrl+t", "toggle_todo", "Toggle Todo", show=False),
+        Binding("ctrl+r", "toggle_reasoning", "Toggle Reasoning", show=False),
         Binding("shift+tab", "cycle_mode", "Cycle Mode", show=False, priority=True),
         Binding("shift+up", "scroll_chat_up", "Scroll Up", show=False, priority=True),
         Binding(
@@ -134,6 +135,7 @@ class VibeApp(App):
         # completes exactly at the moment the user interrupts
         self._agent_init_interrupted = False
         self._auto_scroll = True
+        self._show_reasoning = config.show_reasoning
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="chat"):
@@ -168,6 +170,7 @@ class VibeApp(App):
             todo_area_callback=lambda: self.query_one("#todo-area"),
             get_tools_collapsed=lambda: self._tools_collapsed,
             get_todos_collapsed=lambda: self._todos_collapsed,
+            get_show_reasoning=lambda: self._show_reasoning,
         )
 
         self._chat_input_container = self.query_one(ChatInputContainer)
@@ -262,6 +265,10 @@ class VibeApp(App):
     def on_config_app_setting_changed(self, message: ConfigApp.SettingChanged) -> None:
         if message.key == "textual_theme":
             self.theme = message.value
+        if message.key == "show_reasoning":
+            self._show_reasoning = message.value == "visible"
+            self.config.show_reasoning = self._show_reasoning
+            self._apply_reasoning_visibility()
 
     async def on_config_app_config_closed(
         self, message: ConfigApp.ConfigClosed
@@ -301,6 +308,10 @@ class VibeApp(App):
                 case "textual_theme":
                     if value != self.config.textual_theme:
                         updates["textual_theme"] = value
+                case "show_reasoning":
+                    new_value = value == "visible"
+                    if new_value != self.config.show_reasoning:
+                        updates["show_reasoning"] = new_value
 
         if updates:
             VibeConfig.save_updates(updates)
@@ -606,7 +617,7 @@ class VibeApp(App):
             new_config = VibeConfig.load()
 
             if self.agent:
-                await self.agent.reload_with_initial_messages(config=new_config)
+            await self.agent.reload_with_initial_messages(config=new_config)
 
             self.config = new_config
             if self._context_progress:
@@ -620,6 +631,9 @@ class VibeApp(App):
                     )
                 else:
                     self._context_progress.tokens = TokenState()
+
+            self._show_reasoning = self.config.show_reasoning
+            self._apply_reasoning_visibility()
 
             await self._mount_and_scroll(UserCommandMessage("Configuration reloaded."))
         except Exception as e:
@@ -928,6 +942,15 @@ class VibeApp(App):
             result.collapsed = self._todos_collapsed
             await result.render_result()
 
+    async def action_toggle_reasoning(self) -> None:
+        self._show_reasoning = not self._show_reasoning
+        self.config.show_reasoning = self._show_reasoning
+
+        self._apply_reasoning_visibility()
+
+        status = "Reasoning shown" if self._show_reasoning else "Reasoning hidden"
+        await self._mount_and_scroll(UserCommandMessage(status))
+
     def action_cycle_mode(self) -> None:
         if self._current_bottom_app != BottomApp.Input:
             return
@@ -995,6 +1018,10 @@ class VibeApp(App):
         await self._current_streaming_message.stop_stream()
         self._current_streaming_message = None
 
+    def _apply_reasoning_visibility(self) -> None:
+        for message in self.query(AssistantMessage):
+            message.set_show_reasoning(self._show_reasoning)
+
     async def _mount_and_scroll(self, widget: Widget) -> None:
         messages_area = self.query_one("#messages")
         chat = self.query_one("#chat", VerticalScroll)
@@ -1004,10 +1031,14 @@ class VibeApp(App):
             self._auto_scroll = True
 
         if isinstance(widget, AssistantMessage):
+            widget.set_show_reasoning(self._show_reasoning)
             if self._current_streaming_message is not None:
-                content = widget._content or ""
+                content = widget.content_chunk
+                reasoning = widget.reasoning_chunk
                 if content:
                     await self._current_streaming_message.append_content(content)
+                if reasoning:
+                    await self._current_streaming_message.append_reasoning(reasoning)
             else:
                 self._current_streaming_message = widget
                 await messages_area.mount(widget)

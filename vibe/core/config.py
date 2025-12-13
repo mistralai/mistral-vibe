@@ -285,6 +285,7 @@ class VibeConfig(BaseSettings):
     auto_compact_threshold: int = 200_000
     context_warnings: bool = False
     textual_theme: str = "textual-dark"
+    show_reasoning: bool = False
     instructions: str = ""
     workdir: Path | None = Field(default=None, exclude=True)
     system_prompt_id: str = "cli"
