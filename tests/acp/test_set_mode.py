@@ -9,7 +9,7 @@ import pytest
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_connection import FakeAgentSideConnection
 from vibe.acp.acp_agent import VibeAcpAgent
-from vibe.acp.utils import VibeSessionMode
+from vibe.core.modes import ModeID
 from vibe.core.agent import Agent
 from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
 
@@ -60,16 +60,16 @@ class TestACPSetMode:
         assert acp_session is not None
 
         acp_session.agent.auto_approve = True
-        acp_session.mode_id = VibeSessionMode.AUTO_APPROVE
+        acp_session.mode_id = ModeID.AUTO_APPROVE
 
         response = await acp_agent.setSessionMode(
             SetSessionModeRequest(
-                sessionId=session_id, modeId=VibeSessionMode.APPROVAL_REQUIRED
+                sessionId=session_id, modeId=ModeID.NORMAL
             )
         )
 
         assert response is not None
-        assert acp_session.mode_id == VibeSessionMode.APPROVAL_REQUIRED
+        assert acp_session.mode_id == ModeID.NORMAL
         assert acp_session.agent.auto_approve is False
 
     @pytest.mark.asyncio
@@ -83,17 +83,17 @@ class TestACPSetMode:
         )
         assert acp_session is not None
 
-        assert acp_session.mode_id == VibeSessionMode.APPROVAL_REQUIRED
+        assert acp_session.mode_id == ModeID.NORMAL
         assert acp_session.agent.auto_approve is False
 
         response = await acp_agent.setSessionMode(
             SetSessionModeRequest(
-                sessionId=session_id, modeId=VibeSessionMode.AUTO_APPROVE
+                sessionId=session_id, modeId=ModeID.AUTO_APPROVE
             )
         )
 
         assert response is not None
-        assert acp_session.mode_id == VibeSessionMode.AUTO_APPROVE
+        assert acp_session.mode_id == ModeID.AUTO_APPROVE
         assert acp_session.agent.auto_approve is True
 
     @pytest.mark.asyncio
@@ -131,7 +131,7 @@ class TestACPSetMode:
         )
         assert acp_session is not None
 
-        initial_mode_id = VibeSessionMode.APPROVAL_REQUIRED
+        initial_mode_id = ModeID.NORMAL
         assert acp_session.mode_id == initial_mode_id
 
         response = await acp_agent.setSessionMode(

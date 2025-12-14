@@ -9,7 +9,7 @@ import pytest
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_connection import FakeAgentSideConnection
 from vibe.acp.acp_agent import VibeAcpAgent
-from vibe.acp.utils import VibeSessionMode
+from vibe.core.modes import ModeID
 from vibe.core.agent import Agent
 from vibe.core.config import ModelConfig, VibeConfig
 from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
@@ -101,18 +101,27 @@ class TestACPNewSession:
         assert session_response.modes is not None
         assert session_response.modes.currentModeId is not None
         assert session_response.modes.availableModes is not None
-        assert len(session_response.modes.availableModes) == 2
+        # Now there are 4 predefined modes: normal, plan, accept-edits, auto-approve
+        assert len(session_response.modes.availableModes) == 4
 
-        assert session_response.modes.currentModeId == VibeSessionMode.APPROVAL_REQUIRED
+        assert session_response.modes.currentModeId == ModeID.NORMAL
         assert (
             session_response.modes.availableModes[0].id
-            == VibeSessionMode.APPROVAL_REQUIRED
+            == ModeID.NORMAL
         )
-        assert session_response.modes.availableModes[0].name == "Approval Required"
+        assert session_response.modes.availableModes[0].name == "Normal"
         assert (
-            session_response.modes.availableModes[1].id == VibeSessionMode.AUTO_APPROVE
+            session_response.modes.availableModes[1].id == ModeID.PLAN
         )
-        assert session_response.modes.availableModes[1].name == "Auto Approve"
+        assert session_response.modes.availableModes[1].name == "Plan"
+        assert (
+            session_response.modes.availableModes[2].id == ModeID.ACCEPT_EDITS
+        )
+        assert session_response.modes.availableModes[2].name == "Accept Edits"
+        assert (
+            session_response.modes.availableModes[3].id == ModeID.AUTO_APPROVE
+        )
+        assert session_response.modes.availableModes[3].name == "Auto-Approve"
 
     @pytest.mark.skip(reason="TODO: Fix this test")
     @pytest.mark.asyncio
