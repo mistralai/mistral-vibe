@@ -51,6 +51,11 @@ class CommandRegistry:
                 description="Compact conversation history by summarizing",
                 handler="_compact_history",
             ),
+            "session": Command(
+                aliases=frozenset(["/session", "/sessions"]),
+                description="Session manager - list, switch, rename, and delete sessions",
+                handler="_show_session_manager",
+            ),
             "exit": Command(
                 aliases=frozenset(["/exit", "/quit", "/q"]),
                 description="Exit the application",
