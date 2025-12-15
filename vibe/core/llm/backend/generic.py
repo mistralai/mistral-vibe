@@ -136,24 +136,35 @@ class OpenAIAdapter(APIAdapter):
         return PreparedRequest(self.endpoint, headers, body)
 
     def parse_response(self, data: dict[str, Any]) -> LLMChunk:
-        if data.get("choices"):
-            if "message" in data["choices"][0]:
-                message = LLMMessage.model_validate(data["choices"][0]["message"])
-            elif "delta" in data["choices"][0]:
-                message = LLMMessage.model_validate(data["choices"][0]["delta"])
-            else:
-                raise ValueError("Invalid response data")
-            finish_reason = data["choices"][0].get("finish_reason", None)
+        if error := data.get("error"):
+            if isinstance(error, dict):
+                raise ValueError(error.get("message") or str(error))
+            raise ValueError(str(error))
 
-        elif "message" in data:
-            message = LLMMessage.model_validate(data["message"])
-            finish_reason = data["choices"][0].get("finish_reason", None)
-        elif "delta" in data:
-            message = LLMMessage.model_validate(data["delta"])
-            finish_reason = None
-        else:
-            message = LLMMessage(role=Role.assistant, content="")
-            finish_reason = None
+        choices = data.get("choices") or []
+        first_choice = choices[0] if choices else {}
+        message_payload = (
+            first_choice.get("message")
+            or first_choice.get("delta")
+            or data.get("message")
+            or data.get("delta")
+        )
+
+        if message_payload is None:
+            message_payload = {
+                "role": Role.assistant,
+                "content": data.get("content", ""),
+            }
+
+        message = LLMMessage.model_validate(message_payload)
+
+        finish_reason = (
+            first_choice.get("finish_reason")
+            if isinstance(first_choice, dict)
+            else None
+        )
+        if finish_reason is None:
+            finish_reason = data.get("finish_reason")
 
         usage_data = data.get("usage") or {}
         usage = LLMUsage(
