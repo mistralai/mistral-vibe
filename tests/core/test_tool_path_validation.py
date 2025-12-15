@@ -1,7 +1,9 @@
 """Tests for tool path validation (is_path_within_workdir)."""
 
-import tempfile
+from __future__ import annotations
+
 from pathlib import Path
+import tempfile
 
 import pytest
 

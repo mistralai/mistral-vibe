@@ -1,12 +1,14 @@
 """Tests for the mode system (vibe/core/modes.py)."""
 
-import pytest
+from __future__ import annotations
+
 from pydantic import ValidationError
+import pytest
 
 from vibe.core.modes import (
+    PREDEFINED_MODES,
     ModeConfig,
     PathRestrictionConfig,
-    PREDEFINED_MODES,
     build_mode_registry,
     get_mode_config,
     list_available_modes,
@@ -95,20 +97,14 @@ class TestModeConfig:
         valid_colors = ["primary", "secondary", "warning", "error", "success", "info"]
         for color in valid_colors:
             mode = ModeConfig(
-                id="test",
-                name="Test",
-                description="Test",
-                border_color=color,
+                id="test", name="Test", description="Test", border_color=color
             )
             assert mode.border_color == color
 
         # Invalid color
         with pytest.raises(ValidationError, match="Invalid border_color"):
             ModeConfig(
-                id="test",
-                name="Test",
-                description="Test",
-                border_color="invalid-color",
+                id="test", name="Test", description="Test", border_color="invalid-color"
             )
 
     def test_get_tool_permission_exact_match(self):
@@ -132,10 +128,7 @@ class TestModeConfig:
             id="test",
             name="Test",
             description="Test",
-            tool_permissions={
-                "grep": ToolPermission.ALWAYS,
-                "*": ToolPermission.NEVER,
-            },
+            tool_permissions={"grep": ToolPermission.ALWAYS, "*": ToolPermission.NEVER},
         )
         # Exact match takes precedence
         assert mode.get_tool_permission("grep") == ToolPermission.ALWAYS
@@ -298,14 +291,8 @@ class TestModeRegistry:
     def test_list_available_modes_with_custom(self):
         """Test listing modes with custom modes appended."""
         custom_modes = {
-            "zebra-mode": {
-                "name": "Zebra",
-                "description": "Test",
-            },
-            "alpha-mode": {
-                "name": "Alpha",
-                "description": "Test",
-            },
+            "zebra-mode": {"name": "Zebra", "description": "Test"},
+            "alpha-mode": {"name": "Alpha", "description": "Test"},
         }
         registry = build_mode_registry(custom_modes)
         modes = list_available_modes(registry)

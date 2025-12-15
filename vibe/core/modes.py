@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import re
 from enum import StrEnum
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -13,11 +13,17 @@ from vibe.core.tools.base import ToolPermission
 
 class ModeID(StrEnum):
     """Standard mode identifiers."""
+
     NORMAL = "normal"
     AUTO_APPROVE = "auto-approve"
     ACCEPT_EDITS = "accept-edits"
     PLAN = "plan"
 
+
+# Constants for validation limits
+MAX_MODE_ID_LENGTH = 50
+MAX_MODE_NAME_LENGTH = 100
+MAX_UI_INDICATOR_LENGTH = 10
 
 # Valid Textual theme colors for border styling
 VALID_BORDER_COLORS = {
@@ -59,11 +65,19 @@ class ModeConfig(BaseModel):
         """Validate mode ID format: lowercase alphanumeric with hyphens."""
         if not re.match(r"^[a-z0-9]+(-[a-z0-9]+)*$", v):
             raise ValueError(
-                f"Invalid mode ID '{v}'. Must be lowercase alphanumeric with hyphens "
+                "Invalid mode ID '"
+                + v
+                + "'. Must be lowercase alphanumeric with hyphens "
                 "(e.g., 'my-custom-mode')"
             )
-        if len(v) > 50:
-            raise ValueError(f"Mode ID '{v}' too long (max 50 characters)")
+        if len(v) > MAX_MODE_ID_LENGTH:
+            raise ValueError(
+                "Mode ID '"
+                + v
+                + "' too long (max "
+                + str(MAX_MODE_ID_LENGTH)
+                + " characters)"
+            )
         return v
 
     @field_validator("name", mode="after")
@@ -72,16 +86,22 @@ class ModeConfig(BaseModel):
         """Validate mode name is non-empty and reasonable length."""
         if not v or len(v.strip()) == 0:
             raise ValueError("Mode name cannot be empty")
-        if len(v) > 100:
-            raise ValueError(f"Mode name too long (max 100 characters)")
+        if len(v) > MAX_MODE_NAME_LENGTH:
+            raise ValueError(
+                "Mode name too long (max " + str(MAX_MODE_NAME_LENGTH) + " characters)"
+            )
         return v.strip()
 
     @field_validator("ui_indicator", mode="after")
     @classmethod
     def validate_ui_indicator(cls, v: str) -> str:
         """Validate UI indicator length."""
-        if len(v) > 10:
-            raise ValueError("UI indicator too long (max 10 characters)")
+        if len(v) > MAX_UI_INDICATOR_LENGTH:
+            raise ValueError(
+                "UI indicator too long (max "
+                + str(MAX_UI_INDICATOR_LENGTH)
+                + " characters)"
+            )
         return v
 
     @field_validator("border_color", mode="after")
@@ -90,7 +110,10 @@ class ModeConfig(BaseModel):
         """Validate border color is a valid Textual theme color."""
         if v not in VALID_BORDER_COLORS:
             raise ValueError(
-                f"Invalid border_color '{v}'. Must be one of: {', '.join(sorted(VALID_BORDER_COLORS))}"
+                "Invalid border_color '"
+                + v
+                + "'. Must be one of: "
+                + ", ".join(sorted(VALID_BORDER_COLORS))
             )
         return v
 
@@ -146,9 +169,7 @@ ACCEPT_EDITS_MODE = ModeConfig(
         "write_file": ToolPermission.ALWAYS,
     },
     path_restrictions=PathRestrictionConfig(
-        restrict_to_workdir=True,
-        allowed_patterns=["**/*"],
-        denied_patterns=[],
+        restrict_to_workdir=True, allowed_patterns=["**/*"], denied_patterns=[]
     ),
     ui_indicator="⏵⏵",
     border_color="warning",
@@ -182,7 +203,9 @@ PREDEFINED_MODES: dict[str, ModeConfig] = {
 }
 
 
-def build_mode_registry(custom_modes_config: dict[str, dict[str, Any]]) -> dict[str, ModeConfig]:
+def build_mode_registry(
+    custom_modes_config: dict[str, dict[str, Any]],
+) -> dict[str, ModeConfig]:
     """Build the complete mode registry from predefined and custom modes."""
     registry = dict(PREDEFINED_MODES)  # Start with predefined modes
 
@@ -191,23 +214,21 @@ def build_mode_registry(custom_modes_config: dict[str, dict[str, Any]]) -> dict[
         # Check for reserved mode IDs
         if mode_id in PREDEFINED_MODES:
             raise ValueError(
-                f"Cannot override predefined mode '{mode_id}'. "
-                f"Predefined modes are: {', '.join(PREDEFINED_MODES.keys())}"
+                "Cannot override predefined mode '" + mode_id + "'. "
+                "Predefined modes are: " + ", ".join(PREDEFINED_MODES.keys())
             )
 
         try:
             # Parse and validate custom mode
-            mode_config = ModeConfig.model_validate(
-                {
-                    **mode_data,
-                    "id": mode_id,
-                    "is_custom": True,
-                }
-            )
+            mode_config = ModeConfig.model_validate({
+                **mode_data,
+                "id": mode_id,
+                "is_custom": True,
+            })
             registry[mode_id] = mode_config
         except Exception as e:
             raise ValueError(
-                f"Invalid custom mode configuration for '{mode_id}': {e}"
+                "Invalid custom mode configuration for '" + mode_id + "': " + str(e)
             ) from e
 
     return registry
@@ -216,9 +237,9 @@ def build_mode_registry(custom_modes_config: dict[str, dict[str, Any]]) -> dict[
 def get_mode_config(mode_id: str, mode_registry: dict[str, ModeConfig]) -> ModeConfig:
     """Get mode configuration by ID."""
     if mode_id not in mode_registry:
-        available = ", ".join(f"'{m}'" for m in sorted(mode_registry.keys()))
+        available = ", ".join("'" + m + "'" for m in sorted(mode_registry.keys()))
         raise ValueError(
-            f"Unknown mode: '{mode_id}'. Available modes: {available}"
+            "Unknown mode: '" + mode_id + "'. Available modes: " + available
         )
     return mode_registry[mode_id]
 
@@ -226,8 +247,17 @@ def get_mode_config(mode_id: str, mode_registry: dict[str, ModeConfig]) -> ModeC
 def list_available_modes(mode_registry: dict[str, ModeConfig]) -> list[ModeConfig]:
     """Get list of all available modes."""
     # Predefined modes in fixed order (safe → dangerous)
-    predefined_order = (ModeID.NORMAL, ModeID.PLAN, ModeID.ACCEPT_EDITS, ModeID.AUTO_APPROVE)
-    result = [mode_registry[mode_id] for mode_id in predefined_order if mode_id in mode_registry]
+    predefined_order = (
+        ModeID.NORMAL,
+        ModeID.PLAN,
+        ModeID.ACCEPT_EDITS,
+        ModeID.AUTO_APPROVE,
+    )
+    result = [
+        mode_registry[mode_id]
+        for mode_id in predefined_order
+        if mode_id in mode_registry
+    ]
 
     # Custom modes in alphabetical order (single pass, minimal allocations)
     predefined_set = frozenset(predefined_order)

@@ -5,6 +5,7 @@ from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable
 from enum import StrEnum, auto
 import logging
+from pathlib import Path
 import time
 from typing import Any, cast
 from uuid import uuid4
@@ -32,7 +33,6 @@ from vibe.core.middleware import (
 from vibe.core.modes import (
     ModeConfig,
     ModeID,
-    PREDEFINED_MODES,
     build_mode_registry,
     get_mode_config,
     list_available_modes,
@@ -110,13 +110,17 @@ class Agent:
         self.config = config
 
         self._mode_registry = build_mode_registry(getattr(config, "modes", {}))
-        mode_id = initial_mode or (ModeID.AUTO_APPROVE if auto_approve else config.initial_mode)
+        mode_id = initial_mode or (
+            ModeID.AUTO_APPROVE if auto_approve else config.initial_mode
+        )
         if mode_id not in self._mode_registry:
             logger.warning(f"Invalid initial mode '{mode_id}', using '{ModeID.NORMAL}'")
             mode_id = ModeID.NORMAL
 
         self._current_mode_id = mode_id
-        self._previous_mode_id: str | None = None  # Track previous mode for auto_approve setter
+        self._previous_mode_id: str | None = (
+            None  # Track previous mode for auto_approve setter
+        )
         self._mode_config = self._mode_registry[mode_id]
 
         self.tool_manager = ToolManager(config)
@@ -148,7 +152,7 @@ class Agent:
             pass
 
         # Maintain backward compatibility: auto_approve reflects current mode
-        self._auto_approve = (self._current_mode_id == ModeID.AUTO_APPROVE)
+        self._auto_approve = self._current_mode_id == ModeID.AUTO_APPROVE
         self.approval_callback: ApprovalCallback | None = None
 
         self.session_id = str(uuid4())
@@ -188,13 +192,15 @@ class Agent:
 
     def set_mode(self, mode_id: str) -> None:
         """Switch to a different operational mode."""
-        self._mode_config = get_mode_config(mode_id, self._mode_registry)  # Raises if not found
+        self._mode_config = get_mode_config(
+            mode_id, self._mode_registry
+        )  # Raises if not found
         # Track previous mode before switching
         if self._current_mode_id != mode_id:
             self._previous_mode_id = self._current_mode_id
         self._current_mode_id = mode_id
         # Update backward compatibility flag
-        self._auto_approve = (mode_id == ModeID.AUTO_APPROVE)
+        self._auto_approve = mode_id == ModeID.AUTO_APPROVE
 
     def get_current_mode(self) -> ModeConfig:
         """Get the current mode configuration."""
@@ -799,18 +805,15 @@ class Agent:
         return await self._ask_approval(tool_name, args, tool_call_id)
 
     async def _handle_mode_permission(
-        self,
-        tool: BaseTool,
-        args: Any,
-        tool_call_id: str,
-        permission: ToolPermission,
+        self, tool: BaseTool, args: Any, tool_call_id: str, permission: ToolPermission
     ) -> ToolDecision:
         tool_name = tool.get_name()
 
         if permission == ToolPermission.ALWAYS:
             # Check path restrictions if applicable
-            if self._mode_config.path_restrictions and not self._validate_path_restrictions(
-                tool, args
+            if (
+                self._mode_config.path_restrictions
+                and not self._validate_path_restrictions(tool, args)
             ):
                 # Path violation - require approval
                 return await self._ask_approval(
@@ -829,7 +832,9 @@ class Agent:
 
         # Shouldn't reach here
         return await self._ask_approval(
-            tool_name, args if isinstance(args, dict) else args.model_dump(), tool_call_id
+            tool_name,
+            args if isinstance(args, dict) else args.model_dump(),
+            tool_call_id,
         )
 
     def _matches_pattern(self, path: Path, pattern: str) -> bool:
@@ -903,7 +908,9 @@ class Agent:
             )
         if asyncio.iscoroutinefunction(self.approval_callback):
             async_callback = cast(AsyncApprovalCallback, self.approval_callback)
-            response, user_feedback = await async_callback(tool_name, args, tool_call_id)
+            response, user_feedback = await async_callback(
+                tool_name, args, tool_call_id
+            )
         else:
             sync_callback = cast(SyncApprovalCallback, self.approval_callback)
             response, user_feedback = sync_callback(tool_name, args, tool_call_id)

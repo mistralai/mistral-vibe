@@ -1,10 +1,11 @@
 """Integration tests for mode system with Agent."""
 
+from __future__ import annotations
+
 import pytest
 
 from vibe.core.agent import Agent
 from vibe.core.config import VibeConfig
-from vibe.core.modes import build_mode_registry
 
 
 class TestAgentModeIntegration:
@@ -105,10 +106,7 @@ class TestAgentWithCustomModes:
         config = VibeConfig(
             initial_mode="my-mode",
             modes={
-                "my-mode": {
-                    "name": "My Mode",
-                    "description": "Custom initial mode",
-                }
+                "my-mode": {"name": "My Mode", "description": "Custom initial mode"}
             },
         )
         agent = Agent(config=config)
@@ -165,12 +163,7 @@ class TestModeRegistryBuilding:
     def test_registry_built_on_agent_init(self):
         """Test agent builds its own mode registry correctly."""
         config = VibeConfig(
-            modes={
-                "test-mode": {
-                    "name": "Test",
-                    "description": "Test mode",
-                }
-            }
+            modes={"test-mode": {"name": "Test", "description": "Test mode"}}
         )
 
         # Registry should be built when agent is created
@@ -185,25 +178,11 @@ class TestModeRegistryBuilding:
     def test_registry_not_polluted_between_tests(self):
         """Test that custom modes from one agent don't affect others."""
         # First agent with custom mode
-        config1 = VibeConfig(
-            modes={
-                "mode1": {
-                    "name": "Mode 1",
-                    "description": "Test",
-                }
-            }
-        )
+        config1 = VibeConfig(modes={"mode1": {"name": "Mode 1", "description": "Test"}})
         agent1 = Agent(config=config1)
 
         # Second agent with different custom mode
-        config2 = VibeConfig(
-            modes={
-                "mode2": {
-                    "name": "Mode 2",
-                    "description": "Test",
-                }
-            }
-        )
+        config2 = VibeConfig(modes={"mode2": {"name": "Mode 2", "description": "Test"}})
         agent2 = Agent(config=config2)
 
         # Each agent should have its own modes

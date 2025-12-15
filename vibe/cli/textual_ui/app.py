@@ -83,7 +83,6 @@ class VibeApp(App):
     def __init__(
         self,
         config: VibeConfig,
-        auto_approve: bool = False,
         initial_mode: str | None = None,
         enable_streaming: bool = False,
         initial_prompt: str | None = None,
@@ -98,15 +97,8 @@ class VibeApp(App):
         self.config = config
 
         # Determine initial mode
-        match initial_mode:
-            case str() as mode:
-                self.initial_mode_id = mode
-            case None if auto_approve:
-                self.initial_mode_id = ModeID.AUTO_APPROVE
-            case None:
-                self.initial_mode_id = config.initial_mode
-
-        self.auto_approve = (self.initial_mode_id == ModeID.AUTO_APPROVE)
+        self.initial_mode_id = initial_mode or config.initial_mode
+        self.auto_approve = self.initial_mode_id == ModeID.AUTO_APPROVE
         self.enable_streaming = enable_streaming
         self.agent: Agent | None = None
         self._agent_running = False
@@ -960,7 +952,7 @@ class VibeApp(App):
         new_mode_id = self._mode_indicator.cycle_mode()
 
         # Update auto_approve flag for backward compatibility
-        self.auto_approve = (new_mode_id == ModeID.AUTO_APPROVE)
+        self.auto_approve = new_mode_id == ModeID.AUTO_APPROVE
 
         # Update agent mode if agent exists
         if self.agent:
@@ -972,7 +964,9 @@ class VibeApp(App):
                 if self._chat_input_container:
                     self._chat_input_container.set_mode_border(new_mode_id)
                     # Keep warning border for dangerous modes
-                    self._chat_input_container.set_show_warning(mode_config.is_dangerous)
+                    self._chat_input_container.set_show_warning(
+                        mode_config.is_dangerous
+                    )
 
                 # Update approval callback based on mode
                 if new_mode_id == ModeID.AUTO_APPROVE:
@@ -1165,8 +1159,7 @@ def run_textual_ui(
     update_cache_repository = FileSystemUpdateCacheRepository()
     app = VibeApp(
         config=config,
-        auto_approve=auto_approve,
-        initial_mode=initial_mode,
+        initial_mode=initial_mode or (ModeID.AUTO_APPROVE if auto_approve else None),
         enable_streaming=enable_streaming,
         initial_prompt=initial_prompt,
         loaded_messages=loaded_messages,

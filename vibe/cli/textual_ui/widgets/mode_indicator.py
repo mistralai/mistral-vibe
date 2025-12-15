@@ -2,17 +2,23 @@ from __future__ import annotations
 
 from textual.widgets import Static
 
-from vibe.core.modes import ModeConfig, ModeID, PREDEFINED_MODES
+from vibe.core.modes import PREDEFINED_MODES, ModeConfig, ModeID
 
 
 class ModeIndicator(Static):
     """Widget displaying the current operational mode with cycling support."""
 
-    def __init__(self, mode_id: str = ModeID.NORMAL, available_modes: list[ModeConfig] | None = None) -> None:
+    def __init__(
+        self,
+        mode_id: str = ModeID.NORMAL,
+        available_modes: list[ModeConfig] | None = None,
+    ) -> None:
         super().__init__()
         self.can_focus = False
         self._mode_id = mode_id
-        self._previous_mode: ModeConfig | None = None  # Track previous for O(1) CSS cleanup
+        self._previous_mode: ModeConfig | None = (
+            None  # Track previous for O(1) CSS cleanup
+        )
         # Cache available modes as dict for O(1) lookups
         if available_modes is not None:
             self._mode_dict = {mode.id: mode for mode in available_modes}

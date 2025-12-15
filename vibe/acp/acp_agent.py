@@ -56,9 +56,9 @@ from vibe.acp.tools.session_update import (
 from vibe.acp.utils import TOOL_OPTIONS, ToolOption
 from vibe.core import __version__
 from vibe.core.agent import Agent as VibeAgent
-from vibe.core.modes import ModeConfig, ModeID, list_available_modes
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import MissingAPIKeyError, VibeConfig, load_api_keys_from_env
+from vibe.core.modes import ModeID, list_available_modes
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
     ApprovalResponse,
@@ -192,7 +192,9 @@ class VibeAcpAgent(AcpAgent):
             modes=SessionModeState(
                 currentModeId=session.mode_id,
                 availableModes=[
-                    SessionMode(id=mode.id, name=mode.name, description=mode.description)
+                    SessionMode(
+                        id=mode.id, name=mode.name, description=mode.description
+                    )
                     for mode in list_available_modes(session.agent._mode_registry)
                 ],
             ),

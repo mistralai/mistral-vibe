@@ -338,8 +338,7 @@ class VibeConfig(BaseSettings):
     )
 
     modes: dict[str, dict[str, Any]] = Field(
-        default_factory=dict,
-        description="Custom mode configurations keyed by mode ID",
+        default_factory=dict, description="Custom mode configurations keyed by mode ID"
     )
 
     model_config = SettingsConfigDict(

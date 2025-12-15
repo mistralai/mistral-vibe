@@ -1,15 +1,27 @@
 """Integration tests for path pattern restrictions in mode system."""
 
-import tempfile
+from __future__ import annotations
+
 from pathlib import Path
+import tempfile
 
 import pytest
 
 from vibe.core.agent import Agent
 from vibe.core.config import VibeConfig
 from vibe.core.modes import PathRestrictionConfig
-from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs, ReadFileState, ReadFileToolConfig
-from vibe.core.tools.builtins.write_file import WriteFile, WriteFileArgs, WriteFileConfig, WriteFileState
+from vibe.core.tools.builtins.read_file import (
+    ReadFile,
+    ReadFileArgs,
+    ReadFileState,
+    ReadFileToolConfig,
+)
+from vibe.core.tools.builtins.write_file import (
+    WriteFile,
+    WriteFileArgs,
+    WriteFileConfig,
+    WriteFileState,
+)
 
 
 @pytest.fixture
@@ -62,25 +74,25 @@ def write_file_tool(config_with_workdir):
 class TestAllowedPatterns:
     """Test allowed_patterns path restrictions."""
 
-    def test_allowed_pattern_allows_matching_file(self, agent_with_workdir, read_file_tool):
+    def test_allowed_pattern_allows_matching_file(
+        self, agent_with_workdir, read_file_tool
+    ):
         """Test that allowed pattern allows matching files."""
         # Create mode with only markdown files allowed
         agent_with_workdir._mode_config.path_restrictions = PathRestrictionConfig(
-            restrict_to_workdir=True,
-            allowed_patterns=["**/*.md"],
-            denied_patterns=[],
+            restrict_to_workdir=True, allowed_patterns=["**/*.md"], denied_patterns=[]
         )
 
         args = ReadFileArgs(path="docs/README.md")
         result = agent_with_workdir._validate_path_restrictions(read_file_tool, args)
         assert result is True
 
-    def test_allowed_pattern_blocks_non_matching_file(self, agent_with_workdir, read_file_tool):
+    def test_allowed_pattern_blocks_non_matching_file(
+        self, agent_with_workdir, read_file_tool
+    ):
         """Test that allowed pattern blocks non-matching files."""
         agent_with_workdir._mode_config.path_restrictions = PathRestrictionConfig(
-            restrict_to_workdir=True,
-            allowed_patterns=["**/*.md"],
-            denied_patterns=[],
+            restrict_to_workdir=True, allowed_patterns=["**/*.md"], denied_patterns=[]
         )
 
         args = ReadFileArgs(path="src/main.py")
@@ -97,32 +109,47 @@ class TestAllowedPatterns:
 
         # Both .md and .py should be allowed
         args_md = ReadFileArgs(path="docs/README.md")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args_md) is True
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args_md)
+            is True
+        )
 
         args_py = ReadFileArgs(path="src/main.py")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args_py) is True
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args_py)
+            is True
+        )
 
         # .toml should be blocked
         args_toml = ReadFileArgs(path="config.toml")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args_toml) is False
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args_toml)
+            is False
+        )
 
     def test_directory_pattern(self, agent_with_workdir, read_file_tool):
         """Test pattern matching specific directory."""
         agent_with_workdir._mode_config.path_restrictions = PathRestrictionConfig(
-            restrict_to_workdir=True,
-            allowed_patterns=["docs/**"],
-            denied_patterns=[],
+            restrict_to_workdir=True, allowed_patterns=["docs/**"], denied_patterns=[]
         )
 
         # Files in docs/ should be allowed
         args_docs = ReadFileArgs(path="docs/README.md")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args_docs) is True
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args_docs)
+            is True
+        )
 
         # Files outside docs/ should be blocked
         args_src = ReadFileArgs(path="src/main.py")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args_src) is False
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args_src)
+            is False
+        )
 
-    def test_default_all_pattern_allows_everything(self, agent_with_workdir, read_file_tool):
+    def test_default_all_pattern_allows_everything(
+        self, agent_with_workdir, read_file_tool
+    ):
         """Test that default ['**/*'] pattern allows all files."""
         agent_with_workdir._mode_config.path_restrictions = PathRestrictionConfig(
             restrict_to_workdir=True,
@@ -132,16 +159,24 @@ class TestAllowedPatterns:
 
         # All files should be allowed
         args1 = ReadFileArgs(path="docs/README.md")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args1) is True
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args1)
+            is True
+        )
 
         args2 = ReadFileArgs(path="src/main.py")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args2) is True
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args2)
+            is True
+        )
 
 
 class TestDeniedPatterns:
     """Test denied_patterns path restrictions."""
 
-    def test_denied_pattern_blocks_matching_file(self, agent_with_workdir, read_file_tool):
+    def test_denied_pattern_blocks_matching_file(
+        self, agent_with_workdir, read_file_tool
+    ):
         """Test that denied pattern blocks matching files."""
         agent_with_workdir._mode_config.path_restrictions = PathRestrictionConfig(
             restrict_to_workdir=True,
@@ -153,7 +188,9 @@ class TestDeniedPatterns:
         result = agent_with_workdir._validate_path_restrictions(read_file_tool, args)
         assert result is False
 
-    def test_denied_pattern_allows_non_matching_file(self, agent_with_workdir, read_file_tool):
+    def test_denied_pattern_allows_non_matching_file(
+        self, agent_with_workdir, read_file_tool
+    ):
         """Test that denied pattern allows non-matching files."""
         agent_with_workdir._mode_config.path_restrictions = PathRestrictionConfig(
             restrict_to_workdir=True,
@@ -175,15 +212,24 @@ class TestDeniedPatterns:
 
         # .env should be blocked
         args_env = ReadFileArgs(path=".env")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args_env) is False
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args_env)
+            is False
+        )
 
         # .pem files should be blocked
         args_pem = ReadFileArgs(path="secrets/key.pem")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args_pem) is False
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args_pem)
+            is False
+        )
 
         # Regular files should be allowed
         args_ok = ReadFileArgs(path="src/main.py")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args_ok) is True
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args_ok)
+            is True
+        )
 
 
 class TestCombinedPatterns:
@@ -199,11 +245,17 @@ class TestCombinedPatterns:
 
         # Regular .py files should be allowed
         args_ok = ReadFileArgs(path="src/main.py")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args_ok) is True
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args_ok)
+            is True
+        )
 
         # test_*.py files should be blocked even though *.py is allowed
         args_test = ReadFileArgs(path="src/test_util.py")
-        assert agent_with_workdir._validate_path_restrictions(read_file_tool, args_test) is False
+        assert (
+            agent_with_workdir._validate_path_restrictions(read_file_tool, args_test)
+            is False
+        )
 
     def test_docs_only_mode(self, agent_with_workdir, write_file_tool):
         """Test realistic 'docs-only' mode configuration."""
@@ -215,11 +267,17 @@ class TestCombinedPatterns:
 
         # Markdown files should be allowed
         args_md = WriteFileArgs(path="docs/new.md", content="# New")
-        assert agent_with_workdir._validate_path_restrictions(write_file_tool, args_md) is True
+        assert (
+            agent_with_workdir._validate_path_restrictions(write_file_tool, args_md)
+            is True
+        )
 
         # Python files should be blocked
         args_py = WriteFileArgs(path="src/new.py", content="pass")
-        assert agent_with_workdir._validate_path_restrictions(write_file_tool, args_py) is False
+        assert (
+            agent_with_workdir._validate_path_restrictions(write_file_tool, args_py)
+            is False
+        )
 
     def test_safe_scripting_mode(self, agent_with_workdir, write_file_tool):
         """Test realistic 'safe-scripting' mode that blocks secrets."""
@@ -231,14 +289,23 @@ class TestCombinedPatterns:
 
         # Regular files should be allowed
         args_ok = WriteFileArgs(path="src/app.py", content="pass")
-        assert agent_with_workdir._validate_path_restrictions(write_file_tool, args_ok) is True
+        assert (
+            agent_with_workdir._validate_path_restrictions(write_file_tool, args_ok)
+            is True
+        )
 
         # Secret files should be blocked
         args_env = WriteFileArgs(path=".env", content="SECRET=x")
-        assert agent_with_workdir._validate_path_restrictions(write_file_tool, args_env) is False
+        assert (
+            agent_with_workdir._validate_path_restrictions(write_file_tool, args_env)
+            is False
+        )
 
         args_key = WriteFileArgs(path="id_rsa.key", content="key")
-        assert agent_with_workdir._validate_path_restrictions(write_file_tool, args_key) is False
+        assert (
+            agent_with_workdir._validate_path_restrictions(write_file_tool, args_key)
+            is False
+        )
 
 
 class TestEdgeCases:
@@ -255,29 +322,31 @@ class TestEdgeCases:
     def test_empty_denied_patterns(self, agent_with_workdir, read_file_tool):
         """Test that empty denied patterns allows everything."""
         agent_with_workdir._mode_config.path_restrictions = PathRestrictionConfig(
-            restrict_to_workdir=True,
-            allowed_patterns=["**/*"],
-            denied_patterns=[],
+            restrict_to_workdir=True, allowed_patterns=["**/*"], denied_patterns=[]
         )
 
         args = ReadFileArgs(path="any/file.txt")
         result = agent_with_workdir._validate_path_restrictions(read_file_tool, args)
         assert result is True
 
-    def test_workdir_and_patterns_both_enforced(self, agent_with_workdir, read_file_tool):
+    def test_workdir_and_patterns_both_enforced(
+        self, agent_with_workdir, read_file_tool
+    ):
         """Test that both workdir restriction and patterns are enforced."""
         agent_with_workdir._mode_config.path_restrictions = PathRestrictionConfig(
-            restrict_to_workdir=True,
-            allowed_patterns=["**/*.md"],
-            denied_patterns=[],
+            restrict_to_workdir=True, allowed_patterns=["**/*.md"], denied_patterns=[]
         )
 
         # File outside workdir should be blocked even if pattern matches
         args_outside = ReadFileArgs(path="/tmp/README.md")
-        result = agent_with_workdir._validate_path_restrictions(read_file_tool, args_outside)
+        result = agent_with_workdir._validate_path_restrictions(
+            read_file_tool, args_outside
+        )
         assert result is False
 
-    def test_empty_allowed_patterns_blocks_everything(self, agent_with_workdir, read_file_tool):
+    def test_empty_allowed_patterns_blocks_everything(
+        self, agent_with_workdir, read_file_tool
+    ):
         """Test that empty allowed_patterns list blocks all files."""
         agent_with_workdir._mode_config.path_restrictions = PathRestrictionConfig(
             restrict_to_workdir=True,
