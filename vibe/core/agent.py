@@ -335,6 +335,11 @@ class Agent:
     ) -> AssistantEvent:
         return AssistantEvent(content=content)
 
+    @staticmethod
+    def _is_empty_response_text(text: str) -> bool:
+        cleaned = text.strip()
+        return cleaned == "" or cleaned == "No response body returned from the model."
+
     async def _stream_assistant_events(self) -> AsyncGenerator[AssistantEvent]:
         chunks: list[LLMChunk] = []
         content_buffer = ""
@@ -345,7 +350,9 @@ class Agent:
             chunks.append(chunk)
 
             if chunk.message.tool_calls and chunk.finish_reason is None:
-                if chunk.message.content:
+                if chunk.message.content and not self._is_empty_response_text(
+                    chunk.message.content
+                ):
                     content_buffer += chunk.message.content
                     chunks_with_content += 1
 
@@ -355,7 +362,9 @@ class Agent:
                     chunks_with_content = 0
                 continue
 
-            if chunk.message.content:
+            if chunk.message.content and not self._is_empty_response_text(
+                chunk.message.content
+            ):
                 content_buffer += chunk.message.content
                 chunks_with_content += 1
 
@@ -364,14 +373,16 @@ class Agent:
                     content_buffer = ""
                     chunks_with_content = 0
 
-        if content_buffer:
+        if content_buffer and not self._is_empty_response_text(content_buffer):
             last_chunk = chunks[-1] if chunks else None
             yield self._create_assistant_event(content_buffer, last_chunk)
 
         full_content = ""
         full_tool_calls_map = OrderedDict[int, ToolCall]()
         for chunk in chunks:
-            full_content += chunk.message.content or ""
+            if not self._is_empty_response_text(chunk.message.content or ""):
+                full_content += chunk.message.content or ""
+
             if not chunk.message.tool_calls:
                 continue
 
