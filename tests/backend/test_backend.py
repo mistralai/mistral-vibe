@@ -304,7 +304,7 @@ class TestBackend:
             assert payload["stream_options"] == expected_stream_options
 
     @pytest.mark.asyncio
-    async def test_backend_reasoning_content_always_included_for_llamacpp(self):
+    async def test_backend_reasoning_content_included_for_llamacpp(self):
         captured_payloads: list[JsonResponse] = []
 
         async def responder(request: httpx.Request) -> httpx.Response:
@@ -360,7 +360,7 @@ class TestBackend:
         assert message_payload["reasoning_content"] == "hidden thoughts"
 
     @pytest.mark.asyncio
-    async def test_backend_reasoning_content_excluded_for_non_llamacpp_provider(self):
+    async def test_backend_reasoning_content_included_for_non_llamacpp_provider(self):
         captured_payloads: list[JsonResponse] = []
 
         async def responder(request: httpx.Request) -> httpx.Response:
@@ -415,7 +415,7 @@ class TestBackend:
 
         assert captured_payloads, "Request payload was not captured"
         message_payload = captured_payloads[0]["messages"][0]
-        assert "reasoning_content" not in message_payload
+        assert message_payload["reasoning_content"] == "hidden thoughts"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("backend_type", [Backend.MISTRAL, Backend.GENERIC])
