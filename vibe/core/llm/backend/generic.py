@@ -8,6 +8,100 @@ from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, TypeVar
 
 import httpx
 
+import time
+
+try:
+    from opentelemetry.trace import SpanKind
+
+    from vibe.core.observability.tracing import (
+        LLM_REQUEST_ATTRIBUTES,
+        async_run_in_trace_span,
+        build_llm_request_attributes,
+        run_in_trace_span_async,
+    )
+    from vibe.core.observability.metrics import (
+        get_metrics_manager,
+        GENAI_CLIENT_TOKEN_USAGE,
+        GENAI_CLIENT_OPERATION_DURATION,
+    )
+    from vibe.core.observability.semconv import (
+        ATTR_GEN_AI_OPERATION_NAME,
+        ATTR_GEN_AI_RESPONSE_MODEL,
+        ATTR_GEN_AI_SYSTEM,
+        ATTR_GEN_AI_TOKEN_TYPE,
+        ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+        ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+        ATTR_GEN_AI_USAGE_TOTAL_TOKENS,
+        OP_CHAT,
+        SYSTEM_OPENAI,
+        TOKEN_TYPE_INPUT,
+        TOKEN_TYPE_OUTPUT,
+    )
+
+    _LLM_TRACING_AVAILABLE = True
+except ImportError:
+    SpanKind = None
+    LLM_REQUEST_ATTRIBUTES = {}
+    async_run_in_trace_span = None
+    build_llm_request_attributes = None
+    run_in_trace_span_async = None
+    get_metrics_manager = None
+    GENAI_CLIENT_TOKEN_USAGE = None
+    GENAI_CLIENT_OPERATION_DURATION = None
+    ATTR_GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
+    ATTR_GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+    ATTR_GEN_AI_SYSTEM = "gen_ai.system"
+    ATTR_GEN_AI_TOKEN_TYPE = "gen_ai.token.type"
+    ATTR_GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+    ATTR_GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+    ATTR_GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
+    OP_CHAT = "chat"
+    SYSTEM_OPENAI = "openai"
+    TOKEN_TYPE_INPUT = "input"
+    TOKEN_TYPE_OUTPUT = "output"
+    _LLM_TRACING_AVAILABLE = False
+
+
+def _record_genai_metrics(
+    duration_s: float,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    model_name: str = "",
+    provider_name: str = "",
+) -> None:
+    """Record GenAI metrics following OTel GenAI semantic conventions.
+    
+    Args:
+        duration_s: Duration in seconds (OTel convention)
+        prompt_tokens: Number of input tokens
+        completion_tokens: Number of output tokens
+        model_name: Model name for attributes
+        provider_name: Provider name for gen_ai.system attribute
+    """
+    if get_metrics_manager is None:
+        return
+    metrics = get_metrics_manager()
+    
+    base_attrs = {
+        ATTR_GEN_AI_OPERATION_NAME: OP_CHAT,
+        ATTR_GEN_AI_SYSTEM: provider_name or SYSTEM_OPENAI,
+    }
+    if model_name:
+        base_attrs[ATTR_GEN_AI_RESPONSE_MODEL] = model_name
+    
+    # Record input tokens with token type attribute
+    if prompt_tokens > 0:
+        input_attrs = {**base_attrs, ATTR_GEN_AI_TOKEN_TYPE: TOKEN_TYPE_INPUT}
+        metrics.get_counter(GENAI_CLIENT_TOKEN_USAGE).add(prompt_tokens, input_attrs)
+    
+    # Record output tokens with token type attribute
+    if completion_tokens > 0:
+        output_attrs = {**base_attrs, ATTR_GEN_AI_TOKEN_TYPE: TOKEN_TYPE_OUTPUT}
+        metrics.get_counter(GENAI_CLIENT_TOKEN_USAGE).add(completion_tokens, output_attrs)
+    
+    # Record duration in seconds
+    metrics.get_histogram(GENAI_CLIENT_OPERATION_DURATION).record(duration_s, base_attrs)
+
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.types import (
     AvailableTool,
@@ -63,6 +157,15 @@ def register_adapter(
         return cls
 
     return decorator
+
+
+def _should_trace_llm() -> bool:
+    return (
+        _LLM_TRACING_AVAILABLE
+        and run_in_trace_span_async is not None
+        and async_run_in_trace_span is not None
+        and SpanKind is not None
+    )
 
 
 @register_adapter(BACKEND_ADAPTERS, "openai")
@@ -246,33 +349,92 @@ class GenericBackend:
 
         url = f"{self._provider.api_base}{endpoint}"
 
-        try:
-            res_data, _ = await self._make_request(url, body, headers)
-            return adapter.parse_response(res_data)
+        async def _perform_request() -> LLMChunk:
+            try:
+                res_data, _ = await self._make_request(url, body, headers)
+                return adapter.parse_response(res_data)
 
-        except httpx.HTTPStatusError as e:
-            raise BackendErrorBuilder.build_http_error(
-                provider=self._provider.name,
-                endpoint=url,
-                response=e.response,
-                headers=dict(e.response.headers.items()),
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
-            ) from e
-        except httpx.RequestError as e:
-            raise BackendErrorBuilder.build_request_error(
-                provider=self._provider.name,
-                endpoint=url,
-                error=e,
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
-            ) from e
+            except httpx.HTTPStatusError as e:
+                raise BackendErrorBuilder.build_http_error(
+                    provider=self._provider.name,
+                    endpoint=url,
+                    response=e.response,
+                    headers=dict(e.response.headers.items()),
+                    model=model.name,
+                    messages=messages,
+                    temperature=temperature,
+                    has_tools=bool(tools),
+                    tool_choice=tool_choice,
+                ) from e
+            except httpx.RequestError as e:
+                raise BackendErrorBuilder.build_request_error(
+                    provider=self._provider.name,
+                    endpoint=url,
+                    error=e,
+                    model=model.name,
+                    messages=messages,
+                    temperature=temperature,
+                    has_tools=bool(tools),
+                    tool_choice=tool_choice,
+                ) from e
+
+        if _should_trace_llm():
+            async def _execute(span_payload: dict[str, Any]) -> LLMChunk:
+                metadata = span_payload["metadata"]
+                attributes = metadata.setdefault("attributes", {})
+                attributes.update(
+                    build_llm_request_attributes(
+                        model_name=model.name,
+                        provider_name=self._provider.name,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        streaming=False,
+                        tool_count=len(tools or []),
+                        endpoint=url,
+                    )
+                )
+                metadata["input"] = {
+                    "message_count": len(messages),
+                    "tool_count": len(tools or []),
+                    "streaming": False,
+                }
+                start_time = time.time()
+                result = await _perform_request()
+                duration_s = time.time() - start_time
+                prompt_tokens = 0
+                completion_tokens = 0
+                if getattr(result, "usage", None):
+                    prompt_tokens = result.usage.prompt_tokens or 0
+                    completion_tokens = result.usage.completion_tokens or 0
+                    attributes[ATTR_GEN_AI_USAGE_INPUT_TOKENS] = prompt_tokens
+                    attributes[ATTR_GEN_AI_USAGE_OUTPUT_TOKENS] = completion_tokens
+                    attributes[ATTR_GEN_AI_USAGE_TOTAL_TOKENS] = (
+                        prompt_tokens + completion_tokens
+                    )
+                _record_genai_metrics(duration_s, prompt_tokens, completion_tokens, model.name, self._provider.name)
+                # Record output (LLM response content)
+                if result and hasattr(result, "content") and result.content:
+                    metadata["output"] = {"content": result.content}
+                return result
+
+            return await run_in_trace_span_async(
+                "LLMRequest",
+                _execute,
+                span_kind=SpanKind.CLIENT,
+                initial_attributes=LLM_REQUEST_ATTRIBUTES,
+            )
+
+        # Record metrics even when tracing is disabled
+        start_time = time.time()
+        result = await _perform_request()
+        duration_s = time.time() - start_time
+        prompt_tokens = 0
+        completion_tokens = 0
+        if getattr(result, "usage", None):
+            prompt_tokens = result.usage.prompt_tokens or 0
+            completion_tokens = result.usage.completion_tokens or 0
+        _record_genai_metrics(duration_s, prompt_tokens, completion_tokens, model.name, self._provider.name)
+        return result
 
     async def complete_streaming(
         self,
@@ -311,33 +473,105 @@ class GenericBackend:
 
         url = f"{self._provider.api_base}{endpoint}"
 
-        try:
-            async for res_data in self._make_streaming_request(url, body, headers):
-                yield adapter.parse_response(res_data)
+        async def _stream_raw() -> AsyncGenerator[LLMChunk, None]:
+            try:
+                async for res_data in self._make_streaming_request(
+                    url, body, headers
+                ):
+                    yield adapter.parse_response(res_data)
 
-        except httpx.HTTPStatusError as e:
-            raise BackendErrorBuilder.build_http_error(
-                provider=self._provider.name,
-                endpoint=url,
-                response=e.response,
-                headers=dict(e.response.headers.items()),
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
-            ) from e
-        except httpx.RequestError as e:
-            raise BackendErrorBuilder.build_request_error(
-                provider=self._provider.name,
-                endpoint=url,
-                error=e,
-                model=model.name,
-                messages=messages,
-                temperature=temperature,
-                has_tools=bool(tools),
-                tool_choice=tool_choice,
-            ) from e
+            except httpx.HTTPStatusError as e:
+                raise BackendErrorBuilder.build_http_error(
+                    provider=self._provider.name,
+                    endpoint=url,
+                    response=e.response,
+                    headers=dict(e.response.headers.items()),
+                    model=model.name,
+                    messages=messages,
+                    temperature=temperature,
+                    has_tools=bool(tools),
+                    tool_choice=tool_choice,
+                ) from e
+            except httpx.RequestError as e:
+                raise BackendErrorBuilder.build_request_error(
+                    provider=self._provider.name,
+                    endpoint=url,
+                    error=e,
+                    model=model.name,
+                    messages=messages,
+                    temperature=temperature,
+                    has_tools=bool(tools),
+                    tool_choice=tool_choice,
+                ) from e
+
+        if not _should_trace_llm():
+            start_time = time.time()
+            last_usage: LLMUsage | None = None
+            async for chunk in _stream_raw():
+                if getattr(chunk, "usage", None):
+                    last_usage = chunk.usage
+                yield chunk
+            duration_s = time.time() - start_time
+            prompt_tokens = last_usage.prompt_tokens or 0 if last_usage else 0
+            completion_tokens = last_usage.completion_tokens or 0 if last_usage else 0
+            _record_genai_metrics(duration_s, prompt_tokens, completion_tokens, model.name, self._provider.name)
+            return
+
+        async def _wrapped() -> AsyncGenerator[LLMChunk, None]:
+            async with async_run_in_trace_span(
+                "LLMRequest",
+                span_kind=SpanKind.CLIENT,
+                initial_attributes=LLM_REQUEST_ATTRIBUTES,
+            ) as (metadata, end_span):
+                attributes = metadata.setdefault("attributes", {})
+                attributes.update(
+                    build_llm_request_attributes(
+                        model_name=model.name,
+                        provider_name=self._provider.name,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        streaming=True,
+                        tool_count=len(tools or []),
+                        endpoint=url,
+                    )
+                )
+                metadata["input"] = {
+                    "message_count": len(messages),
+                    "tool_count": len(tools or []),
+                    "streaming": True,
+                }
+                start_time = time.time()
+                last_usage: LLMUsage | None = None
+                caught: BaseException | None = None
+                output_chunks: list[str] = []
+                try:
+                    async for chunk in _stream_raw():
+                        if getattr(chunk, "usage", None):
+                            last_usage = chunk.usage
+                        # Collect content for output
+                        if hasattr(chunk, "content") and chunk.content:
+                            output_chunks.append(str(chunk.content))
+                        yield chunk
+                except BaseException as exc:
+                    caught = exc
+                    metadata["error"] = exc
+                    raise
+                finally:
+                    duration_s = time.time() - start_time
+                    prompt_tokens = last_usage.prompt_tokens or 0 if last_usage else 0
+                    completion_tokens = last_usage.completion_tokens or 0 if last_usage else 0
+                    if last_usage:
+                        attributes[ATTR_GEN_AI_USAGE_INPUT_TOKENS] = prompt_tokens
+                        attributes[ATTR_GEN_AI_USAGE_OUTPUT_TOKENS] = completion_tokens
+                        attributes[ATTR_GEN_AI_USAGE_TOTAL_TOKENS] = prompt_tokens + completion_tokens
+                    _record_genai_metrics(duration_s, prompt_tokens, completion_tokens, model.name, self._provider.name)
+                    # Record output (streamed content)
+                    if output_chunks:
+                        metadata["output"] = {"content": "".join(output_chunks)}
+                    await end_span()
+
+        async for chunk in _wrapped():
+            yield chunk
 
     class HTTPResponse(NamedTuple):
         data: dict[str, Any]

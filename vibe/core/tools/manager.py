@@ -26,6 +26,13 @@ logger = getLogger("vibe")
 if TYPE_CHECKING:
     from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp, VibeConfig
 
+# Import observability components
+try:
+    from vibe.core.observability.tracing import trace_tool_execution
+except ImportError:
+    def trace_tool_execution(func):
+        return func
+
 
 class NoSuchToolError(Exception):
     """Exception raised when a tool is not found."""

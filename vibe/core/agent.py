@@ -52,6 +52,29 @@ from vibe.core.types import (
     ToolCallEvent,
     ToolResultEvent,
 )
+
+# Import observability components
+try:
+    from vibe.core.observability.tracing import (
+        trace_agent_execution,
+        trace_agent_execution_async,
+        trace_tool_execution,
+        trace_tool_execution_async,
+    )
+except ImportError:
+    # Create dummy decorators if observability is not available
+    def trace_agent_execution(func):
+        return func
+
+    def trace_agent_execution_async(func):
+        return func
+
+    def trace_tool_execution(func):
+        return func
+
+    def trace_tool_execution_async(func):
+        return func
+
 from vibe.core.utils import (
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
@@ -159,6 +182,7 @@ class Agent:
             self.message_observer(msg)
         self._last_observed_message_index = len(self.messages)
 
+    @trace_agent_execution_async
     async def act(self, msg: str) -> AsyncGenerator[BaseEvent]:
         self._clean_message_history()
         async for event in self._conversation_loop(msg):

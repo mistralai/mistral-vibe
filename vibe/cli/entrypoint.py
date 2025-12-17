@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
+from typing import Any
 
 from rich import print as rprint
 
@@ -18,6 +20,20 @@ from vibe.core.programmatic import run_programmatic
 from vibe.core.types import OutputFormat, ResumeSessionInfo
 from vibe.core.utils import ConversationLimitException
 from vibe.setup.onboarding import run_onboarding
+
+# Import observability components
+try:
+    from opentelemetry.trace import SpanKind
+    from vibe.core.observability import ObservabilitySDK
+    from vibe.core.observability.tracing import run_in_trace_span
+    OBSERVABILITY_AVAILABLE = True
+except ImportError:
+    OBSERVABILITY_AVAILABLE = False
+    run_in_trace_span = None
+    SpanKind = None
+
+# Global observability SDK instance
+_observability_sdk = None
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -83,6 +99,61 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
 
+    telemetry_group = parser.add_argument_group("Telemetry")
+    telemetry_group.add_argument(
+        "--telemetry-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable telemetry for this invocation",
+    )
+    telemetry_group.add_argument(
+        "--telemetry-export-target",
+        choices=["console", "otlp", "file", "none"],
+        help="Override telemetry export target",
+    )
+    telemetry_group.add_argument(
+        "--telemetry-config",
+        type=Path,
+        help="Path to observability config file (toml or yaml)",
+    )
+    telemetry_group.add_argument(
+        "--telemetry-development-mode",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle telemetry development mode",
+    )
+    telemetry_group.add_argument(
+        "--telemetry-sampling-rate",
+        type=float,
+        help="Override telemetry sampling rate (0.0-1.0)",
+    )
+    telemetry_group.add_argument(
+        "--telemetry-log-level",
+        type=str,
+        help="Telemetry log level",
+    )
+    telemetry_group.add_argument(
+        "--telemetry-file-path",
+        type=str,
+        help="File path for telemetry file exporter",
+    )
+    telemetry_group.add_argument(
+        "--telemetry-otlp-endpoint",
+        type=str,
+        help="OTLP collector endpoint",
+    )
+    telemetry_group.add_argument(
+        "--telemetry-otlp-headers",
+        type=str,
+        help="JSON string of OTLP headers",
+    )
+    telemetry_group.add_argument(
+        "--telemetry-session-based-trace",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="When enabled, all agent executions share a single trace per CLI session",
+    )
+
     continuation_group = parser.add_mutually_exclusive_group()
     continuation_group.add_argument(
         "-c",
@@ -97,6 +168,32 @@ def parse_arguments() -> argparse.Namespace:
         help="Resume a specific session by its ID (supports partial matching)",
     )
     return parser.parse_args()
+
+
+def _build_telemetry_overrides(args: argparse.Namespace) -> tuple[dict[str, object], Path | None]:
+    overrides: dict[str, object] = {}
+
+    if args.telemetry_enabled is not None:
+        overrides["enabled"] = args.telemetry_enabled
+    if args.telemetry_export_target:
+        overrides["export_target"] = args.telemetry_export_target
+    if args.telemetry_development_mode is not None:
+        overrides["development_mode"] = args.telemetry_development_mode
+    if args.telemetry_sampling_rate is not None:
+        overrides["sampling_rate"] = args.telemetry_sampling_rate
+    if args.telemetry_log_level:
+        overrides["log_level"] = args.telemetry_log_level
+    if args.telemetry_file_path:
+        overrides["file_path"] = args.telemetry_file_path
+    if args.telemetry_otlp_endpoint:
+        overrides["otlp_endpoint"] = args.telemetry_otlp_endpoint
+    if args.telemetry_otlp_headers:
+        overrides["otlp_headers"] = args.telemetry_otlp_headers
+    if args.telemetry_session_based_trace is not None:
+        overrides["session_based_trace"] = args.telemetry_session_based_trace
+
+    telemetry_config_path = args.telemetry_config
+    return overrides, telemetry_config_path
 
 
 def get_prompt_from_stdin() -> str | None:
@@ -132,127 +229,190 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     load_api_keys_from_env()
     args = parse_arguments()
 
-    if args.setup:
-        run_onboarding()
-        sys.exit(0)
-    try:
-        if not CONFIG_FILE.path.exists():
-            try:
-                VibeConfig.save_updates(VibeConfig.create_default())
-            except Exception as e:
-                rprint(f"[yellow]Could not create default config file: {e}[/]")
+    # Initialize observability if available and enabled
+    if OBSERVABILITY_AVAILABLE:
+        overrides, telemetry_config_path = _build_telemetry_overrides(args)
+        try:
+            from vibe.core.observability.config import load_config
 
-        if not INSTRUCTIONS_FILE.path.exists():
-            try:
-                INSTRUCTIONS_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-                INSTRUCTIONS_FILE.path.touch()
-            except Exception as e:
-                rprint(f"[yellow]Could not create instructions file: {e}[/]")
+            obs_config = load_config(
+                cli_overrides=overrides,
+                config_path=telemetry_config_path,
+            )
+            if obs_config.enabled:
+                sdk = ObservabilitySDK(obs_config)
+                if sdk.initialize():
+                    # Store SDK for potential use in other components
+                    global _observability_sdk
+                    _observability_sdk = sdk
+        except Exception as e:
+            # Don't let observability failures break the main application
+            rprint(f"[yellow]Observability initialization failed: {e}[/]")
 
-        if not HISTORY_FILE.path.exists():
-            try:
-                HISTORY_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-                HISTORY_FILE.path.write_text("Hello Vibe!\n", "utf-8")
-            except Exception as e:
-                rprint(f"[yellow]Could not create history file: {e}[/]")
+    def _run_cli_flow() -> None:
+        if args.setup:
+            run_onboarding()
+            sys.exit(0)
 
-        config = load_config_or_exit(args.agent)
+        try:
+            if not CONFIG_FILE.path.exists():
+                try:
+                    VibeConfig.save_updates(VibeConfig.create_default())
+                except Exception as e:
+                    rprint(f"[yellow]Could not create default config file: {e}[/]")
 
-        if args.enabled_tools:
-            config.enabled_tools = args.enabled_tools
+            if not INSTRUCTIONS_FILE.path.exists():
+                try:
+                    INSTRUCTIONS_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+                    INSTRUCTIONS_FILE.path.touch()
+                except Exception as e:
+                    rprint(f"[yellow]Could not create instructions file: {e}[/]")
 
-        loaded_messages = None
-        session_info = None
+            if not HISTORY_FILE.path.exists():
+                try:
+                    HISTORY_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+                    HISTORY_FILE.path.write_text("Hello Vibe!\n", "utf-8")
+                except Exception as e:
+                    rprint(f"[yellow]Could not create history file: {e}[/]")
 
-        if args.continue_session or args.resume:
-            if not config.session_logging.enabled:
-                rprint(
-                    "[red]Session logging is disabled. "
-                    "Enable it in config to use --continue or --resume[/]"
-                )
-                sys.exit(1)
+            config = load_config_or_exit(args.agent)
 
-            session_to_load = None
-            if args.continue_session:
-                session_to_load = InteractionLogger.find_latest_session(
-                    config.session_logging
-                )
-                if not session_to_load:
+            if args.enabled_tools:
+                config.enabled_tools = args.enabled_tools
+
+            loaded_messages = None
+            session_info = None
+
+            if args.continue_session or args.resume:
+                if not config.session_logging.enabled:
                     rprint(
-                        f"[red]No previous sessions found in "
-                        f"{config.session_logging.save_dir}[/]"
+                        "[red]Session logging is disabled. "
+                        "Enable it in config to use --continue or --resume[/]"
                     )
+                    sys.exit(1)
+
+                session_to_load = None
+                if args.continue_session:
+                    session_to_load = InteractionLogger.find_latest_session(
+                        config.session_logging
+                    )
+                    if not session_to_load:
+                        rprint(
+                            f"[red]No previous sessions found in "
+                            f"{config.session_logging.save_dir}[/]"
+                        )
+                        sys.exit(1)
+                else:
+                    session_to_load = InteractionLogger.find_session_by_id(
+                        args.resume, config.session_logging
+                    )
+                    if not session_to_load:
+                        rprint(
+                            f"[red]Session '{args.resume}' not found in "
+                            f"{config.session_logging.save_dir}[/]"
+                        )
+                        sys.exit(1)
+
+                try:
+                    loaded_messages, metadata = InteractionLogger.load_session(
+                        session_to_load
+                    )
+                    session_id = metadata.get("session_id", "unknown")[:8]
+                    session_time = metadata.get("start_time", "unknown time")
+
+                    session_info = ResumeSessionInfo(
+                        type="continue" if args.continue_session else "resume",
+                        session_id=session_id,
+                        session_time=session_time,
+                    )
+                except Exception as e:
+                    rprint(f"[red]Failed to load session: {e}[/]")
+                    sys.exit(1)
+
+            stdin_prompt = get_prompt_from_stdin()
+            if args.prompt is not None:
+                programmatic_prompt = args.prompt or stdin_prompt
+                if not programmatic_prompt:
+                    print(
+                        "Error: No prompt provided for programmatic mode",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                output_format = OutputFormat(
+                    args.output if hasattr(args, "output") else "text"
+                )
+
+                try:
+                    final_response = run_programmatic(
+                        config=config,
+                        prompt=programmatic_prompt,
+                        max_turns=args.max_turns,
+                        max_price=args.max_price,
+                        output_format=output_format,
+                        previous_messages=loaded_messages,
+                    )
+                    if final_response:
+                        print(final_response)
+                    sys.exit(0)
+                except ConversationLimitException as e:
+                    print(e, file=sys.stderr)
+                    sys.exit(1)
+                except RuntimeError as e:
+                    print(f"Error: {e}", file=sys.stderr)
                     sys.exit(1)
             else:
-                session_to_load = InteractionLogger.find_session_by_id(
-                    args.resume, config.session_logging
+                run_textual_ui(
+                    config,
+                    auto_approve=args.auto_approve,
+                    enable_streaming=True,
+                    initial_prompt=args.initial_prompt or stdin_prompt,
+                    loaded_messages=loaded_messages,
+                    session_info=session_info,
                 )
-                if not session_to_load:
-                    rprint(
-                        f"[red]Session '{args.resume}' not found in "
-                        f"{config.session_logging.save_dir}[/]"
-                    )
-                    sys.exit(1)
 
-            try:
-                loaded_messages, metadata = InteractionLogger.load_session(
-                    session_to_load
-                )
-                session_id = metadata.get("session_id", "unknown")[:8]
-                session_time = metadata.get("start_time", "unknown time")
+        except (KeyboardInterrupt, EOFError):
+            rprint("\n[dim]Bye![/]")
+            sys.exit(0)
 
-                session_info = ResumeSessionInfo(
-                    type="continue" if args.continue_session else "resume",
-                    session_id=session_id,
-                    session_time=session_time,
-                )
-            except Exception as e:
-                rprint(f"[red]Failed to load session: {e}[/]")
-                sys.exit(1)
+    def _maybe_trace_user_interaction() -> None:
+        can_trace = (
+            OBSERVABILITY_AVAILABLE
+            and run_in_trace_span is not None
+            and SpanKind is not None
+            and _observability_sdk is not None
+            and _observability_sdk.is_initialized()
+        )
+        if not can_trace:
+            _run_cli_flow()
+            return
 
-        stdin_prompt = get_prompt_from_stdin()
-        if args.prompt is not None:
-            programmatic_prompt = args.prompt or stdin_prompt
-            if not programmatic_prompt:
-                print(
-                    "Error: No prompt provided for programmatic mode", file=sys.stderr
-                )
-                sys.exit(1)
-            output_format = OutputFormat(
-                args.output if hasattr(args, "output") else "text"
+        interaction_mode = (
+            "setup"
+            if args.setup
+            else ("programmatic" if args.prompt is not None else "interactive")
+        )
+
+        def _execute(span_payload: dict[str, Any]) -> None:
+            metadata = span_payload["metadata"]
+            attributes = metadata.setdefault("attributes", {})
+            attributes.update(
+                {
+                    "cli.mode": interaction_mode,
+                    "cli.resume": bool(args.continue_session or args.resume),
+                    "cli.agent": args.agent or "default",
+                }
             )
+            metadata["input"] = {"argv": sys.argv[1:], "agent": args.agent}
+            _run_cli_flow()
 
-            try:
-                final_response = run_programmatic(
-                    config=config,
-                    prompt=programmatic_prompt,
-                    max_turns=args.max_turns,
-                    max_price=args.max_price,
-                    output_format=output_format,
-                    previous_messages=loaded_messages,
-                )
-                if final_response:
-                    print(final_response)
-                sys.exit(0)
-            except ConversationLimitException as e:
-                print(e, file=sys.stderr)
-                sys.exit(1)
-            except RuntimeError as e:
-                print(f"Error: {e}", file=sys.stderr)
-                sys.exit(1)
-        else:
-            run_textual_ui(
-                config,
-                auto_approve=args.auto_approve,
-                enable_streaming=True,
-                initial_prompt=args.initial_prompt or stdin_prompt,
-                loaded_messages=loaded_messages,
-                session_info=session_info,
-            )
+        run_in_trace_span(
+            "UserInteraction",
+            _execute,
+            span_kind=SpanKind.SERVER,
+            initial_attributes={"genai.operation.name": "user.interaction"},
+        )
 
-    except (KeyboardInterrupt, EOFError):
-        rprint("\n[dim]Bye![/]")
-        sys.exit(0)
+    _maybe_trace_user_interaction()
 
 
 if __name__ == "__main__":

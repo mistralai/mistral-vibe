@@ -11,6 +11,16 @@ from typing import Any, ClassVar, cast, get_args, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+# Import observability components
+try:
+    from vibe.core.observability.tracing import trace_tool_execution, trace_tool_execution_async
+except ImportError:
+    def trace_tool_execution(func):
+        return func
+    
+    def trace_tool_execution_async(func):
+        return func
+
 ARGS_COUNT = 4
 
 
@@ -134,6 +144,7 @@ class BaseTool[
 
         return None
 
+    @trace_tool_execution_async
     async def invoke(self, **raw: Any) -> ToolResult:
         """Validate arguments and run the tool.
         Pattern checking is now handled by Agent._should_execute_tool.
