@@ -32,7 +32,7 @@ from vibe.core.observability.metrics import (
     init_system_metrics,
     reset_meter,
 )
-from vibe.core.observability.tracing import set_tracing_enabled
+from vibe.core.observability.tracing import set_tracing_enabled, set_session_based_trace
 
 if TYPE_CHECKING:
     pass
@@ -86,6 +86,9 @@ class ObservabilitySDK:
             self._initialize_tracing()
             self._initialize_metrics()
             self._initialize_logging()
+            
+            # Set session-based trace mode
+            set_session_based_trace(self.config.session_based_trace)
             
             self._initialized = True
             self.logger.info("Mistral Vibe Observability SDK initialized successfully")

@@ -24,14 +24,16 @@ vibe --telemetry-enabled --telemetry-export-target console
 | `--telemetry-otlp-headers` | JSON headers for OTLP |
 | `--telemetry-file-path` | Output file path |
 | `--telemetry-log-level` | Log level |
+| `--telemetry-session-based-trace` | Put all agent executions in one trace |
 
 ### 2. Environment Variables
 
 ```bash
 export MISTRAL_VIBE_TELEMETRY_ENABLED=true
 export MISTRAL_VIBE_TELEMETRY_EXPORT_TARGET=otlp
-export MISTRAL_VIBE_TELEMETRY_OTLP_ENDPOINT=http://localhost:4318
+export MISTRAL_VIBE_TELEMETRY_OTLP_ENDPOINT=http://localhost:4317
 export MISTRAL_VIBE_TELEMETRY_SAMPLING_RATE=1.0
+export MISTRAL_VIBE_TELEMETRY_SESSION_BASED_TRACE=true  # optional
 ```
 
 ### 3. Config File
@@ -56,6 +58,9 @@ file_path = "telemetry.jsonl"
 metrics_enabled = true
 tracing_enabled = true
 logging_enabled = true
+
+# Trace behavior
+session_based_trace = false  # true = one trace per session; false = one trace per agent execution
 ```
 
 ## Export Targets
@@ -113,4 +118,39 @@ sdk.initialize()
 # Your code here...
 
 sdk.shutdown()
+```
+
+## Trace Modes
+
+### Default: Independent Traces (session_based_trace=false)
+
+Each agent execution creates a **separate trace**. This is useful when you want to analyze individual conversations independently.
+
+```
+Trace 1: AgentExecution (conversation 1)
+├── LLMRequest
+└── ToolExecution
+
+Trace 2: AgentExecution (conversation 2)
+├── LLMRequest
+└── LLMRequest
+```
+
+### Session-Based Trace (session_based_trace=true)
+
+All agent executions within a CLI session share a **single trace**. Useful for analyzing an entire user session.
+
+```
+UserInteraction (single trace for entire session)
+├── AgentExecution (conversation 1)
+│   ├── LLMRequest
+│   └── ToolExecution
+└── AgentExecution (conversation 2)
+    ├── LLMRequest
+    └── LLMRequest
+```
+
+Enable with:
+```bash
+vibe --telemetry-enabled --telemetry-session-based-trace
 ```

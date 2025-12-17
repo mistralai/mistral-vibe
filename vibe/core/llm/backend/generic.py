@@ -412,6 +412,9 @@ class GenericBackend:
                         prompt_tokens + completion_tokens
                     )
                 _record_genai_metrics(duration_s, prompt_tokens, completion_tokens, model.name, self._provider.name)
+                # Record output (LLM response content)
+                if result and hasattr(result, "content") and result.content:
+                    metadata["output"] = {"content": result.content}
                 return result
 
             return await run_in_trace_span_async(
@@ -540,10 +543,14 @@ class GenericBackend:
                 start_time = time.time()
                 last_usage: LLMUsage | None = None
                 caught: BaseException | None = None
+                output_chunks: list[str] = []
                 try:
                     async for chunk in _stream_raw():
                         if getattr(chunk, "usage", None):
                             last_usage = chunk.usage
+                        # Collect content for output
+                        if hasattr(chunk, "content") and chunk.content:
+                            output_chunks.append(str(chunk.content))
                         yield chunk
                 except BaseException as exc:
                     caught = exc
@@ -558,6 +565,9 @@ class GenericBackend:
                         attributes[ATTR_GEN_AI_USAGE_OUTPUT_TOKENS] = completion_tokens
                         attributes[ATTR_GEN_AI_USAGE_TOTAL_TOKENS] = prompt_tokens + completion_tokens
                     _record_genai_metrics(duration_s, prompt_tokens, completion_tokens, model.name, self._provider.name)
+                    # Record output (streamed content)
+                    if output_chunks:
+                        metadata["output"] = {"content": "".join(output_chunks)}
                     await end_span()
 
         async for chunk in _wrapped():

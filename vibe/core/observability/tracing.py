@@ -11,8 +11,8 @@ from contextlib import asynccontextmanager
 from functools import wraps
 from typing import Any, TypedDict
 
-from opentelemetry import trace
-from opentelemetry.trace import Span, SpanKind, Status, StatusCode, Tracer
+from opentelemetry import trace, context
+from opentelemetry.trace import Span, SpanKind, Status, StatusCode, Tracer, INVALID_SPAN
 
 from vibe.core.observability.metrics import (
     AGENT_EXECUTION_COUNT,
@@ -66,12 +66,19 @@ LLM_REQUEST_ATTRIBUTES = get_llm_request_attributes()
 
 
 _TRACING_ENABLED = False
+_SESSION_BASED_TRACE = False
 
 
 def set_tracing_enabled(value: bool) -> None:
     """Set global tracing state (used by the SDK)."""
     global _TRACING_ENABLED
     _TRACING_ENABLED = value
+
+
+def set_session_based_trace(value: bool) -> None:
+    """Set session-based trace mode"""
+    global _SESSION_BASED_TRACE
+    _SESSION_BASED_TRACE = value
 
 
 def _env_tracing_enabled() -> bool:
@@ -83,6 +90,16 @@ def _env_tracing_enabled() -> bool:
 
 def _is_tracing_enabled() -> bool:
     return _TRACING_ENABLED or _env_tracing_enabled()
+
+
+def _is_session_based_trace() -> bool:
+    """Check if session-based trace mode is enabled."""
+    if _SESSION_BASED_TRACE:
+        return True
+    env_value = os.environ.get("MISTRAL_VIBE_TELEMETRY_SESSION_BASED_TRACE")
+    if env_value is None:
+        return False
+    return env_value.lower() in {"1", "true", "yes"}
 
 
 def get_tracer_provider() -> Tracer:
@@ -261,7 +278,17 @@ async def run_in_trace_span_async(
     func: Callable[[SpanPayload], Awaitable[Any]],
     span_kind: SpanKind = SpanKind.INTERNAL,
     initial_attributes: dict[str, Any] | None = None,
+    as_root_span: bool = False,
 ) -> Any:
+    """Execute async function within a trace span.
+
+    Args:
+        name: Span name
+        func: Async function to execute
+        span_kind: OpenTelemetry span kind
+        initial_attributes: Initial span attributes
+        as_root_span: If True, creates a new root span (independent trace)
+    """
     metadata: SpanMetadata = {
         "name": name,
         "attributes": dict(initial_attributes or {}),
@@ -283,7 +310,14 @@ async def run_in_trace_span_async(
         return await _execute_without_tracing()
 
     tracer = get_tracer_provider()
-    span_cm = tracer.start_as_current_span(name, kind=span_kind)
+
+    # If as_root_span is True, create span with empty context to start new trace
+    if as_root_span:
+        empty_context = trace.set_span_in_context(INVALID_SPAN)
+        span_cm = tracer.start_as_current_span(name, kind=span_kind, context=empty_context)
+    else:
+        span_cm = tracer.start_as_current_span(name, kind=span_kind)
+
     span = span_cm.__enter__()
     finalized = False
 
@@ -347,7 +381,17 @@ async def async_run_in_trace_span(
     name: str,
     span_kind: SpanKind = SpanKind.INTERNAL,
     initial_attributes: dict[str, Any] | None = None,
+    as_root_span: bool = False,
 ):
+    """Create a trace span context manager.
+
+    Args:
+        name: Span name
+        span_kind: OpenTelemetry span kind
+        initial_attributes: Initial span attributes
+        as_root_span: If True, creates a new root span (independent trace)
+                      instead of a child span of the current context
+    """
     metadata: SpanMetadata = {
         "name": name,
         "attributes": dict(initial_attributes or {}),
@@ -361,7 +405,15 @@ async def async_run_in_trace_span(
         return
 
     tracer = get_tracer_provider()
-    with tracer.start_as_current_span(name, kind=span_kind) as span:
+
+    # If as_root_span is True, create span with empty context to start new trace
+    if as_root_span:
+        empty_context = trace.set_span_in_context(INVALID_SPAN)
+        span_context = tracer.start_as_current_span(name, kind=span_kind, context=empty_context)
+    else:
+        span_context = tracer.start_as_current_span(name, kind=span_kind)
+
+    with span_context as span:
         finalized = False
 
         async def end_span() -> None:
@@ -419,24 +471,44 @@ def trace_agent_execution(func: Callable) -> Callable:
 
 
 def trace_agent_execution_async(func: Callable) -> Callable:
+    """Decorator for async agent execution tracing.
+
+    By default (session_based_trace=False), each agent execution creates
+    an independent trace. When session_based_trace=True, agent executions
+    are nested as child spans under the parent trace.
+    """
     if inspect.isasyncgenfunction(func):
 
         @wraps(func)
         async def generator_wrapper(*args: Any, **kwargs: Any):
+            # Create independent trace unless session_based_trace is enabled
+            as_root = not _is_session_based_trace()
             async with async_run_in_trace_span(
                 "AgentExecution",
                 span_kind=SpanKind.SERVER,
                 initial_attributes=AGENT_EXECUTION_ATTRIBUTES,
+                as_root_span=as_root,
             ) as (metadata, end_span):
                 attributes = metadata.setdefault("attributes", {}).copy()
                 metadata["attributes"] = attributes
                 agent = args[0] if args else None
                 attributes.update(_agent_attribute_defaults(agent, kwargs))
+                
+                # Record input (user prompt)
+                # args[1] is typically the user message for agent.act(msg)
+                if len(args) > 1:
+                    metadata["input"] = {"prompt": args[1]}
+                elif "msg" in kwargs:
+                    metadata["input"] = {"prompt": kwargs["msg"]}
 
                 start_time = time.time()
                 metrics = get_metrics_manager()
+                output_events: list[str] = []
                 try:
                     async for value in func(*args, **kwargs):
+                        # Collect output events for tracing
+                        if hasattr(value, "content") and value.content:
+                            output_events.append(str(value.content))
                         yield value
                 except Exception as exc:
                     duration_ms = (time.time() - start_time) * 1000
@@ -450,6 +522,9 @@ def trace_agent_execution_async(func: Callable) -> Callable:
                     attributes[ATTR_GEN_AI_USAGE_DURATION_MS] = duration_ms
                     metrics.get_counter(AGENT_EXECUTION_COUNT).add(1)
                     metrics.get_histogram(AGENT_EXECUTION_DURATION).record(duration_ms)
+                    # Record output (agent response)
+                    if output_events:
+                        metadata["output"] = {"response": "".join(output_events)}
                 finally:
                     await end_span()
 
@@ -462,6 +537,12 @@ def trace_agent_execution_async(func: Callable) -> Callable:
             attributes = metadata.setdefault("attributes", {})
             agent = args[0] if args else None
             attributes.update(_agent_attribute_defaults(agent, kwargs))
+            
+            # Record input (user prompt)
+            if len(args) > 1:
+                metadata["input"] = {"prompt": args[1]}
+            elif "msg" in kwargs:
+                metadata["input"] = {"prompt": kwargs["msg"]}
 
             start_time = time.time()
             metrics = get_metrics_manager()
@@ -479,6 +560,12 @@ def trace_agent_execution_async(func: Callable) -> Callable:
                 attributes[ATTR_GEN_AI_USAGE_DURATION_MS] = duration_ms
                 metrics.get_counter(AGENT_EXECUTION_COUNT).add(1)
                 metrics.get_histogram(AGENT_EXECUTION_DURATION).record(duration_ms)
+                # Record output
+                if result is not None:
+                    if hasattr(result, "content"):
+                        metadata["output"] = {"response": str(result.content)}
+                    else:
+                        metadata["output"] = {"response": str(result)}
                 return result
 
         return await run_in_trace_span_async(
@@ -486,6 +573,7 @@ def trace_agent_execution_async(func: Callable) -> Callable:
             _execute,
             span_kind=SpanKind.SERVER,
             initial_attributes=AGENT_EXECUTION_ATTRIBUTES,
+            as_root_span=not _is_session_based_trace(),
         )
 
     return wrapper
@@ -520,6 +608,9 @@ def trace_tool_execution(func: Callable) -> Callable:
                 attributes[ATTR_TOOL_DURATION_MS] = duration_ms
                 metrics.get_counter(TOOL_EXECUTION_COUNT).add(1)
                 metrics.get_histogram(TOOL_EXECUTION_DURATION).record(duration_ms)
+                # Record output
+                if result is not None:
+                    metadata["output"] = _sanitize_metadata_payload({"result": result})
                 return result
 
         return run_in_trace_span(
@@ -553,8 +644,10 @@ def trace_tool_execution_async(func: Callable) -> Callable:
 
                 start_time = time.time()
                 metrics = get_metrics_manager()
+                output_values: list[Any] = []
                 try:
                     async for value in func(*args, **kwargs):
+                        output_values.append(value)
                         yield value
                 except Exception as exc:
                     duration_ms = (time.time() - start_time) * 1000
@@ -568,6 +661,9 @@ def trace_tool_execution_async(func: Callable) -> Callable:
                     attributes[ATTR_TOOL_DURATION_MS] = duration_ms
                     metrics.get_counter(TOOL_EXECUTION_COUNT).add(1)
                     metrics.get_histogram(TOOL_EXECUTION_DURATION).record(duration_ms)
+                    # Record output
+                    if output_values:
+                        metadata["output"] = _sanitize_metadata_payload({"result": output_values})
                 finally:
                     await end_span()
 
@@ -601,6 +697,9 @@ def trace_tool_execution_async(func: Callable) -> Callable:
                 attributes[ATTR_TOOL_DURATION_MS] = duration_ms
                 metrics.get_counter(TOOL_EXECUTION_COUNT).add(1)
                 metrics.get_histogram(TOOL_EXECUTION_DURATION).record(duration_ms)
+                # Record output
+                if result is not None:
+                    metadata["output"] = _sanitize_metadata_payload({"result": result})
                 return result
 
         return await run_in_trace_span_async(

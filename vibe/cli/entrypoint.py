@@ -147,6 +147,12 @@ def parse_arguments() -> argparse.Namespace:
         type=str,
         help="JSON string of OTLP headers",
     )
+    telemetry_group.add_argument(
+        "--telemetry-session-based-trace",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="When enabled, all agent executions share a single trace per CLI session",
+    )
 
     continuation_group = parser.add_mutually_exclusive_group()
     continuation_group.add_argument(
@@ -183,6 +189,8 @@ def _build_telemetry_overrides(args: argparse.Namespace) -> tuple[dict[str, obje
         overrides["otlp_endpoint"] = args.telemetry_otlp_endpoint
     if args.telemetry_otlp_headers:
         overrides["otlp_headers"] = args.telemetry_otlp_headers
+    if args.telemetry_session_based_trace is not None:
+        overrides["session_based_trace"] = args.telemetry_session_based_trace
 
     telemetry_config_path = args.telemetry_config
     return overrides, telemetry_config_path

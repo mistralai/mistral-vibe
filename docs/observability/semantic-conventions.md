@@ -90,6 +90,22 @@ Values for `gen_ai.operation.name`: `chat`, `agent.execution`, `tool.execution`,
 | `error` | bool | Error occurred |
 | `error.message` | string | Error message |
 
+### Input/Output (all spans)
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `input-json` | string | JSON-serialized input data |
+| `output-json` | string | JSON-serialized output data |
+
+**Content by span type:**
+
+| Span Type | `input-json` | `output-json` |
+|-----------|--------------|---------------|
+| AgentExecution | `{"prompt": "user message"}` | `{"response": "agent response"}` |
+| ToolExecution | Tool kwargs | `{"result": ...}` |
+| LLMRequest | `{"message_count": N, "tool_count": N, "streaming": bool}` | `{"content": "LLM response"}` |
+| UserInteraction | `{"argv": [...], "agent": "..."}` | - |
+
 ## Token Data Source
 
 Tokens extracted from LLM API response `usage` field:

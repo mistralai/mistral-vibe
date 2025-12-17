@@ -90,6 +90,13 @@ class ObservabilityConfig(BaseModel):
         description="Enable structured logging"
     )
 
+    # Trace behavior
+    session_based_trace: bool = Field(
+        default=False,
+        description="When enabled, all agent executions within a CLI session share a single trace. "
+                    "When disabled (default), each agent execution creates a separate trace."
+    )
+
 
 class ObservabilitySettings(BaseSettings):
     """Settings loaded from environment variables"""
@@ -154,6 +161,11 @@ class ObservabilitySettings(BaseSettings):
     logging_enabled: bool | None = Field(
         default=None,
         description="Logging enabled (MISTRAL_VIBE_TELEMETRY_LOGGING_ENABLED)"
+    )
+
+    session_based_trace: bool | None = Field(
+        default=None,
+        description="Session-based trace (MISTRAL_VIBE_TELEMETRY_SESSION_BASED_TRACE)"
     )
 
 
