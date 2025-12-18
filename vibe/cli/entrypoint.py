@@ -5,6 +5,7 @@ import sys
 
 from rich import print as rprint
 
+from vibe.cli.session_selector import select_session
 from vibe.cli.textual_ui.app import run_textual_ui
 from vibe.core.config import (
     MissingAPIKeyError,
@@ -93,8 +94,12 @@ def parse_arguments() -> argparse.Namespace:
     )
     continuation_group.add_argument(
         "--resume",
+        nargs="?",
+        const=True,
+        default=None,
         metavar="SESSION_ID",
-        help="Resume a specific session by its ID (supports partial matching)",
+        help="Resume a session. Without ID: show list to select from. "
+        "With ID: resume that specific session (supports partial matching)",
     )
     return parser.parse_args()
 
@@ -183,7 +188,13 @@ def main() -> None:  # noqa: PLR0912, PLR0915
                         f"{config.session_logging.save_dir}[/]"
                     )
                     sys.exit(1)
+            elif args.resume is True:
+                # --resume without argument: show interactive selection
+                session_to_load = select_session(config.session_logging)
+                if not session_to_load:
+                    sys.exit(0)
             else:
+                # --resume SESSION_ID: find by ID
                 session_to_load = InteractionLogger.find_session_by_id(
                     args.resume, config.session_logging
                 )
