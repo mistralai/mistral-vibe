@@ -1,0 +1,48 @@
+/* =============================================================================
+   Session Selector Styles
+   ============================================================================= */
+
+Screen {
+    layout: vertical;
+}
+
+#selector-outer {
+    width: 100%;
+    height: 100%;
+    padding: 1 2;
+}
+
+#selector-title {
+    width: 100%;
+    text-align: center;
+    text-style: bold;
+    padding: 1;
+}
+
+#session-list {
+    width: 100%;
+    height: 1fr;
+    border: round #555555;
+    padding: 1;
+}
+
+.session-item {
+    width: 100%;
+    height: auto;
+}
+
+.session-item.selected {
+    color: $primary;
+    text-style: bold;
+}
+
+.session-item.unselected {
+    color: $text-muted;
+}
+
+#selector-help {
+    width: 100%;
+    text-align: center;
+    color: $text-muted;
+    padding: 1;
+}

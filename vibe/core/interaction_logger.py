@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import getpass
 import json
@@ -16,6 +17,18 @@ from vibe.core.utils import is_windows
 if TYPE_CHECKING:
     from vibe.core.config import SessionLoggingConfig, VibeConfig
     from vibe.core.tools.manager import ToolManager
+
+
+@dataclass
+class SessionListEntry:
+    """Represents a session entry for listing purposes."""
+
+    session_id: str
+    filepath: Path
+    start_time: datetime
+    working_directory: str | None
+    message_count: int
+    git_branch: str | None
 
 
 class InteractionLogger:
@@ -243,3 +256,99 @@ class InteractionLogger:
         metadata = data.get("metadata", {})
 
         return messages, metadata
+
+    @staticmethod
+    def list_sessions(
+        config: SessionLoggingConfig, limit: int = 20
+    ) -> list[SessionListEntry]:
+        """List available sessions, sorted by most recent first.
+
+        Args:
+            config: Session logging configuration.
+            limit: Maximum number of sessions to return.
+
+        Returns:
+            List of SessionListEntry objects, most recent first.
+        """
+        save_dir = Path(config.save_dir)
+        if not save_dir.exists():
+            return []
+
+        pattern = f"{config.session_prefix}_*.json"
+        session_files = list(save_dir.glob(pattern))
+
+        if not session_files:
+            return []
+
+        # Sort by modification time, most recent first
+        session_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+        entries: list[SessionListEntry] = []
+        for filepath in session_files[:limit]:
+            try:
+                with filepath.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                if not isinstance(data, dict):
+                    # Corrupted session file (unexpected JSON shape)
+                    continue
+
+                metadata = data.get("metadata")
+                if not isinstance(metadata, dict):
+                    # Corrupted session file (missing/invalid metadata)
+                    continue
+
+                session_id_raw = metadata.get("session_id")
+                session_id = (str(session_id_raw) if session_id_raw is not None else "unknown")[
+                    :8
+                ]
+
+                start_time_value = metadata.get("start_time")
+                match start_time_value:
+                    case str() as start_time_str if start_time_str:
+                        try:
+                            start_time = datetime.fromisoformat(start_time_str)
+                        except ValueError:
+                            # Corrupted session file (invalid timestamp)
+                            continue
+                    case None:
+                        # Fallback to file modification time
+                        try:
+                            start_time = datetime.fromtimestamp(filepath.stat().st_mtime)
+                        except (OSError, OverflowError, ValueError):
+                            # Corrupted or unrepresentable file timestamp
+                            continue
+                    case _:
+                        # Corrupted session file (unexpected timestamp type)
+                        continue
+
+                environment = metadata.get("environment")
+                working_directory = (
+                    environment.get("working_directory")
+                    if isinstance(environment, dict)
+                    else None
+                )
+                if working_directory is not None and not isinstance(working_directory, str):
+                    working_directory = None
+
+                message_count_raw = metadata.get("total_messages", 0)
+                message_count = message_count_raw if isinstance(message_count_raw, int) else 0
+
+                git_branch_raw = metadata.get("git_branch")
+                git_branch = git_branch_raw if isinstance(git_branch_raw, str) else None
+
+                entries.append(
+                    SessionListEntry(
+                        session_id=session_id,
+                        filepath=filepath,
+                        start_time=start_time,
+                        working_directory=working_directory,
+                        message_count=message_count,
+                        git_branch=git_branch,
+                    )
+                )
+            except (json.JSONDecodeError, OSError, OverflowError):
+                # Skip corrupted or unreadable session files
+                continue
+
+        return entries
