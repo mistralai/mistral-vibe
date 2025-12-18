@@ -105,7 +105,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def check_and_resolve_trusted_folder() -> None:
     cwd = Path.cwd()
-    if not (cwd / ".vibe").exists():
+    if not (cwd / ".vibe").exists() or cwd.resolve() == Path.home().resolve():
         return
 
     is_folder_trusted = trusted_folders_manager.is_trusted(cwd)

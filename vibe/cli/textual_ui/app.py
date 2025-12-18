@@ -1130,7 +1130,7 @@ class VibeApp(App):
             warning = (
                 f"⚠ WARNING: {reason}\n\nRunning in this location is not recommended."
             )
-            await self._mount_and_scroll(UserCommandMessage(warning))
+            await self._mount_and_scroll(WarningMessage(warning, show_border=False))
 
     async def _finalize_current_streaming_message(self) -> None:
         if self._current_streaming_message is None:

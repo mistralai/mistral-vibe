@@ -189,12 +189,14 @@ class ErrorMessage(Static):
 
 
 class WarningMessage(Static):
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, show_border: bool = True) -> None:
         super().__init__()
         self.add_class("warning-message")
         self._message = message
+        self._show_border = show_border
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="warning-container"):
-            yield ExpandingBorder(classes="warning-border")
+            if self._show_border:
+                yield ExpandingBorder(classes="warning-border")
             yield Static(self._message, markup=False, classes="warning-content")
