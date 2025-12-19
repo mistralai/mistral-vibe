@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
+import base64
 from textual.app import App
 
-from vibe.cli.clipboard import copy_selection_to_clipboard
-
+from vibe.cli.clipboard import _copy_osc52, copy_selection_to_clipboard
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
@@ -225,3 +225,21 @@ def test_preview_shortening(
     notify_text = mock_app.notify.call_args[0][0]
     assert "copied to clipboard" in notify_text
     assert len(notify_text) < len(long_text)
+
+
+@patch("builtins.open", new_callable=mock_open)
+def test_copy_osc52_writes_correct_sequence(
+    mock_file: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TMUX", raising=False)
+    test_text = "héllo wörld "
+
+    _copy_osc52(test_text)
+
+    encoded = base64.b64encode(test_text.encode("utf-8")).decode("ascii")
+    expected_seq = f"\033]52;c;{encoded}\a"
+    mock_file.assert_called_once_with("/dev/tty", "w")
+    handle = mock_file()
+    handle.write.assert_called_once_with(expected_seq)
+    handle.flush.assert_called_once()
+
