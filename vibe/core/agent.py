@@ -213,9 +213,10 @@ class Agent:
                     # Don't inject into tool messages as it creates invalid sequences
                     # Tool messages should only be followed by assistant messages
                     if last_msg.role == Role.tool:
-                        # Skip injection when last message is from a tool
-                        # This prevents invalid sequences like: assistant -> tool -> tool (modified)
-                        pass
+                        # When last message is from a tool, we need to add an assistant message first
+                        # to maintain valid sequence: assistant -> tool -> assistant (with injected content)
+                        assistant_msg = LLMMessage(role=Role.assistant, content=result.message)
+                        self.messages.append(assistant_msg)
                     elif last_msg.content:
                         last_msg.content += f"\n\n{result.message}"
                     else:

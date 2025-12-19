@@ -689,6 +689,13 @@ class VibeApp(App):  # noqa: PLR0904
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
+    async def _show_version(self) -> None:
+        version_text = f"""## Mistral Vibe
+
+- **Version**: {CORE_VERSION}
+"""
+        await self._mount_and_scroll(UserCommandMessage(version_text))
+
     async def _show_config(self) -> None:
         """Switch to the configuration app in the bottom panel."""
         if self._current_bottom_app == BottomApp.Config:
