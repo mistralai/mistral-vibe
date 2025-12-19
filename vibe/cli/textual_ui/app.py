@@ -9,7 +9,7 @@ from typing import Any, ClassVar, assert_never
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalScroll
-from textual.events import AppBlur, AppFocus, MouseUp
+from textual.events import AppBlur, AppFocus, MouseDown, MouseMove, MouseUp
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -17,7 +17,6 @@ from vibe import __version__ as CORE_VERSION
 from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.terminal_setup import setup_terminal
-from vibe.cli.windows_console import get_console_manager, refresh_console_if_windows
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
@@ -47,6 +46,11 @@ from vibe.cli.update_notifier import (
     VersionUpdateGateway,
     get_update_if_available,
 )
+from vibe.cli.windows_console import (
+    describe_console_modes,
+    get_console_manager,
+    refresh_console_if_windows,
+)
 from vibe.core.agent import Agent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
@@ -68,7 +72,7 @@ class BottomApp(StrEnum):
     Input = auto()
 
 
-class VibeApp(App):
+class VibeApp(App):  # noqa: PLR0904
     ENABLE_COMMAND_PALETTE = False
     CSS_PATH = "app.tcss"
 
@@ -143,6 +147,9 @@ class VibeApp(App):
         # Windows console mode management to prevent corruption
         self._console_manager = get_console_manager()
         self._console_refresh_task: asyncio.Task | None = None
+        self._last_console_refresh_time: float = 0.0
+        self._last_mouse_event_time: float = time.monotonic()
+        self._app_focused = True
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="chat"):
@@ -202,6 +209,9 @@ class VibeApp(App):
             self._ensure_agent_init_task()
 
         # Start Windows console mode refresh task to prevent corruption
+        # Do an immediate refresh first, then start periodic task
+        if self._console_manager:
+            self._console_manager.refresh_console_modes()
         self._start_console_refresh_task()
 
     def _process_initial_prompt(self) -> None:
@@ -891,6 +901,10 @@ class VibeApp(App):
                 ErrorMessage(result.message, collapsed=self._tools_collapsed)
             )
 
+    async def _show_console_debug(self) -> None:
+        message = self._build_console_debug_message("command")
+        await self._mount_and_scroll(UserCommandMessage(message))
+
     async def _switch_to_config_app(self) -> None:
         if self._current_bottom_app == BottomApp.Config:
             return
@@ -1126,6 +1140,8 @@ class VibeApp(App):
         self.exit(result=self._get_session_resume_info())
 
     def action_scroll_chat_up(self) -> None:
+        # Refresh Windows console modes to ensure scrollbar works
+        refresh_console_if_windows()
         try:
             chat = self.query_one("#chat", VerticalScroll)
             chat.scroll_relative(y=-5, animate=False)
@@ -1134,6 +1150,8 @@ class VibeApp(App):
             pass
 
     def action_scroll_chat_down(self) -> None:
+        # Refresh Windows console modes to ensure scrollbar works
+        refresh_console_if_windows()
         try:
             chat = self.query_one("#chat", VerticalScroll)
             chat.scroll_relative(y=5, animate=False)
@@ -1269,14 +1287,37 @@ class VibeApp(App):
         )
         self._update_notification_shown = True
 
+    def _throttled_console_refresh(self) -> None:
+        """Refresh console modes with throttling to avoid excessive calls."""
+        current_time = time.monotonic()
+        throttle_interval = 0.25  # seconds between refreshes
+        if current_time - self._last_console_refresh_time >= throttle_interval:
+            self._last_console_refresh_time = current_time
+            refresh_console_if_windows()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        self._last_mouse_event_time = time.monotonic()
+        # Refresh Windows console modes on mouse movement (throttled)
+        self._throttled_console_refresh()
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        self._last_mouse_event_time = time.monotonic()
+        # Refresh Windows console modes on mouse button press
+        self._throttled_console_refresh()
+
     def on_mouse_up(self, event: MouseUp) -> None:
+        self._last_mouse_event_time = time.monotonic()
+        # Refresh Windows console modes on mouse interaction
+        self._throttled_console_refresh()
         copy_selection_to_clipboard(self)
 
     def on_app_blur(self, event: AppBlur) -> None:
+        self._app_focused = False
         if self._chat_input_container and self._chat_input_container.input_widget:
             self._chat_input_container.input_widget.set_app_focus(False)
 
     def on_app_focus(self, event: AppFocus) -> None:
+        self._app_focused = True
         if self._chat_input_container and self._chat_input_container.input_widget:
             self._chat_input_container.input_widget.set_app_focus(True)
         # Refresh Windows console modes on focus to recover from corruption
@@ -1297,7 +1338,7 @@ class VibeApp(App):
     async def _periodic_console_refresh(self) -> None:
         """Periodically refresh Windows console modes to prevent corruption.
 
-        This runs every 30 seconds and ensures console mode flags are in
+        This runs every 2 seconds and ensures console mode flags are in
         a good state. Console mode corruption can occur during long-running
         sessions, causing issues like scrollbar and copy/paste stopping.
         """
@@ -1308,7 +1349,7 @@ class VibeApp(App):
 
         try:
             while True:
-                await asyncio.sleep(30)  # Refresh every 30 seconds
+                await asyncio.sleep(2)  # Refresh every 2 seconds (very aggressive)
                 self._console_manager.refresh_console_modes()
         except asyncio.CancelledError:
             logger.debug("Windows console refresh task cancelled")
@@ -1320,6 +1361,36 @@ class VibeApp(App):
         if self._console_refresh_task and not self._console_refresh_task.done():
             self._console_refresh_task.cancel()
             self._console_refresh_task = None
+
+    def _build_console_debug_message(self, reason: str) -> str:
+        refresh_ok = refresh_console_if_windows()
+        manager = self._console_manager
+        stdin_mode, stdout_mode = (None, None)
+        if manager:
+            stdin_mode, stdout_mode = manager.get_current_modes()
+
+        mouse_idle = time.monotonic() - self._last_mouse_event_time
+        textual_version = self._get_textual_version()
+        mode_summary = describe_console_modes(stdin_mode, stdout_mode)
+
+        lines = [
+            f"Console debug ({reason})",
+            (
+                "textual="
+                f"{textual_version} focused={self._app_focused} "
+                f"mouse_idle={mouse_idle:.1f}s refresh_ok={refresh_ok}"
+            ),
+            mode_summary,
+        ]
+        return "\n".join(lines)
+
+    def _get_textual_version(self) -> str:
+        try:
+            import textual
+        except Exception:
+            return "unknown"
+
+        return getattr(textual, "__version__", "unknown")
 
 
 def _print_session_resume_message(session_id: str | None) -> None:

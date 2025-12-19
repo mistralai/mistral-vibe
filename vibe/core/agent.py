@@ -210,7 +210,13 @@ class Agent:
             case MiddlewareAction.INJECT_MESSAGE:
                 if result.message and len(self.messages) > 0:
                     last_msg = self.messages[-1]
-                    if last_msg.content:
+                    # Don't inject into tool messages as it creates invalid sequences
+                    # Tool messages should only be followed by assistant messages
+                    if last_msg.role == Role.tool:
+                        # Skip injection when last message is from a tool
+                        # This prevents invalid sequences like: assistant -> tool -> tool (modified)
+                        pass
+                    elif last_msg.content:
                         last_msg.content += f"\n\n{result.message}"
                     else:
                         last_msg.content = result.message

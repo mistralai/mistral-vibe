@@ -1,7 +1,7 @@
 id = "mistral-vibe"
 name = "Mistral Vibe"
 description = "Mistral's open-source coding assistant"
-version = "1.2.1"
+version = "1.2.1b"
 schema_version = 1
 authors = ["Mistral AI"]
 repository = "https://github.com/mistralai/mistral-vibe"

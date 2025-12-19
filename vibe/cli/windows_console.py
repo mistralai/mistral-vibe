@@ -44,6 +44,46 @@ ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
 DISABLE_NEWLINE_AUTO_RETURN = 0x0008
 ENABLE_LVB_GRID_WORLDWIDE = 0x0010
 
+_INPUT_FLAGS = [
+    ("PROCESSED_INPUT", ENABLE_PROCESSED_INPUT),
+    ("LINE_INPUT", ENABLE_LINE_INPUT),
+    ("ECHO_INPUT", ENABLE_ECHO_INPUT),
+    ("WINDOW_INPUT", ENABLE_WINDOW_INPUT),
+    ("MOUSE_INPUT", ENABLE_MOUSE_INPUT),
+    ("INSERT_MODE", ENABLE_INSERT_MODE),
+    ("QUICK_EDIT_MODE", ENABLE_QUICK_EDIT_MODE),
+    ("EXTENDED_FLAGS", ENABLE_EXTENDED_FLAGS),
+    ("VT_INPUT", ENABLE_VIRTUAL_TERMINAL_INPUT),
+]
+
+_OUTPUT_FLAGS = [
+    ("PROCESSED_OUTPUT", ENABLE_PROCESSED_OUTPUT),
+    ("WRAP_AT_EOL", ENABLE_WRAP_AT_EOL_OUTPUT),
+    ("VT_PROCESSING", ENABLE_VIRTUAL_TERMINAL_PROCESSING),
+    ("DISABLE_NEWLINE_AUTO_RETURN", DISABLE_NEWLINE_AUTO_RETURN),
+    ("LVB_GRID_WORLDWIDE", ENABLE_LVB_GRID_WORLDWIDE),
+]
+
+
+def _format_mode_flags(mode: int | None, flags: list[tuple[str, int]]) -> str:
+    if mode is None:
+        return "unavailable"
+
+    enabled = [name for name, bit in flags if mode & bit]
+    hex_mode = f"0x{mode:04x}"
+
+    if not enabled:
+        return f"{hex_mode} (none)"
+
+    return f"{hex_mode} ({', '.join(enabled)})"
+
+
+def describe_console_modes(stdin_mode: int | None, stdout_mode: int | None) -> str:
+    """Return a readable summary of console modes and flags."""
+    stdin_desc = _format_mode_flags(stdin_mode, _INPUT_FLAGS)
+    stdout_desc = _format_mode_flags(stdout_mode, _OUTPUT_FLAGS)
+    return f"stdin={stdin_desc} stdout={stdout_desc}"
+
 
 class WindowsConsoleManager:
     """Manages Windows console mode flags to prevent corruption."""
@@ -56,6 +96,8 @@ class WindowsConsoleManager:
         self._stdout_handle = None
         self._original_stdin_mode: int | None = None
         self._original_stdout_mode: int | None = None
+        self._last_known_stdin_mode: int | None = None
+        self._last_known_stdout_mode: int | None = None
         self._initialized = False
 
         if not is_windows():
@@ -220,13 +262,47 @@ class WindowsConsoleManager:
         if not self._initialized:
             return False
 
+        # Check for unexpected mode changes before refreshing
+        current_stdin, current_stdout = self.get_current_modes()
+        if self._last_known_stdin_mode is not None and current_stdin is not None:
+            if current_stdin != self._last_known_stdin_mode:
+                logger.warning(
+                    "WindowsConsoleManager: stdin mode changed unexpectedly! "
+                    "Was 0x%x, now 0x%x (diff: added=0x%x, removed=0x%x)",
+                    self._last_known_stdin_mode,
+                    current_stdin,
+                    current_stdin & ~self._last_known_stdin_mode,
+                    self._last_known_stdin_mode & ~current_stdin,
+                )
+
+        if self._last_known_stdout_mode is not None and current_stdout is not None:
+            if current_stdout != self._last_known_stdout_mode:
+                logger.warning(
+                    "WindowsConsoleManager: stdout mode changed unexpectedly! "
+                    "Was 0x%x, now 0x%x (diff: added=0x%x, removed=0x%x)",
+                    self._last_known_stdout_mode,
+                    current_stdout,
+                    current_stdout & ~self._last_known_stdout_mode,
+                    self._last_known_stdout_mode & ~current_stdout,
+                )
+
         logger.debug("WindowsConsoleManager: Refreshing console modes")
 
         vt_ok = self.ensure_virtual_terminal_processing()
         mouse_ok = self.ensure_mouse_input()
 
+        # Update last known modes after refresh
+        new_stdin, new_stdout = self.get_current_modes()
+        self._last_known_stdin_mode = new_stdin
+        self._last_known_stdout_mode = new_stdout
+
         if vt_ok and mouse_ok:
-            logger.debug("WindowsConsoleManager: Console modes refreshed successfully")
+            logger.debug(
+                "WindowsConsoleManager: Console modes refreshed successfully "
+                "(stdin=0x%x, stdout=0x%x)",
+                new_stdin or 0,
+                new_stdout or 0,
+            )
             return True
 
         logger.warning(

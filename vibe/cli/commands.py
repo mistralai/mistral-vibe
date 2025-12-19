@@ -62,6 +62,11 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "console-debug": Command(
+                aliases=frozenset(["/console-debug", "/console"]),
+                description="Show Windows console mode debug info",
+                handler="_show_console_debug",
+            ),
         }
 
         for command in excluded_commands:
