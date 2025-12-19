@@ -79,10 +79,14 @@ def test_copy_selection_to_clipboard_no_notification(
     mock_app.notify.assert_not_called()
 
 
+@patch("vibe.cli.clipboard._is_windows", return_value=False)
 @patch("vibe.cli.clipboard._copy_osc52")
 @patch("vibe.cli.clipboard.pyperclip.copy")
 def test_copy_selection_to_clipboard_success_with_osc52(
-    mock_pyperclip_copy: MagicMock, mock_osc52_copy: MagicMock, mock_app: MagicMock
+    mock_pyperclip_copy: MagicMock,
+    mock_osc52_copy: MagicMock,
+    mock_is_windows: MagicMock,
+    mock_app: MagicMock,
 ) -> None:
     widget = MockWidget(
         text_selection=SimpleNamespace(), get_selection_result=("selected text", None)
@@ -99,10 +103,14 @@ def test_copy_selection_to_clipboard_success_with_osc52(
     )
 
 
+@patch("vibe.cli.clipboard._is_windows", return_value=False)
 @patch("vibe.cli.clipboard._copy_osc52")
 @patch("vibe.cli.clipboard.pyperclip.copy")
 def test_copy_selection_to_clipboard_osc52_fails_success_with_pyperclip(
-    mock_pyperclip_copy: MagicMock, mock_osc52_copy: MagicMock, mock_app: MagicMock
+    mock_pyperclip_copy: MagicMock,
+    mock_osc52_copy: MagicMock,
+    mock_is_windows: MagicMock,
+    mock_app: MagicMock,
 ) -> None:
     widget = MockWidget(
         text_selection=SimpleNamespace(),
@@ -121,10 +129,14 @@ def test_copy_selection_to_clipboard_osc52_fails_success_with_pyperclip(
     mock_app.copy_to_clipboard.assert_not_called()
 
 
+@patch("vibe.cli.clipboard._is_windows", return_value=False)
 @patch("vibe.cli.clipboard._copy_osc52")
 @patch("vibe.cli.clipboard.pyperclip.copy")
 def test_copy_selection_to_clipboard_osc52_and_pyperclip_fail_success_with_app_copy(
-    mock_pyperclip_copy: MagicMock, mock_osc52_copy: MagicMock, mock_app: MagicMock
+    mock_pyperclip_copy: MagicMock,
+    mock_osc52_copy: MagicMock,
+    mock_is_windows: MagicMock,
+    mock_app: MagicMock,
 ) -> None:
     widget = MockWidget(
         text_selection=SimpleNamespace(), get_selection_result=("selected text", None)
@@ -143,10 +155,14 @@ def test_copy_selection_to_clipboard_osc52_and_pyperclip_fail_success_with_app_c
     )
 
 
+@patch("vibe.cli.clipboard._is_windows", return_value=False)
 @patch("vibe.cli.clipboard._copy_osc52")
 @patch("vibe.cli.clipboard.pyperclip.copy")
 def test_copy_selection_to_clipboard_all_methods_fail(
-    mock_pyperclip_copy: MagicMock, mock_osc52_copy: MagicMock, mock_app: MagicMock
+    mock_pyperclip_copy: MagicMock,
+    mock_osc52_copy: MagicMock,
+    mock_is_windows: MagicMock,
+    mock_app: MagicMock,
 ) -> None:
     widget = MockWidget(
         text_selection=SimpleNamespace(), get_selection_result=("selected text", None)
@@ -177,7 +193,10 @@ def test_copy_selection_to_clipboard_multiple_widgets(mock_app: MagicMock) -> No
     widget3 = MockWidget(text_selection=None)
     mock_app.query.return_value = [widget1, widget2, widget3]
 
-    with patch("vibe.cli.clipboard._copy_osc52") as mock_osc52_copy:
+    with (
+        patch("vibe.cli.clipboard._is_windows", return_value=False),
+        patch("vibe.cli.clipboard._copy_osc52") as mock_osc52_copy,
+    ):
         copy_selection_to_clipboard(mock_app)
 
         mock_osc52_copy.assert_called_once_with("first selection\nsecond selection")
@@ -196,6 +215,7 @@ def test_copy_selection_to_clipboard_preview_shortening(mock_app: MagicMock) -> 
     mock_app.query.return_value = [widget]
 
     with (
+        patch("vibe.cli.clipboard._is_windows", return_value=False),
         patch("vibe.cli.clipboard._copy_osc52") as mock_osc52_copy,
         patch("vibe.cli.clipboard.pyperclip.copy") as mock_pyperclip_copy,
     ):
@@ -211,9 +231,10 @@ def test_copy_selection_to_clipboard_preview_shortening(mock_app: MagicMock) -> 
         assert len(notification_call[0][0]) < len(long_text) + 30
 
 
+@patch("vibe.cli.clipboard._is_windows", return_value=False)
 @patch("builtins.open", new_callable=mock_open)
 def test_copy_osc52_writes_correct_sequence(
-    mock_file: MagicMock, monkeypatch: pytest.MonkeyPatch
+    mock_file: MagicMock, mock_is_windows: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("TMUX", raising=False)
     test_text = "héllo wörld 🎉"
@@ -226,3 +247,35 @@ def test_copy_osc52_writes_correct_sequence(
     handle = mock_file()
     handle.write.assert_called_once_with(expected_seq)
     handle.flush.assert_called_once()
+
+
+@patch("vibe.cli.clipboard._is_windows", return_value=True)
+def test_copy_osc52_raises_on_windows(mock_is_windows: MagicMock) -> None:
+    """Test that OSC52 raises an error on Windows."""
+    with pytest.raises(OSError, match="OSC52 not supported on Windows"):
+        _copy_osc52("test text")
+
+
+@patch("vibe.cli.clipboard._is_windows", return_value=True)
+@patch("vibe.cli.clipboard.pyperclip.copy")
+def test_copy_selection_to_clipboard_windows_skips_osc52(
+    mock_pyperclip_copy: MagicMock,
+    mock_is_windows: MagicMock,
+    mock_app: MagicMock,
+) -> None:
+    """Test that on Windows, OSC52 is skipped and pyperclip is used directly."""
+    widget = MockWidget(
+        text_selection=SimpleNamespace(), get_selection_result=("selected text", None)
+    )
+    mock_app.query.return_value = [widget]
+
+    with patch("vibe.cli.clipboard._copy_osc52") as mock_osc52_copy:
+        copy_selection_to_clipboard(mock_app)
+
+        # OSC52 should not be called on Windows
+        mock_osc52_copy.assert_not_called()
+        # Pyperclip should be called instead
+        mock_pyperclip_copy.assert_called_once_with("selected text")
+        mock_app.notify.assert_called_once_with(
+            '"selected text" copied to clipboard', severity="information", timeout=2
+        )

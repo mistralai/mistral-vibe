@@ -17,6 +17,7 @@ from vibe import __version__ as CORE_VERSION
 from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.terminal_setup import setup_terminal
+from vibe.cli.windows_console import get_console_manager, refresh_console_if_windows
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
@@ -139,6 +140,10 @@ class VibeApp(App):
         self._auto_scroll = True
         self._last_escape_time: float | None = None
 
+        # Windows console mode management to prevent corruption
+        self._console_manager = get_console_manager()
+        self._console_refresh_task: asyncio.Task | None = None
+
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="chat"):
             yield WelcomeBanner(self.config)
@@ -195,6 +200,9 @@ class VibeApp(App):
             self.call_after_refresh(self._process_initial_prompt)
         else:
             self._ensure_agent_init_task()
+
+        # Start Windows console mode refresh task to prevent corruption
+        self._start_console_refresh_task()
 
     def _process_initial_prompt(self) -> None:
         if self._initial_prompt:
@@ -855,6 +863,11 @@ class VibeApp(App):
         return self.agent.interaction_logger.session_id[:8]
 
     async def _exit_app(self) -> None:
+        # Clean up Windows console refresh task
+        self._stop_console_refresh_task()
+        if self._console_manager:
+            self._console_manager.restore_original_modes()
+
         self.exit(result=self._get_session_resume_info())
 
     async def _setup_terminal(self) -> None:
@@ -1105,6 +1118,11 @@ class VibeApp(App):
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
 
+        # Clean up Windows console refresh task
+        self._stop_console_refresh_task()
+        if self._console_manager:
+            self._console_manager.restore_original_modes()
+
         self.exit(result=self._get_session_resume_info())
 
     def action_scroll_chat_up(self) -> None:
@@ -1261,6 +1279,47 @@ class VibeApp(App):
     def on_app_focus(self, event: AppFocus) -> None:
         if self._chat_input_container and self._chat_input_container.input_widget:
             self._chat_input_container.input_widget.set_app_focus(True)
+        # Refresh Windows console modes on focus to recover from corruption
+        refresh_console_if_windows()
+
+    def _start_console_refresh_task(self) -> None:
+        """Start the periodic Windows console mode refresh task."""
+        if self._console_manager is None:
+            return
+
+        if self._console_refresh_task and not self._console_refresh_task.done():
+            return
+
+        self._console_refresh_task = asyncio.create_task(
+            self._periodic_console_refresh(), name="console-refresh"
+        )
+
+    async def _periodic_console_refresh(self) -> None:
+        """Periodically refresh Windows console modes to prevent corruption.
+
+        This runs every 30 seconds and ensures console mode flags are in
+        a good state. Console mode corruption can occur during long-running
+        sessions, causing issues like scrollbar and copy/paste stopping.
+        """
+        if self._console_manager is None:
+            return
+
+        logger.debug("Starting periodic Windows console refresh task")
+
+        try:
+            while True:
+                await asyncio.sleep(30)  # Refresh every 30 seconds
+                self._console_manager.refresh_console_modes()
+        except asyncio.CancelledError:
+            logger.debug("Windows console refresh task cancelled")
+        except Exception as e:
+            logger.warning("Windows console refresh task error: %s", e)
+
+    def _stop_console_refresh_task(self) -> None:
+        """Stop the periodic Windows console mode refresh task."""
+        if self._console_refresh_task and not self._console_refresh_task.done():
+            self._console_refresh_task.cancel()
+            self._console_refresh_task = None
 
 
 def _print_session_resume_message(session_id: str | None) -> None:
