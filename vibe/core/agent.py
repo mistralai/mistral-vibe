@@ -61,6 +61,7 @@ from vibe.core.utils import (
     get_user_agent,
     get_user_cancellation_message,
     is_user_cancellation_event,
+    logger,
 )
 
 
@@ -220,7 +221,7 @@ class Agent:
                     elif last_msg.content:
                         last_msg.content += f"\n\n{result.message}"
                     else:
-                        last_msg.content = result.message
+                        last_msg.content = result.message or ""  # ADD: or ""
 
             case MiddlewareAction.COMPACT:
                 old_tokens = result.metadata.get(
@@ -251,6 +252,10 @@ class Agent:
         )
 
     async def _conversation_loop(self, user_msg: str) -> AsyncGenerator[BaseEvent]:
+        # Ensure user message is not None
+        if user_msg is None:
+            user_msg = ""
+
         self.messages.append(LLMMessage(role=Role.user, content=user_msg))
         self.stats.steps += 1
 
@@ -593,6 +598,14 @@ class Agent:
         try:
             start_time = time.perf_counter()
 
+            # Ensure messages have valid content before sending to LLM
+            for idx, msg in enumerate(self.messages):
+                if msg.content is None:
+                    msg.content = ""
+                elif msg.content == "":
+                    # Replace empty content with a space to prevent Jinja2 template errors
+                    msg.content = " "
+
             async with self.backend as backend:
                 result = await backend.complete(
                     model=active_model,
@@ -759,6 +772,28 @@ class Agent:
             return
         self._fill_missing_tool_responses()
         self._ensure_assistant_after_tools()
+        self._ensure_role_alternation()
+        self._ensure_content_not_null()  # NEW: Final validation pass
+
+    def _ensure_content_not_null(self) -> None:
+        """Ensure all messages have non-null content.
+
+        This is a defensive measure to catch any edge cases where message
+        construction or manipulation resulted in null content, which would
+        cause errors in llama-server's Jinja2 template processing.
+        """
+        from vibe.core.utils import logger
+
+        for idx, msg in enumerate(self.messages):
+            if msg.content is None:
+                logger.warning(
+                    "Message at index %d has null content (role=%s, tool_call_id=%s). "
+                    "Fixing by setting to empty string. This should be investigated.",
+                    idx,
+                    msg.role,
+                    msg.tool_call_id or "N/A"
+                )
+                msg.content = ""
 
     def _fill_missing_tool_responses(self) -> None:
         i = 1
@@ -812,6 +847,64 @@ class Agent:
             empty_assistant_msg = LLMMessage(role=Role.assistant, content="Understood.")
             self.messages.append(empty_assistant_msg)
 
+    def _ensure_role_alternation(self) -> None:
+        """Ensure user and assistant messages alternate properly.
+
+        This fixes invalid sequences that can occur after interruptions or compaction.
+        Tool messages are allowed between assistant messages (assistant -> tool -> assistant).
+        The pattern should be: user -> assistant [-> tool]* -> user -> assistant ...
+        """
+        MIN_MESSAGE_SIZE = 3
+        if len(self.messages) < MIN_MESSAGE_SIZE:
+            return
+
+        i = 1  # Skip system message
+        while i < len(self.messages) - 1:
+            current = self.messages[i]
+            next_msg = self.messages[i + 1]
+
+            # Skip tool messages - they're handled by _fill_missing_tool_responses
+            if Role.tool in {current.role, next_msg.role}:
+                i += 1
+                continue
+
+            # Check for consecutive user messages
+            if current.role == Role.user and next_msg.role == Role.user:
+                # Insert an assistant acknowledgment between them
+                ack_msg = LLMMessage(
+                    role=Role.assistant,
+                    content="Understood.",
+                )
+                self.messages.insert(i + 1, ack_msg)
+                logger.debug(
+                    "_ensure_role_alternation: Inserted assistant message "
+                    "between consecutive user messages at index %d",
+                    i + 1,
+                )
+                i += 2  # Skip past the inserted message
+                continue
+
+            # Check for consecutive assistant messages (without tool calls on first)
+            if current.role == Role.assistant and next_msg.role == Role.assistant:
+                # If first assistant has tool_calls, this might be valid (tool responses follow)
+                if not current.tool_calls:
+                    # Merge the messages or remove the empty one
+                    if current.content and next_msg.content:
+                        # Merge content
+                        current.content = f"{current.content}\n\n{next_msg.content}"
+                    elif next_msg.content:
+                        current.content = next_msg.content
+                    # Remove the duplicate
+                    self.messages.pop(i + 1)
+                    logger.debug(
+                        "_ensure_role_alternation: Merged consecutive assistant "
+                        "messages at index %d",
+                        i,
+                    )
+                    continue
+
+            i += 1
+
     def _reset_session(self) -> None:
         self.session_id = str(uuid4())
         self.interaction_logger.reset_session(self.session_id)
@@ -862,6 +955,9 @@ class Agent:
                 raise LLMResponseError(
                     "Usage data missing in compaction summary response"
                 )
+
+            # Ensure summary result has valid content
+
             summary_content = summary_result.message.content or ""
 
             if last_user_message:
@@ -871,7 +967,21 @@ class Agent:
 
             system_message = self.messages[0]
             summary_message = LLMMessage(role=Role.user, content=summary_content)
-            self.messages = [system_message, summary_message]
+            # Add an assistant acknowledgment to ensure proper role alternation
+            # Without this, the next user message would create two consecutive user messages
+            ack_message = LLMMessage(
+                role=Role.assistant,
+                content="Understood. I have the conversation context and am ready to continue.",
+            )
+            self.messages = [system_message, summary_message, ack_message]
+
+            # DEBUG: Check messages after compact
+            from vibe.core.utils import logger
+            logger.info(f"After compact, messages count: {len(self.messages)}")
+            for idx, msg in enumerate(self.messages):
+                logger.info(f"Message {idx}: role={msg.role}, content={msg.content[:100] if msg.content else 'None'}...")
+                if msg.content is None:
+                    logger.error(f"*** NULL CONTENT FOUND in message {idx} after compact ***")
 
             active_model = self.config.get_active_model()
             provider = self.config.get_provider_for_model(active_model)

@@ -48,9 +48,13 @@ async def test_auto_compact_triggers_and_batches_observer() -> None:
     assert final.content == "<final>"
 
     roles = [r for r, _ in observed]
-    assert roles == [Role.system, Role.user, Role.assistant]
+    # After compact: system, user (summary), assistant (ack), assistant (final response)
+    assert roles == [Role.system, Role.user, Role.assistant, Role.assistant]
     assert (
         observed[1][1] is not None
         and "Last request from user was: Hello" in observed[1][1]
     )
-    assert observed[2][1] == "<final>"
+    # observed[2] is the acknowledgment message after compact
+    assert observed[2][1] == "Understood. I have the conversation context and am ready to continue."
+    # observed[3] is the final response
+    assert observed[3][1] == "<final>"

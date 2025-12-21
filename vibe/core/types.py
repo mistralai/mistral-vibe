@@ -174,12 +174,15 @@ class LLMMessage(BaseModel):
     @classmethod
     def _from_any(cls, v: Any) -> dict[str, Any] | Any:
         if isinstance(v, dict):
-            v.setdefault("content", "")
+            # CRITICAL FIX: Explicitly replace None content, not just missing
+            # setdefault() doesn't replace explicit None values
+            if v.get("content") is None or "content" not in v:
+                v["content"] = ""
             v.setdefault("role", "assistant")
             return v
         return {
             "role": str(getattr(v, "role", "assistant")),
-            "content": getattr(v, "content", ""),
+            "content": getattr(v, "content", "") or "",  # Double protection against None
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),

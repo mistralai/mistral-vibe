@@ -116,7 +116,31 @@ class OpenAIAdapter(APIAdapter):
         provider: ProviderConfig,
         api_key: str | None = None,
     ) -> PreparedRequest:
-        converted_messages = [msg.model_dump(exclude_none=True) for msg in messages]
+        from vibe.core.utils import logger
+
+        converted_messages: list[dict[str, Any]] = []
+        for idx, msg in enumerate(messages):
+            # CRITICAL: Fix None content BEFORE model_dump
+            if msg.content is None:
+                logger.warning(
+                    "Message %d has null content (role=%s, tool_call_id=%s). "
+                    "Converting to empty string. This indicates a bug in message construction.",
+                    idx, msg.role, msg.tool_call_id or "N/A"
+                )
+                msg.content = ""
+
+            data = msg.model_dump(exclude_none=True)
+
+            # Safety check after dump in case exclude_none caused issues
+            if "content" not in data or data.get("content") is None:
+                logger.warning(
+                    "Message %d missing content after model_dump (role=%s). "
+                    "This indicates exclude_none=True may have removed it. Setting to empty string.",
+                    idx, data.get("role", "unknown")
+                )
+                data["content"] = ""
+
+            converted_messages.append(data)
 
         payload = self.build_payload(
             model_name, converted_messages, temperature, tools, max_tokens, tool_choice
@@ -130,6 +154,16 @@ class OpenAIAdapter(APIAdapter):
             payload["stream_options"] = stream_options
 
         headers = self.build_headers(api_key)
+
+        # Fix empty content to prevent Jinja2 template errors in llama-server
+        for idx, msg in enumerate(payload.get("messages", [])):
+            if msg.get("content") is None:
+                # Convert None to empty string to prevent template errors
+                msg["content"] = ""
+            elif msg.get("content") == "":
+                # Convert empty string to space to prevent Jinja2 template errors
+                # llama-server's Mistral template treats empty strings as null
+                msg["content"] = " "
 
         body = json.dumps(payload).encode("utf-8")
 
@@ -228,6 +262,15 @@ class GenericBackend:
 
         api_style = getattr(self._provider, "api_style", "openai")
         adapter = BACKEND_ADAPTERS[api_style]
+
+        # Ensure all messages have valid content before processing
+        for idx, msg in enumerate(messages):
+            if msg.content is None:
+                # Convert None to empty string for consistency
+                msg.content = ""
+            elif msg.content == "":
+                # Convert empty string to space to prevent template errors
+                msg.content = " "
 
         endpoint, headers, body = adapter.prepare_request(
             model_name=model.name,
