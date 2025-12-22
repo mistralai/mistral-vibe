@@ -306,13 +306,16 @@ class VibeApp(App):
 
         self.config.tools[tool_name].permission = ToolPermission.ALWAYS
 
-    def _save_config_changes(self, changes: dict[str, str]) -> None:
+    def _save_config_changes(self, changes: dict) -> None:
         if not changes:
             return
 
         updates: dict = {}
 
+        # Handle basic settings
         for key, value in changes.items():
+            if key.startswith("_"):
+                continue  # Skip internal keys
             match key:
                 case "active_model":
                     if value != self.config.active_model:
@@ -320,6 +323,24 @@ class VibeApp(App):
                 case "textual_theme":
                     if value != self.config.textual_theme:
                         updates["textual_theme"] = value
+
+        # Handle providers
+        if "_providers" in changes:
+            providers_data = changes["_providers"]
+            # Remove deleted providers
+            if "_providers_deleted" in changes:
+                deleted = set(changes["_providers_deleted"])
+                providers_data = [p for p in providers_data if p.get("name") not in deleted]
+            updates["providers"] = providers_data
+
+        # Handle models
+        if "_models" in changes:
+            models_data = changes["_models"]
+            # Remove deleted models
+            if "_models_deleted" in changes:
+                deleted = set(changes["_models_deleted"])
+                models_data = [m for m in models_data if m.get("alias") not in deleted]
+            updates["models"] = models_data
 
         if updates:
             VibeConfig.save_updates(updates)

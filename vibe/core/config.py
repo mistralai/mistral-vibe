@@ -244,6 +244,12 @@ DEFAULT_PROVIDERS = [
         api_base="http://127.0.0.1:8080/v1",
         api_key_env_var="",  # NOTE: if you wish to use --api-key in llama-server, change this value
     ),
+    ProviderConfig(
+        name="lmstudio",
+        api_base="http://localhost:1234/v1",
+        api_key_env_var="",
+        backend=Backend.GENERIC,
+    ),
 ]
 
 DEFAULT_MODELS = [
@@ -265,6 +271,14 @@ DEFAULT_MODELS = [
         name="devstral",
         provider="llamacpp",
         alias="local",
+        input_price=0.0,
+        output_price=0.0,
+    ),
+    ModelConfig(
+        name="mistralai/devstral-small-2-2512",
+        provider="lmstudio",
+        alias="devstral-2-small-local",
+        temperature=0.7,
         input_price=0.0,
         output_price=0.0,
     ),

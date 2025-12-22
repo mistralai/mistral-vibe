@@ -657,6 +657,16 @@ WelcomeBanner {
 #config-content {
     width: 100%;
     height: auto;
+    overflow: hidden;
+}
+
+#config-content-body {
+    width: 100%;
+    height: auto;
+    max-height: 25;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-size: 0 1;
 }
 
 .settings-title {
