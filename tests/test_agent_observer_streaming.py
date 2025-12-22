@@ -10,7 +10,6 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agent import Agent
 from vibe.core.config import SessionLoggingConfig, VibeConfig
-from vibe.core.llm.types import BackendLike
 from vibe.core.middleware import (
     ConversationContext,
     MiddlewareAction,
@@ -25,7 +24,6 @@ from vibe.core.types import (
     ApprovalResponse,
     AssistantEvent,
     FunctionCall,
-    LLMChunk,
     LLMMessage,
     Role,
     ToolCall,
@@ -177,10 +175,11 @@ async def test_act_handles_streaming_with_tool_call_events_in_sequence() -> None
         function=FunctionCall(name="todo", arguments='{"action": "read"}'),
     )
     backend = FakeBackend([
-        mock_llm_chunk(content="Checking your todos."),
-        mock_llm_chunk(content="", tool_calls=[todo_tool_call]),
-        mock_llm_chunk(content="", finish_reason="stop"),
-        mock_llm_chunk(content="Done reviewing todos."),
+        [
+            mock_llm_chunk(content="Checking your todos."),
+            mock_llm_chunk(content="", tool_calls=[todo_tool_call]),
+        ],
+        [mock_llm_chunk(content="Done reviewing todos.")],
     ])
     agent = Agent(
         make_config(
@@ -222,7 +221,7 @@ async def test_act_handles_tool_call_chunk_with_content() -> None:
     backend = FakeBackend([
         mock_llm_chunk(content="Preparing "),
         mock_llm_chunk(content="todo request", tool_calls=[todo_tool_call]),
-        mock_llm_chunk(content=" complete", finish_reason="stop"),
+        mock_llm_chunk(content=" complete"),
     ])
     agent = Agent(
         make_config(
@@ -238,14 +237,11 @@ async def test_act_handles_tool_call_chunk_with_content() -> None:
 
     assert [type(event) for event in events] == [
         AssistantEvent,
-        AssistantEvent,
         ToolCallEvent,
         ToolResultEvent,
     ]
     assert isinstance(events[0], AssistantEvent)
-    assert events[0].content == "Preparing todo request"
-    assert isinstance(events[1], AssistantEvent)
-    assert events[1].content == " complete"
+    assert events[0].content == "Preparing todo request complete"
     assert any(
         m.role == Role.assistant and m.content == "Preparing todo request complete"
         for m in agent.messages
@@ -305,35 +301,6 @@ async def test_act_merges_streamed_tool_call_arguments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_act_raises_when_stream_never_signals_finish() -> None:
-    class IncompleteStreamingBackend(BackendLike):
-        def __init__(self, chunks: list[LLMChunk]) -> None:
-            self._chunks = list(chunks)
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def complete_streaming(self, **_: object):
-            while self._chunks:
-                yield self._chunks.pop(0)
-
-        async def complete(self, **_: object):
-            return mock_llm_chunk(content="", finish_reason="stop")
-
-        async def count_tokens(self, **_: object) -> int:
-            return 0
-
-    backend = IncompleteStreamingBackend([mock_llm_chunk(content="partial")])
-    agent = Agent(make_config(), backend=backend, enable_streaming=True)
-
-    with pytest.raises(RuntimeError, match="Streamed completion returned no chunks"):
-        [event async for event in agent.act("Will this finish?")]
-
-
-@pytest.mark.asyncio
 async def test_act_handles_user_cancellation_during_streaming() -> None:
     class CountingMiddleware(MiddlewarePipeline):
         def __init__(self) -> None:
@@ -359,7 +326,6 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     backend = FakeBackend([
         mock_llm_chunk(content="Preparing "),
         mock_llm_chunk(content="todo request", tool_calls=[todo_tool_call]),
-        mock_llm_chunk(content="", finish_reason="stop"),
     ])
     agent = Agent(
         make_config(

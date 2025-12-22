@@ -13,7 +13,6 @@ def mock_llm_chunk(
     tool_calls: list[ToolCall] | None = None,
     name: str | None = None,
     tool_call_id: str | None = None,
-    finish_reason: str | None = None,
     prompt_tokens: int = 10,
     completion_tokens: int = 5,
 ) -> LLMChunk:
@@ -29,7 +28,6 @@ def mock_llm_chunk(
         usage=LLMUsage(
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
         ),
-        finish_reason=finish_reason,
     )
 
 

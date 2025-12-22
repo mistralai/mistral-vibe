@@ -116,9 +116,9 @@ class TestMultiSessionCore:
         )
         session2 = acp_agent.sessions[session2_response.sessionId]
 
-        backend._chunks = [
-            mock_llm_chunk(content="Response 1", finish_reason="stop"),
-            mock_llm_chunk(content="Response 2", finish_reason="stop"),
+        backend._streams = [
+            [mock_llm_chunk(content="Response 1")],
+            [mock_llm_chunk(content="Response 2")],
         ]
 
         async def run_session1():
