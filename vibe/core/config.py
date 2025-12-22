@@ -273,6 +273,7 @@ DEFAULT_MODELS = [
 
 class VibeConfig(BaseSettings):
     active_model: str = "devstral-2"
+    compact_model: str = ""
     vim_keybindings: bool = False
     disable_welcome_banner_animation: bool = False
     displayed_workdir: str = ""
@@ -353,6 +354,13 @@ class VibeConfig(BaseSettings):
         raise ValueError(
             f"Active model '{self.active_model}' not found in configuration."
         )
+
+    def get_compact_model(self) -> ModelConfig:
+        if self.compact_model:
+            for model in self.models:
+                if model.alias == self.compact_model:
+                    return model
+        return self.get_active_model()
 
     def get_provider_for_model(self, model: ModelConfig) -> ProviderConfig:
         for provider in self.providers:

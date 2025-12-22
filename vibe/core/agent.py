@@ -107,7 +107,7 @@ class Agent:
 
         self.backend_factory = lambda: backend or self._select_backend()
         self.backend = self.backend_factory()
-
+        self._compact_backend = self._select_compact_backend()
         self.message_observer = message_observer
         self._last_observed_message_index: int = 0
         self.middleware_pipeline = MiddlewarePipeline()
@@ -153,6 +153,15 @@ class Agent:
         provider = self.config.get_provider_for_model(active_model)
         timeout = self.config.api_timeout
         return BACKEND_FACTORY[provider.backend](provider=provider, timeout=timeout)
+
+    def _select_compact_backend(self) -> BackendLike:
+        if not self.config.compact_model:
+            return self.backend
+        compact_model = self.config.get_compact_model()
+        provider = self.config.get_provider_for_model(compact_model)
+        return BACKEND_FACTORY[provider.backend](
+            provider=provider, timeout=self.config.api_timeout
+        )
 
     def add_message(self, message: LLMMessage) -> None:
         self.messages.append(message)
@@ -501,8 +510,17 @@ class Agent:
                 continue
 
     async def _chat(self, max_tokens: int | None = None) -> LLMChunk:
-        active_model = self.config.get_active_model()
-        provider = self.config.get_provider_for_model(active_model)
+        return await self._chat_with_backend(
+            max_tokens, self.backend, self.config.get_active_model()
+        )
+
+    async def _chat_with_backend(
+        self,
+        max_tokens: int | None,
+        backend: BackendLike,
+        model: Any,
+    ) -> LLMChunk:
+        provider = self.config.get_provider_for_model(model)
 
         available_tools = self.format_handler.get_available_tools(
             self.tool_manager, self.config
@@ -511,11 +529,12 @@ class Agent:
 
         try:
             start_time = time.perf_counter()
-            async with self.backend as backend:
+
+            async with backend:
                 result = await backend.complete(
-                    model=active_model,
+                    model=model,
                     messages=self.messages,
-                    temperature=active_model.temperature,
+                    temperature=model.temperature,
                     tools=available_tools,
                     tool_choice=tool_choice,
                     extra_headers={
@@ -540,7 +559,7 @@ class Agent:
 
         except Exception as e:
             raise RuntimeError(
-                f"API error from {provider.name} (model: {active_model.name}): {e}"
+                f"API error from {provider.name} (model: {model.name}): {e}"
             ) from e
 
     async def _chat_streaming(
@@ -762,11 +781,22 @@ class Agent:
                     last_user_message = msg.content
                     break
 
+            # Save message count to restore on failure
+            original_message_count = len(self.messages)
+
             summary_request = UtilityPrompt.COMPACT.read()
             self.messages.append(LLMMessage(role=Role.user, content=summary_request))
             self.stats.steps += 1
 
-            summary_result = await self._chat()
+            compact_model = self.config.get_compact_model()
+            try:
+                summary_result = await self._chat_with_backend(
+                    None, self._compact_backend, compact_model
+                )
+            except Exception:
+                # Restore messages to original state on failure
+                self.messages = self.messages[:original_message_count]
+                raise
             if summary_result.usage is None:
                 raise LLMResponseError(
                     "Usage data missing in compaction summary response"
