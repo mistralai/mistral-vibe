@@ -34,12 +34,11 @@ def test_run_programmatic_preload_streaming_is_batched(
 
     with mock_backend_factory(
         Backend.MISTRAL,
-        lambda provider, **kwargs: FakeBackend([
+        lambda provider, **kwargs: FakeBackend(
             mock_llm_chunk(
-                content="Decorators are wrappers that modify function behavior.",
-                finish_reason="stop",
+                content="Decorators are wrappers that modify function behavior."
             )
-        ]),
+        ),
     ):
         cfg = VibeConfig(
             session_logging=SessionLoggingConfig(enabled=False),

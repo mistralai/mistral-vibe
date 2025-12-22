@@ -143,17 +143,13 @@ class OpenAIAdapter(APIAdapter):
                 message = LLMMessage.model_validate(data["choices"][0]["delta"])
             else:
                 raise ValueError("Invalid response data")
-            finish_reason = data["choices"][0].get("finish_reason", None)
 
         elif "message" in data:
             message = LLMMessage.model_validate(data["message"])
-            finish_reason = data["choices"][0].get("finish_reason", None)
         elif "delta" in data:
             message = LLMMessage.model_validate(data["delta"])
-            finish_reason = None
         else:
             message = LLMMessage(role=Role.assistant, content="")
-            finish_reason = None
 
         usage_data = data.get("usage") or {}
         usage = LLMUsage(
@@ -161,7 +157,7 @@ class OpenAIAdapter(APIAdapter):
             completion_tokens=usage_data.get("completion_tokens", 0),
         )
 
-        return LLMChunk(message=message, usage=usage, finish_reason=finish_reason)
+        return LLMChunk(message=message, usage=usage)
 
 
 class GenericBackend:
@@ -255,7 +251,7 @@ class GenericBackend:
                 provider=self._provider.name,
                 endpoint=url,
                 response=e.response,
-                headers=dict(e.response.headers.items()),
+                headers=e.response.headers,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -320,7 +316,7 @@ class GenericBackend:
                 provider=self._provider.name,
                 endpoint=url,
                 response=e.response,
-                headers=dict(e.response.headers.items()),
+                headers=e.response.headers,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -369,7 +365,11 @@ class GenericBackend:
                     continue
 
                 DELIM_CHAR = ":"
-                assert f"{DELIM_CHAR} " in line, "line should look like `key: value`"
+                if f"{DELIM_CHAR} " not in line:
+                    raise ValueError(
+                        f"Stream chunk improperly formatted. "
+                        f"Expected `key{DELIM_CHAR} value`, received `{line}`"
+                    )
                 delim_index = line.find(DELIM_CHAR)
                 key = line[0:delim_index]
                 value = line[delim_index + 2 :]
@@ -404,9 +404,8 @@ class GenericBackend:
             tool_choice=tool_choice,
             extra_headers=extra_headers,
         )
-        assert result.usage is not None, (
-            "Usage should be present in non-streaming completions"
-        )
+        if result.usage is None:
+            raise ValueError("Missing usage in non streaming completion")
 
         return result.usage.prompt_tokens
 

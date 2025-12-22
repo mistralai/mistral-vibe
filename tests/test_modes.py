@@ -157,7 +157,6 @@ class TestAgentSwitchMode:
         return FakeBackend([
             LLMChunk(
                 message=LLMMessage(role=Role.assistant, content="Test response"),
-                finish_reason="stop",
                 usage=LLMUsage(prompt_tokens=10, completion_tokens=5),
             )
         ])
@@ -274,7 +273,6 @@ class TestPlanModeToolRestriction:
         backend = FakeBackend([
             LLMChunk(
                 message=LLMMessage(role=Role.assistant, content="ok"),
-                finish_reason="stop",
                 usage=LLMUsage(prompt_tokens=10, completion_tokens=5),
             )
         ])
@@ -298,11 +296,12 @@ class TestPlanModeToolRestriction:
     async def test_plan_mode_rejects_non_plan_tool_call(self) -> None:
         tool_call = ToolCall(
             id="call_1",
+            index=0,
             function=FunctionCall(name="bash", arguments='{"command": "ls"}'),
         )
         backend = FakeBackend([
             mock_llm_chunk(content="Let me run bash", tool_calls=[tool_call]),
-            mock_llm_chunk(content="Tool not available", finish_reason="stop"),
+            mock_llm_chunk(content="Tool not available"),
         ])
 
         config = VibeConfig(

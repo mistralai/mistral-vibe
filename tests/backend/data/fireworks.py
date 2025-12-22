@@ -30,7 +30,6 @@ SIMPLE_CONVERSATION_PARAMS: list[tuple[Url, JsonResponse, ResultData]] = [
         },
         {
             "message": "Some content",
-            "finish_reason": "stop",
             "usage": {
                 "prompt_tokens": 100,
                 "total_tokens": 300,
@@ -78,7 +77,6 @@ TOOL_CONVERSATION_PARAMS: list[tuple[Url, JsonResponse, ResultData]] = [
         },
         {
             "message": "",
-            "finish_reason": "tool_calls",
             "tool_calls": [
                 {
                     "name": "some_tool",
@@ -102,26 +100,13 @@ STREAMED_SIMPLE_CONVERSATION_PARAMS: list[tuple[Url, list[Chunk], list[ResultDat
             rb"data: [DONE]",
         ],
         [
-            {
-                "message": "",
-                "finish_reason": None,
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-            },
-            {
-                "message": "",
-                "finish_reason": None,
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-            },
+            {"message": "", "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
+            {"message": "", "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
             {
                 "message": "Some content",
-                "finish_reason": None,
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0},
             },
-            {
-                "message": "",
-                "finish_reason": "stop",
-                "usage": {"prompt_tokens": 100, "completion_tokens": 200},
-            },
+            {"message": "", "usage": {"prompt_tokens": 100, "completion_tokens": 200}},
         ],
     )
 ]
@@ -140,30 +125,19 @@ STREAMED_TOOL_CONVERSATION_PARAMS: list[tuple[Url, list[Chunk], list[ResultData]
             rb"data: [DONE]",
         ],
         [
-            {
-                "message": "",
-                "finish_reason": None,
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-            },
-            {
-                "message": "",
-                "finish_reason": None,
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-            },
+            {"message": "", "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
+            {"message": "", "usage": {"prompt_tokens": 0, "completion_tokens": 0}},
             {
                 "message": "Some content",
-                "finish_reason": None,
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0},
             },
             {
                 "message": "",
-                "finish_reason": None,
                 "tool_calls": [{"name": "some_tool", "arguments": None, "index": 0}],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0},
             },
             {
                 "message": "",
-                "finish_reason": None,
                 "tool_calls": [
                     {
                         "name": None,
@@ -173,11 +147,7 @@ STREAMED_TOOL_CONVERSATION_PARAMS: list[tuple[Url, list[Chunk], list[ResultData]
                 ],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0},
             },
-            {
-                "message": "",
-                "finish_reason": "tool_calls",
-                "usage": {"prompt_tokens": 100, "completion_tokens": 200},
-            },
+            {"message": "", "usage": {"prompt_tokens": 100, "completion_tokens": 200}},
         ],
     )
 ]

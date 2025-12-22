@@ -205,7 +205,6 @@ class MistralBackend:
                     prompt_tokens=response.usage.prompt_tokens or 0,
                     completion_tokens=response.usage.completion_tokens or 0,
                 ),
-                finish_reason=response.choices[0].finish_reason,
             )
 
         except mistralai.SDKError as e:
@@ -213,7 +212,7 @@ class MistralBackend:
                 provider=self._provider.name,
                 endpoint=self._server_url,
                 response=e.raw_response,
-                headers=dict(e.raw_response.headers.items()),
+                headers=e.raw_response.headers,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -279,7 +278,6 @@ class MistralBackend:
                         if chunk.data.usage
                         else 0,
                     ),
-                    finish_reason=chunk.data.choices[0].finish_reason,
                 )
 
         except mistralai.SDKError as e:
@@ -287,7 +285,7 @@ class MistralBackend:
                 provider=self._provider.name,
                 endpoint=self._server_url,
                 response=e.raw_response,
-                headers=dict(e.raw_response.headers.items()),
+                headers=e.raw_response.headers,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -325,8 +323,7 @@ class MistralBackend:
             tool_choice=tool_choice,
             extra_headers=extra_headers,
         )
-        assert result.usage is not None, (
-            "Usage should be present in non-streaming completions"
-        )
+        if result.usage is None:
+            raise ValueError("Missing usage in non streaming completion")
 
         return result.usage.prompt_tokens

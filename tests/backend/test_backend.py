@@ -87,7 +87,6 @@ class TestBackend:
                 )
 
                 assert result.message.content == result_data["message"]
-                assert result.finish_reason == result_data["finish_reason"]
                 assert result.usage is not None
                 assert (
                     result.usage.prompt_tokens == result_data["usage"]["prompt_tokens"]
@@ -165,7 +164,6 @@ class TestBackend:
 
                 for result, expected_result in zip(results, result_data, strict=True):
                     assert result.message.content == expected_result["message"]
-                    assert result.finish_reason == expected_result["finish_reason"]
                     assert result.usage is not None
                     assert (
                         result.usage.prompt_tokens

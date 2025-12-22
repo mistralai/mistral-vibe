@@ -38,7 +38,6 @@ class EventHandler:
         self.get_todos_collapsed = get_todos_collapsed
         self.current_tool_call: ToolCallMessage | None = None
         self.current_compact: CompactMessage | None = None
-        self.tool_results: list[ToolResultMessage] = []
 
     async def handle_event(
         self,
@@ -121,7 +120,6 @@ class EventHandler:
             )
             await self.mount_callback(tool_result)
 
-        self.tool_results.append(tool_result)
         self.current_tool_call = None
 
     async def _handle_assistant_message(self, event: AssistantEvent) -> None:
@@ -153,6 +151,3 @@ class EventHandler:
         if self.current_compact:
             self.current_compact.stop_spinning(success=False)
             self.current_compact = None
-
-    def get_last_tool_result(self) -> ToolResultMessage | None:
-        return self.tool_results[-1] if self.tool_results else None

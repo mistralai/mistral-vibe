@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable
 from enum import StrEnum, auto
 import time
@@ -48,9 +47,9 @@ from vibe.core.types import (
     CompactStartEvent,
     LLMChunk,
     LLMMessage,
+    LLMUsage,
     Role,
     SyncApprovalCallback,
-    ToolCall,
     ToolCallEvent,
     ToolResultEvent,
 )
@@ -140,8 +139,6 @@ class Agent:
             self.auto_approve,
             config.effective_workdir,
         )
-
-        self._last_chunk: LLMChunk | None = None
 
     @property
     def mode(self) -> AgentMode:
@@ -267,11 +264,7 @@ class Agent:
                     yield event
 
                 last_message = self.messages[-1]
-                should_break_loop = (
-                    last_message.role != Role.tool
-                    and self._last_chunk is not None
-                    and self._last_chunk.finish_reason is not None
-                )
+                should_break_loop = last_message.role != Role.tool
 
                 self._flush_new_messages()
 
@@ -293,9 +286,7 @@ class Agent:
                 self.messages, self.stats, self.config, self.tool_manager
             )
 
-    async def _perform_llm_turn(
-        self,
-    ) -> AsyncGenerator[AssistantEvent | ToolCallEvent | ToolResultEvent]:
+    async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
         if self.enable_streaming:
             async for event in self._stream_assistant_events():
                 yield event
@@ -305,19 +296,11 @@ class Agent:
                 yield assistant_event
 
         last_message = self.messages[-1]
-        last_chunk = self._last_chunk
-        if last_chunk is None or last_chunk.usage is None:
-            raise LLMResponseError("LLM response missing chunk or usage data")
 
         parsed = self.format_handler.parse_message(last_message)
         resolved = self.format_handler.resolve_tool_calls(
             parsed, self.tool_manager, self.config
         )
-
-        if last_chunk.usage.completion_tokens > 0 and self.stats.last_turn_duration > 0:
-            self.stats.tokens_per_second = (
-                last_chunk.usage.completion_tokens / self.stats.last_turn_duration
-            )
 
         if not resolved.tool_calls and not resolved.failed_calls:
             return
@@ -325,85 +308,28 @@ class Agent:
         async for event in self._handle_tool_calls(resolved):
             yield event
 
-    def _create_assistant_event(
-        self, content: str, chunk: LLMChunk | None
-    ) -> AssistantEvent:
-        return AssistantEvent(content=content)
-
     async def _stream_assistant_events(self) -> AsyncGenerator[AssistantEvent]:
-        chunks: list[LLMChunk] = []
-        content_buffer = ""
+        batched_chunk = LLMChunk(message=LLMMessage(role=Role.assistant))
         chunks_with_content = 0
         BATCH_SIZE = 5
 
         async for chunk in self._chat_streaming():
-            chunks.append(chunk)
-
-            if chunk.message.tool_calls and chunk.finish_reason is None:
-                if chunk.message.content:
-                    content_buffer += chunk.message.content
-                    chunks_with_content += 1
-
-                if content_buffer:
-                    yield self._create_assistant_event(content_buffer, chunk)
-                    content_buffer = ""
-                    chunks_with_content = 0
-                continue
+            batched_chunk += chunk
 
             if chunk.message.content:
-                content_buffer += chunk.message.content
                 chunks_with_content += 1
 
-                if chunks_with_content >= BATCH_SIZE:
-                    yield self._create_assistant_event(content_buffer, chunk)
-                    content_buffer = ""
-                    chunks_with_content = 0
+            if chunks_with_content >= BATCH_SIZE:
+                yield AssistantEvent(content=cast(str, batched_chunk.message.content))
+                batched_chunk = LLMChunk(message=LLMMessage(role=Role.assistant))
+                chunks_with_content = 0
 
-        if content_buffer:
-            last_chunk = chunks[-1] if chunks else None
-            yield self._create_assistant_event(content_buffer, last_chunk)
-
-        full_content = ""
-        full_tool_calls_map = OrderedDict[int, ToolCall]()
-        for chunk in chunks:
-            full_content += chunk.message.content or ""
-            if not chunk.message.tool_calls:
-                continue
-
-            for tc in chunk.message.tool_calls:
-                if tc.index is None:
-                    raise LLMResponseError("Tool call chunk missing index")
-                if tc.index not in full_tool_calls_map:
-                    full_tool_calls_map[tc.index] = tc
-                else:
-                    new_args_str = (
-                        full_tool_calls_map[tc.index].function.arguments or ""
-                    ) + (tc.function.arguments or "")
-                    full_tool_calls_map[tc.index].function.arguments = new_args_str
-
-        full_tool_calls = list(full_tool_calls_map.values()) or None
-        last_message = LLMMessage(
-            role=Role.assistant, content=full_content, tool_calls=full_tool_calls
-        )
-        self.messages.append(last_message)
-        finish_reason = next(
-            (c.finish_reason for c in chunks if c.finish_reason is not None), None
-        )
-        self._last_chunk = LLMChunk(
-            message=last_message, usage=chunks[-1].usage, finish_reason=finish_reason
-        )
+        if batched_chunk.message.content:
+            yield AssistantEvent(content=batched_chunk.message.content)
 
     async def _get_assistant_event(self) -> AssistantEvent:
         llm_result = await self._chat()
-        if llm_result.usage is None:
-            raise LLMResponseError(
-                "Usage data missing in non-streaming completion response"
-            )
-        self._last_chunk = llm_result
-        assistant_msg = llm_result.message
-        self.messages.append(assistant_msg)
-
-        return AssistantEvent(content=assistant_msg.content or "")
+        return AssistantEvent(content=llm_result.message.content or "")
 
     async def _handle_tool_calls(
         self, resolved: ResolvedMessage
@@ -585,7 +511,6 @@ class Agent:
 
         try:
             start_time = time.perf_counter()
-
             async with self.backend as backend:
                 result = await backend.complete(
                     model=active_model,
@@ -599,31 +524,19 @@ class Agent:
                     },
                     max_tokens=max_tokens,
                 )
-
             end_time = time.perf_counter()
+
             if result.usage is None:
                 raise LLMResponseError(
                     "Usage data missing in non-streaming completion response"
                 )
-
-            self.stats.last_turn_duration = end_time - start_time
-            self.stats.last_turn_prompt_tokens = result.usage.prompt_tokens
-            self.stats.last_turn_completion_tokens = result.usage.completion_tokens
-            self.stats.session_prompt_tokens += result.usage.prompt_tokens
-            self.stats.session_completion_tokens += result.usage.completion_tokens
-            self.stats.context_tokens = (
-                result.usage.prompt_tokens + result.usage.completion_tokens
-            )
+            self._update_stats(usage=result.usage, time_seconds=end_time - start_time)
 
             processed_message = self.format_handler.process_api_response_message(
                 result.message
             )
-
-            return LLMChunk(
-                message=processed_message,
-                usage=result.usage,
-                finish_reason=result.finish_reason,
-            )
+            self.messages.append(processed_message)
+            return LLMChunk(message=processed_message, usage=result.usage)
 
         except Exception as e:
             raise RuntimeError(
@@ -642,7 +555,8 @@ class Agent:
         tool_choice = self.format_handler.get_tool_choice()
         try:
             start_time = time.perf_counter()
-            last_chunk = None
+            usage = LLMUsage()
+            chunk_agg = LLMChunk(message=LLMMessage(role=Role.assistant))
             async with self.backend as backend:
                 async for chunk in backend.complete_streaming(
                     model=active_model,
@@ -656,37 +570,39 @@ class Agent:
                     },
                     max_tokens=max_tokens,
                 ):
-                    last_chunk = chunk
                     processed_message = (
                         self.format_handler.process_api_response_message(chunk.message)
                     )
-                    yield LLMChunk(
-                        message=processed_message,
-                        usage=chunk.usage,
-                        finish_reason=chunk.finish_reason,
+                    processed_chunk = LLMChunk(
+                        message=processed_message, usage=chunk.usage
                     )
-
+                    chunk_agg += processed_chunk
+                    usage += chunk.usage or LLMUsage()
+                    yield processed_chunk
             end_time = time.perf_counter()
-            if last_chunk is None:
-                raise LLMResponseError("Streamed completion returned no chunks")
-            if last_chunk.usage is None:
+
+            if chunk_agg.usage is None:
                 raise LLMResponseError(
                     "Usage data missing in final chunk of streamed completion"
                 )
+            self._update_stats(usage=usage, time_seconds=end_time - start_time)
 
-            self.stats.last_turn_duration = end_time - start_time
-            self.stats.last_turn_prompt_tokens = last_chunk.usage.prompt_tokens
-            self.stats.last_turn_completion_tokens = last_chunk.usage.completion_tokens
-            self.stats.session_prompt_tokens += last_chunk.usage.prompt_tokens
-            self.stats.session_completion_tokens += last_chunk.usage.completion_tokens
-            self.stats.context_tokens = (
-                last_chunk.usage.prompt_tokens + last_chunk.usage.completion_tokens
-            )
+            self.messages.append(chunk_agg.message)
 
         except Exception as e:
             raise RuntimeError(
                 f"API error from {provider.name} (model: {active_model.name}): {e}"
             ) from e
+
+    def _update_stats(self, usage: LLMUsage, time_seconds: float) -> None:
+        self.stats.last_turn_duration = time_seconds
+        self.stats.last_turn_prompt_tokens = usage.prompt_tokens
+        self.stats.last_turn_completion_tokens = usage.completion_tokens
+        self.stats.session_prompt_tokens += usage.prompt_tokens
+        self.stats.session_completion_tokens += usage.completion_tokens
+        self.stats.context_tokens = usage.prompt_tokens + usage.completion_tokens
+        if time_seconds > 0 and usage.completion_tokens > 0:
+            self.stats.tokens_per_second = usage.completion_tokens / time_seconds
 
     async def _should_execute_tool(
         self, tool: BaseTool, args: dict[str, Any], tool_call_id: str

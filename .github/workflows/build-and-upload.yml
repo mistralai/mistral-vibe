@@ -108,12 +108,17 @@ jobs:
         with:
           path: artifacts
 
-      - name: Zip artifacts like GitHub UI
+      - name: Zip artifacts
         run: |
           mkdir release-assets
           for dir in artifacts/*; do
             name=$(basename "$dir")
-            (cd artifacts && zip -r "../release-assets/${name}.zip" "$name")
+            if [ -f "$dir/vibe-acp" ]; then
+              chmod +x "$dir/vibe-acp"
+              zip -j "release-assets/${name}.zip" "$dir/vibe-acp"
+            elif [ -f "$dir/vibe-acp.exe" ]; then
+              zip -j "release-assets/${name}.zip" "$dir/vibe-acp.exe"
+            fi
           done
 
       - name: Attach binaries to release
