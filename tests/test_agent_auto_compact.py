@@ -23,8 +23,8 @@ async def test_auto_compact_triggers_and_batches_observer() -> None:
         observed.append((msg.role, msg.content))
 
     backend = FakeBackend([
-        mock_llm_chunk(content="<summary>"),
-        mock_llm_chunk(content="<final>"),
+        [mock_llm_chunk(content="<summary>")],
+        [mock_llm_chunk(content="<final>")],
     ])
     cfg = VibeConfig(
         session_logging=SessionLoggingConfig(enabled=False), auto_compact_threshold=1

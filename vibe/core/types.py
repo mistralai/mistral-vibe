@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+import copy
 from enum import StrEnum, auto
 from typing import Annotated, Any, Literal
 
@@ -188,18 +190,74 @@ class LLMMessage(BaseModel):
             "tool_call_id": getattr(v, "tool_call_id", None),
         }
 
+    def __add__(self, other: LLMMessage) -> LLMMessage:
+        """Careful: this is not commutative!"""
+        if self.role != other.role:
+            raise ValueError("Can't accumulate messages with different roles")
+
+        if self.name != other.name:
+            raise ValueError("Can't accumulate messages with different names")
+
+        if self.tool_call_id != other.tool_call_id:
+            raise ValueError("Can't accumulate messages with different tool_call_ids")
+
+        content = (self.content or "") + (other.content or "")
+        if not content:
+            content = None
+
+        tool_calls_map = OrderedDict[int, ToolCall]()
+        for tool_calls in [self.tool_calls or [], other.tool_calls or []]:
+            for tc in tool_calls:
+                if tc.index is None:
+                    raise ValueError("Tool call chunk missing index")
+                if tc.index not in tool_calls_map:
+                    tool_calls_map[tc.index] = copy.deepcopy(tc)
+                else:
+                    existing_name = tool_calls_map[tc.index].function.name
+                    new_name = tc.function.name
+                    if existing_name and new_name and existing_name != new_name:
+                        raise ValueError(
+                            "Can't accumulate messages with different tool call names"
+                        )
+                    if new_name and not existing_name:
+                        tool_calls_map[tc.index].function.name = new_name
+                    new_args = (tool_calls_map[tc.index].function.arguments or "") + (
+                        tc.function.arguments or ""
+                    )
+                    tool_calls_map[tc.index].function.arguments = new_args
+
+        return LLMMessage(
+            role=self.role,
+            content=content,
+            tool_calls=list(tool_calls_map.values()) or None,
+            name=self.name,
+            tool_call_id=self.tool_call_id,
+        )
+
 
 class LLMUsage(BaseModel):
     model_config = ConfigDict(frozen=True)
     prompt_tokens: int = 0
     completion_tokens: int = 0
 
+    def __add__(self, other: LLMUsage) -> LLMUsage:
+        return LLMUsage(
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+        )
+
 
 class LLMChunk(BaseModel):
     model_config = ConfigDict(frozen=True)
     message: LLMMessage
-    finish_reason: str | None = None
     usage: LLMUsage | None = None
+
+    def __add__(self, other: LLMChunk) -> LLMChunk:
+        if self.usage is None and other.usage is None:
+            new_usage = None
+        else:
+            new_usage = (self.usage or LLMUsage()) + (other.usage or LLMUsage())
+        return LLMChunk(message=self.message + other.message, usage=new_usage)
 
 
 class BaseEvent(BaseModel, ABC):
@@ -211,6 +269,13 @@ class BaseEvent(BaseModel, ABC):
 class AssistantEvent(BaseEvent):
     content: str
     stopped_by_middleware: bool = False
+
+    def __add__(self, other: AssistantEvent) -> AssistantEvent:
+        return AssistantEvent(
+            content=self.content + other.content,
+            stopped_by_middleware=self.stopped_by_middleware
+            or other.stopped_by_middleware,
+        )
 
 
 class ToolCallEvent(BaseEvent):
