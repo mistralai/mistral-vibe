@@ -4,9 +4,9 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.renderers import get_renderer
 from vibe.cli.textual_ui.widgets.messages import ExpandingBorder
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
+from vibe.cli.textual_ui.widgets.tool_widgets import get_result_widget
 from vibe.cli.textual_ui.widgets.utils import DEFAULT_TOOL_SHORTCUT, TOOL_SHORTCUTS
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -129,11 +129,16 @@ class ToolResultMessage(Static):
 
         adapter = ToolUIDataAdapter(self._event.tool_class)
         display = adapter.get_result_display(self._event)
-        renderer = get_renderer(self._event.tool_name)
-        widget_class, data = renderer.get_result_widget(display, self.collapsed)
-        await self._content_container.mount(
-            widget_class(data, collapsed=self.collapsed)
+
+        widget = get_result_widget(
+            self._event.tool_name,
+            self._event.result,
+            success=display.success,
+            message=display.message,
+            collapsed=self.collapsed,
+            warnings=display.warnings,
         )
+        await self._content_container.mount(widget)
 
     async def _render_simple(self) -> None:
         if self._content_container is None:

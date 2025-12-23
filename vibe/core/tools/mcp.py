@@ -173,12 +173,7 @@ def create_mcp_http_proxy_tool_class(
 
         @classmethod
         def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-            return ToolCallDisplay(
-                summary=f"{published_name}",
-                details=event.args.model_dump()
-                if hasattr(event.args, "model_dump")
-                else {},
-            )
+            return ToolCallDisplay(summary=f"{published_name}")
 
         @classmethod
         def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -189,15 +184,7 @@ def create_mcp_http_proxy_tool_class(
                 )
 
             message = f"MCP tool {event.result.tool} completed"
-            details = {}
-            if event.result.text:
-                details["text"] = event.result.text
-            if event.result.structured:
-                details["structured"] = event.result.structured
-
-            return ToolResultDisplay(
-                success=event.result.ok, message=message, details=details
-            )
+            return ToolResultDisplay(success=event.result.ok, message=message)
 
         @classmethod
         def get_status_text(cls) -> str:
@@ -279,12 +266,7 @@ def create_mcp_stdio_proxy_tool_class(
 
         @classmethod
         def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-            return ToolCallDisplay(
-                summary=f"{published_name}",
-                details=event.args.model_dump()
-                if hasattr(event.args, "model_dump")
-                else {},
-            )
+            return ToolCallDisplay(summary=f"{published_name}")
 
         @classmethod
         def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -295,15 +277,7 @@ def create_mcp_stdio_proxy_tool_class(
                 )
 
             message = f"MCP tool {event.result.tool} completed"
-            details = {}
-            if event.result.text:
-                details["text"] = event.result.text
-            if event.result.structured:
-                details["structured"] = event.result.structured
-
-            return ToolResultDisplay(
-                success=event.result.ok, message=message, details=details
-            )
+            return ToolResultDisplay(success=event.result.ok, message=message)
 
         @classmethod
         def get_status_text(cls) -> str:

@@ -284,15 +284,7 @@ class Grep(
         if not event.args.use_default_ignore:
             summary += " [no-ignore]"
 
-        return ToolCallDisplay(
-            summary=summary,
-            details={
-                "pattern": event.args.pattern,
-                "path": event.args.path,
-                "max_matches": event.args.max_matches,
-                "use_default_ignore": event.args.use_default_ignore,
-            },
-        )
+        return ToolCallDisplay(summary=summary)
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -309,18 +301,8 @@ class Grep(
         if event.result.was_truncated:
             warnings.append("Output was truncated due to size/match limits")
 
-        return ToolResultDisplay(
-            success=True,
-            message=message,
-            warnings=warnings,
-            details={
-                "match_count": event.result.match_count,
-                "was_truncated": event.result.was_truncated,
-                "matches": event.result.matches,
-            },
-        )
+        return ToolResultDisplay(success=True, message=message, warnings=warnings)
 
     @classmethod
     def get_status_text(cls) -> str:
-        """Return status message for spinner."""
         return "Searching files"

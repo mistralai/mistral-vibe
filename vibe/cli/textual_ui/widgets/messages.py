@@ -7,6 +7,8 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Markdown, Static
 from textual.widgets._markdown import MarkdownStream
 
+from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
+
 
 class NonSelectableStatic(Static):
     @property
@@ -57,25 +59,18 @@ class UserMessage(Static):
         self.remove_class("pending")
 
 
-class AssistantMessage(Static):
+class StreamingMessageBase(Static):
     def __init__(self, content: str) -> None:
         super().__init__()
-        self.add_class("assistant-message")
         self._content = content
         self._markdown: Markdown | None = None
         self._stream: MarkdownStream | None = None
 
-    def compose(self) -> ComposeResult:
-        with Horizontal(classes="assistant-message-container"):
-            yield NonSelectableStatic("● ", classes="assistant-message-dot")
-            with Vertical(classes="assistant-message-content"):
-                markdown = Markdown("")
-                self._markdown = markdown
-                yield markdown
-
     def _get_markdown(self) -> Markdown:
         if self._markdown is None:
-            self._markdown = self.query_one(Markdown)
+            raise RuntimeError(
+                "Markdown widget not initialized. compose() must be called first."
+            )
         return self._markdown
 
     def _ensure_stream(self) -> MarkdownStream:
@@ -88,11 +83,12 @@ class AssistantMessage(Static):
             return
 
         self._content += content
-        stream = self._ensure_stream()
-        await stream.write(content)
+        if self._should_write_content():
+            stream = self._ensure_stream()
+            await stream.write(content)
 
     async def write_initial_content(self) -> None:
-        if self._content:
+        if self._content and self._should_write_content():
             stream = self._ensure_stream()
             await stream.write(self._content)
 
@@ -102,6 +98,86 @@ class AssistantMessage(Static):
 
         await self._stream.stop()
         self._stream = None
+
+    def _should_write_content(self) -> bool:
+        return True
+
+
+class AssistantMessage(StreamingMessageBase):
+    def __init__(self, content: str) -> None:
+        super().__init__(content)
+        self.add_class("assistant-message")
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="assistant-message-container"):
+            yield NonSelectableStatic("● ", classes="assistant-message-dot")
+            with Vertical(classes="assistant-message-content"):
+                markdown = Markdown("")
+                self._markdown = markdown
+                yield markdown
+
+
+class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
+    SPINNER_TYPE = SpinnerType.LINE
+    SPINNING_TEXT = "Thinking"
+    COMPLETED_TEXT = "Thought"
+
+    def __init__(self, content: str, collapsed: bool = True) -> None:
+        super().__init__(content)
+        self.add_class("reasoning-message")
+        self.collapsed = collapsed
+        self._indicator_widget: Static | None = None
+        self._triangle_widget: Static | None = None
+        self.init_spinner()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="reasoning-message-wrapper"):
+            with Horizontal(classes="reasoning-message-header"):
+                self._indicator_widget = NonSelectableStatic(
+                    self._spinner.current_frame(), classes="reasoning-indicator"
+                )
+                yield self._indicator_widget
+                self._status_text_widget = Static(
+                    self.SPINNING_TEXT, markup=False, classes="reasoning-collapsed-text"
+                )
+                yield self._status_text_widget
+                self._triangle_widget = NonSelectableStatic(
+                    "▶" if self.collapsed else "▼", classes="reasoning-triangle"
+                )
+                yield self._triangle_widget
+            markdown = Markdown("", classes="reasoning-message-content")
+            markdown.display = not self.collapsed
+            self._markdown = markdown
+            yield markdown
+
+    def on_mount(self) -> None:
+        self.start_spinner_timer()
+
+    async def on_click(self) -> None:
+        await self._toggle_collapsed()
+
+    async def _toggle_collapsed(self) -> None:
+        await self.set_collapsed(not self.collapsed)
+
+    def _should_write_content(self) -> bool:
+        return not self.collapsed
+
+    async def set_collapsed(self, collapsed: bool) -> None:
+        if self.collapsed == collapsed:
+            return
+
+        self.collapsed = collapsed
+        if self._triangle_widget:
+            self._triangle_widget.update("▶" if collapsed else "▼")
+        if self._markdown:
+            self._markdown.display = not collapsed
+            if not collapsed and self._content:
+                if self._stream is not None:
+                    await self._stream.stop()
+                    self._stream = None
+                await self._markdown.update("")
+                stream = self._ensure_stream()
+                await stream.write(self._content)
 
 
 class UserCommandMessage(Static):

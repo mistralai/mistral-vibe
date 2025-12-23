@@ -6,6 +6,7 @@ import subprocess
 import time
 from typing import Any, ClassVar, assert_never
 
+from pydantic import BaseModel
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalScroll
@@ -18,6 +19,10 @@ from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.terminal_setup import setup_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
+from vibe.cli.textual_ui.terminal_theme import (
+    TERMINAL_THEME_NAME,
+    capture_terminal_theme,
+)
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
@@ -29,6 +34,8 @@ from vibe.cli.textual_ui.widgets.messages import (
     BashOutputMessage,
     ErrorMessage,
     InterruptMessage,
+    ReasoningMessage,
+    StreamingMessageBase,
     UserCommandMessage,
     UserMessage,
     WarningMessage,
@@ -116,13 +123,13 @@ class VibeApp(App):
         self._mode_indicator: ModeIndicator | None = None
         self._context_progress: ContextProgress | None = None
         self._current_bottom_app: BottomApp = BottomApp.Input
-        self.theme = config.textual_theme
 
         self.history_file = HISTORY_FILE.path
 
         self._tools_collapsed = True
         self._todos_collapsed = False
         self._current_streaming_message: AssistantMessage | None = None
+        self._current_streaming_reasoning: ReasoningMessage | None = None
         self._version_update_notifier = version_update_notifier
         self._update_cache_repository = update_cache_repository
         self._is_update_check_enabled = config.enable_update_checks
@@ -138,6 +145,7 @@ class VibeApp(App):
         self._agent_init_interrupted = False
         self._auto_scroll = True
         self._last_escape_time: float | None = None
+        self._terminal_theme = capture_terminal_theme()
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="chat"):
@@ -166,6 +174,15 @@ class VibeApp(App):
             yield ContextProgress()
 
     async def on_mount(self) -> None:
+        if self._terminal_theme:
+            self.register_theme(self._terminal_theme)
+
+        if self.config.textual_theme == TERMINAL_THEME_NAME:
+            if self._terminal_theme:
+                self.theme = TERMINAL_THEME_NAME
+        else:
+            self.theme = self.config.textual_theme
+
         self.event_handler = EventHandler(
             mount_callback=self._mount_and_scroll,
             scroll_callback=self._scroll_to_bottom_deferred,
@@ -280,7 +297,11 @@ class VibeApp(App):
 
     def on_config_app_setting_changed(self, message: ConfigApp.SettingChanged) -> None:
         if message.key == "textual_theme":
-            self.theme = message.value
+            if message.value == TERMINAL_THEME_NAME:
+                if self._terminal_theme:
+                    self.theme = TERMINAL_THEME_NAME
+            else:
+                self.theme = message.value
 
     async def on_config_app_config_closed(
         self, message: ConfigApp.ConfigClosed
@@ -539,7 +560,7 @@ class VibeApp(App):
         return self._agent_init_task
 
     async def _approval_callback(
-        self, tool: str, args: dict, tool_call_id: str
+        self, tool: str, args: BaseModel, tool_call_id: str
     ) -> tuple[ApprovalResponse, str | None]:
         self._pending_approval = asyncio.Future()
         await self._switch_to_approval_app(tool, args)
@@ -894,13 +915,17 @@ class VibeApp(App):
         if self._mode_indicator:
             self._mode_indicator.display = False
 
-        config_app = ConfigApp(self.config)
+        config_app = ConfigApp(
+            self.config, has_terminal_theme=self._terminal_theme is not None
+        )
         await bottom_container.mount(config_app)
         self._current_bottom_app = BottomApp.Config
 
         self.call_after_refresh(config_app.focus)
 
-    async def _switch_to_approval_app(self, tool_name: str, tool_args: dict) -> None:
+    async def _switch_to_approval_app(
+        self, tool_name: str, tool_args: BaseModel
+    ) -> None:
         bottom_container = self.query_one("#bottom-app-container")
 
         try:
@@ -1133,11 +1158,35 @@ class VibeApp(App):
             await self._mount_and_scroll(WarningMessage(warning, show_border=False))
 
     async def _finalize_current_streaming_message(self) -> None:
+        if self._current_streaming_reasoning is not None:
+            self._current_streaming_reasoning.stop_spinning()
+            await self._current_streaming_reasoning.stop_stream()
+            self._current_streaming_reasoning = None
+
         if self._current_streaming_message is None:
             return
 
         await self._current_streaming_message.stop_stream()
         self._current_streaming_message = None
+
+    async def _handle_streaming_widget[T: StreamingMessageBase](
+        self,
+        widget: T,
+        current_stream: T | None,
+        other_stream: StreamingMessageBase | None,
+        messages_area: Widget,
+    ) -> T | None:
+        if other_stream is not None:
+            await other_stream.stop_stream()
+
+        if current_stream is not None:
+            if widget._content:
+                await current_stream.append_content(widget._content)
+            return None
+
+        await messages_area.mount(widget)
+        await widget.write_initial_content()
+        return widget
 
     async def _mount_and_scroll(self, widget: Widget) -> None:
         messages_area = self.query_one("#messages")
@@ -1147,15 +1196,28 @@ class VibeApp(App):
         if was_at_bottom:
             self._auto_scroll = True
 
-        if isinstance(widget, AssistantMessage):
-            if self._current_streaming_message is not None:
-                content = widget._content or ""
-                if content:
-                    await self._current_streaming_message.append_content(content)
-            else:
-                self._current_streaming_message = widget
-                await messages_area.mount(widget)
-                await widget.write_initial_content()
+        if isinstance(widget, ReasoningMessage):
+            result = await self._handle_streaming_widget(
+                widget,
+                self._current_streaming_reasoning,
+                self._current_streaming_message,
+                messages_area,
+            )
+            if result is not None:
+                self._current_streaming_reasoning = result
+            self._current_streaming_message = None
+        elif isinstance(widget, AssistantMessage):
+            if self._current_streaming_reasoning is not None:
+                self._current_streaming_reasoning.stop_spinning()
+            result = await self._handle_streaming_widget(
+                widget,
+                self._current_streaming_message,
+                self._current_streaming_reasoning,
+                messages_area,
+            )
+            if result is not None:
+                self._current_streaming_message = result
+            self._current_streaming_reasoning = None
         else:
             await self._finalize_current_streaming_message()
             await messages_area.mount(widget)
@@ -1279,7 +1341,6 @@ def run_textual_ui(
     initial_prompt: str | None = None,
     loaded_messages: list[LLMMessage] | None = None,
 ) -> None:
-    """Run the Textual UI."""
     update_notifier = PyPIVersionUpdateGateway(project_name="mistral-vibe")
     update_cache_repository = FileSystemUpdateCacheRepository()
     app = VibeApp(

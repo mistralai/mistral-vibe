@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2025-12-23
+
+### Added
+
+- agentskills.io support
+- Reasoning support
+- Native terminal theme support
+- Issue templates for bug reports and feature requests
+- Auto update zed extension on release creation
+
+### Changed
+
+- Improve ToolUI system with better rendering and organization
+- Use pinned actions in CI workflows
+- Remove 100k -> 200k tokens config migration
+
+### Fixed
+
+- Fix `-p` mode to auto-approve tool calls
+- Fix crash when switching mode
+- Fix some cases where clipboard copy didn't work
+
 ## [1.2.2] - 2025-12-22
 
 ### Fixed

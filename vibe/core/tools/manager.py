@@ -19,7 +19,6 @@ from vibe.core.tools.mcp import (
     list_tools_http,
     list_tools_stdio,
 )
-from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.utils import run_sync
 
 logger = getLogger("vibe")
@@ -53,17 +52,11 @@ class ToolManager:
     def _compute_search_paths(config: VibeConfig) -> list[Path]:
         paths: list[Path] = [DEFAULT_TOOL_DIR.path]
 
-        for p in config.tool_paths:
-            path = Path(p).expanduser().resolve()
+        for path in config.tool_paths:
             if path.is_dir():
                 paths.append(path)
 
-        is_folder_trusted = trusted_folders_manager.is_trusted(config.effective_workdir)
-        if (
-            is_folder_trusted is True
-            and (tools_dir := resolve_local_tools_dir(config.effective_workdir))
-            is not None
-        ):
+        if (tools_dir := resolve_local_tools_dir(config.effective_workdir)) is not None:
             paths.append(tools_dir)
 
         if GLOBAL_TOOLS_DIR.path.is_dir():

@@ -13,7 +13,7 @@ from textual.widgets import Input
 from vibe.core.paths.global_paths import GLOBAL_CONFIG_FILE, GLOBAL_ENV_FILE
 from vibe.setup.onboarding import OnboardingApp
 from vibe.setup.onboarding.screens.api_key import ApiKeyScreen
-from vibe.setup.onboarding.screens.theme_selection import THEMES, ThemeSelectionScreen
+from vibe.setup.onboarding.screens.theme_selection import ThemeSelectionScreen
 
 
 async def _wait_for(
@@ -78,16 +78,19 @@ async def test_ui_can_pick_a_theme_and_saves_selection(config_dir: Path) -> None
         await pass_welcome_screen(pilot)
 
         theme_screen = app.screen
+        assert isinstance(theme_screen, ThemeSelectionScreen)
         app.post_message(
             Resize(Size(40, 10), Size(40, 10))
         )  # trigger the resize event handler
         preview = theme_screen.query_one("#preview")
         assert preview.styles.max_height is not None
         target_theme = "gruvbox"
-        assert target_theme in THEMES
-        start_index = THEMES.index(app.theme)
-        target_index = THEMES.index(target_theme)
-        steps_down = (target_index - start_index) % len(THEMES)
+        # Use the screen's available themes which accounts for terminal theme availability
+        available_themes = theme_screen._available_themes
+        assert target_theme in available_themes
+        start_index = theme_screen._theme_index
+        target_index = available_themes.index(target_theme)
+        steps_down = (target_index - start_index) % len(available_themes)
         await pilot.press(*["down"] * steps_down)
         assert app.theme == target_theme
         await pilot.press("enter")

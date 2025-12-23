@@ -13,11 +13,11 @@ from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolEr
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
-_BLOCK_RE = re.compile(
+SEARCH_REPLACE_BLOCK_RE = re.compile(
     r"<{5,} SEARCH\r?\n(.*?)\r?\n?={5,}\r?\n(.*?)\r?\n?>{5,} REPLACE", flags=re.DOTALL
 )
 
-_BLOCK_WITH_FENCE_RE = re.compile(
+SEARCH_REPLACE_BLOCK_WITH_FENCE_RE = re.compile(
     r"```[\s\S]*?\n<{5,} SEARCH\r?\n(.*?)\r?\n?={5,}\r?\n(.*?)\r?\n?>{5,} REPLACE\s*\n```",
     flags=re.DOTALL,
 )
@@ -88,11 +88,6 @@ class SearchReplace(
         return ToolCallDisplay(
             summary=f"Patching {args.file_path} ({len(blocks)} blocks)",
             content=args.content,
-            details={
-                "path": args.file_path,
-                "blocks_count": len(blocks),
-                "original_path": args.file_path,
-            },
         )
 
     @classmethod
@@ -102,10 +97,6 @@ class SearchReplace(
                 success=True,
                 message=f"Applied {event.result.blocks_applied} block{'' if event.result.blocks_applied == 1 else 's'}",
                 warnings=event.result.warnings,
-                details={
-                    "lines_changed": event.result.lines_changed,
-                    "content": event.result.content,
-                },
             )
 
         return ToolResultDisplay(success=True, message="Patch applied")
@@ -406,10 +397,10 @@ class SearchReplace(
         1. With code block fences (```...```)
         2. Without code block fences
         """
-        matches = _BLOCK_WITH_FENCE_RE.findall(content)
+        matches = SEARCH_REPLACE_BLOCK_WITH_FENCE_RE.findall(content)
 
         if not matches:
-            matches = _BLOCK_RE.findall(content)
+            matches = SEARCH_REPLACE_BLOCK_RE.findall(content)
 
         return [
             SearchReplaceBlock(

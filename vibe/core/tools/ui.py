@@ -11,14 +11,12 @@ if TYPE_CHECKING:
 class ToolCallDisplay(BaseModel):
     summary: str  # Brief description: "Writing file.txt", "Patching code.py"
     content: str | None = None  # Optional content preview
-    details: dict[str, Any] = Field(default_factory=dict)  # Tool-specific data
 
 
 class ToolResultDisplay(BaseModel):
     success: bool
     message: str
     warnings: list[str] = Field(default_factory=list)
-    details: dict[str, Any] = Field(default_factory=dict)  # Tool-specific data
 
 
 @runtime_checkable
@@ -46,9 +44,7 @@ class ToolUIDataAdapter:
 
         args_dict = event.args.model_dump() if hasattr(event.args, "model_dump") else {}
         args_str = ", ".join(f"{k}={v!r}" for k, v in list(args_dict.items())[:3])
-        return ToolCallDisplay(
-            summary=f"{event.tool_name}({args_str})", details=args_dict
-        )
+        return ToolCallDisplay(summary=f"{event.tool_name}({args_str})")
 
     def get_result_display(self, event: ToolResultEvent) -> ToolResultDisplay:
         if event.error:
@@ -62,15 +58,7 @@ class ToolUIDataAdapter:
         if self.ui_data_class:
             return self.ui_data_class.get_result_display(event)
 
-        return ToolResultDisplay(
-            success=True,
-            message="Success",
-            details=(
-                event.result.model_dump()
-                if event.result and hasattr(event.result, "model_dump")
-                else {}
-            ),
-        )
+        return ToolResultDisplay(success=True, message="Success")
 
     def get_status_text(self) -> str:
         if self.ui_data_class:

@@ -10,10 +10,14 @@ from textual.message import Message
 from textual.theme import BUILTIN_THEMES
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.terminal_theme import TERMINAL_THEME_NAME
+
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
 
-THEMES = sorted(k for k in BUILTIN_THEMES if k != "textual-ansi")
+_ALL_THEMES = [TERMINAL_THEME_NAME] + sorted(
+    k for k in BUILTIN_THEMES if k != "textual-ansi"
+)
 
 
 class SettingDefinition(TypedDict):
@@ -46,11 +50,17 @@ class ConfigApp(Container):
             super().__init__()
             self.changes = changes
 
-    def __init__(self, config: VibeConfig) -> None:
+    def __init__(self, config: VibeConfig, *, has_terminal_theme: bool = False) -> None:
         super().__init__(id="config-app")
         self.config = config
         self.selected_index = 0
         self.changes: dict[str, str] = {}
+
+        themes = (
+            _ALL_THEMES
+            if has_terminal_theme
+            else [t for t in _ALL_THEMES if t != TERMINAL_THEME_NAME]
+        )
 
         self.settings: list[SettingDefinition] = [
             {
@@ -64,7 +74,7 @@ class ConfigApp(Container):
                 "key": "textual_theme",
                 "label": "Theme",
                 "type": "cycle",
-                "options": THEMES,
+                "options": themes,
                 "value": self.config.textual_theme,
             },
         ]
