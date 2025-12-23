@@ -121,8 +121,10 @@ async def test_tool_messages_are_skipped_in_role_check():
 async def test_compact_creates_valid_sequence():
     """Test that compact operation creates a valid message sequence."""
     # Use a mock backend to avoid calling real API
+    # FakeBackend expects an iterable of iterables of chunks (multiple streams)
+    # For compact, we need one stream with one chunk for the summary response
     mock_backend = FakeBackend([
-        mock_llm_chunk(content="Understood.", finish_reason="stop")
+        [mock_llm_chunk(content="Understood.")]
     ])
     config = VibeConfig(
         session_logging=SessionLoggingConfig(enabled=False),
@@ -133,7 +135,7 @@ async def test_compact_creates_valid_sequence():
         include_prompt_detail=False,
     )
     agent = Agent(config=config, backend=mock_backend)
-    
+
     # Set up conversation history
     agent.messages = [
         LLMMessage(role=Role.system, content="System prompt"),
@@ -142,17 +144,17 @@ async def test_compact_creates_valid_sequence():
         LLMMessage(role=Role.user, content="Second message"),
         LLMMessage(role=Role.assistant, content="Second response"),
     ]
-    
+
     # Compact the conversation
     summary = await agent.compact()
-    
+
     # Verify the sequence after compact
-    # Should be: system, user(summary), assistant(ack), user(summary)
+    # Should be: system, user(summary), assistant(ack)
     assert len(agent.messages) == 3
     roles = [msg.role for msg in agent.messages]
     assert roles[0] == Role.system
     assert roles[1] == Role.user  # Summary
     assert roles[2] == Role.assistant  # Acknowledgment
-    
+
     # Verify acknowledgment content
     assert "Understood" in agent.messages[2].content
