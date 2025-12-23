@@ -8,7 +8,6 @@ import uuid
 
 import docker
 from docker.errors import DockerException, ImageNotFound
-
 from rich import print as rprint
 
 from vibe.core.paths.global_paths import _get_vibe_home

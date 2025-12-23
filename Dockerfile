@@ -1,7 +1,7 @@
 FROM ghcr.io/astral-sh/uv:alpine3.22
 
 # install bash support for tooling
-RUN apk update && apk add bash curl shadow gosu sed
+RUN apk update && apk add bash curl shadow gosu sed git
 
 # Create vibeuser with a default UID/GID that can be overridden at runtime
 ARG VIBE_UID=1000

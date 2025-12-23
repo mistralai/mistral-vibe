@@ -8,9 +8,10 @@ import pytest
 
 from vibe.core.sandbox.sandbox import IMAGE_NAME, run_sandbox
 
+
 def _is_running_in_docker() -> bool:
     try:
-        with open("/proc/1/cgroup", "rt", encoding="utf-8") as f:
+        with open("/proc/1/cgroup", encoding="utf-8") as f:
             return "docker" in f.read()
     except FileNotFoundError:
         # Not running on Linux or /proc not available
