@@ -75,20 +75,12 @@ class Todo(
 
         match args.action:
             case "read":
-                return ToolCallDisplay(
-                    summary="Reading todos", details={"action": "read"}
-                )
+                return ToolCallDisplay(summary="Reading todos")
             case "write":
                 count = len(args.todos) if args.todos else 0
-                return ToolCallDisplay(
-                    summary=f"Writing {count} todos",
-                    details={"action": "write", "count": count},
-                )
+                return ToolCallDisplay(summary=f"Writing {count} todos")
             case _:
-                return ToolCallDisplay(
-                    summary=f"Unknown action: {args.action}",
-                    details={"action": args.action},
-                )
+                return ToolCallDisplay(summary=f"Unknown action: {args.action}")
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -97,16 +89,7 @@ class Todo(
 
         result = event.result
 
-        by_status = {"in_progress": [], "pending": [], "completed": [], "cancelled": []}
-
-        for todo in result.todos:
-            by_status[todo.status].append({"content": todo.content, "id": todo.id})
-
-        return ToolResultDisplay(
-            success=True,
-            message=result.message,
-            details={"todos_by_status": by_status, "total_count": result.total_count},
-        )
+        return ToolResultDisplay(success=True, message=result.message)
 
     @classmethod
     def get_status_text(cls) -> str:

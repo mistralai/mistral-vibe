@@ -227,6 +227,67 @@ Markdown MarkdownFence {
     margin-bottom: 0;
 }
 
+.reasoning-message {
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+}
+
+.reasoning-message-wrapper {
+    width: 100%;
+    height: auto;
+}
+
+.reasoning-message-header {
+    width: 100%;
+    height: auto;
+}
+
+.reasoning-indicator {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    margin-right: 1;
+
+    &.success {
+        color: $text-success;
+    }
+}
+
+.reasoning-collapsed-text {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    text-style: italic;
+}
+
+.reasoning-triangle {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    text-style: italic;
+    margin-left: 1;
+}
+
+.reasoning-message-content {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    padding-left: 2;
+    margin: 0;
+    color: $text-muted;
+    text-style: italic;
+}
+
+.reasoning-message-content * {
+    color: $text-muted;
+    text-style: italic;
+}
+
+.reasoning-message-content > *:last-child {
+    margin-bottom: 0;
+}
+
 .interrupt-message {
     margin-top: 0;
     margin-bottom: 0;

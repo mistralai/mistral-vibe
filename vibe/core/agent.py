@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator, Callable
 from enum import StrEnum, auto
 import time
-from typing import Any, cast
+from typing import cast
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -28,6 +28,7 @@ from vibe.core.middleware import (
 )
 from vibe.core.modes import AgentMode
 from vibe.core.prompts import UtilityPrompt
+from vibe.core.skills.manager import SkillManager
 from vibe.core.system_prompt import get_universal_system_prompt
 from vibe.core.tools.base import (
     BaseTool,
@@ -48,6 +49,7 @@ from vibe.core.types import (
     LLMChunk,
     LLMMessage,
     LLMUsage,
+    ReasoningEvent,
     Role,
     SyncApprovalCallback,
     ToolCallEvent,
@@ -103,6 +105,7 @@ class Agent:
         self._max_price = max_price
 
         self.tool_manager = ToolManager(config)
+        self.skill_manager = SkillManager(config)
         self.format_handler = APIToolFormatHandler()
 
         self.backend_factory = lambda: backend or self._select_backend()
@@ -114,7 +117,9 @@ class Agent:
         self.enable_streaming = enable_streaming
         self._setup_middleware()
 
-        system_prompt = get_universal_system_prompt(self.tool_manager, config)
+        system_prompt = get_universal_system_prompt(
+            self.tool_manager, config, self.skill_manager
+        )
         self.messages = [LLMMessage(role=Role.system, content=system_prompt)]
 
         if self.message_observer:
@@ -308,24 +313,49 @@ class Agent:
         async for event in self._handle_tool_calls(resolved):
             yield event
 
-    async def _stream_assistant_events(self) -> AsyncGenerator[AssistantEvent]:
-        batched_chunk = LLMChunk(message=LLMMessage(role=Role.assistant))
+    async def _stream_assistant_events(
+        self,
+    ) -> AsyncGenerator[AssistantEvent | ReasoningEvent]:
+        content_buffer = ""
+        reasoning_buffer = ""
         chunks_with_content = 0
+        chunks_with_reasoning = 0
         BATCH_SIZE = 5
 
         async for chunk in self._chat_streaming():
-            batched_chunk += chunk
+            if chunk.message.reasoning_content:
+                if content_buffer:
+                    yield AssistantEvent(content=content_buffer)
+                    content_buffer = ""
+                    chunks_with_content = 0
+
+                reasoning_buffer += chunk.message.reasoning_content
+                chunks_with_reasoning += 1
+
+                if chunks_with_reasoning >= BATCH_SIZE:
+                    yield ReasoningEvent(content=reasoning_buffer)
+                    reasoning_buffer = ""
+                    chunks_with_reasoning = 0
 
             if chunk.message.content:
+                if reasoning_buffer:
+                    yield ReasoningEvent(content=reasoning_buffer)
+                    reasoning_buffer = ""
+                    chunks_with_reasoning = 0
+
+                content_buffer += chunk.message.content
                 chunks_with_content += 1
 
-            if chunks_with_content >= BATCH_SIZE:
-                yield AssistantEvent(content=cast(str, batched_chunk.message.content))
-                batched_chunk = LLMChunk(message=LLMMessage(role=Role.assistant))
-                chunks_with_content = 0
+                if chunks_with_content >= BATCH_SIZE:
+                    yield AssistantEvent(content=content_buffer)
+                    content_buffer = ""
+                    chunks_with_content = 0
 
-        if batched_chunk.message.content:
-            yield AssistantEvent(content=batched_chunk.message.content)
+        if reasoning_buffer:
+            yield ReasoningEvent(content=reasoning_buffer)
+
+        if content_buffer:
+            yield AssistantEvent(content=content_buffer)
 
     async def _get_assistant_event(self) -> AssistantEvent:
         llm_result = await self._chat()
@@ -381,7 +411,7 @@ class Agent:
                 continue
 
             decision = await self._should_execute_tool(
-                tool_instance, tool_call.args_dict, tool_call_id
+                tool_instance, tool_call.validated_args, tool_call_id
             )
 
             if decision.verdict == ToolExecutionResponse.SKIP:
@@ -605,15 +635,12 @@ class Agent:
             self.stats.tokens_per_second = usage.completion_tokens / time_seconds
 
     async def _should_execute_tool(
-        self, tool: BaseTool, args: dict[str, Any], tool_call_id: str
+        self, tool: BaseTool, args: BaseModel, tool_call_id: str
     ) -> ToolDecision:
         if self.auto_approve:
             return ToolDecision(verdict=ToolExecutionResponse.EXECUTE)
 
-        args_model, _ = tool._get_tool_args_results()
-        validated_args = args_model.model_validate(args)
-
-        allowlist_denylist_result = tool.check_allowlist_denylist(validated_args)
+        allowlist_denylist_result = tool.check_allowlist_denylist(args)
         if allowlist_denylist_result == ToolPermission.ALWAYS:
             return ToolDecision(verdict=ToolExecutionResponse.EXECUTE)
         elif allowlist_denylist_result == ToolPermission.NEVER:
@@ -638,7 +665,7 @@ class Agent:
         return await self._ask_approval(tool_name, args, tool_call_id)
 
     async def _ask_approval(
-        self, tool_name: str, args: dict[str, Any], tool_call_id: str
+        self, tool_name: str, args: BaseModel, tool_call_id: str
     ) -> ToolDecision:
         if not self.approval_callback:
             return ToolDecision(
@@ -844,8 +871,11 @@ class Agent:
             self._max_price = max_price
 
         self.tool_manager = ToolManager(self.config)
+        self.skill_manager = SkillManager(self.config)
 
-        new_system_prompt = get_universal_system_prompt(self.tool_manager, self.config)
+        new_system_prompt = get_universal_system_prompt(
+            self.tool_manager, self.config, self.skill_manager
+        )
         self.messages = [LLMMessage(role=Role.system, content=new_system_prompt)]
 
         if preserved_messages:

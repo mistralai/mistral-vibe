@@ -25,6 +25,7 @@ from vibe.core.types import (
     AssistantEvent,
     FunctionCall,
     LLMMessage,
+    ReasoningEvent,
     Role,
     ToolCall,
     ToolCallEvent,
@@ -376,3 +377,150 @@ async def test_act_flushes_and_logs_when_streaming_errors(observer_capture) -> N
 
     assert [role for role, _ in observed] == [Role.system, Role.user]
     assert agent.interaction_logger.save_interaction.await_count == 1
+
+
+def _snapshot_events(events: list) -> list[tuple[str, str]]:
+    return [
+        (type(e).__name__, e.content)
+        for e in events
+        if isinstance(e, (AssistantEvent, ReasoningEvent))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_buffer_yields_before_content_on_transition() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(content="", reasoning_content="Let me think"),
+        mock_llm_chunk(content="", reasoning_content=" about this"),
+        mock_llm_chunk(content="", reasoning_content=" problem..."),
+        mock_llm_chunk(content="The answer is 42."),
+    ])
+    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+
+    events = [event async for event in agent.act("What's the answer?")]
+
+    assert _snapshot_events(events) == [
+        ("ReasoningEvent", "Let me think about this problem..."),
+        ("AssistantEvent", "The answer is 42."),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_buffer_yields_before_content_with_batching() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(content="", reasoning_content="Step 1"),
+        mock_llm_chunk(content="", reasoning_content=", Step 2"),
+        mock_llm_chunk(content="", reasoning_content=", Step 3"),
+        mock_llm_chunk(content="", reasoning_content=", Step 4"),
+        mock_llm_chunk(content="", reasoning_content=", Step 5"),  # Triggers batch
+        mock_llm_chunk(content="", reasoning_content=", Step 6"),
+        mock_llm_chunk(content="", reasoning_content=", Final"),
+        mock_llm_chunk(content="Done thinking!"),
+    ])
+    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+
+    events = [event async for event in agent.act("Think step by step")]
+
+    assert _snapshot_events(events) == [
+        ("ReasoningEvent", "Step 1, Step 2, Step 3, Step 4, Step 5"),
+        ("ReasoningEvent", ", Step 6, Final"),
+        ("AssistantEvent", "Done thinking!"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_content_buffer_yields_before_reasoning_on_transition() -> None:
+    """When content is buffered and reasoning arrives, content yields first."""
+    backend = FakeBackend([
+        mock_llm_chunk(content="Starting the response"),
+        mock_llm_chunk(content=" here..."),
+        mock_llm_chunk(content="", reasoning_content="Wait, let me reconsider"),
+        mock_llm_chunk(content="", reasoning_content=" this approach..."),
+        mock_llm_chunk(content="Actually, the final answer."),
+    ])
+    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+
+    events = [event async for event in agent.act("Give me an answer")]
+
+    assert _snapshot_events(events) == [
+        ("AssistantEvent", "Starting the response here..."),
+        ("ReasoningEvent", "Wait, let me reconsider this approach..."),
+        ("AssistantEvent", "Actually, the final answer."),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_interleaved_reasoning_content_preserves_order() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(content="", reasoning_content="Think 1"),
+        mock_llm_chunk(content="Answer 1 "),
+        mock_llm_chunk(content="", reasoning_content="Think 2"),
+        mock_llm_chunk(content="Answer 2 "),
+        mock_llm_chunk(content="", reasoning_content="Think 3"),
+        mock_llm_chunk(content="Answer 3"),
+    ])
+    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+
+    events = [event async for event in agent.act("Interleaved test")]
+
+    assert _snapshot_events(events) == [
+        ("ReasoningEvent", "Think 1"),
+        ("AssistantEvent", "Answer 1 "),
+        ("ReasoningEvent", "Think 2"),
+        ("AssistantEvent", "Answer 2 "),
+        ("ReasoningEvent", "Think 3"),
+        ("AssistantEvent", "Answer 3"),
+    ]
+
+    assistant_msg = next(m for m in agent.messages if m.role == Role.assistant)
+    assert assistant_msg.reasoning_content == "Think 1Think 2Think 3"
+    assert assistant_msg.content == "Answer 1 Answer 2 Answer 3"
+
+
+@pytest.mark.asyncio
+async def test_only_reasoning_chunks_yields_reasoning_event() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(content="", reasoning_content="Just thinking..."),
+        mock_llm_chunk(content="", reasoning_content=" nothing to say yet."),
+    ])
+    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+
+    events = [event async for event in agent.act("Silent thinking")]
+
+    assert _snapshot_events(events) == [
+        ("ReasoningEvent", "Just thinking... nothing to say yet.")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_final_buffers_flush_in_correct_order() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(content="", reasoning_content="Final thought"),
+        mock_llm_chunk(content="Final words"),
+    ])
+    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+
+    events = [event async for event in agent.act("End buffers test")]
+
+    assert _snapshot_events(events) == [
+        ("ReasoningEvent", "Final thought"),
+        ("AssistantEvent", "Final words"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_empty_content_chunks_do_not_trigger_false_yields() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(content="", reasoning_content="Reasoning here"),
+        mock_llm_chunk(content=""),  # Empty content shouldn't flush reasoning
+        mock_llm_chunk(content="", reasoning_content=" more reasoning"),
+        mock_llm_chunk(content="Actual content"),
+    ])
+    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+
+    events = [event async for event in agent.act("Empty content test")]
+
+    assert _snapshot_events(events) == [
+        ("ReasoningEvent", "Reasoning here more reasoning"),
+        ("AssistantEvent", "Actual content"),
+    ]

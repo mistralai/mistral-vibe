@@ -32,7 +32,17 @@ def _resolve_config_path(basename: str, type: Literal["file", "dir"]) -> Path:
 
 
 def resolve_local_tools_dir(dir: Path) -> Path | None:
+    if not trusted_folders_manager.is_trusted(dir):
+        return None
     if (candidate := dir / ".vibe" / "tools").is_dir():
+        return candidate
+    return None
+
+
+def resolve_local_skills_dir(dir: Path) -> Path | None:
+    if not trusted_folders_manager.is_trusted(dir):
+        return None
+    if (candidate := dir / ".vibe" / "skills").is_dir():
         return candidate
     return None
 

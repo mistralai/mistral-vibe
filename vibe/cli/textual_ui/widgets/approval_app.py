@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from pydantic import BaseModel
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -9,7 +10,7 @@ from textual.containers import Container, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.renderers import get_renderer
+from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.core.config import VibeConfig
 
 
@@ -29,14 +30,14 @@ class ApprovalApp(Container):
     ]
 
     class ApprovalGranted(Message):
-        def __init__(self, tool_name: str, tool_args: dict) -> None:
+        def __init__(self, tool_name: str, tool_args: BaseModel) -> None:
             super().__init__()
             self.tool_name = tool_name
             self.tool_args = tool_args
 
     class ApprovalGrantedAlwaysTool(Message):
         def __init__(
-            self, tool_name: str, tool_args: dict, save_permanently: bool
+            self, tool_name: str, tool_args: BaseModel, save_permanently: bool
         ) -> None:
             super().__init__()
             self.tool_name = tool_name
@@ -44,13 +45,13 @@ class ApprovalApp(Container):
             self.save_permanently = save_permanently
 
     class ApprovalRejected(Message):
-        def __init__(self, tool_name: str, tool_args: dict) -> None:
+        def __init__(self, tool_name: str, tool_args: BaseModel) -> None:
             super().__init__()
             self.tool_name = tool_name
             self.tool_args = tool_args
 
     def __init__(
-        self, tool_name: str, tool_args: dict, workdir: str, config: VibeConfig
+        self, tool_name: str, tool_args: BaseModel, workdir: str, config: VibeConfig
     ) -> None:
         super().__init__(id="approval-app")
         self.tool_name = tool_name
@@ -100,11 +101,8 @@ class ApprovalApp(Container):
         if not self.tool_info_container:
             return
 
-        renderer = get_renderer(self.tool_name)
-        widget_class, data = renderer.get_approval_widget(self.tool_args)
-
+        approval_widget = get_approval_widget(self.tool_name, self.tool_args)
         await self.tool_info_container.remove_children()
-        approval_widget = widget_class(data)
         await self.tool_info_container.mount(approval_widget)
 
     def _update_options(self) -> None:

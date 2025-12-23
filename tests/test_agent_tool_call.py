@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
 
+from pydantic import BaseModel
 import pytest
 
 from tests.mock.utils import mock_llm_chunk
@@ -140,7 +140,7 @@ async def test_tool_call_requires_approval_if_not_auto_approved() -> None:
 @pytest.mark.asyncio
 async def test_tool_call_approved_by_callback() -> None:
     def approval_callback(
-        _tool_name: str, _args: dict[str, Any], _tool_call_id: str
+        _tool_name: str, _args: BaseModel, _tool_call_id: str
     ) -> tuple[ApprovalResponse, str | None]:
         return (ApprovalResponse.YES, None)
 
@@ -177,7 +177,7 @@ async def test_tool_call_rejected_when_auto_approve_disabled_and_rejected_by_cal
     custom_feedback = "User declined tool execution"
 
     def approval_callback(
-        _tool_name: str, _args: dict[str, Any], _tool_call_id: str
+        _tool_name: str, _args: BaseModel, _tool_call_id: str
     ) -> tuple[ApprovalResponse, str | None]:
         return (ApprovalResponse.NO, custom_feedback)
 
@@ -247,7 +247,7 @@ async def test_approval_always_sets_tool_permission_for_subsequent_calls() -> No
     agent_ref: Agent | None = None
 
     def approval_callback(
-        tool_name: str, _args: dict[str, Any], _tool_call_id: str
+        tool_name: str, _args: BaseModel, _tool_call_id: str
     ) -> tuple[ApprovalResponse, str | None]:
         callback_invocations.append(tool_name)
         # Set permission to ALWAYS for this tool (simulating the new behavior)

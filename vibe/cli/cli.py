@@ -26,6 +26,8 @@ def get_initial_mode(args: argparse.Namespace) -> AgentMode:
         return AgentMode.PLAN
     if args.auto_approve:
         return AgentMode.AUTO_APPROVE
+    if args.prompt is not None:
+        return AgentMode.AUTO_APPROVE
     return AgentMode.DEFAULT
 
 

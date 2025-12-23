@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question
+    url: https://discord.com/channels/1144547040454508606/1447989080720670915
+    about: Join Mistral AI Discord server for support and discussions
+  - name: Read the docs
+    url: https://docs.mistral.ai/mistral-vibe/introduction
+    about: Read the Mistral Vibe documentation for more information

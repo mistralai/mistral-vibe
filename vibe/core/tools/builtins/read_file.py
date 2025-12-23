@@ -188,14 +188,7 @@ class ReadFile(
                 parts.append(f"limit {event.args.limit} lines")
             summary += f" ({', '.join(parts)})"
 
-        return ToolCallDisplay(
-            summary=summary,
-            details={
-                "path": event.args.path,
-                "offset": event.args.offset,
-                "limit": event.args.limit,
-            },
-        )
+        return ToolCallDisplay(summary=summary)
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -215,15 +208,6 @@ class ReadFile(
             warnings=["File was truncated due to size limit"]
             if event.result.was_truncated
             else [],
-            details={
-                "path": str(event.result.path),
-                "lines_read": event.result.lines_read,
-                "was_truncated": event.result.was_truncated,
-                "content": event.result.content,
-                "file_extension": path_obj.suffix.lstrip(".")
-                if path_obj.suffix
-                else "text",
-            },
         )
 
     @classmethod

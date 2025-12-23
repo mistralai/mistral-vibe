@@ -7,20 +7,17 @@ from textual.containers import Horizontal
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.messages import NonSelectableStatic
-from vibe.cli.textual_ui.widgets.spinner import Spinner, SpinnerType, create_spinner
+from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
-class StatusMessage(Static):
+class StatusMessage(SpinnerMixin, Static):
     SPINNER_TYPE: ClassVar[SpinnerType] = SpinnerType.LINE
 
     def __init__(self, initial_text: str = "", **kwargs: Any) -> None:
-        self._spinner: Spinner = create_spinner(self.SPINNER_TYPE)
-        self._spinner_timer = None
-        self._is_spinning = True
-        self.success = True
         self._initial_text = initial_text
         self._indicator_widget: Static | None = None
         self._text_widget: Static | None = None
+        self.init_spinner()
         super().__init__(**kwargs)
 
     def compose(self) -> ComposeResult:
@@ -38,9 +35,9 @@ class StatusMessage(Static):
 
     def on_mount(self) -> None:
         self.update_display()
-        self._spinner_timer = self.set_interval(0.1, self._update_spinner)
+        self.start_spinner_timer()
 
-    def _update_spinner(self) -> None:
+    def _update_spinner_frame(self) -> None:
         if not self._is_spinning:
             return
         self.update_display()
@@ -72,4 +69,7 @@ class StatusMessage(Static):
     def stop_spinning(self, success: bool = True) -> None:
         self._is_spinning = False
         self.success = success
+        if self._spinner_timer:
+            self._spinner_timer.stop()
+            self._spinner_timer = None
         self.update_display()

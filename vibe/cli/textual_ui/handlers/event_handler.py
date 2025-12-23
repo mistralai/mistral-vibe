@@ -6,13 +6,14 @@ from typing import TYPE_CHECKING
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
-from vibe.cli.textual_ui.widgets.messages import AssistantMessage
+from vibe.cli.textual_ui.widgets.messages import AssistantMessage, ReasoningMessage
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.core.types import (
     AssistantEvent,
     BaseEvent,
     CompactEndEvent,
     CompactStartEvent,
+    ReasoningEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
@@ -50,21 +51,18 @@ class EventHandler:
                 return await self._handle_tool_call(event, loading_widget)
             case ToolResultEvent():
                 sanitized_event = self._sanitize_event(event)
-
                 await self._handle_tool_result(sanitized_event)
-                return None
+            case ReasoningEvent():
+                await self._handle_reasoning_message(event)
             case AssistantEvent():
                 await self._handle_assistant_message(event)
-                return None
             case CompactStartEvent():
                 await self._handle_compact_start()
-                return None
             case CompactEndEvent():
                 await self._handle_compact_end(event)
-                return None
             case _:
                 await self._handle_unknown_event(event)
-                return None
+        return None
 
     def _sanitize_event(self, event: ToolResultEvent) -> ToolResultEvent:
         if isinstance(event, ToolResultEvent):
@@ -124,6 +122,12 @@ class EventHandler:
 
     async def _handle_assistant_message(self, event: AssistantEvent) -> None:
         await self.mount_callback(AssistantMessage(event.content))
+
+    async def _handle_reasoning_message(self, event: ReasoningEvent) -> None:
+        tools_collapsed = self.get_tools_collapsed()
+        await self.mount_callback(
+            ReasoningMessage(event.content, collapsed=tools_collapsed)
+        )
 
     async def _handle_compact_start(self) -> None:
         compact_msg = CompactMessage()

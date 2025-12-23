@@ -78,7 +78,7 @@ class LoadingWidget(Static):
         return None
 
     def _get_default_status(self) -> str:
-        return self._get_easter_egg() or "Thinking"
+        return self._get_easter_egg() or "Generating"
 
     def _apply_easter_egg(self, status: str) -> str:
         return self._get_easter_egg() or status

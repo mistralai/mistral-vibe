@@ -56,17 +56,10 @@ class WriteFile(
             return ToolCallDisplay(summary="Invalid arguments")
 
         args = event.args
-        file_ext = Path(args.path).suffix.lstrip(".")
 
         return ToolCallDisplay(
             summary=f"Writing {args.path}{' (overwrite)' if args.overwrite else ''}",
             content=args.content,
-            details={
-                "path": args.path,
-                "overwrite": args.overwrite,
-                "file_extension": file_ext,
-                "content": args.content,
-            },
         )
 
     @classmethod
@@ -74,13 +67,7 @@ class WriteFile(
         if isinstance(event.result, WriteFileResult):
             action = "Overwritten" if event.result.file_existed else "Created"
             return ToolResultDisplay(
-                success=True,
-                message=f"{action} {Path(event.result.path).name}",
-                details={
-                    "bytes_written": event.result.bytes_written,
-                    "path": event.result.path,
-                    "content": event.result.content,
-                },
+                success=True, message=f"{action} {Path(event.result.path).name}"
             )
 
         return ToolResultDisplay(success=True, message="File written")

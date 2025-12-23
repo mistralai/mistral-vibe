@@ -1,5 +1,5 @@
 {
-  "version": "1.2.2",
+  "version": "1.3.0",
   "configurations": [
     {
       "name": "ACP Server",
@@ -46,6 +46,13 @@
       "args": [],
       "console": "integratedTerminal",
       "justMyCode": false
+    },
+    {
+      "name": "Attach using PID",
+      "type": "debugpy",
+      "request": "attach",
+      "processId": "${command:pickProcess}",
+      "justMyCode": true
     }
   ],
   "inputs": [

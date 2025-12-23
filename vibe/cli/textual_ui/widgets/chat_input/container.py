@@ -158,7 +158,11 @@ class ChatInputContainer(Vertical):
     def set_safety(self, safety: ModeSafety) -> None:
         self._safety = safety
 
-        input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
+        try:
+            input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
+        except Exception:
+            return
+
         for border_class in SAFETY_BORDER_CLASSES.values():
             input_box.remove_class(border_class)
 

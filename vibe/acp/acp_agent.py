@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
 import sys
-from typing import Any, cast, override
+from typing import cast, override
 
 from acp import (
     PROTOCOL_VERSION,
@@ -244,7 +244,7 @@ class VibeAcpAgent(AcpAgent):
                     return (ApprovalResponse.NO, f"Unknown option: {option_id}")
 
         async def approval_callback(
-            tool_name: str, args: dict[str, Any], tool_call_id: str
+            tool_name: str, args: BaseModel, tool_call_id: str
         ) -> tuple[ApprovalResponse, str | None]:
             # Create the tool call update
             tool_call = ToolCall(toolCallId=tool_call_id)
