@@ -308,6 +308,27 @@ This affects where Vibe looks for:
 
 Mistral Vibe can be used in text editors and IDEs that support [Agent Client Protocol](https://agentclientprotocol.com/overview/clients). See the [ACP Setup documentation](docs/acp-setup.md) for setup instructions for various editors and IDEs.
 
+## Sandboxing
+
+Especially when freely giving permissions through `--auto-approve`, it is good
+practice to use _sandboxing_, i.e. execute the agent from within a container. Docker,
+for example, offers [Sandboxes](https://docs.docker.com/ai/sandboxes/) (without `vibe` support)
+but there are also [community-lead projects](https://github.com/agent-infra/sandbox).
+
+For now, we can build a custom Docker image for sandboxing (instructions for Linux):
+```bash
+./scripts/build_sandbox.sh
+```
+
+Then, after installing `mistral-vibe` as above, the flag `--sandbox` for `vibe`
+executes `vibe` in the custom Docker sandbox.
+
+Please note that there are several restrictions on the use:
+- ` The `~/.vibe` directory is copied to the container at `/vibe`, hence sessions
+are not stored and no settings can be changed.
+- Only `bash` and `uv` are installed for tool use. More tools need to be installed
+either at runtime or installed via `apk` within the `Dockerfile`.
+
 ## Resources
 
 - [CHANGELOG](CHANGELOG.md) - See what's new in each version

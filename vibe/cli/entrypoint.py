@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import os
 
 from rich import print as rprint
 
@@ -86,6 +87,7 @@ def parse_arguments() -> argparse.Namespace:
         help="Load agent configuration from ~/.vibe/agents/NAME.toml",
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
+    parser.add_argument("--sandbox", action="store_true", help="Launch vibe in docker container as a sandbox.")
 
     continuation_group = parser.add_mutually_exclusive_group()
     continuation_group.add_argument(
@@ -100,6 +102,7 @@ def parse_arguments() -> argparse.Namespace:
         metavar="SESSION_ID",
         help="Resume a specific session by its ID (supports partial matching)",
     )
+
     return parser.parse_args()
 
 
@@ -129,6 +132,16 @@ def check_and_resolve_trusted_folder() -> None:
 
 def main() -> None:
     args = parse_arguments()
+
+    if args.sandbox:
+        # launch sanboxing container and pass arguments and current working dir
+        raw_arg_str = " ".join(sys.argv[1:]).replace("--sandbox", "")
+        cwd_path = os.curdir
+
+        from vibe.core.sandbox.sandbox import run_sandbox
+        run_sandbox(cwd_path, raw_arg_str)
+
+        return
 
     is_interactive = args.prompt is None
     if is_interactive:
