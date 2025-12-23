@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 from enum import StrEnum, auto
 import subprocess
+import sys
 import time
 from typing import Any, ClassVar, assert_never
 
@@ -212,6 +214,36 @@ class VibeApp(App):
             self.call_after_refresh(self._process_initial_prompt)
         else:
             self._ensure_agent_init_task()
+
+        # Fix Windows console mode after Textual's raw mode setup clobbers mouse flags
+        self._fix_windows_console_mode()
+
+    def _fix_windows_console_mode(self) -> None:
+        """Re-apply Windows console mode flags after Textual enters raw mode.
+
+        When Python/Textual enables raw mode, it calls SetConsoleMode() and
+        overwrites all existing flags, including ENABLE_MOUSE_INPUT. This
+        restores mouse input functionality on Windows.
+
+        See: https://github.com/nodejs/node/issues/61161
+        """
+        if sys.platform != "win32":
+            return
+
+        try:
+            STD_INPUT_HANDLE = -10
+            ENABLE_MOUSE_INPUT = 0x0010
+            ENABLE_EXTENDED_FLAGS = 0x0080
+
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            mode = ctypes.c_ulong()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                new_mode = mode.value | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS
+                kernel32.SetConsoleMode(handle, new_mode)
+        except Exception:
+            # Silently ignore - mouse may not work but app still runs
+            pass
 
     def _process_initial_prompt(self) -> None:
         if self._initial_prompt:
