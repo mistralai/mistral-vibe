@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -207,23 +208,47 @@ def create_mcp_http_proxy_tool_class(
     return MCPHttpProxyTool
 
 
-async def list_tools_stdio(command: list[str]) -> list[RemoteTool]:
-    params = StdioServerParameters(command=command[0], args=command[1:])
+async def list_tools_stdio(
+    command: list[str],
+    env: dict[str, str] | None = None,
+    startup_timeout_ms: int | None = None,
+) -> list[RemoteTool]:
+    params = StdioServerParameters(command=command[0], args=command[1:], env=env)
+    init_timeout = (
+        timedelta(milliseconds=startup_timeout_ms) if startup_timeout_ms else None
+    )
+
     async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
+        async with ClientSession(
+            read, write, read_timeout_seconds=init_timeout
+        ) as session:
             await session.initialize()
             tools_resp = await session.list_tools()
             return [RemoteTool.model_validate(t) for t in tools_resp.tools]
 
 
 async def call_tool_stdio(
-    command: list[str], tool_name: str, arguments: dict[str, Any]
+    command: list[str],
+    tool_name: str,
+    arguments: dict[str, Any],
+    env: dict[str, str] | None = None,
+    startup_timeout_ms: int | None = None,
+    tool_timeout_sec: float | None = None,
 ) -> MCPToolResult:
-    params = StdioServerParameters(command=command[0], args=command[1:])
+    params = StdioServerParameters(command=command[0], args=command[1:], env=env)
+    init_timeout = (
+        timedelta(milliseconds=startup_timeout_ms) if startup_timeout_ms else None
+    )
+    call_timeout = timedelta(seconds=tool_timeout_sec) if tool_timeout_sec else None
+
     async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
+        async with ClientSession(
+            read, write, read_timeout_seconds=init_timeout
+        ) as session:
             await session.initialize()
-            result = await session.call_tool(tool_name, arguments)
+            result = await session.call_tool(
+                tool_name, arguments, read_timeout_seconds=call_timeout
+            )
             return _parse_call_result("stdio:" + " ".join(command), tool_name, result)
 
 
@@ -233,6 +258,9 @@ def create_mcp_stdio_proxy_tool_class(
     remote: RemoteTool,
     alias: str | None = None,
     server_hint: str | None = None,
+    env: dict[str, str] | None = None,
+    startup_timeout_ms: int | None = None,
+    tool_timeout_sec: float | None = None,
 ) -> type[BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]]:
     def _alias_from_command(cmd: list[str]) -> str:
         prog = Path(cmd[0]).name.replace(".", "_") if cmd else "mcp"
@@ -258,6 +286,9 @@ def create_mcp_stdio_proxy_tool_class(
         _stdio_command: ClassVar[list[str]] = command
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
+        _env: ClassVar[dict[str, str] | None] = env
+        _startup_timeout_ms: ClassVar[int | None] = startup_timeout_ms
+        _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
 
         @classmethod
         def get_name(cls) -> str:
@@ -271,7 +302,12 @@ def create_mcp_stdio_proxy_tool_class(
             try:
                 payload = args.model_dump(exclude_none=True)
                 result = await call_tool_stdio(
-                    self._stdio_command, self._remote_name, payload
+                    self._stdio_command,
+                    self._remote_name,
+                    payload,
+                    env=self._env,
+                    startup_timeout_ms=self._startup_timeout_ms,
+                    tool_timeout_sec=self._tool_timeout_sec,
                 )
                 return result
             except Exception as exc:

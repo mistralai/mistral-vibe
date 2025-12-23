@@ -205,7 +205,9 @@ class ToolManager:
             return 0
 
         try:
-            tools: list[RemoteTool] = await list_tools_stdio(cmd)
+            tools: list[RemoteTool] = await list_tools_stdio(
+                cmd, env=srv.env, startup_timeout_ms=srv.startup_timeout_ms
+            )
         except Exception as exc:
             logger.warning("MCP stdio discovery failed for %r: %s", cmd, exc)
             return 0
@@ -214,7 +216,13 @@ class ToolManager:
         for remote in tools:
             try:
                 proxy_cls = create_mcp_stdio_proxy_tool_class(
-                    command=cmd, remote=remote, alias=srv.name, server_hint=srv.prompt
+                    command=cmd,
+                    remote=remote,
+                    alias=srv.name,
+                    server_hint=srv.prompt,
+                    env=srv.env,
+                    startup_timeout_ms=srv.startup_timeout_ms,
+                    tool_timeout_sec=srv.tool_timeout_sec,
                 )
                 self._available[proxy_cls.get_name()] = proxy_cls
                 added += 1

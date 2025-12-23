@@ -200,6 +200,16 @@ class MCPStdio(_MCPBase):
     transport: Literal["stdio"]
     command: str | list[str]
     args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables to set for the MCP server process.",
+    )
+    startup_timeout_ms: int | None = Field(
+        default=None, description="Timeout in milliseconds for the server to start."
+    )
+    tool_timeout_sec: float | None = Field(
+        default=None, description="Timeout in seconds for tool execution."
+    )
 
     def argv(self) -> list[str]:
         base = (
