@@ -38,6 +38,9 @@ class StatusMessage(SpinnerMixin, Static):
         self.update_display()
         self.start_spinner_timer()
 
+    def on_resize(self) -> None:
+        self.refresh_spinner()
+
     def _update_spinner_frame(self) -> None:
         if not self._is_spinning:
             return

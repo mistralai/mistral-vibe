@@ -16,8 +16,8 @@ from vibe.core.config import (
     SessionLoggingConfig,
     VibeConfig,
 )
-from vibe.core.llm.backend.generic import GenericBackend
-from vibe.core.llm.backend.mistral import MistralMapper, ParsedContent
+from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
+from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper, ParsedContent
 from vibe.core.llm.format import APIToolFormatHandler
 from vibe.core.types import AssistantEvent, LLMMessage, ReasoningEvent, Role
 
@@ -358,3 +358,175 @@ class TestLLMMessageReasoningContent:
         dumped = msg.model_dump(exclude_none=True)
 
         assert "reasoning_content" not in dumped
+
+
+class TestReasoningFieldNameConversion:
+    def test_reasoning_to_api_keeps_default_field(self):
+        adapter = OpenAIAdapter()
+        msg_dict = {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning_content": "Thinking...",
+        }
+
+        result = adapter._reasoning_to_api(msg_dict, "reasoning_content")
+
+        assert result["reasoning_content"] == "Thinking..."
+        assert "reasoning" not in result
+
+    def test_reasoning_to_api_renames_to_custom_field(self):
+        adapter = OpenAIAdapter()
+        msg_dict = {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning_content": "Thinking...",
+        }
+
+        result = adapter._reasoning_to_api(msg_dict, "reasoning")
+
+        assert result["reasoning"] == "Thinking..."
+        assert "reasoning_content" not in result
+
+    def test_reasoning_from_api_converts_custom_field(self):
+        adapter = OpenAIAdapter()
+        msg_dict = {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning": "Thinking...",
+        }
+
+        result = adapter._reasoning_from_api(msg_dict, "reasoning")
+
+        assert result["reasoning_content"] == "Thinking..."
+        assert "reasoning" not in result
+
+    def test_reasoning_from_api_keeps_default_field(self):
+        adapter = OpenAIAdapter()
+        msg_dict = {
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning_content": "Thinking...",
+        }
+
+        result = adapter._reasoning_from_api(msg_dict, "reasoning_content")
+
+        assert result["reasoning_content"] == "Thinking..."
+
+    @pytest.mark.asyncio
+    async def test_complete_with_custom_reasoning_field_name(self):
+        base_url = "https://api.example.com"
+        json_response = {
+            "id": "fake_id",
+            "created": 1234567890,
+            "model": "test-model",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "The answer is 42.",
+                        "reasoning": "Let me think step by step...",
+                    },
+                }
+            ],
+        }
+
+        with respx.mock(base_url=base_url) as mock_api:
+            mock_api.post("/v1/chat/completions").mock(
+                return_value=httpx.Response(status_code=200, json=json_response)
+            )
+            provider = ProviderConfig(
+                name="test",
+                api_base=f"{base_url}/v1",
+                api_key_env_var="API_KEY",
+                reasoning_field_name="reasoning",
+            )
+            backend = GenericBackend(provider=provider)
+            model = ModelConfig(name="test-model", provider="test", alias="test")
+            messages = [LLMMessage(role=Role.user, content="What is the answer?")]
+
+            result = await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+            assert result.message.content == "The answer is 42."
+            assert result.message.reasoning_content == "Let me think step by step..."
+
+    @pytest.mark.asyncio
+    async def test_streaming_with_custom_reasoning_field_name(self):
+        base_url = "https://api.example.com"
+        chunks = [
+            b'data: {"id":"id1","object":"chat.completion.chunk","created":123,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","reasoning":"Thinking..."},"finish_reason":null}]}',
+            b'data: {"id":"id1","object":"chat.completion.chunk","created":123,"model":"test","choices":[{"index":0,"delta":{"content":"Answer"},"finish_reason":null}]}',
+            b'data: {"id":"id1","object":"chat.completion.chunk","created":123,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}',
+            b"data: [DONE]",
+        ]
+
+        with respx.mock(base_url=base_url) as mock_api:
+            mock_api.post("/v1/chat/completions").mock(
+                return_value=httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            )
+            provider = ProviderConfig(
+                name="test",
+                api_base=f"{base_url}/v1",
+                api_key_env_var="API_KEY",
+                reasoning_field_name="reasoning",
+            )
+            backend = GenericBackend(provider=provider)
+            model = ModelConfig(name="test-model", provider="test", alias="test")
+            messages = [LLMMessage(role=Role.user, content="Stream please")]
+
+            results = []
+            async for chunk in backend.complete_streaming(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            ):
+                results.append(chunk)
+
+            assert results[0].message.reasoning_content == "Thinking..."
+            assert results[1].message.content == "Answer"
+
+
+class TestMistralReasoningFieldNameValidation:
+    def test_mistral_backend_rejects_custom_reasoning_field_name(self):
+        provider = ProviderConfig(
+            name="mistral",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="MISTRAL_API_KEY",
+            reasoning_field_name="reasoning",
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            MistralBackend(provider=provider)
+
+        assert "does not support custom reasoning_field_name" in str(exc_info.value)
+        assert "reasoning" in str(exc_info.value)
+
+    def test_mistral_backend_accepts_default_reasoning_field_name(self):
+        provider = ProviderConfig(
+            name="mistral",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="MISTRAL_API_KEY",
+            reasoning_field_name="reasoning_content",
+        )
+
+        backend = MistralBackend(provider=provider)
+        assert backend is not None

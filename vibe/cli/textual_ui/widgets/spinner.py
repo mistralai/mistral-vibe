@@ -129,6 +129,10 @@ class SpinnerMixin:
             return
         self._indicator_widget.update(self._spinner.next_frame())
 
+    def refresh_spinner(self) -> None:
+        if self._indicator_widget:
+            self._indicator_widget.refresh()
+
     def stop_spinning(self, success: bool = True) -> None:
         self._is_spinning = False
         if self._spinner_timer:

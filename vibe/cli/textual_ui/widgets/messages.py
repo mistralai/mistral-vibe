@@ -153,6 +153,9 @@ class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
     def on_mount(self) -> None:
         self.start_spinner_timer()
 
+    def on_resize(self) -> None:
+        self.refresh_spinner()
+
     async def on_click(self) -> None:
         await self._toggle_collapsed()
 

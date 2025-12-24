@@ -9,11 +9,12 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.widgets.spinner import BrailleSpinner
+from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
-class LoadingWidget(Static):
+class LoadingWidget(SpinnerMixin, Static):
     TARGET_COLORS = ("#FFD800", "#FFAF00", "#FF8205", "#FA500F", "#E10500")
+    SPINNER_TYPE = SpinnerType.BRAILLE
 
     EASTER_EGGS: ClassVar[list[str]] = [
         "Eating a chocolatine",
@@ -50,12 +51,11 @@ class LoadingWidget(Static):
 
     def __init__(self, status: str | None = None) -> None:
         super().__init__(classes="loading-widget")
+        self.init_spinner()
         self.status = status or self._get_default_status()
         self.current_color_index = 0
         self.transition_progress = 0
-        self._spinner = BrailleSpinner()
         self.char_widgets: list[Static] = []
-        self.spinner_widget: Static | None = None
         self.ellipsis_widget: Static | None = None
         self.hint_widget: Static | None = None
         self.start_time: float | None = None
@@ -89,10 +89,10 @@ class LoadingWidget(Static):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="loading-container"):
-            self.spinner_widget = Static(
+            self._indicator_widget = Static(
                 self._spinner.current_frame(), classes="loading-indicator"
             )
-            yield self.spinner_widget
+            yield self._indicator_widget
 
             with Horizontal(classes="loading-status"):
                 for char in self.status:
@@ -120,12 +120,20 @@ class LoadingWidget(Static):
             self.char_widgets.append(widget)
             status_container.mount(widget)
 
-        self.update_animation()
+        self._update_animation()
 
     def on_mount(self) -> None:
         self.start_time = time()
-        self.update_animation()
-        self.set_interval(0.1, self.update_animation)
+        self._update_animation()
+        self.start_spinner_timer()
+
+    def on_resize(self) -> None:
+        self.refresh_spinner()
+
+    def _update_spinner_frame(self) -> None:
+        if not self._is_spinning:
+            return
+        self._update_animation()
 
     def _get_color_for_position(self, position: int) -> str:
         current_color = self.TARGET_COLORS[self.current_color_index]
@@ -136,13 +144,13 @@ class LoadingWidget(Static):
             return next_color
         return current_color
 
-    def update_animation(self) -> None:
+    def _update_animation(self) -> None:
         total_elements = 1 + len(self.char_widgets) + 2
 
-        if self.spinner_widget:
+        if self._indicator_widget:
             spinner_char = self._spinner.next_frame()
             color = self._get_color_for_position(0)
-            self.spinner_widget.update(f"[{color}]{spinner_char}[/]")
+            self._indicator_widget.update(f"[{color}]{spinner_char}[/]")
 
         for i, widget in enumerate(self.char_widgets):
             position = 1 + i

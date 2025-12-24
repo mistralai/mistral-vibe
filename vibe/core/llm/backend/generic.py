@@ -46,7 +46,9 @@ class APIAdapter(Protocol):
         api_key: str | None = None,
     ) -> PreparedRequest: ...
 
-    def parse_response(self, data: dict[str, Any]) -> LLMChunk: ...
+    def parse_response(
+        self, data: dict[str, Any], provider: ProviderConfig
+    ) -> LLMChunk: ...
 
 
 BACKEND_ADAPTERS: dict[str, APIAdapter] = {}
@@ -103,6 +105,20 @@ class OpenAIAdapter(APIAdapter):
             headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
+    def _reasoning_to_api(
+        self, msg_dict: dict[str, Any], field_name: str
+    ) -> dict[str, Any]:
+        if field_name != "reasoning_content" and "reasoning_content" in msg_dict:
+            msg_dict[field_name] = msg_dict.pop("reasoning_content")
+        return msg_dict
+
+    def _reasoning_from_api(
+        self, msg_dict: dict[str, Any], field_name: str
+    ) -> dict[str, Any]:
+        if field_name != "reasoning_content" and field_name in msg_dict:
+            msg_dict["reasoning_content"] = msg_dict.pop(field_name)
+        return msg_dict
+
     def prepare_request(
         self,
         *,
@@ -116,7 +132,11 @@ class OpenAIAdapter(APIAdapter):
         provider: ProviderConfig,
         api_key: str | None = None,
     ) -> PreparedRequest:
-        converted_messages = [msg.model_dump(exclude_none=True) for msg in messages]
+        field_name = provider.reasoning_field_name
+        converted_messages = [
+            self._reasoning_to_api(msg.model_dump(exclude_none=True), field_name)
+            for msg in messages
+        ]
 
         payload = self.build_payload(
             model_name, converted_messages, temperature, tools, max_tokens, tool_choice
@@ -130,25 +150,37 @@ class OpenAIAdapter(APIAdapter):
             payload["stream_options"] = stream_options
 
         headers = self.build_headers(api_key)
-
         body = json.dumps(payload).encode("utf-8")
 
         return PreparedRequest(self.endpoint, headers, body)
 
-    def parse_response(self, data: dict[str, Any]) -> LLMChunk:
+    def _parse_message(
+        self, data: dict[str, Any], field_name: str
+    ) -> LLMMessage | None:
         if data.get("choices"):
-            if "message" in data["choices"][0]:
-                message = LLMMessage.model_validate(data["choices"][0]["message"])
-            elif "delta" in data["choices"][0]:
-                message = LLMMessage.model_validate(data["choices"][0]["delta"])
-            else:
-                raise ValueError("Invalid response data")
+            choice = data["choices"][0]
+            if "message" in choice:
+                msg_dict = self._reasoning_from_api(choice["message"], field_name)
+                return LLMMessage.model_validate(msg_dict)
+            if "delta" in choice:
+                msg_dict = self._reasoning_from_api(choice["delta"], field_name)
+                return LLMMessage.model_validate(msg_dict)
+            raise ValueError("Invalid response data: missing message or delta")
 
-        elif "message" in data:
-            message = LLMMessage.model_validate(data["message"])
-        elif "delta" in data:
-            message = LLMMessage.model_validate(data["delta"])
-        else:
+        if "message" in data:
+            msg_dict = self._reasoning_from_api(data["message"], field_name)
+            return LLMMessage.model_validate(msg_dict)
+        if "delta" in data:
+            msg_dict = self._reasoning_from_api(data["delta"], field_name)
+            return LLMMessage.model_validate(msg_dict)
+
+        return None
+
+    def parse_response(
+        self, data: dict[str, Any], provider: ProviderConfig
+    ) -> LLMChunk:
+        message = self._parse_message(data, provider.reasoning_field_name)
+        if message is None:
             message = LLMMessage(role=Role.assistant, content="")
 
         usage_data = data.get("usage") or {}
@@ -244,7 +276,7 @@ class GenericBackend:
 
         try:
             res_data, _ = await self._make_request(url, body, headers)
-            return adapter.parse_response(res_data)
+            return adapter.parse_response(res_data, self._provider)
 
         except httpx.HTTPStatusError as e:
             raise BackendErrorBuilder.build_http_error(
@@ -309,7 +341,7 @@ class GenericBackend:
 
         try:
             async for res_data in self._make_streaming_request(url, body, headers):
-                yield adapter.parse_response(res_data)
+                yield adapter.parse_response(res_data, self._provider)
 
         except httpx.HTTPStatusError as e:
             raise BackendErrorBuilder.build_http_error(

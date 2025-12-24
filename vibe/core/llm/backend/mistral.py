@@ -160,6 +160,13 @@ class MistralBackend:
             else None
         )
 
+        reasoning_field = getattr(provider, "reasoning_field_name", "reasoning_content")
+        if reasoning_field != "reasoning_content":
+            raise ValueError(
+                f"Mistral backend does not support custom reasoning_field_name "
+                f"(got '{reasoning_field}'). Mistral uses ThinkChunk for reasoning."
+            )
+
         # Mistral SDK takes server URL without api version as input
         url_pattern = r"(https?://[^/]+)(/v.*)"
         match = re.match(url_pattern, self._provider.api_base)
