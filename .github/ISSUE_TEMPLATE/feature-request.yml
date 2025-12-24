@@ -18,6 +18,7 @@ body:
         - CLI
         - ACP
         - Both
+        - None
     validations:
       required: true
 

@@ -127,3 +127,30 @@ jobs:
           files: release-assets/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  nix-build:
+    needs: configure
+    name: "Nix: ${{ matrix.os }}-${{ matrix.arch }}"
+    strategy:
+      matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        if: matrix.os != 'windows'
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+
+      - name: Install Nix
+        if: matrix.os != 'windows'
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31
+
+      - name: Build with Nix
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          nix build .#
+
+      - name: Nix Smoke Test
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          nix run .# -- --version

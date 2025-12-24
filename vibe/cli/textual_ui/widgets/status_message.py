@@ -17,6 +17,7 @@ class StatusMessage(SpinnerMixin, Static):
         self._initial_text = initial_text
         self._indicator_widget: Static | None = None
         self._text_widget: Static | None = None
+        self.success = True
         self.init_spinner()
         super().__init__(**kwargs)
 

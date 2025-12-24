@@ -1,0 +1,61 @@
+name: Issue Labeler
+
+on:
+    issues:
+        types: [opened]
+
+jobs:
+    label-component:
+        runs-on: ubuntu-latest
+        permissions:
+            issues: write
+        steps:
+            - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+            - name: Parse bug report form
+              id: parse-bug
+              uses: stefanbuck/github-issue-parser@25f1485edffc1fee3ea68eb9f59a72e58720ffc4 # v3
+              with:
+                  template-path: .github/ISSUE_TEMPLATE/bug-report.yml
+              continue-on-error: true
+
+            - name: Parse feature request form
+              id: parse-feature
+              uses: stefanbuck/github-issue-parser@25f1485edffc1fee3ea68eb9f59a72e58720ffc4 # v3
+              with:
+                  template-path: .github/ISSUE_TEMPLATE/feature-request.yml
+              continue-on-error: true
+
+            - name: Apply component label
+              uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+              with:
+                  script: |
+                      // Get component from either bug report or feature request
+                      const bugComponent = '${{ steps.parse-bug.outputs.issueparser_component }}';
+                      const featureComponent = '${{ steps.parse-feature.outputs.issueparser_component }}';
+                      const component = bugComponent || featureComponent;
+
+                      if (!component) {
+                        console.log('No component field found, skipping labeling');
+                        return;
+                      }
+
+                      const labels = [];
+
+                      if (component === 'CLI') {
+                        labels.push('CLI');
+                      } else if (component === 'ACP') {
+                        labels.push('ACP');
+                      } else if (component === 'Both') {
+                        labels.push('CLI', 'ACP');
+                      }
+
+                      if (labels.length > 0) {
+                        await github.rest.issues.addLabels({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          issue_number: context.issue.number,
+                          labels: labels
+                        });
+                        console.log(`Added labels: ${labels.join(', ')}`);
+                      }

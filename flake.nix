@@ -69,8 +69,13 @@
             pyprojectOverrides
           ]
         );
+      inherit (pkgs.callPackages pyproject-nix.build.util { }) mkApplication;
     in {
-      packages.default = pythonSet.mkVirtualEnv "mistralai-vibe-env" workspace.deps.default;
+
+      packages.default = mkApplication {
+        venv = pythonSet.mkVirtualEnv "mistralai-vibe-env" workspace.deps.default;
+        package = pythonSet.mistral-vibe;
+      };
 
       apps = {
         default = {
