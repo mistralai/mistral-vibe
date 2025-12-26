@@ -74,7 +74,7 @@ class BottomApp(StrEnum):
     Input = auto()
 
 
-class VibeApp(App):
+class VibeApp(App):  # noqa: PLR0904
     ENABLE_COMMAND_PALETTE = False
     CSS_PATH = "app.tcss"
 
@@ -104,7 +104,7 @@ class VibeApp(App):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.config = config
+        self._config = config
         self._current_agent_mode = initial_mode
         self.enable_streaming = enable_streaming
         self.agent: Agent | None = None
@@ -146,6 +146,10 @@ class VibeApp(App):
         self._auto_scroll = True
         self._last_escape_time: float | None = None
         self._terminal_theme = capture_terminal_theme()
+
+    @property
+    def config(self) -> VibeConfig:
+        return self.agent.config if self.agent else self._config
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="chat"):
@@ -704,8 +708,8 @@ class VibeApp(App):
 
             if self.agent:
                 await self.agent.reload_with_initial_messages(config=new_config)
-
-            self.config = new_config
+            else:
+                self._config = new_config
             if self._context_progress:
                 if self.config.auto_compact_threshold > 0:
                     current_tokens = (

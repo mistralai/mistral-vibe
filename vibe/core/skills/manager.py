@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from logging import getLogger
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,9 +17,9 @@ logger = getLogger("vibe")
 
 
 class SkillManager:
-    def __init__(self, config: VibeConfig) -> None:
-        self._config = config
-        self._search_paths = self._compute_search_paths(config)
+    def __init__(self, config_getter: Callable[[], VibeConfig]) -> None:
+        self._config_getter = config_getter
+        self._search_paths = self._compute_search_paths(self._config)
         self.available_skills = self._discover_skills()
 
         if self.available_skills:
@@ -27,6 +28,10 @@ class SkillManager:
                 len(self.available_skills),
                 len(self._search_paths),
             )
+
+    @property
+    def _config(self) -> VibeConfig:
+        return self._config_getter()
 
     @staticmethod
     def _compute_search_paths(config: VibeConfig) -> list[Path]:

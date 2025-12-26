@@ -22,7 +22,7 @@ def test_get_universal_system_prompt_includes_windows_prompt_on_windows(
         include_model_info=False,
         include_commit_signature=False,
     )
-    tool_manager = ToolManager(config)
+    tool_manager = ToolManager(lambda: config)
 
     prompt = get_universal_system_prompt(tool_manager, config)
 

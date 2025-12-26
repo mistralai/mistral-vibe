@@ -20,7 +20,7 @@ def config() -> VibeConfig:
 
 @pytest.fixture
 def skill_manager(config: VibeConfig) -> SkillManager:
-    return SkillManager(config)
+    return SkillManager(lambda: config)
 
 
 class TestSkillManagerDiscovery:
@@ -38,7 +38,7 @@ class TestSkillManagerDiscovery:
             include_project_context=False,
             skill_paths=[skills_dir],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         assert "test-skill" in manager.available_skills
         assert manager.available_skills["test-skill"].description == "A test skill"
@@ -54,7 +54,7 @@ class TestSkillManagerDiscovery:
             include_project_context=False,
             skill_paths=[skills_dir],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         assert len(manager.available_skills) == 3
         assert "skill-one" in manager.available_skills
@@ -76,7 +76,7 @@ class TestSkillManagerDiscovery:
             include_project_context=False,
             skill_paths=[skills_dir],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
         assert len(skills) == 1
@@ -96,7 +96,7 @@ class TestSkillManagerDiscovery:
             include_project_context=False,
             skill_paths=[skills_dir],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
         assert len(skills) == 1
@@ -121,7 +121,7 @@ class TestSkillManagerParsing:
             include_project_context=False,
             skill_paths=[skills_dir],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         skill = manager.get_skill("full-skill")
         assert skill is not None
@@ -141,7 +141,7 @@ class TestSkillManagerParsing:
             include_project_context=False,
             skill_paths=[skills_dir],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         skill = manager.get_skill("test-skill")
         assert skill is not None
@@ -163,7 +163,7 @@ class TestSkillManagerParsing:
             include_project_context=False,
             skill_paths=[skills_dir],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
         assert len(skills) == 1
@@ -185,7 +185,7 @@ class TestSkillManagerParsing:
             include_project_context=False,
             skill_paths=[skills_dir],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
         assert len(skills) == 1
@@ -209,7 +209,7 @@ class TestSkillManagerSearchPaths:
             include_project_context=False,
             skill_paths=[skills_dir_1, skills_dir_2],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
         assert len(skills) == 2
@@ -232,7 +232,7 @@ class TestSkillManagerSearchPaths:
             include_project_context=False,
             skill_paths=[skills_dir_1, skills_dir_2],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
         assert len(skills) == 1
@@ -249,7 +249,7 @@ class TestSkillManagerSearchPaths:
             include_project_context=False,
             skill_paths=[skills_dir, tmp_path / "nonexistent"],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         assert len(manager.available_skills) == 1
         assert "valid-skill" in manager.available_skills
@@ -265,7 +265,7 @@ class TestSkillManagerGetSkill:
             include_project_context=False,
             skill_paths=[skills_dir],
         )
-        manager = SkillManager(config)
+        manager = SkillManager(lambda: config)
 
         skill = manager.get_skill("test-skill")
         assert skill is not None

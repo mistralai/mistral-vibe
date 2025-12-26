@@ -18,7 +18,7 @@ def config():
 
 @pytest.fixture
 def tool_manager(config):
-    return ToolManager(config)
+    return ToolManager(lambda: config)
 
 
 def test_returns_default_config_when_no_overrides(tool_manager):
@@ -39,7 +39,7 @@ def test_merges_user_overrides_with_defaults():
         include_project_context=False,
         tools={"bash": BaseToolConfig(permission=ToolPermission.ALWAYS)},
     )
-    manager = ToolManager(vibe_config)
+    manager = ToolManager(lambda: vibe_config)
 
     config = manager.get_tool_config("bash")
 
@@ -58,7 +58,7 @@ def test_preserves_tool_specific_fields_from_overrides():
         tools={"bash": BaseToolConfig(permission=ToolPermission.ASK)},
     )
     vibe_config.tools["bash"].__pydantic_extra__ = {"default_timeout": 600}
-    manager = ToolManager(vibe_config)
+    manager = ToolManager(lambda: vibe_config)
 
     config = manager.get_tool_config("bash")
 
@@ -80,7 +80,7 @@ def test_applies_workdir_from_vibe_config(tmp_path):
         include_project_context=False,
         workdir=tmp_path,
     )
-    manager = ToolManager(vibe_config)
+    manager = ToolManager(lambda: vibe_config)
 
     config = manager.get_tool_config("bash")
 

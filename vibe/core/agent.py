@@ -104,8 +104,8 @@ class Agent:
         self._max_turns = max_turns
         self._max_price = max_price
 
-        self.tool_manager = ToolManager(config)
-        self.skill_manager = SkillManager(config)
+        self.tool_manager = ToolManager(lambda: self.config)
+        self.skill_manager = SkillManager(lambda: self.config)
         self.format_handler = APIToolFormatHandler()
 
         self.backend_factory = lambda: backend or self._select_backend()
@@ -870,8 +870,8 @@ class Agent:
         if max_price is not None:
             self._max_price = max_price
 
-        self.tool_manager = ToolManager(self.config)
-        self.skill_manager = SkillManager(self.config)
+        self.tool_manager = ToolManager(lambda: self.config)
+        self.skill_manager = SkillManager(lambda: self.config)
 
         new_system_prompt = get_universal_system_prompt(
             self.tool_manager, self.config, self.skill_manager
