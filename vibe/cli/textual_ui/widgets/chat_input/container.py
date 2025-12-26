@@ -51,6 +51,10 @@ class ChatInputContainer(Vertical):
             for command in self._command_registry.commands.values()
             for alias in sorted(command.aliases)
         ]
+        # Add custom commands to completion
+        for custom_cmd in self._command_registry.custom_commands.values():
+            for alias in custom_cmd.aliases:
+                command_entries.append((alias, custom_cmd.description))
 
         self._completion_manager = MultiCompletionManager([
             SlashCommandController(CommandCompleter(command_entries), self),
