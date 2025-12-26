@@ -63,6 +63,20 @@ async def test_truncates_output_to_max_bytes(bash):
 
 
 @pytest.mark.asyncio
+async def test_bash_source_command(bash, tmp_path):
+    # Create a temporary script to source
+    script_path = tmp_path / "test_script.sh"
+    script_path.write_text("export TEST_VAR='hello from source'")
+
+    # Test that source command works (bash-specific feature)
+    result = await bash.run(BashArgs(command=f"source {script_path} && echo $TEST_VAR"))
+
+    assert result.returncode == 0
+    assert "hello from source" in result.stdout
+    assert result.stderr == ""
+
+
+@pytest.mark.asyncio
 async def test_decodes_non_utf8_bytes(bash):
     result = await bash.run(BashArgs(command="printf '\\xff\\xfe'"))
 
