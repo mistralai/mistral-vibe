@@ -46,6 +46,16 @@ class CommandRegistry:
                 description="Compact conversation history by summarizing",
                 handler="_compact_history",
             ),
+            "save": Command(
+                aliases=frozenset(["/save", "/stash"]),
+                description="Save current conversation history to a file",
+                handler="_save_conversation",
+            ),
+            "load": Command(
+                aliases=frozenset(["/load", "/resume"]),
+                description="Load conversation history from a file",
+                handler="_load_conversation",
+            ),
             "exit": Command(
                 aliases=frozenset(["/exit"]),
                 description="Exit the application",
