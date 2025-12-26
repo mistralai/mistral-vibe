@@ -1,0 +1,21 @@
+# Ignore hidden files and directories
+.*
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+*.egg
+*.log
+*.pid
+*.sock
+*.swp
+*.swo
+.DS_Store
+.env
+.venv/
+venv/
+.env
+.git/
+.gitignore
+.dockerignore

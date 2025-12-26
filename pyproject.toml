@@ -44,6 +44,7 @@ dependencies = [
     "watchfiles>=1.1.1",
     "pyperclip>=1.11.0",
     "textual-speedups>=0.2.1",
+    "docker>=7.1.0",
 ]
 
 [project.urls]
