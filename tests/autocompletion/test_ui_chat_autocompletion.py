@@ -161,6 +161,38 @@ async def test_path_completion_popup_lists_files_and_directories(
 
 
 @pytest.mark.asyncio
+async def test_path_completion_uses_config_workdir_over_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    (workdir / "src").mkdir()
+    (workdir / "src" / "main.py").write_text("", encoding="utf-8")
+    (workdir / "workdir.txt").write_text("", encoding="utf-8")
+
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    (other_dir / "other.txt").write_text("", encoding="utf-8")
+    monkeypatch.chdir(other_dir)
+
+    config = VibeConfig(
+        session_logging=SessionLoggingConfig(enabled=False),
+        workdir=workdir,
+    )
+    vibe_app = VibeApp(config=config)
+
+    async with vibe_app.run_test() as pilot:
+        popup = vibe_app.query_one(CompletionPopup)
+
+        await pilot.press("@")
+
+        popup_content = str(popup.render())
+        assert "@workdir.txt" in popup_content
+        assert "@src/" in popup_content
+        assert "@other.txt" not in popup_content
+
+
+@pytest.mark.asyncio
 async def test_path_completion_popup_shows_up_to_ten_results(
     vibe_app: VibeApp, file_tree: Path
 ) -> None:

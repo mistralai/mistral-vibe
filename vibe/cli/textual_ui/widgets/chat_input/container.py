@@ -54,7 +54,9 @@ class ChatInputContainer(Vertical):
 
         self._completion_manager = MultiCompletionManager([
             SlashCommandController(CommandCompleter(command_entries), self),
-            PathCompletionController(PathCompleter(), self),
+            PathCompletionController(
+                PathCompleter(root_resolver=self._resolve_completion_root), self
+            ),
         ])
         self._completion_popup: CompletionPopup | None = None
         self._body: ChatInputBody | None = None
@@ -77,6 +79,12 @@ class ChatInputContainer(Vertical):
         if self._body.input_widget:
             self._body.input_widget.set_completion_manager(self._completion_manager)
             self._body.focus_input()
+
+    def _resolve_completion_root(self) -> Path | None:
+        try:
+            return self.app.config.workdir
+        except Exception:
+            return None
 
     @property
     def input_widget(self) -> ChatTextArea | None:

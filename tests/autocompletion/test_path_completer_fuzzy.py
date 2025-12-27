@@ -34,6 +34,27 @@ def test_fuzzy_matches_subsequence_characters(file_tree: Path) -> None:
     assert "@src/" in results
 
 
+def test_root_resolver_overrides_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "src").mkdir()
+    (root / "root.txt").write_text("", encoding="utf-8")
+
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    (sandbox / "cwd.txt").write_text("", encoding="utf-8")
+    monkeypatch.chdir(sandbox)
+
+    completer = PathCompleter(root_resolver=lambda: root)
+    results = completer.get_completions("@", cursor_pos=1)
+
+    assert "@root.txt" in results
+    assert "@src/" in results
+    assert "@cwd.txt" not in results
+
+
 def test_fuzzy_matches_consecutive_characters_higher(file_tree: Path) -> None:
     results = PathCompleter().get_completions("@src/main", cursor_pos=9)
 
