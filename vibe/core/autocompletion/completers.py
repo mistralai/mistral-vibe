@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -8,6 +9,42 @@ from vibe.core.autocompletion.fuzzy import fuzzy_match
 
 DEFAULT_MAX_ENTRIES_TO_PROCESS = 32000
 DEFAULT_TARGET_MATCHES = 100
+
+
+def _safe_cwd() -> Path:
+    try:
+        return Path.cwd()
+    except OSError:
+        return Path.home()
+
+
+def _normalize_root(path: Path) -> Path | None:
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        return None
+
+    try:
+        if not resolved.exists():
+            return None
+    except OSError:
+        return None
+
+    return resolved.parent if resolved.is_file() else resolved
+
+
+def _find_git_root(start: Path) -> Path | None:
+    if not (normalized := _normalize_root(start)):
+        return None
+
+    for candidate in (normalized, *normalized.parents):
+        try:
+            if (candidate / ".git").exists():
+                return candidate
+        except OSError:
+            continue
+
+    return None
 
 
 class Completer:
@@ -61,10 +98,13 @@ class PathCompleter(Completer):
         self,
         max_entries_to_process: int = DEFAULT_MAX_ENTRIES_TO_PROCESS,
         target_matches: int = DEFAULT_TARGET_MATCHES,
+        root_resolver: Callable[[], Path | None] | None = None,
     ) -> None:
         self._indexer = FileIndexer()
         self._max_entries_to_process = max_entries_to_process
         self._target_matches = target_matches
+        self._root_resolver = root_resolver
+        self._root_cache: tuple[Path, bool, Path] | None = None
 
     class _SearchContext(NamedTuple):
         suffix: str
@@ -109,6 +149,31 @@ class PathCompleter(Completer):
             suffix=suffix,
             immediate_only=False,
         )
+
+    def _resolve_base_root(self) -> tuple[Path, bool]:
+        if self._root_resolver:
+            try:
+                candidate = self._root_resolver()
+            except Exception:
+                candidate = None
+
+            if candidate and (normalized := _normalize_root(Path(candidate))):
+                return normalized, False
+
+        cwd = _safe_cwd()
+        return _normalize_root(cwd) or cwd, True
+
+    def _resolve_root(self) -> Path:
+        base_root, allow_git_root = self._resolve_base_root()
+        if self._root_cache:
+            cached_base, cached_allow_git, cached_root = self._root_cache
+            if cached_base == base_root and cached_allow_git == allow_git_root:
+                return cached_root
+
+        root = _find_git_root(base_root) if allow_git_root else None
+        resolved_root = root or base_root
+        self._root_cache = (base_root, allow_git_root, resolved_root)
+        return resolved_root
 
     def _matches_prefix(self, entry: IndexEntry, context: _SearchContext) -> bool:
         path_str = entry.rel
@@ -193,8 +258,7 @@ class PathCompleter(Completer):
         context = self._build_search_context(partial_path)
 
         try:
-            # TODO (Vince): doing the assumption that "." is the root directory... Reliable?
-            file_index = self._indexer.get_index(Path("."))
+            file_index = self._indexer.get_index(self._resolve_root())
         except (OSError, RuntimeError):
             return []
 

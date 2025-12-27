@@ -28,6 +28,26 @@ def test_finds_files_recursively_by_filename(file_tree: Path) -> None:
     assert results[0] == "@vibe/acp/entrypoint.py"
 
 
+def test_defaults_to_git_root_when_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "src").mkdir()
+    (repo / "src" / "main.py").write_text("", encoding="utf-8")
+    (repo / "README.md").write_text("", encoding="utf-8")
+    (repo / "subdir").mkdir()
+    (repo / "subdir" / "nested.txt").write_text("", encoding="utf-8")
+
+    monkeypatch.chdir(repo / "subdir")
+
+    results = PathCompleter().get_completions("@", cursor_pos=1)
+
+    assert "@README.md" in results
+    assert "@src/" in results
+    assert "@nested.txt" not in results
+
+
 def test_finds_files_recursively_by_partial_path(file_tree: Path) -> None:
     results = PathCompleter().get_completions("@acp/entry", cursor_pos=10)
 
