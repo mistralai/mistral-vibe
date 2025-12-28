@@ -464,6 +464,8 @@ This fork includes fixes for critical upstream bugs:
 
 3. **✅ Fixed #186 - Bash Tool**: The bash tool now correctly uses `/bin/bash` instead of `/bin/sh`, enabling bash-specific features like the `source` command.
 
+4. **✅ Fixed #218 - API Key Validation (Enhanced)**: Validates API keys during setup for ALL providers (Mistral, OpenAI, Groq, Together, OpenRouter), not just Mistral. Includes network error handling and skip option for offline setups. This is an improved version of upstream PR #219 which only worked for Mistral.
+
 For detailed information about each fix, see [IMPROVEMENTS.md](IMPROVEMENTS.md).
 
 ## Editors/IDEs

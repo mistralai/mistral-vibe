@@ -42,10 +42,28 @@ This document tracks improvements and bug fixes implemented in this fork that ad
 
 ## Pending Improvements
 
-### 🔄 #218 - API Key Validation Before Chat Mode
-**Status:** Planned
+### ✅ Fixed #218 - API Key Validation Before Chat Mode (Improved)
+**Status:** Fixed (Enhanced version of PR #219)
 **Upstream Issue:** https://github.com/mistralai/mistral-vibe/issues/218
-**Description:** Validate API keys during setup wizard before allowing users to enter chat mode.
+**Upstream PR:** https://github.com/mistralai/mistral-vibe/pull/219
+**Problem:** Original PR #219 only worked for Mistral API keys and failed for other providers (OpenAI, Groq, Together, OpenRouter). No support for local providers or network error handling.
+
+**Our Enhanced Implementation:**
+- **Multi-provider support**: Works with ALL providers (Mistral, OpenAI, Groq, Together, OpenRouter)
+- **Local provider handling**: Skips validation for local providers (Ollama, llama.cpp, vLLM, LocalAI, LM Studio)
+- **Better error handling**: Distinguishes between authentication errors and network errors
+- **Skip option**: Shift+Enter to skip validation if network is unavailable
+- **Provider-specific logic**: Uses Mistral SDK for Mistral, httpx for OpenAI-compatible APIs
+- **OpenRouter headers**: Adds required HTTP-Referer and X-Title headers for OpenRouter
+
+**Files Changed:**
+- `vibe/setup/onboarding/screens/api_key.py`
+
+**Technical Details:**
+- Mistral validation: Uses `mistralai.Mistral.models.list()`
+- Generic validation: Uses httpx to call `/v1/models` endpoint
+- Errors are categorized as ValueError (auth) or ConnectionError (network)
+- 10-second timeout prevents hanging on slow networks
 
 ---
 
