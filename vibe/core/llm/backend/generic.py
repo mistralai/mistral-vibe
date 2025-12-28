@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable
 import json
 import os
+import re
 import types
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, TypeVar
 
@@ -18,6 +19,63 @@ from vibe.core.types import (
     StrToolChoice,
 )
 from vibe.core.utils import async_generator_retry, async_retry
+
+
+def _sanitize_tool_call_arguments(arguments: str) -> str:
+    r"""Sanitize tool call arguments to ensure valid JSON.
+
+    Some LLM backends (like vLLM) may generate arguments with improperly escaped
+    backslashes (e.g., C:\Users instead of C:\\Users). When these are sent back
+    in conversation history, the server may fail to parse them.
+
+    This function attempts to fix common escape issues by re-parsing and
+    re-serializing the JSON. If parsing fails, it tries to fix backslash escaping.
+    """
+    if not arguments:
+        return arguments
+
+    # First, try to parse as-is - if it works, it's valid JSON
+    try:
+        parsed = json.loads(arguments)
+        # Re-serialize to ensure consistent escaping
+        return json.dumps(parsed)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to fix common backslash escaping issues
+    # Replace single backslashes that are not already escaped
+    # This regex finds backslashes that are NOT followed by valid JSON escapes
+    # Valid JSON escapes: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+    fixed = re.sub(
+        r'\\(?!["\\/bfnrtu])',
+        r"\\\\",
+        arguments,
+    )
+
+    try:
+        parsed = json.loads(fixed)
+        return json.dumps(parsed)
+    except json.JSONDecodeError:
+        # If we still can't parse it, return original - let the caller handle it
+        return arguments
+
+def _sanitize_message_tool_calls(msg_dict: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize tool call arguments in a message dict before sending to API."""
+    if "tool_calls" not in msg_dict:
+        return msg_dict
+
+    tool_calls = msg_dict.get("tool_calls")
+    if not tool_calls:
+        return msg_dict
+
+    for tc in tool_calls:
+        if "function" in tc and "arguments" in tc["function"]:
+            args = tc["function"]["arguments"]
+            if isinstance(args, str):
+                tc["function"]["arguments"] = _sanitize_tool_call_arguments(args)
+
+    return msg_dict
+
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
@@ -134,7 +192,9 @@ class OpenAIAdapter(APIAdapter):
     ) -> PreparedRequest:
         field_name = provider.reasoning_field_name
         converted_messages = [
-            self._reasoning_to_api(msg.model_dump(exclude_none=True), field_name)
+            _sanitize_message_tool_calls(
+                self._reasoning_to_api(msg.model_dump(exclude_none=True), field_name)
+            )
             for msg in messages
         ]
 
