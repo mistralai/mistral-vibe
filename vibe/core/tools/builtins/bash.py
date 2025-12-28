@@ -244,6 +244,7 @@ class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
                 stdin=asyncio.subprocess.DEVNULL,
                 cwd=self.config.effective_workdir,
                 env=_get_base_env(),
+                executable="/bin/bash" if not is_windows() else None,
                 **kwargs,
             )
 

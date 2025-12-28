@@ -1,10 +1,11 @@
-# Mistral Vibe
+# Mistral Vibe (Enhanced Fork)
 
 [![PyPI Version](https://img.shields.io/pypi/v/mistral-vibe)](https://pypi.org/project/mistral-vibe)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/release/python-3120/)
-[![CI Status](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml/badge.svg)](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml)
+[![Upstream](https://img.shields.io/badge/upstream-mistralai%2Fmistral--vibe-blue)](https://github.com/mistralai/mistral-vibe)
 [![License](https://img.shields.io/github/license/mistralai/mistral-vibe)](https://github.com/mistralai/mistral-vibe/blob/main/LICENSE)
 
+> **Note:** This is an enhanced fork of [Mistral Vibe](https://github.com/mistralai/mistral-vibe) with bug fixes and improvements. See [IMPROVEMENTS.md](IMPROVEMENTS.md) for details.
 
 **Mistral's open-source CLI coding assistant with multi-provider support.**
 
@@ -452,6 +453,18 @@ This fork adds the following features to the upstream Mistral Vibe:
    - `/mcp`: Show all MCP servers with their tools, resources, and prompts
 
 7. **Generic Backend Improvements**: Better handling of non-Mistral API responses (finish_reason, tool call index fields).
+
+## Bug Fixes in This Fork
+
+This fork includes fixes for critical upstream bugs:
+
+1. **✅ Fixed #213 - Mode Switch Toggle**: Fixed issue where mode switching via shift+tab would update the UI but the agent would continue operating in the previous mode.
+
+2. **✅ Fixed #217 - Session Log Updates**: Session logs now update after every turn (including tool calls), enabling real-time auditing during long agentic tasks.
+
+3. **✅ Fixed #186 - Bash Tool**: The bash tool now correctly uses `/bin/bash` instead of `/bin/sh`, enabling bash-specific features like the `source` command.
+
+For detailed information about each fix, see [IMPROVEMENTS.md](IMPROVEMENTS.md).
 
 ## Editors/IDEs
 
