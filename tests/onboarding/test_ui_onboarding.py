@@ -13,7 +13,8 @@ from textual.widgets import Input
 from vibe.core.paths.global_paths import GLOBAL_CONFIG_FILE, GLOBAL_ENV_FILE
 from vibe.setup.onboarding import OnboardingApp
 from vibe.setup.onboarding.screens.api_key import ApiKeyScreen
-from vibe.setup.onboarding.screens.theme_selection import ThemeSelectionScreen
+from vibe.setup.onboarding.screens.provider_selection import ProviderSelectionScreen
+from vibe.setup.onboarding.screens.theme_selection import THEMES, ThemeSelectionScreen
 
 
 async def _wait_for(
@@ -47,15 +48,24 @@ async def test_ui_gets_through_the_onboarding_successfully() -> None:
     async with app.run_test() as pilot:
         await pass_welcome_screen(pilot)
 
+        # Theme selection -> Provider selection
         await pilot.press("enter")
-        await _wait_for(lambda: isinstance(app.screen, ApiKeyScreen), pilot)
+        await _wait_for(lambda: isinstance(app.screen, ProviderSelectionScreen), pilot)
+
+        # Provider selection -> API key (default is Mistral, button is focused)
+        # Small pause to ensure button is focused and screen is ready
+        await pilot.pause(0.2)
+        # Click on the focused button (Mistral is focused by default)
+        await pilot.click("#provider-mistral")
+        await _wait_for(lambda: isinstance(app.screen, ApiKeyScreen), pilot, timeout=5.0)
+
         api_screen = app.screen
         input_widget = api_screen.query_one("#key", Input)
         await pilot.press(*api_key_value)
         assert input_widget.value == api_key_value
 
         await pilot.press("enter")
-        await _wait_for(lambda: app.return_value is not None, pilot, timeout=2.0)
+        await _wait_for(lambda: app.return_value is not None, pilot, timeout=3.0)
 
     assert app.return_value == "completed"
 
@@ -94,7 +104,8 @@ async def test_ui_can_pick_a_theme_and_saves_selection(config_dir: Path) -> None
         await pilot.press(*["down"] * steps_down)
         assert app.theme == target_theme
         await pilot.press("enter")
-        await _wait_for(lambda: isinstance(app.screen, ApiKeyScreen), pilot)
+        # Theme selection now goes to provider selection, not API key
+        await _wait_for(lambda: isinstance(app.screen, ProviderSelectionScreen), pilot)
 
     assert GLOBAL_CONFIG_FILE.path.is_file()
     config_contents = GLOBAL_CONFIG_FILE.path.read_text(encoding="utf-8")

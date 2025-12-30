@@ -119,6 +119,12 @@ class VibeApp(App):  # noqa: PLR0904
         self.event_handler: EventHandler | None = None
         self.commands = CommandRegistry()
 
+        # Load custom commands
+        from vibe.core.custom_commands import CustomCommandExecutor, CustomCommandLoader
+        self._custom_command_loader = CustomCommandLoader()
+        self._custom_commands = self._custom_command_loader.load_commands()
+        self._custom_command_executor = CustomCommandExecutor(config.effective_workdir)
+
         self._chat_input_container: ChatInputContainer | None = None
         self._mode_indicator: ModeIndicator | None = None
         self._context_progress: ContextProgress | None = None
@@ -352,11 +358,17 @@ class VibeApp(App):  # noqa: PLR0904
     async def _handle_command(self, user_input: str) -> bool:
         if command := self.commands.find_command(user_input):
             await self._mount_and_scroll(UserMessage(user_input))
-            handler = getattr(self, command.handler)
-            if asyncio.iscoroutinefunction(handler):
-                await handler()
+
+            # Check if this is a custom command
+            if command.is_custom:
+                await self._handle_custom_command(command.handler)
             else:
-                handler()
+                # Built-in command
+                handler = getattr(self, command.handler)
+                if asyncio.iscoroutinefunction(handler):
+                    await handler()
+                else:
+                    handler()
             return True
         return False
 
@@ -901,6 +913,75 @@ class VibeApp(App):  # noqa: PLR0904
         else:
             await self._mount_and_scroll(
                 ErrorMessage(result.message, collapsed=self._tools_collapsed)
+            )
+
+    async def _handle_custom_command(self, handler_name: str) -> None:
+        """Handle execution of a custom command."""
+        # Extract command name from handler name (format: _custom_<name>)
+        cmd_name = handler_name.replace("_custom_", "")
+
+        if cmd_name not in self._custom_commands:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Custom command '{cmd_name}' not found", collapsed=self._tools_collapsed
+                )
+            )
+            return
+
+        cmd_def = self._custom_commands[cmd_name]
+
+        try:
+            if cmd_def.command_type == "bash":
+                # Execute bash command
+                stdout, stderr, returncode = await self._custom_command_executor.execute_bash_command(
+                    cmd_def.handler  # type: ignore
+                )
+
+                if returncode == 0:
+                    if stdout.strip():
+                        await self._mount_and_scroll(
+                            BashOutputMessage(
+                                command=cmd_def.handler,  # type: ignore
+                                stdout=stdout,
+                                stderr="",
+                                returncode=0,
+                                collapsed=self._tools_collapsed,
+                            )
+                        )
+                    else:
+                        await self._mount_and_scroll(
+                            UserCommandMessage(f"Command '{cmd_name}' completed successfully")
+                        )
+                else:
+                    await self._mount_and_scroll(
+                        BashOutputMessage(
+                            command=cmd_def.handler,  # type: ignore
+                            stdout=stdout,
+                            stderr=stderr,
+                            returncode=returncode,
+                            collapsed=False,  # Show errors expanded
+                        )
+                    )
+
+            elif cmd_def.command_type == "prompt":
+                # Submit prompt template as user message
+                prompt_text = self._custom_command_executor.get_prompt_text(cmd_def.handler)  # type: ignore
+                await self._handle_input_submit(prompt_text, prefilled=True)
+
+            else:
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        f"Unknown command type '{cmd_def.command_type}'",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Error executing custom command '{cmd_name}': {e}",
+                    collapsed=self._tools_collapsed,
+                )
             )
 
     async def _switch_to_config_app(self) -> None:

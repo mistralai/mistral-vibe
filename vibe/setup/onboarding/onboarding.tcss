@@ -228,3 +228,70 @@ ThemeSelectionScreen #enter-hint {
 #config-docs-group .link-row {
     margin-top: 0;
 }
+
+/* =============================================================================
+   Provider Selection Screen
+   ============================================================================= */
+
+#provider-outer {
+    width: 100%;
+    height: 100%;
+    align: center middle;
+}
+
+#provider-title {
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#provider-container {
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    max-height: 24;
+    padding: 1 2;
+}
+
+.provider-section-title {
+    text-align: center;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+
+.provider-row {
+    width: auto;
+    height: auto;
+    align: center middle;
+    layout: horizontal;
+}
+
+.provider-btn {
+    margin: 0 1;
+    min-width: 10;
+    width: auto;
+}
+
+.provider-btn.selected {
+    border: tall $accent;
+}
+
+#provider-description {
+    text-align: center;
+    width: 60;
+    height: auto;
+    min-height: 4;
+}
+
+#provider-hint {
+    text-align: center;
+    margin-top: 1;
+}
+
+.spacer-small {
+    height: 1;
+}
+
+#local-provider-info {
+    text-align: center;
+    margin-bottom: 1;
+}

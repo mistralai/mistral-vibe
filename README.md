@@ -1,28 +1,20 @@
-# Mistral Vibe
+# Mistral Vibe (Enhanced Fork)
 
 [![PyPI Version](https://img.shields.io/pypi/v/mistral-vibe)](https://pypi.org/project/mistral-vibe)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/release/python-3120/)
-[![CI Status](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml/badge.svg)](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml)
+[![Upstream](https://img.shields.io/badge/upstream-mistralai%2Fmistral--vibe-blue)](https://github.com/mistralai/mistral-vibe)
 [![License](https://img.shields.io/github/license/mistralai/mistral-vibe)](https://github.com/mistralai/mistral-vibe/blob/main/LICENSE)
 
-```
-██████████████████░░
-██████████████████░░
-████  ██████  ████░░
-████    ██    ████░░
-████          ████░░
-████  ██  ██  ████░░
-██      ██      ██░░
-██████████████████░░
-██████████████████░░
-```
+> **Note:** This is an enhanced fork of [Mistral Vibe](https://github.com/mistralai/mistral-vibe) with bug fixes and improvements. See [IMPROVEMENTS.md](IMPROVEMENTS.md) for details.
 
-**Mistral's open-source CLI coding assistant.**
+**Mistral's open-source CLI coding assistant with multi-provider support.**
 
-Mistral Vibe is a command-line coding assistant powered by Mistral's models. It provides a conversational interface to your codebase, allowing you to use natural language to explore, modify, and interact with your projects through a powerful set of tools.
+Mistral Vibe is a command-line coding assistant that works with Mistral's models, local LLMs (Ollama, llama.cpp, vLLM, LM Studio, LocalAI), and cloud providers (OpenAI, OpenRouter, Together AI, Groq). It provides a conversational interface to your codebase, allowing you to use natural language to explore, modify, and interact with your projects through a powerful set of tools.
 
 > [!WARNING]
 > Mistral Vibe works on Windows, but we officially support and target UNIX environments.
+
+## Installation
 
 ### One-line install (recommended)
 
@@ -53,180 +45,295 @@ uv tool install mistral-vibe
 pip install mistral-vibe
 ```
 
+### Development Installation
+
+```bash
+git clone https://github.com/mixelpixx/mistral-vibe.git
+cd mistral-vibe
+uv sync
+uv run vibe --help
+```
+
 ## Features
 
+- **Multi-Provider Support**: Use Mistral AI, local LLMs, or third-party cloud providers with a unified interface.
 - **Interactive Chat**: A conversational AI agent that understands your requests and breaks down complex tasks.
-- **Powerful Toolset**: A suite of tools for file manipulation, code searching, version control, and command execution, right from the chat prompt.
-  - Read, write, and patch files (`read_file`, `write_file`, `search_replace`).
-  - Execute shell commands in a stateful terminal (`bash`).
-  - Recursively search code with `grep` (with `ripgrep` support).
-  - Manage a `todo` list to track the agent's work.
-- **Project-Aware Context**: Vibe automatically scans your project's file structure and Git status to provide relevant context to the agent, improving its understanding of your codebase.
-- **Advanced CLI Experience**: Built with modern libraries for a smooth and efficient workflow.
-  - Autocompletion for slash commands (`/`) and file paths (`@`).
-  - Persistent command history.
-  - Beautiful Themes.
-- **Highly Configurable**: Customize models, providers, tool permissions, and UI preferences through a simple `config.toml` file.
-- **Safety First**: Features tool execution approval.
+- **Powerful Toolset**: A suite of tools for file manipulation, code searching, version control, and command execution.
+- **Custom Slash Commands**: Extend Vibe with your own commands - execute bash scripts or insert prompt templates.
+- **Full MCP Protocol**: Complete Model Context Protocol support including tools, resources, and prompts.
+- **Project-Aware Context**: Automatic scanning of project structure and Git status for relevant context.
+- **Advanced CLI Experience**: Autocompletion, persistent history, beautiful themes.
+- **Highly Configurable**: Customize models, providers, tool permissions, and UI preferences.
+- **Safety First**: Tool execution approval and permission controls.
 
 ## Quick Start
 
-1. Navigate to your project's root directory:
+1. Navigate to your project directory:
 
    ```bash
    cd /path/to/your/project
    ```
 
-2. Run Vibe:
+2. Run the setup wizard:
+
+   ```bash
+   vibe --setup
+   ```
+
+   The wizard will guide you through:
+   - Selecting a theme
+   - Choosing your LLM provider (local or cloud)
+   - Configuring your API key (if needed)
+
+3. Start using Vibe:
 
    ```bash
    vibe
    ```
 
-3. If this is your first time running Vibe, it will:
+4. Or use a specific provider directly:
 
-   - Create a default configuration file at `~/.vibe/config.toml`
-   - Prompt you to enter your API key if it's not already configured
-   - Save your API key to `~/.vibe/.env` for future use
-
-4. Start interacting with the agent!
-
-   ```
-   > Can you find all instances of the word "TODO" in the project?
-
-   🤖 The user wants to find all instances of "TODO". The `grep` tool is perfect for this. I will use it to search the current directory.
-
-   > grep(pattern="TODO", path=".")
-
-   ... (grep tool output) ...
-
-   🤖 I found the following "TODO" comments in your project.
+   ```bash
+   vibe --provider ollama --model devstral
    ```
 
-## Usage
+## Provider Support
 
-### Interactive Mode
+Vibe supports 10 built-in provider presets across local and cloud deployments.
 
-Simply run `vibe` to enter the interactive chat loop.
-
-- **Multi-line Input**: Press `Ctrl+J` or `Shift+Enter` for select terminals to insert a newline.
-- **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`).
-- **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
-
-You can start Vibe with a prompt with the following command:
+### List Available Providers
 
 ```bash
-vibe "Refactor the main function in cli/main.py to be more modular."
+vibe --list-providers
 ```
 
-**Note**: The `--auto-approve` flag automatically approves all tool executions without prompting. In interactive mode, you can also toggle auto-approve on/off using `Shift+Tab`.
+### Local Providers
 
-### Programmatic Mode
+| Provider | Default Port | Command |
+|----------|--------------|---------|
+| Ollama | 11434 | `vibe --provider ollama` |
+| llama.cpp | 8080 | `vibe --provider llamacpp` |
+| vLLM | 8000 | `vibe --provider vllm` |
+| LocalAI | 8080 | `vibe --provider localai` |
+| LM Studio | 1234 | `vibe --provider lmstudio` |
 
-You can run Vibe non-interactively by piping input or using the `--prompt` flag. This is useful for scripting.
+Local providers do not require API keys. Ensure your local server is running before starting Vibe.
+
+**Example: Using Ollama**
 
 ```bash
-vibe --prompt "Refactor the main function in cli/main.py to be more modular."
+# Start Ollama (in another terminal)
+ollama serve
+
+# Pull a model
+ollama pull devstral
+
+# Run Vibe with Ollama
+vibe --provider ollama --model devstral
 ```
 
-by default it will use `auto-approve` mode.
+**Example: Using llama.cpp**
 
-### Slash Commands
+```bash
+# Start llama.cpp server
+llama-server -m model.gguf --port 8080
 
-Use slash commands for meta-actions and configuration changes during a session.
+# Run Vibe
+vibe --provider llamacpp --model devstral
+```
+
+### Cloud Providers
+
+| Provider | API Base | Environment Variable |
+|----------|----------|---------------------|
+| Mistral AI | api.mistral.ai | MISTRAL_API_KEY |
+| OpenAI | api.openai.com | OPENAI_API_KEY |
+| OpenRouter | openrouter.ai | OPENROUTER_API_KEY |
+| Together AI | api.together.xyz | TOGETHER_API_KEY |
+| Groq | api.groq.com | GROQ_API_KEY |
+
+**Example: Using OpenAI**
+
+```bash
+export OPENAI_API_KEY="sk-..."
+vibe --provider openai --model gpt-4o
+```
+
+**Example: Using OpenRouter**
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+vibe --provider openrouter --model anthropic/claude-3.5-sonnet
+```
+
+### Custom API Endpoints
+
+Override the default API base URL for any provider:
+
+```bash
+vibe --provider ollama --api-base http://192.168.1.100:11434/v1
+```
+
+### Disable Streaming
+
+Some providers or configurations may not support streaming responses:
+
+```bash
+vibe --provider vllm --no-stream
+```
+
+## Command-Line Options
+
+| Option | Description |
+|--------|-------------|
+| `--setup` | Run the onboarding wizard |
+| `--provider NAME` | Use a specific provider preset |
+| `--model NAME` | Use a specific model |
+| `--api-base URL` | Override the API base URL |
+| `--no-stream` | Disable streaming responses |
+| `--list-providers` | List all available provider presets |
+| `--agent NAME` | Load agent configuration from ~/.vibe/agents/NAME.toml |
+| `--auto-approve` | Automatically approve all tool executions |
+| `--continue` | Continue from the most recent session |
+| `--resume ID` | Resume a specific session by ID |
+
+## Built-in Tools
+
+Vibe includes a comprehensive set of tools for coding tasks:
+
+### File Operations
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read file contents with optional line range |
+| `write_file` | Write content to a file |
+| `search_replace` | Make targeted edits to files |
+| `glob` | Find files matching glob patterns (e.g., `**/*.py`) |
+| `list_directory` | List directory contents with metadata |
+
+### Code Search
+
+| Tool | Description |
+|------|-------------|
+| `grep` | Recursive regex search with ripgrep support |
+
+### System
+
+| Tool | Description |
+|------|-------------|
+| `bash` | Execute shell commands in a stateful terminal |
+| `todo` | Track task progress |
+
+### Web
+
+| Tool | Description |
+|------|-------------|
+| `web_fetch` | Fetch and extract content from URLs |
+
+### MCP Integration
+
+| Tool | Description |
+|------|-------------|
+| `mcp_read_resource` | Read resources from MCP servers |
+| `mcp_get_prompt` | Get prompt templates from MCP servers |
+
+## Slash Commands
+
+Use slash commands during a session for meta-actions:
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/clear` | Clear conversation history |
+| `/cost` | Show token usage and cost for the session |
+| `/mcp` | Show MCP servers, tools, resources, and prompts |
+| `/model` | Change the active model |
+| `/mode` | Toggle auto-approve mode |
+| `/compact` | Summarize and compact conversation |
+| `/quit` | Exit the session |
+
+### Custom Slash Commands
+
+Create your own slash commands to extend Vibe! Custom commands can execute bash scripts or insert prompt templates. See the [Custom Commands Documentation](docs/custom-commands.md) for details.
+
+**Quick Example:**
+```bash
+# Create the commands directory
+mkdir -p ~/.vibe/commands
+
+# Create a test command
+cat > ~/.vibe/commands/test.toml << 'EOF'
+[command]
+name = "test"
+aliases = ["/test", "/t"]
+description = "Run the project's test suite"
+type = "bash"
+command = "pytest tests/ -v"
+EOF
+
+# Use it in Vibe
+vibe
+> /test
+```
 
 ## Configuration
 
-Vibe is configured via a `config.toml` file. It looks for this file first in `./.vibe/config.toml` and then falls back to `~/.vibe/config.toml`.
+Vibe uses a `config.toml` file located at `~/.vibe/config.toml` (or `./.vibe/config.toml` for project-specific config).
+
+### Provider Configuration
+
+Configure custom providers in your config file:
+
+```toml
+# Define a custom provider
+[[providers]]
+name = "my-local-server"
+api_base = "http://localhost:5000/v1"
+api_key_env_var = ""  # Empty for no auth
+api_style = "openai"
+backend = "generic"
+
+# Define models for the provider
+[[models]]
+name = "my-model"
+provider = "my-local-server"
+alias = "local-custom"
+temperature = 0.2
+
+# Set the active model
+active_model = "local-custom"
+```
 
 ### API Key Configuration
 
-Vibe supports multiple ways to configure your API keys:
+API keys can be configured in multiple ways (in order of precedence):
 
-1. **Interactive Setup (Recommended for first-time users)**: When you run Vibe for the first time or if your API key is missing, Vibe will prompt you to enter it. The key will be securely saved to `~/.vibe/.env` for future sessions.
-
-2. **Environment Variables**: Set your API key as an environment variable:
-
+1. **Environment Variables**:
    ```bash
-   export MISTRAL_API_KEY="your_mistral_api_key"
+   export MISTRAL_API_KEY="your_key"
    ```
 
-3. **`.env` File**: Create a `.env` file in `~/.vibe/` and add your API keys:
-
+2. **`.env` File** at `~/.vibe/.env`:
    ```bash
-   MISTRAL_API_KEY=your_mistral_api_key
+   MISTRAL_API_KEY=your_key
+   OPENAI_API_KEY=your_key
    ```
 
-   Vibe automatically loads API keys from `~/.vibe/.env` on startup. Environment variables take precedence over the `.env` file if both are set.
-
-**Note**: The `.env` file is specifically for API keys and other provider credentials. General Vibe configuration should be done in `config.toml`.
-
-### Custom System Prompts
-
-You can create custom system prompts to replace the default one (`prompts/cli.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
-
-To use a custom system prompt, set the `system_prompt_id` in your configuration to match the filename (without the `.md` extension):
-
-```toml
-# Use a custom system prompt
-system_prompt_id = "my_custom_prompt"
-```
-
-This will load the prompt from `~/.vibe/prompts/my_custom_prompt.md`.
-
-### Custom Agent Configurations
-
-You can create custom agent configurations for specific use cases (e.g., red-teaming, specialized tasks) by adding agent-specific TOML files in the `~/.vibe/agents/` directory.
-
-To use a custom agent, run Vibe with the `--agent` flag:
-
-```bash
-vibe --agent my_custom_agent
-```
-
-Vibe will look for a file named `my_custom_agent.toml` in the agents directory and apply its configuration.
-
-Example custom agent configuration (`~/.vibe/agents/redteam.toml`):
-
-```toml
-# Custom agent configuration for red-teaming
-active_model = "devstral-2"
-system_prompt_id = "redteam"
-
-# Disable some tools for this agent
-disabled_tools = ["search_replace", "write_file"]
-
-# Override tool permissions for this agent
-[tools.bash]
-permission = "always"
-
-[tools.read_file]
-permission = "always"
-```
-
-Note: this implies that you have setup a redteam prompt names `~/.vibe/prompts/redteam.md`
+3. **Interactive Setup**: Run `vibe --setup` to configure through the wizard.
 
 ### MCP Server Configuration
 
-You can configure MCP (Model Context Protocol) servers to extend Vibe's capabilities. Add MCP server configurations under the `mcp_servers` section:
+Configure MCP (Model Context Protocol) servers for extended capabilities:
 
 ```toml
-# Example MCP server configurations
+# HTTP MCP server
 [[mcp_servers]]
 name = "my_http_server"
 transport = "http"
 url = "http://localhost:8000"
 headers = { "Authorization" = "Bearer my_token" }
-api_key_env = "MY_API_KEY_ENV_VAR"
-api_key_header = "Authorization"
-api_key_format = "Bearer {token}"
 
-[[mcp_servers]]
-name = "my_streamable_server"
-transport = "streamable-http"
-url = "http://localhost:8001"
-headers = { "X-API-Key" = "my_api_key" }
-
+# Stdio MCP server (local process)
 [[mcp_servers]]
 name = "fetch_server"
 transport = "stdio"
@@ -234,75 +341,161 @@ command = "uvx"
 args = ["mcp-server-fetch"]
 ```
 
-Supported transports:
+**MCP Features Supported:**
+- Tools: Remote tool execution
+- Resources: Read data from MCP servers (files, databases, APIs)
+- Resource Templates: Dynamic resource URIs
+- Prompts: Reusable prompt templates with arguments
 
-- `http`: Standard HTTP transport
-- `streamable-http`: HTTP transport with streaming support
-- `stdio`: Standard input/output transport (for local processes)
+View configured MCP servers and their capabilities with the `/mcp` command.
 
-Key fields:
+### Tool Permissions
 
-- `name`: A short alias for the server (used in tool names)
-- `transport`: The transport type
-- `url`: Base URL for HTTP transports
-- `headers`: Additional HTTP headers
-- `api_key_env`: Environment variable containing the API key
-- `command`: Command to run for stdio transport
-- `args`: Additional arguments for stdio transport
-
-MCP tools are named using the pattern `{server_name}_{tool_name}` and can be configured with permissions like built-in tools:
+Control tool execution permissions:
 
 ```toml
-# Configure permissions for specific MCP tools
-[tools.fetch_server_get]
-permission = "always"
+[tools.bash]
+permission = "ask"  # "always", "ask", or "never"
 
-[tools.my_http_server_query]
+[tools.write_file]
 permission = "ask"
+
+[tools.read_file]
+permission = "always"
 ```
 
-### Enable/disable tools with patterns
+### Enable/Disable Tools
 
-You can control which tools are active using `enabled_tools` and `disabled_tools`.
-These fields support exact names, glob patterns, and regular expressions.
-
-Examples:
+Control which tools are available:
 
 ```toml
-# Only enable tools that start with "serena_" (glob)
-enabled_tools = ["serena_*"]
+# Only enable specific tools (glob patterns supported)
+enabled_tools = ["read_file", "grep", "bash"]
 
-# Regex (prefix with re:) — matches full tool name (case-insensitive)
-enabled_tools = ["re:^serena_.*$"]
+# Or disable specific tools
+disabled_tools = ["web_fetch", "mcp_*"]
 
-# Heuristic regex support (patterns like `serena.*` are treated as regex)
-enabled_tools = ["serena.*"]
-
-# Disable a group with glob; everything else stays enabled
-disabled_tools = ["mcp_*", "grep"]
+# Regex patterns (prefix with re:)
+enabled_tools = ["re:^(?!mcp_).*$"]  # Exclude all MCP tools
 ```
 
-Notes:
+### Custom System Prompts
 
-- MCP tool names use underscores, e.g., `serena_list` not `serena.list`.
-- Regex patterns are matched against the full tool name using fullmatch.
+Create custom prompts in `~/.vibe/prompts/`:
 
-### Custom Vibe Home Directory
+```toml
+system_prompt_id = "my_custom_prompt"  # Loads ~/.vibe/prompts/my_custom_prompt.md
+```
 
-By default, Vibe stores its configuration in `~/.vibe/`. You can override this by setting the `VIBE_HOME` environment variable:
+### Custom Agent Configurations
+
+Create agent profiles in `~/.vibe/agents/`:
+
+```toml
+# ~/.vibe/agents/local-dev.toml
+active_model = "ollama-devstral"
+system_prompt_id = "developer"
+
+[tools.bash]
+permission = "always"
+```
+
+Use with: `vibe --agent local-dev`
+
+## Usage Examples
+
+### Interactive Mode
 
 ```bash
-export VIBE_HOME="/path/to/custom/vibe/home"
+# Start with default provider
+vibe
+
+# Start with specific provider and model
+vibe --provider ollama --model codellama
+
+# Continue previous session
+vibe --continue
 ```
 
-This affects where Vibe looks for:
+### One-shot Mode
 
-- `config.toml` - Main configuration
-- `.env` - API keys
-- `agents/` - Custom agent configurations
-- `prompts/` - Custom system prompts
-- `tools/` - Custom tools
-- `logs/` - Session logsRetryTo run code, enable code execution and file creation in Settings > Capabilities.
+```bash
+# Run a single prompt
+vibe --prompt "Find all TODO comments in the project"
+
+# With auto-approve for scripting
+vibe --prompt "Run the test suite" --auto-approve
+```
+
+### Session Management
+
+```bash
+# Resume a specific session
+vibe --resume abc123
+
+# View session cost
+# (Use /cost command during session)
+```
+
+## Development
+
+### Running Tests
+
+```bash
+uv run pytest tests/ -v
+```
+
+### Syntax Checking
+
+```bash
+uv run python -m py_compile vibe/core/tools/builtins/*.py
+```
+
+## Enhancements in This Fork
+
+This fork adds the following features to the upstream Mistral Vibe:
+
+1. **Multi-Provider Support**: 10 built-in provider presets (Ollama, llama.cpp, vLLM, LocalAI, LM Studio, OpenAI, OpenRouter, Together AI, Groq, Mistral).
+
+2. **Provider CLI Flags**: New command-line options `--provider`, `--model`, `--api-base`, `--no-stream`, `--list-providers`.
+
+3. **Provider Selection in Onboarding**: The setup wizard now includes provider selection.
+
+4. **Custom Slash Commands**: User-defined commands for bash scripts and prompt templates (see [docs/custom-commands.md](docs/custom-commands.md)).
+
+5. **New Tools**:
+   - `glob`: Find files by pattern (`**/*.py`, `src/**/*.ts`)
+   - `list_directory`: List directory contents with size/date metadata
+   - `web_fetch`: Fetch and extract content from URLs
+
+6. **Full MCP Protocol Support**:
+   - Resources: Read data exposed by MCP servers
+   - Resource Templates: Dynamic resource URI patterns
+   - Prompts: Reusable prompt templates with arguments
+   - `mcp_read_resource` tool for LLM to access MCP resources
+   - `mcp_get_prompt` tool for LLM to retrieve MCP prompts
+
+7. **New Slash Commands**:
+   - `/cost`: Display token usage and estimated cost for the session
+   - `/mcp`: Show all MCP servers with their tools, resources, and prompts
+
+8. **Generic Backend Improvements**: Better handling of non-Mistral API responses (finish_reason, tool call index fields).
+
+## Bug Fixes in This Fork
+
+This fork includes fixes for critical upstream bugs:
+
+1. **✅ Fixed #213 - Mode Switch Toggle**: Fixed issue where mode switching via shift+tab would update the UI but the agent would continue operating in the previous mode.
+
+2. **✅ Fixed #217 - Session Log Updates**: Session logs now update after every turn (including tool calls), enabling real-time auditing during long agentic tasks.
+
+3. **✅ Fixed #186 - Bash Tool**: The bash tool now correctly uses `/bin/bash` instead of `/bin/sh`, enabling bash-specific features like the `source` command.
+
+4. **✅ Fixed #218 - API Key Validation (Enhanced)**: Validates API keys during setup for ALL providers (Mistral, OpenAI, Groq, Together, OpenRouter), not just Mistral. Includes network error handling and skip option for offline setups. This is an improved version of upstream PR #219 which only worked for Mistral.
+
+5. **✅ Fixed #191 - Custom Slash Commands**: Implemented user-defined custom slash commands for executing bash scripts and inserting prompt templates. Commands are configured via TOML files in `~/.vibe/commands/`.
+
+For detailed information about each fix, see [IMPROVEMENTS.md](IMPROVEMENTS.md).
 
 ## Editors/IDEs
 
@@ -310,8 +503,8 @@ Mistral Vibe can be used in text editors and IDEs that support [Agent Client Pro
 
 ## Resources
 
-- [CHANGELOG](CHANGELOG.md) - See what's new in each version
-- [CONTRIBUTING](CONTRIBUTING.md) - Guidelines for feedback and bug reports
+- [CHANGELOG](CHANGELOG.md) - Version history
+- [CONTRIBUTING](CONTRIBUTING.md) - Contribution guidelines
 
 ## License
 

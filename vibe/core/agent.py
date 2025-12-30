@@ -273,6 +273,11 @@ class Agent:
 
                 self._flush_new_messages()
 
+                # Save session log after every turn (not just when conversation completes)
+                await self.interaction_logger.save_interaction(
+                    self.messages, self.stats, self.config, self.tool_manager
+                )
+
                 if user_cancelled:
                     return
 
@@ -842,12 +847,15 @@ class Agent:
     async def switch_mode(self, new_mode: AgentMode) -> None:
         if new_mode == self._mode:
             return
+
+        # Update mode immediately so middleware sees the new mode during reload
+        self._mode = new_mode
+
         new_config = VibeConfig.load(
             workdir=self.config.workdir, **new_mode.config_overrides
         )
 
         await self.reload_with_initial_messages(config=new_config)
-        self._mode = new_mode
 
     async def reload_with_initial_messages(
         self,
