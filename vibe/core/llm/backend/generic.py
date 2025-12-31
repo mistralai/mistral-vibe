@@ -24,19 +24,23 @@ from vibe.core.utils import async_generator_retry, async_retry
 def _sanitize_tool_call_arguments(arguments: str) -> str:
     r"""Sanitize tool call arguments to ensure valid JSON.
 
-    Some LLM backends (like vLLM) may generate arguments with improperly escaped
-    backslashes (e.g., C:\Users instead of C:\\Users). When these are sent back
-    in conversation history, the server may fail to parse them.
+    Some LLM backends (like vLLM) may generate arguments with:
+    1. Improperly escaped backslashes (e.g., C:\Users instead of C:\\Users)
+    2. Unescaped control characters (literal newlines, tabs instead of \n, \t)
 
-    This function attempts to fix common escape issues by re-parsing and
-    re-serializing the JSON. If parsing fails, it tries to fix backslash escaping.
+    When these are sent back in conversation history, the server may fail to
+    parse them with errors like "Invalid control character".
+
+    This function fixes these issues by parsing with strict=False (to allow
+    control characters) and re-serializing to get properly escaped JSON.
     """
     if not arguments:
         return arguments
 
-    # First, try to parse as-is - if it works, it's valid JSON
+    # First, try to parse with strict=False to handle control characters
+    # (literal newlines, tabs, etc. that should be escaped)
     try:
-        parsed = json.loads(arguments)
+        parsed = json.loads(arguments, strict=False)
         # Re-serialize to ensure consistent escaping
         return json.dumps(parsed)
     except json.JSONDecodeError:
@@ -53,7 +57,7 @@ def _sanitize_tool_call_arguments(arguments: str) -> str:
     )
 
     try:
-        parsed = json.loads(fixed)
+        parsed = json.loads(fixed, strict=False)
         return json.dumps(parsed)
     except json.JSONDecodeError:
         # If we still can't parse it, return original - let the caller handle it
