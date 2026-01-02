@@ -59,6 +59,7 @@ from vibe.cli.update_notifier import (
 from vibe.core.agent import Agent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
+from vibe.core.interaction_logger import InteractionLogger
 from vibe.core.modes import AgentMode, next_mode
 from vibe.core.paths.config_paths import HISTORY_FILE
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
@@ -333,6 +334,12 @@ class VibeApp(App):  # noqa: PLR0904
             await self._mount_and_scroll(
                 UserCommandMessage("History closed (no changes saved).")
             )
+        await self._switch_to_input_app()
+
+    async def on_history_app_session_selected(
+        self, message: HistoryApp.SessionSelected
+    ) -> None:
+        await self._load_session_from_history(message.session["session_id"])
         await self._switch_to_input_app()
 
     def _set_tool_permission_always(
@@ -748,6 +755,77 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
         await self._switch_to_history_app(sessions)
+
+    async def _load_session_from_history(self, session_id: str) -> None:
+        if not self.config.session_logging.enabled:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Session logging is disabled. Enable it to resume sessions.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        session_path = InteractionLogger.find_session_by_id(
+            session_id, self.config.session_logging
+        )
+
+        if not session_path:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Session '{session_id}' not found in {self.config.session_logging.save_dir}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        try:
+            loaded_messages, metadata = InteractionLogger.load_session(session_path)
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to load session {session_id}: {e}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        if self._agent_running:
+            await self._interrupt_agent()
+
+        # Clear UI areas
+        try:
+            await self._finalize_current_streaming_message()
+            messages_area = self.query_one("#messages")
+            await messages_area.remove_children()
+            todo_area = self.query_one("#todo-area")
+            await todo_area.remove_children()
+        except Exception:
+            pass
+
+        # Reset agent state so we can rebuild with loaded messages
+        self._loaded_messages = loaded_messages
+        self.agent = None
+        self._agent_init_task = None
+        self._agent_initializing = False
+        self._agent_running = False
+        self._agent_task = None
+        self._interrupt_requested = False
+        self._current_streaming_message = None
+        self._current_streaming_reasoning = None
+
+        await self._initialize_agent()
+
+        if self.agent:
+            resume_session_id = str(metadata.get("session_id") or session_id)
+            self.agent.interaction_logger.reset_session(resume_session_id)
+            if title := metadata.get("session_title"):
+                self.agent.session_title = str(title)
+
+        await self._rebuild_history_from_messages()
+        await self._mount_and_scroll(
+            UserCommandMessage(f"Resumed session {session_id}")
+        )
 
     async def _show_status(self) -> None:
         if self.agent is None:

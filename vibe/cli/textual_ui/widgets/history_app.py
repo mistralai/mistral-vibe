@@ -40,6 +40,11 @@ class HistoryApp(Container):
             super().__init__()
             self.changes = changes
 
+    class SessionSelected(Message):
+        def __init__(self, session: HistoryDefinition) -> None:
+            super().__init__()
+            self.session = session
+
     def __init__(
         self,
         config: VibeConfig,
@@ -97,6 +102,22 @@ class HistoryApp(Container):
         self.selected_index = (self.selected_index + 1) % len(self.history)
         self._update_display()
 
+    def _emit_selection(self) -> None:
+        if not self.history:
+            return
+
+        try:
+            session = self.history[self.selected_index]
+            self.post_message(self.SessionSelected(session))
+        except Exception:
+            pass
+
+    def action_toggle_setting(self) -> None:
+        self._emit_selection()
+
+    def action_cycle(self) -> None:
+        self._emit_selection()
+
     def action_close(self) -> None:
         self.post_message(self.HistoryClosed(changes=self.changes.copy()))
 
@@ -118,6 +139,6 @@ class HistoryApp(Container):
             yield Static("")
 
             self.help_widget = Static(
-                "↑↓ navigate  Space/Enter toggle  ESC exit", classes="settings-help"
+                "↑↓ navigate  Enter/Open  ESC exit", classes="settings-help"
             )
             yield self.help_widget
