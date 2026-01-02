@@ -720,6 +720,20 @@ WelcomeBanner {
     height: auto;
 }
 
+#history-app {
+    width: 100%;
+    height: auto;
+    background: $background;
+    border: round $foreground-muted;
+    padding: 0 1;
+    margin: 0 0 1 0;
+}
+
+#history-content {
+    width: 100%;
+    height: auto;
+}
+
 .settings-title {
     height: auto;
     text-style: bold;
