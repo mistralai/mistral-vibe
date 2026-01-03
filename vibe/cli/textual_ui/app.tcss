@@ -720,6 +720,39 @@ WelcomeBanner {
     height: auto;
 }
 
+<<<<<<< HEAD
+=======
+#history-app {
+    width: 100%;
+    height: auto;
+    background: $background;
+    border: round $foreground-muted;
+    padding: 0 1;
+    margin: 0 0 1 0;
+}
+
+#history-content {
+    width: 100%;
+    height: auto;
+}
+
+
+#api-key-app {
+    width: 100%;
+    height: auto;
+    background: $background;
+    border: round $foreground-muted;
+    padding: 0 1;
+    margin: 0 0 1 0;
+}
+
+#config-content {
+    width: 100%;
+    height: auto;
+}
+
+
+>>>>>>> 0a74946 (add update api key update command)
 .settings-title {
     height: auto;
     text-style: bold;

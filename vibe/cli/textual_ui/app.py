@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from enum import StrEnum, auto
+<<<<<<< HEAD
+=======
+import json
+import os
+from pathlib import Path
+>>>>>>> 0a74946 (add update api key update command)
 import subprocess
 import time
 from typing import Any, ClassVar, assert_never
@@ -12,7 +18,7 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalScroll
 from textual.events import AppBlur, AppFocus, MouseUp
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from vibe import __version__ as CORE_VERSION
 from vibe.cli.clipboard import copy_selection_to_clipboard
@@ -22,6 +28,10 @@ from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.terminal_theme import (
     TERMINAL_THEME_NAME,
     capture_terminal_theme,
+)
+from vibe.cli.textual_ui.widgets.api_key_app import (
+    Api_KeyApp,
+    _save_api_key_to_env_file,
 )
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
@@ -71,6 +81,11 @@ from vibe.core.utils import (
 class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
+<<<<<<< HEAD
+=======
+    History = auto()
+    APIKey = auto()
+>>>>>>> 0a74946 (add update api key update command)
     Input = auto()
 
 
@@ -81,7 +96,7 @@ class VibeApp(App):  # noqa: PLR0904
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+c", "clear_quit", "Quit", show=False),
         Binding("ctrl+d", "force_quit", "Quit", show=False, priority=True),
-        Binding("escape", "interrupt", "Interrupt", show=False, priority=True),
+        Binding("escape", "interrupt", "Interrupt", show=False, priority=True),  # <=
         Binding("ctrl+o", "toggle_tool", "Toggle Tool", show=False),
         Binding("ctrl+t", "toggle_todo", "Toggle Todo", show=False),
         Binding("shift+tab", "cycle_mode", "Cycle Mode", show=False, priority=True),
@@ -320,6 +335,71 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._switch_to_input_app()
 
+<<<<<<< HEAD
+=======
+    async def on_api_key_app_api_key_submitted(
+        self, message: Api_KeyApp.Api_KeySubmitted
+    ) -> None:
+        """Handle API key submission."""
+        try:
+            # Get the active model's provider
+            active_model = self.config.get_active_model()
+            provider = self.config.get_provider_for_model(active_model)
+            env_key = provider.api_key_env_var
+
+            _save_api_key_to_env_file(env_key, message.api_key)
+
+            # Reload config with the new API key
+            await self._reload_config()
+
+            await self._mount_and_scroll(
+                UserCommandMessage("API key updated successfully.")
+            )
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to update API key: {e}", collapsed=self._tools_collapsed
+                )
+            )
+
+        await self._switch_to_input_app()
+
+    async def on_api_key_app_api_key_cancelled(
+        self, message: Api_KeyApp.APIKeyCancelled
+    ) -> None:
+        """Handle API key update cancellation."""
+        await self._mount_and_scroll(UserCommandMessage("API key update cancelled."))
+        await self._switch_to_input_app()
+
+    async def on_api_key_app_api_key_closed(
+        self, message: Api_KeyApp.ApiKeyClosed
+    ) -> None:
+        if message.changes:
+            await self._mount_and_scroll(UserCommandMessage("API key closed."))
+        else:
+            await self._mount_and_scroll(
+                UserCommandMessage("API key closed (no changes saved).")
+            )
+        await self._switch_to_input_app()
+
+    async def on_history_app_history_closed(
+        self, message: HistoryApp.HistoryClosed
+    ) -> None:
+        if message.changes:
+            await self._mount_and_scroll(UserCommandMessage("History closed."))
+        else:
+            await self._mount_and_scroll(
+                UserCommandMessage("History closed (no changes saved).")
+            )
+        await self._switch_to_input_app()
+
+    async def on_history_app_session_selected(
+        self, message: HistoryApp.SessionSelected
+    ) -> None:
+        await self._load_session_from_history(message.session["session_id"])
+        await self._switch_to_input_app()
+
+>>>>>>> 0a74946 (add update api key update command)
     def _set_tool_permission_always(
         self, tool_name: str, save_permanently: bool = False
     ) -> None:
@@ -771,6 +851,14 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
 
+    async def _update_api_key(self) -> None:
+        """Switch to the API key update app in the bottom panel."""
+        logger.info("Api_KeyApp.action_close called")
+        if self._current_bottom_app == BottomApp.APIKey:
+            return
+
+        await self._switch_to_api_key_app()
+
     async def _show_log_path(self) -> None:
         if self.agent is None:
             await self._mount_and_scroll(
@@ -927,6 +1015,35 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.call_after_refresh(config_app.focus)
 
+    async def _switch_to_api_key_app(self) -> None:
+        if self._current_bottom_app == BottomApp.APIKey:
+            return
+
+        bottom_container = self.query_one("#bottom-app-container")
+        await self._mount_and_scroll(UserCommandMessage("API key update opened..."))
+
+        try:
+            chat_input_container = self.query_one(ChatInputContainer)
+            await chat_input_container.remove()
+        except Exception:
+            pass
+
+        if self._mode_indicator:
+            self._mode_indicator.display = False
+
+        api_key_app = Api_KeyApp(self.config)
+        await bottom_container.mount(api_key_app)
+        self._current_bottom_app = BottomApp.APIKey
+
+        def focus_input() -> None:
+            try:
+                input_widget = self.query_one("#api-key-input", Input)
+                input_widget.focus()
+            except Exception:
+                pass
+
+        self.call_after_refresh(focus_input)
+
     async def _switch_to_approval_app(
         self, tool_name: str, tool_args: BaseModel
     ) -> None:
@@ -968,6 +1085,12 @@ class VibeApp(App):  # noqa: PLR0904
         except Exception:
             pass
 
+        try:
+            api_key_app = self.query_one("#api-key-app")
+            await api_key_app.remove()
+        except Exception:
+            pass
+
         if self._mode_indicator:
             self._mode_indicator.display = True
 
@@ -1002,6 +1125,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(ConfigApp).focus()
                 case BottomApp.Approval:
                     self.query_one(ApprovalApp).focus()
+                case BottomApp.APIKey:
+                    self.query_one(Api_KeyApp).focus()
                 case app:
                     assert_never(app)
         except Exception:
@@ -1009,6 +1134,7 @@ class VibeApp(App):  # noqa: PLR0904
 
     def action_interrupt(self) -> None:
         current_time = time.monotonic()
+        logger.info("VibeApp.action_interrupt: bottom_app=%s", self._current_bottom_app)
 
         if self._current_bottom_app == BottomApp.Config:
             try:
@@ -1019,6 +1145,30 @@ class VibeApp(App):  # noqa: PLR0904
             self._last_escape_time = None
             return
 
+<<<<<<< HEAD
+=======
+        if self._current_bottom_app == BottomApp.History:
+            try:
+                history_app = self.query_one(HistoryApp)
+                history_app.action_close()
+            except Exception:
+                pass
+            self._last_escape_time = None
+            return
+
+        if self._current_bottom_app == BottomApp.APIKey:
+            try:
+                api_key_app = self.query_one(Api_KeyApp)
+                logger.info(
+                    "VibeApp.action_interrupt: calling Api_KeyApp.action_close()"
+                )
+                api_key_app.action_close()
+            except Exception:
+                pass
+            self._last_escape_time = None
+            return
+
+>>>>>>> 0a74946 (add update api key update command)
         if self._current_bottom_app == BottomApp.Approval:
             try:
                 approval_app = self.query_one(ApprovalApp)
