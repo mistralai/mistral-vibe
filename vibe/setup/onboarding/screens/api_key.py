@@ -4,6 +4,7 @@ import os
 from typing import ClassVar
 
 from dotenv import set_key
+from mistralai import Mistral
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Center, Horizontal, Vertical
@@ -117,8 +118,46 @@ class ApiKeyScreen(OnboardingScreen):
         input_box.add_class("invalid")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.validation_result and event.validation_result.is_valid:
-            self._save_and_finish(event.value)
+        if not (event.validation_result and event.validation_result.is_valid):
+            return
+
+        feedback = self.query_one("#feedback", Static)
+        input_box = self.query_one("#input-box")
+
+        # Clear previous feedback
+        feedback.update("")
+        feedback.remove_class("error", "success")
+
+        try:
+            self._validate_api_key(event.value)
+        except ValueError:
+            feedback.update("Invalid API key. Please try again.")
+            feedback.add_class("error")
+            input_box.remove_class("valid")
+            input_box.add_class("invalid")
+            self.input_widget.focus()
+            return
+        except Exception as err:
+            feedback.update(f"Failed to validate API key: {err}")
+            feedback.add_class("error")
+            self.input_widget.focus()
+            return
+
+        self._save_and_finish(event.value)
+
+    def _validate_api_key(self, api_key: str) -> None:
+        """
+        Raises ValueError if the API key is invalid.
+        """
+        client = Mistral(api_key=api_key)
+
+        try:
+            client.models.list()
+        except Exception as err:
+            message = str(err).lower()
+            if "unauthorized" in message or "401" in message or "api key" in message:
+                raise ValueError("Invalid API key") from err
+            raise
 
     def _save_and_finish(self, api_key: str) -> None:
         env_key = self.provider.api_key_env_var

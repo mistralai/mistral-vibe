@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from enum import StrEnum, auto
+import os
 import subprocess
 import time
 from typing import Any, ClassVar, assert_never
 
+from dotenv import set_key
 from pydantic import BaseModel
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
@@ -23,6 +25,7 @@ from vibe.cli.textual_ui.terminal_theme import (
     TERMINAL_THEME_NAME,
     capture_terminal_theme,
 )
+from vibe.cli.textual_ui.widgets.api_key_app import ApiKeyApp
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
@@ -58,6 +61,7 @@ from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
 from vibe.core.modes import AgentMode, next_mode
 from vibe.core.paths.config_paths import HISTORY_FILE
+from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import ApprovalResponse, LLMMessage, Role
 from vibe.core.utils import (
@@ -68,9 +72,19 @@ from vibe.core.utils import (
 )
 
 
+def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
+    """Save API key to the global .env file and process env."""
+    # Update in-memory environment
+    os.environ[env_key] = api_key
+    # Persist to .env file
+    GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+    set_key(GLOBAL_ENV_FILE.path, env_key, api_key)
+
+
 class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
+    APIKey = auto()
     Input = auto()
 
 
@@ -81,7 +95,7 @@ class VibeApp(App):  # noqa: PLR0904
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+c", "clear_quit", "Quit", show=False),
         Binding("ctrl+d", "force_quit", "Quit", show=False, priority=True),
-        Binding("escape", "interrupt", "Interrupt", show=False, priority=True),
+        Binding("escape", "interrupt", "Interrupt", show=False, priority=True),  # <=
         Binding("ctrl+o", "toggle_tool", "Toggle Tool", show=False),
         Binding("ctrl+t", "toggle_todo", "Toggle Todo", show=False),
         Binding("shift+tab", "cycle_mode", "Cycle Mode", show=False, priority=True),
@@ -318,6 +332,51 @@ class VibeApp(App):  # noqa: PLR0904
                 UserCommandMessage("Configuration closed (no changes saved).")
             )
 
+        await self._switch_to_input_app()
+
+    async def on_api_key_app_api_key_submitted(
+        self, message: ApiKeyApp.Api_KeySubmitted
+    ) -> None:
+        """Handle API key submission."""
+        try:
+            # Get the active model's provider
+            active_model = self.config.get_active_model()
+            provider = self.config.get_provider_for_model(active_model)
+            env_key = provider.api_key_env_var
+
+            _save_api_key_to_env_file(env_key, message.api_key)
+
+            # Reload config with the new API key
+            await self._reload_config()
+
+            await self._mount_and_scroll(
+                UserCommandMessage("API key updated successfully.")
+            )
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to update API key: {e}", collapsed=self._tools_collapsed
+                )
+            )
+
+        await self._switch_to_input_app()
+
+    async def on_api_key_app_api_key_cancelled(
+        self, message: ApiKeyApp.APIKeyCancelled
+    ) -> None:
+        """Handle API key update cancellation."""
+        await self._mount_and_scroll(UserCommandMessage("API key update cancelled."))
+        await self._switch_to_input_app()
+
+    async def on_api_key_app_api_key_closed(
+        self, message: ApiKeyApp.ApiKeyClosed
+    ) -> None:
+        if message.changes:
+            await self._mount_and_scroll(UserCommandMessage("API key closed."))
+        else:
+            await self._mount_and_scroll(
+                UserCommandMessage("API key closed (no changes saved).")
+            )
         await self._switch_to_input_app()
 
     def _set_tool_permission_always(
@@ -771,6 +830,14 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
 
+    async def _update_api_key(self) -> None:
+        """Switch to the API key update app in the bottom panel."""
+        logger.info("ApiKeyApp.action_close called")
+        if self._current_bottom_app == BottomApp.APIKey:
+            return
+
+        await self._switch_to_api_key_app()
+
     async def _show_log_path(self) -> None:
         if self.agent is None:
             await self._mount_and_scroll(
@@ -927,6 +994,35 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.call_after_refresh(config_app.focus)
 
+    async def _switch_to_api_key_app(self) -> None:
+        if self._current_bottom_app == BottomApp.APIKey:
+            return
+
+        bottom_container = self.query_one("#bottom-app-container")
+        await self._mount_and_scroll(UserCommandMessage("API key update opened..."))
+
+        try:
+            chat_input_container = self.query_one(ChatInputContainer)
+            await chat_input_container.remove()
+        except Exception:
+            pass
+
+        if self._mode_indicator:
+            self._mode_indicator.display = False
+
+        api_key_app = ApiKeyApp(self.config)
+        await bottom_container.mount(api_key_app)
+        self._current_bottom_app = BottomApp.APIKey
+
+        def focus_input() -> None:
+            try:
+                input_widget = self.query_one("#api-key-input", Input)
+                input_widget.focus()
+            except Exception:
+                pass
+
+        self.call_after_refresh(focus_input)
+
     async def _switch_to_approval_app(
         self, tool_name: str, tool_args: BaseModel
     ) -> None:
@@ -968,6 +1064,12 @@ class VibeApp(App):  # noqa: PLR0904
         except Exception:
             pass
 
+        try:
+            api_key_app = self.query_one("#api-key-app")
+            await api_key_app.remove()
+        except Exception:
+            pass
+
         if self._mode_indicator:
             self._mode_indicator.display = True
 
@@ -1002,6 +1104,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(ConfigApp).focus()
                 case BottomApp.Approval:
                     self.query_one(ApprovalApp).focus()
+                case BottomApp.APIKey:
+                    self.query_one(ApiKeyApp).focus()
                 case app:
                     assert_never(app)
         except Exception:
@@ -1009,11 +1113,24 @@ class VibeApp(App):  # noqa: PLR0904
 
     def action_interrupt(self) -> None:
         current_time = time.monotonic()
+        logger.info("VibeApp.action_interrupt: bottom_app=%s", self._current_bottom_app)
 
         if self._current_bottom_app == BottomApp.Config:
             try:
                 config_app = self.query_one(ConfigApp)
                 config_app.action_close()
+            except Exception:
+                pass
+            self._last_escape_time = None
+            return
+
+        if self._current_bottom_app == BottomApp.APIKey:
+            try:
+                api_key_app = self.query_one(ApiKeyApp)
+                logger.info(
+                    "VibeApp.action_interrupt: calling ApiKeyApp.action_close()"
+                )
+                api_key_app.action_close()
             except Exception:
                 pass
             self._last_escape_time = None

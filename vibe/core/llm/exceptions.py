@@ -52,7 +52,7 @@ class BackendError(RuntimeError):
 
     def _fmt(self) -> str:
         if self.status == HTTPStatus.UNAUTHORIZED:
-            return "Invalid API key. Please check your API key and try again."
+            return "Invalid API key. Type the command '/update-api-key' to set a new key, then try again."
 
         if self.status == HTTPStatus.TOO_MANY_REQUESTS:
             return "Rate limit exceeded. Please wait a moment before trying again."

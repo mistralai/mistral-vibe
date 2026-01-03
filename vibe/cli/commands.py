@@ -62,6 +62,11 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "update-api-key": Command(
+                aliases=frozenset(["/update-api-key"]),
+                description="Update the API key",
+                handler="_update_api_key",
+            ),
         }
 
         for command in excluded_commands:
