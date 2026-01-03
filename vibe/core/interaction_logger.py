@@ -11,7 +11,7 @@ import aiofiles
 
 from vibe.core.llm.format import get_active_tool_classes
 from vibe.core.types import AgentStats, LLMMessage, SessionInfo, SessionMetadata
-from vibe.core.utils import is_windows
+from vibe.core.utils import is_windows, logger
 
 if TYPE_CHECKING:
     from vibe.core.config import SessionLoggingConfig, VibeConfig
@@ -111,6 +111,7 @@ class InteractionLogger:
             auto_approve=self.auto_approve,
             username=user_name,
             environment={"working_directory": str(self.workdir)},
+            session_title=None,
         )
 
     async def save_interaction(
@@ -119,6 +120,7 @@ class InteractionLogger:
         stats: AgentStats,
         config: VibeConfig,
         tool_manager: ToolManager,
+        session_title: str | None = None,
     ) -> str | None:
         if not self.enabled or self.filepath is None:
             return None
@@ -140,15 +142,19 @@ class InteractionLogger:
             for tool_class in active_tools
         ]
 
+        metadata = {
+            **self.session_metadata.model_dump(),
+            "end_time": datetime.now().isoformat(),
+            "stats": stats.model_dump(),
+            "total_messages": len(messages),
+            "tools_available": tools_available,
+            "agent_config": config.model_dump(mode="json"),
+        }
+
+        metadata["session_title"] = session_title
+
         interaction_data = {
-            "metadata": {
-                **self.session_metadata.model_dump(),
-                "end_time": datetime.now().isoformat(),
-                "stats": stats.model_dump(),
-                "total_messages": len(messages),
-                "tools_available": tools_available,
-                "agent_config": config.model_dump(mode="json"),
-            },
+            "metadata": metadata,
             "messages": [m.model_dump(exclude_none=True) for m in messages],
         }
 

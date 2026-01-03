@@ -21,6 +21,11 @@ class CommandRegistry:
                 description="Show help message",
                 handler="_show_help",
             ),
+            "restore-session": Command(
+                aliases=frozenset(["/restore-session"]),
+                description="Restore a session from history",
+                handler="_restore_session",
+            ),
             "config": Command(
                 aliases=frozenset(["/config", "/theme", "/model"]),
                 description="Edit config settings",

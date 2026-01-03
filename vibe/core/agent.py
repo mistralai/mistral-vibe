@@ -62,6 +62,7 @@ from vibe.core.utils import (
     get_user_agent,
     get_user_cancellation_message,
     is_user_cancellation_event,
+    logger,
 )
 
 
@@ -137,6 +138,8 @@ class Agent:
         self.approval_callback: ApprovalCallback | None = None
 
         self.session_id = str(uuid4())
+
+        self.session_title: str | None = None
 
         self.interaction_logger = InteractionLogger(
             config.session_logging,
@@ -288,7 +291,11 @@ class Agent:
         finally:
             self._flush_new_messages()
             await self.interaction_logger.save_interaction(
-                self.messages, self.stats, self.config, self.tool_manager
+                self.messages,
+                self.stats,
+                self.config,
+                self.tool_manager,
+                session_title=self.session_title,
             )
 
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
@@ -757,7 +764,11 @@ class Agent:
 
     async def clear_history(self) -> None:
         await self.interaction_logger.save_interaction(
-            self.messages, self.stats, self.config, self.tool_manager
+            self.messages,
+            self.stats,
+            self.config,
+            self.tool_manager,
+            session_title=self.session_title,
         )
         self.messages = self.messages[:1]
 
@@ -775,12 +786,46 @@ class Agent:
         self.tool_manager.reset_all()
         self._reset_session()
 
+    async def add_title(self) -> str:
+        """Generate and add a title for the current conversation."""
+        self._clean_message_history()
+        title_prompt = UtilityPrompt.TITLE.read()
+        # log the prompt that will be sent to the LLM so you can inspect it in the log file
+        try:
+            logger.info("add_title: title_prompt=%r", title_prompt)
+        except Exception:
+            pass
+        self.messages.append(LLMMessage(role=Role.user, content=title_prompt))
+        self.stats.steps += 1
+
+        llm_result = await self._chat()  # ._chat(max_tokens=20)
+
+        title = llm_result.message.content or "Untitled Conversation"
+
+        logger.info("add_title: llm_response=%r", title)
+
+        # store title on agent so subsequent saves include it
+        self.session_title = title
+
+        await self.interaction_logger.save_interaction(
+            self.messages,
+            self.stats,
+            self.config,
+            self.tool_manager,
+            session_title=self.session_title,
+        )
+        return title
+
     async def compact(self) -> str:
         """Compact the conversation history."""
         try:
             self._clean_message_history()
             await self.interaction_logger.save_interaction(
-                self.messages, self.stats, self.config, self.tool_manager
+                self.messages,
+                self.stats,
+                self.config,
+                self.tool_manager,
+                session_title=self.session_title,
             )
 
             last_user_message = None
@@ -826,7 +871,11 @@ class Agent:
 
             self._reset_session()
             await self.interaction_logger.save_interaction(
-                self.messages, self.stats, self.config, self.tool_manager
+                self.messages,
+                self.stats,
+                self.config,
+                self.tool_manager,
+                session_title=self.session_title,
             )
 
             self.middleware_pipeline.reset(reset_reason=ResetReason.COMPACT)
@@ -835,7 +884,11 @@ class Agent:
 
         except Exception:
             await self.interaction_logger.save_interaction(
-                self.messages, self.stats, self.config, self.tool_manager
+                self.messages,
+                self.stats,
+                self.config,
+                self.tool_manager,
+                session_title=self.session_title,
             )
             raise
 
@@ -856,7 +909,11 @@ class Agent:
         max_price: float | None = None,
     ) -> None:
         await self.interaction_logger.save_interaction(
-            self.messages, self.stats, self.config, self.tool_manager
+            self.messages,
+            self.stats,
+            self.config,
+            self.tool_manager,
+            session_title=self.session_title,
         )
 
         preserved_messages = self.messages[1:] if len(self.messages) > 1 else []
@@ -904,5 +961,9 @@ class Agent:
         self.tool_manager.reset_all()
 
         await self.interaction_logger.save_interaction(
-            self.messages, self.stats, self.config, self.tool_manager
+            self.messages,
+            self.stats,
+            self.config,
+            self.tool_manager,
+            session_title=self.session_title,
         )

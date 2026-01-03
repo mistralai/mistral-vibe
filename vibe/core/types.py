@@ -106,6 +106,7 @@ class SessionMetadata(BaseModel):
     environment: dict[str, str | None]
     auto_approve: bool = False
     username: str
+    session_title: str | None
 
 
 StrToolChoice = Literal["auto", "none", "any", "required"]
