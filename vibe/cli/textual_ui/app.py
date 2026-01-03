@@ -12,6 +12,7 @@ import subprocess
 import time
 from typing import Any, ClassVar, assert_never
 
+from dotenv import set_key
 from pydantic import BaseModel
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
@@ -29,10 +30,7 @@ from vibe.cli.textual_ui.terminal_theme import (
     TERMINAL_THEME_NAME,
     capture_terminal_theme,
 )
-from vibe.cli.textual_ui.widgets.api_key_app import (
-    Api_KeyApp,
-    _save_api_key_to_env_file,
-)
+from vibe.cli.textual_ui.widgets.api_key_app import ApiKeyApp
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
@@ -68,6 +66,7 @@ from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
 from vibe.core.modes import AgentMode, next_mode
 from vibe.core.paths.config_paths import HISTORY_FILE
+from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import ApprovalResponse, LLMMessage, Role
 from vibe.core.utils import (
@@ -76,6 +75,12 @@ from vibe.core.utils import (
     is_dangerous_directory,
     logger,
 )
+
+
+def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
+    """Save API key to the global .env file."""
+    GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+    set_key(GLOBAL_ENV_FILE.path, env_key, api_key)
 
 
 class BottomApp(StrEnum):
@@ -338,7 +343,7 @@ class VibeApp(App):  # noqa: PLR0904
 <<<<<<< HEAD
 =======
     async def on_api_key_app_api_key_submitted(
-        self, message: Api_KeyApp.Api_KeySubmitted
+        self, message: ApiKeyApp.Api_KeySubmitted
     ) -> None:
         """Handle API key submission."""
         try:
@@ -365,14 +370,14 @@ class VibeApp(App):  # noqa: PLR0904
         await self._switch_to_input_app()
 
     async def on_api_key_app_api_key_cancelled(
-        self, message: Api_KeyApp.APIKeyCancelled
+        self, message: ApiKeyApp.APIKeyCancelled
     ) -> None:
         """Handle API key update cancellation."""
         await self._mount_and_scroll(UserCommandMessage("API key update cancelled."))
         await self._switch_to_input_app()
 
     async def on_api_key_app_api_key_closed(
-        self, message: Api_KeyApp.ApiKeyClosed
+        self, message: ApiKeyApp.ApiKeyClosed
     ) -> None:
         if message.changes:
             await self._mount_and_scroll(UserCommandMessage("API key closed."))
@@ -853,7 +858,7 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _update_api_key(self) -> None:
         """Switch to the API key update app in the bottom panel."""
-        logger.info("Api_KeyApp.action_close called")
+        logger.info("ApiKeyApp.action_close called")
         if self._current_bottom_app == BottomApp.APIKey:
             return
 
@@ -1031,7 +1036,7 @@ class VibeApp(App):  # noqa: PLR0904
         if self._mode_indicator:
             self._mode_indicator.display = False
 
-        api_key_app = Api_KeyApp(self.config)
+        api_key_app = ApiKeyApp(self.config)
         await bottom_container.mount(api_key_app)
         self._current_bottom_app = BottomApp.APIKey
 
@@ -1126,7 +1131,7 @@ class VibeApp(App):  # noqa: PLR0904
                 case BottomApp.Approval:
                     self.query_one(ApprovalApp).focus()
                 case BottomApp.APIKey:
-                    self.query_one(Api_KeyApp).focus()
+                    self.query_one(ApiKeyApp).focus()
                 case app:
                     assert_never(app)
         except Exception:
@@ -1158,9 +1163,9 @@ class VibeApp(App):  # noqa: PLR0904
 
         if self._current_bottom_app == BottomApp.APIKey:
             try:
-                api_key_app = self.query_one(Api_KeyApp)
+                api_key_app = self.query_one(ApiKeyApp)
                 logger.info(
-                    "VibeApp.action_interrupt: calling Api_KeyApp.action_close()"
+                    "VibeApp.action_interrupt: calling ApiKeyApp.action_close()"
                 )
                 api_key_app.action_close()
             except Exception:

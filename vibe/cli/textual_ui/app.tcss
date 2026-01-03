@@ -736,6 +736,10 @@ WelcomeBanner {
     height: auto;
 }
 
+#api-key-feedback {
+    padding-bottom: 1;
+}
+
 
 #api-key-app {
     width: 100%;

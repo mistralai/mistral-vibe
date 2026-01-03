@@ -2,52 +2,37 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from dotenv import set_key
 from mistralai import Mistral
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Container, Vertical
+from textual.containers import Vertical
 from textual.message import Message
 from textual.validation import Length
+from textual.widget import Widget
 from textual.widgets import Input, Static
-
-from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
-from vibe.core.utils import logger
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
 
 
-def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
-    """Save API key to the global .env file."""
-    GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-    set_key(GLOBAL_ENV_FILE.path, env_key, api_key)
+class ApiKeyApp(Widget):
+    """Widget for updating and validating an API key."""
 
-
-class Api_KeyApp(Container):
-    """Widget for updating API key."""
-
-    can_focus = True
-    can_focus_children = True
-    changes: dict[str, str] = {}
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "close", "Esc", show=False)
     ]
 
-    class Api_KeySubmitted(Message):
-        """Posted when user submits an API key."""
+    class ApiKeySubmitted(Message):
+        """Posted when a valid API key is submitted."""
 
         def __init__(self, api_key: str) -> None:
             super().__init__()
             self.api_key = api_key
 
-    # class Api_KeyCancelled(Message):
-    #     """Posted when user cancels API key update."""
+    class ApiKeyClosed(Message):
+        """Posted when the widget is closed."""
 
-    #     pass
-
-    class Api_KeyCancelled(Message):
         def __init__(self, changes: dict[str, str]) -> None:
             super().__init__()
             self.changes = changes
@@ -55,12 +40,13 @@ class Api_KeyApp(Container):
     def __init__(self, config: VibeConfig) -> None:
         super().__init__(id="api-key-app")
         self.config = config
+
         self.input_widget: Input | None = None
         self.title_widget: Static | None = None
         self.help_widget: Static | None = None
         self.feedback_widget: Static | None = None
+
         self.changes: dict[str, str] = {}
-        from vibe.core.utils import logger
 
     def compose(self) -> ComposeResult:
         with Vertical(id="config-content"):
@@ -81,101 +67,97 @@ class Api_KeyApp(Container):
 
             yield Static("")
 
-            self.help_widget = Static("↵ submit  ESC exit", classes="settings-help")
-            yield self.help_widget
-
             self.feedback_widget = Static(
                 "", id="api-key-feedback", classes="api-key-feedback"
             )
             yield self.feedback_widget
+
+            self.help_widget = Static("↵ submit   ESC exit", classes="settings-help")
+            yield self.help_widget
 
     def on_mount(self) -> None:
         if self.input_widget:
             self.input_widget.focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Handle validation feedback for input changes."""
-        feedback = self.query_one("#api-key-feedback", Static)
+        """Update validation feedback while typing."""
+        if not self.input_widget or not self.feedback_widget:
+            return
 
         if event.validation_result is None:
             return
 
-        input_widget = self.query_one("#api-key-input", Input)
-        input_widget.remove_class("valid", "invalid")
-        feedback.remove_class("error", "success")
+        self.input_widget.remove_class("valid", "invalid")
+        self.feedback_widget.remove_class("error", "success")
 
         if event.validation_result.is_valid:
-            feedback.update("Press Enter to submit ↵")
-            feedback.add_class("success")
-            input_widget.add_class("valid")
+            self.feedback_widget.update("Press Enter to submit ↵")
+            self.feedback_widget.add_class("success")
+            self.input_widget.add_class("valid")
             return
 
-        descriptions = event.validation_result.failure_descriptions
-        feedback.update(descriptions[0])
-        feedback.add_class("error")
-        input_widget.add_class("invalid")
+        description = event.validation_result.failure_descriptions[0]
+        self.feedback_widget.update(description)
+        self.feedback_widget.add_class("error")
+        self.input_widget.add_class("invalid")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle API key submission."""
-        if not (event.validation_result and event.validation_result.is_valid):
+        """Validate and submit the API key."""
+        if not (
+            event.validation_result
+            and event.validation_result.is_valid
+            and self.input_widget
+            and self.feedback_widget
+        ):
             return
 
-        feedback = self.query_one("#api-key-feedback", Static)
-        input_widget = self.query_one("#api-key-input", Input)
+        self._reset_feedback()
 
-        feedback.update("")
-        feedback.remove_class("error", "success", "info")
-        input_widget.remove_class("valid", "invalid")
-
-        feedback.update("Validating API key...")
-        feedback.add_class("info")
+        self.feedback_widget.update("Validating API key...")
+        self.feedback_widget.add_class("info")
 
         try:
             self._validate_api_key(event.value)
         except ValueError:
-            feedback.update("Invalid API key. Please try again.")
-            feedback.add_class("error")
-            input_widget.remove_class("valid")
-            input_widget.add_class("invalid")
-            if self.input_widget:
-                self.input_widget.focus()
+            self._show_error("Invalid API key. Please try again.")
             return
         except Exception as err:
-            feedback.update(f"Failed to validate API key: {err}")
-            feedback.remove_class("info", "success")
-            feedback.add_class("error")
-            input_widget.remove_class("valid")
-            input_widget.add_class("invalid")
-            if self.input_widget:
-                self.input_widget.focus()
+            self._show_error(f"Failed to validate API key: {err}")
             return
 
-        self.post_message(self.Api_KeySubmitted(api_key=event.value))
+        self.post_message(self.ApiKeySubmitted(api_key=event.value))
+
+    def on_blur(self, event: events.Blur) -> None:
+        """Keep focus on the input widget while active."""
+        if self.input_widget:
+            self.call_after_refresh(self.input_widget.focus)
+
+    def action_close(self) -> None:
+        self.post_message(self.ApiKeyClosed(self.changes.copy()))
+
+    def _reset_feedback(self) -> None:
+        assert self.input_widget and self.feedback_widget
+
+        self.feedback_widget.update("")
+        self.feedback_widget.remove_class("error", "success", "info")
+        self.input_widget.remove_class("valid", "invalid")
+
+    def _show_error(self, message: str) -> None:
+        assert self.input_widget and self.feedback_widget
+
+        self.feedback_widget.update(message)
+        self.feedback_widget.remove_class("info", "success")
+        self.feedback_widget.add_class("error")
+
+        self.input_widget.remove_class("valid")
+        self.input_widget.add_class("invalid")
+        self.input_widget.focus()
 
     def _validate_api_key(self, api_key: str) -> None:
-        """Validate the API key by making a test API call.
 
-        Raises ValueError if the API key is invalid.
-        """
         client = Mistral(api_key=api_key)
 
         try:
             client.models.list()
         except Exception as err:
-            message = str(err).lower()
-            if "unauthorized" in message or "401" in message or "api key" in message:
-                raise ValueError("Invalid API key") from err
-            raise
-
-    def on_blur(self, event: events.Blur) -> None:
-        """Keep focus on the input widget."""
-        if self.input_widget:
-            self.call_after_refresh(self.input_widget.focus)
-
-    class Api_KeyClosed(Message):
-        def __init__(self, changes: dict[str, str]) -> None:
-            super().__init__()
-            self.changes = changes
-
-    def action_close(self) -> None:
-        self.post_message(self.Api_KeyClosed(changes=self.changes.copy()))
+            raise ValueError("Invalid API key") from err
