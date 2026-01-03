@@ -720,8 +720,6 @@ WelcomeBanner {
     height: auto;
 }
 
-<<<<<<< HEAD
-=======
 #history-app {
     width: 100%;
     height: auto;
@@ -756,7 +754,6 @@ WelcomeBanner {
 }
 
 
->>>>>>> 0a74946 (add update api key update command)
 .settings-title {
     height: auto;
     text-style: bold;

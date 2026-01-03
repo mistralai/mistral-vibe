@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from enum import StrEnum, auto
-<<<<<<< HEAD
-=======
 import json
 import os
 from pathlib import Path
->>>>>>> 0a74946 (add update api key update command)
 import subprocess
 import time
 from typing import Any, ClassVar, assert_never
@@ -86,11 +83,8 @@ def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
 class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
-<<<<<<< HEAD
-=======
     History = auto()
     APIKey = auto()
->>>>>>> 0a74946 (add update api key update command)
     Input = auto()
 
 
@@ -340,8 +334,6 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._switch_to_input_app()
 
-<<<<<<< HEAD
-=======
     async def on_api_key_app_api_key_submitted(
         self, message: ApiKeyApp.Api_KeySubmitted
     ) -> None:
@@ -404,7 +396,6 @@ class VibeApp(App):  # noqa: PLR0904
         await self._load_session_from_history(message.session["session_id"])
         await self._switch_to_input_app()
 
->>>>>>> 0a74946 (add update api key update command)
     def _set_tool_permission_always(
         self, tool_name: str, save_permanently: bool = False
     ) -> None:
@@ -1150,8 +1141,6 @@ class VibeApp(App):  # noqa: PLR0904
             self._last_escape_time = None
             return
 
-<<<<<<< HEAD
-=======
         if self._current_bottom_app == BottomApp.History:
             try:
                 history_app = self.query_one(HistoryApp)
@@ -1173,7 +1162,6 @@ class VibeApp(App):  # noqa: PLR0904
             self._last_escape_time = None
             return
 
->>>>>>> 0a74946 (add update api key update command)
         if self._current_bottom_app == BottomApp.Approval:
             try:
                 approval_app = self.query_one(ApprovalApp)
