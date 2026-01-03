@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from enum import StrEnum, auto
+import os
 import subprocess
 import time
 from typing import Any, ClassVar, assert_never
@@ -72,7 +73,10 @@ from vibe.core.utils import (
 
 
 def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
-    """Save API key to the global .env file."""
+    """Save API key to the global .env file and process env."""
+    # Update in-memory environment
+    os.environ[env_key] = api_key
+    # Persist to .env file
     GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
     set_key(GLOBAL_ENV_FILE.path, env_key, api_key)
 
