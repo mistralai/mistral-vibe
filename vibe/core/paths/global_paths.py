@@ -36,3 +36,11 @@ LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs")
 LOG_FILE = GlobalPath(lambda: VIBE_HOME.path / "vibe.log")
 
 DEFAULT_TOOL_DIR = GlobalPath(lambda: VIBE_ROOT / "core" / "tools" / "builtins")
+GLOBAL_CONVERSATIONS_DIR = GlobalPath(lambda: VIBE_HOME.path / "conversations")
+
+
+def ensure_conversations_dir_exists() -> Path:
+    """Ensure the conversations directory exists and return its path."""
+    conv_dir = GLOBAL_CONVERSATIONS_DIR.path
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    return conv_dir

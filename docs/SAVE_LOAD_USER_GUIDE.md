@@ -36,7 +36,7 @@ Enter submit  ESC cancel
 
 **Example folder structure:**
 ```
-conversations/
+~/.vibe/conversations/
 ├── code_reviews/
 │   ├── PR_123_Review.json
 │   └── PR_456_Review.json
@@ -156,7 +156,7 @@ Conversations are sorted by date with the most recent first.
 
 ### No Conversations Found
 - Make sure you've saved at least one conversation with `/save`
-- Check that the `conversations/` directory exists in your working directory
+- Check that the `~/.vibe/conversations/` directory exists
 
 ### Cannot Load While Agent is Processing
 - Wait for the agent to finish processing before loading
@@ -167,7 +167,7 @@ Conversations are sorted by date with the most recent first.
 - The system continues to show valid conversations
 
 ## File Storage
-- Conversations are saved as JSON files in the `conversations/` directory
+- Conversations are saved as JSON files in the `~/.vibe/conversations/` directory
 - Each file includes:
   - Conversation name
   - Timestamp

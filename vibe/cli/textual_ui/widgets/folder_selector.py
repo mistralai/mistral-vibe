@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from textual import events
 from textual.app import ComposeResult
@@ -19,7 +19,7 @@ class FolderSelector(Container):
     can_focus = True
     can_focus_children = False
 
-    BINDINGS: list[BindingType] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "move_up", "Up", show=False),
         Binding("down", "move_down", "Down", show=False),
         Binding("enter", "select", "Select", show=False),
@@ -76,7 +76,7 @@ class FolderSelector(Container):
             yield widget
 
             # Show available folders
-            for folder in self.folders:
+            for _ in self.folders:
                 widget = Static("", classes="approval-option")  # Empty initially, will be formatted in _update_display
                 self.folder_widgets.append(widget)
                 yield widget
@@ -138,7 +138,6 @@ class FolderSelector(Container):
     def action_move_up(self) -> None:
         """Move selection up."""
         # We have len(self.folders) + 1 options (Default + user folders)
-        total_options = max(1, len(self.folders) + 1)
         # Don't wrap around - stop at first item (Default)
         if self.selected_index > 0:
             self.selected_index -= 1

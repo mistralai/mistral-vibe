@@ -9,7 +9,7 @@ from typing import Any, ClassVar, assert_never
 from pydantic import BaseModel
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import AppBlur, AppFocus, MouseUp
 from textual.widget import Widget
 from textual.widgets import Static
@@ -23,6 +23,7 @@ from vibe.cli.textual_ui.terminal_theme import (
     TERMINAL_THEME_NAME,
     capture_terminal_theme,
 )
+
 from vibe.cli.textual_ui.utils import (
     build_conversation_tree,
     load_conversation_from_file,
@@ -32,7 +33,6 @@ from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
-from vibe.cli.textual_ui.widgets.conversation_selector import ConversationSelector
 from vibe.cli.textual_ui.widgets.conversation_tree_selector import (
     ConversationTreeSelector,
 )
@@ -68,6 +68,7 @@ from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
 from vibe.core.modes import AgentMode, next_mode
 from vibe.core.paths.config_paths import HISTORY_FILE
+from vibe.core.paths.global_paths import ensure_conversations_dir_exists
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import ApprovalResponse, LLMMessage, Role
 from vibe.core.utils import (
@@ -83,7 +84,6 @@ class BottomApp(StrEnum):
     Config = auto()
     Input = auto()
     InputDialog = auto()
-    ConversationSelector = auto()
     ConversationTreeSelector = auto()
     FolderSelector = auto()
 
@@ -174,7 +174,7 @@ class VibeApp(App):
 
         yield Static(id="todo-area")
 
-        with Static(id="bottom-app-container"):
+        with Vertical(id="bottom-app-container"):
             yield ChatInputContainer(
                 history_file=self.history_file,
                 command_registry=self.commands,
@@ -934,9 +934,7 @@ class VibeApp(App):
 
     async def _get_available_folders(self) -> list[str]:
         """Get list of available folders in conversations directory."""
-        conv_dir = Path.cwd() / "conversations"
-        if not conv_dir.exists():
-            return []
+        conv_dir = ensure_conversations_dir_exists()
 
         folders = []
         for item in conv_dir.iterdir():
@@ -984,8 +982,7 @@ class VibeApp(App):
                     import re
 
                     # Create conversations directory if it doesn't exist
-                    conv_dir = Path.cwd() / "conversations"
-                    conv_dir.mkdir(exist_ok=True)
+                    conv_dir = ensure_conversations_dir_exists()
 
                     # Clean folder name (preserve case)
                     safe_name = re.sub(r'[\\/:*?"<>|]', "_", folder_name.strip())
@@ -1050,8 +1047,7 @@ class VibeApp(App):
             filename = f"{safe_name}_{int(timestamp)}.json"
 
             # Get save directory
-            save_dir = Path.cwd() / "conversations"
-            save_dir.mkdir(exist_ok=True)
+            save_dir = ensure_conversations_dir_exists()
 
             # Check if a conversation with this exact name already exists in the save directory
             # Use the actual save directory (which may include selected folder)
@@ -1185,8 +1181,7 @@ class VibeApp(App):
             import re
 
             # Create conversations directory if it doesn't exist
-            conv_dir = Path.cwd() / "conversations"
-            conv_dir.mkdir(exist_ok=True)
+            conv_dir = ensure_conversations_dir_exists()
 
             # Clean folder name (preserve case)
             safe_name = re.sub(r'[\\/:*?"<>|]', "_", folder_name.strip())
@@ -1399,15 +1394,7 @@ class VibeApp(App):
 
         try:
             # Find conversation files and build tree structure
-            conv_dir = Path.cwd() / "conversations"
-            if not conv_dir.exists():
-                await self._mount_and_scroll(
-                    ErrorMessage(
-                        "No conversations directory found. Use /save to create one.",
-                        collapsed=self._tools_collapsed,
-                    )
-                )
-                return
+            conv_dir = ensure_conversations_dir_exists()
 
             # Build tree structure with folders and conversations
             tree_items = build_conversation_tree(conv_dir)
@@ -1446,48 +1433,6 @@ class VibeApp(App):
                     f"Failed to load conversation: {e}", collapsed=self._tools_collapsed
                 )
             )
-
-    async def on_conversation_selector_conversation_selected(
-        self, message: ConversationSelector.ConversationSelected
-    ) -> None:
-        """Handle when user selects a conversation to load."""
-        try:
-            data, messages = load_conversation_from_file(message.filepath, self.agent)
-
-            if not messages:
-                await self._mount_and_scroll(
-                    ErrorMessage(
-                        "No messages found in saved conversation.",
-                        collapsed=self._tools_collapsed,
-                    )
-                )
-                await self._switch_to_input_app()
-                return
-
-            # Return to input mode
-            await self._switch_to_input_app()
-
-            await self._mount_and_scroll(
-                UserCommandMessage(
-                    f"✓ Loaded conversation: {data.get('name', message.filepath.name)}"
-                    f"\n  - {len(messages)} messages loaded"
-                    f"\n  - Model: {data.get('model', 'unknown')}"
-                )
-            )
-
-        except Exception as e:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    f"Failed to load conversation: {e}", collapsed=self._tools_collapsed
-                )
-            )
-            await self._switch_to_input_app()
-
-    async def on_conversation_selector_conversation_closed(
-        self, message: ConversationSelector.ConversationClosed
-    ) -> None:
-        """Handle when user cancels conversation selection."""
-        await self._switch_to_input_app()
 
     async def on_conversation_tree_selector_conversation_selected(
         self, message: ConversationTreeSelector.ConversationSelected
@@ -1680,8 +1625,6 @@ class VibeApp(App):
                     self.query_one(ApprovalApp).focus()
                 case BottomApp.InputDialog:
                     self.query_one(InputDialog).focus()
-                case BottomApp.ConversationSelector:
-                    self.query_one(ConversationSelector).focus()
                 case BottomApp.ConversationTreeSelector:
                     self.query_one(ConversationTreeSelector).focus()
                 case BottomApp.FolderSelector:
@@ -1729,14 +1672,6 @@ class VibeApp(App):
             try:
                 input_dialog = self.query_one(InputDialog)
                 input_dialog.action_cancel()
-            except Exception:
-                pass
-            return
-
-        if self._current_bottom_app == BottomApp.ConversationSelector:
-            try:
-                conversation_selector = self.query_one(ConversationSelector)
-                conversation_selector.action_close()
             except Exception:
                 pass
             return

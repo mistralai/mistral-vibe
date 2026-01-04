@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from textual import events
 from textual.app import ComposeResult
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 @dataclass
 class ConversationTreeItem:
     """Represents an item in the conversation tree (folder or conversation)."""
+
     path: Path
     name: str
     is_folder: bool
@@ -30,10 +31,11 @@ class ConversationTreeItem:
 
 class ConversationTreeSelector(Container):
     """Widget for selecting a saved conversation with tree navigation."""
+
     can_focus = True
     can_focus_children = False
 
-    BINDINGS: list[BindingType] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "move_up", "Up", show=False),
         Binding("down", "move_down", "Down", show=False),
         Binding("enter", "select", "Select", show=False),
@@ -44,12 +46,14 @@ class ConversationTreeSelector(Container):
 
     class ConversationSelected(Message):
         """Message sent when a conversation is selected."""
+
         def __init__(self, filepath: Path) -> None:
             super().__init__()
             self.filepath = filepath
 
     class ConversationClosed(Message):
         """Message sent when the selector is closed without selection."""
+
         def __init__(self) -> None:
             super().__init__()
 
@@ -88,30 +92,31 @@ class ConversationTreeSelector(Container):
     def _update_display(self) -> None:
         """Update the display to show the tree structure."""
         visible_items = self._get_visible_items()
-        
+
         # Only update widgets for visible items
-        for i, (item, widget) in enumerate(zip(visible_items, self.item_widgets)):
+        # Use min() to handle cases where visible_items and item_widgets have different lengths
+        for i, (item, widget) in enumerate(zip(visible_items, self.item_widgets, strict=False)):
             is_selected = i == self.selected_index
             cursor = "› " if is_selected else "  "
 
             # Create indentation based on level
             indent = "  " * item.level
-            
-            # Tree marker - use proper tree structure with |- and   
+
+            # Tree marker - use proper tree structure with |- and
             if item.level > 0:
                 # Check if this is the last item at this level
                 is_last_at_level = self._is_last_item_at_level(visible_items, i, item.level)
-                
+
                 # Build tree markers for each level
                 tree_markers = []
                 for level in range(1, item.level):
                     # Check if there's a sibling at this level
                     has_sibling = self._has_sibling_at_level(visible_items, i, level)
                     tree_markers.append("│ " if has_sibling else "  ")
-                
+
                 # Add the final connector
                 tree_markers.append("└─ " if is_last_at_level else "├─ ")
-                
+
                 tree_marker = "".join(tree_markers)
             else:
                 # For root level, no marker
@@ -129,7 +134,7 @@ class ConversationTreeSelector(Container):
                 # but WITHOUT the tree marker to avoid the |- character appearing
                 # Add padding to account for the tree marker length (2 chars: ├─ or └─)
                 stats_indent = f"{indent}{' ' * len(tree_marker)}"
-                
+
                 # Use ANSI color codes for better readability
                 # Date in primary (bright), Message count in green, Model in yellow
                 # Improved formatting: remove labels, just show the values
@@ -151,7 +156,7 @@ class ConversationTreeSelector(Container):
                 widget.add_class("approval-option-selected")
             else:
                 widget.add_class("approval-option-selected")
-        
+
         # Hide any extra widgets that aren't needed
         for widget in self.item_widgets[len(visible_items):]:
             widget.update("")
@@ -162,7 +167,7 @@ class ConversationTreeSelector(Container):
         """Get items that should be visible based on expanded folders."""
         # Build a hierarchical structure: {parent_path: [children]}
         hierarchy: dict[str, list[ConversationTreeItem]] = {}
-        
+
         # First pass: collect all visible items and build hierarchy
         for item in self.all_items:
             # Always show root level items
@@ -171,23 +176,23 @@ class ConversationTreeSelector(Container):
                     hierarchy[""] = []
                 hierarchy[""].append(item)
                 continue
-            
+
             # For non-root items, check if their immediate parent folder is expanded
             parent_path = str(item.path.parent)
-            
+
             # Check if the parent folder is expanded
             # Root folder is always expanded, so level 1 items are always visible
             if item.level == 1 or parent_path in self.expanded_folders:
                 if parent_path not in hierarchy:
                     hierarchy[parent_path] = []
                 hierarchy[parent_path].append(item)
-        
+
         # Second pass: recursively flatten the hierarchy while maintaining order
         visible: list[ConversationTreeItem] = []
         self._flatten_hierarchy("", hierarchy, visible, self.expanded_folders)
-        
+
         return visible
-    
+
     def _flatten_hierarchy(
         self,
         parent_path: str,
@@ -198,14 +203,14 @@ class ConversationTreeSelector(Container):
         """Recursively flatten the hierarchy into a flat list while maintaining order."""
         # Get children of this parent
         children = hierarchy.get(parent_path, [])
-        
+
         # Sort children: folders first (alphabetically), then files (alphabetically)
         children.sort(key=lambda c: (not c.is_folder, c.name))
-        
+
         # Add children to visible list
         for child in children:
             visible.append(child)
-            
+
             # If this is an expanded folder, recursively add its children
             if child.is_folder and str(child.path) in expanded_folders:
                 self._flatten_hierarchy(
@@ -225,12 +230,12 @@ class ConversationTreeSelector(Container):
         """Check if there's a sibling at the specified level after the current item."""
         # Find all items at the specified level
         items_at_level = [i for i, item in enumerate(items) if item.level == level]
-        
+
         # Check if there are items after the current index at this level
         for idx in items_at_level:
             if idx > current_index:
                 return True
-        
+
         return False
 
     def action_move_up(self) -> None:
@@ -238,7 +243,7 @@ class ConversationTreeSelector(Container):
         visible_items = self._get_visible_items()
         if not visible_items:
             return
-        
+
         self.selected_index = (self.selected_index - 1) % len(visible_items)
         self._update_display()
 
@@ -247,7 +252,7 @@ class ConversationTreeSelector(Container):
         visible_items = self._get_visible_items()
         if not visible_items:
             return
-        
+
         self.selected_index = (self.selected_index + 1) % len(visible_items)
         self._update_display()
 
@@ -256,9 +261,9 @@ class ConversationTreeSelector(Container):
         visible_items = self._get_visible_items()
         if not visible_items:
             return
-        
+
         selected_item = visible_items[self.selected_index]
-        
+
         if selected_item.is_folder:
             # Toggle folder expansion
             folder_path = str(selected_item.path)
@@ -278,7 +283,7 @@ class ConversationTreeSelector(Container):
         visible_items = self._get_visible_items()
         if not visible_items:
             return
-        
+
         selected_item = visible_items[self.selected_index]
         if selected_item.is_folder:
             folder_path = str(selected_item.path)
@@ -291,7 +296,7 @@ class ConversationTreeSelector(Container):
         visible_items = self._get_visible_items()
         if not visible_items:
             return
-        
+
         selected_item = visible_items[self.selected_index]
         if selected_item.is_folder:
             folder_path = str(selected_item.path)
