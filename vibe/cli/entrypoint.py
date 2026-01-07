@@ -8,7 +8,7 @@ from rich import print as rprint
 
 from vibe import __version__
 from vibe.core.paths.config_paths import unlock_config_paths
-from vibe.core.trusted_folders import trusted_folders_manager
+from vibe.core.trusted_folders import has_trustable_content, trusted_folders_manager
 from vibe.setup.trusted_folders.trust_folder_dialog import (
     TrustDialogQuitException,
     ask_trust_folder,
@@ -105,7 +105,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def check_and_resolve_trusted_folder() -> None:
     cwd = Path.cwd()
-    if not (cwd / ".vibe").exists() or cwd.resolve() == Path.home().resolve():
+    if not has_trustable_content(cwd) or cwd.resolve() == Path.home().resolve():
         return
 
     is_folder_trusted = trusted_folders_manager.is_trusted(cwd)

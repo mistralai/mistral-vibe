@@ -5,6 +5,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.messages import ExpandingBorder
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
 from vibe.cli.textual_ui.widgets.tool_widgets import get_result_widget
 from vibe.cli.textual_ui.widgets.utils import DEFAULT_TOOL_SHORTCUT, TOOL_SHORTCUTS
@@ -99,11 +100,11 @@ class ToolResultMessage(Static):
             self.add_class("error-text")
             if self.collapsed:
                 await self._content_container.mount(
-                    Static(f"Error. {self._hint()}", markup=False)
+                    NoMarkupStatic(f"Error. {self._hint()}")
                 )
             else:
                 await self._content_container.mount(
-                    Static(f"Error: {self._event.error}", markup=False)
+                    NoMarkupStatic(f"Error: {self._event.error}")
                 )
             return
 
@@ -112,11 +113,11 @@ class ToolResultMessage(Static):
             reason = self._event.skip_reason or "User skipped"
             if self.collapsed:
                 await self._content_container.mount(
-                    Static(f"Skipped. {self._hint()}", markup=False)
+                    NoMarkupStatic(f"Skipped. {self._hint()}")
                 )
             else:
                 await self._content_container.mount(
-                    Static(f"Skipped: {reason}", markup=False)
+                    NoMarkupStatic(f"Skipped: {reason}")
                 )
             return
 
@@ -146,15 +147,15 @@ class ToolResultMessage(Static):
 
         if self.collapsed:
             await self._content_container.mount(
-                Static(f"{self._tool_name} completed {self._hint()}", markup=False)
+                NoMarkupStatic(f"{self._tool_name} completed {self._hint()}")
             )
             return
 
         if self._content:
-            await self._content_container.mount(Static(self._content, markup=False))
+            await self._content_container.mount(NoMarkupStatic(self._content))
         else:
             await self._content_container.mount(
-                Static(f"{self._tool_name} completed.", markup=False)
+                NoMarkupStatic(f"{self._tool_name} completed.")
             )
 
     async def set_collapsed(self, collapsed: bool) -> None:

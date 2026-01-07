@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "1.3.3"
+version = "1.3.4"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -44,6 +44,8 @@ dependencies = [
     "watchfiles>=1.1.1",
     "pyperclip>=1.11.0",
     "textual-speedups>=0.2.1",
+    "tree-sitter>=0.25.2",
+    "tree-sitter-bash>=0.25.1",
 ]
 
 [project.urls]

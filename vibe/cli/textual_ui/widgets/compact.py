@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from textual.message import Message
+
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
 
 
 class CompactMessage(StatusMessage):
+    class Completed(Message):
+        def __init__(self, compact_widget: CompactMessage) -> None:
+            super().__init__()
+            self.compact_widget = compact_widget
+
     def __init__(self) -> None:
         super().__init__()
         self.add_class("compact-message")
@@ -36,6 +43,7 @@ class CompactMessage(StatusMessage):
         self.old_tokens = old_tokens
         self.new_tokens = new_tokens
         self.stop_spinning(success=True)
+        self.post_message(self.Completed(self))
 
     def set_error(self, error_message: str) -> None:
         self.error_message = error_message

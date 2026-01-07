@@ -10,6 +10,8 @@ on:
 jobs:
   configure:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -42,6 +44,8 @@ jobs:
   build-and-upload:
     needs: configure
     name: ${{ matrix.os }}-${{ matrix.arch }}
+    permissions:
+      contents: read
     strategy:
       matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
@@ -131,6 +135,8 @@ jobs:
   nix-build:
     needs: configure
     name: "Nix: ${{ matrix.os }}-${{ matrix.arch }}"
+    permissions:
+      contents: read
     strategy:
       matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}

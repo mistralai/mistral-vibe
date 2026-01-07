@@ -41,7 +41,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agentInfo == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="1.3.3"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="1.3.4"
         )
 
         assert response.authMethods == []
@@ -63,7 +63,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agentInfo == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="1.3.3"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="1.3.4"
         )
 
         assert response.authMethods is not None

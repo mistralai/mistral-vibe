@@ -48,6 +48,8 @@ jobs:
     name: Release Zed Extension
     runs-on: ubuntu-latest
     if: github.repository == 'mistralai/mistral-vibe'
+    permissions:
+      contents: read
     environment:
       name: zed
     steps:

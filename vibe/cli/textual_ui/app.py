@@ -41,6 +41,7 @@ from vibe.cli.textual_ui.widgets.messages import (
     WarningMessage,
 )
 from vibe.cli.textual_ui.widgets.mode_indicator import ModeIndicator
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.cli.textual_ui.widgets.welcome import WelcomeBanner
@@ -174,7 +175,7 @@ class VibeApp(App):  # noqa: PLR0904
             yield PathDisplay(
                 self.config.displayed_workdir or self.config.effective_workdir
             )
-            yield Static(id="spacer")
+            yield NoMarkupStatic(id="spacer")
             yield ContextProgress()
 
     async def on_mount(self) -> None:
@@ -319,6 +320,24 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
         await self._switch_to_input_app()
+
+    async def on_compact_message_completed(
+        self, message: CompactMessage.Completed
+    ) -> None:
+        messages_area = self.query_one("#messages")
+        children = list(messages_area.children)
+
+        try:
+            compact_index = children.index(message.compact_widget)
+        except ValueError:
+            return
+
+        if compact_index == 0:
+            return
+
+        with self.batch_update():
+            for widget in children[:compact_index]:
+                await widget.remove()
 
     def _set_tool_permission_always(
         self, tool_name: str, save_permanently: bool = False
@@ -502,31 +521,32 @@ class VibeApp(App):  # noqa: PLR0904
         messages_area = self.query_one("#messages")
         tool_call_map: dict[str, str] = {}
 
-        for msg in self._loaded_messages:
-            if msg.role == Role.system:
-                continue
+        with self.batch_update():
+            for msg in self._loaded_messages:
+                if msg.role == Role.system:
+                    continue
 
-            match msg.role:
-                case Role.user:
-                    if msg.content:
-                        await messages_area.mount(UserMessage(msg.content))
+                match msg.role:
+                    case Role.user:
+                        if msg.content:
+                            await messages_area.mount(UserMessage(msg.content))
 
-                case Role.assistant:
-                    await self._mount_history_assistant_message(
-                        msg, messages_area, tool_call_map
-                    )
-
-                case Role.tool:
-                    tool_name = msg.name or tool_call_map.get(
-                        msg.tool_call_id or "", "tool"
-                    )
-                    await messages_area.mount(
-                        ToolResultMessage(
-                            tool_name=tool_name,
-                            content=msg.content,
-                            collapsed=self._tools_collapsed,
+                    case Role.assistant:
+                        await self._mount_history_assistant_message(
+                            msg, messages_area, tool_call_map
                         )
-                    )
+
+                    case Role.tool:
+                        tool_name = msg.name or tool_call_map.get(
+                            msg.tool_call_id or "", "tool"
+                        )
+                        await messages_area.mount(
+                            ToolResultMessage(
+                                tool_name=tool_name,
+                                content=msg.content,
+                                collapsed=self._tools_collapsed,
+                            )
+                        )
 
     async def _mount_history_assistant_message(
         self, msg: LLMMessage, messages_area: Widget, tool_call_map: dict[str, str]

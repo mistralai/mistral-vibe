@@ -1,7 +1,7 @@
 id = "mistral-vibe"
 name = "Mistral Vibe"
 description = "Mistral's open-source coding assistant"
-version = "1.3.3"
+version = "1.3.4"
 schema_version = 1
 authors = ["Mistral AI"]
 repository = "https://github.com/mistralai/mistral-vibe"
@@ -11,25 +11,25 @@ name = "Mistral Vibe"
 icon = "./icons/mistral_vibe.svg"
 
 [agent_servers.mistral-vibe.targets.darwin-aarch64]
-archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.3/vibe-acp-darwin-aarch64-1.3.3.zip"
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.4/vibe-acp-darwin-aarch64-1.3.4.zip"
 cmd = "./vibe-acp"
 
 [agent_servers.mistral-vibe.targets.darwin-x86_64]
-archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.3/vibe-acp-darwin-x86_64-1.3.3.zip"
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.4/vibe-acp-darwin-x86_64-1.3.4.zip"
 cmd = "./vibe-acp"
 
 [agent_servers.mistral-vibe.targets.linux-aarch64]
-archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.3/vibe-acp-linux-aarch64-1.3.3.zip"
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.4/vibe-acp-linux-aarch64-1.3.4.zip"
 cmd = "./vibe-acp"
 
 [agent_servers.mistral-vibe.targets.linux-x86_64]
-archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.3/vibe-acp-linux-x86_64-1.3.3.zip"
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.4/vibe-acp-linux-x86_64-1.3.4.zip"
 cmd = "./vibe-acp"
 
 [agent_servers.mistral-vibe.targets.windows-aarch64]
-archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.3/vibe-acp-windows-aarch64-1.3.3.zip"
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.4/vibe-acp-windows-aarch64-1.3.4.zip"
 cmd = "./vibe-acp.exe"
 
 [agent_servers.mistral-vibe.targets.windows-x86_64]
-archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.3/vibe-acp-windows-x86_64-1.3.3.zip"
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v1.3.4/vibe-acp-windows-x86_64-1.3.4.zip"
 cmd = "./vibe-acp.exe"

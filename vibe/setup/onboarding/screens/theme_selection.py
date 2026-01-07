@@ -10,6 +10,7 @@ from textual.theme import BUILTIN_THEMES
 from textual.widgets import Markdown, Static
 
 from vibe.cli.textual_ui.terminal_theme import TERMINAL_THEME_NAME
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import VibeConfig
 from vibe.setup.onboarding.base import OnboardingScreen
 
@@ -67,19 +68,19 @@ class ThemeSelectionScreen(OnboardingScreen):
 
     def _compose_theme_list(self) -> ComposeResult:
         for _ in range(VISIBLE_NEIGHBORS * 2 + 1):
-            widget = Static("", classes="theme-item")
+            widget = NoMarkupStatic("", classes="theme-item")
             self._theme_widgets.append(widget)
             yield widget
 
     def compose(self) -> ComposeResult:
         with Center(id="theme-outer"):
             with Vertical(id="theme-content"):
-                yield Static("Select your preferred theme", id="theme-title")
+                yield NoMarkupStatic("Select your preferred theme", id="theme-title")
                 yield Center(
                     Horizontal(
-                        Static("Navigate ↑ ↓", id="nav-hint"),
+                        NoMarkupStatic("Navigate ↑ ↓", id="nav-hint"),
                         Vertical(*self._compose_theme_list(), id="theme-list"),
-                        Static("Press Enter \u21b5", id="enter-hint"),
+                        NoMarkupStatic("Press Enter \u21b5", id="enter-hint"),
                         id="theme-row",
                     )
                 )

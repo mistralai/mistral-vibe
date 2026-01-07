@@ -7,16 +7,17 @@ from textual.containers import Horizontal
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.messages import NonSelectableStatic
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
-class StatusMessage(SpinnerMixin, Static):
+class StatusMessage(SpinnerMixin, NoMarkupStatic):
     SPINNER_TYPE: ClassVar[SpinnerType] = SpinnerType.LINE
 
     def __init__(self, initial_text: str = "", **kwargs: Any) -> None:
         self._initial_text = initial_text
         self._indicator_widget: Static | None = None
-        self._text_widget: Static | None = None
+        self._text_widget: NoMarkupStatic | None = None
         self.success = True
         self.init_spinner()
         super().__init__(**kwargs)
@@ -24,14 +25,10 @@ class StatusMessage(SpinnerMixin, Static):
     def compose(self) -> ComposeResult:
         with Horizontal():
             self._indicator_widget = NonSelectableStatic(
-                self._spinner.current_frame(),
-                markup=False,
-                classes="status-indicator-icon",
+                self._spinner.current_frame(), classes="status-indicator-icon"
             )
             yield self._indicator_widget
-            self._text_widget = Static(
-                "", markup=False, classes="status-indicator-text"
-            )
+            self._text_widget = NoMarkupStatic("", classes="status-indicator-text")
             yield self._text_widget
 
     def on_mount(self) -> None:

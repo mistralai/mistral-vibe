@@ -15,6 +15,7 @@ from vibe.cli.textual_ui.terminal_theme import (
     TERMINAL_THEME_NAME,
     capture_terminal_theme,
 )
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.paths.global_paths import GLOBAL_CONFIG_FILE, TRUSTED_FOLDERS_FILE
 
 
@@ -50,14 +51,14 @@ class TrustFolderDialog(CenterMiddle):
 
     def compose(self) -> ComposeResult:
         with CenterMiddle(id="trust-dialog"):
-            yield Static("⚠ Trust this folder?", id="trust-dialog-title")
-            yield Static(
+            yield NoMarkupStatic("⚠ Trust this folder?", id="trust-dialog-title")
+            yield NoMarkupStatic(
                 str(self.folder_path),
                 id="trust-dialog-path",
                 classes="trust-dialog-path",
             )
-            yield Static(
-                "A .vibe/ directory was found here. Should Vibe load custom configuration and tools from it?",
+            yield NoMarkupStatic(
+                "Files that can modify your Mistral Vibe setup were found here. Do you trust this folder?",
                 id="trust-dialog-message",
                 classes="trust-dialog-message",
             )
@@ -65,13 +66,17 @@ class TrustFolderDialog(CenterMiddle):
             with Horizontal(id="trust-options-container"):
                 options = ["Yes", "No"]
                 for idx, text in enumerate(options):
-                    widget = Static(f"  {idx + 1}. {text}", classes="trust-option")
+                    widget = NoMarkupStatic(
+                        f"  {idx + 1}. {text}", classes="trust-option"
+                    )
                     self.option_widgets.append(widget)
                     yield widget
 
-            yield Static("← → navigate  Enter select", classes="trust-dialog-help")
+            yield NoMarkupStatic(
+                "← → navigate  Enter select", classes="trust-dialog-help"
+            )
 
-            yield Static(
+            yield NoMarkupStatic(
                 f"Setting will be saved in: {TRUSTED_FOLDERS_FILE.path}",
                 id="trust-dialog-save-info",
                 classes="trust-dialog-save-info",

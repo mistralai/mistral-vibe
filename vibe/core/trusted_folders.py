@@ -7,6 +7,17 @@ import tomli_w
 
 from vibe.core.paths.global_paths import TRUSTED_FOLDERS_FILE
 
+TRUSTABLE_FILENAMES = ["AGENTS.md", "VIBE.md", ".vibe.md"]
+
+
+def has_trustable_content(path: Path) -> bool:
+    if (path / ".vibe").exists():
+        return True
+    for name in TRUSTABLE_FILENAMES:
+        if (path / name).exists():
+            return True
+    return False
+
 
 class TrustedFoldersManager:
     def __init__(self) -> None:

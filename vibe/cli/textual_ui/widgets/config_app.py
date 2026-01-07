@@ -11,6 +11,7 @@ from textual.theme import BUILTIN_THEMES
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.terminal_theme import TERMINAL_THEME_NAME
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
@@ -85,19 +86,19 @@ class ConfigApp(Container):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="config-content"):
-            self.title_widget = Static("Settings", classes="settings-title")
+            self.title_widget = NoMarkupStatic("Settings", classes="settings-title")
             yield self.title_widget
 
-            yield Static("")
+            yield NoMarkupStatic("")
 
             for _ in self.settings:
-                widget = Static("", classes="settings-option")
+                widget = NoMarkupStatic("", classes="settings-option")
                 self.setting_widgets.append(widget)
                 yield widget
 
-            yield Static("")
+            yield NoMarkupStatic("")
 
-            self.help_widget = Static(
+            self.help_widget = NoMarkupStatic(
                 "↑↓ navigate  Space/Enter toggle  ESC exit", classes="settings-help"
             )
             yield self.help_widget
@@ -143,12 +144,13 @@ class ConfigApp(Container):
         current: str = self.changes.get(key, setting["value"])
 
         options: list[str] = setting["options"]
+        new_value = ""
         try:
             current_idx = options.index(current)
             next_idx = (current_idx + 1) % len(options)
-            new_value: str = options[next_idx]
+            new_value = options[next_idx]
         except (ValueError, IndexError):
-            new_value: str = options[0] if options else current
+            new_value = options[0] if options else current
 
         self.changes[key] = new_value
 

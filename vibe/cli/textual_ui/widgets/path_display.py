@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from textual.widgets import Static
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
 
-class PathDisplay(Static):
+class PathDisplay(NoMarkupStatic):
     def __init__(self, path: Path | str) -> None:
         super().__init__()
         self.can_focus = False

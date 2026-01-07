@@ -24,8 +24,6 @@ from vibe.core.paths.global_paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
 from vibe.core.prompts import SystemPrompt
 from vibe.core.tools.base import BaseToolConfig
 
-PROJECT_DOC_FILENAMES = ["AGENTS.md", "VIBE.md", ".vibe.md"]
-
 
 def load_api_keys_from_env() -> None:
     if GLOBAL_ENV_FILE.path.is_file():

@@ -9,6 +9,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
@@ -55,10 +56,10 @@ class LoadingWidget(SpinnerMixin, Static):
         self.status = status or self._get_default_status()
         self.current_color_index = 0
         self.transition_progress = 0
-        self.char_widgets: list[Static] = []
-        self.ellipsis_widget: Static | None = None
+        self._status_widget: Static | None = None
         self.hint_widget: Static | None = None
         self.start_time: float | None = None
+        self._last_elapsed: int = -1
 
     def _get_easter_egg(self) -> str | None:
         EASTER_EGG_PROBABILITY = 0.10
@@ -85,7 +86,7 @@ class LoadingWidget(SpinnerMixin, Static):
 
     def set_status(self, status: str) -> None:
         self.status = self._apply_easter_egg(status)
-        self._rebuild_chars()
+        self._update_animation()
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="loading-container"):
@@ -94,33 +95,13 @@ class LoadingWidget(SpinnerMixin, Static):
             )
             yield self._indicator_widget
 
-            with Horizontal(classes="loading-status"):
-                for char in self.status:
-                    widget = Static(char, classes="loading-char")
-                    self.char_widgets.append(widget)
-                    yield widget
+            self._status_widget = Static("", classes="loading-status")
+            yield self._status_widget
 
-            self.ellipsis_widget = Static("… ", classes="loading-ellipsis")
-            yield self.ellipsis_widget
-
-            self.hint_widget = Static("(0s esc to interrupt)", classes="loading-hint")
+            self.hint_widget = NoMarkupStatic(
+                "(0s esc to interrupt)", classes="loading-hint"
+            )
             yield self.hint_widget
-
-    def _rebuild_chars(self) -> None:
-        if not self.is_mounted:
-            return
-
-        status_container = self.query_one(".loading-status", Horizontal)
-
-        status_container.remove_children()
-        self.char_widgets.clear()
-
-        for char in self.status:
-            widget = Static(char, classes="loading-char")
-            self.char_widgets.append(widget)
-            status_container.mount(widget)
-
-        self._update_animation()
 
     def on_mount(self) -> None:
         self.start_time = time()
@@ -144,24 +125,26 @@ class LoadingWidget(SpinnerMixin, Static):
             return next_color
         return current_color
 
+    def _build_status_text(self) -> str:
+        parts = []
+        for i, char in enumerate(self.status):
+            color = self._get_color_for_position(1 + i)
+            parts.append(f"[{color}]{char}[/]")
+        ellipsis_start = 1 + len(self.status)
+        color_ellipsis = self._get_color_for_position(ellipsis_start)
+        parts.append(f"[{color_ellipsis}]… [/]")
+        return "".join(parts)
+
     def _update_animation(self) -> None:
-        total_elements = 1 + len(self.char_widgets) + 2
+        total_elements = 1 + len(self.status) + 1
 
         if self._indicator_widget:
             spinner_char = self._spinner.next_frame()
             color = self._get_color_for_position(0)
             self._indicator_widget.update(f"[{color}]{spinner_char}[/]")
 
-        for i, widget in enumerate(self.char_widgets):
-            position = 1 + i
-            color = self._get_color_for_position(position)
-            widget.update(f"[{color}]{self.status[i]}[/]")
-
-        if self.ellipsis_widget:
-            ellipsis_start = 1 + len(self.status)
-            color_ellipsis = self._get_color_for_position(ellipsis_start)
-            color_space = self._get_color_for_position(ellipsis_start + 1)
-            self.ellipsis_widget.update(f"[{color_ellipsis}]…[/][{color_space}] [/]")
+        if self._status_widget:
+            self._status_widget.update(self._build_status_text())
 
         self.transition_progress += 1
         if self.transition_progress > total_elements:
@@ -172,4 +155,6 @@ class LoadingWidget(SpinnerMixin, Static):
 
         if self.hint_widget and self.start_time is not None:
             elapsed = int(time() - self.start_time)
-            self.hint_widget.update(f"({elapsed}s esc to interrupt)")
+            if elapsed != self._last_elapsed:
+                self._last_elapsed = elapsed
+                self.hint_widget.update(f"({elapsed}s esc to interrupt)")

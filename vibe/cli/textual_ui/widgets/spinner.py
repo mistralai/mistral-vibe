@@ -147,3 +147,8 @@ class SpinnerMixin:
                 self._indicator_widget.add_class("error")
         if self._status_text_widget and self.COMPLETED_TEXT:
             self._status_text_widget.update(self.COMPLETED_TEXT)
+
+    def on_unmount(self) -> None:
+        if self._spinner_timer:
+            self._spinner_timer.stop()
+            self._spinner_timer = None

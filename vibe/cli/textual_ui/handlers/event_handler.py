@@ -3,10 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from textual.widgets import Static
-
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.messages import AssistantMessage, ReasoningMessage
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.core.types import (
     AssistantEvent,
@@ -142,9 +141,7 @@ class EventHandler:
             self.current_compact = None
 
     async def _handle_unknown_event(self, event: BaseEvent) -> None:
-        await self.mount_callback(
-            Static(str(event), markup=False, classes="unknown-event")
-        )
+        await self.mount_callback(NoMarkupStatic(str(event), classes="unknown-event"))
 
     def stop_current_tool_call(self) -> None:
         if self.current_tool_call:

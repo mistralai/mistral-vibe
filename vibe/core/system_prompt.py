@@ -10,10 +10,10 @@ import sys
 import time
 from typing import TYPE_CHECKING
 
-from vibe.core.config import PROJECT_DOC_FILENAMES
 from vibe.core.llm.format import get_active_tool_classes
 from vibe.core.paths.config_paths import INSTRUCTIONS_FILE
 from vibe.core.prompts import UtilityPrompt
+from vibe.core.trusted_folders import TRUSTABLE_FILENAMES, trusted_folders_manager
 from vibe.core.utils import is_dangerous_directory, is_windows
 
 if TYPE_CHECKING:
@@ -30,7 +30,9 @@ def _load_user_instructions() -> str:
 
 
 def _load_project_doc(workdir: Path, max_bytes: int) -> str:
-    for name in PROJECT_DOC_FILENAMES:
+    if not trusted_folders_manager.is_trusted(workdir):
+        return ""
+    for name in TRUSTABLE_FILENAMES:
         path = workdir / name
         try:
             return path.read_text("utf-8", errors="ignore")[:max_bytes]

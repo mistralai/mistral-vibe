@@ -7,10 +7,11 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Markdown, Static
 from textual.widgets._markdown import MarkdownStream
 
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
-class NonSelectableStatic(Static):
+class NonSelectableStatic(NoMarkupStatic):
     @property
     def text_selection(self) -> None:
         return None
@@ -42,7 +43,7 @@ class UserMessage(Static):
     def compose(self) -> ComposeResult:
         with Horizontal(classes="user-message-container"):
             yield NonSelectableStatic("> ", classes="user-message-prompt")
-            yield Static(self._content, markup=False, classes="user-message-content")
+            yield NoMarkupStatic(self._content, classes="user-message-content")
             if self._pending:
                 self.add_class("pending")
 
@@ -137,8 +138,8 @@ class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
                     self._spinner.current_frame(), classes="reasoning-indicator"
                 )
                 yield self._indicator_widget
-                self._status_text_widget = Static(
-                    self.SPINNING_TEXT, markup=False, classes="reasoning-collapsed-text"
+                self._status_text_widget = NoMarkupStatic(
+                    self.SPINNING_TEXT, classes="reasoning-collapsed-text"
                 )
                 yield self._status_text_widget
                 self._triangle_widget = NonSelectableStatic(
@@ -204,9 +205,8 @@ class InterruptMessage(Static):
     def compose(self) -> ComposeResult:
         with Horizontal(classes="interrupt-container"):
             yield ExpandingBorder(classes="interrupt-border")
-            yield Static(
+            yield NoMarkupStatic(
                 "Interrupted · What should Vibe do instead?",
-                markup=False,
                 classes="interrupt-content",
             )
 
@@ -223,18 +223,20 @@ class BashOutputMessage(Static):
     def compose(self) -> ComposeResult:
         with Vertical(classes="bash-output-container"):
             with Horizontal(classes="bash-cwd-line"):
-                yield Static(self._cwd, markup=False, classes="bash-cwd")
-                yield Static("", classes="bash-cwd-spacer")
+                yield NoMarkupStatic(self._cwd, classes="bash-cwd")
+                yield NoMarkupStatic("", classes="bash-cwd-spacer")
                 if self._exit_code == 0:
-                    yield Static("✓", classes="bash-exit-success")
+                    yield NoMarkupStatic("✓", classes="bash-exit-success")
                 else:
-                    yield Static("✗", classes="bash-exit-failure")
-                    yield Static(f" ({self._exit_code})", classes="bash-exit-code")
+                    yield NoMarkupStatic("✗", classes="bash-exit-failure")
+                    yield NoMarkupStatic(
+                        f" ({self._exit_code})", classes="bash-exit-code"
+                    )
             with Horizontal(classes="bash-command-line"):
-                yield Static("> ", classes="bash-chevron")
-                yield Static(self._command, markup=False, classes="bash-command")
-                yield Static("", classes="bash-command-spacer")
-            yield Static(self._output, markup=False, classes="bash-output")
+                yield NoMarkupStatic("> ", classes="bash-chevron")
+                yield NoMarkupStatic(self._command, classes="bash-command")
+                yield NoMarkupStatic("", classes="bash-command-spacer")
+            yield NoMarkupStatic(self._output, classes="bash-output")
 
 
 class ErrorMessage(Static):
@@ -248,8 +250,8 @@ class ErrorMessage(Static):
     def compose(self) -> ComposeResult:
         with Horizontal(classes="error-container"):
             yield ExpandingBorder(classes="error-border")
-            self._content_widget = Static(
-                self._get_text(), markup=False, classes="error-content"
+            self._content_widget = NoMarkupStatic(
+                self._get_text(), classes="error-content"
             )
             yield self._content_widget
 
@@ -278,4 +280,4 @@ class WarningMessage(Static):
         with Horizontal(classes="warning-container"):
             if self._show_border:
                 yield ExpandingBorder(classes="warning-border")
-            yield Static(self._message, markup=False, classes="warning-content")
+            yield NoMarkupStatic(self._message, classes="warning-content")
