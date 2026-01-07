@@ -1,5 +1,5 @@
 {
-  description = "Mistral Vibe!";
+  description = "X Vibe!";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -73,8 +73,8 @@
     in {
 
       packages.default = mkApplication {
-        venv = pythonSet.mkVirtualEnv "mistralai-vibe-env" workspace.deps.default;
-        package = pythonSet.mistral-vibe;
+        venv = pythonSet.mkVirtualEnv "x-vibe-env" workspace.deps.default;
+        package = pythonSet.x-vibe;
       };
 
       apps = {
@@ -96,7 +96,7 @@
 
               # Apply fixups for building an editable package of your workspace packages
               (final: prev: {
-                mistralai-vibe = prev.mistralai-vibe.overrideAttrs (old: {
+                x-vibe = prev.x-vibe.overrideAttrs (old: {
                   # It's a good idea to filter the sources going into an editable build
                   # so the editable package doesn't have to be rebuilt on every change.
                   src = lib.fileset.toSource {
@@ -117,7 +117,7 @@
             ]
           );
 
-          virtualenv = editablePythonSet.mkVirtualEnv "mistralai-vibe-dev-env" workspace.deps.all;
+          virtualenv = editablePythonSet.mkVirtualEnv "x-vibe-dev-env" workspace.deps.all;
         in
           pkgs.mkShell {
             packages = [

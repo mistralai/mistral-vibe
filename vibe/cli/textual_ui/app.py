@@ -1310,7 +1310,7 @@ class VibeApp(App):  # noqa: PLR0904
         if self._update_notification_shown:
             return
 
-        message = f'{self._current_version} => {update.latest_version}\nRun "uv tool upgrade mistral-vibe" to update'
+        message = f'{self._current_version} => {update.latest_version}\nRun "uv tool upgrade x-vibe" to update'
 
         self.notify(
             message, title="Update available", severity="information", timeout=10
@@ -1345,7 +1345,7 @@ def run_textual_ui(
     initial_prompt: str | None = None,
     loaded_messages: list[LLMMessage] | None = None,
 ) -> None:
-    update_notifier = PyPIVersionUpdateGateway(project_name="mistral-vibe")
+    update_notifier = PyPIVersionUpdateGateway(project_name="x-vibe")
     update_cache_repository = FileSystemUpdateCacheRepository()
     app = VibeApp(
         config=config,

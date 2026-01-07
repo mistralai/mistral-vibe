@@ -1,16 +1,16 @@
 [project]
-name = "mistral-vibe"
-version = "1.3.3"
-description = "Minimal CLI coding agent by Mistral"
+name = "x-vibe"
+version = "1.3.5"
+description = "Minimal CLI coding agent"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
-authors = [{ name = "Mistral AI" }]
+authors = [{ name = "X Vibe" }]
 keywords = [
     "ai",
     "cli",
     "coding-assistant",
-    "mistral",
+    "x-vibe",
     "llm",
     "developer-tools",
 ]
@@ -47,10 +47,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mistralai/mistral-vibe"
-Repository = "https://github.com/mistralai/mistral-vibe"
-Issues = "https://github.com/mistralai/mistral-vibe/issues"
-Documentation = "https://github.com/mistralai/mistral-vibe#readme"
+Homepage = "https://github.com/gilgedje/x-vibe"
+Repository = "https://github.com/gilgedje/x-vibe"
+Issues = "https://github.com/gilgedje/x-vibe/issues"
+Documentation = "https://github.com/gilgedje/x-vibe#readme"
 
 
 [build-system]

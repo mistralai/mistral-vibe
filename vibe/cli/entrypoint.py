@@ -16,7 +16,7 @@ from vibe.setup.trusted_folders.trust_folder_dialog import (
 
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Mistral Vibe interactive CLI")
+    parser = argparse.ArgumentParser(description="Run the X Vibe interactive CLI")
     parser.add_argument(
         "-v", "--version", action="version", version=f"%(prog)s {__version__}"
     )

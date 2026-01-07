@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/mistral-vibe
+      url: https://pypi.org/p/x-vibe
     permissions:
       id-token: write
       contents: read
@@ -41,19 +41,19 @@ jobs:
           path: dist/
 
       - name: Publish distribution to PyPI
-        if: github.repository == 'mistralai/mistral-vibe'
+        if: github.repository == 'gilgedje/x-vibe'
         uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
 
   release-zed-extension:
     name: Release Zed Extension
     runs-on: ubuntu-latest
-    if: github.repository == 'mistralai/mistral-vibe'
+    if: github.repository == 'gilgedje/x-vibe'
     environment:
       name: zed
     steps:
       - uses: huacnlee/zed-extension-action@8cd592a0d24e1e41157740f1a529aeabddc88a1b # v2
         with:
-          extension-name: mistral-vibe
-          push-to: mistralai/zed-extensions
+          extension-name: x-vibe
+          push-to: gilgedje/zed-extensions
         env:
           COMMITTER_TOKEN: ${{ secrets.ZED_EXTENSION_GITHUB_TOKEN }}

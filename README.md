@@ -1,9 +1,9 @@
-# Mistral Vibe
+# X Vibe
 
-[![PyPI Version](https://img.shields.io/pypi/v/mistral-vibe)](https://pypi.org/project/mistral-vibe)
+[![PyPI Version](https://img.shields.io/pypi/v/x-vibe)](https://pypi.org/project/x-vibe)
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/release/python-3120/)
-[![CI Status](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml/badge.svg)](https://github.com/mistralai/mistral-vibe/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/mistralai/mistral-vibe)](https://github.com/mistralai/mistral-vibe/blob/main/LICENSE)
+[![CI Status](https://github.com/gilgedje/x-vibe/actions/workflows/ci.yml/badge.svg)](https://github.com/gilgedje/x-vibe/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/gilgedje/x-vibe)](https://github.com/gilgedje/x-vibe/blob/main/LICENSE)
 
 ```
 ██████████████████░░
@@ -17,19 +17,19 @@
 ██████████████████░░
 ```
 
-**Mistral's open-source CLI coding assistant.**
+**Open-source CLI coding assistant.**
 
-Mistral Vibe is a command-line coding assistant powered by Mistral's models. It provides a conversational interface to your codebase, allowing you to use natural language to explore, modify, and interact with your projects through a powerful set of tools.
+X Vibe is a command-line coding assistant powered by AI models. It provides a conversational interface to your codebase, allowing you to use natural language to explore, modify, and interact with your projects through a powerful set of tools.
 
 > [!WARNING]
-> Mistral Vibe works on Windows, but we officially support and target UNIX environments.
+> X Vibe works on Windows, but we officially support and target UNIX environments.
 
 ### One-line install (recommended)
 
 **Linux and macOS**
 
 ```bash
-curl -LsSf https://mistral.ai/vibe/install.sh | bash
+curl -LsSf https://raw.githubusercontent.com/gilgedje/x-vibe/main/scripts/install.sh | bash
 ```
 
 **Windows**
@@ -44,13 +44,13 @@ Then, use uv command below.
 ### Using uv
 
 ```bash
-uv tool install mistral-vibe
+uv tool install x-vibe
 ```
 
 ### Using pip
 
 ```bash
-pip install mistral-vibe
+pip install x-vibe
 ```
 
 ## Features
@@ -306,7 +306,7 @@ This affects where Vibe looks for:
 
 ## Editors/IDEs
 
-Mistral Vibe can be used in text editors and IDEs that support [Agent Client Protocol](https://agentclientprotocol.com/overview/clients). See the [ACP Setup documentation](docs/acp-setup.md) for setup instructions for various editors and IDEs.
+X Vibe can be used in text editors and IDEs that support [Agent Client Protocol](https://agentclientprotocol.com/overview/clients). See the [ACP Setup documentation](docs/acp-setup.md) for setup instructions for various editors and IDEs.
 
 ## Resources
 
@@ -315,7 +315,7 @@ Mistral Vibe can be used in text editors and IDEs that support [Agent Client Pro
 
 ## License
 
-Copyright 2025 Mistral AI
+Copyright 2025 X Vibe
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

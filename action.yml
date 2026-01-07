@@ -1,7 +1,7 @@
 ---
-name: Mistral Vibe
-description: "Download, install, and run Mistral Vibe"
-author: Mistral AI
+name: X Vibe
+description: "Download, install, and run X Vibe"
+author: X Vibe
 
 inputs:
   prompt:
@@ -40,14 +40,14 @@ runs:
     - name: Install uv
       uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
 
-    - name: Install Mistral Vibe
+    - name: Install X Vibe
       shell: bash
       working-directory: ${{ github.action_path }}
       run: |
         uv sync --locked --all-extras --dev
 
-    - name: Run Mistral Vibe
-      id: run-mistral-vibe
+    - name: Run X Vibe
+      id: run-x-vibe
       shell: bash
       working-directory: ${{ github.action_path }}
       env:

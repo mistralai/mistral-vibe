@@ -1,5 +1,5 @@
 name: Feature Request
-description: Pitch an improvement for Mistral Vibe
+description: Pitch an improvement for X Vibe
 title: "feat: "
 labels: ["enhancement"]
 body:
@@ -13,7 +13,7 @@ body:
     id: component
     attributes:
       label: Component
-      description: Which part of Mistral Vibe would this feature apply to?
+      description: Which part of X Vibe would this feature apply to?
       options:
         - CLI
         - ACP
@@ -28,7 +28,7 @@ body:
       label: Problem statement
       description: >
         What use case is blocked? Provide a clear and concise description of the problem.
-      placeholder: "I want to be able to use the agent to write a blog post about the benefits of using Mistral Vibe"
+      placeholder: "I want to be able to use the agent to write a blog post about the benefits of using X Vibe"
     validations:
       required: true
 
