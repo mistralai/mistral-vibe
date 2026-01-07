@@ -132,6 +132,18 @@ class ProviderConfig(BaseModel):
     api_style: str = "openai"
     backend: Backend = Backend.GENERIC
     reasoning_field_name: str = "reasoning_content"
+    ssl_cert_path: str | None = None
+    ssl_verify: bool = True
+
+    @field_validator("ssl_cert_path", mode="after")
+    @classmethod
+    def _validate_ssl_cert_path(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        path = Path(v).expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"SSL certificate file not found: {v}")
+        return str(path)
 
 
 class _MCPBase(BaseModel):

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable
 import json
 import os
+from pathlib import Path
 import types
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, TypeVar
 
@@ -210,11 +211,35 @@ class GenericBackend:
         self._provider = provider
         self._timeout = timeout
 
+    def _get_ssl_verify(self) -> bool | str:
+        """Resolve SSL verification setting.
+
+        Priority:
+        1. ssl_verify=False -> disable verification
+        2. ssl_cert_path set -> use that path
+        3. SSL_CERT_FILE env var -> use if file exists
+        4. REQUESTS_CA_BUNDLE env var -> use if file exists
+        5. Default -> True (system certs)
+        """
+        if not self._provider.ssl_verify:
+            return False
+
+        if self._provider.ssl_cert_path:
+            return self._provider.ssl_cert_path
+
+        for env_var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+            cert_path = os.getenv(env_var)
+            if cert_path and Path(cert_path).is_file():
+                return cert_path
+
+        return True
+
     async def __aenter__(self) -> GenericBackend:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout),
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                verify=self._get_ssl_verify(),
             )
         return self
 
@@ -233,6 +258,7 @@ class GenericBackend:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout),
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                verify=self._get_ssl_verify(),
             )
             self._owns_client = True
         return self._client
