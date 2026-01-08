@@ -17,6 +17,7 @@ from vibe.core.config import (
 )
 from vibe.core.interaction_logger import InteractionLogger
 from vibe.core.programmatic import run_programmatic
+from vibe.core.tools.base import ToolPermission, ToolPermissionError
 from vibe.core.types import OutputFormat, ResumeSessionInfo
 from vibe.core.utils import ConversationLimitException
 from vibe.setup.onboarding import run_onboarding
@@ -44,6 +45,15 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Automatically approve all tool executions.",
+    )
+    parser.add_argument(
+        "--default-permission",
+        type=str,
+        metavar="PERMISSION",
+        choices=["always", "never", "ask", "ask-time", "ask-iterations"],
+        default=None,
+        help="Set default permission for tools that don't have explicit permission configured. "
+        "Valid values: 'always', 'never', 'ask', 'ask-time', 'ask-iterations'.",
     )
     parser.add_argument(
         "--max-turns",
@@ -162,6 +172,15 @@ def main() -> None:  # noqa: PLR0912, PLR0915
 
         if args.enabled_tools:
             config.enabled_tools = args.enabled_tools
+
+        if args.default_permission:
+            try:
+                config.default_tool_permission = ToolPermission.by_name(
+                    args.default_permission
+                )
+            except ToolPermissionError as e:
+                rprint(f"[red]Invalid default permission: {e}[/]")
+                sys.exit(1)
 
         loaded_messages = None
         session_info = None

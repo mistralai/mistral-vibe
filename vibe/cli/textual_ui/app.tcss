@@ -628,6 +628,28 @@ WelcomeBanner {
     color: $text-muted;
 }
 
+.approval-input-container {
+    width: 100%;
+    height: auto;
+    padding: 1 0;
+}
+
+.approval-input-label {
+    height: auto;
+    color: $foreground;
+    margin-bottom: 1;
+}
+
+#duration-input,
+#iterations-input {
+    width: 100%;
+    height: auto;
+    background: $surface;
+    border: round $foreground-muted;
+    color: $foreground;
+    padding: 0 1;
+}
+
 .approval-description {
     height: auto;
     color: $foreground;

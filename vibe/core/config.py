@@ -20,7 +20,7 @@ from pydantic_settings import (
 import tomli_w
 
 from vibe.core.prompts import SystemPrompt
-from vibe.core.tools.base import BaseToolConfig
+from vibe.core.tools.base import BaseToolConfig, ToolPermission
 
 
 def get_vibe_home() -> Path:
@@ -347,6 +347,16 @@ class VibeConfig(BaseSettings):
             " regex with 're:' prefix or regex-like patterns."
         ),
     )
+    default_tool_permission: ToolPermission | None = Field(
+        default=None,
+        description=(
+            "Default permission for tools that don't have an explicit permission set."
+            " If None, tools use their class-defined default permission. "
+            "Valid values: 'always', 'never', 'ask', 'ask-time', 'ask-iterations'."
+            " This setting only applies when a tool doesn't have an explicit "
+            "permission configured in the [tools.*] section."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="forbid"
@@ -472,6 +482,17 @@ class VibeConfig(BaseSettings):
                 normalized[tool_name] = BaseToolConfig()
 
         return normalized
+
+    @field_validator("default_tool_permission", mode="before")
+    @classmethod
+    def _normalize_default_tool_permission(cls, v: Any) -> ToolPermission | None:
+        if v is None or v == "":
+            return None
+        if isinstance(v, ToolPermission):
+            return v
+        if isinstance(v, str):
+            return ToolPermission.by_name(v)
+        return None
 
     @model_validator(mode="after")
     def _validate_model_uniqueness(self) -> VibeConfig:

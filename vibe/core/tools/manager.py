@@ -240,10 +240,24 @@ class ToolManager:
             default_config = BaseToolConfig()
 
         user_overrides = self._config.tools.get(tool_name)
+
         if user_overrides is None:
-            merged_dict = default_config.model_dump()
+            # No explicit tool config - use tool class default
+            # Use mode='json' to get string values instead of enum objects
+            merged_dict = default_config.model_dump(mode="json")
+            # Apply global default permission if set (overrides tool class default)
+            # This applies when a tool doesn't have an explicit config section
+            if self._config.default_tool_permission is not None:
+                merged_dict["permission"] = self._config.default_tool_permission.value
         else:
-            merged_dict = {**default_config.model_dump(), **user_overrides.model_dump()}
+            # Explicit tool config exists - merge with tool class default
+            # If a tool has an explicit config section, it always takes precedence
+            # (even if permission wasn't specified, the section itself is explicit)
+            # Use mode='json' for consistency
+            merged_dict = {
+                **default_config.model_dump(mode="json"),
+                **user_overrides.model_dump(mode="json"),
+            }
 
         if self._config.workdir is not None:
             merged_dict["workdir"] = self._config.workdir

@@ -35,6 +35,10 @@ from vibe.core.tools.base import (
     ToolPermissionError,
 )
 from vibe.core.tools.manager import ToolManager
+from vibe.core.tools.permission_tracker import (
+    PermissionExpirationReason,
+    PermissionTracker,
+)
 from vibe.core.types import (
     AgentStats,
     ApprovalCallback,
@@ -126,6 +130,7 @@ class Agent:
 
         self.auto_approve = auto_approve
         self.approval_callback: ApprovalCallback | None = None
+        self.permission_tracker = PermissionTracker()
 
         self.session_id = str(uuid4())
 
@@ -719,7 +724,7 @@ class Agent:
                 f"API error from {provider.name} (model: {active_model.name}): {e}"
             ) from e
 
-    async def _should_execute_tool(
+    async def _should_execute_tool(  # noqa: PLR0911
         self, tool: BaseTool, args: dict[str, Any], tool_call_id: str
     ) -> ToolDecision:
         if self.auto_approve:
@@ -740,6 +745,31 @@ class Agent:
             )
 
         tool_name = tool.get_name()
+
+        # Check temporary permissions first (before config permission)
+        # check_and_reserve_iteration handles both time-based and iteration-based:
+        # - For time-based (remaining_iterations is None): returns True without decrementing
+        # - For iteration-based: atomically checks and reserves (decrements)
+        # Note: We check before cleanup so we can detect expiration reasons
+        (
+            is_granted,
+            expiration_reason,
+        ) = await self.permission_tracker.check_and_reserve_iteration(tool_name)
+
+        # Clean up expired permissions after checking (to remove any that were just detected as expired)
+        await self.permission_tracker.cleanup_expired()
+
+        if is_granted:
+            return ToolDecision(verdict=ToolExecutionResponse.EXECUTE)
+
+        # Temporary permission expired/exhausted - fall through to config permission
+        # Track expiration reason for user feedback
+        expiration_context = (
+            expiration_reason
+            if expiration_reason != PermissionExpirationReason.NONE
+            else None
+        )
+
         perm = self.tool_manager.get_tool_config(tool_name).permission
 
         if perm is ToolPermission.ALWAYS:
@@ -750,31 +780,98 @@ class Agent:
                 feedback=f"Tool '{tool_name}' is permanently disabled",
             )
 
-        return await self._ask_approval(tool_name, args, tool_call_id)
+        # For ASK, ASK_TIME, ASK_ITERATIONS - prompt user
+        return await self._ask_approval(
+            tool_name, args, tool_call_id, perm, expiration_context
+        )
 
     async def _ask_approval(
-        self, tool_name: str, args: dict[str, Any], tool_call_id: str
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        tool_call_id: str,
+        permission_type: ToolPermission = ToolPermission.ASK,
+        expiration_reason: str | None = None,
     ) -> ToolDecision:
         if not self.approval_callback:
             return ToolDecision(
                 verdict=ToolExecutionResponse.SKIP,
                 feedback="Tool execution not permitted.",
             )
+
+        # Call approval callback - handle both old (3 args) and new (5 args) signatures
+        import inspect
+
+        NEW_CALLBACK_PARAM_COUNT = 5
+
         if asyncio.iscoroutinefunction(self.approval_callback):
-            response, feedback = await self.approval_callback(
-                tool_name, args, tool_call_id
-            )
+            sig = inspect.signature(self.approval_callback)
+            param_count = len(sig.parameters)
+            if param_count >= NEW_CALLBACK_PARAM_COUNT:
+                result = await self.approval_callback(
+                    tool_name, args, tool_call_id, permission_type, expiration_reason
+                )
+            else:
+                # Old signature - only 3 parameters
+                # Type ignore needed because pyright sees the union type but we check at runtime
+                from vibe.core.types import LegacyAsyncApprovalCallback
+
+                legacy_callback = cast(
+                    LegacyAsyncApprovalCallback, self.approval_callback
+                )
+                result = await legacy_callback(tool_name, args, tool_call_id)
         else:
             sync_callback = cast(SyncApprovalCallback, self.approval_callback)
-            response, feedback = sync_callback(tool_name, args, tool_call_id)
+            sig = inspect.signature(sync_callback)
+            param_count = len(sig.parameters)
+            if param_count >= NEW_CALLBACK_PARAM_COUNT:
+                from vibe.core.types import NewSyncApprovalCallback
+
+                new_callback = cast(NewSyncApprovalCallback, sync_callback)
+                result = new_callback(
+                    tool_name, args, tool_call_id, permission_type, expiration_reason
+                )
+            else:
+                # Old signature - only 3 parameters
+                from vibe.core.types import LegacySyncApprovalCallback
+
+                legacy_callback = cast(LegacySyncApprovalCallback, sync_callback)
+                result = legacy_callback(tool_name, args, tool_call_id)
+
+        # Handle both legacy tuple format and new ApprovalResult format
+        from vibe.core.types import ApprovalResult
+
+        if isinstance(result, ApprovalResult):
+            approval_result = result
+            response = approval_result.response
+            feedback = approval_result.feedback
+            duration_seconds = approval_result.duration_seconds
+            iterations = approval_result.iterations
+        else:
+            # Legacy tuple format for backward compatibility
+            response_str, feedback = result
+            response = ApprovalResponse(response_str)
+            duration_seconds = None
+            iterations = None
 
         match response:
             case ApprovalResponse.ALWAYS:
+                # Grant permanent permission and save to config
                 self.auto_approve = True
+                # Save to config file (will be handled by UI layer)
                 return ToolDecision(
                     verdict=ToolExecutionResponse.EXECUTE, feedback=feedback
                 )
             case ApprovalResponse.YES:
+                # Grant temporary permission if duration/iterations provided
+                if duration_seconds is not None:
+                    await self.permission_tracker.grant_time_based(
+                        tool_name, duration_seconds
+                    )
+                elif iterations is not None:
+                    await self.permission_tracker.grant_iteration_based(
+                        tool_name, iterations
+                    )
                 return ToolDecision(
                     verdict=ToolExecutionResponse.EXECUTE, feedback=feedback
                 )

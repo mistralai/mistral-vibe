@@ -35,6 +35,7 @@ curl -LsSf https://mistral.ai/vibe/install.sh | bash
 **Windows**
 
 First, install uv
+
 ```bash
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
@@ -120,6 +121,14 @@ vibe "Refactor the main function in cli/main.py to be more modular."
 ```
 
 **Note**: The `--auto-approve` flag automatically approves all tool executions without prompting. In interactive mode, you can also toggle auto-approve on/off using `Shift+Tab`.
+
+You can set a default permission mode for all tools using the `--default-permission` flag:
+
+```bash
+vibe --default-permission ask-time
+```
+
+This sets the default permission for tools that don't have an explicit permission configured in your `config.toml`. Valid values are: `always`, `never`, `ask`, `ask-time`, `ask-iterations`. See the [Tool Permissions](#tool-permissions) section for details.
 
 ### Programmatic Mode
 
@@ -260,6 +269,69 @@ permission = "always"
 [tools.my_http_server_query]
 permission = "ask"
 ```
+
+### Tool Permissions
+
+Vibe provides fine-grained control over tool execution through a permission system. You can configure permissions globally or per-tool.
+
+#### Permission Types
+
+- **`always`**: Tool executes automatically without prompting (use with caution)
+- **`never`**: Tool is permanently disabled
+- **`ask`**: Prompt user for approval each time the tool is used
+- **`ask-time`**: Prompt user to grant permission for a specific duration (e.g., 5 minutes). After the time expires, the user will be prompted again.
+- **`ask-iterations`**: Prompt user to grant permission for a specific number of uses (e.g., 10 executions). After the iterations are exhausted, the user will be prompted again.
+
+#### Global Default Permission
+
+You can set a default permission for all tools that don't have an explicit permission configured:
+
+```toml
+# Set global default permission for all tools
+default_tool_permission = "ask-time"
+```
+
+This setting applies to tools that don't have an explicit `[tools.tool_name]` section in your config. If a tool has an explicit config section (even without a `permission` field), that section takes precedence.
+
+**Example:**
+
+```toml
+# Global default: all tools use ask-time unless explicitly configured
+default_tool_permission = "ask-time"
+
+# Explicitly configure specific tools
+[tools.bash]
+permission = "always"  # Bash always allowed
+
+[tools.write_file]
+permission = "ask"  # Write file prompts every time
+
+# read_file will use the global default (ask-time)
+# because it doesn't have an explicit [tools.read_file] section
+```
+
+#### Permission Precedence
+
+Permissions are applied in the following order (highest to lowest priority):
+
+1. **Explicit tool config** - If a tool has a `[tools.tool_name]` section, it takes precedence
+2. **Global default** - If `default_tool_permission` is set and no explicit tool config exists
+3. **Tool class default** - The default permission defined by the tool itself (e.g., `read_file` defaults to `always`)
+
+#### Temporary Permissions
+
+When using `ask-time` or `ask-iterations`, you can grant temporary permissions:
+
+- **Time-based**: Grant permission for a specific duration (default: 5 minutes). The permission expires after the time elapses.
+- **Iteration-based**: Grant permission for a specific number of uses (default: 10 iterations). The permission expires after the specified number of executions.
+
+After a temporary permission expires, Vibe will prompt you again with a notification that the previous permission has expired. You can then:
+
+- Grant a new temporary permission (with the same or different duration/iterations)
+- Grant permanent permission (`always`)
+- Deny the request
+
+**Note**: If a tool execution is cancelled or fails, the iteration is still consumed (to prevent retry abuse).
 
 ### Enable/disable tools with patterns
 

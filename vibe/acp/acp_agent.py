@@ -203,7 +203,11 @@ class VibeAcpAgent(AcpAgent):
     def _create_approval_callback(self, session_id: str) -> AsyncApprovalCallback:
 
         async def approval_callback(
-            tool_name: str, args: dict[str, Any], tool_call_id: str
+            tool_name: str,
+            args: dict[str, Any],
+            tool_call_id: str,
+            permission_type: Any = None,  # ToolPermission, but not imported to avoid circular deps
+            expiration_reason: str | None = None,
         ) -> tuple[str, str | None]:
             # Create the tool call update
             tool_call = ToolCall(toolCallId=tool_call_id)

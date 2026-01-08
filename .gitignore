@@ -199,3 +199,4 @@ result-*
 # Tests run the agent in the playground, we don't need to keep the session files
 tests/playground/*
 .
+.vibe/config.toml.test

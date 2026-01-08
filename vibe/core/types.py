@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from vibe.core.tools.base import BaseTool
+from vibe.core.tools.base import BaseTool, ToolPermission
 
 
 @dataclass
@@ -262,10 +262,63 @@ class OutputFormat(StrEnum):
     STREAMING = auto()
 
 
-type AsyncApprovalCallback = Callable[
+# Import ApprovalResponse here to avoid circular import
+from vibe.core.utils import ApprovalResponse
+
+
+class ApprovalResult:
+    """Result of an approval request with optional metadata.
+
+    Attributes:
+        response: The approval response (YES, NO, or ALWAYS)
+        duration_seconds: Optional duration in seconds for time-based permissions
+        iterations: Optional number of iterations for iteration-based permissions
+        feedback: Optional feedback message
+    """
+
+    def __init__(
+        self,
+        response: ApprovalResponse,
+        duration_seconds: int | None = None,
+        iterations: int | None = None,
+        feedback: str | None = None,
+    ) -> None:
+        self.response = response
+        self.duration_seconds = duration_seconds
+        self.iterations = iterations
+        self.feedback = feedback
+
+    def to_tuple(self) -> tuple[str, str | None]:
+        """Convert to legacy tuple format for backward compatibility.
+
+        Returns:
+            Tuple of (response_string, feedback)
+        """
+        return (self.response.value, self.feedback)
+
+
+# Support both old (3 args) and new (5 args) callback signatures for backward compatibility
+# The agent dynamically checks the signature at runtime
+type LegacyAsyncApprovalCallback = Callable[
     [str, dict[str, Any], str], Awaitable[tuple[str, str | None]]
 ]
 
-type SyncApprovalCallback = Callable[[str, dict[str, Any], str], tuple[str, str | None]]
+type LegacySyncApprovalCallback = Callable[
+    [str, dict[str, Any], str], tuple[str, str | None]
+]
+
+type NewAsyncApprovalCallback = Callable[
+    [str, dict[str, Any], str, ToolPermission, str | None],
+    Awaitable[ApprovalResult | tuple[str, str | None]],
+]
+
+type NewSyncApprovalCallback = Callable[
+    [str, dict[str, Any], str, ToolPermission, str | None],
+    ApprovalResult | tuple[str, str | None],
+]
+
+type AsyncApprovalCallback = NewAsyncApprovalCallback | LegacyAsyncApprovalCallback
+
+type SyncApprovalCallback = NewSyncApprovalCallback | LegacySyncApprovalCallback
 
 type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback

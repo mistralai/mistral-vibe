@@ -46,7 +46,7 @@ from vibe.core.agent import Agent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import HISTORY_FILE, VibeConfig
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.types import LLMMessage, ResumeSessionInfo, Role
+from vibe.core.types import ApprovalResult, LLMMessage, ResumeSessionInfo, Role
 from vibe.core.utils import (
     ApprovalResponse,
     CancellationReason,
@@ -215,20 +215,30 @@ class VibeApp(App):
     async def on_approval_app_approval_granted(
         self, message: ApprovalApp.ApprovalGranted
     ) -> None:
+        from vibe.core.types import ApprovalResult
+
         if self._pending_approval and not self._pending_approval.done():
-            self._pending_approval.set_result((ApprovalResponse.YES, None))
+            result = ApprovalResult(
+                ApprovalResponse.YES,
+                duration_seconds=message.duration_seconds,
+                iterations=message.iterations,
+            )
+            self._pending_approval.set_result(result)
 
         await self._switch_to_input_app()
 
     async def on_approval_app_approval_granted_always_tool(
         self, message: ApprovalApp.ApprovalGrantedAlwaysTool
     ) -> None:
+        from vibe.core.types import ApprovalResult
+
         self._set_tool_permission_always(
             message.tool_name, save_permanently=message.save_permanently
         )
 
         if self._pending_approval and not self._pending_approval.done():
-            self._pending_approval.set_result((ApprovalResponse.YES, None))
+            result = ApprovalResult(ApprovalResponse.ALWAYS)
+            self._pending_approval.set_result(result)
 
         await self._switch_to_input_app()
 
@@ -459,12 +469,24 @@ class VibeApp(App):
         return self._agent_init_task
 
     async def _approval_callback(
-        self, tool: str, args: dict, tool_call_id: str
-    ) -> tuple[str, str | None]:
+        self,
+        tool: str,
+        args: dict,
+        tool_call_id: str,
+        permission_type: ToolPermission = ToolPermission.ASK,
+        expiration_reason: str | None = None,
+    ) -> ApprovalResult | tuple[str, str | None]:
         self._pending_approval = asyncio.Future()
-        await self._switch_to_approval_app(tool, args)
+        await self._switch_to_approval_app(
+            tool, args, permission_type, expiration_reason
+        )
         result = await self._pending_approval
         self._pending_approval = None
+
+        # Convert tuple to ApprovalResult if needed
+        if isinstance(result, tuple):
+            response_str, feedback = result
+            return ApprovalResult(ApprovalResponse(response_str), feedback=feedback)
         return result
 
     async def _handle_agent_turn(self, prompt: str) -> None:
@@ -770,7 +792,13 @@ class VibeApp(App):
 
         self.call_after_refresh(config_app.focus)
 
-    async def _switch_to_approval_app(self, tool_name: str, tool_args: dict) -> None:
+    async def _switch_to_approval_app(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        permission_type: ToolPermission = ToolPermission.ASK,
+        expiration_reason: str | None = None,
+    ) -> None:
         bottom_container = self.query_one("#bottom-app-container")
 
         try:
@@ -787,11 +815,16 @@ class VibeApp(App):
             tool_args=tool_args,
             workdir=str(self.config.effective_workdir),
             config=self.config,
+            permission_type=permission_type,
+            expiration_reason=expiration_reason,
         )
         await bottom_container.mount(approval_app)
         self._current_bottom_app = BottomApp.Approval
 
-        self.call_after_refresh(approval_app.focus)
+        # Only focus the container if there's no input field (for time/iteration permissions)
+        # The input field will be focused automatically by the ApprovalApp
+        if permission_type not in {ToolPermission.ASK_TIME, ToolPermission.ASK_ITERATIONS}:
+            self.call_after_refresh(approval_app.focus)
         self.call_after_refresh(self._scroll_to_bottom)
 
     async def _switch_to_input_app(self) -> None:

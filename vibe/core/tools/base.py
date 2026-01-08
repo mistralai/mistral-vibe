@@ -40,15 +40,21 @@ class ToolPermission(StrEnum):
     ALWAYS = auto()
     NEVER = auto()
     ASK = auto()
+    ASK_TIME = auto()
+    ASK_ITERATIONS = auto()
 
     @classmethod
     def by_name(cls, name: str) -> ToolPermission:
-        try:
-            return ToolPermission(name.upper())
-        except ValueError:
-            raise ToolPermissionError(
-                f"Invalid tool permission: {name}. Must be one of {list(cls)}"
-            )
+        # Handle hyphenated names (ask-time, ask-iterations)
+        # Convert to lowercase and replace hyphens with underscores
+        normalized = name.lower().replace("-", "_")
+        # Try to find by value (enum values are lowercase)
+        for member in cls:
+            if member.value == normalized:
+                return member
+        raise ToolPermissionError(
+            f"Invalid tool permission: {name}. Must be one of {[m.value for m in cls]}"
+        )
 
 
 class BaseToolConfig(BaseModel):

@@ -86,3 +86,64 @@ def test_applies_workdir_from_vibe_config(tmp_path):
 
     assert config.workdir == tmp_path
     assert config.effective_workdir == tmp_path
+
+
+def test_default_tool_permission_applies_when_no_tool_config():
+    """Test that default_tool_permission applies when no explicit tool config exists."""
+    vibe_config = VibeConfig(
+        session_logging=SessionLoggingConfig(enabled=False),
+        system_prompt_id="tests",
+        include_project_context=False,
+        default_tool_permission=ToolPermission.ASK_TIME,
+    )
+    manager = ToolManager(vibe_config)
+
+    # read_file doesn't have explicit config, should use default
+    config = manager.get_tool_config("read_file")
+    assert config.permission == ToolPermission.ASK_TIME
+
+
+def test_default_tool_permission_does_not_override_explicit_config():
+    """Test that explicit tool config takes precedence over default_tool_permission."""
+    vibe_config = VibeConfig(
+        session_logging=SessionLoggingConfig(enabled=False),
+        system_prompt_id="tests",
+        include_project_context=False,
+        default_tool_permission=ToolPermission.ASK_TIME,
+        tools={"read_file": BaseToolConfig(permission=ToolPermission.ALWAYS)},
+    )
+    manager = ToolManager(vibe_config)
+
+    # read_file has explicit config, should use that instead of default
+    config = manager.get_tool_config("read_file")
+    assert config.permission == ToolPermission.ALWAYS
+
+
+def test_default_tool_permission_with_ask_iterations():
+    """Test that default_tool_permission works with ask-iterations."""
+    vibe_config = VibeConfig(
+        session_logging=SessionLoggingConfig(enabled=False),
+        system_prompt_id="tests",
+        include_project_context=False,
+        default_tool_permission=ToolPermission.ASK_ITERATIONS,
+    )
+    manager = ToolManager(vibe_config)
+
+    # grep doesn't have explicit config, should use default
+    config = manager.get_tool_config("grep")
+    assert config.permission == ToolPermission.ASK_ITERATIONS
+
+
+def test_default_tool_permission_none_uses_tool_default():
+    """Test that when default_tool_permission is None, tool class default is used."""
+    vibe_config = VibeConfig(
+        session_logging=SessionLoggingConfig(enabled=False),
+        system_prompt_id="tests",
+        include_project_context=False,
+        default_tool_permission=None,
+    )
+    manager = ToolManager(vibe_config)
+
+    # read_file defaults to ALWAYS in its class
+    config = manager.get_tool_config("read_file")
+    assert config.permission == ToolPermission.ALWAYS
