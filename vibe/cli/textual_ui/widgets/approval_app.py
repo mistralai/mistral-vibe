@@ -153,8 +153,8 @@ class ApprovalApp(Container):
         """Focus the input widget after it's fully mounted and scroll it into view."""
         if self.input_widget and self.input_widget.is_attached:
             self.input_widget.focus()
-            # Scroll the input widget into view to ensure it's visible
-            self.call_after_refresh(self._scroll_input_into_view)
+            # Use a longer delay to ensure widget is fully laid out before scrolling
+            self.set_timer(0.1, self._scroll_input_into_view)
 
     def _scroll_input_into_view(self) -> None:
         """Scroll the input widget into the visible area."""
@@ -164,6 +164,8 @@ class ApprovalApp(Container):
             if scroll_container:
                 # Scroll to make the input widget visible
                 scroll_container.scroll_to_widget(self.input_widget, animate=False)
+                # Debug: Print scroll position
+                print(f"DEBUG: Scrolled to input widget, scroll position: {scroll_container.scroll_y}")
 
     def _get_expiration_text(self) -> str:
         """Get expiration notification text."""
@@ -199,9 +201,6 @@ class ApprovalApp(Container):
             )
             await self.input_container.mount(label)
             await self.input_container.mount(self.input_widget)
-            # Focus the input widget after it's mounted
-            if self.input_widget:
-                self.call_after_refresh(self._focus_input_widget)
             # Focus the input widget after it's mounted
             if self.input_widget:
                 self.call_after_refresh(self._focus_input_widget)
