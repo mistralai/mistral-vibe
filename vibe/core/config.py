@@ -199,6 +199,7 @@ class MCPStdio(_MCPBase):
     transport: Literal["stdio"]
     command: str | list[str]
     args: list[str] = Field(default_factory=list)
+    env: dict[str, str] | None = None
 
     def argv(self) -> list[str]:
         base = (
