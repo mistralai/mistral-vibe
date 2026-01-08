@@ -562,12 +562,7 @@ WelcomeBanner {
 #approval-content {
     width: 100%;
     height: auto;
-}
-
-.approval-tool-info-scroll {
-    width: 100%;
-    height: auto;
-    max-height: 8;
+    max-height: 16; /* Match parent max-height */
 }
 
 .approval-title {

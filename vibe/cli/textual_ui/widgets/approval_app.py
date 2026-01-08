@@ -90,7 +90,8 @@ class ApprovalApp(Container):
         self.iterations = 10  # Default: 10 iterations
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="approval-content"):
+        # Use VerticalScroll for the entire content to handle long tool info
+        with VerticalScroll(id="approval-content"):
             self.title_widget = Static(
                 f"⚠ {self.tool_name} command", classes="approval-title"
             )
@@ -104,11 +105,11 @@ class ApprovalApp(Container):
                 )
                 yield self.expiration_widget
 
-            with VerticalScroll(classes="approval-tool-info-scroll"):
-                self.tool_info_container = Vertical(
-                    classes="approval-tool-info-container"
-                )
-                yield self.tool_info_container
+            # Tool info container (no longer in separate scroll)
+            self.tool_info_container = Vertical(
+                classes="approval-tool-info-container"
+            )
+            yield self.tool_info_container
 
             yield Static("")
 
@@ -149,9 +150,20 @@ class ApprovalApp(Container):
             self.focus()
 
     def _focus_input_widget(self) -> None:
-        """Focus the input widget after it's fully mounted."""
+        """Focus the input widget after it's fully mounted and scroll it into view."""
         if self.input_widget and self.input_widget.is_attached:
             self.input_widget.focus()
+            # Scroll the input widget into view to ensure it's visible
+            self.call_after_refresh(self._scroll_input_into_view)
+
+    def _scroll_input_into_view(self) -> None:
+        """Scroll the input widget into the visible area."""
+        if self.input_widget and self.input_widget.is_attached:
+            # Get the scroll container (approval-content)
+            scroll_container = self.query_one("#approval-content")
+            if scroll_container:
+                # Scroll to make the input widget visible
+                scroll_container.scroll_to_widget(self.input_widget, animate=False)
 
     def _get_expiration_text(self) -> str:
         """Get expiration notification text."""
@@ -187,6 +199,9 @@ class ApprovalApp(Container):
             )
             await self.input_container.mount(label)
             await self.input_container.mount(self.input_widget)
+            # Focus the input widget after it's mounted
+            if self.input_widget:
+                self.call_after_refresh(self._focus_input_widget)
             # Focus the input widget after it's mounted
             if self.input_widget:
                 self.call_after_refresh(self._focus_input_widget)
