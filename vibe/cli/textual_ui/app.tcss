@@ -56,6 +56,21 @@ Screen {
     background: $background;
 }
 
+#folder-selector, #input-dialog {
+    width: 100%;
+    height: auto;
+    max-height: 80vh;
+    background: $background;
+    border: round $foreground-muted;
+    padding: 0 1;
+}
+
+#folder-selector #folder-content, #input-dialog #input-content {
+    height: auto;
+    width: 100%;
+    overflow-y: auto;
+}
+
 #bottom-bar {
     height: auto;
     width: 100%;
@@ -766,6 +781,22 @@ WelcomeBanner {
 .settings-help {
     height: auto;
     color: $text-muted;
+}
+
+#conversation-tree-selector {
+    width: 100%;
+    height: auto;
+    max-height: 80vh;
+    background: $background;
+    border: round $foreground-muted;
+    padding: 0 1;
+    margin: 0 2 1 2;
+    overflow-y: auto;
+}
+
+#conversation-tree-content {
+    width: 100%;
+    height: auto;
 }
 
 #approval-app {
