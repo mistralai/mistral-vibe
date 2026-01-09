@@ -53,6 +53,12 @@ uv tool install mistral-vibe
 pip install mistral-vibe
 ```
 
+### Using pixi
+
+```bash
+pixi global install mistral-vibe
+```
+
 ## Features
 
 - **Interactive Chat**: A conversational AI agent that understands your requests and breaks down complex tasks.
