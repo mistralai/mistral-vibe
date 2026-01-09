@@ -133,6 +133,23 @@ class ToolManager:
     def available_tools(self) -> dict[str, type[BaseTool]]:
         return dict(self._available)
 
+    def set_tool_callback(
+        self, tool_name: str, callback_name: str, callback: Callable[..., Any]
+    ) -> None:
+        """Set a callback on a tool class.
+
+        Args:
+            tool_name: Name of the tool to configure
+            callback_name: Name of the callback attribute to set
+            callback: The callback function to set
+        """
+        if tool_name in self._available:
+            tool_class = self._available[tool_name]
+            if hasattr(tool_class, f"set_{callback_name}"):
+                getattr(tool_class, f"set_{callback_name}")(callback)
+            else:
+                setattr(tool_class, callback_name, callback)
+
     def _integrate_mcp(self) -> None:
         if not self._config.mcp_servers:
             return

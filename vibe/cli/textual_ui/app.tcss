@@ -913,3 +913,219 @@ ContextProgress {
     margin: 0;
     color: $foreground;
 }
+
+#question-app {
+    width: 100%;
+    height: auto;
+    max-height: 20;
+    background: $background;
+    border: round $foreground-muted;
+    padding: 0 1;
+    margin: 0 0 1 0;
+}
+
+#question-content {
+    width: 100%;
+    height: auto;
+}
+
+.question-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+}
+
+.question-option {
+    height: auto;
+    color: $foreground;
+}
+
+.question-option-selected {
+    text-style: bold;
+}
+
+.question-option-confirmed {
+    text-style: bold;
+    color: $success;
+}
+
+.question-option-positive {
+    color: $success;
+}
+
+.question-option-neutral {
+    color: $primary;
+}
+
+#question-input {
+    width: 100%;
+    height: auto;
+    background: $surface;
+    border: none;
+    padding: 0 1;
+}
+
+#question-other-input {
+    width: 100%;
+    height: auto;
+    background: $surface;
+    border: none;
+    padding: 0 1;
+    margin-top: 1;
+}
+
+.question-help {
+    height: auto;
+    color: $text-muted;
+}
+
+.question-header {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+}
+
+.questions-scroll {
+    width: 100%;
+    height: auto;
+    max-height: 15;
+}
+
+.single-question {
+    width: 100%;
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+.question-separator {
+    height: 1;
+}
+
+.question-input {
+    width: 100%;
+    height: auto;
+    background: $surface;
+    border: none;
+    padding: 0 1;
+}
+
+.question-tabs {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.question-tab {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+.question-tab-active {
+    color: $primary;
+    text-style: bold;
+}
+
+.question-tab-answered {
+    color: $success;
+}
+
+.question-other-line {
+    width: 100%;
+    height: auto;
+}
+
+.question-other-cursor {
+    width: auto;
+    height: auto;
+}
+
+.question-other-input {
+    width: auto;
+    height: auto;
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: $foreground;
+}
+
+.question-other-input > .input--placeholder {
+    color: $foreground;
+}
+
+.question-other-confirmed {
+    color: $success;
+    text-style: bold;
+}
+
+.question-other-check {
+    width: auto;
+    height: auto;
+    color: $success;
+    text-style: bold;
+}
+
+.question-panels-container {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.question-panel {
+    width: 100%;
+    height: auto;
+}
+
+.question-text {
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+.question-text-active {
+    color: $primary;
+    text-style: bold;
+}
+
+.question-padding {
+    height: auto;
+}
+
+.recap-panel {
+    width: 100%;
+    height: auto;
+}
+
+.recap-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+    margin-bottom: 1;
+}
+
+.recap-answer {
+    height: auto;
+    color: $foreground;
+    margin-bottom: 1;
+}
+
+.recap-item-selected {
+    text-style: bold;
+    color: $primary;
+}
+
+.recap-submit {
+    height: auto;
+    color: $foreground;
+    margin-top: 1;
+}
+
+.recap-submit.recap-item-selected {
+    color: $success;
+    text-style: bold;
+}
+
+.question-tab-validate {
+    color: $success;
+}
