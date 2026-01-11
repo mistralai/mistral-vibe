@@ -261,6 +261,31 @@ permission = "always"
 permission = "ask"
 ```
 
+### Hooks
+
+Hooks allow you to run custom shell commands at specific points during Vibe's execution. You can use hooks to block dangerous commands, log tool usage, modify inputs, or add context to prompts.
+
+```toml
+[hooks]
+enabled = true
+
+# Block dangerous rm commands
+[[hooks.hooks.PreToolUse]]
+type = "command"
+command = "uv run ~/.vibe/hooks/validate_bash.py"
+matcher = "bash"
+timeout = 10
+```
+
+Available hook events:
+- `PreToolUse` - Before a tool is executed (can block/modify)
+- `PostToolUse` - After a tool completes
+- `UserPromptSubmit` - When user submits a prompt (can block/modify)
+- `SessionStart` - When a session begins
+- `SessionEnd` - When a session ends
+
+See the [Hooks documentation](docs/hooks.md) for detailed configuration and examples.
+
 ### Enable/disable tools with patterns
 
 You can control which tools are active using `enabled_tools` and `disabled_tools`.

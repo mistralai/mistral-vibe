@@ -55,11 +55,16 @@ def run_programmatic(
                 "Loaded %d messages from previous session", len(non_system_messages)
             )
 
-        async for event in agent.act(prompt):
-            formatter.on_event(event)
-            if isinstance(event, AssistantEvent) and event.stopped_by_middleware:
-                raise ConversationLimitException(event.content)
+        await agent.apply_session_start_hooks()
 
-        return formatter.finalize()
+        try:
+            async for event in agent.act(prompt):
+                formatter.on_event(event)
+                if isinstance(event, AssistantEvent) and event.stopped_by_middleware:
+                    raise ConversationLimitException(event.content)
+
+            return formatter.finalize()
+        finally:
+            await agent.run_session_end_hooks()
 
     return asyncio.run(_async_run())
