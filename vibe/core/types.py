@@ -172,6 +172,7 @@ class LLMMessage(BaseModel):
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -187,6 +188,7 @@ class LLMMessage(BaseModel):
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
+            "metadata": getattr(v, "metadata", None),
         }
 
     def __add__(self, other: LLMMessage) -> LLMMessage:
@@ -238,6 +240,7 @@ class LLMMessage(BaseModel):
             tool_calls=list(tool_calls_map.values()) or None,
             name=self.name,
             tool_call_id=self.tool_call_id,
+            metadata=self.metadata or other.metadata,
         )
 
 

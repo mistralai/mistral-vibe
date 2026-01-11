@@ -147,6 +147,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._auto_scroll = True
         self._last_escape_time: float | None = None
         self._terminal_theme = capture_terminal_theme()
+        self._session_end_hooks_run = False
 
     @property
     def config(self) -> VibeConfig:
@@ -502,6 +503,7 @@ class VibeApp(App):  # noqa: PLR0904
                 )
 
             self.agent = agent
+            await self.agent.apply_session_start_hooks()
         except asyncio.CancelledError:
             self.agent = None
             return
@@ -899,7 +901,15 @@ class VibeApp(App):  # noqa: PLR0904
             return None
         return self.agent.interaction_logger.session_id[:8]
 
+    async def _run_session_end_hooks(self) -> None:
+        if self._session_end_hooks_run:
+            return
+        self._session_end_hooks_run = True
+        if self.agent:
+            await self.agent.run_session_end_hooks()
+
     async def _exit_app(self) -> None:
+        await self._run_session_end_hooks()
         self.exit(result=self._get_session_resume_info())
 
     async def _setup_terminal(self) -> None:
@@ -1140,7 +1150,7 @@ class VibeApp(App):  # noqa: PLR0904
                     current_tokens=self.agent.stats.context_tokens,
                 )
 
-    def action_clear_quit(self) -> None:
+    async def action_clear_quit(self) -> None:
         input_widgets = self.query(ChatInputContainer)
         if input_widgets:
             input_widget = input_widgets.first()
@@ -1148,12 +1158,13 @@ class VibeApp(App):  # noqa: PLR0904
                 input_widget.value = ""
                 return
 
-        self.action_force_quit()
+        await self.action_force_quit()
 
-    def action_force_quit(self) -> None:
+    async def action_force_quit(self) -> None:
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
 
+        await self._run_session_end_hooks()
         self.exit(result=self._get_session_resume_info())
 
     def action_scroll_chat_up(self) -> None:

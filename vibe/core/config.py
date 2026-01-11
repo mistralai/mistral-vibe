@@ -19,6 +19,7 @@ from pydantic_settings import (
 )
 import tomli_w
 
+from vibe.core.hooks.types import HooksConfig
 from vibe.core.paths.config_paths import AGENT_DIR, CONFIG_DIR, CONFIG_FILE, PROMPT_DIR
 from vibe.core.paths.global_paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
 from vibe.core.prompts import SystemPrompt
@@ -330,6 +331,15 @@ class VibeConfig(BaseSettings):
         description=(
             "Additional directories to search for skills. "
             "Each path may be absolute or relative to the current working directory."
+        ),
+    )
+
+    hooks: HooksConfig = Field(
+        default_factory=HooksConfig,
+        description=(
+            "Configuration for hooks that run at specific points during agent execution. "
+            "Hooks allow running custom shell commands before/after tool execution, "
+            "at session start/end, and when user submits a prompt."
         ),
     )
 

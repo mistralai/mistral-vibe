@@ -185,6 +185,8 @@ class VibeAcpAgent(AcpAgent):
                 self._create_approval_callback(agent.session_id)
             )
 
+        await agent.apply_session_start_hooks()
+
         response = NewSessionResponse(
             sessionId=agent.session_id,
             models=SessionModelState(
@@ -200,6 +202,10 @@ class VibeAcpAgent(AcpAgent):
             ),
         )
         return response
+
+    async def run_session_end_hooks(self) -> None:
+        for session in self.sessions.values():
+            await session.agent.run_session_end_hooks()
 
     def _get_disabled_tools_from_capabilities(self) -> list[str]:
         if not self.client_capabilities:
@@ -464,8 +470,23 @@ class VibeAcpAgent(AcpAgent):
 async def _run_acp_server() -> None:
     reader, writer = await stdio_streams()
 
-    AgentSideConnection(lambda connection: VibeAcpAgent(connection), writer, reader)
-    await asyncio.Event().wait()
+    agent: VibeAcpAgent | None = None
+
+    def _create_agent(connection: AgentSideConnection) -> VibeAcpAgent:
+        nonlocal agent
+        agent = VibeAcpAgent(connection)
+        return agent
+
+    AgentSideConnection(_create_agent, writer, reader)
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        if agent:
+            try:
+                await asyncio.shield(agent.run_session_end_hooks())
+            except Exception:
+                pass
 
 
 def run_acp_server() -> None:

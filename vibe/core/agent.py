@@ -4,12 +4,13 @@ import asyncio
 from collections.abc import AsyncGenerator, Callable
 from enum import StrEnum, auto
 import time
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 from pydantic import BaseModel
 
 from vibe.core.config import VibeConfig
+from vibe.core.hooks import HookManager, HookPermissionDecision
 from vibe.core.interaction_logger import InteractionLogger
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.format import APIToolFormatHandler, ResolvedMessage
@@ -145,6 +146,12 @@ class Agent:
             config.effective_workdir,
         )
 
+        self.hook_manager = HookManager(
+            config_getter=lambda: self.config.hooks,
+            session_id=self.session_id,
+            cwd=str(config.effective_workdir),
+        )
+
     @property
     def mode(self) -> AgentMode:
         return self._mode
@@ -174,9 +181,51 @@ class Agent:
         self._last_observed_message_index = len(self.messages)
 
     async def act(self, msg: str) -> AsyncGenerator[BaseEvent]:
+        hook_result = await self.hook_manager.run_user_prompt_submit(msg)
+
+        if hook_result.system_messages:
+            self._inject_system_reminders(hook_result.system_messages)
+
+        if not hook_result.should_continue:
+            self._flush_new_messages()
+            block_message = "Prompt blocked by hook."
+            if hook_result.block_reason:
+                block_message = f"{block_message}\n\nReason: {hook_result.block_reason}"
+            yield AssistantEvent(
+                content=block_message,
+            )
+            return
+
+        effective_msg = hook_result.modified_prompt or msg
+        prompt_metadata = (
+            {"original_prompt": msg}
+            if hook_result.modified_prompt and hook_result.modified_prompt != msg
+            else None
+        )
+
         self._clean_message_history()
-        async for event in self._conversation_loop(msg):
+        async for event in self._conversation_loop(
+            effective_msg, prompt_metadata=prompt_metadata
+        ):
             yield event
+
+    async def run_session_start_hooks(self) -> list[str]:
+        """Run session start hooks. Returns list of system messages to inject."""
+        return await self.hook_manager.run_session_start()
+
+    async def apply_session_start_hooks(self) -> None:
+        """Run session start hooks and inject any system messages."""
+        system_messages = await self.run_session_start_hooks()
+        if system_messages:
+            self._inject_system_reminders(system_messages)
+            self._flush_new_messages()
+
+    async def run_session_end_hooks(self) -> None:
+        """Run session end hooks with current session statistics."""
+        await self.hook_manager.run_session_end(
+            message_count=len(self.messages),
+            total_tokens=self.stats.session_total_llm_tokens,
+        )
 
     def _setup_middleware(self) -> None:
         """Configure middleware pipeline for this conversation."""
@@ -211,7 +260,7 @@ class Agent:
 
             case MiddlewareAction.INJECT_MESSAGE:
                 if result.message and len(self.messages) > 0:
-                    last_msg = self.messages[-1]
+                    last_msg = self._last_non_system_message() or self.messages[-1]
                     if last_msg.content:
                         last_msg.content += f"\n\n{result.message}"
                     else:
@@ -245,8 +294,18 @@ class Agent:
             messages=self.messages, stats=self.stats, config=self.config
         )
 
-    async def _conversation_loop(self, user_msg: str) -> AsyncGenerator[BaseEvent]:
-        self.messages.append(LLMMessage(role=Role.user, content=user_msg))
+    def _last_non_system_message(self) -> LLMMessage | None:
+        for msg in reversed(self.messages):
+            if msg.role != Role.system:
+                return msg
+        return None
+
+    async def _conversation_loop(
+        self, user_msg: str, prompt_metadata: dict[str, Any] | None = None
+    ) -> AsyncGenerator[BaseEvent]:
+        self.messages.append(
+            LLMMessage(role=Role.user, content=user_msg, metadata=prompt_metadata)
+        )
         self.stats.steps += 1
 
         try:
@@ -268,8 +327,10 @@ class Agent:
                         user_cancelled = True
                     yield event
 
-                last_message = self.messages[-1]
-                should_break_loop = last_message.role != Role.tool
+                last_message = self._last_non_system_message()
+                should_break_loop = (
+                    last_message is None or last_message.role != Role.tool
+                )
 
                 self._flush_new_messages()
 
@@ -383,11 +444,53 @@ class Agent:
 
         for tool_call in resolved.tool_calls:
             tool_call_id = tool_call.call_id
+            effective_validated_args = tool_call.validated_args
+            effective_args = tool_call.args_dict.copy()
+
+            pre_hook_result = await self.hook_manager.run_pre_tool_use(
+                tool_call.tool_name, effective_args
+            )
+            pre_hook_messages = list(pre_hook_result.system_messages)
+
+            if pre_hook_result.updated_input:
+                effective_validated_args = tool_call.validated_args.model_copy(
+                    update=pre_hook_result.updated_input
+                )
+                effective_args = effective_validated_args.model_dump()
+
+            if not pre_hook_result.should_execute:
+                self.stats.tool_calls_rejected += 1
+                skip_reason = pre_hook_result.reason or "Blocked by hook"
+
+                yield ToolCallEvent(
+                    tool_name=tool_call.tool_name,
+                    tool_class=tool_call.tool_class,
+                    args=effective_validated_args,
+                    tool_call_id=tool_call_id,
+                )
+
+                yield ToolResultEvent(
+                    tool_name=tool_call.tool_name,
+                    tool_class=tool_call.tool_class,
+                    skipped=True,
+                    skip_reason=skip_reason,
+                    tool_call_id=tool_call_id,
+                )
+
+                self.messages.append(
+                    LLMMessage.model_validate(
+                        self.format_handler.create_tool_response_message(
+                            tool_call, skip_reason
+                        )
+                    )
+                )
+                self._inject_system_reminders(pre_hook_messages)
+                continue
 
             yield ToolCallEvent(
                 tool_name=tool_call.tool_name,
                 tool_class=tool_call.tool_class,
-                args=tool_call.validated_args,
+                args=effective_validated_args,
                 tool_call_id=tool_call_id,
             )
 
@@ -408,10 +511,18 @@ class Agent:
                         )
                     )
                 )
+                self._inject_system_reminders(pre_hook_messages)
                 continue
 
+            hook_forces_ask = (
+                pre_hook_result.decision == HookPermissionDecision.ASK
+            )
+
             decision = await self._should_execute_tool(
-                tool_instance, tool_call.validated_args, tool_call_id
+                tool_instance,
+                effective_validated_args,
+                tool_call_id,
+                force_ask=hook_forces_ask,
             )
 
             if decision.verdict == ToolExecutionResponse.SKIP:
@@ -437,13 +548,14 @@ class Agent:
                         )
                     )
                 )
+                self._inject_system_reminders(pre_hook_messages)
                 continue
 
             self.stats.tool_calls_agreed += 1
 
             try:
                 start_time = time.perf_counter()
-                result_model = await tool_instance.invoke(**tool_call.args_dict)
+                result_model = await tool_instance.invoke(**effective_args)
                 duration = time.perf_counter() - start_time
 
                 text = "\n".join(
@@ -468,6 +580,14 @@ class Agent:
 
                 self.stats.tool_calls_succeeded += 1
 
+                self._inject_system_reminders(pre_hook_messages)
+                post_hook_result = await self.hook_manager.run_post_tool_use(
+                    tool_call.tool_name,
+                    effective_args,
+                    tool_result=text,
+                )
+                self._inject_system_reminders(post_hook_result.system_messages)
+
             except asyncio.CancelledError:
                 cancel = str(
                     get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
@@ -485,6 +605,7 @@ class Agent:
                         )
                     )
                 )
+                self._inject_system_reminders(pre_hook_messages)
                 raise
 
             except KeyboardInterrupt:
@@ -504,6 +625,7 @@ class Agent:
                         )
                     )
                 )
+                self._inject_system_reminders(pre_hook_messages)
                 raise
 
             except (ToolError, ToolPermissionError) as exc:
@@ -528,6 +650,15 @@ class Agent:
                         )
                     )
                 )
+
+                self._inject_system_reminders(pre_hook_messages)
+                post_hook_result = await self.hook_manager.run_post_tool_use(
+                    tool_call.tool_name,
+                    effective_args,
+                    tool_error=error_msg,
+                )
+                self._inject_system_reminders(post_hook_result.system_messages)
+
                 continue
 
     async def _chat(self, max_tokens: int | None = None) -> LLMChunk:
@@ -634,14 +765,33 @@ class Agent:
         if time_seconds > 0 and usage.completion_tokens > 0:
             self.stats.tokens_per_second = usage.completion_tokens / time_seconds
 
+    def _inject_system_reminders(self, messages: list[str]) -> None:
+        for message in messages:
+            self._inject_system_reminder(message)
+
+    def _inject_system_reminder(self, message: str) -> None:
+        """Append a system reminder message to the conversation."""
+        reminder_content = f"<system-reminder>{message}</system-reminder>"
+        self.messages.append(
+            LLMMessage(role=Role.system, content=reminder_content)
+        )
+
     async def _should_execute_tool(
-        self, tool: BaseTool, args: BaseModel, tool_call_id: str
+        self, tool: BaseTool, args: BaseModel, tool_call_id: str, force_ask: bool = False
     ) -> ToolDecision:
-        if self.auto_approve:
+        if force_ask and self.approval_callback is None:
+            return ToolDecision(
+                verdict=ToolExecutionResponse.SKIP,
+                feedback=(
+                    "Tool execution not permitted: hook requested approval, "
+                    f"but approvals are disabled in {self._mode.display_name} mode."
+                ),
+            )
+        if self.auto_approve and not force_ask:
             return ToolDecision(verdict=ToolExecutionResponse.EXECUTE)
 
         allowlist_denylist_result = tool.check_allowlist_denylist(args)
-        if allowlist_denylist_result == ToolPermission.ALWAYS:
+        if allowlist_denylist_result == ToolPermission.ALWAYS and not force_ask:
             return ToolDecision(verdict=ToolExecutionResponse.EXECUTE)
         elif allowlist_denylist_result == ToolPermission.NEVER:
             denylist_patterns = tool.config.denylist
@@ -654,7 +804,7 @@ class Agent:
         tool_name = tool.get_name()
         perm = self.tool_manager.get_tool_config(tool_name).permission
 
-        if perm is ToolPermission.ALWAYS:
+        if perm is ToolPermission.ALWAYS and not force_ask:
             return ToolDecision(verdict=ToolExecutionResponse.EXECUTE)
         if perm is ToolPermission.NEVER:
             return ToolDecision(
@@ -670,7 +820,10 @@ class Agent:
         if not self.approval_callback:
             return ToolDecision(
                 verdict=ToolExecutionResponse.SKIP,
-                feedback="Tool execution not permitted.",
+                feedback=(
+                    "Tool execution not permitted: approval required, "
+                    f"but no approval callback is configured in {self._mode.display_name} mode."
+                ),
             )
         if asyncio.iscoroutinefunction(self.approval_callback):
             async_callback = cast(AsyncApprovalCallback, self.approval_callback)
@@ -743,14 +896,17 @@ class Agent:
         if len(self.messages) < MIN_MESSAGE_SIZE:
             return
 
-        last_msg = self.messages[-1]
-        if last_msg.role is Role.tool:
+        last_msg = self._last_non_system_message()
+        if last_msg and last_msg.role is Role.tool:
             empty_assistant_msg = LLMMessage(role=Role.assistant, content="Understood.")
             self.messages.append(empty_assistant_msg)
 
     def _reset_session(self) -> None:
         self.session_id = str(uuid4())
         self.interaction_logger.reset_session(self.session_id)
+        self.hook_manager.update_session_info(
+            self.session_id, str(self.config.effective_workdir)
+        )
 
     def set_approval_callback(self, callback: ApprovalCallback) -> None:
         self.approval_callback = callback
@@ -864,6 +1020,9 @@ class Agent:
         if config is not None:
             self.config = config
             self.backend = self.backend_factory()
+            self.hook_manager.update_session_info(
+                self.session_id, str(self.config.effective_workdir)
+            )
 
         if max_turns is not None:
             self._max_turns = max_turns

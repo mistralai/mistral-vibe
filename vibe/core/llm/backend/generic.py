@@ -134,7 +134,9 @@ class OpenAIAdapter(APIAdapter):
     ) -> PreparedRequest:
         field_name = provider.reasoning_field_name
         converted_messages = [
-            self._reasoning_to_api(msg.model_dump(exclude_none=True), field_name)
+            self._reasoning_to_api(
+                msg.model_dump(exclude_none=True, exclude={"metadata"}), field_name
+            )
             for msg in messages
         ]
 
