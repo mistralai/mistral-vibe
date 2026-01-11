@@ -118,7 +118,12 @@ def load_session(
             sys.exit(1)
 
     try:
-        loaded_messages, _ = InteractionLogger.load_session(session_to_load)
+        import asyncio
+
+        # Use async loading for better performance
+        loaded_messages, _ = asyncio.run(
+            InteractionLogger.load_session_async(session_to_load)
+        )
         return loaded_messages
     except Exception as e:
         rprint(f"[red]Failed to load session: {e}[/]")

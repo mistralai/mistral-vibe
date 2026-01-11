@@ -234,7 +234,58 @@ class InteractionLogger:
         return None
 
     @staticmethod
+    async def load_session_async(filepath: Path) -> tuple[list[LLMMessage], dict[str, Any]]:
+        """Load session asynchronously with streaming parsing for better performance."""
+        import asyncio
+
+        import aiofiles
+
+        # Read file asynchronously
+        async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
+            content = await f.read()
+
+        # Parse JSON asynchronously (offload to thread pool to avoid blocking)
+        data = await asyncio.to_thread(json.loads, content)
+
+        # Validate messages in chunks to avoid blocking the event loop
+        messages = []
+        raw_messages = data.get("messages", [])
+
+        # Process in chunks of 50 messages
+        CHUNK_SIZE = 50
+        for i in range(0, len(raw_messages), CHUNK_SIZE):
+            chunk = raw_messages[i : i + CHUNK_SIZE]
+            chunk_messages = await asyncio.to_thread(
+                lambda c: [LLMMessage.model_validate(msg) for msg in c], chunk
+            )
+            messages.extend(chunk_messages)
+            # Yield control to event loop between chunks
+            await asyncio.sleep(0)
+
+        metadata = data.get("metadata", {})
+        return messages, metadata
+
+    @staticmethod
     def load_session(filepath: Path) -> tuple[list[LLMMessage], dict[str, Any]]:
+        """Synchronous wrapper for backward compatibility."""
+        import asyncio
+
+        # Try to use async version if event loop is available
+        try:
+            loop = asyncio.get_running_loop()
+            # If we're in an async context, we can't use run_until_complete
+            # Fall back to sync version
+        except RuntimeError:
+            # No running loop, we can use run_until_complete
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(
+                    InteractionLogger.load_session_async(filepath)
+                )
+            finally:
+                loop.close()
+
+        # Synchronous fallback for when called from async context
         with filepath.open("r", encoding="utf-8") as f:
             content = f.read()
 

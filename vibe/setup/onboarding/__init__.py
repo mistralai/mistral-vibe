@@ -13,6 +13,7 @@ from vibe.cli.textual_ui.terminal_theme import (
 from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
 from vibe.setup.onboarding.screens import (
     ApiKeyScreen,
+    ProviderSelectionScreen,
     ThemeSelectionScreen,
     WelcomeScreen,
 )
@@ -31,6 +32,7 @@ class OnboardingApp(App[str | None]):
             self.theme = TERMINAL_THEME_NAME
 
         self.install_screen(WelcomeScreen(), "welcome")
+        self.install_screen(ProviderSelectionScreen(), "provider_selection")
         self.install_screen(ThemeSelectionScreen(), "theme_selection")
         self.install_screen(ApiKeyScreen(), "api_key")
         self.push_screen("welcome")

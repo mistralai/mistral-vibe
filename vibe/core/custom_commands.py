@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-
-import tomli
 
 from vibe.core.paths.config_paths import VIBE_HOME
 
@@ -74,7 +73,7 @@ class CustomCommandLoader:
             CustomCommandDefinition if successful, None otherwise.
         """
         with open(file_path, "rb") as f:
-            data = tomli.load(f)
+            data = tomllib.load(f)
 
         if "command" not in data:
             return None

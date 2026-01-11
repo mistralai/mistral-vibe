@@ -1,1441 +1,723 @@
 from __future__ import annotations
 
 import asyncio
-from enum import StrEnum, auto
-import subprocess
-import time
-from typing import Any, ClassVar, assert_never
+import sys
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, ClassVar, Iterator
+import uuid
 
-from pydantic import BaseModel
+from prompt_toolkit.history import FileHistory
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
+from textual.command import Hit, Hits, Provider
 from textual.containers import Horizontal, VerticalScroll
-from textual.events import AppBlur, AppFocus, MouseUp
-from textual.widget import Widget
-from textual.widgets import Static
+from textual.events import ScreenResume
+from textual.reactive import reactive
+from textual.screen import ModalScreen
+from textual.widgets import Static, Input
+from textual.worker import Worker, WorkerCancelled, get_current_worker
+import yaml
 
-from vibe import __version__ as CORE_VERSION
-from vibe.cli.clipboard import copy_selection_to_clipboard
-from vibe.cli.commands import CommandRegistry
-from vibe.cli.terminal_setup import setup_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
+from vibe.cli.textual_ui.handlers.render_handler import RenderHandler
+from vibe.cli.textual_ui.hooks import HookManager, HookContext, HookEvent
 from vibe.cli.textual_ui.terminal_theme import (
     TERMINAL_THEME_NAME,
     capture_terminal_theme,
 )
-from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
-from vibe.cli.textual_ui.widgets.compact import CompactMessage
-from vibe.cli.textual_ui.widgets.config_app import ConfigApp
-from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
-from vibe.cli.textual_ui.widgets.loading import LoadingWidget
+from vibe.cli.textual_ui.widgets.context_progress import ContextProgress
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
-    BashOutputMessage,
-    ErrorMessage,
-    InterruptMessage,
-    ReasoningMessage,
-    StreamingMessageBase,
-    UserCommandMessage,
+    BaseMessage,
+    LoadingMessage,
+    SystemMessage,
     UserMessage,
-    WarningMessage,
 )
-from vibe.cli.textual_ui.widgets.mode_indicator import ModeIndicator
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
-from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
+from vibe.cli.textual_ui.widgets.todos import TodoOverlay
 from vibe.cli.textual_ui.widgets.welcome import WelcomeBanner
-from vibe.cli.update_notifier import (
-    FileSystemUpdateCacheRepository,
-    PyPIVersionUpdateGateway,
-    UpdateCacheRepository,
-    VersionUpdateAvailability,
-    VersionUpdateError,
-    VersionUpdateGateway,
-    get_update_if_available,
-)
-from vibe.core.agent import Agent
-from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
+from vibe.core.agent import Agent, LoopControl
 from vibe.core.config import VibeConfig
-from vibe.core.modes import AgentMode, next_mode
+from vibe.core.modes import AgentMode
 from vibe.core.paths.config_paths import HISTORY_FILE
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.types import ApprovalResponse, LLMMessage, Role
-from vibe.core.utils import (
-    CancellationReason,
-    get_user_cancellation_message,
-    is_dangerous_directory,
-    logger,
-)
+from vibe.core.types import LLMMessage
+from vibe.core.utils import InteractionStopped
 
 
-class BottomApp(StrEnum):
-    Approval = auto()
-    Config = auto()
-    Input = auto()
+@dataclass
+class AgentTurnResult:
+    turn_control: LoopControl
+    rendered_ui: list[BaseMessage]
 
 
-class VibeApp(App):  # noqa: PLR0904
-    ENABLE_COMMAND_PALETTE = False
+class TodoCommandProvider(Provider):
+    """Command palette provider for TODO list."""
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        app = self.app
+        assert isinstance(app, VibeApp)
+        todos = app.todo_overlay.get_all_todos()
+
+        for i, todo in enumerate(todos, 1):
+            searchable = f"{i} {todo['content']} {todo['status']}"
+            score = matcher.match(searchable)
+            if score > 0:
+                status_emoji = {
+                    "pending": "⏳",
+                    "in_progress": "🔄",
+                    "completed": "✅",
+                }.get(todo["status"], "❓")
+                yield Hit(
+                    score,
+                    matcher.highlight(f"{status_emoji} {todo['content']}"),
+                    lambda t=todo: app.focus_todo(t),
+                    help=f"Status: {todo['status']}",
+                )
+
+
+class LoadingScreen(ModalScreen[None]):
+    """Modal screen showing loading indicator while session loads."""
+
+    DEFAULT_CSS = """
+    LoadingScreen {
+        align: center middle;
+    }
+    
+    LoadingScreen > Vertical {
+        width: auto;
+        height: auto;
+        background: $surface;
+        border: thick $primary;
+        padding: 2 4;
+    }
+    
+    #loading-title {
+        text-align: center;
+        text-style: bold;
+        color: $accent;
+        padding-bottom: 1;
+    }
+    
+    #loading-message {
+        text-align: center;
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, message: str = "Loading session...") -> None:
+        super().__init__()
+        self.loading_message = message
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Vertical
+
+        with Vertical():
+            yield Static("⏳ Loading", id="loading-title")
+            yield Static(self.loading_message, id="loading-message")
+
+
+class VibeApp(App[None]):
     CSS_PATH = "app.tcss"
 
+    COMMANDS = {TodoCommandProvider}
+
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("ctrl+c", "clear_quit", "Quit", show=False),
-        Binding("ctrl+d", "force_quit", "Quit", show=False, priority=True),
-        Binding("escape", "interrupt", "Interrupt", show=False, priority=True),
-        Binding("ctrl+o", "toggle_tool", "Toggle Tool", show=False),
-        Binding("ctrl+t", "toggle_todo", "Toggle Todo", show=False),
-        Binding("shift+tab", "cycle_mode", "Cycle Mode", show=False, priority=True),
-        Binding("shift+up", "scroll_chat_up", "Scroll Up", show=False, priority=True),
-        Binding(
-            "shift+down", "scroll_chat_down", "Scroll Down", show=False, priority=True
-        ),
+        Binding("ctrl+l", "clear_chat", "Clear Chat", show=True, priority=True),
+        Binding("ctrl+n", "new_session", "New Session", show=True),
+        Binding("ctrl+t", "toggle_todos", "Toggle TODOs", show=False),
+        Binding("ctrl+p", "command_palette", "Commands", show=False),
+        Binding("ctrl+k", "command_palette", "Commands", show=False),
+        Binding("ctrl+1", "toggle_panel('files')", "Toggle Files", show=False),
+        Binding("ctrl+2", "toggle_panel('telemetry')", "Toggle Telemetry", show=False),
+        Binding("ctrl+3", "toggle_panel('tools')", "Toggle Tools", show=False),
+        Binding("ctrl+4", "toggle_panel('memory')", "Toggle Memory", show=False),
     ]
+
+    enable_streaming = reactive(True)
 
     def __init__(
         self,
         config: VibeConfig,
-        initial_mode: AgentMode = AgentMode.DEFAULT,
-        enable_streaming: bool = False,
+        agent: Agent,
+        event_handler: EventHandler,
+        render_handler: RenderHandler,
+        hook_manager: HookManager | None = None,
+        enable_streaming: bool = True,
         initial_prompt: str | None = None,
         loaded_messages: list[LLMMessage] | None = None,
-        version_update_notifier: VersionUpdateGateway | None = None,
-        update_cache_repository: UpdateCacheRepository | None = None,
-        current_version: str = CORE_VERSION,
-        **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
-        self._config = config
-        self._current_agent_mode = initial_mode
+        super().__init__()
+        self.config = config
+        self.agent = agent
+        self.event_handler = event_handler
+        self.render_handler = render_handler
+        self.hook_manager = hook_manager or HookManager()
         self.enable_streaming = enable_streaming
-        self.agent: Agent | None = None
-        self._agent_running = False
-        self._agent_initializing = False
-        self._interrupt_requested = False
-        self._agent_task: asyncio.Task | None = None
+        self.initial_prompt = initial_prompt
+        self.loaded_messages = loaded_messages
 
-        self._loading_widget: LoadingWidget | None = None
-        self._pending_approval: asyncio.Future | None = None
+        self.pt_history = FileHistory(str(HISTORY_FILE.path))
 
-        self.event_handler: EventHandler | None = None
-        self.commands = CommandRegistry()
+        self.event_handler.set_mount_callback(self._mount_and_scroll)
+        self.event_handler.set_app(self)
 
-        # Load custom commands
-        from vibe.core.custom_commands import CustomCommandExecutor, CustomCommandLoader
-        self._custom_command_loader = CustomCommandLoader()
-        self._custom_commands = self._custom_command_loader.load_commands()
-        self._custom_command_executor = CustomCommandExecutor(config.effective_workdir)
+        self.render_handler.on_new_assistant_message = self._handle_new_assistant_message
+        self.render_handler.on_chunk = self._handle_chunk
+        self.render_handler.on_done = self._handle_render_done
 
-        self._chat_input_container: ChatInputContainer | None = None
-        self._mode_indicator: ModeIndicator | None = None
-        self._context_progress: ContextProgress | None = None
-        self._current_bottom_app: BottomApp = BottomApp.Input
+        self.current_turn_worker: Worker[AgentTurnResult] | None = None
+        self.todo_overlay = TodoOverlay()
 
-        self.history_file = HISTORY_FILE.path
-
-        self._tools_collapsed = True
-        self._todos_collapsed = False
-        self._current_streaming_message: AssistantMessage | None = None
-        self._current_streaming_reasoning: ReasoningMessage | None = None
-        self._version_update_notifier = version_update_notifier
-        self._update_cache_repository = update_cache_repository
-        self._is_update_check_enabled = config.enable_update_checks
-        self._current_version = current_version
-        self._update_notification_task: asyncio.Task | None = None
-        self._update_notification_shown = False
-
-        self._initial_prompt = initial_prompt
-        self._loaded_messages = loaded_messages
-        self._agent_init_task: asyncio.Task | None = None
-        # prevent a race condition where the agent initialization
-        # completes exactly at the moment the user interrupts
-        self._agent_init_interrupted = False
-        self._auto_scroll = True
-        self._last_escape_time: float | None = None
         self._terminal_theme = capture_terminal_theme()
 
-    @property
-    def config(self) -> VibeConfig:
-        return self.agent.config if self.agent else self._config
-
     def compose(self) -> ComposeResult:
+        """Compose UI layout based on configuration."""
+        if self.config.use_grid_layout:
+            yield from self._compose_grid_layout()
+        else:
+            yield from self._compose_linear_layout()
+
+        # Common elements for both layouts
+        yield self.todo_overlay
+        yield from self._compose_common_elements()
+
+    def _compose_linear_layout(self) -> ComposeResult:
+        """Traditional single-column chat layout."""
         with VerticalScroll(id="chat"):
             yield WelcomeBanner(self.config)
             yield Static(id="messages")
 
-        with Horizontal(id="loading-area"):
-            yield Static(id="loading-area-content")
-            yield ModeIndicator(mode=self._current_agent_mode)
+    def _compose_grid_layout(self) -> ComposeResult:
+        """Bento Grid cockpit layout with dedicated panels."""
+        from textual.containers import Grid
+        from vibe.cli.textual_ui.widgets.panels import (
+            FileExplorerPanel,
+            MemoryPanel,
+            TelemetryPanel,
+            ToolLogsPanel,
+        )
 
+        with Grid(id="cockpit"):
+            # Left column: File Explorer (rows 1-2)
+            yield FileExplorerPanel(id="file-explorer-panel", classes="panel")
+
+            # Center column: Main Chat (rows 1-2, main content area)
+            with VerticalScroll(id="chat-panel", classes="panel main-chat"):
+                yield WelcomeBanner(self.config)
+                yield Static(id="messages")
+
+            # Right column top: Telemetry (row 1)
+            yield TelemetryPanel(id="telemetry-panel", classes="panel")
+
+            # Left column bottom: Tool Logs (row 2) - moved to row 2 position
+            yield ToolLogsPanel(id="tool-logs-panel", classes="panel")
+
+            # Right column bottom: Memory Bank (row 2)
+            max_context = (
+                self.config.auto_compact_threshold
+                if self.config.auto_compact_threshold > 0
+                else 200_000
+            )
+            yield MemoryPanel(
+                max_context=max_context, id="memory-panel", classes="panel"
+            )
+
+    def _compose_common_elements(self) -> ComposeResult:
+        """Elements common to both layout modes."""
+        yield Horizontal(id="loading-area")
         yield Static(id="todo-area")
-
-        with Static(id="bottom-app-container"):
-            yield ChatInputContainer(
-                history_file=self.history_file,
-                command_registry=self.commands,
-                id="input-container",
-                safety=self._current_agent_mode.safety,
-            )
-
+        yield Static(id="bottom-app-container")
         with Horizontal(id="bottom-bar"):
-            yield PathDisplay(
-                self.config.displayed_workdir or self.config.effective_workdir
+            yield PathDisplay(self.config.displayed_workdir or str(Path.cwd()))
+            yield Static("", id="spacer")
+            yield ContextProgress(max_context=self.config.auto_compact_threshold)
+
+    def _get_messages_container(self) -> Static:
+        """Get messages container regardless of layout mode."""
+        if self.config.use_grid_layout:
+            return self.query_one("#chat-panel #messages", Static)
+        else:
+            return self.query_one("#messages", Static)
+
+    def _get_chat_container(self) -> VerticalScroll:
+        """Get chat scroll container regardless of layout mode."""
+        if self.config.use_grid_layout:
+            return self.query_one("#chat-panel", VerticalScroll)
+        else:
+            return self.query_one("#chat", VerticalScroll)
+
+    def _update_grid_panels(self) -> None:
+        """Update all grid panels after an agent turn."""
+        if not self.config.use_grid_layout:
+            return
+
+        # Update telemetry panel
+        with suppress(Exception):
+            from vibe.cli.textual_ui.widgets.panels import TelemetryPanel
+
+            telemetry = self.query_one("#telemetry-panel", TelemetryPanel)
+            telemetry.update_from_stats(self.agent.stats)
+
+        # Update memory panel
+        with suppress(Exception):
+            from vibe.cli.textual_ui.widgets.panels import MemoryPanel
+
+            memory = self.query_one("#memory-panel", MemoryPanel)
+            memory.update_from_agent(
+                message_count=len(self.agent.messages),
+                stats=self.agent.stats,
             )
-            yield Static(id="spacer")
-            yield ContextProgress()
+
+        # File explorer updates happen automatically via tool events
 
     async def on_mount(self) -> None:
         if self._terminal_theme:
             self.register_theme(self._terminal_theme)
+            self.theme = TERMINAL_THEME_NAME
 
-        if self.config.textual_theme == TERMINAL_THEME_NAME:
-            if self._terminal_theme:
-                self.theme = TERMINAL_THEME_NAME
-        else:
-            self.theme = self.config.textual_theme
-
-        self.event_handler = EventHandler(
-            mount_callback=self._mount_and_scroll,
-            scroll_callback=self._scroll_to_bottom_deferred,
-            todo_area_callback=lambda: self.query_one("#todo-area"),
-            get_tools_collapsed=lambda: self._tools_collapsed,
-            get_todos_collapsed=lambda: self._todos_collapsed,
-        )
-
-        self._chat_input_container = self.query_one(ChatInputContainer)
-        self._mode_indicator = self.query_one(ModeIndicator)
-        self._context_progress = self.query_one(ContextProgress)
-
-        if self.config.auto_compact_threshold > 0:
-            self._context_progress.tokens = TokenState(
-                max_tokens=self.config.auto_compact_threshold, current_tokens=0
+        # Show layout selection screen if preference not set
+        if not self.config.layout_preference_set:
+            from vibe.cli.textual_ui.screens.layout_selection import (
+                LayoutSelectionScreen,
             )
 
-        chat_input_container = self.query_one(ChatInputContainer)
-        chat_input_container.focus_input()
-        await self._show_dangerous_directory_warning()
-        self._schedule_update_notification()
-
-        if self._loaded_messages:
-            await self._rebuild_history_from_messages()
-
-        if self._initial_prompt:
-            self.call_after_refresh(self._process_initial_prompt)
-        else:
-            self._ensure_agent_init_task()
-
-    def _process_initial_prompt(self) -> None:
-        if self._initial_prompt:
-            self.run_worker(
-                self._handle_user_message(self._initial_prompt), exclusive=False
+            use_grid, remember_choice = await self.push_screen_wait(
+                LayoutSelectionScreen()
             )
 
-    async def on_chat_input_container_submitted(
-        self, event: ChatInputContainer.Submitted
-    ) -> None:
-        value = event.value.strip()
-        if not value:
-            return
-
-        input_widget = self.query_one(ChatInputContainer)
-        input_widget.value = ""
-
-        if self._agent_running:
-            await self._interrupt_agent()
-
-        if value.startswith("!"):
-            await self._handle_bash_command(value[1:])
-            return
-
-        if await self._handle_command(value):
-            return
-
-        await self._handle_user_message(value)
-
-    async def on_approval_app_approval_granted(
-        self, message: ApprovalApp.ApprovalGranted
-    ) -> None:
-        if self._pending_approval and not self._pending_approval.done():
-            self._pending_approval.set_result((ApprovalResponse.YES, None))
-
-        await self._switch_to_input_app()
-
-    async def on_approval_app_approval_granted_always_tool(
-        self, message: ApprovalApp.ApprovalGrantedAlwaysTool
-    ) -> None:
-        self._set_tool_permission_always(
-            message.tool_name, save_permanently=message.save_permanently
-        )
-
-        if self._pending_approval and not self._pending_approval.done():
-            self._pending_approval.set_result((ApprovalResponse.YES, None))
-
-        await self._switch_to_input_app()
-
-    async def on_approval_app_approval_rejected(
-        self, message: ApprovalApp.ApprovalRejected
-    ) -> None:
-        if self._pending_approval and not self._pending_approval.done():
-            feedback = str(
-                get_user_cancellation_message(CancellationReason.OPERATION_CANCELLED)
-            )
-            self._pending_approval.set_result((ApprovalResponse.NO, feedback))
-
-        await self._switch_to_input_app()
-
-        if self._loading_widget and self._loading_widget.parent:
-            await self._remove_loading_widget()
-
-    async def _remove_loading_widget(self) -> None:
-        if self._loading_widget and self._loading_widget.parent:
-            await self._loading_widget.remove()
-            self._loading_widget = None
-        self._hide_todo_area()
-
-    def _show_todo_area(self) -> None:
-        try:
-            todo_area = self.query_one("#todo-area")
-            todo_area.add_class("loading-active")
-        except Exception:
-            pass
-
-    def _hide_todo_area(self) -> None:
-        try:
-            todo_area = self.query_one("#todo-area")
-            todo_area.remove_class("loading-active")
-        except Exception:
-            pass
-
-    def on_config_app_setting_changed(self, message: ConfigApp.SettingChanged) -> None:
-        if message.key == "textual_theme":
-            if message.value == TERMINAL_THEME_NAME:
-                if self._terminal_theme:
-                    self.theme = TERMINAL_THEME_NAME
-            else:
-                self.theme = message.value
-
-    async def on_config_app_config_closed(
-        self, message: ConfigApp.ConfigClosed
-    ) -> None:
-        if message.changes:
-            self._save_config_changes(message.changes)
-            await self._reload_config()
-        else:
-            await self._mount_and_scroll(
-                UserCommandMessage("Configuration closed (no changes saved).")
-            )
-
-        await self._switch_to_input_app()
-
-    def _set_tool_permission_always(
-        self, tool_name: str, save_permanently: bool = False
-    ) -> None:
-        if save_permanently:
-            VibeConfig.save_updates({"tools": {tool_name: {"permission": "always"}}})
-
-        if tool_name not in self.config.tools:
-            self.config.tools[tool_name] = BaseToolConfig()
-
-        self.config.tools[tool_name].permission = ToolPermission.ALWAYS
-
-    def _save_config_changes(self, changes: dict[str, str]) -> None:
-        if not changes:
-            return
-
-        updates: dict = {}
-
-        for key, value in changes.items():
-            match key:
-                case "active_model":
-                    if value != self.config.active_model:
-                        updates["active_model"] = value
-                case "textual_theme":
-                    if value != self.config.textual_theme:
-                        updates["textual_theme"] = value
-
-        if updates:
-            VibeConfig.save_updates(updates)
-
-    async def _handle_command(self, user_input: str) -> bool:
-        if command := self.commands.find_command(user_input):
-            await self._mount_and_scroll(UserMessage(user_input))
-
-            # Check if this is a custom command
-            if command.is_custom:
-                await self._handle_custom_command(command.handler)
-            else:
-                # Built-in command
-                handler = getattr(self, command.handler)
-                if asyncio.iscoroutinefunction(handler):
-                    await handler()
-                else:
-                    handler()
-            return True
-        return False
-
-    async def _handle_bash_command(self, command: str) -> None:
-        if not command:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "No command provided after '!'", collapsed=self._tools_collapsed
-                )
-            )
-            return
-
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=False,
-                timeout=30,
-                cwd=self.config.effective_workdir,
-            )
-            stdout = (
-                result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
-            )
-            stderr = (
-                result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
-            )
-            output = stdout or stderr or "(no output)"
-            exit_code = result.returncode
-            await self._mount_and_scroll(
-                BashOutputMessage(
-                    command, str(self.config.effective_workdir), output, exit_code
-                )
-            )
-        except subprocess.TimeoutExpired:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "Command timed out after 30 seconds",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-        except Exception as e:
-            await self._mount_and_scroll(
-                ErrorMessage(f"Command failed: {e}", collapsed=self._tools_collapsed)
-            )
-
-    async def _handle_user_message(self, message: str) -> None:
-        init_task = self._ensure_agent_init_task()
-        pending_init = bool(init_task and not init_task.done())
-        user_message = UserMessage(message, pending=pending_init)
-
-        await self._mount_and_scroll(user_message)
-
-        self.run_worker(
-            self._process_user_message_after_mount(
-                message=message,
-                user_message=user_message,
-                init_task=init_task,
-                pending_init=pending_init,
-            ),
-            exclusive=False,
-        )
-
-    async def _process_user_message_after_mount(
-        self,
-        message: str,
-        user_message: UserMessage,
-        init_task: asyncio.Task | None,
-        pending_init: bool,
-    ) -> None:
-        try:
-            if init_task and not init_task.done():
-                loading = LoadingWidget()
-                self._loading_widget = loading
-                await self.query_one("#loading-area-content").mount(loading)
-
+            if remember_choice:
+                # Save preference to config
                 try:
-                    await init_task
-                finally:
-                    if self._loading_widget and self._loading_widget.parent:
-                        await self._loading_widget.remove()
-                        self._loading_widget = None
-                    if pending_init:
-                        await user_message.set_pending(False)
-            elif pending_init:
-                await user_message.set_pending(False)
+                    VibeConfig.save_updates(
+                        {
+                            "use_grid_layout": use_grid,
+                            "layout_preference_set": True,
+                        }
+                    )
+                except Exception:
+                    pass
 
-            if pending_init and self._agent_init_interrupted:
-                self._agent_init_interrupted = False
+            if use_grid and not self.config.use_grid_layout:
+                # User selected grid but app started in linear mode
+                # Inform them to restart
+                from rich import print as rprint
+
+                rprint(
+                    "\n[green]Grid layout preference saved![/] "
+                    "Please restart Vibe to use the new layout.\n"
+                )
+                self.exit()
                 return
-
-            if self.agent and not self._agent_running:
-                self._agent_task = asyncio.create_task(self._handle_agent_turn(message))
-        except asyncio.CancelledError:
-            self._agent_init_interrupted = False
-            if pending_init:
-                await user_message.set_pending(False)
-            return
-
-    async def _initialize_agent(self) -> None:
-        if self.agent or self._agent_initializing:
-            return
-
-        self._agent_initializing = True
-        try:
-            agent = Agent(
-                self.config,
-                mode=self._current_agent_mode,
-                enable_streaming=self.enable_streaming,
-            )
-
-            if not self._current_agent_mode.auto_approve:
-                agent.approval_callback = self._approval_callback
-
-            if self._loaded_messages:
-                non_system_messages = [
-                    msg
-                    for msg in self._loaded_messages
-                    if not (msg.role == Role.system)
-                ]
-                agent.messages.extend(non_system_messages)
-                logger.info(
-                    "Loaded %d messages from previous session", len(non_system_messages)
-                )
-
-            self.agent = agent
-        except asyncio.CancelledError:
-            self.agent = None
-            return
-        except Exception as e:
-            self.agent = None
-            await self._mount_and_scroll(
-                ErrorMessage(str(e), collapsed=self._tools_collapsed)
-            )
-        finally:
-            self._agent_initializing = False
-            self._agent_init_task = None
-
-    async def _rebuild_history_from_messages(self) -> None:
-        if not self._loaded_messages:
-            return
-
-        messages_area = self.query_one("#messages")
-        tool_call_map: dict[str, str] = {}
-
-        for msg in self._loaded_messages:
-            if msg.role == Role.system:
-                continue
-
-            match msg.role:
-                case Role.user:
-                    if msg.content:
-                        await messages_area.mount(UserMessage(msg.content))
-
-                case Role.assistant:
-                    await self._mount_history_assistant_message(
-                        msg, messages_area, tool_call_map
-                    )
-
-                case Role.tool:
-                    tool_name = msg.name or tool_call_map.get(
-                        msg.tool_call_id or "", "tool"
-                    )
-                    await messages_area.mount(
-                        ToolResultMessage(
-                            tool_name=tool_name,
-                            content=msg.content,
-                            collapsed=self._tools_collapsed,
-                        )
-                    )
-
-    async def _mount_history_assistant_message(
-        self, msg: LLMMessage, messages_area: Widget, tool_call_map: dict[str, str]
-    ) -> None:
-        if msg.content:
-            widget = AssistantMessage(msg.content)
-            await messages_area.mount(widget)
-            await widget.write_initial_content()
-            await widget.stop_stream()
-
-        if not msg.tool_calls:
-            return
-
-        for tool_call in msg.tool_calls:
-            tool_name = tool_call.function.name or "unknown"
-            if tool_call.id:
-                tool_call_map[tool_call.id] = tool_name
-
-            await messages_area.mount(ToolCallMessage(tool_name=tool_name))
-
-    def _ensure_agent_init_task(self) -> asyncio.Task | None:
-        if self.agent:
-            self._agent_init_task = None
-            self._agent_init_interrupted = False
-            return None
-
-        if self._agent_init_task and self._agent_init_task.done():
-            if self._agent_init_task.cancelled():
-                self._agent_init_task = None
-
-        if not self._agent_init_task or self._agent_init_task.done():
-            self._agent_init_interrupted = False
-            self._agent_init_task = asyncio.create_task(self._initialize_agent())
-
-        return self._agent_init_task
-
-    async def _approval_callback(
-        self, tool: str, args: BaseModel, tool_call_id: str
-    ) -> tuple[ApprovalResponse, str | None]:
-        self._pending_approval = asyncio.Future()
-        await self._switch_to_approval_app(tool, args)
-        result = await self._pending_approval
-        self._pending_approval = None
-        return result
-
-    async def _handle_agent_turn(self, prompt: str) -> None:
-        if not self.agent:
-            return
-
-        self._agent_running = True
-
-        loading_area = self.query_one("#loading-area-content")
-
-        loading = LoadingWidget()
-        self._loading_widget = loading
-        await loading_area.mount(loading)
-        self._show_todo_area()
-
-        try:
-            rendered_prompt = render_path_prompt(
-                prompt, base_dir=self.config.effective_workdir
-            )
-            async for event in self.agent.act(rendered_prompt):
-                if self._context_progress and self.agent:
-                    current_state = self._context_progress.tokens
-                    self._context_progress.tokens = TokenState(
-                        max_tokens=current_state.max_tokens,
-                        current_tokens=self.agent.stats.context_tokens,
-                    )
-
-                if self.event_handler:
-                    await self.event_handler.handle_event(
-                        event,
-                        loading_active=self._loading_widget is not None,
-                        loading_widget=self._loading_widget,
-                    )
-
-        except asyncio.CancelledError:
-            if self._loading_widget and self._loading_widget.parent:
-                await self._loading_widget.remove()
-            if self.event_handler:
-                self.event_handler.stop_current_tool_call()
-            raise
-        except Exception as e:
-            if self._loading_widget and self._loading_widget.parent:
-                await self._loading_widget.remove()
-            if self.event_handler:
-                self.event_handler.stop_current_tool_call()
-            await self._mount_and_scroll(
-                ErrorMessage(str(e), collapsed=self._tools_collapsed)
-            )
-        finally:
-            self._agent_running = False
-            self._interrupt_requested = False
-            self._agent_task = None
-            if self._loading_widget:
-                await self._loading_widget.remove()
-            self._loading_widget = None
-            self._hide_todo_area()
-            await self._finalize_current_streaming_message()
-
-    async def _interrupt_agent(self) -> None:
-        interrupting_agent_init = bool(
-            self._agent_init_task and not self._agent_init_task.done()
-        )
-
-        if (
-            not self._agent_running and not interrupting_agent_init
-        ) or self._interrupt_requested:
-            return
-
-        self._interrupt_requested = True
-
-        if interrupting_agent_init and self._agent_init_task:
-            self._agent_init_interrupted = True
-            self._agent_init_task.cancel()
-            try:
-                await self._agent_init_task
-            except asyncio.CancelledError:
-                pass
-
-        if self._agent_task and not self._agent_task.done():
-            self._agent_task.cancel()
-            try:
-                await self._agent_task
-            except asyncio.CancelledError:
-                pass
-
-        if self.event_handler:
-            self.event_handler.stop_current_tool_call()
-            self.event_handler.stop_current_compact()
-
-        self._agent_running = False
-        loading_area = self.query_one("#loading-area-content")
-        await loading_area.remove_children()
-        self._loading_widget = None
-        self._hide_todo_area()
-
-        await self._finalize_current_streaming_message()
-        await self._mount_and_scroll(InterruptMessage())
-
-        self._interrupt_requested = False
-
-    async def _show_help(self) -> None:
-        help_text = self.commands.get_help_text()
-        await self._mount_and_scroll(UserCommandMessage(help_text))
-
-    async def _show_status(self) -> None:
-        if self.agent is None:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "Agent not initialized yet. Send a message first.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
-        stats = self.agent.stats
-        status_text = f"""## Agent Statistics
-
-- **Steps**: {stats.steps:,}
-- **Session Prompt Tokens**: {stats.session_prompt_tokens:,}
-- **Session Completion Tokens**: {stats.session_completion_tokens:,}
-- **Session Total LLM Tokens**: {stats.session_total_llm_tokens:,}
-- **Last Turn Tokens**: {stats.last_turn_total_tokens:,}
-- **Cost**: ${stats.session_cost:.4f}
-"""
-        await self._mount_and_scroll(UserCommandMessage(status_text))
-
-    async def _show_config(self) -> None:
-        """Switch to the configuration app in the bottom panel."""
-        if self._current_bottom_app == BottomApp.Config:
-            return
-        await self._switch_to_config_app()
-
-    async def _reload_config(self) -> None:
-        try:
-            new_config = VibeConfig.load(**self._current_agent_mode.config_overrides)
-
-            if self.agent:
-                await self.agent.reload_with_initial_messages(config=new_config)
-            else:
-                self._config = new_config
-            if self._context_progress:
-                if self.config.auto_compact_threshold > 0:
-                    current_tokens = (
-                        self.agent.stats.context_tokens if self.agent else 0
-                    )
-                    self._context_progress.tokens = TokenState(
-                        max_tokens=self.config.auto_compact_threshold,
-                        current_tokens=current_tokens,
-                    )
-                else:
-                    self._context_progress.tokens = TokenState()
-
-            await self._mount_and_scroll(UserCommandMessage("Configuration reloaded."))
-        except Exception as e:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    f"Failed to reload config: {e}", collapsed=self._tools_collapsed
-                )
-            )
-
-    async def _clear_history(self) -> None:
-        if self.agent is None:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "No conversation history to clear yet.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
-        if not self.agent:
-            return
-
-        try:
-            await self.agent.clear_history()
-            await self._finalize_current_streaming_message()
-            messages_area = self.query_one("#messages")
-            await messages_area.remove_children()
-            todo_area = self.query_one("#todo-area")
-            await todo_area.remove_children()
-
-            if self._context_progress and self.agent:
-                current_state = self._context_progress.tokens
-                self._context_progress.tokens = TokenState(
-                    max_tokens=current_state.max_tokens,
-                    current_tokens=self.agent.stats.context_tokens,
-                )
-            await messages_area.mount(UserMessage("/clear"))
-            await self._mount_and_scroll(
-                UserCommandMessage("Conversation history cleared!")
-            )
-            chat = self.query_one("#chat", VerticalScroll)
-            chat.scroll_home(animate=False)
-
-        except Exception as e:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    f"Failed to clear history: {e}", collapsed=self._tools_collapsed
-                )
-            )
-
-    async def _show_log_path(self) -> None:
-        if self.agent is None:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "No log file created yet. Send a message first.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
-        if not self.agent.interaction_logger.enabled:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "Session logging is disabled in configuration.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
-        try:
-            log_path = str(self.agent.interaction_logger.filepath)
-            await self._mount_and_scroll(
-                UserCommandMessage(
-                    f"## Current Log File Path\n\n`{log_path}`\n\nYou can send this file to share your interaction."
-                )
-            )
-        except Exception as e:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    f"Failed to get log path: {e}", collapsed=self._tools_collapsed
-                )
-            )
-
-    async def _compact_history(self) -> None:
-        if self._agent_running:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "Cannot compact while agent is processing. Please wait.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
-        if self.agent is None:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "No conversation history to compact yet.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
-        if len(self.agent.messages) <= 1:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "No conversation history to compact yet.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
-        if not self.agent or not self.event_handler:
-            return
-
-        old_tokens = self.agent.stats.context_tokens
-        compact_msg = CompactMessage()
-        self.event_handler.current_compact = compact_msg
-        await self._mount_and_scroll(compact_msg)
-
-        self._agent_task = asyncio.create_task(
-            self._run_compact(compact_msg, old_tokens)
-        )
-
-    async def _run_compact(self, compact_msg: CompactMessage, old_tokens: int) -> None:
-        self._agent_running = True
-        try:
-            if not self.agent:
-                return
-
-            await self.agent.compact()
-            new_tokens = self.agent.stats.context_tokens
-            compact_msg.set_complete(old_tokens=old_tokens, new_tokens=new_tokens)
-
-            if self._context_progress:
-                current_state = self._context_progress.tokens
-                self._context_progress.tokens = TokenState(
-                    max_tokens=current_state.max_tokens, current_tokens=new_tokens
-                )
-        except asyncio.CancelledError:
-            compact_msg.set_error("Compaction interrupted")
-            raise
-        except Exception as e:
-            compact_msg.set_error(str(e))
-        finally:
-            self._agent_running = False
-            self._agent_task = None
-            if self.event_handler:
-                self.event_handler.current_compact = None
-
-    def _get_session_resume_info(self) -> str | None:
-        if not self.agent:
-            return None
-        if not self.agent.interaction_logger.enabled:
-            return None
-        if not self.agent.interaction_logger.session_id:
-            return None
-        return self.agent.interaction_logger.session_id[:8]
-
-    async def _exit_app(self) -> None:
-        self.exit(result=self._get_session_resume_info())
-
-    async def _setup_terminal(self) -> None:
-        result = setup_terminal()
-
-        if result.success:
-            if result.requires_restart:
-                await self._mount_and_scroll(
-                    UserCommandMessage(
-                        f"{result.terminal.value}: Set up Shift+Enter keybind (You may need to restart your terminal.)"
-                    )
-                )
-            else:
-                await self._mount_and_scroll(
-                    WarningMessage(
-                        f"{result.terminal.value}: Shift+Enter keybind already set up"
-                    )
-                )
-        else:
-            await self._mount_and_scroll(
-                ErrorMessage(result.message, collapsed=self._tools_collapsed)
-            )
-
-    async def _handle_custom_command(self, handler_name: str) -> None:
-        """Handle execution of a custom command."""
-        # Extract command name from handler name (format: _custom_<name>)
-        cmd_name = handler_name.replace("_custom_", "")
-
-        if cmd_name not in self._custom_commands:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    f"Custom command '{cmd_name}' not found", collapsed=self._tools_collapsed
-                )
-            )
-            return
-
-        cmd_def = self._custom_commands[cmd_name]
-
-        try:
-            if cmd_def.command_type == "bash":
-                # Execute bash command
-                stdout, stderr, returncode = await self._custom_command_executor.execute_bash_command(
-                    cmd_def.handler  # type: ignore
-                )
-
-                if returncode == 0:
-                    if stdout.strip():
-                        await self._mount_and_scroll(
-                            BashOutputMessage(
-                                command=cmd_def.handler,  # type: ignore
-                                stdout=stdout,
-                                stderr="",
-                                returncode=0,
-                                collapsed=self._tools_collapsed,
-                            )
-                        )
-                    else:
-                        await self._mount_and_scroll(
-                            UserCommandMessage(f"Command '{cmd_name}' completed successfully")
-                        )
-                else:
-                    await self._mount_and_scroll(
-                        BashOutputMessage(
-                            command=cmd_def.handler,  # type: ignore
-                            stdout=stdout,
-                            stderr=stderr,
-                            returncode=returncode,
-                            collapsed=False,  # Show errors expanded
-                        )
-                    )
-
-            elif cmd_def.command_type == "prompt":
-                # Submit prompt template as user message
-                prompt_text = self._custom_command_executor.get_prompt_text(cmd_def.handler)  # type: ignore
-                await self._handle_input_submit(prompt_text, prefilled=True)
-
-            else:
-                await self._mount_and_scroll(
-                    ErrorMessage(
-                        f"Unknown command type '{cmd_def.command_type}'",
-                        collapsed=self._tools_collapsed,
-                    )
-                )
-
-        except Exception as e:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    f"Error executing custom command '{cmd_name}': {e}",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-
-    async def _switch_to_config_app(self) -> None:
-        if self._current_bottom_app == BottomApp.Config:
-            return
-
-        bottom_container = self.query_one("#bottom-app-container")
-        await self._mount_and_scroll(UserCommandMessage("Configuration opened..."))
-
-        try:
-            chat_input_container = self.query_one(ChatInputContainer)
-            await chat_input_container.remove()
-        except Exception:
-            pass
-
-        if self._mode_indicator:
-            self._mode_indicator.display = False
-
-        config_app = ConfigApp(
-            self.config, has_terminal_theme=self._terminal_theme is not None
-        )
-        await bottom_container.mount(config_app)
-        self._current_bottom_app = BottomApp.Config
-
-        self.call_after_refresh(config_app.focus)
-
-    async def _switch_to_approval_app(
-        self, tool_name: str, tool_args: BaseModel
-    ) -> None:
-        bottom_container = self.query_one("#bottom-app-container")
-
-        try:
-            chat_input_container = self.query_one(ChatInputContainer)
-            await chat_input_container.remove()
-        except Exception:
-            pass
-
-        if self._mode_indicator:
-            self._mode_indicator.display = False
-
-        approval_app = ApprovalApp(
-            tool_name=tool_name,
-            tool_args=tool_args,
-            workdir=str(self.config.effective_workdir),
-            config=self.config,
-        )
-        await bottom_container.mount(approval_app)
-        self._current_bottom_app = BottomApp.Approval
-
-        self.call_after_refresh(approval_app.focus)
-        self.call_after_refresh(self._scroll_to_bottom)
-
-    async def _switch_to_input_app(self) -> None:
-        bottom_container = self.query_one("#bottom-app-container")
-
-        try:
-            config_app = self.query_one("#config-app")
-            await config_app.remove()
-        except Exception:
-            pass
-
-        try:
-            approval_app = self.query_one("#approval-app")
-            await approval_app.remove()
-        except Exception:
-            pass
-
-        if self._mode_indicator:
-            self._mode_indicator.display = True
-
-        try:
-            chat_input_container = self.query_one(ChatInputContainer)
-            self._chat_input_container = chat_input_container
-            self._current_bottom_app = BottomApp.Input
-            self.call_after_refresh(chat_input_container.focus_input)
-            return
-        except Exception:
-            pass
 
         chat_input_container = ChatInputContainer(
-            history_file=self.history_file,
-            command_registry=self.commands,
-            id="input-container",
-            safety=self._current_agent_mode.safety,
+            self.pt_history,
+            self.agent.mode,
+            submit_callback=self.handle_user_input,
+            vim_mode=self.config.vim_keybindings,
         )
-        await bottom_container.mount(chat_input_container)
-        self._chat_input_container = chat_input_container
+        await self.query_one("#bottom-app-container").mount(chat_input_container)
+        self.set_focus(chat_input_container.query_one(Input))
 
-        self._current_bottom_app = BottomApp.Input
+        # If we have loaded messages, display them
+        if self.loaded_messages:
+            await self._restore_session(self.loaded_messages)
 
-        self.call_after_refresh(chat_input_container.focus_input)
+        # If there's an initial prompt, send it automatically
+        if self.initial_prompt:
+            await self.handle_user_input(self.initial_prompt)
 
-    def _focus_current_bottom_app(self) -> None:
-        try:
-            match self._current_bottom_app:
-                case BottomApp.Input:
-                    self.query_one(ChatInputContainer).focus_input()
-                case BottomApp.Config:
-                    self.query_one(ConfigApp).focus()
-                case BottomApp.Approval:
-                    self.query_one(ApprovalApp).focus()
-                case app:
-                    assert_never(app)
-        except Exception:
-            pass
-
-    def action_interrupt(self) -> None:
-        current_time = time.monotonic()
-
-        if self._current_bottom_app == BottomApp.Config:
-            try:
-                config_app = self.query_one(ConfigApp)
-                config_app.action_close()
-            except Exception:
-                pass
-            self._last_escape_time = None
-            return
-
-        if self._current_bottom_app == BottomApp.Approval:
-            try:
-                approval_app = self.query_one(ApprovalApp)
-                approval_app.action_reject()
-            except Exception:
-                pass
-            self._last_escape_time = None
-            return
-
-        if (
-            self._current_bottom_app == BottomApp.Input
-            and self._last_escape_time is not None
-            and (current_time - self._last_escape_time) < 0.2  # noqa: PLR2004
-        ):
-            try:
-                input_widget = self.query_one(ChatInputContainer)
-                if input_widget.value:
-                    input_widget.value = ""
-                    self._last_escape_time = None
-                    return
-            except Exception:
-                pass
-
-        has_pending_user_message = any(
-            msg.has_class("pending") for msg in self.query(UserMessage)
+    async def _restore_session(self, messages: list[LLMMessage]) -> None:
+        """Restore a session from loaded messages."""
+        # Show loading screen
+        loading_screen = LoadingScreen(
+            f"Loading {len(messages)} messages from previous session..."
         )
-
-        interrupt_needed = self._agent_running or (
-            self._agent_init_task
-            and not self._agent_init_task.done()
-            and has_pending_user_message
-        )
-
-        if interrupt_needed:
-            self.run_worker(self._interrupt_agent(), exclusive=False)
-
-        self._last_escape_time = current_time
-        self._scroll_to_bottom()
-        self._focus_current_bottom_app()
-
-    async def action_toggle_tool(self) -> None:
-        self._tools_collapsed = not self._tools_collapsed
-
-        for result in self.query(ToolResultMessage):
-            if result.tool_name != "todo":
-                await result.set_collapsed(self._tools_collapsed)
+        self.push_screen(loading_screen)
 
         try:
-            for error_msg in self.query(ErrorMessage):
-                error_msg.set_collapsed(self._tools_collapsed)
-        except Exception:
-            pass
+            # Add messages to agent (this is fast, just appending to list)
+            self.agent.messages = list(messages)
 
-    async def action_toggle_todo(self) -> None:
-        self._todos_collapsed = not self._todos_collapsed
+            # Render messages progressively in the UI
+            rendered_widgets = []
+            for msg in messages:
+                widgets = self.render_handler.render_message(msg)
+                rendered_widgets.extend(widgets)
 
-        for result in self.query(ToolResultMessage):
-            if result.tool_name == "todo":
-                await result.set_collapsed(self._todos_collapsed)
+            # Mount in chunks to avoid blocking
+            messages_container = self._get_messages_container()
+            CHUNK_SIZE = 20  # Mount 20 widgets at a time
 
-    def action_cycle_mode(self) -> None:
-        if self._current_bottom_app != BottomApp.Input:
-            return
+            for i in range(0, len(rendered_widgets), CHUNK_SIZE):
+                chunk = rendered_widgets[i : i + CHUNK_SIZE]
+                await messages_container.mount_all(chunk)
+                # Brief pause to let UI update
+                await asyncio.sleep(0.01)
 
-        new_mode = next_mode(self._current_agent_mode)
-        self._switch_mode(new_mode)
+            # Scroll to bottom
+            chat = self._get_chat_container()
+            chat.scroll_end(animate=False)
 
-    def _switch_mode(self, mode: AgentMode) -> None:
-        if mode == self._current_agent_mode:
-            return
+        finally:
+            # Dismiss loading screen
+            self.pop_screen()
 
-        self._current_agent_mode = mode
+    def focus_todo(self, todo: dict[str, Any]) -> None:
+        """Focus and highlight a specific TODO item."""
+        if not self.todo_overlay.overlay_open:
+            self.action_toggle_todos()
+        # Additional focus logic here if needed
 
-        if self._mode_indicator:
-            self._mode_indicator.set_mode(mode)
-        if self._chat_input_container:
-            self._chat_input_container.set_safety(mode.safety)
+    async def handle_user_input(self, user_input: str) -> None:
+        hook_ctx = HookContext(self, self.config, self.agent, user_input=user_input)
+        await self.hook_manager.run_hook(HookEvent.USER_PROMPT_SUBMIT, hook_ctx)
 
-        if self.agent:
-            if mode.auto_approve:
-                self.agent.approval_callback = None
+        # Create user message widget
+        user_widget = UserMessage(user_input)
+
+        # Mount user message
+        await self._mount_and_scroll(user_widget)
+
+        # Start agent turn
+        await self._start_agent_turn(user_input)
+
+    @work(exclusive=True)
+    async def _start_agent_turn(self, user_input: str) -> AgentTurnResult:
+        """Execute a single agent turn."""
+        self.current_turn_worker = get_current_worker()
+
+        try:
+            # Add thinking animation class
+            if self.config.use_grid_layout:
+                chat_panel = self.query_one("#chat-panel")
+                chat_panel.add_class("thinking")
             else:
-                self.agent.approval_callback = self._approval_callback
+                chat = self.query_one("#chat")
+                chat.add_class("thinking")
 
-            self.run_worker(
-                self._do_agent_switch(mode), group="mode_switch", exclusive=True
+            turn_control = await self.agent.step(
+                user_input, self.event_handler, self.enable_streaming
             )
 
-        self._focus_current_bottom_app()
+            # Render any remaining messages
+            rendered_ui = self.render_handler.finalize()
+            for widget in rendered_ui:
+                await self._mount_and_scroll(widget)
 
-    async def _do_agent_switch(self, mode: AgentMode) -> None:
-        if self.agent:
-            await self.agent.switch_mode(mode)
+            return AgentTurnResult(turn_control=turn_control, rendered_ui=rendered_ui)
 
-            if self._context_progress:
-                current_state = self._context_progress.tokens
-                self._context_progress.tokens = TokenState(
-                    max_tokens=current_state.max_tokens,
-                    current_tokens=self.agent.stats.context_tokens,
-                )
-
-    def action_clear_quit(self) -> None:
-        input_widgets = self.query(ChatInputContainer)
-        if input_widgets:
-            input_widget = input_widgets.first()
-            if input_widget.value:
-                input_widget.value = ""
-                return
-
-        self.action_force_quit()
-
-    def action_force_quit(self) -> None:
-        if self._agent_task and not self._agent_task.done():
-            self._agent_task.cancel()
-
-        self.exit(result=self._get_session_resume_info())
-
-    def action_scroll_chat_up(self) -> None:
-        try:
-            chat = self.query_one("#chat", VerticalScroll)
-            chat.scroll_relative(y=-5, animate=False)
-            self._auto_scroll = False
-        except Exception:
-            pass
-
-    def action_scroll_chat_down(self) -> None:
-        try:
-            chat = self.query_one("#chat", VerticalScroll)
-            chat.scroll_relative(y=5, animate=False)
-            if self._is_scrolled_to_bottom(chat):
-                self._auto_scroll = True
-        except Exception:
-            pass
-
-    async def _show_dangerous_directory_warning(self) -> None:
-        is_dangerous, reason = is_dangerous_directory()
-        if is_dangerous:
-            warning = (
-                f"⚠ WARNING: {reason}\n\nRunning in this location is not recommended."
+        except WorkerCancelled:
+            raise
+        except InteractionStopped:
+            return AgentTurnResult(
+                turn_control=LoopControl(should_continue=False, is_stuck=False),
+                rendered_ui=[],
             )
-            await self._mount_and_scroll(WarningMessage(warning, show_border=False))
+        except Exception:
+            raise
+        finally:
+            # Remove thinking animation
+            if self.config.use_grid_layout:
+                with suppress(Exception):
+                    chat_panel = self.query_one("#chat-panel")
+                    chat_panel.remove_class("thinking")
+            else:
+                with suppress(Exception):
+                    chat = self.query_one("#chat")
+                    chat.remove_class("thinking")
 
-    async def _finalize_current_streaming_message(self) -> None:
-        if self._current_streaming_reasoning is not None:
-            self._current_streaming_reasoning.stop_spinning()
-            await self._current_streaming_reasoning.stop_stream()
-            self._current_streaming_reasoning = None
+            self.current_turn_worker = None
 
-        if self._current_streaming_message is None:
+    def _handle_agent_turn(self, result: AgentTurnResult) -> None:
+        """Handle completion of agent turn."""
+        # Update grid panels if in grid mode
+        self._update_grid_panels()
+
+        # Update context progress
+        with suppress(Exception):
+            progress = self.query_one(ContextProgress)
+            progress.update_from_agent(self.agent)
+
+        # Cleanup old messages if needed (performance optimization)
+        self._cleanup_old_messages()
+
+        if result.turn_control.should_continue and not result.turn_control.is_stuck:
+            # Schedule next turn
+            self._start_agent_turn("")
+
+    def _cleanup_old_messages(self, keep_last_n: int = 200) -> None:
+        """Remove old message widgets to prevent DOM bloat.
+
+        Keeps the last N messages in the DOM for performance.
+        """
+        messages_container = self._get_messages_container()
+        all_messages = list(messages_container.query(BaseMessage))
+
+        if len(all_messages) > keep_last_n:
+            to_remove = all_messages[: -keep_last_n]
+            for msg in to_remove:
+                # Call disposal method if it exists
+                if hasattr(msg, "dispose"):
+                    msg.dispose()
+                msg.remove()
+
+    @on(Worker.StateChanged)
+    def handle_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker is not self.current_turn_worker:
             return
 
-        await self._current_streaming_message.stop_stream()
-        self._current_streaming_message = None
+        if event.state == event.worker.state.SUCCESS:
+            assert event.worker.result is not None
+            self._handle_agent_turn(event.worker.result)
+        elif event.state == event.worker.state.ERROR:
+            self._handle_agent_error(event.worker.error)
+        elif event.state == event.worker.state.CANCELLED:
+            self._handle_agent_cancel()
 
-    async def _handle_streaming_widget[T: StreamingMessageBase](
-        self,
-        widget: T,
-        current_stream: T | None,
-        other_stream: StreamingMessageBase | None,
-        messages_area: Widget,
-    ) -> T | None:
-        if other_stream is not None:
-            await other_stream.stop_stream()
+    def _handle_agent_error(self, error: BaseException | None) -> None:
+        err_msg = str(error) if error else "Unknown error"
+        self.notify(f"Agent error: {err_msg}", severity="error")
+        # Re-enable input
+        chat_input = self.query_one(ChatInputContainer)
+        chat_input.set_enabled(True)
 
-        if current_stream is not None:
-            if widget._content:
-                await current_stream.append_content(widget._content)
-            return None
+    def _handle_agent_cancel(self) -> None:
+        self.notify("Agent turn cancelled", severity="warning")
+        chat_input = self.query_one(ChatInputContainer)
+        chat_input.set_enabled(True)
 
-        await messages_area.mount(widget)
-        await widget.write_initial_content()
+    async def _handle_new_assistant_message(self, widget: AssistantMessage) -> None:
+        await self._mount_and_scroll(widget)
+
+    async def _handle_chunk(self, widget: AssistantMessage, text_delta: str) -> None:
+        widget.append_text(text_delta)
+
+        # Auto-scroll if near bottom
+        chat = self._get_chat_container()
+        if chat.scroll_offset.y >= chat.max_scroll_y - 10:
+            chat.scroll_end(animate=False)
+
+    async def _handle_render_done(self, widget: AssistantMessage) -> None:
+        # Final scroll
+        chat = self._get_chat_container()
+        chat.scroll_end(animate=False)
+
+    async def _mount_and_scroll(
+        self, widget: BaseMessage, scroll: bool = True
+    ) -> BaseMessage:
+        """Mount widget and optionally scroll to it."""
+        messages_container = self._get_messages_container()
+
+        # Route tool widgets to tool panel if in grid mode
+        if self.config.use_grid_layout and self.config.route_tools_to_panel:
+            from vibe.cli.textual_ui.widgets.messages import ToolResultMessage
+
+            if isinstance(widget, ToolResultMessage):
+                # Check if this should go to tool panel
+                tool_name = getattr(widget, "tool_name", None)
+                if tool_name != "TodoWrite":  # TODOs stay in overlay, not panel
+                    with suppress(Exception):
+                        from vibe.cli.textual_ui.widgets.panels import ToolLogsPanel
+
+                        tool_panel = self.query_one("#tool-logs-panel", ToolLogsPanel)
+                        await tool_panel.add_tool_log(widget)
+
+                        # Also track files if it's a file operation
+                        if tool_name in (
+                            "Read",
+                            "Write",
+                            "Edit",
+                            "Glob",
+                            "Grep",
+                        ):
+                            from vibe.cli.textual_ui.widgets.panels import (
+                                FileExplorerPanel,
+                            )
+
+                            file_panel = self.query_one(
+                                "#file-explorer-panel", FileExplorerPanel
+                            )
+                            # Extract file path from widget if available
+                            if hasattr(widget, "file_path"):
+                                file_panel.add_recent_file(Path(widget.file_path))
+
+                        # Don't mount in chat
+                        return widget
+
+        # Default: mount in chat
+        await messages_container.mount(widget)
+
+        if scroll:
+            chat = self._get_chat_container()
+            chat.scroll_end(animate=False)
+
         return widget
 
-    async def _mount_and_scroll(self, widget: Widget) -> None:
-        messages_area = self.query_one("#messages")
-        chat = self.query_one("#chat", VerticalScroll)
-        was_at_bottom = self._is_scrolled_to_bottom(chat)
-
-        if was_at_bottom:
-            self._auto_scroll = True
-
-        if isinstance(widget, ReasoningMessage):
-            result = await self._handle_streaming_widget(
-                widget,
-                self._current_streaming_reasoning,
-                self._current_streaming_message,
-                messages_area,
-            )
-            if result is not None:
-                self._current_streaming_reasoning = result
-            self._current_streaming_message = None
-        elif isinstance(widget, AssistantMessage):
-            if self._current_streaming_reasoning is not None:
-                self._current_streaming_reasoning.stop_spinning()
-            result = await self._handle_streaming_widget(
-                widget,
-                self._current_streaming_message,
-                self._current_streaming_reasoning,
-                messages_area,
-            )
-            if result is not None:
-                self._current_streaming_message = result
-            self._current_streaming_reasoning = None
-        else:
-            await self._finalize_current_streaming_message()
-            await messages_area.mount(widget)
-
-            is_tool_message = isinstance(widget, (ToolCallMessage, ToolResultMessage))
-
-            if not is_tool_message:
-                self.call_after_refresh(self._scroll_to_bottom)
-
-        if was_at_bottom:
-            self.call_after_refresh(self._anchor_if_scrollable)
-
-    def _is_scrolled_to_bottom(self, scroll_view: VerticalScroll) -> bool:
-        try:
-            threshold = 3
-            return scroll_view.scroll_y >= (scroll_view.max_scroll_y - threshold)
-        except Exception:
-            return True
-
-    def _scroll_to_bottom(self) -> None:
-        try:
-            chat = self.query_one("#chat")
-            chat.scroll_end(animate=False)
-        except Exception:
-            pass
-
-    def _scroll_to_bottom_deferred(self) -> None:
-        self.call_after_refresh(self._scroll_to_bottom)
-
-    def _anchor_if_scrollable(self) -> None:
-        if not self._auto_scroll:
-            return
-        try:
-            chat = self.query_one("#chat", VerticalScroll)
-            if chat.max_scroll_y == 0:
-                return
-            chat.anchor()
-        except Exception:
-            pass
-
-    def _schedule_update_notification(self) -> None:
-        if (
-            self._version_update_notifier is None
-            or self._update_notification_task
-            or not self._is_update_check_enabled
-        ):
-            return
-
-        self._update_notification_task = asyncio.create_task(
-            self._check_version_update(), name="version-update-check"
+    async def action_clear_chat(self) -> None:
+        """Clear chat and start new session."""
+        confirmed = await self.push_screen_wait(
+            ConfirmDialog("Clear chat and start a new session?")
         )
-
-    async def _check_version_update(self) -> None:
-        try:
-            if (
-                self._version_update_notifier is None
-                or self._update_cache_repository is None
-            ):
-                return
-
-            update = await get_update_if_available(
-                version_update_notifier=self._version_update_notifier,
-                current_version=self._current_version,
-                update_cache_repository=self._update_cache_repository,
-            )
-        except VersionUpdateError as error:
-            self.notify(
-                error.message,
-                title="Update check failed",
-                severity="warning",
-                timeout=10,
-            )
-            return
-        except Exception as exc:
-            logger.debug("Version update check failed", exc_info=exc)
-            return
-        finally:
-            self._update_notification_task = None
-
-        if update is None or not update.should_notify:
+        if not confirmed:
             return
 
-        self._display_update_notification(update)
+        # Clear messages
+        messages_container = self._get_messages_container()
+        await messages_container.query(BaseMessage).remove()
 
-    def _display_update_notification(self, update: VersionUpdateAvailability) -> None:
-        if self._update_notification_shown:
+        # Reset agent
+        self.agent.reset(new_session_id=str(uuid.uuid4()))
+
+        # Update UI
+        self.notify("Started new session", severity="information")
+        with suppress(Exception):
+            progress = self.query_one(ContextProgress)
+            progress.update_from_agent(self.agent)
+
+    async def action_new_session(self) -> None:
+        """Alias for clear_chat."""
+        await self.action_clear_chat()
+
+    def action_toggle_todos(self) -> None:
+        """Toggle TODO overlay."""
+        self.todo_overlay.toggle()
+
+    def action_toggle_panel(self, panel_name: str) -> None:
+        """Toggle visibility of a grid panel."""
+        if not self.config.use_grid_layout:
+            self.notify("Panels only available in grid layout", severity="warning")
             return
 
-        message = f'{self._current_version} => {update.latest_version}\nRun "uv tool upgrade mistral-vibe" to update'
+        panel_ids = {
+            "files": "#file-explorer-panel",
+            "telemetry": "#telemetry-panel",
+            "tools": "#tool-logs-panel",
+            "memory": "#memory-panel",
+        }
 
-        self.notify(
-            message, title="Update available", severity="information", timeout=10
-        )
-        self._update_notification_shown = True
+        panel_id = panel_ids.get(panel_name)
+        if not panel_id:
+            return
 
-    def on_mouse_up(self, event: MouseUp) -> None:
-        copy_selection_to_clipboard(self)
+        with suppress(Exception):
+            panel = self.query_one(panel_id)
+            panel.toggle_class("hidden")
 
-    def on_app_blur(self, event: AppBlur) -> None:
-        if self._chat_input_container and self._chat_input_container.input_widget:
-            self._chat_input_container.input_widget.set_app_focus(False)
+    @on(ScreenResume)
+    def handle_screen_resume(self, event: ScreenResume) -> None:
+        """Handle screen resume to refocus input."""
+        with suppress(Exception):
+            chat_input = self.query_one(ChatInputContainer)
+            self.set_focus(chat_input.query_one(Input))
 
-    def on_app_focus(self, event: AppFocus) -> None:
-        if self._chat_input_container and self._chat_input_container.input_widget:
-            self._chat_input_container.input_widget.set_app_focus(True)
 
+class ConfirmDialog(ModalScreen[bool]):
+    """Simple confirmation dialog."""
 
-def _print_session_resume_message(session_id: str | None) -> None:
-    if not session_id:
-        return
+    DEFAULT_CSS = """
+    ConfirmDialog {
+        align: center middle;
+    }
+    
+    ConfirmDialog > Vertical {
+        width: auto;
+        height: auto;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    
+    #confirm-message {
+        padding: 1 2;
+    }
+    
+    #confirm-buttons {
+        width: 100%;
+        height: auto;
+        align: center middle;
+    }
+    
+    .confirm-button {
+        margin: 0 1;
+    }
+    """
 
-    print()
-    print("To continue this session, run: vibe --continue")
-    print(f"Or: vibe --resume {session_id}")
+    BINDINGS = [
+        Binding("y", "confirm", "Yes"),
+        Binding("n", "cancel", "No"),
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Vertical
+        from textual.widgets import Button
+
+        with Vertical():
+            yield Static(self.message, id="confirm-message")
+            with Horizontal(id="confirm-buttons"):
+                yield Button("Yes (y)", id="yes-btn", variant="success", classes="confirm-button")
+                yield Button("No (n)", id="no-btn", variant="error", classes="confirm-button")
+
+    def on_mount(self) -> None:
+        self.query_one("#yes-btn").focus()
+
+    @on(Button.Pressed, "#yes-btn")
+    def handle_yes(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#no-btn")
+    def handle_no(self) -> None:
+        self.dismiss(False)
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 def run_textual_ui(
     config: VibeConfig,
     initial_mode: AgentMode = AgentMode.DEFAULT,
-    enable_streaming: bool = False,
+    enable_streaming: bool = True,
     initial_prompt: str | None = None,
     loaded_messages: list[LLMMessage] | None = None,
 ) -> None:
-    update_notifier = PyPIVersionUpdateGateway(project_name="mistral-vibe")
-    update_cache_repository = FileSystemUpdateCacheRepository()
+    agent = Agent(
+        config=config,
+        mode=initial_mode,
+    )
+
+    hook_manager = HookManager()
+
+    event_handler = EventHandler(
+        config=config,
+        enable_todos=True,
+    )
+
+    render_handler = RenderHandler(
+        config=config,
+        agent_stats=agent.stats,
+    )
+
     app = VibeApp(
         config=config,
-        initial_mode=initial_mode,
+        agent=agent,
+        event_handler=event_handler,
+        render_handler=render_handler,
+        hook_manager=hook_manager,
         enable_streaming=enable_streaming,
         initial_prompt=initial_prompt,
         loaded_messages=loaded_messages,
-        version_update_notifier=update_notifier,
-        update_cache_repository=update_cache_repository,
     )
-    session_id = app.run()
-    _print_session_resume_message(session_id)
+
+    app.run()

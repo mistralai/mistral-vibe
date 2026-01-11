@@ -294,6 +294,24 @@ class VibeConfig(BaseSettings):
     )
     models: list[ModelConfig] = Field(default_factory=lambda: list(DEFAULT_MODELS))
 
+    # Grid Layout (Bento Cockpit) - Phase 1
+    use_grid_layout: bool = Field(
+        default=False,
+        description="Enable Bento Grid cockpit layout with dedicated panels for files, telemetry, tools, and memory"
+    )
+    layout_preference_set: bool = Field(
+        default=False,
+        description="Whether user has been asked about layout preference (internal flag)"
+    )
+    visible_panels: set[str] = Field(
+        default_factory=lambda: {"chat", "telemetry", "files", "tools", "memory"},
+        description="Set of panel names to display in grid layout"
+    )
+    route_tools_to_panel: bool = Field(
+        default=True,
+        description="Route tool execution logs to dedicated tool panel instead of main chat (grid layout only)"
+    )
+
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
     tools: dict[str, BaseToolConfig] = Field(default_factory=dict)
