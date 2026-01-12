@@ -37,7 +37,7 @@ class ChatInputBody(Widget):
             self.prompt_widget = NoMarkupStatic(">", id="prompt")
             yield self.prompt_widget
 
-            self.input_widget = ChatTextArea(placeholder="Ask anything...", id="input")
+            self.input_widget = ChatTextArea(placeholder="Ask anything... (Ctrl+J / Shift+Enter to insert newline)", id="input")
             yield self.input_widget
 
     def on_mount(self) -> None:
