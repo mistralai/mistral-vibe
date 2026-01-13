@@ -194,8 +194,10 @@ def create_mcp_http_proxy_tool_class(
     return MCPHttpProxyTool
 
 
-async def list_tools_stdio(command: list[str]) -> list[RemoteTool]:
-    params = StdioServerParameters(command=command[0], args=command[1:])
+async def list_tools_stdio(
+    command: list[str], env: dict[str, str] | None = None
+) -> list[RemoteTool]:
+    params = StdioServerParameters(command=command[0], args=command[1:], env=env)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -204,9 +206,9 @@ async def list_tools_stdio(command: list[str]) -> list[RemoteTool]:
 
 
 async def call_tool_stdio(
-    command: list[str], tool_name: str, arguments: dict[str, Any]
+    command: list[str], tool_name: str, arguments: dict[str, Any], env: dict[str, str] | None = None
 ) -> MCPToolResult:
-    params = StdioServerParameters(command=command[0], args=command[1:])
+    params = StdioServerParameters(command=command[0], args=command[1:], env=env)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -220,6 +222,7 @@ def create_mcp_stdio_proxy_tool_class(
     remote: RemoteTool,
     alias: str | None = None,
     server_hint: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> type[BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]]:
     def _alias_from_command(cmd: list[str]) -> str:
         prog = Path(cmd[0]).name.replace(".", "_") if cmd else "mcp"
@@ -245,6 +248,7 @@ def create_mcp_stdio_proxy_tool_class(
         _stdio_command: ClassVar[list[str]] = command
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
+        _env: ClassVar[dict[str, str] | None] = env
 
         @classmethod
         def get_name(cls) -> str:
@@ -258,7 +262,7 @@ def create_mcp_stdio_proxy_tool_class(
             try:
                 payload = args.model_dump(exclude_none=True)
                 result = await call_tool_stdio(
-                    self._stdio_command, self._remote_name, payload
+                    self._stdio_command, self._remote_name, payload, env=self._env
                 )
                 return result
             except Exception as exc:
