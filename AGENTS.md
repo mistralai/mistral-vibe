@@ -124,7 +124,7 @@ guidelines:
 
   - title: "Use uv for All Commands"
     description: >
-      We use uv to manage our python environment. You should nevery try to run a bare python commands.
+      We use uv to manage our python environment. You should never try to run a bare python commands.
       Always run commands using `uv` instead of invoking `python` or `pip` directly.
       For example, use `uv add package` and `uv run script.py` rather than `pip install package` or `python script.py`.
       This practice helps avoid environment drift and leverages modern Python packaging best practices.
