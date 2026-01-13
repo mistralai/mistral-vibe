@@ -204,7 +204,7 @@ permission = "always"
 permission = "always"
 ```
 
-Note: this implies that you have setup a redteam prompt names `~/.vibe/prompts/redteam.md`
+Note: this implies that you have set up a redteam prompt names `~/.vibe/prompts/redteam.md`
 
 ### MCP Server Configuration
 
