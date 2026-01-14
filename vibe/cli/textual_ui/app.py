@@ -9,7 +9,7 @@ from typing import Any, ClassVar, assert_never
 from pydantic import BaseModel
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import AppBlur, AppFocus, MouseUp
 from textual.widget import Widget
 from textual.widgets import Static
@@ -23,11 +23,21 @@ from vibe.cli.textual_ui.terminal_theme import (
     TERMINAL_THEME_NAME,
     capture_terminal_theme,
 )
+
+from vibe.cli.textual_ui.utils import (
+    build_conversation_tree,
+    load_conversation_from_file,
+)
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
+from vibe.cli.textual_ui.widgets.conversation_tree_selector import (
+    ConversationTreeSelector,
+)
+from vibe.cli.textual_ui.widgets.folder_selector import FolderSelector
+from vibe.cli.textual_ui.widgets.input_dialog import InputDialog
 from vibe.cli.textual_ui.widgets.loading import LoadingWidget
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
@@ -59,6 +69,7 @@ from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
 from vibe.core.modes import AgentMode, next_mode
 from vibe.core.paths.config_paths import HISTORY_FILE
+from vibe.core.paths.global_paths import ensure_conversations_dir_exists
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import ApprovalResponse, LLMMessage, Role
 from vibe.core.utils import (
@@ -73,6 +84,9 @@ class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
     Input = auto()
+    InputDialog = auto()
+    ConversationTreeSelector = auto()
+    FolderSelector = auto()
 
 
 class VibeApp(App):  # noqa: PLR0904
@@ -124,6 +138,8 @@ class VibeApp(App):  # noqa: PLR0904
         self._mode_indicator: ModeIndicator | None = None
         self._context_progress: ContextProgress | None = None
         self._current_bottom_app: BottomApp = BottomApp.Input
+        self._selected_folder: str = ""  # Selected folder for saving
+        self.theme = config.textual_theme
 
         self.history_file = HISTORY_FILE.path
 
@@ -163,7 +179,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         yield Static(id="todo-area")
 
-        with Static(id="bottom-app-container"):
+        with Vertical(id="bottom-app-container"):
             yield ChatInputContainer(
                 history_file=self.history_file,
                 command_registry=self.commands,
@@ -899,6 +915,591 @@ class VibeApp(App):  # noqa: PLR0904
             return None
         return self.agent.interaction_logger.session_id[:8]
 
+    async def _save_conversation(self) -> None:
+        """Save current conversation history to a file with user-provided name."""
+        if not self.agent or not self.agent.messages:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "No conversation history to save.", collapsed=self._tools_collapsed
+                )
+            )
+            return
+
+        # Always show the save dialog with folder selection
+        await self._switch_to_save_dialog()
+
+    async def _switch_to_save_dialog(self) -> None:
+        """Switch to the save dialog in the bottom panel."""
+        if self._current_bottom_app == BottomApp.InputDialog:
+            return
+
+        bottom_container = self.query_one("#bottom-app-container")
+
+        # Remove chat input if present
+        try:
+            chat_input_container = self.query_one(ChatInputContainer)
+            await chat_input_container.remove()
+        except Exception:
+            pass
+
+        # Hide mode indicator
+        if self._mode_indicator:
+            self._mode_indicator.display = False
+
+        # Get list of available folders
+        folders = await self._get_available_folders()
+
+        # Show folder selector first
+        folder_selector = FolderSelector(folders=folders)
+        await bottom_container.mount(folder_selector)
+        self._current_bottom_app = BottomApp.FolderSelector
+
+        self.call_after_refresh(folder_selector.focus)
+
+    async def _get_available_folders(self) -> list[str]:
+        """Get list of available folders in conversations directory."""
+        conv_dir = ensure_conversations_dir_exists()
+
+        folders = []
+        for item in conv_dir.iterdir():
+            if item.is_dir():
+                folders.append(item.name)
+
+        return sorted(folders)
+
+    def _generate_auto_conversation_name(self) -> str:
+        """Generate an automatic name from the conversation context."""
+        import re
+
+        if not self.agent or not self.agent.messages:
+            return "conversation"
+
+        # Try to get first user message
+        first_user_msg = None
+        for msg in self.agent.messages:
+            if msg.role == Role.user and msg.content:
+                first_user_msg = msg.content[:50]  # First 50 chars
+                break
+
+        if not first_user_msg:
+            return "conversation"
+
+        # Clean filename - strip spaces and replace special characters
+        safe_name = re.sub(
+            r'[\\/:*?"<>|]', "_", first_user_msg.strip().replace(" ", "_")
+        )
+        return safe_name
+
+    async def on_input_dialog_input_submitted(
+        self, message: InputDialog.InputSubmitted
+    ) -> None:
+        """Handle when user submits a conversation name or folder name."""
+        # Check if this is a folder creation dialog by checking the InputDialog's is_folder_creation flag
+        input_dialog = self.query_one(InputDialog)
+        is_folder_creation = getattr(input_dialog, "is_folder_creation", False)
+
+        if is_folder_creation:
+            # This is a folder creation submission
+            folder_name = message.value.strip()
+            if folder_name:
+                try:
+                    import re
+
+                    # Create conversations directory if it doesn't exist
+                    conv_dir = ensure_conversations_dir_exists()
+
+                    # Clean folder name (preserve case)
+                    safe_name = re.sub(r'[\\/:*?"<>|]', "_", folder_name.strip())
+                    folder_path = conv_dir / safe_name
+
+                    # Check if folder already exists
+                    if folder_path.exists():
+                        await self._mount_to_bottom_panel(
+                            ErrorMessage(
+                                f"Folder '{safe_name}' already exists!",
+                                collapsed=self._tools_collapsed,
+                            )
+                        )
+                        # Return to folder creation dialog
+                        await self._show_folder_creation_dialog()
+                        return
+
+                    # Create folder
+                    folder_path.mkdir(exist_ok=True)
+
+                    # Show success message
+                    await self._mount_and_scroll(
+                        UserCommandMessage(f"✓ Created folder: {safe_name}")
+                    )
+
+                    # Return to folder selector to show the new folder
+                    await self._show_folder_selector()
+
+                except Exception as e:
+                    await self._mount_to_bottom_panel(
+                        ErrorMessage(
+                            f"Failed to create folder: {e}",
+                            collapsed=self._tools_collapsed,
+                        )
+                    )
+                    await self._switch_to_input_app()
+            else:
+                await self._switch_to_input_app()
+            return
+
+        # This is a conversation save submission
+        try:
+            import json
+            import re
+
+            # Get the user-provided name or use auto-generated one
+            conv_name = (
+                message.value
+                if message.value.strip()
+                else self._generate_auto_conversation_name()
+            )
+            if not conv_name:
+                conv_name = "conversation"
+
+            # Clean filename - strip spaces and replace special characters for filename
+            # But keep the original name with spaces for display
+            safe_name = re.sub(
+                r'[\\/:*?"<>|]', "_", conv_name.strip().replace(" ", "_")
+            )
+
+            timestamp = time.time()
+            filename = f"{safe_name}_{int(timestamp)}.json"
+
+            # Get save directory
+            save_dir = ensure_conversations_dir_exists()
+
+            # Check if a conversation with this exact name already exists in the save directory
+            # Use the actual save directory (which may include selected folder)
+            final_save_dir = save_dir
+            if self._selected_folder:
+                final_save_dir = save_dir / self._selected_folder
+
+            if final_save_dir.exists():
+                # Check for exact filename match (without timestamp)
+                existing_files = list(final_save_dir.glob("*.json"))
+                for f in existing_files:
+                    # Extract the name before the timestamp
+                    existing_filename = f.name
+                    if "_" in existing_filename:
+                        base_name = existing_filename.split("_")[0]
+                        if base_name == safe_name:
+                            await self._mount_to_bottom_panel(
+                                ErrorMessage(
+                                    f"A conversation named '{conv_name}' already exists! "
+                                    f"File: {existing_filename}",
+                                    collapsed=self._tools_collapsed,
+                                )
+                            )
+                            # Return to conversation naming dialog for retry
+                            await self._show_conversation_naming_dialog(conv_name)
+                            return
+
+            # Use selected folder if specified
+            if self._selected_folder:
+                folder_path = save_dir / self._selected_folder
+                folder_path.mkdir(exist_ok=True)
+                save_dir = folder_path
+
+            filepath = save_dir / filename
+
+            # Prepare messages for saving (exclude system prompt to save space)
+            messages_to_save = []
+            for msg in self.agent.messages:
+                if msg.role != Role.system:  # Skip system prompt
+                    messages_to_save.append(msg.model_dump())
+
+            # Store the original name with spaces for display
+            # Escape any special characters that might cause JSON issues
+            display_name = conv_name.replace('"', '\\"').replace("\\", "\\\\")
+
+            data = {
+                "name": display_name,  # Store the user-friendly name with spaces
+                "saved_at": timestamp,
+                "messages": messages_to_save,
+                "stats": self.agent.stats.model_dump() if self.agent.stats else None,
+                "model": self.config.active_model,
+                "provider": self.config.get_active_model().provider,
+            }
+
+            with open(filepath, "w") as f:
+                json.dump(data, f, indent=2)
+
+            # Return to input mode
+            await self._switch_to_input_app()
+
+            await self._mount_and_scroll(
+                UserCommandMessage(f"✓ Conversation saved as: {conv_name}")
+            )
+
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to save conversation: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            await self._switch_to_input_app()
+
+    async def on_input_dialog_input_cancelled(
+        self, message: InputDialog.InputCancelled
+    ) -> None:
+        """Handle when user cancels the save dialog."""
+        await self._switch_to_input_app()
+
+    async def on_folder_selector_folder_selected(
+        self, message: FolderSelector.FolderSelected
+    ) -> None:
+        """Handle when user selects a folder."""
+        bottom_container = self.query_one("#bottom-app-container")
+
+        # Remove folder selector
+        try:
+            folder_selector = self.query_one(FolderSelector)
+            await folder_selector.remove()
+        except Exception:
+            pass
+
+        # Store the selected folder for use in save
+        self._selected_folder = message.folder_name
+
+        # Create auto-generated name from first user message
+        auto_name = self._generate_auto_conversation_name()
+
+        # Show input dialog for conversation name
+        input_dialog = InputDialog(title="Save Conversation", initial_value=auto_name)
+        await bottom_container.mount(input_dialog)
+        self._current_bottom_app = BottomApp.InputDialog
+
+        # InputDialog will focus its input widget in on_mount, no need to focus the dialog
+
+    async def on_input_blurred(self, event: Input.Blurred) -> None:
+        """Handle when any input loses focus."""
+        # Check if this is the folder selector's input widget (old implementation)
+        if hasattr(event._sender, "parent") and hasattr(event._sender.parent, "id"):
+            if event._sender.parent.id == "folder-selector" and isinstance(
+                event._sender, Input
+            ):
+                folder_name = event._sender.value.strip()
+                if folder_name:
+                    await self._create_folder(folder_name, event._sender)
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle when any input is submitted via Enter key."""
+        # Check if this is the folder selector's input widget (old implementation)
+        if hasattr(event.input, "parent") and hasattr(event.input.parent, "id"):
+            if event.input.parent.id == "folder-selector" and isinstance(
+                event.input, Input
+            ):
+                folder_name = event.input.value.strip()
+                if folder_name:
+                    await self._create_folder(folder_name, event.input)
+
+    async def _create_folder(self, folder_name: str, input_widget: Input) -> None:
+        """Helper method to create a folder."""
+        try:
+            from pathlib import Path
+            import re
+
+            # Create conversations directory if it doesn't exist
+            conv_dir = ensure_conversations_dir_exists()
+
+            # Clean folder name (preserve case)
+            safe_name = re.sub(r'[\\/:*?"<>|]', "_", folder_name.strip())
+            folder_path = conv_dir / safe_name
+
+            # Check if folder already exists
+            if folder_path.exists():
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        f"Folder '{safe_name}' already exists!",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+                # Return to folder creation dialog
+                await self._show_folder_creation_dialog()
+                return
+
+            # Create folder
+            folder_path.mkdir(exist_ok=True)
+
+            # Remove the InputDialog (which contains the input widget)
+            try:
+                # Find and remove the parent InputDialog
+                if hasattr(input_widget, "parent") and hasattr(
+                    input_widget.parent, "id"
+                ):
+                    if input_widget.parent.id == "input-dialog":
+                        await input_widget.parent.remove()
+            except Exception:
+                pass
+
+            # Show success message
+            await self._mount_and_scroll(
+                UserCommandMessage(f"✓ Created folder: {safe_name}")
+            )
+
+            # Return to folder selector with updated folder list
+            await self._show_folder_selector()
+
+        except PermissionError:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Permission denied: Cannot create folder. Check your permissions for the conversations directory.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+        except OSError as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"System error: Cannot create folder. {e!s}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to create folder: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            # Try to clean up the InputDialog on error
+            try:
+                if hasattr(input_widget, "parent") and hasattr(
+                    input_widget.parent, "id"
+                ):
+                    if input_widget.parent.id == "input-dialog":
+                        await input_widget.parent.remove()
+            except Exception:
+                pass
+
+            # Return to input mode on error
+            await self._switch_to_input_app()
+
+    async def on_folder_selector_folder_closed(
+        self, message: FolderSelector.FolderClosed
+    ) -> None:
+        """Handle when user cancels folder selection."""
+        await self._switch_to_input_app()
+
+    async def _show_conversation_naming_dialog(self, initial_name: str = "") -> None:
+        """Show the conversation naming dialog."""
+        bottom_container = self.query_one("#bottom-app-container")
+
+        # Remove any existing widgets
+        try:
+            folder_selector = self.query_one(FolderSelector)
+            await folder_selector.remove()
+        except Exception:
+            pass
+
+        try:
+            input_dialog = self.query_one(InputDialog)
+            await input_dialog.remove()
+        except Exception:
+            pass
+
+        # Show conversation naming dialog
+        auto_name = (
+            initial_name if initial_name else self._generate_auto_conversation_name()
+        )
+        input_dialog = InputDialog(title="Save Conversation", initial_value=auto_name)
+        await bottom_container.mount(input_dialog)
+        self._current_bottom_app = BottomApp.InputDialog
+
+        self.call_after_refresh(input_dialog.focus)
+
+    async def _show_folder_selector(self) -> None:
+        """Show the folder selector with updated folder list."""
+        bottom_container = self.query_one("#bottom-app-container")
+
+        # Remove any existing widgets
+        try:
+            folder_selector = self.query_one(FolderSelector)
+            await folder_selector.remove()
+        except Exception:
+            pass
+
+        try:
+            input_dialog = self.query_one(InputDialog)
+            await input_dialog.remove()
+        except Exception:
+            pass
+
+        # Get updated list of folders
+        folders = await self._get_available_folders()
+
+        # Show folder selector
+        folder_selector = FolderSelector(folders=folders)
+        await bottom_container.mount(folder_selector)
+        self._current_bottom_app = BottomApp.FolderSelector
+
+        self.call_after_refresh(folder_selector.focus)
+
+    async def _show_folder_creation_dialog(self) -> None:
+        """Show the folder creation dialog, ensuring any existing one is removed."""
+        bottom_container = self.query_one("#bottom-app-container")
+
+        # Remove any existing InputDialog to avoid duplicate IDs
+        try:
+            existing_dialog = self.query_one(InputDialog)
+            await existing_dialog.remove()
+        except Exception:
+            pass
+
+        # Remove current folder selector
+        try:
+            folder_selector = self.query_one(FolderSelector)
+            await folder_selector.remove()
+        except Exception:
+            pass
+
+        # Show folder creation dialog
+        folder_dialog = InputDialog(
+            title="Create Folder",
+            initial_value="",
+            show_folder_option=False,
+            is_folder_creation=True,
+        )
+        await bottom_container.mount(folder_dialog)
+        self._current_bottom_app = BottomApp.InputDialog
+
+    async def on_folder_selector_create_folder(
+        self, message: FolderSelector.CreateFolder
+    ) -> None:
+        """Handle when user wants to create a folder from folder selector."""
+        await self._show_folder_creation_dialog()
+
+    async def on_input_dialog_create_folder(
+        self, message: InputDialog.CreateFolder
+    ) -> None:
+        """Handle when user wants to create a folder."""
+        # Show a new input dialog for folder name
+        bottom_container = self.query_one("#bottom-app-container")
+
+        # Remove current dialog
+        try:
+            input_dialog = self.query_one(InputDialog)
+            await input_dialog.remove()
+        except Exception:
+            pass
+
+        # Show folder creation dialog
+        folder_dialog = InputDialog(
+            title="Create Folder",
+            initial_value="",
+            show_folder_option=False,
+            is_folder_creation=True,
+        )
+        await bottom_container.mount(folder_dialog)
+        self._current_bottom_app = BottomApp.InputDialog
+
+        # InputDialog will focus its input widget in on_mount, no need to focus the dialog
+
+    async def _load_conversation(self) -> None:
+        """Load conversation history from a file with selection interface."""
+        if self._agent_running:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Cannot load conversation while agent is processing. Please wait.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        await self._switch_to_load_selector()
+
+    async def _switch_to_load_selector(self) -> None:
+        """Switch to the conversation tree selector in the bottom panel."""
+        if self._current_bottom_app == BottomApp.ConversationTreeSelector:
+            return
+
+        try:
+            # Find conversation files and build tree structure
+            conv_dir = ensure_conversations_dir_exists()
+
+            # Build tree structure with folders and conversations
+            tree_items = build_conversation_tree(conv_dir)
+
+            if not tree_items:
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        "No saved conversations found.", collapsed=self._tools_collapsed
+                    )
+                )
+                return
+
+            bottom_container = self.query_one("#bottom-app-container")
+
+            # Remove chat input if present
+            try:
+                chat_input_container = self.query_one(ChatInputContainer)
+                await chat_input_container.remove()
+            except Exception:
+                pass
+
+            # Hide mode indicator
+            if self._mode_indicator:
+                self._mode_indicator.display = False
+
+            # Show conversation tree selector
+            conversation_selector = ConversationTreeSelector(conversations=tree_items)
+            await bottom_container.mount(conversation_selector)
+            self._current_bottom_app = BottomApp.ConversationTreeSelector
+
+            self.call_after_refresh(conversation_selector.focus)
+
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to load conversation: {e}", collapsed=self._tools_collapsed
+                )
+            )
+
+    async def on_conversation_tree_selector_conversation_selected(
+        self, message: ConversationTreeSelector.ConversationSelected
+    ) -> None:
+        """Handle when user selects a conversation to load from tree."""
+        try:
+            data, messages = load_conversation_from_file(message.filepath, self.agent)
+
+            if not messages:
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        "No messages found in saved conversation.",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+                await self._switch_to_input_app()
+                return
+
+            # Return to input mode
+            await self._switch_to_input_app()
+
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    f"✓ Loaded conversation: {data.get('name', message.filepath.name)}"
+                    f"\n  - {len(messages)} messages loaded"
+                    f"\n  - Model: {data.get('model', 'unknown')}"
+                )
+            )
+
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to load conversation: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            await self._switch_to_input_app()
+
+    async def on_conversation_tree_selector_conversation_closed(
+        self, message: ConversationTreeSelector.ConversationClosed
+    ) -> None:
+        """Handle when user cancels conversation selection from tree."""
+        await self._switch_to_input_app()
+
     async def _exit_app(self) -> None:
         self.exit(result=self._get_session_resume_info())
 
@@ -988,6 +1589,30 @@ class VibeApp(App):  # noqa: PLR0904
         except Exception:
             pass
 
+        try:
+            input_dialog = self.query_one("#input-dialog")
+            await input_dialog.remove()
+        except Exception:
+            pass
+
+        try:
+            conversation_selector = self.query_one("#conversation-selector")
+            await conversation_selector.remove()
+        except Exception:
+            pass
+
+        try:
+            conversation_tree_selector = self.query_one("#conversation-tree-selector")
+            await conversation_tree_selector.remove()
+        except Exception:
+            pass
+
+        try:
+            folder_selector = self.query_one("#folder-selector")
+            await folder_selector.remove()
+        except Exception:
+            pass
+
         if self._mode_indicator:
             self._mode_indicator.display = True
 
@@ -1022,6 +1647,12 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(ConfigApp).focus()
                 case BottomApp.Approval:
                     self.query_one(ApprovalApp).focus()
+                case BottomApp.InputDialog:
+                    self.query_one(InputDialog).focus()
+                case BottomApp.ConversationTreeSelector:
+                    self.query_one(ConversationTreeSelector).focus()
+                case BottomApp.FolderSelector:
+                    self.query_one(FolderSelector).focus()
                 case app:
                     assert_never(app)
         except Exception:
@@ -1061,6 +1692,29 @@ class VibeApp(App):  # noqa: PLR0904
                     return
             except Exception:
                 pass
+        if self._current_bottom_app == BottomApp.InputDialog:
+            try:
+                input_dialog = self.query_one(InputDialog)
+                input_dialog.action_cancel()
+            except Exception:
+                pass
+            return
+
+        if self._current_bottom_app == BottomApp.ConversationTreeSelector:
+            try:
+                conversation_selector = self.query_one(ConversationTreeSelector)
+                conversation_selector.action_close()
+            except Exception:
+                pass
+            return
+
+        if self._current_bottom_app == BottomApp.FolderSelector:
+            try:
+                folder_selector = self.query_one(FolderSelector)
+                folder_selector.action_close()
+            except Exception:
+                pass
+            return
 
         has_pending_user_message = any(
             msg.has_class("pending") for msg in self.query(UserMessage)
@@ -1253,6 +1907,39 @@ class VibeApp(App):  # noqa: PLR0904
 
         if was_at_bottom:
             self.call_after_refresh(self._anchor_if_scrollable)
+
+    async def _mount_to_bottom_panel(self, widget: Widget) -> None:
+        """Mount a widget to the bottom panel (for save dialog errors)."""
+        try:
+            bottom_container = self.query_one("#bottom-app-container")
+
+            # Create a container for the message
+            from textual.containers import Vertical
+
+            message_container = Vertical(id=f"bottom-message-container-{id(widget)}")
+
+            # Add the widget
+            message_container.mount(widget)
+
+            # Mount to bottom panel
+            await bottom_container.mount(message_container)
+
+            # Auto-remove after a delay
+            self.call_after_refresh(
+                lambda: self.call_later(
+                    self._remove_bottom_message, message_container, 5.0
+                )
+            )
+        except Exception:
+            # If bottom panel doesn't exist or can't be mounted, fall back to main messages
+            await self._mount_and_scroll(widget)
+
+    async def _remove_bottom_message(self, container: Vertical) -> None:
+        """Remove a message container from the bottom panel."""
+        try:
+            await container.remove()
+        except Exception:
+            pass
 
     def _is_scrolled_to_bottom(self, scroll_view: VerticalScroll) -> bool:
         try:
