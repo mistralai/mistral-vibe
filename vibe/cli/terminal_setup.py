@@ -258,8 +258,26 @@ def _setup_iterm2() -> SetupResult:
         )
 
 
+def _get_wezterm_config_path() -> Path:
+    """Get wezterm config path following XDG specification."""
+    # Check XDG_CONFIG_HOME first
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        config_path = Path(xdg_config_home) / "wezterm" / "wezterm.lua"
+        if config_path.exists():
+            return config_path
+
+    # Fall back to ~/.config/wezterm/wezterm.lua
+    config_path = Path.home() / ".config" / "wezterm" / "wezterm.lua"
+    if config_path.exists():
+        return config_path
+
+    # Fall back to traditional location
+    return Path.home() / ".wezterm.lua"
+
+
 def _setup_wezterm() -> SetupResult:
-    wezterm_config = Path.home() / ".wezterm.lua"
+    wezterm_config = _get_wezterm_config_path()
 
     key_binding = """{
     key = "Enter",
