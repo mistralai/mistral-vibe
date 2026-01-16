@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 from enum import StrEnum, auto
+from pathlib import Path
+import shlex
 import subprocess
+import sys
 import time
 from typing import Any, ClassVar, assert_never
 
@@ -56,9 +60,10 @@ from vibe.cli.update_notifier import (
 )
 from vibe.core.agent import Agent
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
-from vibe.core.config import VibeConfig
+from vibe.core.config import MissingAPIKeyError, VibeConfig, load_api_keys_from_env
 from vibe.core.modes import AgentMode, next_mode
 from vibe.core.paths.config_paths import HISTORY_FILE
+from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import ApprovalResponse, LLMMessage, Role
 from vibe.core.utils import (
@@ -66,6 +71,16 @@ from vibe.core.utils import (
     get_user_cancellation_message,
     is_dangerous_directory,
     logger,
+)
+from vibe.setup.onboarding.screens import (
+    ApiKeyScreen,
+    ThemeSelectionScreen,
+    WelcomeScreen,
+)
+
+# Path to onboarding stylesheet for loading when in onboarding mode.
+_ONBOARDING_CSS_PATH = (
+    Path(__file__).parent.parent.parent / "setup" / "onboarding" / "onboarding.tcss"
 )
 
 
@@ -102,6 +117,9 @@ class VibeApp(App):  # noqa: PLR0904
         version_update_notifier: VersionUpdateGateway | None = None,
         update_cache_repository: UpdateCacheRepository | None = None,
         current_version: str = CORE_VERSION,
+        needs_onboarding: bool = False,
+        agent_name: str | None = None,
+        initial_mode_overrides: dict[str, object] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -148,9 +166,36 @@ class VibeApp(App):  # noqa: PLR0904
         self._last_escape_time: float | None = None
         self._terminal_theme = capture_terminal_theme()
 
+        # Onboarding state
+        self._needs_onboarding = needs_onboarding
+        self._agent_name = agent_name
+        self._initial_mode_overrides = initial_mode_overrides or {}
+        self._onboarding_active = needs_onboarding
+
     @property
     def config(self) -> VibeConfig:
         return self.agent.config if self.agent else self._config
+
+    def exit(  # type: ignore[override]
+        self,
+        result: object = None,
+        return_code: int = 0,
+        message: Any = None,
+    ) -> None:
+        """Override exit to intercept onboarding completion."""
+        if self._onboarding_active:
+            # Onboarding screen is signaling completion.
+            self._onboarding_active = False
+            # Schedule completion handler to run async.
+            self.call_later(self._handle_onboarding_result, result)
+            return
+        super().exit(result, return_code, message)
+
+    def _handle_onboarding_result(self, result: object) -> None:
+        """Handle the result from onboarding screens."""
+        # Pop all onboarding screens off the stack and return to default.
+        self.pop_screen()
+        self.run_worker(self._on_onboarding_complete(result))  # type: ignore[arg-type]
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="chat"):
@@ -188,6 +233,71 @@ class VibeApp(App):  # noqa: PLR0904
         else:
             self.theme = self.config.textual_theme
 
+        # If onboarding is needed, install and push onboarding screens.
+        if self._needs_onboarding:
+            self._install_onboarding_screens()
+            self.push_screen("welcome")
+            return
+
+        await self._initialize_main_ui()
+
+    def _install_onboarding_screens(self) -> None:
+        """Install onboarding screens for first-time setup."""
+        # Load onboarding CSS dynamically to avoid conflicts with main app CSS.
+        onboarding_css = _ONBOARDING_CSS_PATH.read_text()
+        self.stylesheet.add_source(
+            onboarding_css,
+            ("onboarding", str(_ONBOARDING_CSS_PATH)),
+            is_default_css=False,
+        )
+        # Use the names that OnboardingScreen.NEXT_SCREEN expects.
+        self.install_screen(WelcomeScreen(), "welcome")
+        self.install_screen(ThemeSelectionScreen(), "theme_selection")
+        self.install_screen(ApiKeyScreen(), "api_key")
+
+    async def _on_onboarding_complete(self, result: object) -> None:
+        """Handle completion of the onboarding flow."""
+        match result:
+            case None:
+                # User cancelled onboarding.
+                self._onboarding_active = False  # Prevent infinite loop
+                super().exit(None)
+                return
+            case str() as s if s.startswith("save_error:"):
+                err = s.removeprefix("save_error:")
+                logger.warning(
+                    "Could not save API key to .env file: %s. "
+                    "You may need to set it manually in %s",
+                    err,
+                    GLOBAL_ENV_FILE.path,
+                )
+            case "completed":
+                pass
+            case _:
+                # Unexpected result type—treat as cancel.
+                self._onboarding_active = False
+                super().exit(None)
+                return
+
+        # Reload API keys and config now that onboarding is done.
+        load_api_keys_from_env()
+        try:
+            self._config = VibeConfig.load(
+                self._agent_name, **self._initial_mode_overrides
+            )
+            self._needs_onboarding = False
+        except MissingAPIKeyError:
+            # Still no key after onboarding—exit gracefully.
+            logger.error("API key still missing after onboarding")
+            self._onboarding_active = False
+            super().exit(None)
+            return
+
+        # Now initialize the main UI.
+        await self._initialize_main_ui()
+
+    async def _initialize_main_ui(self) -> None:
+        """Initialize the main chat UI after onboarding (if any) completes."""
         self.event_handler = EventHandler(
             mount_callback=self._mount_and_scroll,
             scroll_callback=self._scroll_to_bottom_deferred,
@@ -1358,16 +1468,19 @@ def _print_session_resume_message(session_id: str | None) -> None:
     print(f"Or: vibe --resume {session_id}")
 
 
-def run_textual_ui(
+def _create_vibe_app(
     config: VibeConfig,
     initial_mode: AgentMode = AgentMode.DEFAULT,
     enable_streaming: bool = False,
     initial_prompt: str | None = None,
     loaded_messages: list[LLMMessage] | None = None,
-) -> None:
+    needs_onboarding: bool = False,
+    agent_name: str | None = None,
+    initial_mode_overrides: dict[str, object] | None = None,
+) -> VibeApp:
     update_notifier = PyPIVersionUpdateGateway(project_name="mistral-vibe")
     update_cache_repository = FileSystemUpdateCacheRepository()
-    app = VibeApp(
+    return VibeApp(
         config=config,
         initial_mode=initial_mode,
         enable_streaming=enable_streaming,
@@ -1375,6 +1488,96 @@ def run_textual_ui(
         loaded_messages=loaded_messages,
         version_update_notifier=update_notifier,
         update_cache_repository=update_cache_repository,
+        needs_onboarding=needs_onboarding,
+        agent_name=agent_name,
+        initial_mode_overrides=initial_mode_overrides,
+    )
+
+
+def _build_textual_serve_command(
+    serve_args: argparse.Namespace | None,
+    initial_prompt: str | None,
+) -> str:
+    cmd: list[str] = [sys.executable, "-m", "vibe.cli.serve_child"]
+
+    if serve_args:
+        if serve_args.agent:
+            cmd += ["--agent", serve_args.agent]
+        if getattr(serve_args, "auto_approve", False):
+            cmd.append("--auto-approve")
+        if getattr(serve_args, "plan", False):
+            cmd.append("--plan")
+        for tool in serve_args.enabled_tools or []:
+            cmd += ["--enabled-tools", tool]
+        if getattr(serve_args, "continue_session", False):
+            cmd.append("--continue")
+        elif serve_args.resume:
+            cmd += ["--resume", serve_args.resume]
+
+    prompt = initial_prompt or (serve_args.initial_prompt if serve_args else None)
+    if prompt:
+        cmd.append(prompt)
+
+    return shlex.join(cmd)
+
+
+def serve_textual_ui(
+    config: VibeConfig,
+    initial_mode: AgentMode = AgentMode.DEFAULT,
+    enable_streaming: bool = False,
+    initial_prompt: str | None = None,
+    loaded_messages: list[LLMMessage] | None = None,
+    *,
+    bind_address: str = "127.0.0.1",
+    port: int = 8000,
+    public_url: str | None = None,
+    serve_args: argparse.Namespace | None = None,
+) -> None:
+    try:
+        from textual_serve.server import Server
+    except ImportError as exc:
+        raise RuntimeError(
+            "textual-serve is required for `vibe serve`. Install textual-serve>=1.1.2."
+        ) from exc
+
+    command = _build_textual_serve_command(serve_args, initial_prompt)
+    title = "vibe"
+
+    class QuietServer(Server):
+        async def on_startup(self, app: Any) -> None:  # type: ignore[override]
+            # Suppress the ASCII banner; keep the rest of the startup behavior minimal.
+            self.console.print(f"Serving {self.command!r} on {self.public_url}")
+            self.console.print("\n[cyan]Press Ctrl+C to quit")
+
+    server = QuietServer(
+        command=command,
+        host=bind_address,
+        port=port,
+        public_url=public_url,
+        title=title,
+    )
+    server.serve()
+
+
+def run_textual_ui(
+    config: VibeConfig,
+    initial_mode: AgentMode = AgentMode.DEFAULT,
+    enable_streaming: bool = False,
+    initial_prompt: str | None = None,
+    loaded_messages: list[LLMMessage] | None = None,
+    needs_onboarding: bool = False,
+    agent_name: str | None = None,
+    initial_mode_overrides: dict[str, object] | None = None,
+) -> None:
+    app = _create_vibe_app(
+        config,
+        initial_mode=initial_mode,
+        enable_streaming=enable_streaming,
+        initial_prompt=initial_prompt,
+        loaded_messages=loaded_messages,
+        needs_onboarding=needs_onboarding,
+        agent_name=agent_name,
+        initial_mode_overrides=initial_mode_overrides,
     )
     session_id = app.run()
     _print_session_resume_message(session_id)
