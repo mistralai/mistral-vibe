@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from uuid import uuid4
 
 from vibe.core.agent import Agent
 from vibe.core.config import VibeConfig
@@ -33,7 +34,9 @@ def run_programmatic(
     Returns:
         The final assistant response text, or None if no response
     """
+    session_id = str(uuid4())
     formatter = create_formatter(output_format)
+    formatter.set_session_id(session_id)
 
     agent = Agent(
         config,
@@ -42,6 +45,7 @@ def run_programmatic(
         max_turns=max_turns,
         max_price=max_price,
         enable_streaming=False,
+        session_id=session_id,
     )
     logger.info("USER: %s", prompt)
 
