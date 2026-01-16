@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from pathlib import Path
 import sys
 
@@ -16,7 +17,10 @@ from vibe.setup.trusted_folders.trust_folder_dialog import (
 
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Mistral Vibe interactive CLI")
+    parser = argparse.ArgumentParser(
+        description="Run the Mistral Vibe interactive CLI",
+        epilog="Subcommand: serve — host the Textual UI over HTTP. Run `vibe serve --help` for details.",
+    )
     parser.add_argument(
         "-v", "--version", action="version", version=f"%(prog)s {__version__}"
     )
@@ -103,6 +107,81 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def parse_serve_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Serve the Vibe Textual UI over HTTP (requires Textual.serve support)",
+        prog="vibe serve",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to listen on (default: 8000)",
+    )
+    parser.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        help="Address/interface to bind to (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--public-url",
+        dest="public_url",
+        default=None,
+        help="Public URL advertised to clients (useful when behind a reverse proxy)",
+    )
+    parser.add_argument(
+        "initial_prompt",
+        nargs="?",
+        metavar="PROMPT",
+        help="Initial prompt to start the interactive session with.",
+    )
+    parser.add_argument(
+        "--agent",
+        metavar="NAME",
+        default=None,
+        help="Load agent configuration from ~/.vibe/agents/NAME.toml",
+    )
+    parser.add_argument(
+        "--auto-approve",
+        action="store_true",
+        default=False,
+        help="Start in auto-approve mode: never ask for approval before running tools.",
+    )
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        default=False,
+        help="Start in plan mode: read-only tools for exploration and planning.",
+    )
+    parser.add_argument(
+        "--enabled-tools",
+        action="append",
+        metavar="TOOL",
+        help="Enable specific tools. Disables all other tools. Can be specified multiple times.",
+    )
+
+    continuation_group = parser.add_mutually_exclusive_group()
+    continuation_group.add_argument(
+        "-c",
+        "--continue",
+        action="store_true",
+        dest="continue_session",
+        help="Continue from the most recent saved session",
+    )
+    continuation_group.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="Resume a specific session by its ID (supports partial matching)",
+    )
+
+    args = parser.parse_args(argv)
+    # Keep parity with the main CLI parser so shared helpers (e.g., get_initial_mode)
+    # continue to work.
+    args.prompt = None
+    args.setup = False
+    return args
+
+
 def check_and_resolve_trusted_folder() -> None:
     cwd = Path.cwd()
     if not has_trustable_content(cwd) or cwd.resolve() == Path.home().resolve():
@@ -127,7 +206,54 @@ def check_and_resolve_trusted_folder() -> None:
         trusted_folders_manager.add_untrusted(cwd)
 
 
+def run_serve(args: argparse.Namespace) -> None:
+    from vibe.cli.cli import bootstrap_config_files, get_initial_mode
+    from vibe.cli.textual_ui.app import serve_textual_ui
+    from vibe.core.config import MissingAPIKeyError, VibeConfig, load_api_keys_from_env
+
+    load_api_keys_from_env()
+
+    try:
+        bootstrap_config_files()
+
+        initial_mode = get_initial_mode(args)
+        try:
+            config = VibeConfig.load(args.agent, **initial_mode.config_overrides)
+        except MissingAPIKeyError:
+            # Config will be loaded in child process; onboarding runs inside HTTP UI.
+            fallback_config = VibeConfig.create_default()
+            fallback_config.update(initial_mode.config_overrides)
+            config = VibeConfig.model_construct(**fallback_config)
+
+        if args.enabled_tools:
+            config.enabled_tools = args.enabled_tools
+
+        serve_textual_ui(
+            config,
+            initial_mode=initial_mode,
+            initial_prompt=args.initial_prompt,
+            bind_address=args.bind,
+            port=args.port,
+            public_url=args.public_url,
+            serve_args=args,
+        )
+
+    except (KeyboardInterrupt, EOFError):
+        rprint("\n[dim]Bye![/]")
+        sys.exit(0)
+    except RuntimeError as exc:
+        rprint(f"[red]{exc}[/]")
+        sys.exit(1)
+
+
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        args = parse_serve_arguments(sys.argv[2:])
+        check_and_resolve_trusted_folder()
+        unlock_config_paths()
+        run_serve(args)
+        return
+
     args = parse_arguments()
 
     is_interactive = args.prompt is None

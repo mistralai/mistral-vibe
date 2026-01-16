@@ -266,8 +266,11 @@ def test_get_copy_fns_no_system_tools(mock_which: MagicMock, mock_app: App) -> N
     assert copy_fns[2] == mock_app.copy_to_clipboard
 
 
+@patch("vibe.cli.clipboard.platform.system", return_value="Linux")
 @patch("vibe.cli.clipboard.shutil.which")
-def test_get_copy_fns_with_xclip(mock_which: MagicMock, mock_app: App) -> None:
+def test_get_copy_fns_with_xclip(
+    mock_which: MagicMock, mock_system: MagicMock, mock_app: App
+) -> None:
     def which_side_effect(cmd: str) -> str | None:
         return "/usr/bin/xclip" if cmd == "xclip" else None
 
@@ -282,8 +285,11 @@ def test_get_copy_fns_with_xclip(mock_which: MagicMock, mock_app: App) -> None:
     assert copy_fns[3] == mock_app.copy_to_clipboard
 
 
+@patch("vibe.cli.clipboard.platform.system", return_value="Linux")
 @patch("vibe.cli.clipboard.shutil.which")
-def test_get_copy_fns_with_wl_copy(mock_which: MagicMock, mock_app: App) -> None:
+def test_get_copy_fns_with_wl_copy(
+    mock_which: MagicMock, mock_system: MagicMock, mock_app: App
+) -> None:
     def which_side_effect(cmd: str) -> str | None:
         return "/usr/bin/wl-copy" if cmd == "wl-copy" else None
 
@@ -298,9 +304,10 @@ def test_get_copy_fns_with_wl_copy(mock_which: MagicMock, mock_app: App) -> None
     assert copy_fns[3] == mock_app.copy_to_clipboard
 
 
+@patch("vibe.cli.clipboard.platform.system", return_value="Linux")
 @patch("vibe.cli.clipboard.shutil.which")
 def test_get_copy_fns_with_both_system_tools(
-    mock_which: MagicMock, mock_app: App
+    mock_which: MagicMock, mock_system: MagicMock, mock_app: App
 ) -> None:
     def which_side_effect(cmd: str) -> str | None:
         match cmd:
