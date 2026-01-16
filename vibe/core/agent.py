@@ -97,6 +97,7 @@ class Agent:
         max_price: float | None = None,
         backend: BackendLike | None = None,
         enable_streaming: bool = False,
+        session_id: str | None = None,
     ) -> None:
         """Initialize the agent with configuration and mode."""
         self.config = config
@@ -117,6 +118,8 @@ class Agent:
         self.enable_streaming = enable_streaming
         self._setup_middleware()
 
+        self.session_id = session_id or str(uuid4())
+
         system_prompt = get_universal_system_prompt(
             self.tool_manager, config, self.skill_manager
         )
@@ -135,8 +138,6 @@ class Agent:
             pass
 
         self.approval_callback: ApprovalCallback | None = None
-
-        self.session_id = str(uuid4())
 
         self.interaction_logger = InteractionLogger(
             config.session_logging,

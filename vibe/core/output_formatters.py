@@ -13,6 +13,10 @@ class OutputFormatter(ABC):
         self.stream = stream
         self._messages: list[LLMMessage] = []
         self._final_response: str | None = None
+        self.session_id: str | None = None
+
+    def set_session_id(self, session_id: str) -> None:
+        self.session_id = session_id
 
     @abstractmethod
     def on_message_added(self, message: LLMMessage) -> None:
@@ -61,7 +65,10 @@ class JsonOutputFormatter(OutputFormatter):
 
 class StreamingJsonOutputFormatter(OutputFormatter):
     def on_message_added(self, message: LLMMessage) -> None:
-        json.dump(message.model_dump(mode="json"), self.stream)
+        data = message.model_dump(mode="json")
+        if self.session_id:
+            data["session_id"] = self.session_id
+        json.dump(data, self.stream)
         self.stream.write("\n")
         self.stream.flush()
 

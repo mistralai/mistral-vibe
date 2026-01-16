@@ -13,6 +13,10 @@ from vibe.core.types import LLMMessage, OutputFormat, Role
 class SpyStreamingFormatter:
     def __init__(self) -> None:
         self.emitted: list[tuple[Role, str | None]] = []
+        self.session_id: str | None = None
+
+    def set_session_id(self, session_id: str) -> None:
+        self.session_id = session_id
 
     def on_message_added(self, message: LLMMessage) -> None:
         self.emitted.append((message.role, message.content))
