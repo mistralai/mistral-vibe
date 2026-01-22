@@ -80,21 +80,86 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
     def _parse_command(
         self, command_str: str
     ) -> tuple[list[EnvVariable], str, list[str]]:
-        parts = shlex.split(command_str)
-        env: list[EnvVariable] = []
-        command: str = ""
-        args: list[str] = []
-
-        for part in parts:
-            if "=" in part and not command:
-                key, value = part.split("=", 1)
-                env.append(EnvVariable(name=key, value=value))
-            elif not command:
-                command = part
+        """
+        Parse a command string into environment variables, command, and arguments.
+        
+        For commands containing shell syntax (pipes, redirections, etc.), we use
+        a shell to execute the command. For simple commands, we parse them directly.
+        """
+        # Check if the command contains shell syntax that requires a shell
+        if self._requires_shell(command_str):
+            # Use a shell to execute the command
+            # Extract environment variables first
+            parts = shlex.split(command_str)
+            env: list[EnvVariable] = []
+            remaining_parts: list[str] = []
+            
+            for part in parts:
+                if "=" in part and not remaining_parts:
+                    # This is an environment variable assignment
+                    key, value = part.split("=", 1)
+                    env.append(EnvVariable(name=key, value=value))
+                else:
+                    remaining_parts.append(part)
+            
+            # Reconstruct the command string for the shell
+            if remaining_parts:
+                shell_command = " ".join(remaining_parts)
             else:
-                args.append(part)
+                shell_command = command_str
+            
+            # Use /bin/sh as the command and pass the shell command as arguments
+            return env, "/bin/sh", ["-c", shell_command]
+        else:
+            # Simple command, parse as before
+            parts = shlex.split(command_str)
+            env: list[EnvVariable] = []
+            command: str = ""
+            args: list[str] = []
 
-        return env, command, args
+            for part in parts:
+                if "=" in part and not command:
+                    key, value = part.split("=", 1)
+                    env.append(EnvVariable(name=key, value=value))
+                elif not command:
+                    command = part
+                else:
+                    args.append(part)
+
+            return env, command, args
+
+    def _requires_shell(self, command_str: str) -> bool:
+        """
+        Check if a command requires shell execution.
+        
+        Returns True if the command contains shell syntax like pipes, redirections, etc.
+        """
+        # Shell metacharacters that require shell execution
+        shell_metacharacters = ["|", "&", ";", "<", ">", "(", ")", "`", "$", "\n"]
+        
+        # Check for shell metacharacters
+        for char in shell_metacharacters:
+            if char in command_str:
+                return True
+        
+        # Check for shell builtins and special syntax
+        shell_patterns = [
+            "&&",  # AND operator
+            "||",  # OR operator
+            "|&",  # Pipe both stdout and stderr
+            "2>",  # Redirect stderr
+            "1>",  # Redirect stdout
+            "&>",  # Redirect both stdout and stderr
+            "<<",  # Here document
+            "<(",  # Process substitution
+            ">(",  # Process substitution
+        ]
+        
+        for pattern in shell_patterns:
+            if pattern in command_str:
+                return True
+        
+        return False
 
     @classmethod
     def get_summary(cls, args: BashArgs) -> str:
