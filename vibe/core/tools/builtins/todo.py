@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from enum import StrEnum, auto
 from typing import ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from vibe.core.tools.base import (
     BaseTool,
@@ -41,6 +42,19 @@ class TodoArgs(BaseModel):
     todos: list[TodoItem] | None = Field(
         default=None, description="Complete list of todos when writing."
     )
+
+    @field_validator("todos", mode="before")
+    @classmethod
+    def parse_todos(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON string for todos: {e}")
+        return value
 
 
 class TodoResult(BaseModel):
