@@ -139,10 +139,10 @@ class PathCompletionController:
                 if self._apply_selected_completion(text, cursor_index):
                     return CompletionResult.HANDLED
                 return CompletionResult.IGNORED
-            case "down":
+            case "down" | "ctrl+n":
                 self._move_selection(1)
                 return CompletionResult.HANDLED
-            case "up":
+            case "up" | "ctrl+p":
                 self._move_selection(-1)
                 return CompletionResult.HANDLED
             case _:

@@ -55,6 +55,8 @@ class ThemeSelectionScreen(OnboardingScreen):
         Binding("enter", "next", "Next", show=False, priority=True),
         Binding("up", "prev_theme", "Previous", show=False),
         Binding("down", "next_theme", "Next Theme", show=False),
+        Binding("ctrl+p", "prev_theme", "Previous", show=False),
+        Binding("ctrl+n", "next_theme", "Next Theme", show=False),
         Binding("ctrl+c", "cancel", "Cancel", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
@@ -78,7 +80,7 @@ class ThemeSelectionScreen(OnboardingScreen):
                 yield NoMarkupStatic("Select your preferred theme", id="theme-title")
                 yield Center(
                     Horizontal(
-                        NoMarkupStatic("Navigate ↑ ↓", id="nav-hint"),
+                        NoMarkupStatic("Navigate: ↑↓ or ^p^n", id="nav-hint"),
                         Vertical(*self._compose_theme_list(), id="theme-list"),
                         NoMarkupStatic("Press Enter \u21b5", id="enter-hint"),
                         id="theme-row",

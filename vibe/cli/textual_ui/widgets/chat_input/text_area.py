@@ -215,12 +215,12 @@ class ChatTextArea(TextArea):
             event.stop()
             return
 
-        if event.key == "up" and self._handle_history_up():
+        if event.key in {"up", "ctrl+p"} and self._handle_history_up():
             event.prevent_default()
             event.stop()
             return
 
-        if event.key == "down" and self._handle_history_down():
+        if event.key in {"down", "ctrl+n"} and self._handle_history_down():
             event.prevent_default()
             event.stop()
             return

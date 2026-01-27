@@ -62,10 +62,10 @@ class SlashCommandController:
                     result = CompletionResult.SUBMIT
                 else:
                     result = CompletionResult.HANDLED
-            case "down":
+            case "down" | "ctrl+n":
                 self._move_selection(1)
                 result = CompletionResult.HANDLED
-            case "up":
+            case "up" | "ctrl+p":
                 self._move_selection(-1)
                 result = CompletionResult.HANDLED
             case _:
