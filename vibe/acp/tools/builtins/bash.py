@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
+from pathlib import Path
 import shlex
 
-from acp import CreateTerminalRequest, TerminalHandle
 from acp.schema import (
     EnvVariable,
     TerminalToolCallContent,
@@ -14,9 +15,9 @@ from acp.schema import (
 
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
-from vibe.core.tools.base import BaseToolState, ToolError
+from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.bash import Bash as CoreBashTool, BashArgs, BashResult
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import logger
 
 
@@ -32,48 +33,54 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
     def _get_tool_state_class(cls) -> type[AcpBashState]:
         return AcpBashState
 
-    async def run(self, args: BashArgs) -> BashResult:
-        connection, session_id, _ = self._load_state()
+    async def run(
+        self, args: BashArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
+        client, session_id, _ = self._load_state()
 
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
         env, command, cmd_args = self._parse_command(args.command)
 
-        create_request = CreateTerminalRequest(
-            sessionId=session_id,
-            command=command,
-            args=cmd_args,
-            env=env,
-            cwd=str(self.config.effective_workdir),
-            outputByteLimit=max_bytes,
-        )
-
         try:
-            terminal_handle = await connection.createTerminal(create_request)
+            terminal_handle = await client.create_terminal(
+                session_id=session_id,
+                command=command,
+                args=cmd_args,
+                env=env,
+                cwd=str(Path.cwd()),
+                output_byte_limit=max_bytes,
+            )
         except Exception as e:
             raise ToolError(f"Failed to create terminal: {e!r}") from e
 
+        terminal_id = terminal_handle.id
+
         await self._send_in_progress_session_update([
-            TerminalToolCallContent(type="terminal", terminalId=terminal_handle.id)
+            TerminalToolCallContent(type="terminal", terminal_id=terminal_id)
         ])
 
         try:
             exit_response = await self._wait_for_terminal_exit(
-                terminal_handle, timeout, args.command
+                terminal_id=terminal_id, timeout=timeout, command=args.command
             )
 
-            output_response = await terminal_handle.current_output()
+            output_response = await client.terminal_output(
+                session_id=session_id, terminal_id=terminal_id
+            )
 
-            return self._build_result(
+            yield self._build_result(
                 command=args.command,
                 stdout=output_response.output,
                 stderr="",
-                returncode=exit_response.exitCode or 0,
+                returncode=exit_response.exit_code or 0,
             )
 
         finally:
             try:
-                await terminal_handle.release()
+                await client.release_terminal(
+                    session_id=session_id, terminal_id=terminal_id
+                )
             except Exception as e:
                 logger.error(f"Failed to release terminal: {e!r}")
 
@@ -105,15 +112,22 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
         return summary
 
     async def _wait_for_terminal_exit(
-        self, terminal_handle: TerminalHandle, timeout: int, command: str
+        self, terminal_id: str, timeout: int, command: str
     ) -> WaitForTerminalExitResponse:
+        client, session_id, _ = self._load_state()
+
         try:
             return await asyncio.wait_for(
-                terminal_handle.wait_for_exit(), timeout=timeout
+                client.wait_for_terminal_exit(
+                    session_id=session_id, terminal_id=terminal_id
+                ),
+                timeout=timeout,
             )
         except TimeoutError:
             try:
-                await terminal_handle.kill()
+                await client.kill_terminal(
+                    session_id=session_id, terminal_id=terminal_id
+                )
             except Exception as e:
                 logger.error(f"Failed to kill terminal: {e!r}")
 
@@ -125,12 +139,12 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
             raise ValueError(f"Unexpected tool args: {event.args}")
 
         return ToolCallStart(
-            sessionUpdate="tool_call",
+            session_update="tool_call",
             title=Bash.get_summary(event.args),
             content=None,
-            toolCallId=event.tool_call_id,
+            tool_call_id=event.tool_call_id,
             kind="execute",
-            rawInput=event.args.model_dump_json(),
+            raw_input=event.args.model_dump_json(),
         )
 
     @classmethod
@@ -138,7 +152,7 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
         cls, event: ToolResultEvent
     ) -> ToolCallProgress | None:
         return ToolCallProgress(
-            sessionUpdate="tool_call_update",
-            toolCallId=event.tool_call_id,
+            session_update="tool_call_update",
+            tool_call_id=event.tool_call_id,
             status="failed" if event.error else "completed",
         )

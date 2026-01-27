@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,13 +17,13 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
 )
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
+from vibe.core.agents import AgentSafety
 from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
-from vibe.core.modes import ModeSafety
 
-SAFETY_BORDER_CLASSES: dict[ModeSafety, str] = {
-    ModeSafety.SAFE: "border-safe",
-    ModeSafety.DESTRUCTIVE: "border-warning",
-    ModeSafety.YOLO: "border-error",
+SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
+    AgentSafety.SAFE: "border-safe",
+    AgentSafety.DESTRUCTIVE: "border-warning",
+    AgentSafety.YOLO: "border-error",
 }
 
 
@@ -38,26 +39,32 @@ class ChatInputContainer(Vertical):
         self,
         history_file: Path | None = None,
         command_registry: CommandRegistry | None = None,
-        safety: ModeSafety = ModeSafety.NEUTRAL,
+        safety: AgentSafety = AgentSafety.NEUTRAL,
+        skill_entries_getter: Callable[[], list[tuple[str, str]]] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._history_file = history_file
         self._command_registry = command_registry or CommandRegistry()
         self._safety = safety
-
-        command_entries = [
-            (alias, command.description)
-            for command in self._command_registry.commands.values()
-            for alias in sorted(command.aliases)
-        ]
+        self._skill_entries_getter = skill_entries_getter
 
         self._completion_manager = MultiCompletionManager([
-            SlashCommandController(CommandCompleter(command_entries), self),
+            SlashCommandController(CommandCompleter(self._get_slash_entries), self),
             PathCompletionController(PathCompleter(), self),
         ])
         self._completion_popup: CompletionPopup | None = None
         self._body: ChatInputBody | None = None
+
+    def _get_slash_entries(self) -> list[tuple[str, str]]:
+        entries = [
+            (alias, command.description)
+            for command in self._command_registry.commands.values()
+            for alias in sorted(command.aliases)
+        ]
+        if self._skill_entries_getter:
+            entries.extend(self._skill_entries_getter())
+        return sorted(entries)
 
     def compose(self) -> ComposeResult:
         self._completion_popup = CompletionPopup()
@@ -155,7 +162,7 @@ class ChatInputContainer(Vertical):
         event.stop()
         self.post_message(self.Submitted(event.value))
 
-    def set_safety(self, safety: ModeSafety) -> None:
+    def set_safety(self, safety: AgentSafety) -> None:
         self._safety = safety
 
         try:

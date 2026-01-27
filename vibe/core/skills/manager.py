@@ -9,6 +9,7 @@ from vibe.core.paths.config_paths import resolve_local_skills_dir
 from vibe.core.paths.global_paths import GLOBAL_SKILLS_DIR
 from vibe.core.skills.models import SkillInfo, SkillMetadata
 from vibe.core.skills.parser import SkillParseError, parse_frontmatter
+from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
@@ -20,18 +21,34 @@ class SkillManager:
     def __init__(self, config_getter: Callable[[], VibeConfig]) -> None:
         self._config_getter = config_getter
         self._search_paths = self._compute_search_paths(self._config)
-        self.available_skills = self._discover_skills()
+        self._available: dict[str, SkillInfo] = self._discover_skills()
 
-        if self.available_skills:
+        if self._available:
             logger.info(
                 "Discovered %d skill(s) from %d search path(s)",
-                len(self.available_skills),
+                len(self._available),
                 len(self._search_paths),
             )
 
     @property
     def _config(self) -> VibeConfig:
         return self._config_getter()
+
+    @property
+    def available_skills(self) -> dict[str, SkillInfo]:
+        if self._config.enabled_skills:
+            return {
+                name: info
+                for name, info in self._available.items()
+                if name_matches(name, self._config.enabled_skills)
+            }
+        if self._config.disabled_skills:
+            return {
+                name: info
+                for name, info in self._available.items()
+                if not name_matches(name, self._config.disabled_skills)
+            }
+        return dict(self._available)
 
     @staticmethod
     def _compute_search_paths(config: VibeConfig) -> list[Path]:
@@ -41,9 +58,7 @@ class SkillManager:
             if path.is_dir():
                 paths.append(path)
 
-        if (
-            skills_dir := resolve_local_skills_dir(config.effective_workdir)
-        ) is not None:
+        if (skills_dir := resolve_local_skills_dir(Path.cwd())) is not None:
             paths.append(skills_dir)
 
         if GLOBAL_SKILLS_DIR.path.is_dir():

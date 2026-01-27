@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from enum import StrEnum, auto
 from typing import ClassVar
 
@@ -9,11 +10,12 @@ from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
     BaseToolState,
+    InvokeContext,
     ToolError,
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 
 
 class TodoStatus(StrEnum):
@@ -95,12 +97,14 @@ class Todo(
     def get_status_text(cls) -> str:
         return "Managing todos"
 
-    async def run(self, args: TodoArgs) -> TodoResult:
+    async def run(
+        self, args: TodoArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | TodoResult, None]:
         match args.action:
             case "read":
-                return self._read_todos()
+                yield self._read_todos()
             case "write":
-                return self._write_todos(args.todos or [])
+                yield self._write_todos(args.todos or [])
             case _:
                 raise ToolError(
                     f"Invalid action '{args.action}'. Use 'read' or 'write'."

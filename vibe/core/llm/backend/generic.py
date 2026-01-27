@@ -134,7 +134,9 @@ class OpenAIAdapter(APIAdapter):
     ) -> PreparedRequest:
         field_name = provider.reasoning_field_name
         converted_messages = [
-            self._reasoning_to_api(msg.model_dump(exclude_none=True), field_name)
+            self._reasoning_to_api(
+                msg.model_dump(exclude_none=True, exclude={"message_id"}), field_name
+            )
             for msg in messages
         ]
 
@@ -150,7 +152,7 @@ class OpenAIAdapter(APIAdapter):
             payload["stream_options"] = stream_options
 
         headers = self.build_headers(api_key)
-        body = json.dumps(payload).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
         return PreparedRequest(self.endpoint, headers, body)
 

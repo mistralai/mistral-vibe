@@ -8,6 +8,7 @@ from textual.message import Message
 from textual.widgets import TextArea
 
 from vibe.cli.autocompletion.base import CompletionResult
+from vibe.cli.textual_ui.external_editor import ExternalEditor
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
@@ -23,7 +24,8 @@ class ChatTextArea(TextArea):
             "New Line",
             show=False,
             priority=True,
-        )
+        ),
+        Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
     ]
 
     MODE_CHARACTERS: ClassVar[set[Literal["!", "/"]]] = {"!", "/"}
@@ -83,6 +85,17 @@ class ChatTextArea(TextArea):
 
     def action_insert_newline(self) -> None:
         self.insert("\n")
+
+    def action_open_external_editor(self) -> None:
+        editor = ExternalEditor()
+        current_text = self.get_full_text()
+
+        with self.app.suspend():
+            result = editor.edit(current_text)
+
+        if result is not None:
+            self.clear()
+            self.insert(result)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if not self._navigating_history and self.text != self._last_text:

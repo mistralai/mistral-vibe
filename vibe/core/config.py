@@ -19,7 +19,7 @@ from pydantic_settings import (
 )
 import tomli_w
 
-from vibe.core.paths.config_paths import AGENT_DIR, CONFIG_DIR, CONFIG_FILE, PROMPT_DIR
+from vibe.core.paths.config_paths import CONFIG_DIR, CONFIG_FILE, PROMPT_DIR
 from vibe.core.paths.global_paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
 from vibe.core.prompts import SystemPrompt
 from vibe.core.tools.base import BaseToolConfig
@@ -137,6 +137,14 @@ class _MCPBase(BaseModel):
     prompt: str | None = Field(
         default=None, description="Optional usage hint appended to tool descriptions"
     )
+    startup_timeout_sec: float = Field(
+        default=10.0,
+        gt=0,
+        description="Timeout in seconds for the server to start and initialize.",
+    )
+    tool_timeout_sec: float = Field(
+        default=60.0, gt=0, description="Timeout in seconds for tool execution."
+    )
 
     @field_validator("name", mode="after")
     @classmethod
@@ -199,6 +207,10 @@ class MCPStdio(_MCPBase):
     transport: Literal["stdio"]
     command: str | list[str]
     args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables to set for the MCP server process.",
+    )
 
     def argv(self) -> list[str]:
         base = (
@@ -278,14 +290,14 @@ class VibeConfig(BaseSettings):
     displayed_workdir: str = ""
     auto_compact_threshold: int = 200_000
     context_warnings: bool = False
-    instructions: str = ""
-    workdir: Path | None = Field(default=None, exclude=True)
+    auto_approve: bool = False
     system_prompt_id: str = "cli"
     include_commit_signature: bool = True
     include_model_info: bool = True
     include_project_context: bool = True
     include_prompt_detail: bool = True
     enable_update_checks: bool = True
+    enable_auto_update: bool = True
     api_timeout: float = 720.0
     providers: list[ProviderConfig] = Field(
         default_factory=lambda: list(DEFAULT_PROVIDERS)
@@ -298,8 +310,10 @@ class VibeConfig(BaseSettings):
     tool_paths: list[Path] = Field(
         default_factory=list,
         description=(
-            "Additional directories to search for custom tools. "
-            "Each path may be absolute or relative to the current working directory."
+            "Additional directories or files to explore for custom tools. "
+            "Paths may be absolute or relative to the current working directory. "
+            "Directories are shallow-searched for tool definition files, "
+            "while files are loaded directly if valid."
         ),
     )
 
@@ -311,20 +325,39 @@ class VibeConfig(BaseSettings):
         default_factory=list,
         description=(
             "An explicit list of tool names/patterns to enable. If set, only these"
-            " tools will be active. Supports exact names, glob patterns (e.g.,"
-            " 'serena_*'), and regex with 're:' prefix or regex-like patterns (e.g.,"
-            " 're:^serena_.*' or 'serena.*')."
+            " tools will be active. Supports glob patterns (e.g., 'serena_*') and"
+            " regex with 're:' prefix (e.g., 're:^serena_.*')."
         ),
     )
     disabled_tools: list[str] = Field(
         default_factory=list,
         description=(
             "A list of tool names/patterns to disable. Ignored if 'enabled_tools'"
-            " is set. Supports exact names, glob patterns (e.g., 'bash*'), and"
-            " regex with 're:' prefix or regex-like patterns."
+            " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
-
+    agent_paths: list[Path] = Field(
+        default_factory=list,
+        description=(
+            "Additional directories to search for custom agent profiles. "
+            "Each path may be absolute or relative to the current working directory."
+        ),
+    )
+    enabled_agents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "An explicit list of agent names/patterns to enable. If set, only these"
+            " agents will be available. Supports glob patterns (e.g., 'custom-*')"
+            " and regex with 're:' prefix."
+        ),
+    )
+    disabled_agents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "A list of agent names/patterns to disable. Ignored if 'enabled_agents'"
+            " is set. Supports glob patterns and regex with 're:' prefix."
+        ),
+    )
     skill_paths: list[Path] = Field(
         default_factory=list,
         description=(
@@ -332,14 +365,25 @@ class VibeConfig(BaseSettings):
             "Each path may be absolute or relative to the current working directory."
         ),
     )
+    enabled_skills: list[str] = Field(
+        default_factory=list,
+        description=(
+            "An explicit list of skill names/patterns to enable. If set, only these"
+            " skills will be active. Supports glob patterns (e.g., 'search-*') and"
+            " regex with 're:' prefix."
+        ),
+    )
+    disabled_skills: list[str] = Field(
+        default_factory=list,
+        description=(
+            "A list of skill names/patterns to disable. Ignored if 'enabled_skills'"
+            " is set. Supports glob patterns and regex with 're:' prefix."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"
     )
-
-    @property
-    def effective_workdir(self) -> Path:
-        return self.workdir if self.workdir is not None else Path.cwd()
 
     @property
     def system_prompt(self) -> str:
@@ -439,22 +483,6 @@ class VibeConfig(BaseSettings):
             return []
         return [Path(p).expanduser().resolve() for p in v]
 
-    @field_validator("workdir", mode="before")
-    @classmethod
-    def _expand_workdir(cls, v: Any) -> Path | None:
-        if v is None or (isinstance(v, str) and not v.strip()):
-            return None
-
-        if isinstance(v, str):
-            v = Path(v).expanduser().resolve()
-        elif isinstance(v, Path):
-            v = v.expanduser().resolve()
-        if not v.is_dir():
-            raise ValueError(
-                f"Tried to set {v} as working directory, path doesn't exist"
-            )
-        return v
-
     @field_validator("tools", mode="before")
     @classmethod
     def _normalize_tool_configs(cls, v: Any) -> dict[str, BaseToolConfig]:
@@ -524,28 +552,13 @@ class VibeConfig(BaseSettings):
             tomli_w.dump(config, f)
 
     @classmethod
-    def _get_agent_config(cls, agent: str | None) -> dict[str, Any] | None:
-        if agent is None:
-            return None
-
-        agent_config_path = (AGENT_DIR.path / agent).with_suffix(".toml")
-        try:
-            return tomllib.load(agent_config_path.open("rb"))
-        except FileNotFoundError:
-            raise ValueError(
-                f"Config '{agent}.toml' for agent not found in {AGENT_DIR.path}"
-            )
-
-    @classmethod
     def _migrate(cls) -> None:
         pass
 
     @classmethod
-    def load(cls, agent: str | None = None, **overrides: Any) -> VibeConfig:
+    def load(cls, **overrides: Any) -> VibeConfig:
         cls._migrate()
-        agent_config = cls._get_agent_config(agent)
-        init_data = {**(agent_config or {}), **overrides}
-        return cls(**init_data)
+        return cls(**(overrides or {}))
 
     @classmethod
     def create_default(cls) -> dict[str, Any]:

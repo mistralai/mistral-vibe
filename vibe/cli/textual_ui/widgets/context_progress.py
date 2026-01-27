@@ -25,8 +25,6 @@ class ContextProgress(NoMarkupStatic):
             self.update("")
             return
 
-        percentage = min(
-            100, int((new_state.current_tokens / new_state.max_tokens) * 100)
-        )
-        text = f"{percentage}% of {new_state.max_tokens // 1000}k tokens"
+        ratio = min(1, new_state.current_tokens / new_state.max_tokens)
+        text = f"{ratio:.0%} of {new_state.max_tokens // 1000}k tokens"
         self.update(text)

@@ -52,7 +52,7 @@ class Todo(CoreTodoTool, BaseAcpTool[AcpTodoState]):
         }
 
         update = AgentPlanUpdate(
-            sessionUpdate="plan",
+            session_update="plan",
             entries=[
                 PlanEntry(
                     content=todo.content,

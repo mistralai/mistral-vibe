@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 import random
 from time import time
@@ -60,6 +62,8 @@ class LoadingWidget(SpinnerMixin, Static):
         self.hint_widget: Static | None = None
         self.start_time: float | None = None
         self._last_elapsed: int = -1
+        self._paused_total: float = 0.0
+        self._pause_start: float | None = None
 
     def _get_easter_egg(self) -> str | None:
         EASTER_EGG_PROBABILITY = 0.10
@@ -83,6 +87,15 @@ class LoadingWidget(SpinnerMixin, Static):
 
     def _apply_easter_egg(self, status: str) -> str:
         return self._get_easter_egg() or status
+
+    def pause_timer(self) -> None:
+        if self._pause_start is None:
+            self._pause_start = time()
+
+    def resume_timer(self) -> None:
+        if self._pause_start is not None:
+            self._paused_total += time() - self._pause_start
+            self._pause_start = None
 
     def set_status(self, status: str) -> None:
         self.status = self._apply_easter_egg(status)
@@ -154,7 +167,21 @@ class LoadingWidget(SpinnerMixin, Static):
             self.transition_progress = 0
 
         if self.hint_widget and self.start_time is not None:
-            elapsed = int(time() - self.start_time)
+            paused = self._paused_total + (
+                time() - self._pause_start if self._pause_start else 0
+            )
+            elapsed = int(time() - self.start_time - paused)
             if elapsed != self._last_elapsed:
                 self._last_elapsed = elapsed
                 self.hint_widget.update(f"({elapsed}s esc to interrupt)")
+
+
+@contextmanager
+def paused_timer(loading_widget: LoadingWidget | None) -> Iterator[None]:
+    if loading_widget:
+        loading_widget.pause_timer()
+    try:
+        yield
+    finally:
+        if loading_widget:
+            loading_widget.resume_timer()

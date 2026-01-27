@@ -9,7 +9,7 @@ import respx
 
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
-from vibe.core.agent import Agent
+from vibe.core.agent_loop import AgentLoop
 from vibe.core.config import (
     ModelConfig,
     ProviderConfig,
@@ -294,7 +294,7 @@ class TestAPIToolFormatHandlerReasoningContent:
         assert result.reasoning_content is None
 
 
-class TestAgentStreamingReasoningEvents:
+class TestAgentLoopStreamingReasoningEvents:
     @pytest.mark.asyncio
     async def test_streaming_accumulates_reasoning_in_message(self):
         backend = FakeBackend([
@@ -302,7 +302,7 @@ class TestAgentStreamingReasoningEvents:
             mock_llm_chunk(content="", reasoning_content="Second thought."),
             mock_llm_chunk(content="Final answer."),
         ])
-        agent = Agent(make_config(), backend=backend, enable_streaming=True)
+        agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
 
         [_ async for _ in agent.act("Think and answer")]
 
@@ -316,7 +316,7 @@ class TestAgentStreamingReasoningEvents:
             mock_llm_chunk(content="Hello "),
             mock_llm_chunk(content="world!"),
         ])
-        agent = Agent(make_config(), backend=backend, enable_streaming=True)
+        agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
 
         events = [event async for event in agent.act("Say hello")]
 

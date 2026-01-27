@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 
 from rich import print as rprint
 
 from vibe import __version__
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.paths.config_paths import unlock_config_paths
 from vibe.core.trusted_folders import has_trustable_content, trusted_folders_manager
 from vibe.setup.trusted_folders.trust_folder_dialog import (
@@ -34,18 +36,6 @@ def parse_arguments() -> argparse.Namespace:
         metavar="TEXT",
         help="Run in programmatic mode: send prompt, auto-approve all tools, "
         "output response, and exit.",
-    )
-    parser.add_argument(
-        "--auto-approve",
-        action="store_true",
-        default=False,
-        help="Start in auto-approve mode: never ask for approval before running tools.",
-    )
-    parser.add_argument(
-        "--plan",
-        action="store_true",
-        default=False,
-        help="Start in plan mode: read-only tools for exploration and planning.",
     )
     parser.add_argument(
         "--max-turns",
@@ -82,10 +72,17 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--agent",
         metavar="NAME",
-        default=None,
-        help="Load agent configuration from ~/.vibe/agents/NAME.toml",
+        default=BuiltinAgentName.DEFAULT,
+        help="Agent to use (builtin: default, plan, accept-edits, auto-approve, "
+        "or custom from ~/.vibe/agents/NAME.toml)",
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
+    parser.add_argument(
+        "--workdir",
+        type=Path,
+        metavar="DIR",
+        help="Change to this directory before running",
+    )
 
     continuation_group = parser.add_mutually_exclusive_group()
     continuation_group.add_argument(
@@ -104,7 +101,17 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def check_and_resolve_trusted_folder() -> None:
-    cwd = Path.cwd()
+    try:
+        cwd = Path.cwd()
+    except FileNotFoundError:
+        rprint(
+            "[red]Error: Current working directory no longer exists.[/]\n"
+            "[yellow]The directory you started vibe from has been deleted. "
+            "Please change to an existing directory and try again, "
+            "or use --workdir to specify a working directory.[/]"
+        )
+        sys.exit(1)
+
     if not has_trustable_content(cwd) or cwd.resolve() == Path.home().resolve():
         return
 
@@ -129,6 +136,15 @@ def check_and_resolve_trusted_folder() -> None:
 
 def main() -> None:
     args = parse_arguments()
+
+    if args.workdir:
+        workdir = args.workdir.expanduser().resolve()
+        if not workdir.is_dir():
+            rprint(
+                f"[red]Error: --workdir does not exist or is not a directory: {workdir}[/]"
+            )
+            sys.exit(1)
+        os.chdir(workdir)
 
     is_interactive = args.prompt is None
     if is_interactive:

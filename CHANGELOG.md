@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-01-27
+
+### Added
+
+- Subagent support
+- AskUserQuestion tool for interactive user input
+- User-defined slash commands through skills
+- What's new message display on version update
+- Auto-update feature
+- Environment variables and timeout support for MCP servers
+- Editor shortcut support
+- Shift+enter support for VS Code Insiders
+- Message ID property for messages
+- Client notification of compaction events
+- debugpy support for macOS debugging
+
+### Changed
+
+- Mode system refactored to Agents
+- Standardized managers
+- Improved system prompt
+- Updated session storage to separate metadata from messages
+- Use shell environment to determine shell in bash tool
+- Expanded user input handling
+- Bumped agent-client-protocol to 0.7.1
+- Refactored UI to require AgentLoop at VibeApp construction
+- Updated README with new MCP server config
+- Improved readability of the AskUserQuerstion tool output
+
+### Fixed
+
+- Use ensure_ascii=False for all JSON dumps
+- Delete long-living temporary session files
+- Ignore system prompt when saving/loading session messages
+- Bash tool timeout handling
+- Clipboard: no markup parsing of selected texts
+- Canonical imports
+- Remove last user message from compaction
+- Pause tool timer while awaiting user action
+
+### Removed
+
+- instructions.md support
+- workdir setting in config file
+
+
 ## [1.3.5] - 2026-01-12
 
 ### Fixed

@@ -53,7 +53,7 @@ class JsonOutputFormatter(OutputFormatter):
 
     def finalize(self) -> str | None:
         messages_data = [msg.model_dump(mode="json") for msg in self._messages]
-        json.dump(messages_data, self.stream, indent=2)
+        json.dump(messages_data, self.stream, indent=2, ensure_ascii=False)
         self.stream.write("\n")
         self.stream.flush()
         return None
@@ -61,7 +61,7 @@ class JsonOutputFormatter(OutputFormatter):
 
 class StreamingJsonOutputFormatter(OutputFormatter):
     def on_message_added(self, message: LLMMessage) -> None:
-        json.dump(message.model_dump(mode="json"), self.stream)
+        json.dump(message.model_dump(mode="json"), self.stream, ensure_ascii=False)
         self.stream.write("\n")
         self.stream.flush()
 

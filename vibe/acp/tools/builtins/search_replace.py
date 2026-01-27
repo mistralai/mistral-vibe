@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from acp import ReadTextFileRequest, WriteTextFileRequest
 from acp.helpers import SessionUpdate
 from acp.schema import (
     FileEditToolCallContent,
@@ -38,14 +37,14 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
         return AcpSearchReplaceState
 
     async def _read_file(self, file_path: Path) -> str:
-        connection, session_id, _ = self._load_state()
-
-        read_request = ReadTextFileRequest(sessionId=session_id, path=str(file_path))
+        client, session_id, _ = self._load_state()
 
         await self._send_in_progress_session_update()
 
         try:
-            response = await connection.readTextFile(read_request)
+            response = await client.read_text_file(
+                session_id=session_id, path=str(file_path)
+            )
         except Exception as e:
             raise ToolError(f"Unexpected error reading {file_path}: {e}") from e
 
@@ -62,14 +61,12 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
         )
 
     async def _write_file(self, file_path: Path, content: str) -> None:
-        connection, session_id, _ = self._load_state()
-
-        write_request = WriteTextFileRequest(
-            sessionId=session_id, path=str(file_path), content=content
-        )
+        client, session_id, _ = self._load_state()
 
         try:
-            await connection.writeTextFile(write_request)
+            await client.write_text_file(
+                session_id=session_id, path=str(file_path), content=content
+            )
         except Exception as e:
             raise ToolError(f"Error writing {file_path}: {e}") from e
 
@@ -82,29 +79,29 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
         blocks = cls._parse_search_replace_blocks(args.content)
 
         return ToolCallStart(
-            sessionUpdate="tool_call",
+            session_update="tool_call",
             title=cls.get_call_display(event).summary,
-            toolCallId=event.tool_call_id,
+            tool_call_id=event.tool_call_id,
             kind="edit",
             content=[
                 FileEditToolCallContent(
                     type="diff",
                     path=args.file_path,
-                    oldText=block.search,
-                    newText=block.replace,
+                    old_text=block.search,
+                    new_text=block.replace,
                 )
                 for block in blocks
             ],
             locations=[ToolCallLocation(path=args.file_path)],
-            rawInput=args.model_dump_json(),
+            raw_input=args.model_dump_json(),
         )
 
     @classmethod
     def tool_result_session_update(cls, event: ToolResultEvent) -> SessionUpdate | None:
         if event.error:
             return ToolCallProgress(
-                sessionUpdate="tool_call_update",
-                toolCallId=event.tool_call_id,
+                session_update="tool_call_update",
+                tool_call_id=event.tool_call_id,
                 status="failed",
             )
 
@@ -115,18 +112,18 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
         blocks = cls._parse_search_replace_blocks(result.content)
 
         return ToolCallProgress(
-            sessionUpdate="tool_call_update",
-            toolCallId=event.tool_call_id,
+            session_update="tool_call_update",
+            tool_call_id=event.tool_call_id,
             status="completed",
             content=[
                 FileEditToolCallContent(
                     type="diff",
                     path=result.file,
-                    oldText=block.search,
-                    newText=block.replace,
+                    old_text=block.search,
+                    new_text=block.replace,
                 )
                 for block in blocks
             ],
             locations=[ToolCallLocation(path=result.file)],
-            rawOutput=result.model_dump_json(),
+            raw_output=result.model_dump_json(),
         )

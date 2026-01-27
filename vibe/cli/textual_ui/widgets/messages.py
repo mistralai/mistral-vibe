@@ -197,6 +197,29 @@ class UserCommandMessage(Static):
                 yield Markdown(self._content)
 
 
+class WhatsNewMessage(Static):
+    def __init__(self, content: str) -> None:
+        super().__init__()
+        self.add_class("whats-new-message")
+        self._content = content
+
+    def compose(self) -> ComposeResult:
+        yield Markdown(self._content)
+
+
+class PlanOfferMessage(Static):
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.add_class("plan-offer-message")
+        self._text = text
+
+    def compose(self) -> ComposeResult:
+        yield Markdown(self._text)
+
+    def get_text(self) -> str:
+        return self._text
+
+
 class InterruptMessage(Static):
     def __init__(self) -> None:
         super().__init__()

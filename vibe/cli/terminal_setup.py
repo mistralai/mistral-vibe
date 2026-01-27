@@ -7,11 +7,12 @@ import os
 from pathlib import Path
 import platform
 import subprocess
-from typing import Any
+from typing import Any, Literal
 
 
 class Terminal(Enum):
     VSCODE = "vscode"
+    VSCODE_INSIDERS = "vscode_insiders"
     CURSOR = "cursor"
     ITERM2 = "iterm2"
     WEZTERM = "wezterm"
@@ -41,13 +42,21 @@ def _is_cursor() -> bool:
     return False
 
 
+def _detect_vscode_terminal() -> Literal[Terminal.VSCODE, Terminal.VSCODE_INSIDERS]:
+    term_version = os.environ.get("TERM_PROGRAM_VERSION", "").lower()
+    if term_version.endswith("-insider"):
+        return Terminal.VSCODE_INSIDERS
+
+    return Terminal.VSCODE
+
+
 def detect_terminal() -> Terminal:
     term_program = os.environ.get("TERM_PROGRAM", "").lower()
 
     if term_program == "vscode":
         if _is_cursor():
             return Terminal.CURSOR
-        return Terminal.VSCODE
+        return _detect_vscode_terminal()
 
     term_map = {
         "iterm.app": Terminal.ITERM2,
@@ -65,17 +74,19 @@ def detect_terminal() -> Terminal:
     return Terminal.UNKNOWN
 
 
-def _get_vscode_keybindings_path() -> Path | None:
+def _get_vscode_keybindings_path(is_stable: bool) -> Path | None:
     system = platform.system()
 
+    app_name = "Code" if is_stable else "Code - Insiders"
+
     if system == "Darwin":
-        base = Path.home() / "Library" / "Application Support" / "Code" / "User"
+        base = Path.home() / "Library" / "Application Support" / app_name / "User"
     elif system == "Linux":
-        base = Path.home() / ".config" / "Code" / "User"
+        base = Path.home() / ".config" / app_name / "User"
     elif system == "Windows":
         appdata = os.environ.get("APPDATA", "")
         if appdata:
-            base = Path(appdata) / "Code" / "User"
+            base = Path(appdata) / app_name / "User"
         else:
             return None
     else:
@@ -118,13 +129,13 @@ def _parse_keybindings(content: str) -> list[dict[str, Any]]:
 
 
 def _setup_vscode_like_terminal(terminal: Terminal) -> SetupResult:
-    """Setup keybindings for VSCode or Cursor."""
+    """Setup keybindings for VS Code or Cursor."""
     if terminal == Terminal.CURSOR:
         keybindings_path = _get_cursor_keybindings_path()
         editor_name = "Cursor"
     else:
-        keybindings_path = _get_vscode_keybindings_path()
-        editor_name = "VSCode"
+        keybindings_path = _get_vscode_keybindings_path(terminal == Terminal.VSCODE)
+        editor_name = "VS Code" if terminal == Terminal.VSCODE else "VS Code Insiders"
 
     if keybindings_path is None:
         return SetupResult(
@@ -151,7 +162,9 @@ def _setup_vscode_like_terminal(terminal: Terminal) -> SetupResult:
             )
 
         keybindings.append(new_binding)
-        keybindings_path.write_text(json.dumps(keybindings, indent=2) + "\n")
+        keybindings_path.write_text(
+            json.dumps(keybindings, indent=2, ensure_ascii=False) + "\n"
+        )
 
         return SetupResult(
             success=True,
@@ -376,10 +389,8 @@ def setup_terminal() -> SetupResult:
     terminal = detect_terminal()
 
     match terminal:
-        case Terminal.VSCODE:
-            return _setup_vscode_like_terminal(Terminal.VSCODE)
-        case Terminal.CURSOR:
-            return _setup_vscode_like_terminal(Terminal.CURSOR)
+        case Terminal.VSCODE | Terminal.VSCODE_INSIDERS | Terminal.CURSOR:
+            return _setup_vscode_like_terminal(terminal)
         case Terminal.ITERM2:
             return _setup_iterm2()
         case Terminal.WEZTERM:
@@ -391,7 +402,7 @@ def setup_terminal() -> SetupResult:
                 success=False,
                 terminal=Terminal.UNKNOWN,
                 message="Could not detect terminal. Supported terminals:\n"
-                "- VSCode\n"
+                "- VS Code\n"
                 "- Cursor\n"
                 "- iTerm2\n"
                 "- WezTerm\n"

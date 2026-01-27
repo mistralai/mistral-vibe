@@ -38,7 +38,7 @@ class HistoryManager:
             self.history_file.parent.mkdir(parents=True, exist_ok=True)
             with self.history_file.open("w", encoding="utf-8") as f:
                 for entry in self._entries:
-                    f.write(json.dumps(entry) + "\n")
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError:
             pass
 

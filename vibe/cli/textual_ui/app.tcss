@@ -133,7 +133,7 @@ Screen {
 #input {
     width: 1fr;
     height: auto;
-    max-height: 16;
+    max-height: 50vh;
     background: transparent;
     color: $text;
     border: none;
@@ -523,6 +523,18 @@ StatusMessage {
     margin-top: 1;
 }
 
+.tool-call-container {
+    width: 100%;
+    height: auto;
+}
+
+.tool-stream-message {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    padding-left: 2;
+}
+
 .tool-result {
     width: 100%;
     height: auto;
@@ -852,11 +864,108 @@ WelcomeBanner {
     color: $foreground;
 }
 
+#question-app {
+    width: 100%;
+    height: auto;
+    max-height: 16;
+    background: transparent;
+    border: round $foreground-muted;
+    padding: 0 1;
+    margin: 0 0 1 0;
+}
+
+#question-content {
+    width: 100%;
+    height: auto;
+}
+
+.question-tabs {
+    height: auto;
+    color: $primary;
+    margin-bottom: 1;
+}
+
+.question-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+    margin-bottom: 1;
+}
+
+.question-option {
+    height: auto;
+    color: $foreground;
+}
+
+.question-option-selected {
+    color: $primary;
+    text-style: bold;
+}
+
+.question-other-row {
+    width: 100%;
+    height: auto;
+}
+
+.question-other-prefix {
+    width: auto;
+    height: auto;
+    color: $foreground;
+}
+
+.question-other-input {
+    width: 1fr;
+    height: auto;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+.question-other-static {
+    width: auto;
+    height: auto;
+    color: $foreground;
+}
+
+.question-submit {
+    height: auto;
+    color: $foreground-muted;
+    margin-top: 1;
+}
+
+.question-help {
+    height: auto;
+    color: $foreground-muted;
+    margin-top: 1;
+}
+
 .code-block {
     height: auto;
     color: $foreground;
     background: $surface;
     padding: 1;
+}
+
+.whats-new-message {
+    background: $surface;
+    border-left: solid $warning;
+}
+
+.plan-offer-message {
+    background: $surface;
+    border-left: solid $warning;
+    height: auto;
+    text-align: center;
+    content-align: center middle;
+    padding: 1 2;
+    margin-top: 1;
+
+    Markdown > *:last-child {
+        margin-bottom: 0;
+        link-style: bold underline;
+        link-background-hover: transparent;
+        link-color-hover: $warning;
+    }
 }
 
 Horizontal {
@@ -870,7 +979,7 @@ ExpandingBorder {
     content-align: left bottom;
 }
 
-ModeIndicator {
+AgentIndicator {
     width: auto;
     height: auto;
     background: transparent;
@@ -879,19 +988,19 @@ ModeIndicator {
     color: $text-muted;
     align: left middle;
 
-    &.mode-safe {
+    &.agent-safe {
         color: $success;
     }
 
-    &.mode-neutral {
+    &.agent-neutral {
         color: $text-muted;
     }
 
-    &.mode-destructive {
+    &.agent-destructive {
         color: $warning;
     }
 
-    &.mode-yolo {
+    &.agent-yolo {
         color: $error;
     }
 }

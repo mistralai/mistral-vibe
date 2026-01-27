@@ -52,12 +52,11 @@ class ApprovalApp(Container):
             self.tool_args = tool_args
 
     def __init__(
-        self, tool_name: str, tool_args: BaseModel, workdir: str, config: VibeConfig
+        self, tool_name: str, tool_args: BaseModel, config: VibeConfig
     ) -> None:
         super().__init__(id="approval-app")
         self.tool_name = tool_name
         self.tool_args = tool_args
-        self.workdir = workdir
         self.config = config
         self.selected_option = 0
         self.content_container: Vertical | None = None

@@ -100,6 +100,7 @@ def copy_selection_to_clipboard(app: App) -> None:
             f'"{_shorten_preview(selected_texts)}" copied to clipboard',
             severity="information",
             timeout=2,
+            markup=False,
         )
     else:
         app.notify(

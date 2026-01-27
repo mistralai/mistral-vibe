@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -26,27 +27,36 @@ class Completer:
 
 
 class CommandCompleter(Completer):
-    def __init__(self, commands: list[tuple[str, str]]) -> None:
-        aliases_with_descriptions: dict[str, str] = {}
-        for alias, description in commands:
-            aliases_with_descriptions[alias] = description
+    def __init__(self, entries: Callable[[], list[tuple[str, str]]]) -> None:
+        self._get_entries = entries
 
-        self._descriptions = aliases_with_descriptions
-        self._aliases: list[str] = list(aliases_with_descriptions.keys())
+    def _build_lookup(self) -> tuple[list[str], dict[str, str]]:
+        descriptions: dict[str, str] = {}
+        for alias, description in self._get_entries():
+            descriptions[alias] = description
+        return list(descriptions.keys()), descriptions
 
     def get_completions(self, text: str, cursor_pos: int) -> list[str]:
         if not text.startswith("/"):
             return []
 
+        aliases, _ = self._build_lookup()
+        word = text[1:cursor_pos].lower()
+        search_str = "/" + word
+        return [alias for alias in aliases if alias.lower().startswith(search_str)]
+
+    def get_completion_items(self, text: str, cursor_pos: int) -> list[tuple[str, str]]:
+        if not text.startswith("/"):
+            return []
+
+        aliases, descriptions = self._build_lookup()
         word = text[1:cursor_pos].lower()
         search_str = "/" + word
         return [
-            alias for alias in self._aliases if alias.lower().startswith(search_str)
+            (alias, descriptions.get(alias, ""))
+            for alias in aliases
+            if alias.lower().startswith(search_str)
         ]
-
-    def get_completion_items(self, text: str, cursor_pos: int) -> list[tuple[str, str]]:
-        completions = self.get_completions(text, cursor_pos)
-        return [(alias, self._descriptions.get(alias, "")) for alias in completions]
 
     def get_replacement_range(
         self, text: str, cursor_pos: int

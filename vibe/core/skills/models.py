@@ -39,6 +39,11 @@ class SkillMetadata(BaseModel):
         validation_alias="allowed-tools",
         description="Space-delimited list of pre-approved tools (experimental).",
     )
+    user_invocable: bool = Field(
+        default=True,
+        validation_alias="user-invocable",
+        description="Controls whether the skill appears in the slash command menu.",
+    )
 
     @field_validator("allowed_tools", mode="before")
     @classmethod
@@ -64,6 +69,7 @@ class SkillInfo(BaseModel):
     compatibility: str | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
     allowed_tools: list[str] = Field(default_factory=list)
+    user_invocable: bool = True
     skill_path: Path
 
     model_config = {"arbitrary_types_allowed": True}
@@ -81,5 +87,6 @@ class SkillInfo(BaseModel):
             compatibility=meta.compatibility,
             metadata=meta.metadata,
             allowed_tools=meta.allowed_tools,
+            user_invocable=meta.user_invocable,
             skill_path=skill_path.resolve(),
         )

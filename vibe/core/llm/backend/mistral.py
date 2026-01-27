@@ -141,7 +141,7 @@ class MistralMapper:
                     name=tool_call.function.name,
                     arguments=tool_call.function.arguments
                     if isinstance(tool_call.function.arguments, str)
-                    else json.dumps(tool_call.function.arguments),
+                    else json.dumps(tool_call.function.arguments, ensure_ascii=False),
                 ),
                 index=tool_call.index,
             )

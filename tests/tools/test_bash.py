@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import pytest
 
+from tests.mock.utils import collect_result
 from vibe.core.tools.base import BaseToolState, ToolError, ToolPermission
 from vibe.core.tools.builtins.bash import Bash, BashArgs, BashToolConfig
 
 
 @pytest.fixture
-def bash(tmp_path):
-    config = BashToolConfig(workdir=tmp_path)
+def bash(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = BashToolConfig()
     return Bash(config=config, state=BaseToolState())
 
 
 @pytest.mark.asyncio
 async def test_runs_echo_successfully(bash):
-    result = await bash.run(BashArgs(command="echo hello"))
+    result = await collect_result(bash.run(BashArgs(command="echo hello")))
 
     assert result.returncode == 0
     assert result.stdout == "hello\n"
@@ -24,7 +26,7 @@ async def test_runs_echo_successfully(bash):
 @pytest.mark.asyncio
 async def test_fails_cat_command_with_missing_file(bash):
     with pytest.raises(ToolError) as err:
-        await bash.run(BashArgs(command="cat missing_file.txt"))
+        await collect_result(bash.run(BashArgs(command="cat missing_file.txt")))
 
     message = str(err.value)
     assert "Command failed" in message
@@ -33,11 +35,12 @@ async def test_fails_cat_command_with_missing_file(bash):
 
 
 @pytest.mark.asyncio
-async def test_uses_effective_workdir(tmp_path):
-    config = BashToolConfig(workdir=tmp_path)
+async def test_uses_effective_workdir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = BashToolConfig()
     bash_tool = Bash(config=config, state=BaseToolState())
 
-    result = await bash_tool.run(BashArgs(command="pwd"))
+    result = await collect_result(bash_tool.run(BashArgs(command="pwd")))
 
     assert result.stdout.strip() == str(tmp_path)
 
@@ -45,17 +48,19 @@ async def test_uses_effective_workdir(tmp_path):
 @pytest.mark.asyncio
 async def test_handles_timeout(bash):
     with pytest.raises(ToolError) as err:
-        await bash.run(BashArgs(command="sleep 2", timeout=1))
+        await collect_result(bash.run(BashArgs(command="sleep 2", timeout=1)))
 
     assert "Command timed out after 1s" in str(err.value)
 
 
 @pytest.mark.asyncio
 async def test_truncates_output_to_max_bytes(bash):
-    config = BashToolConfig(workdir=None, max_output_bytes=5)
+    config = BashToolConfig(max_output_bytes=5)
     bash_tool = Bash(config=config, state=BaseToolState())
 
-    result = await bash_tool.run(BashArgs(command="printf 'abcdefghij'"))
+    result = await collect_result(
+        bash_tool.run(BashArgs(command="printf 'abcdefghij'"))
+    )
 
     assert result.stdout == "abcde"
     assert result.stderr == ""
@@ -64,7 +69,7 @@ async def test_truncates_output_to_max_bytes(bash):
 
 @pytest.mark.asyncio
 async def test_decodes_non_utf8_bytes(bash):
-    result = await bash.run(BashArgs(command="printf '\\xff\\xfe'"))
+    result = await collect_result(bash.run(BashArgs(command="printf '\\xff\\xfe'")))
 
     # accept both possible encodings, as some shells emit escaped bytes as literal strings
     assert result.stdout in {"��", "\xff\xfe", r"\xff\xfe"}

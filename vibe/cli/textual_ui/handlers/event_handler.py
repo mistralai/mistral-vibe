@@ -15,6 +15,8 @@ from vibe.core.types import (
     ReasoningEvent,
     ToolCallEvent,
     ToolResultEvent,
+    ToolStreamEvent,
+    UserMessageEvent,
 )
 from vibe.core.utils import TaggedText
 
@@ -51,6 +53,8 @@ class EventHandler:
             case ToolResultEvent():
                 sanitized_event = self._sanitize_event(event)
                 await self._handle_tool_result(sanitized_event)
+            case ToolStreamEvent():
+                await self._handle_tool_stream(event)
             case ReasoningEvent():
                 await self._handle_reasoning_message(event)
             case AssistantEvent():
@@ -59,6 +63,8 @@ class EventHandler:
                 await self._handle_compact_start()
             case CompactEndEvent():
                 await self._handle_compact_end(event)
+            case UserMessageEvent():
+                pass
             case _:
                 await self._handle_unknown_event(event)
         return None
@@ -118,6 +124,10 @@ class EventHandler:
             await self.mount_callback(tool_result)
 
         self.current_tool_call = None
+
+    async def _handle_tool_stream(self, event: ToolStreamEvent) -> None:
+        if self.current_tool_call:
+            self.current_tool_call.set_stream_message(event.message)
 
     async def _handle_assistant_message(self, event: AssistantEvent) -> None:
         await self.mount_callback(AssistantMessage(event.content))

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from enum import StrEnum, auto
+from os import getenv
+from pathlib import Path
 import subprocess
 import time
-from typing import Any, ClassVar, assert_never
+from typing import Any, ClassVar, assert_never, cast
 
 from pydantic import BaseModel
 from textual.app import App, ComposeResult
@@ -17,50 +19,67 @@ from textual.widgets import Static
 from vibe import __version__ as CORE_VERSION
 from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.commands import CommandRegistry
+from vibe.cli.plan_offer.adapters.http_whoami_gateway import HttpWhoAmIGateway
+from vibe.cli.plan_offer.decide_plan_offer import (
+    ACTION_TO_URL,
+    PlanOfferAction,
+    decide_plan_offer,
+)
+from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway
 from vibe.cli.terminal_setup import setup_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.terminal_theme import (
     TERMINAL_THEME_NAME,
     capture_terminal_theme,
 )
+from vibe.cli.textual_ui.widgets.agent_indicator import AgentIndicator
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
-from vibe.cli.textual_ui.widgets.loading import LoadingWidget
+from vibe.cli.textual_ui.widgets.loading import LoadingWidget, paused_timer
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     BashOutputMessage,
     ErrorMessage,
     InterruptMessage,
+    PlanOfferMessage,
     ReasoningMessage,
     StreamingMessageBase,
     UserCommandMessage,
     UserMessage,
     WarningMessage,
+    WhatsNewMessage,
 )
-from vibe.cli.textual_ui.widgets.mode_indicator import ModeIndicator
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
+from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.cli.textual_ui.widgets.welcome import WelcomeBanner
 from vibe.cli.update_notifier import (
     FileSystemUpdateCacheRepository,
-    PyPIVersionUpdateGateway,
+    PyPIUpdateGateway,
     UpdateCacheRepository,
-    VersionUpdateAvailability,
-    VersionUpdateError,
-    VersionUpdateGateway,
+    UpdateError,
+    UpdateGateway,
     get_update_if_available,
+    load_whats_new_content,
+    mark_version_as_seen,
+    should_show_whats_new,
 )
-from vibe.core.agent import Agent
+from vibe.cli.update_notifier.update import do_update
+from vibe.core.agent_loop import AgentLoop
+from vibe.core.agents import AgentProfile
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
-from vibe.core.modes import AgentMode, next_mode
 from vibe.core.paths.config_paths import HISTORY_FILE
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.types import ApprovalResponse, LLMMessage, Role
+from vibe.core.tools.base import ToolPermission
+from vibe.core.tools.builtins.ask_user_question import (
+    AskUserQuestionArgs,
+    AskUserQuestionResult,
+)
+from vibe.core.types import AgentStats, ApprovalResponse, LLMMessage, Role
 from vibe.core.utils import (
     CancellationReason,
     get_user_cancellation_message,
@@ -70,9 +89,17 @@ from vibe.core.utils import (
 
 
 class BottomApp(StrEnum):
+    """Bottom panel app types.
+
+    Convention: Each value must match the widget class name with "App" suffix removed.
+    E.g., ApprovalApp -> Approval, ConfigApp -> Config, QuestionApp -> Question.
+    This allows dynamic lookup via: BottomApp[type(widget).__name__.removesuffix("App")]
+    """
+
     Approval = auto()
     Config = auto()
     Input = auto()
+    Question = auto()
 
 
 class VibeApp(App):  # noqa: PLR0904
@@ -94,35 +121,29 @@ class VibeApp(App):  # noqa: PLR0904
 
     def __init__(
         self,
-        config: VibeConfig,
-        initial_mode: AgentMode = AgentMode.DEFAULT,
-        enable_streaming: bool = False,
+        agent_loop: AgentLoop,
         initial_prompt: str | None = None,
-        loaded_messages: list[LLMMessage] | None = None,
-        version_update_notifier: VersionUpdateGateway | None = None,
+        update_notifier: UpdateGateway | None = None,
         update_cache_repository: UpdateCacheRepository | None = None,
         current_version: str = CORE_VERSION,
+        plan_offer_gateway: WhoAmIGateway | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._config = config
-        self._current_agent_mode = initial_mode
-        self.enable_streaming = enable_streaming
-        self.agent: Agent | None = None
+        self.agent_loop = agent_loop
         self._agent_running = False
-        self._agent_initializing = False
         self._interrupt_requested = False
         self._agent_task: asyncio.Task | None = None
 
         self._loading_widget: LoadingWidget | None = None
         self._pending_approval: asyncio.Future | None = None
+        self._pending_question: asyncio.Future | None = None
 
         self.event_handler: EventHandler | None = None
         self.commands = CommandRegistry()
 
         self._chat_input_container: ChatInputContainer | None = None
-        self._mode_indicator: ModeIndicator | None = None
-        self._context_progress: ContextProgress | None = None
+        self._agent_indicator: AgentIndicator | None = None
         self._current_bottom_app: BottomApp = BottomApp.Input
 
         self.history_file = HISTORY_FILE.path
@@ -131,26 +152,19 @@ class VibeApp(App):  # noqa: PLR0904
         self._todos_collapsed = False
         self._current_streaming_message: AssistantMessage | None = None
         self._current_streaming_reasoning: ReasoningMessage | None = None
-        self._version_update_notifier = version_update_notifier
+        self._update_notifier = update_notifier
         self._update_cache_repository = update_cache_repository
-        self._is_update_check_enabled = config.enable_update_checks
         self._current_version = current_version
-        self._update_notification_task: asyncio.Task | None = None
-        self._update_notification_shown = False
-
+        self._plan_offer_gateway = plan_offer_gateway
+        self._plan_offer_shown = False
         self._initial_prompt = initial_prompt
-        self._loaded_messages = loaded_messages
-        self._agent_init_task: asyncio.Task | None = None
-        # prevent a race condition where the agent initialization
-        # completes exactly at the moment the user interrupts
-        self._agent_init_interrupted = False
         self._auto_scroll = True
         self._last_escape_time: float | None = None
         self._terminal_theme = capture_terminal_theme()
 
     @property
     def config(self) -> VibeConfig:
-        return self.agent.config if self.agent else self._config
+        return self.agent_loop.config
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="chat"):
@@ -159,7 +173,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         with Horizontal(id="loading-area"):
             yield Static(id="loading-area-content")
-            yield ModeIndicator(mode=self._current_agent_mode)
+            yield AgentIndicator(profile=self.agent_loop.agent_profile)
 
         yield Static(id="todo-area")
 
@@ -168,13 +182,12 @@ class VibeApp(App):  # noqa: PLR0904
                 history_file=self.history_file,
                 command_registry=self.commands,
                 id="input-container",
-                safety=self._current_agent_mode.safety,
+                safety=self.agent_loop.agent_profile.safety,
+                skill_entries_getter=self._get_skill_entries,
             )
 
         with Horizontal(id="bottom-bar"):
-            yield PathDisplay(
-                self.config.displayed_workdir or self.config.effective_workdir
-            )
+            yield PathDisplay(self.config.displayed_workdir or Path.cwd())
             yield NoMarkupStatic(id="spacer")
             yield ContextProgress()
 
@@ -197,26 +210,33 @@ class VibeApp(App):  # noqa: PLR0904
         )
 
         self._chat_input_container = self.query_one(ChatInputContainer)
-        self._mode_indicator = self.query_one(ModeIndicator)
-        self._context_progress = self.query_one(ContextProgress)
+        self._agent_indicator = self.query_one(AgentIndicator)
+        context_progress = self.query_one(ContextProgress)
 
-        if self.config.auto_compact_threshold > 0:
-            self._context_progress.tokens = TokenState(
-                max_tokens=self.config.auto_compact_threshold, current_tokens=0
+        def update_context_progress(stats: AgentStats) -> None:
+            context_progress.tokens = TokenState(
+                max_tokens=self.config.auto_compact_threshold,
+                current_tokens=stats.context_tokens,
             )
+
+        AgentStats.add_listener("context_tokens", update_context_progress)
+        self.agent_loop.stats.trigger_listeners()
+
+        self.agent_loop.set_approval_callback(self._approval_callback)
+        self.agent_loop.set_user_input_callback(self._user_input_callback)
+        self._refresh_profile_widgets()
 
         chat_input_container = self.query_one(ChatInputContainer)
         chat_input_container.focus_input()
         await self._show_dangerous_directory_warning()
+        await self._check_and_show_whats_new()
+        await self._maybe_show_plan_offer()
         self._schedule_update_notification()
 
-        if self._loaded_messages:
-            await self._rebuild_history_from_messages()
+        await self._rebuild_history_from_messages()
 
         if self._initial_prompt:
             self.call_after_refresh(self._process_initial_prompt)
-        else:
-            self._ensure_agent_init_task()
 
     def _process_initial_prompt(self) -> None:
         if self._initial_prompt:
@@ -235,13 +255,16 @@ class VibeApp(App):  # noqa: PLR0904
         input_widget.value = ""
 
         if self._agent_running:
-            await self._interrupt_agent()
+            await self._interrupt_agent_loop()
 
         if value.startswith("!"):
             await self._handle_bash_command(value[1:])
             return
 
         if await self._handle_command(value):
+            return
+
+        if await self._handle_skill(value):
             return
 
         await self._handle_user_message(value)
@@ -280,6 +303,21 @@ class VibeApp(App):  # noqa: PLR0904
         if self._loading_widget and self._loading_widget.parent:
             await self._remove_loading_widget()
 
+    async def on_question_app_answered(self, message: QuestionApp.Answered) -> None:
+        if self._pending_question and not self._pending_question.done():
+            result = AskUserQuestionResult(answers=message.answers, cancelled=False)
+            self._pending_question.set_result(result)
+
+        await self._switch_to_input_app()
+
+    async def on_question_app_cancelled(self, message: QuestionApp.Cancelled) -> None:
+        if self._pending_question and not self._pending_question.done():
+            result = AskUserQuestionResult(answers=[], cancelled=True)
+            self._pending_question.set_result(result)
+
+        await self._switch_to_input_app()
+        await self._interrupt_agent_loop()
+
     async def _remove_loading_widget(self) -> None:
         if self._loading_widget and self._loading_widget.parent:
             await self._loading_widget.remove()
@@ -312,7 +350,7 @@ class VibeApp(App):  # noqa: PLR0904
         self, message: ConfigApp.ConfigClosed
     ) -> None:
         if message.changes:
-            self._save_config_changes(message.changes)
+            VibeConfig.save_updates(message.changes)
             await self._reload_config()
         else:
             await self._mount_and_scroll(
@@ -342,31 +380,9 @@ class VibeApp(App):  # noqa: PLR0904
     def _set_tool_permission_always(
         self, tool_name: str, save_permanently: bool = False
     ) -> None:
-        if save_permanently:
-            VibeConfig.save_updates({"tools": {tool_name: {"permission": "always"}}})
-
-        if tool_name not in self.config.tools:
-            self.config.tools[tool_name] = BaseToolConfig()
-
-        self.config.tools[tool_name].permission = ToolPermission.ALWAYS
-
-    def _save_config_changes(self, changes: dict[str, str]) -> None:
-        if not changes:
-            return
-
-        updates: dict = {}
-
-        for key, value in changes.items():
-            match key:
-                case "active_model":
-                    if value != self.config.active_model:
-                        updates["active_model"] = value
-                case "textual_theme":
-                    if value != self.config.textual_theme:
-                        updates["textual_theme"] = value
-
-        if updates:
-            VibeConfig.save_updates(updates)
+        self.agent_loop.set_tool_permission(
+            tool_name, ToolPermission.ALWAYS, save_permanently
+        )
 
     async def _handle_command(self, user_input: str) -> bool:
         if command := self.commands.find_command(user_input):
@@ -379,6 +395,40 @@ class VibeApp(App):  # noqa: PLR0904
             return True
         return False
 
+    def _get_skill_entries(self) -> list[tuple[str, str]]:
+        if not self.agent_loop:
+            return []
+        return [
+            (f"/{name}", info.description)
+            for name, info in self.agent_loop.skill_manager.available_skills.items()
+            if info.user_invocable
+        ]
+
+    async def _handle_skill(self, user_input: str) -> bool:
+        if not user_input.startswith("/"):
+            return False
+
+        if not self.agent_loop:
+            return False
+
+        skill_name = user_input[1:].strip().lower()
+        skill_info = self.agent_loop.skill_manager.get_skill(skill_name)
+        if not skill_info:
+            return False
+
+        try:
+            skill_content = skill_info.skill_path.read_text(encoding="utf-8")
+        except OSError as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to read skill file: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            return True
+
+        await self._handle_user_message(skill_content)
+        return True
+
     async def _handle_bash_command(self, command: str) -> None:
         if not command:
             await self._mount_and_scroll(
@@ -390,12 +440,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         try:
             result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=False,
-                timeout=30,
-                cwd=self.config.effective_workdir,
+                command, shell=True, capture_output=True, text=False, timeout=30
             )
             stdout = (
                 result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
@@ -406,9 +451,7 @@ class VibeApp(App):  # noqa: PLR0904
             output = stdout or stderr or "(no output)"
             exit_code = result.returncode
             await self._mount_and_scroll(
-                BashOutputMessage(
-                    command, str(self.config.effective_workdir), output, exit_code
-                )
+                BashOutputMessage(command, str(Path.cwd()), output, exit_code)
             )
         except subprocess.TimeoutExpired:
             await self._mount_and_scroll(
@@ -423,106 +466,28 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
     async def _handle_user_message(self, message: str) -> None:
-        init_task = self._ensure_agent_init_task()
-        pending_init = bool(init_task and not init_task.done())
-        user_message = UserMessage(message, pending=pending_init)
+        user_message = UserMessage(message)
 
         await self._mount_and_scroll(user_message)
 
-        self.run_worker(
-            self._process_user_message_after_mount(
-                message=message,
-                user_message=user_message,
-                init_task=init_task,
-                pending_init=pending_init,
-            ),
-            exclusive=False,
-        )
-
-    async def _process_user_message_after_mount(
-        self,
-        message: str,
-        user_message: UserMessage,
-        init_task: asyncio.Task | None,
-        pending_init: bool,
-    ) -> None:
-        try:
-            if init_task and not init_task.done():
-                loading = LoadingWidget()
-                self._loading_widget = loading
-                await self.query_one("#loading-area-content").mount(loading)
-
-                try:
-                    await init_task
-                finally:
-                    if self._loading_widget and self._loading_widget.parent:
-                        await self._loading_widget.remove()
-                        self._loading_widget = None
-                    if pending_init:
-                        await user_message.set_pending(False)
-            elif pending_init:
-                await user_message.set_pending(False)
-
-            if pending_init and self._agent_init_interrupted:
-                self._agent_init_interrupted = False
-                return
-
-            if self.agent and not self._agent_running:
-                self._agent_task = asyncio.create_task(self._handle_agent_turn(message))
-        except asyncio.CancelledError:
-            self._agent_init_interrupted = False
-            if pending_init:
-                await user_message.set_pending(False)
-            return
-
-    async def _initialize_agent(self) -> None:
-        if self.agent or self._agent_initializing:
-            return
-
-        self._agent_initializing = True
-        try:
-            agent = Agent(
-                self.config,
-                mode=self._current_agent_mode,
-                enable_streaming=self.enable_streaming,
+        if not self._agent_running:
+            self._agent_task = asyncio.create_task(
+                self._handle_agent_loop_turn(message)
             )
-
-            if not self._current_agent_mode.auto_approve:
-                agent.approval_callback = self._approval_callback
-
-            if self._loaded_messages:
-                non_system_messages = [
-                    msg
-                    for msg in self._loaded_messages
-                    if not (msg.role == Role.system)
-                ]
-                agent.messages.extend(non_system_messages)
-                logger.info(
-                    "Loaded %d messages from previous session", len(non_system_messages)
-                )
-
-            self.agent = agent
-        except asyncio.CancelledError:
-            self.agent = None
-            return
-        except Exception as e:
-            self.agent = None
-            await self._mount_and_scroll(
-                ErrorMessage(str(e), collapsed=self._tools_collapsed)
-            )
-        finally:
-            self._agent_initializing = False
-            self._agent_init_task = None
 
     async def _rebuild_history_from_messages(self) -> None:
-        if not self._loaded_messages:
+        if all(msg.role == Role.system for msg in self.agent_loop.messages):
             return
 
         messages_area = self.query_one("#messages")
+        # Don't rebuild if messages are already displayed
+        if messages_area.children:
+            return
+
         tool_call_map: dict[str, str] = {}
 
         with self.batch_update():
-            for msg in self._loaded_messages:
+            for msg in self.agent_loop.messages:
                 if msg.role == Role.system:
                     continue
 
@@ -567,35 +532,38 @@ class VibeApp(App):  # noqa: PLR0904
 
             await messages_area.mount(ToolCallMessage(tool_name=tool_name))
 
-    def _ensure_agent_init_task(self) -> asyncio.Task | None:
-        if self.agent:
-            self._agent_init_task = None
-            self._agent_init_interrupted = False
-            return None
-
-        if self._agent_init_task and self._agent_init_task.done():
-            if self._agent_init_task.cancelled():
-                self._agent_init_task = None
-
-        if not self._agent_init_task or self._agent_init_task.done():
-            self._agent_init_interrupted = False
-            self._agent_init_task = asyncio.create_task(self._initialize_agent())
-
-        return self._agent_init_task
+    def _is_tool_enabled_in_main_agent(self, tool: str) -> bool:
+        return tool in self.agent_loop.tool_manager.available_tools
 
     async def _approval_callback(
         self, tool: str, args: BaseModel, tool_call_id: str
     ) -> tuple[ApprovalResponse, str | None]:
+        # Auto-approve only if parent is in auto-approve mode AND tool is enabled
+        # This ensures subagents respect the main agent's tool restrictions
+        if self.agent_loop and self.agent_loop.config.auto_approve:
+            if self._is_tool_enabled_in_main_agent(tool):
+                return (ApprovalResponse.YES, None)
+
         self._pending_approval = asyncio.Future()
-        await self._switch_to_approval_app(tool, args)
-        result = await self._pending_approval
+        with paused_timer(self._loading_widget):
+            await self._switch_to_approval_app(tool, args)
+            result = await self._pending_approval
+
         self._pending_approval = None
         return result
 
-    async def _handle_agent_turn(self, prompt: str) -> None:
-        if not self.agent:
-            return
+    async def _user_input_callback(self, args: BaseModel) -> BaseModel:
+        question_args = cast(AskUserQuestionArgs, args)
 
+        self._pending_question = asyncio.Future()
+        with paused_timer(self._loading_widget):
+            await self._switch_to_question_app(question_args)
+            result = await self._pending_question
+
+        self._pending_question = None
+        return result
+
+    async def _handle_agent_loop_turn(self, prompt: str) -> None:
         self._agent_running = True
 
         loading_area = self.query_one("#loading-area-content")
@@ -606,17 +574,8 @@ class VibeApp(App):  # noqa: PLR0904
         self._show_todo_area()
 
         try:
-            rendered_prompt = render_path_prompt(
-                prompt, base_dir=self.config.effective_workdir
-            )
-            async for event in self.agent.act(rendered_prompt):
-                if self._context_progress and self.agent:
-                    current_state = self._context_progress.tokens
-                    self._context_progress.tokens = TokenState(
-                        max_tokens=current_state.max_tokens,
-                        current_tokens=self.agent.stats.context_tokens,
-                    )
-
+            rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
+            async for event in self.agent_loop.act(rendered_prompt):
                 if self.event_handler:
                     await self.event_handler.handle_event(
                         event,
@@ -648,25 +607,11 @@ class VibeApp(App):  # noqa: PLR0904
             self._hide_todo_area()
             await self._finalize_current_streaming_message()
 
-    async def _interrupt_agent(self) -> None:
-        interrupting_agent_init = bool(
-            self._agent_init_task and not self._agent_init_task.done()
-        )
-
-        if (
-            not self._agent_running and not interrupting_agent_init
-        ) or self._interrupt_requested:
+    async def _interrupt_agent_loop(self) -> None:
+        if not self._agent_running or self._interrupt_requested:
             return
 
         self._interrupt_requested = True
-
-        if interrupting_agent_init and self._agent_init_task:
-            self._agent_init_interrupted = True
-            self._agent_init_task.cancel()
-            try:
-                await self._agent_init_task
-            except asyncio.CancelledError:
-                pass
 
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
@@ -695,16 +640,7 @@ class VibeApp(App):  # noqa: PLR0904
         await self._mount_and_scroll(UserCommandMessage(help_text))
 
     async def _show_status(self) -> None:
-        if self.agent is None:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "Agent not initialized yet. Send a message first.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
-        stats = self.agent.stats
+        stats = self.agent_loop.stats
         status_text = f"""## Agent Statistics
 
 - **Steps**: {stats.steps:,}
@@ -724,23 +660,9 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _reload_config(self) -> None:
         try:
-            new_config = VibeConfig.load(**self._current_agent_mode.config_overrides)
+            base_config = VibeConfig.load()
 
-            if self.agent:
-                await self.agent.reload_with_initial_messages(config=new_config)
-            else:
-                self._config = new_config
-            if self._context_progress:
-                if self.config.auto_compact_threshold > 0:
-                    current_tokens = (
-                        self.agent.stats.context_tokens if self.agent else 0
-                    )
-                    self._context_progress.tokens = TokenState(
-                        max_tokens=self.config.auto_compact_threshold,
-                        current_tokens=current_tokens,
-                    )
-                else:
-                    self._context_progress.tokens = TokenState()
+            await self.agent_loop.reload_with_initial_messages(base_config=base_config)
 
             await self._mount_and_scroll(UserCommandMessage("Configuration reloaded."))
         except Exception as e:
@@ -751,32 +673,14 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
     async def _clear_history(self) -> None:
-        if self.agent is None:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "No conversation history to clear yet.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
-        if not self.agent:
-            return
-
         try:
-            await self.agent.clear_history()
+            await self.agent_loop.clear_history()
             await self._finalize_current_streaming_message()
             messages_area = self.query_one("#messages")
             await messages_area.remove_children()
             todo_area = self.query_one("#todo-area")
             await todo_area.remove_children()
 
-            if self._context_progress and self.agent:
-                current_state = self._context_progress.tokens
-                self._context_progress.tokens = TokenState(
-                    max_tokens=current_state.max_tokens,
-                    current_tokens=self.agent.stats.context_tokens,
-                )
             await messages_area.mount(UserMessage("/clear"))
             await self._mount_and_scroll(
                 UserCommandMessage("Conversation history cleared!")
@@ -792,16 +696,7 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
     async def _show_log_path(self) -> None:
-        if self.agent is None:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "No log file created yet. Send a message first.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
-        if not self.agent.interaction_logger.enabled:
+        if not self.agent_loop.session_logger.enabled:
             await self._mount_and_scroll(
                 ErrorMessage(
                     "Session logging is disabled in configuration.",
@@ -811,10 +706,10 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         try:
-            log_path = str(self.agent.interaction_logger.filepath)
+            log_path = str(self.agent_loop.session_logger.session_dir)
             await self._mount_and_scroll(
                 UserCommandMessage(
-                    f"## Current Log File Path\n\n`{log_path}`\n\nYou can send this file to share your interaction."
+                    f"## Current Log Directory\n\n`{log_path}`\n\nYou can send this directory to share your interaction."
                 )
             )
         except Exception as e:
@@ -828,13 +723,13 @@ class VibeApp(App):  # noqa: PLR0904
         if self._agent_running:
             await self._mount_and_scroll(
                 ErrorMessage(
-                    "Cannot compact while agent is processing. Please wait.",
+                    "Cannot compact while agent loop is processing. Please wait.",
                     collapsed=self._tools_collapsed,
                 )
             )
             return
 
-        if self.agent is None:
+        if len(self.agent_loop.messages) <= 1:
             await self._mount_and_scroll(
                 ErrorMessage(
                     "No conversation history to compact yet.",
@@ -843,19 +738,10 @@ class VibeApp(App):  # noqa: PLR0904
             )
             return
 
-        if len(self.agent.messages) <= 1:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "No conversation history to compact yet.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
+        if not self.event_handler:
             return
 
-        if not self.agent or not self.event_handler:
-            return
-
-        old_tokens = self.agent.stats.context_tokens
+        old_tokens = self.agent_loop.stats.context_tokens
         compact_msg = CompactMessage()
         self.event_handler.current_compact = compact_msg
         await self._mount_and_scroll(compact_msg)
@@ -867,18 +753,10 @@ class VibeApp(App):  # noqa: PLR0904
     async def _run_compact(self, compact_msg: CompactMessage, old_tokens: int) -> None:
         self._agent_running = True
         try:
-            if not self.agent:
-                return
-
-            await self.agent.compact()
-            new_tokens = self.agent.stats.context_tokens
+            await self.agent_loop.compact()
+            new_tokens = self.agent_loop.stats.context_tokens
             compact_msg.set_complete(old_tokens=old_tokens, new_tokens=new_tokens)
 
-            if self._context_progress:
-                current_state = self._context_progress.tokens
-                self._context_progress.tokens = TokenState(
-                    max_tokens=current_state.max_tokens, current_tokens=new_tokens
-                )
         except asyncio.CancelledError:
             compact_msg.set_error("Compaction interrupted")
             raise
@@ -891,13 +769,11 @@ class VibeApp(App):  # noqa: PLR0904
                 self.event_handler.current_compact = None
 
     def _get_session_resume_info(self) -> str | None:
-        if not self.agent:
+        if not self.agent_loop.session_logger.enabled:
             return None
-        if not self.agent.interaction_logger.enabled:
+        if not self.agent_loop.session_logger.session_id:
             return None
-        if not self.agent.interaction_logger.session_id:
-            return None
-        return self.agent.interaction_logger.session_id[:8]
+        return self.agent_loop.session_logger.session_id[:8]
 
     async def _exit_app(self) -> None:
         self.exit(result=self._get_session_resume_info())
@@ -923,95 +799,59 @@ class VibeApp(App):  # noqa: PLR0904
                 ErrorMessage(result.message, collapsed=self._tools_collapsed)
             )
 
+    async def _switch_from_input(self, widget: Widget, scroll: bool = False) -> None:
+        bottom_container = self.query_one("#bottom-app-container")
+
+        if self._chat_input_container:
+            self._chat_input_container.display = False
+            self._chat_input_container.disabled = True
+
+        if self._agent_indicator:
+            self._agent_indicator.display = False
+
+        self._current_bottom_app = BottomApp[type(widget).__name__.removesuffix("App")]
+        await bottom_container.mount(widget)
+
+        self.call_after_refresh(widget.focus)
+        if scroll:
+            self.call_after_refresh(self._scroll_to_bottom)
+
     async def _switch_to_config_app(self) -> None:
         if self._current_bottom_app == BottomApp.Config:
             return
 
-        bottom_container = self.query_one("#bottom-app-container")
         await self._mount_and_scroll(UserCommandMessage("Configuration opened..."))
-
-        try:
-            chat_input_container = self.query_one(ChatInputContainer)
-            await chat_input_container.remove()
-        except Exception:
-            pass
-
-        if self._mode_indicator:
-            self._mode_indicator.display = False
-
-        config_app = ConfigApp(
-            self.config, has_terminal_theme=self._terminal_theme is not None
+        await self._switch_from_input(
+            ConfigApp(self.config, has_terminal_theme=self._terminal_theme is not None)
         )
-        await bottom_container.mount(config_app)
-        self._current_bottom_app = BottomApp.Config
-
-        self.call_after_refresh(config_app.focus)
 
     async def _switch_to_approval_app(
         self, tool_name: str, tool_args: BaseModel
     ) -> None:
-        bottom_container = self.query_one("#bottom-app-container")
-
-        try:
-            chat_input_container = self.query_one(ChatInputContainer)
-            await chat_input_container.remove()
-        except Exception:
-            pass
-
-        if self._mode_indicator:
-            self._mode_indicator.display = False
-
         approval_app = ApprovalApp(
-            tool_name=tool_name,
-            tool_args=tool_args,
-            workdir=str(self.config.effective_workdir),
-            config=self.config,
+            tool_name=tool_name, tool_args=tool_args, config=self.config
         )
-        await bottom_container.mount(approval_app)
-        self._current_bottom_app = BottomApp.Approval
+        await self._switch_from_input(approval_app, scroll=True)
 
-        self.call_after_refresh(approval_app.focus)
-        self.call_after_refresh(self._scroll_to_bottom)
+    async def _switch_to_question_app(self, args: AskUserQuestionArgs) -> None:
+        await self._switch_from_input(QuestionApp(args=args), scroll=True)
 
     async def _switch_to_input_app(self) -> None:
-        bottom_container = self.query_one("#bottom-app-container")
+        for app in BottomApp:
+            if app != BottomApp.Input:
+                try:
+                    await self.query_one(f"#{app.value}-app").remove()
+                except Exception:
+                    pass
 
-        try:
-            config_app = self.query_one("#config-app")
-            await config_app.remove()
-        except Exception:
-            pass
+        if self._agent_indicator:
+            self._agent_indicator.display = True
 
-        try:
-            approval_app = self.query_one("#approval-app")
-            await approval_app.remove()
-        except Exception:
-            pass
-
-        if self._mode_indicator:
-            self._mode_indicator.display = True
-
-        try:
-            chat_input_container = self.query_one(ChatInputContainer)
-            self._chat_input_container = chat_input_container
+        if self._chat_input_container:
+            self._chat_input_container.disabled = False
+            self._chat_input_container.display = True
             self._current_bottom_app = BottomApp.Input
-            self.call_after_refresh(chat_input_container.focus_input)
-            return
-        except Exception:
-            pass
-
-        chat_input_container = ChatInputContainer(
-            history_file=self.history_file,
-            command_registry=self.commands,
-            id="input-container",
-            safety=self._current_agent_mode.safety,
-        )
-        await bottom_container.mount(chat_input_container)
-        self._chat_input_container = chat_input_container
-
-        self._current_bottom_app = BottomApp.Input
-
-        self.call_after_refresh(chat_input_container.focus_input)
+            self.call_after_refresh(self._chat_input_container.focus_input)
 
     def _focus_current_bottom_app(self) -> None:
         try:
@@ -1022,6 +862,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(ConfigApp).focus()
                 case BottomApp.Approval:
                     self.query_one(ApprovalApp).focus()
+                case BottomApp.Question:
+                    self.query_one(QuestionApp).focus()
                 case app:
                     assert_never(app)
         except Exception:
@@ -1048,6 +890,15 @@ class VibeApp(App):  # noqa: PLR0904
             self._last_escape_time = None
             return
 
+        if self._current_bottom_app == BottomApp.Question:
+            try:
+                question_app = self.query_one(QuestionApp)
+                question_app.action_cancel()
+            except Exception:
+                pass
+            self._last_escape_time = None
+            return
+
         if (
             self._current_bottom_app == BottomApp.Input
             and self._last_escape_time is not None
@@ -1062,18 +913,8 @@ class VibeApp(App):  # noqa: PLR0904
             except Exception:
                 pass
 
-        has_pending_user_message = any(
-            msg.has_class("pending") for msg in self.query(UserMessage)
-        )
-
-        interrupt_needed = self._agent_running or (
-            self._agent_init_task
-            and not self._agent_init_task.done()
-            and has_pending_user_message
-        )
-
-        if interrupt_needed:
-            self.run_worker(self._interrupt_agent(), exclusive=False)
+        if self._agent_running:
+            self.run_worker(self._interrupt_agent_loop(), exclusive=False)
 
         self._last_escape_time = current_time
         self._scroll_to_bottom()
@@ -1102,43 +943,27 @@ class VibeApp(App):  # noqa: PLR0904
     def action_cycle_mode(self) -> None:
         if self._current_bottom_app != BottomApp.Input:
             return
-
-        new_mode = next_mode(self._current_agent_mode)
-        self._switch_mode(new_mode)
-
-    def _switch_mode(self, mode: AgentMode) -> None:
-        if mode == self._current_agent_mode:
-            return
-
-        self._current_agent_mode = mode
-
-        if self._mode_indicator:
-            self._mode_indicator.set_mode(mode)
-        if self._chat_input_container:
-            self._chat_input_container.set_safety(mode.safety)
-
-        if self.agent:
-            if mode.auto_approve:
-                self.agent.approval_callback = None
-            else:
-                self.agent.approval_callback = self._approval_callback
-
-            self.run_worker(
-                self._do_agent_switch(mode), group="mode_switch", exclusive=True
-            )
-
+        self._refresh_profile_widgets()
         self._focus_current_bottom_app()
+        self.run_worker(self._cycle_agent(), group="mode_switch", exclusive=True)
 
-    async def _do_agent_switch(self, mode: AgentMode) -> None:
-        if self.agent:
-            await self.agent.switch_mode(mode)
+    def _refresh_profile_widgets(self) -> None:
+        self._update_profile_widgets(self.agent_loop.agent_profile)
 
-            if self._context_progress:
-                current_state = self._context_progress.tokens
-                self._context_progress.tokens = TokenState(
-                    max_tokens=current_state.max_tokens,
-                    current_tokens=self.agent.stats.context_tokens,
-                )
+    def _update_profile_widgets(self, profile: AgentProfile) -> None:
+        if self._agent_indicator:
+            self._agent_indicator.set_profile(profile)
+        if self._chat_input_container:
+            self._chat_input_container.set_safety(profile.safety)
+
+    async def _cycle_agent(self) -> None:
+        new_profile = self.agent_loop.agent_manager.next_agent(
+            self.agent_loop.agent_profile
+        )
+        self._update_profile_widgets(new_profile)
+        await self.agent_loop.switch_agent(new_profile.name)
+        self.agent_loop.set_approval_callback(self._approval_callback)
+        self.agent_loop.set_user_input_callback(self._user_input_callback)
 
     def action_clear_quit(self) -> None:
         input_widgets = self.query(ChatInputContainer)
@@ -1180,6 +1005,53 @@ class VibeApp(App):  # noqa: PLR0904
                 f"⚠ WARNING: {reason}\n\nRunning in this location is not recommended."
             )
             await self._mount_and_scroll(WarningMessage(warning, show_border=False))
+
+    async def _check_and_show_whats_new(self) -> None:
+        if self._update_cache_repository is None:
+            return
+
+        if not await should_show_whats_new(
+            self._current_version, self._update_cache_repository
+        ):
+            return
+
+        content = load_whats_new_content()
+        if content is not None:
+            await self._mount_and_scroll(WhatsNewMessage(content))
+        await mark_version_as_seen(self._current_version, self._update_cache_repository)
+
+    async def _maybe_show_plan_offer(self) -> None:
+        if self._plan_offer_shown:
+            return
+        action = await self._resolve_plan_offer_action()
+        if action is PlanOfferAction.NONE:
+            return
+        url = ACTION_TO_URL[action]
+        match action:
+            case PlanOfferAction.UPGRADE:
+                text = f"Upgrade to [Pro]({url})"
+            case PlanOfferAction.SWITCH_TO_PRO_KEY:
+                text = f"Switch to your [Pro API key]({url})"
+        await self._mount_and_scroll(PlanOfferMessage(text))
+        self._plan_offer_shown = True
+
+    async def _resolve_plan_offer_action(self) -> PlanOfferAction:
+        try:
+            active_model = self.config.get_active_model()
+            provider = self.config.get_provider_for_model(active_model)
+        except ValueError:
+            return PlanOfferAction.NONE
+
+        api_key_env = provider.api_key_env_var
+        api_key = getenv(api_key_env) if api_key_env else None
+        gateway = self._plan_offer_gateway or HttpWhoAmIGateway()
+        try:
+            return await decide_plan_offer(api_key, gateway)
+        except Exception as exc:
+            logger.warning(
+                "Plan-offer check failed (%s).", type(exc).__name__, exc_info=True
+            )
+            return PlanOfferAction.NONE
 
     async def _finalize_current_streaming_message(self) -> None:
         if self._current_streaming_reasoning is not None:
@@ -1283,31 +1155,22 @@ class VibeApp(App):  # noqa: PLR0904
             pass
 
     def _schedule_update_notification(self) -> None:
-        if (
-            self._version_update_notifier is None
-            or self._update_notification_task
-            or not self._is_update_check_enabled
-        ):
+        if self._update_notifier is None or not self.config.enable_update_checks:
             return
 
-        self._update_notification_task = asyncio.create_task(
-            self._check_version_update(), name="version-update-check"
-        )
+        asyncio.create_task(self._check_update(), name="version-update-check")
 
-    async def _check_version_update(self) -> None:
+    async def _check_update(self) -> None:
         try:
-            if (
-                self._version_update_notifier is None
-                or self._update_cache_repository is None
-            ):
+            if self._update_notifier is None or self._update_cache_repository is None:
                 return
 
-            update = await get_update_if_available(
-                version_update_notifier=self._version_update_notifier,
+            update_availability = await get_update_if_available(
+                update_notifier=self._update_notifier,
                 current_version=self._current_version,
                 update_cache_repository=self._update_cache_repository,
             )
-        except VersionUpdateError as error:
+        except UpdateError as error:
             self.notify(
                 error.message,
                 title="Update check failed",
@@ -1318,24 +1181,28 @@ class VibeApp(App):  # noqa: PLR0904
         except Exception as exc:
             logger.debug("Version update check failed", exc_info=exc)
             return
-        finally:
-            self._update_notification_task = None
 
-        if update is None or not update.should_notify:
+        if update_availability is None or not update_availability.should_notify:
             return
 
-        self._display_update_notification(update)
+        update_message_prefix = (
+            f"{self._current_version} => {update_availability.latest_version}"
+        )
 
-    def _display_update_notification(self, update: VersionUpdateAvailability) -> None:
-        if self._update_notification_shown:
+        if self.config.enable_auto_update and await do_update():
+            self.notify(
+                f"{update_message_prefix}\nVibe was updated successfully. Please restart to use the new version.",
+                title="Update successful",
+                severity="information",
+                timeout=10,
+            )
             return
 
-        message = f'{self._current_version} => {update.latest_version}\nRun "uv tool upgrade mistral-vibe" to update'
+        message = f"{update_message_prefix}\nPlease update mistral-vibe with your package manager"
 
         self.notify(
             message, title="Update available", severity="information", timeout=10
         )
-        self._update_notification_shown = True
 
     def on_mouse_up(self, event: MouseUp) -> None:
         copy_selection_to_clipboard(self)
@@ -1358,22 +1225,13 @@ def _print_session_resume_message(session_id: str | None) -> None:
     print(f"Or: vibe --resume {session_id}")
 
 
-def run_textual_ui(
-    config: VibeConfig,
-    initial_mode: AgentMode = AgentMode.DEFAULT,
-    enable_streaming: bool = False,
-    initial_prompt: str | None = None,
-    loaded_messages: list[LLMMessage] | None = None,
-) -> None:
-    update_notifier = PyPIVersionUpdateGateway(project_name="mistral-vibe")
+def run_textual_ui(agent_loop: AgentLoop, initial_prompt: str | None = None) -> None:
+    update_notifier = PyPIUpdateGateway(project_name="mistral-vibe")
     update_cache_repository = FileSystemUpdateCacheRepository()
     app = VibeApp(
-        config=config,
-        initial_mode=initial_mode,
-        enable_streaming=enable_streaming,
+        agent_loop=agent_loop,
         initial_prompt=initial_prompt,
-        loaded_messages=loaded_messages,
-        version_update_notifier=update_notifier,
+        update_notifier=update_notifier,
         update_cache_repository=update_cache_repository,
     )
     session_id = app.run()

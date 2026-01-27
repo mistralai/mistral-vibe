@@ -10,6 +10,7 @@ from textual.widgets import Markdown, Static
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.utils import DEFAULT_TOOL_SHORTCUT, TOOL_SHORTCUTS
+from vibe.core.tools.builtins.ask_user_question import AskUserQuestionResult
 from vibe.core.tools.builtins.bash import BashArgs, BashResult
 from vibe.core.tools.builtins.grep import GrepArgs, GrepResult
 from vibe.core.tools.builtins.read_file import ReadFileArgs, ReadFileResult
@@ -321,6 +322,19 @@ class GrepResultWidget(ToolResultWidget[GrepResult]):
             yield Markdown(f"```\n{_truncate_lines(self.result.matches, 30)}\n```")
 
 
+class AskUserQuestionResultWidget(ToolResultWidget[AskUserQuestionResult]):
+    def compose(self) -> ComposeResult:
+        if self.collapsed or not self.result:
+            yield from self._header()
+            return
+
+        for answer in self.result.answers:
+            if len(self.result.answers) > 1:
+                yield NoMarkupStatic(answer.question, classes="tool-result-detail")
+            prefix = "(Other) " if answer.is_other else ""
+            yield NoMarkupStatic(f"{prefix}{answer.answer}", classes="ask-user-answer")
+
+
 APPROVAL_WIDGETS: dict[str, type[ToolApprovalWidget]] = {
     "bash": BashApprovalWidget,
     "read_file": ReadFileApprovalWidget,
@@ -337,6 +351,7 @@ RESULT_WIDGETS: dict[str, type[ToolResultWidget]] = {
     "search_replace": SearchReplaceResultWidget,
     "grep": GrepResultWidget,
     "todo": TodoResultWidget,
+    "ask_user_question": AskUserQuestionResultWidget,
 }
 
 

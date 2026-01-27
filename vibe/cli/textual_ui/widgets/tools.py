@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.widgets.messages import ExpandingBorder
+from vibe.cli.textual_ui.widgets.messages import ExpandingBorder, NonSelectableStatic
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
 from vibe.cli.textual_ui.widgets.tool_widgets import get_result_widget
@@ -23,6 +23,7 @@ class ToolCallMessage(StatusMessage):
         self._event = event
         self._tool_name = tool_name or (event.tool_name if event else "unknown")
         self._is_history = event is None
+        self._stream_widget: NoMarkupStatic | None = None
 
         super().__init__()
         self.add_class("tool-call")
@@ -30,12 +31,37 @@ class ToolCallMessage(StatusMessage):
         if self._is_history:
             self._is_spinning = False
 
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="tool-call-container"):
+            with Horizontal():
+                self._indicator_widget = NonSelectableStatic(
+                    self._spinner.current_frame(), classes="status-indicator-icon"
+                )
+                yield self._indicator_widget
+                self._text_widget = NoMarkupStatic("", classes="status-indicator-text")
+                yield self._text_widget
+            self._stream_widget = NoMarkupStatic("", classes="tool-stream-message")
+            self._stream_widget.display = False
+            yield self._stream_widget
+
     def get_content(self) -> str:
         if self._event and self._event.tool_class:
             adapter = ToolUIDataAdapter(self._event.tool_class)
             display = adapter.get_call_display(self._event)
             return display.summary
         return self._tool_name
+
+    def set_stream_message(self, message: str) -> None:
+        """Update the stream message displayed below the tool call indicator."""
+        if self._stream_widget:
+            self._stream_widget.update(f"→ {message}")
+            self._stream_widget.display = True
+
+    def stop_spinning(self, success: bool = True) -> None:
+        """Stop the spinner and hide the stream widget."""
+        if self._stream_widget:
+            self._stream_widget.display = False
+        super().stop_spinning(success)
 
 
 class ToolResultMessage(Static):
@@ -80,11 +106,20 @@ class ToolResultMessage(Static):
 
     async def on_mount(self) -> None:
         if self._call_widget:
-            success = self._event is None or (
-                not self._event.error and not self._event.skipped
-            )
+            success = self._determine_success()
             self._call_widget.stop_spinning(success=success)
         await self._render_result()
+
+    def _determine_success(self) -> bool:
+        if self._event is None:
+            return True
+        if self._event.error or self._event.skipped:
+            return False
+        if self._event.tool_class:
+            adapter = ToolUIDataAdapter(self._event.tool_class)
+            display = adapter.get_result_display(self._event)
+            return display.success
+        return True
 
     async def _render_result(self) -> None:
         if self._content_container is None:

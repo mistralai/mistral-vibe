@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum, auto
 from typing import TYPE_CHECKING, Any, Protocol
 
-from vibe.core.modes import AgentMode
+from vibe.core.agents import AgentProfile
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.utils import VIBE_WARNING_TAG
 
 if TYPE_CHECKING:
@@ -143,25 +144,25 @@ class ContextWarningMiddleware:
         self.has_warned = False
 
 
-PLAN_MODE_REMINDER = f"""<{VIBE_WARNING_TAG}>Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received (for example, to make edits). Instead, you should:
+PLAN_AGENT_REMINDER = f"""<{VIBE_WARNING_TAG}>Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received (for example, to make edits). Instead, you should:
 1. Answer the user's query comprehensively
 2. When you're done researching, present your plan by giving the full plan and not doing further tool calls to return input to the user. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.</{VIBE_WARNING_TAG}>"""
 
 
-class PlanModeMiddleware:
-    """Injects plan mode reminder after each assistant turn when plan mode is active."""
-
+class PlanAgentMiddleware:
     def __init__(
-        self, mode_getter: Callable[[], AgentMode], reminder: str = PLAN_MODE_REMINDER
+        self,
+        profile_getter: Callable[[], AgentProfile],
+        reminder: str = PLAN_AGENT_REMINDER,
     ) -> None:
-        self._mode_getter = mode_getter
+        self._profile_getter = profile_getter
         self.reminder = reminder
 
-    def _is_plan_mode(self) -> bool:
-        return self._mode_getter() == AgentMode.PLAN
+    def _is_plan_agent(self) -> bool:
+        return self._profile_getter().name == BuiltinAgentName.PLAN
 
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
-        if not self._is_plan_mode():
+        if not self._is_plan_agent():
             return MiddlewareResult()
         return MiddlewareResult(
             action=MiddlewareAction.INJECT_MESSAGE, message=self.reminder

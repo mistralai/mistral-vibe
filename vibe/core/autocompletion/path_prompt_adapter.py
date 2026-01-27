@@ -102,7 +102,7 @@ def _format_content_block(block: ResourceBlock) -> str | None:
                 "name": block.get("name"),
                 "title": block.get("title"),
                 "description": block.get("description"),
-                "mimeType": block.get("mimeType"),
+                "mime_type": block.get("mime_type"),
                 "size": block.get("size"),
             }
             parts = [

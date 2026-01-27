@@ -1,5 +1,5 @@
 {
-  "version": "1.3.5",
+  "version": "2.0.0",
   "configurations": [
     {
       "name": "ACP Server",
@@ -15,7 +15,10 @@
       "type": "debugpy",
       "request": "launch",
       "module": "pytest",
-      "args": ["-v", "-s"],
+      "args": [
+        "-v",
+        "-s"
+      ],
       "console": "integratedTerminal",
       "justMyCode": false,
       "cwd": "${workspaceFolder}",
@@ -28,7 +31,13 @@
       "type": "debugpy",
       "request": "launch",
       "module": "pytest",
-      "args": ["-k", "${input:test_identifier}", "-vvv", "-s", "--no-header"],
+      "args": [
+        "-k",
+        "${input:test_identifier}",
+        "-vvv",
+        "-s",
+        "--no-header"
+      ],
       "console": "integratedTerminal",
       "justMyCode": false,
       "cwd": "${workspaceFolder}",
@@ -52,6 +61,16 @@
       "type": "debugpy",
       "request": "attach",
       "processId": "${command:pickProcess}",
+      "justMyCode": true
+    },
+    {
+      "name": "Attach to Zed Process (Port)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5678
+      },
       "justMyCode": true
     }
   ],

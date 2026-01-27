@@ -5,7 +5,13 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 import copy
 from enum import StrEnum, auto
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from uuid import uuid4
+
+if TYPE_CHECKING:
+    from vibe.core.tools.base import BaseTool
+else:
+    BaseTool = Any
 
 from pydantic import (
     BaseModel,
@@ -15,8 +21,6 @@ from pydantic import (
     computed_field,
     model_validator,
 )
-
-from vibe.core.tools.base import BaseTool
 
 
 class AgentStats(BaseModel):
@@ -29,6 +33,7 @@ class AgentStats(BaseModel):
     tool_calls_succeeded: int = 0
 
     context_tokens: int = 0
+    listeners: ClassVar[dict[str, Callable[[AgentStats], None]]] = {}
 
     last_turn_prompt_tokens: int = 0
     last_turn_completion_tokens: int = 0
@@ -37,6 +42,21 @@ class AgentStats(BaseModel):
 
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        super().__setattr__(name, value)
+        if name in self.listeners:
+            self.listeners[name](self)
+
+    def trigger_listeners(self) -> None:
+        for listener in self.listeners.values():
+            listener(self)
+
+    @classmethod
+    def add_listener(
+        cls, attr_name: str, listener: Callable[[AgentStats], None]
+    ) -> None:
+        cls.listeners[attr_name] = listener
 
     @computed_field
     @property
@@ -104,7 +124,6 @@ class SessionMetadata(BaseModel):
     git_commit: str | None
     git_branch: str | None
     environment: dict[str, str | None]
-    auto_approve: bool = False
     username: str
 
 
@@ -172,6 +191,7 @@ class LLMMessage(BaseModel):
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
+    message_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -179,14 +199,19 @@ class LLMMessage(BaseModel):
         if isinstance(v, dict):
             v.setdefault("content", "")
             v.setdefault("role", "assistant")
+            if "message_id" not in v and v.get("role") != "tool":
+                v["message_id"] = str(uuid4())
             return v
+        role = str(getattr(v, "role", "assistant"))
         return {
-            "role": str(getattr(v, "role", "assistant")),
+            "role": role,
             "content": getattr(v, "content", ""),
             "reasoning_content": getattr(v, "reasoning_content", None),
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
+            "message_id": getattr(v, "message_id", None)
+            or (str(uuid4()) if role != "tool" else None),
         }
 
     def __add__(self, other: LLMMessage) -> LLMMessage:
@@ -238,6 +263,7 @@ class LLMMessage(BaseModel):
             tool_calls=list(tool_calls_map.values()) or None,
             name=self.name,
             tool_call_id=self.tool_call_id,
+            message_id=self.message_id,
         )
 
 
@@ -267,25 +293,31 @@ class LLMChunk(BaseModel):
 
 
 class BaseEvent(BaseModel, ABC):
-    """Abstract base class for all agent events."""
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class UserMessageEvent(BaseEvent):
+    content: str
+    message_id: str
 
 
 class AssistantEvent(BaseEvent):
     content: str
     stopped_by_middleware: bool = False
+    message_id: str | None = None
 
     def __add__(self, other: AssistantEvent) -> AssistantEvent:
         return AssistantEvent(
             content=self.content + other.content,
             stopped_by_middleware=self.stopped_by_middleware
             or other.stopped_by_middleware,
+            message_id=self.message_id or other.message_id,
         )
 
 
 class ReasoningEvent(BaseEvent):
     content: str
+    message_id: str | None = None
 
 
 class ToolCallEvent(BaseEvent):
@@ -306,15 +338,31 @@ class ToolResultEvent(BaseEvent):
     tool_call_id: str
 
 
+class ToolStreamEvent(BaseEvent):
+    tool_name: str
+    message: str
+    tool_call_id: str
+
+
 class CompactStartEvent(BaseEvent):
     current_context_tokens: int
     threshold: int
+    # WORKAROUND: Using tool_call to communicate compact events to the client.
+    # This should be revisited when the ACP protocol defines how compact events
+    # should be represented.
+    # [RFD](https://agentclientprotocol.com/rfds/session-usage)
+    tool_call_id: str
 
 
 class CompactEndEvent(BaseEvent):
     old_context_tokens: int
     new_context_tokens: int
     summary_length: int
+    # WORKAROUND: Using tool_call to communicate compact events to the client.
+    # This should be revisited when the ACP protocol defines how compact events
+    # should be represented.
+    # [RFD](https://agentclientprotocol.com/rfds/session-usage)
+    tool_call_id: str
 
 
 class OutputFormat(StrEnum):
@@ -332,3 +380,5 @@ type SyncApprovalCallback = Callable[
 ]
 
 type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
+
+type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]

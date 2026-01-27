@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 class BackendLike(Protocol):
     """Port protocol for dependency-injectable LLM backends.
 
-    Any backend used by Agent should implement this async context manager
+    Any backend used by AgentLoop should implement this async context manager
     interface with `complete`, `complete_streaming` and `count_tokens` methods.
     """
 

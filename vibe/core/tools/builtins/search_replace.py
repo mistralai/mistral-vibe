@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 import difflib
 from pathlib import Path
 import re
 import shutil
 from typing import ClassVar, NamedTuple, final
 
-import aiofiles
+import anyio
 from pydantic import BaseModel, Field
 
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolError
+from vibe.core.tools.base import (
+    BaseTool,
+    BaseToolConfig,
+    BaseToolState,
+    InvokeContext,
+    ToolError,
+)
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 
 SEARCH_REPLACE_BLOCK_RE = re.compile(
     r"<{5,} SEARCH\r?\n(.*?)\r?\n?={5,}\r?\n(.*?)\r?\n?>{5,} REPLACE", flags=re.DOTALL
@@ -106,7 +113,9 @@ class SearchReplace(
         return "Editing files"
 
     @final
-    async def run(self, args: SearchReplaceArgs) -> SearchReplaceResult:
+    async def run(
+        self, args: SearchReplaceArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | SearchReplaceResult, None]:
         file_path, search_replace_blocks = self._prepare_and_validate_args(args)
 
         original_content = await self._read_file(file_path)
@@ -146,7 +155,7 @@ class SearchReplace(
 
             await self._write_file(file_path, modified_content)
 
-        return SearchReplaceResult(
+        yield SearchReplaceResult(
             file=str(file_path),
             blocks_applied=block_result.applied,
             lines_changed=lines_changed,
@@ -173,7 +182,7 @@ class SearchReplace(
         if not content:
             raise ToolError("Empty content provided")
 
-        project_root = self.config.effective_workdir
+        project_root = Path.cwd()
         file_path = Path(file_path_str).expanduser()
         if not file_path.is_absolute():
             file_path = project_root / file_path
@@ -201,7 +210,7 @@ class SearchReplace(
 
     async def _read_file(self, file_path: Path) -> str:
         try:
-            async with aiofiles.open(file_path, encoding="utf-8") as f:
+            async with await anyio.Path(file_path).open(encoding="utf-8") as f:
                 return await f.read()
         except UnicodeDecodeError as e:
             raise ToolError(f"Unicode decode error reading {file_path}: {e}") from e
@@ -215,7 +224,9 @@ class SearchReplace(
 
     async def _write_file(self, file_path: Path, content: str) -> None:
         try:
-            async with aiofiles.open(file_path, mode="w", encoding="utf-8") as f:
+            async with await anyio.Path(file_path).open(
+                mode="w", encoding="utf-8"
+            ) as f:
                 await f.write(content)
         except PermissionError:
             raise ToolError(f"Permission denied writing to file: {file_path}")

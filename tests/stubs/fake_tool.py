@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+
 from pydantic import BaseModel
 
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
+from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, InvokeContext
+from vibe.core.types import ToolStreamEvent
 
 
 class FakeToolArgs(BaseModel):
@@ -24,7 +27,9 @@ class FakeTool(BaseTool[FakeToolArgs, FakeToolResult, BaseToolConfig, FakeToolSt
     def get_name(cls) -> str:
         return "stub_tool"
 
-    async def run(self, args: FakeToolArgs) -> FakeToolResult:
+    async def run(
+        self, args: FakeToolArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | FakeToolResult, None]:
         if self._exception_to_raise:
             raise self._exception_to_raise
-        return FakeToolResult()
+        yield FakeToolResult()

@@ -8,7 +8,8 @@ import pytest
 
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
-from vibe.core.agent import Agent
+from vibe.core.agent_loop import AgentLoop
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import SessionLoggingConfig, VibeConfig
 from vibe.core.middleware import (
     ConversationContext,
@@ -17,7 +18,6 @@ from vibe.core.middleware import (
     MiddlewareResult,
     ResetReason,
 )
-from vibe.core.modes import AgentMode
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tools.builtins.todo import TodoArgs
 from vibe.core.types import (
@@ -30,17 +30,18 @@ from vibe.core.types import (
     ToolCall,
     ToolCallEvent,
     ToolResultEvent,
+    UserMessageEvent,
 )
 from vibe.core.utils import CancellationReason, get_user_cancellation_message
 
 
 class InjectBeforeMiddleware:
-    injectedMessage = "<injected>"
+    injected_message = "<injected>"
 
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
         "Inject a message just before the current step executes."
         return MiddlewareResult(
-            action=MiddlewareAction.INJECT_MESSAGE, message=self.injectedMessage
+            action=MiddlewareAction.INJECT_MESSAGE, message=self.injected_message
         )
 
     async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
@@ -89,7 +90,7 @@ async def test_act_flushes_batched_messages_with_injection_middleware(
     observed, observer = observer_capture
 
     backend = FakeBackend([mock_llm_chunk(content="I can write very efficient code.")])
-    agent = Agent(make_config(), message_observer=observer, backend=backend)
+    agent = AgentLoop(make_config(), message_observer=observer, backend=backend)
     agent.middleware_pipeline.add(InjectBeforeMiddleware())
 
     async for _ in agent.act("How can you help?"):
@@ -101,7 +102,7 @@ async def test_act_flushes_batched_messages_with_injection_middleware(
     # injected content should be appended to the user's message before emission
     assert (
         observed[1][1]
-        == f"How can you help?\n\n{InjectBeforeMiddleware.injectedMessage}"
+        == f"How can you help?\n\n{InjectBeforeMiddleware.injected_message}"
     )
     assert observed[2][1] == "I can write very efficient code."
 
@@ -114,7 +115,7 @@ async def test_stop_action_flushes_user_msg_before_returning(observer_capture) -
     backend = FakeBackend([
         mock_llm_chunk(content="My response will never reach you...")
     ])
-    agent = Agent(
+    agent = AgentLoop(
         make_config(), message_observer=observer, max_turns=0, backend=backend
     )
 
@@ -133,7 +134,7 @@ async def test_act_emits_user_and_assistant_msgs(observer_capture) -> None:
     observed, observer = observer_capture
 
     backend = FakeBackend([mock_llm_chunk(content="Pong!")])
-    agent = Agent(make_config(), message_observer=observer, backend=backend)
+    agent = AgentLoop(make_config(), message_observer=observer, backend=backend)
 
     async for _ in agent.act("Ping?"):
         pass
@@ -155,12 +156,13 @@ async def test_act_streams_batched_chunks_in_order() -> None:
         mock_llm_chunk(content=" and"),
         mock_llm_chunk(content=" end"),
     ])
-    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+    agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
 
     events = [event async for event in agent.act("Stream, please.")]
 
-    assert len(events) == 2
-    assert [event.content for event in events if isinstance(event, AssistantEvent)] == [
+    assistant_events = [e for e in events if isinstance(e, AssistantEvent)]
+    assert len(assistant_events) == 2
+    assert [event.content for event in assistant_events] == [
         "Hello from Vibe! More",
         " and end",
     ]
@@ -182,33 +184,35 @@ async def test_act_handles_streaming_with_tool_call_events_in_sequence() -> None
         ],
         [mock_llm_chunk(content="Done reviewing todos.")],
     ])
-    agent = Agent(
+    agent = AgentLoop(
         make_config(
             enabled_tools=["todo"],
             tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
         ),
         backend=backend,
-        mode=AgentMode.AUTO_APPROVE,
+        agent_name=BuiltinAgentName.AUTO_APPROVE,
         enable_streaming=True,
     )
 
     events = [event async for event in agent.act("What about my todos?")]
 
     assert [type(event) for event in events] == [
+        UserMessageEvent,
         AssistantEvent,
         ToolCallEvent,
         ToolResultEvent,
         AssistantEvent,
     ]
-    assert isinstance(events[0], AssistantEvent)
-    assert events[0].content == "Checking your todos."
-    assert isinstance(events[1], ToolCallEvent)
-    assert events[1].tool_name == "todo"
-    assert isinstance(events[2], ToolResultEvent)
-    assert events[2].error is None
-    assert events[2].skipped is False
-    assert isinstance(events[3], AssistantEvent)
-    assert events[3].content == "Done reviewing todos."
+    assert isinstance(events[0], UserMessageEvent)
+    assert isinstance(events[1], AssistantEvent)
+    assert events[1].content == "Checking your todos."
+    assert isinstance(events[2], ToolCallEvent)
+    assert events[2].tool_name == "todo"
+    assert isinstance(events[3], ToolResultEvent)
+    assert events[3].error is None
+    assert events[3].skipped is False
+    assert isinstance(events[4], AssistantEvent)
+    assert events[4].content == "Done reviewing todos."
     assert agent.messages[-1].content == "Done reviewing todos."
 
 
@@ -224,25 +228,27 @@ async def test_act_handles_tool_call_chunk_with_content() -> None:
         mock_llm_chunk(content="todo request", tool_calls=[todo_tool_call]),
         mock_llm_chunk(content=" complete"),
     ])
-    agent = Agent(
+    agent = AgentLoop(
         make_config(
             enabled_tools=["todo"],
             tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
         ),
         backend=backend,
-        mode=AgentMode.AUTO_APPROVE,
+        agent_name=BuiltinAgentName.AUTO_APPROVE,
         enable_streaming=True,
     )
 
     events = [event async for event in agent.act("Check todos with content.")]
 
     assert [type(event) for event in events] == [
+        UserMessageEvent,
         AssistantEvent,
         ToolCallEvent,
         ToolResultEvent,
     ]
-    assert isinstance(events[0], AssistantEvent)
-    assert events[0].content == "Preparing todo request complete"
+    assert isinstance(events[0], UserMessageEvent)
+    assert isinstance(events[1], AssistantEvent)
+    assert events[1].content == "Preparing todo request complete"
     assert any(
         m.role == Role.assistant and m.content == "Preparing todo request complete"
         for m in agent.messages
@@ -266,31 +272,33 @@ async def test_act_merges_streamed_tool_call_arguments() -> None:
         mock_llm_chunk(content="", tool_calls=[tool_call_part_one]),
         mock_llm_chunk(content="", tool_calls=[tool_call_part_two]),
     ])
-    agent = Agent(
+    agent = AgentLoop(
         make_config(
             enabled_tools=["todo"],
             tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
         ),
         backend=backend,
-        mode=AgentMode.AUTO_APPROVE,
+        agent_name=BuiltinAgentName.AUTO_APPROVE,
         enable_streaming=True,
     )
 
     events = [event async for event in agent.act("Merge streamed tool call args.")]
 
     assert [type(event) for event in events] == [
+        UserMessageEvent,
         AssistantEvent,
         ToolCallEvent,
         ToolResultEvent,
     ]
-    call_event = events[1]
+    assert isinstance(events[0], UserMessageEvent)
+    call_event = events[2]
     assert isinstance(call_event, ToolCallEvent)
     assert call_event.tool_call_id == "tc_merge"
     call_args = cast(TodoArgs, call_event.args)
     assert call_args.action == "read"
-    assert isinstance(events[2], ToolResultEvent)
-    assert events[2].error is None
-    assert events[2].skipped is False
+    assert isinstance(events[3], ToolResultEvent)
+    assert events[3].error is None
+    assert events[3].skipped is False
     assistant_with_calls = next(
         m for m in agent.messages if m.role == Role.assistant and m.tool_calls
     )
@@ -328,13 +336,13 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
         mock_llm_chunk(content="Preparing "),
         mock_llm_chunk(content="todo request", tool_calls=[todo_tool_call]),
     ])
-    agent = Agent(
+    agent = AgentLoop(
         make_config(
             enabled_tools=["todo"],
             tools={"todo": BaseToolConfig(permission=ToolPermission.ASK)},
         ),
         backend=backend,
-        mode=AgentMode.DEFAULT,
+        agent_name=BuiltinAgentName.DEFAULT,
         enable_streaming=True,
     )
     middleware = CountingMiddleware()
@@ -345,11 +353,12 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
             str(get_user_cancellation_message(CancellationReason.OPERATION_CANCELLED)),
         )
     )
-    agent.interaction_logger.save_interaction = AsyncMock(return_value=None)
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
     events = [event async for event in agent.act("Cancel mid stream?")]
 
     assert [type(event) for event in events] == [
+        UserMessageEvent,
         AssistantEvent,
         ToolCallEvent,
         ToolResultEvent,
@@ -360,23 +369,23 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     assert events[-1].skipped is True
     assert events[-1].skip_reason is not None
     assert "<user_cancellation>" in events[-1].skip_reason
-    assert agent.interaction_logger.save_interaction.await_count == 1
+    assert agent.session_logger.save_interaction.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_act_flushes_and_logs_when_streaming_errors(observer_capture) -> None:
     observed, observer = observer_capture
     backend = FakeBackend(exception_to_raise=RuntimeError("boom in streaming"))
-    agent = Agent(
+    agent = AgentLoop(
         make_config(), backend=backend, message_observer=observer, enable_streaming=True
     )
-    agent.interaction_logger.save_interaction = AsyncMock(return_value=None)
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
     with pytest.raises(RuntimeError, match="boom in streaming"):
         [_ async for _ in agent.act("Trigger stream failure")]
 
     assert [role for role, _ in observed] == [Role.system, Role.user]
-    assert agent.interaction_logger.save_interaction.await_count == 1
+    assert agent.session_logger.save_interaction.await_count == 1
 
 
 def _snapshot_events(events: list) -> list[tuple[str, str]]:
@@ -395,7 +404,7 @@ async def test_reasoning_buffer_yields_before_content_on_transition() -> None:
         mock_llm_chunk(content="", reasoning_content=" problem..."),
         mock_llm_chunk(content="The answer is 42."),
     ])
-    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+    agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
 
     events = [event async for event in agent.act("What's the answer?")]
 
@@ -417,7 +426,7 @@ async def test_reasoning_buffer_yields_before_content_with_batching() -> None:
         mock_llm_chunk(content="", reasoning_content=", Final"),
         mock_llm_chunk(content="Done thinking!"),
     ])
-    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+    agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
 
     events = [event async for event in agent.act("Think step by step")]
 
@@ -438,7 +447,7 @@ async def test_content_buffer_yields_before_reasoning_on_transition() -> None:
         mock_llm_chunk(content="", reasoning_content=" this approach..."),
         mock_llm_chunk(content="Actually, the final answer."),
     ])
-    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+    agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
 
     events = [event async for event in agent.act("Give me an answer")]
 
@@ -459,7 +468,7 @@ async def test_interleaved_reasoning_content_preserves_order() -> None:
         mock_llm_chunk(content="", reasoning_content="Think 3"),
         mock_llm_chunk(content="Answer 3"),
     ])
-    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+    agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
 
     events = [event async for event in agent.act("Interleaved test")]
 
@@ -483,7 +492,7 @@ async def test_only_reasoning_chunks_yields_reasoning_event() -> None:
         mock_llm_chunk(content="", reasoning_content="Just thinking..."),
         mock_llm_chunk(content="", reasoning_content=" nothing to say yet."),
     ])
-    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+    agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
 
     events = [event async for event in agent.act("Silent thinking")]
 
@@ -498,7 +507,7 @@ async def test_final_buffers_flush_in_correct_order() -> None:
         mock_llm_chunk(content="", reasoning_content="Final thought"),
         mock_llm_chunk(content="Final words"),
     ])
-    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+    agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
 
     events = [event async for event in agent.act("End buffers test")]
 
@@ -516,7 +525,7 @@ async def test_empty_content_chunks_do_not_trigger_false_yields() -> None:
         mock_llm_chunk(content="", reasoning_content=" more reasoning"),
         mock_llm_chunk(content="Actual content"),
     ])
-    agent = Agent(make_config(), backend=backend, enable_streaming=True)
+    agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
 
     events = [event async for event in agent.act("Empty content test")]
 

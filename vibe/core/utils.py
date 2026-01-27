@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 import concurrent.futures
 from enum import Enum, auto
+from fnmatch import fnmatch
 import functools
 import logging
 from pathlib import Path
@@ -273,3 +274,45 @@ def run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
 
 def is_windows() -> bool:
     return sys.platform == "win32"
+
+
+@functools.lru_cache(maxsize=256)
+def _compile_icase(expr: str) -> re.Pattern[str] | None:
+    try:
+        return re.compile(expr, re.IGNORECASE)
+    except re.error:
+        return None
+
+
+def name_matches(name: str, patterns: list[str]) -> bool:
+    """Check if a name matches any of the provided patterns.
+
+    Supports two forms (case-insensitive):
+    - Glob wildcards using fnmatch (e.g., 'serena_*')
+    - Regex when prefixed with 're:' (e.g., 're:serena.*')
+    """
+    n = name.lower()
+    for raw in patterns:
+        if not (p := (raw or "").strip()):
+            continue
+
+        if p.startswith("re:"):
+            rx = _compile_icase(p.removeprefix("re:"))
+            if rx is not None and rx.fullmatch(name) is not None:
+                return True
+        elif fnmatch(n, p.lower()):
+            return True
+
+    return False
+
+
+def compact_reduction_display(old_tokens: int | None, new_tokens: int | None) -> str:
+    if old_tokens is None or new_tokens is None:
+        return "Compaction complete"
+
+    reduction = old_tokens - new_tokens
+    reduction_pct = (reduction / old_tokens * 100) if old_tokens > 0 else 0
+    return (
+        f"Compaction complete: {old_tokens:,} → "
+        f"{new_tokens:,} tokens ({-reduction_pct:+#0.2g}%)"
+    )

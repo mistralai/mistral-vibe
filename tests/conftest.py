@@ -29,6 +29,7 @@ def get_base_config() -> dict[str, Any]:
                 "alias": "devstral-latest",
             }
         ],
+        "enable_auto_update": False,
     }
 
 
@@ -74,3 +75,8 @@ def _mock_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("SHELL", "/bin/sh")
+
+
+@pytest.fixture(autouse=True)
+def _mock_update_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("vibe.cli.update_notifier.update.UPDATE_COMMANDS", ["true"])

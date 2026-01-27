@@ -3,6 +3,7 @@ from __future__ import annotations
 from textual.message import Message
 
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
+from vibe.core.utils import compact_reduction_display
 
 
 class CompactMessage(StatusMessage):
@@ -25,17 +26,7 @@ class CompactMessage(StatusMessage):
         if self.error_message:
             return f"Error: {self.error_message}"
 
-        if self.old_tokens is not None and self.new_tokens is not None:
-            reduction = self.old_tokens - self.new_tokens
-            reduction_pct = (
-                (reduction / self.old_tokens * 100) if self.old_tokens > 0 else 0
-            )
-            return (
-                f"Compaction complete: {self.old_tokens:,} → "
-                f"{self.new_tokens:,} tokens (-{reduction_pct:.1f}%)"
-            )
-
-        return "Compaction complete"
+        return compact_reduction_display(self.old_tokens, self.new_tokens)
 
     def set_complete(
         self, old_tokens: int | None = None, new_tokens: int | None = None

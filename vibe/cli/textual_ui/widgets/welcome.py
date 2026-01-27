@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from time import monotonic
 
 from rich.align import Align
@@ -102,7 +103,7 @@ class WelcomeBanner(Static):
         model_count = len(self.config.models)
         self._static_line3_suffix = f"{self.LOGO_TEXT_GAP}[dim]{model_count} models · {mcp_count} MCP servers[/]"
         self._static_line5_suffix = (
-            f"{self.LOGO_TEXT_GAP}[dim]{self.config.effective_workdir}[/]"
+            f"{self.LOGO_TEXT_GAP}[dim]{self.config.displayed_workdir or Path.cwd()}[/]"
         )
         self._static_line7 = f"[dim]Type[/] [{self.BORDER_TARGET_COLOR}]/help[/] [dim]for more information • [/][{self.BORDER_TARGET_COLOR}]/terminal-setup[/][dim] for shift+enter[/]"
 

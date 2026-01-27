@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import pytest
 
+from vibe.core.agents.models import BUILTIN_AGENTS, AgentProfile, BuiltinAgentName
 from vibe.core.config import SessionLoggingConfig, VibeConfig
 from vibe.core.middleware import (
-    PLAN_MODE_REMINDER,
+    PLAN_AGENT_REMINDER,
     ConversationContext,
     MiddlewareAction,
     MiddlewarePipeline,
-    PlanModeMiddleware,
+    PlanAgentMiddleware,
 )
-from vibe.core.modes import AgentMode
 from vibe.core.types import AgentStats
 
 
@@ -19,20 +19,22 @@ def make_context() -> ConversationContext:
     return ConversationContext(messages=[], stats=AgentStats(), config=config)
 
 
-class TestPlanModeMiddleware:
+class TestPlanAgentMiddleware:
     @pytest.mark.asyncio
-    async def test_injects_reminder_when_plan_mode_active(self) -> None:
-        middleware = PlanModeMiddleware(lambda: AgentMode.PLAN)
+    async def test_injects_reminder_when_plan_agent_active(self) -> None:
+        middleware = PlanAgentMiddleware(lambda: BUILTIN_AGENTS[BuiltinAgentName.PLAN])
         ctx = make_context()
 
         result = await middleware.before_turn(ctx)
 
         assert result.action == MiddlewareAction.INJECT_MESSAGE
-        assert result.message == PLAN_MODE_REMINDER
+        assert result.message == PLAN_AGENT_REMINDER
 
     @pytest.mark.asyncio
-    async def test_does_not_inject_when_default_mode(self) -> None:
-        middleware = PlanModeMiddleware(lambda: AgentMode.DEFAULT)
+    async def test_does_not_inject_when_default_agent(self) -> None:
+        middleware = PlanAgentMiddleware(
+            lambda: BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        )
         ctx = make_context()
 
         result = await middleware.before_turn(ctx)
@@ -41,8 +43,10 @@ class TestPlanModeMiddleware:
         assert result.message is None
 
     @pytest.mark.asyncio
-    async def test_does_not_inject_when_auto_approve_mode(self) -> None:
-        middleware = PlanModeMiddleware(lambda: AgentMode.AUTO_APPROVE)
+    async def test_does_not_inject_when_auto_approve_agent(self) -> None:
+        middleware = PlanAgentMiddleware(
+            lambda: BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE]
+        )
         ctx = make_context()
 
         result = await middleware.before_turn(ctx)
@@ -51,8 +55,10 @@ class TestPlanModeMiddleware:
         assert result.message is None
 
     @pytest.mark.asyncio
-    async def test_does_not_inject_when_accept_edits_mode(self) -> None:
-        middleware = PlanModeMiddleware(lambda: AgentMode.ACCEPT_EDITS)
+    async def test_does_not_inject_when_accept_edits_agent(self) -> None:
+        middleware = PlanAgentMiddleware(
+            lambda: BUILTIN_AGENTS[BuiltinAgentName.ACCEPT_EDITS]
+        )
         ctx = make_context()
 
         result = await middleware.before_turn(ctx)
@@ -62,7 +68,7 @@ class TestPlanModeMiddleware:
 
     @pytest.mark.asyncio
     async def test_after_turn_always_continues(self) -> None:
-        middleware = PlanModeMiddleware(lambda: AgentMode.PLAN)
+        middleware = PlanAgentMiddleware(lambda: BUILTIN_AGENTS[BuiltinAgentName.PLAN])
         ctx = make_context()
 
         result = await middleware.after_turn(ctx)
@@ -70,27 +76,27 @@ class TestPlanModeMiddleware:
         assert result.action == MiddlewareAction.CONTINUE
 
     @pytest.mark.asyncio
-    async def test_dynamically_checks_mode(self) -> None:
-        current_mode = AgentMode.DEFAULT
-        middleware = PlanModeMiddleware(lambda: current_mode)
+    async def test_dynamically_checks_agent(self) -> None:
+        current_profile: AgentProfile = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT]
+        middleware = PlanAgentMiddleware(lambda: current_profile)
         ctx = make_context()
 
         result = await middleware.before_turn(ctx)
         assert result.action == MiddlewareAction.CONTINUE
 
-        current_mode = AgentMode.PLAN
+        current_profile = BUILTIN_AGENTS[BuiltinAgentName.PLAN]
         result = await middleware.before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
 
-        current_mode = AgentMode.AUTO_APPROVE
+        current_profile = BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE]
         result = await middleware.before_turn(ctx)
         assert result.action == MiddlewareAction.CONTINUE
 
     @pytest.mark.asyncio
     async def test_custom_reminder(self) -> None:
-        custom_reminder = "Custom plan mode reminder"
-        middleware = PlanModeMiddleware(
-            lambda: AgentMode.PLAN, reminder=custom_reminder
+        custom_reminder = "Custom plan agent reminder"
+        middleware = PlanAgentMiddleware(
+            lambda: BUILTIN_AGENTS[BuiltinAgentName.PLAN], reminder=custom_reminder
         )
         ctx = make_context()
 
@@ -99,26 +105,28 @@ class TestPlanModeMiddleware:
         assert result.message == custom_reminder
 
     def test_reset_does_nothing(self) -> None:
-        middleware = PlanModeMiddleware(lambda: AgentMode.PLAN)
+        middleware = PlanAgentMiddleware(lambda: BUILTIN_AGENTS[BuiltinAgentName.PLAN])
         middleware.reset()
 
 
-class TestMiddlewarePipelineWithPlanMode:
+class TestMiddlewarePipelineWithPlanAgent:
     @pytest.mark.asyncio
-    async def test_pipeline_includes_plan_mode_injection(self) -> None:
+    async def test_pipeline_includes_plan_agent_injection(self) -> None:
         pipeline = MiddlewarePipeline()
-        pipeline.add(PlanModeMiddleware(lambda: AgentMode.PLAN))
+        pipeline.add(PlanAgentMiddleware(lambda: BUILTIN_AGENTS[BuiltinAgentName.PLAN]))
         ctx = make_context()
 
         result = await pipeline.run_before_turn(ctx)
 
         assert result.action == MiddlewareAction.INJECT_MESSAGE
-        assert PLAN_MODE_REMINDER in (result.message or "")
+        assert PLAN_AGENT_REMINDER in (result.message or "")
 
     @pytest.mark.asyncio
-    async def test_pipeline_skips_injection_when_not_plan_mode(self) -> None:
+    async def test_pipeline_skips_injection_when_not_plan_agent(self) -> None:
         pipeline = MiddlewarePipeline()
-        pipeline.add(PlanModeMiddleware(lambda: AgentMode.DEFAULT))
+        pipeline.add(
+            PlanAgentMiddleware(lambda: BUILTIN_AGENTS[BuiltinAgentName.DEFAULT])
+        )
         ctx = make_context()
 
         result = await pipeline.run_before_turn(ctx)

@@ -10,6 +10,8 @@ This script increments the version in pyproject.toml based on the specified bump
 from __future__ import annotations
 
 import argparse
+from datetime import date
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -50,7 +52,6 @@ def update_hard_values_files(filepath: str, patterns: list[tuple[str, str]]) -> 
     if not path.exists():
         raise FileNotFoundError(f"{filepath} not found in current directory")
 
-    # Replace patterns
     for pattern, replacement in patterns:
         content = path.read_text()
         updated_content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
@@ -71,7 +72,6 @@ def get_current_version() -> str:
 
     content = pyproject_path.read_text()
 
-    # Find version line
     version_match = re.search(r'^version = "([^"]+)"$', content, re.MULTILINE)
     if not version_match:
         raise ValueError("Version not found in pyproject.toml")
@@ -79,7 +79,60 @@ def get_current_version() -> str:
     return version_match.group(1)
 
 
+def update_changelog(new_version: str) -> None:
+    changelog_path = Path("CHANGELOG.md")
+
+    if not changelog_path.exists():
+        raise FileNotFoundError("CHANGELOG.md not found in current directory")
+
+    content = changelog_path.read_text()
+    today = date.today().isoformat()
+
+    first_entry_match = re.search(r"^## \[[\d.]+\]", content, re.MULTILINE)
+    if not first_entry_match:
+        raise ValueError("Could not find version entry in CHANGELOG.md")
+
+    insert_position = first_entry_match.start()
+
+    new_entry = f"## [{new_version}] - {today}\n\n"
+    new_entry += "### Added\n\n"
+    new_entry += "### Changed\n\n"
+    new_entry += "### Fixed\n\n"
+    new_entry += "### Removed\n\n"
+    new_entry += "\n"
+
+    updated_content = content[:insert_position] + new_entry + content[insert_position:]
+    changelog_path.write_text(updated_content)
+
+    print(f"Added changelog entry for version {new_version}")
+
+
+def print_warning(new_version: str) -> None:
+    warning = f"""
+{"=" * 80}
+⚠️  WARNING: CHANGELOG UPDATE REQUIRED ⚠️
+{"=" * 80}
+
+Don't forget to fill in the changelog entry for version {new_version} in CHANGELOG.md! 📝
+
+Also, remember to fill in vibe/whats_new.md if needed (you can leave it blank). 📝
+
+{"=" * 80}
+"""
+    print(warning, file=sys.stderr)
+
+
+def clean_up_whats_new_message() -> None:
+    whats_new_path = Path("vibe/whats_new.md")
+    if not whats_new_path.exists():
+        raise FileNotFoundError("whats_new.md not found in current directory")
+
+    whats_new_path.write_text("")
+
+
 def main() -> None:
+    os.chdir(Path(__file__).parent.parent)
+
     parser = argparse.ArgumentParser(
         description="Bump semver version in pyproject.toml",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -140,9 +193,15 @@ Examples:
             [(f'version="{current_version}"', f'version="{new_version}"')],
         )
 
+        # Update CHANGELOG.md
+        update_changelog(new_version)
+
+        clean_up_whats_new_message()
+
         subprocess.run(["uv", "lock"], check=True)
 
         print(f"\nSuccessfully bumped version from {current_version} to {new_version}")
+        print_warning(new_version)
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

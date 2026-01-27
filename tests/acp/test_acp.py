@@ -189,7 +189,7 @@ class WriteTextFileJsonRpcResponse(JsonRpcResponse):
     result: None = None
 
 
-async def get_acp_agent_process(
+async def get_acp_agent_loop_process(
     mock_env: dict[str, str], vibe_home: Path
 ) -> AsyncGenerator[asyncio.subprocess.Process]:
     current_env = os.environ.copy()
@@ -358,43 +358,43 @@ def parse_conversation(message_texts: list[str]) -> list[JsonRpcMessage]:
     return parsed_messages
 
 
-async def initialize_session(acp_agent_process: asyncio.subprocess.Process) -> str:
+async def initialize_session(acp_agent_loop_process: asyncio.subprocess.Process) -> str:
     await send_json_rpc(
-        acp_agent_process,
-        InitializeJsonRpcRequest(id=1, params=InitializeRequest(protocolVersion=1)),
+        acp_agent_loop_process,
+        InitializeJsonRpcRequest(id=1, params=InitializeRequest(protocol_version=1)),
     )
     initialize_response = await read_response_for_id(
-        acp_agent_process, expected_id=1, timeout=5.0
+        acp_agent_loop_process, expected_id=1, timeout=5.0
     )
     assert initialize_response is not None
 
     await send_json_rpc(
-        acp_agent_process,
+        acp_agent_loop_process,
         NewSessionJsonRpcRequest(
-            id=2, params=NewSessionRequest(cwd=str(PLAYGROUND_DIR), mcpServers=[])
+            id=2, params=NewSessionRequest(cwd=str(PLAYGROUND_DIR), mcp_servers=[])
         ),
     )
-    session_response = await read_response_for_id(acp_agent_process, expected_id=2)
+    session_response = await read_response_for_id(acp_agent_loop_process, expected_id=2)
     assert session_response is not None
     session_response_json = json.loads(session_response)
     session_response_obj = NewSessionJsonRpcResponse.model_validate(
         session_response_json
     )
     assert session_response_obj.result is not None, "No result in response"
-    return session_response_obj.result.sessionId
+    return session_response_obj.result.session_id
 
 
 class TestSessionManagement:
     @pytest.mark.asyncio
     async def test_multiple_sessions_unique_ids(self, vibe_home_dir: Path) -> None:
         mock_env = get_mocking_env(mock_chunks=[mock_llm_chunk() for _ in range(3)])
-        async for process in get_acp_agent_process(
+        async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_dir
         ):
             await send_json_rpc(
                 process,
                 InitializeJsonRpcRequest(
-                    id=1, params=InitializeRequest(protocolVersion=1)
+                    id=1, params=InitializeRequest(protocol_version=1)
                 ),
             )
             await read_response_for_id(process, expected_id=1, timeout=5.0)
@@ -406,7 +406,7 @@ class TestSessionManagement:
                     NewSessionJsonRpcRequest(
                         id=i + 2,
                         params=NewSessionRequest(
-                            cwd=str(PLAYGROUND_DIR), mcpServers=[]
+                            cwd=str(PLAYGROUND_DIR), mcp_servers=[]
                         ),
                     ),
                 )
@@ -418,16 +418,18 @@ class TestSessionManagement:
                 response = NewSessionJsonRpcResponse.model_validate(response_json)
                 assert response.error is None, f"JSON-RPC error: {response.error}"
                 assert response.result is not None, "No result in response"
-                session_ids.append(response.result.sessionId)
+                session_ids.append(response.result.session_id)
 
             assert len(set(session_ids)) == 3
 
 
 class TestSessionUpdates:
     @pytest.mark.asyncio
-    async def test_agent_message_chunk_structure(self, vibe_home_dir: Path) -> None:
+    async def test_agent_loop_message_chunk_structure(
+        self, vibe_home_dir: Path
+    ) -> None:
         mock_env = get_mocking_env([mock_llm_chunk(content="Hi")])
-        async for process in get_acp_agent_process(
+        async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_dir
         ):
             # Check stderr for error details if process failed
@@ -444,11 +446,19 @@ class TestSessionUpdates:
                 PromptJsonRpcRequest(
                     id=3,
                     params=PromptRequest(
-                        sessionId=session_id,
+                        session_id=session_id,
                         prompt=[TextContentBlock(type="text", text="Just say hi")],
                     ),
                 ),
             )
+            user_response_text = await read_response(process)
+            assert user_response_text is not None
+            user_response = UpdateJsonRpcNotification.model_validate(
+                json.loads(user_response_text)
+            )
+            assert user_response.params is not None
+            assert user_response.params.update.session_update == "user_message_chunk"
+
             text_response = await read_response(process)
             assert text_response is not None
             response = UpdateJsonRpcNotification.model_validate(
@@ -456,8 +466,9 @@ class TestSessionUpdates:
             )
 
             assert response.params is not None
-            assert response.params.update.sessionUpdate == "agent_message_chunk"
+            assert response.params.update.session_update == "agent_message_chunk"
             assert response.params.update.content is not None
+            assert isinstance(response.params.update.content, TextContentBlock)
             assert response.params.update.content.type == "text"
             assert response.params.update.content.text is not None
             assert response.params.update.content.text == "Hi"
@@ -478,7 +489,7 @@ class TestSessionUpdates:
             ),
             mock_llm_chunk(content="The files containing the pattern 'auth' are ..."),
         ])
-        async for process in get_acp_agent_process(
+        async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_dir
         ):
             session_id = await initialize_session(process)
@@ -488,7 +499,7 @@ class TestSessionUpdates:
                 PromptJsonRpcRequest(
                     id=3,
                     params=PromptRequest(
-                        sessionId=session_id,
+                        session_id=session_id,
                         prompt=[
                             TextContentBlock(
                                 type="text",
@@ -511,7 +522,7 @@ class TestSessionUpdates:
                     for r in responses
                     if isinstance(r, UpdateJsonRpcNotification)
                     and r.params is not None
-                    and r.params.update.sessionUpdate == "tool_call"
+                    and r.params.update.session_update == "tool_call"
                 ),
                 None,
             )
@@ -519,11 +530,11 @@ class TestSessionUpdates:
             assert tool_call.params is not None
             assert tool_call.params.update is not None
 
-            assert tool_call.params.update.sessionUpdate == "tool_call"
+            assert tool_call.params.update.session_update == "tool_call"
             assert tool_call.params.update.kind == "search"
-            assert tool_call.params.update.title == "grep: 'auth'"
+            assert tool_call.params.update.title == "Grepping 'auth'"
             assert (
-                tool_call.params.update.rawInput
+                tool_call.params.update.raw_input
                 == '{"pattern":"auth","path":".","max_matches":null,"use_default_ignore":true}'
             )
 
@@ -537,7 +548,7 @@ async def start_session_with_request_permission(
         PromptJsonRpcRequest(
             id=3,
             params=PromptRequest(
-                sessionId=session_id,
+                session_id=session_id,
                 prompt=[TextContentBlock(type="text", text=prompt)],
             ),
         ),
@@ -575,7 +586,7 @@ class TestToolCallStructure:
             )
         ]
         mock_env = get_mocking_env(custom_results)
-        async for process in get_acp_agent_process(
+        async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_grep_ask
         ):
             session_id = await initialize_session(process)
@@ -584,7 +595,7 @@ class TestToolCallStructure:
                 PromptJsonRpcRequest(
                     id=3,
                     params=PromptRequest(
-                        sessionId=session_id,
+                        session_id=session_id,
                         prompt=[
                             TextContentBlock(
                                 type="text",
@@ -611,8 +622,8 @@ class TestToolCallStructure:
 
             first_request = permission_requests[0]
             assert first_request.params is not None
-            assert first_request.params.toolCall is not None
-            assert first_request.params.toolCall.toolCallId is not None
+            assert first_request.params.tool_call is not None
+            assert first_request.params.tool_call.tool_call_id is not None
 
     @pytest.mark.asyncio
     async def test_tool_call_update_approved_structure(
@@ -635,7 +646,7 @@ class TestToolCallStructure:
             mock_llm_chunk(content="The file test.txt has been created"),
         ]
         mock_env = get_mocking_env(custom_results)
-        async for process in get_acp_agent_process(
+        async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_grep_ask
         ):
             permission_request = await start_session_with_request_permission(
@@ -649,7 +660,7 @@ class TestToolCallStructure:
                     id=permission_request.id,
                     result=RequestPermissionResponse(
                         outcome=AllowedOutcome(
-                            outcome="selected", optionId=selected_option_id
+                            outcome="selected", option_id=selected_option_id
                         )
                     ),
                 ),
@@ -665,9 +676,9 @@ class TestToolCallStructure:
                     and r.method == "session/update"
                     and r.params is not None
                     and r.params.update is not None
-                    and r.params.update.sessionUpdate == "tool_call_update"
-                    and r.params.update.toolCallId
-                    == (permission_request.params.toolCall.toolCallId)
+                    and r.params.update.session_update == "tool_call_update"
+                    and r.params.update.tool_call_id
+                    == (permission_request.params.tool_call.tool_call_id)
                     and r.params.update.status == "completed"
                 ),
                 None,
@@ -697,7 +708,7 @@ class TestToolCallStructure:
             ),
         ]
         mock_env = get_mocking_env(custom_results)
-        async for process in get_acp_agent_process(
+        async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_grep_ask
         ):
             permission_request = await start_session_with_request_permission(
@@ -712,7 +723,7 @@ class TestToolCallStructure:
                     id=permission_request.id,
                     result=RequestPermissionResponse(
                         outcome=AllowedOutcome(
-                            outcome="selected", optionId=selected_option_id
+                            outcome="selected", option_id=selected_option_id
                         )
                     ),
                 ),
@@ -727,9 +738,9 @@ class TestToolCallStructure:
                     if isinstance(r, UpdateJsonRpcNotification)
                     and r.method == "session/update"
                     and r.params is not None
-                    and r.params.update.sessionUpdate == "tool_call_update"
-                    and r.params.update.toolCallId
-                    == (permission_request.params.toolCall.toolCallId)
+                    and r.params.update.session_update == "tool_call_update"
+                    and r.params.update.tool_call_id
+                    == (permission_request.params.tool_call.tool_call_id)
                     and r.params.update.status == "failed"
                 ),
                 None,
@@ -758,7 +769,7 @@ class TestToolCallStructure:
             mock_llm_chunk(content="The command sleep 3 has been run"),
         ]
         mock_env = get_mocking_env(custom_results)
-        async for process in get_acp_agent_process(
+        async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_grep_ask
         ):
             session_id = await initialize_session(process)
@@ -767,7 +778,7 @@ class TestToolCallStructure:
                 PromptJsonRpcRequest(
                     id=3,
                     params=PromptRequest(
-                        sessionId=session_id,
+                        session_id=session_id,
                         prompt=[
                             TextContentBlock(
                                 type="text",
@@ -786,7 +797,7 @@ class TestToolCallStructure:
                 for r in responses
                 if isinstance(r, UpdateJsonRpcNotification)
                 and r.params is not None
-                and r.params.update.sessionUpdate == "tool_call_update"
+                and r.params.update.session_update == "tool_call_update"
                 and r.params.update.status == "in_progress"
             ]
 
@@ -817,7 +828,7 @@ class TestToolCallStructure:
             ),
         ]
         mock_env = get_mocking_env(custom_results)
-        async for process in get_acp_agent_process(
+        async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_grep_ask
         ):
             permission_request = await start_session_with_request_permission(
@@ -832,7 +843,7 @@ class TestToolCallStructure:
                     id=permission_request.id,
                     result=RequestPermissionResponse(
                         outcome=AllowedOutcome(
-                            outcome="selected", optionId=selected_option_id
+                            outcome="selected", option_id=selected_option_id
                         )
                     ),
                 ),
@@ -847,10 +858,10 @@ class TestToolCallStructure:
                     for r in responses
                     if isinstance(r, UpdateJsonRpcNotification)
                     and r.params is not None
-                    and r.params.update.sessionUpdate == "tool_call_update"
+                    and r.params.update.session_update == "tool_call_update"
                     and r.params.update.status == "failed"
-                    and r.params.update.rawOutput is not None
-                    and r.params.update.toolCallId is not None
+                    and r.params.update.raw_output is not None
+                    and r.params.update.tool_call_id is not None
                 ),
                 None,
             )
@@ -888,7 +899,7 @@ class TestCancellationStructure:
             ),
         ]
         mock_env = get_mocking_env(custom_results)
-        async for process in get_acp_agent_process(
+        async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_dir
         ):
             permission_request = await start_session_with_request_permission(
@@ -920,9 +931,9 @@ class TestCancellationStructure:
                     if isinstance(r, UpdateJsonRpcNotification)
                     and r.method == "session/update"
                     and r.params is not None
-                    and r.params.update.sessionUpdate == "tool_call_update"
-                    and r.params.update.toolCallId
-                    == (permission_request.params.toolCall.toolCallId)
+                    and r.params.update.session_update == "tool_call_update"
+                    and r.params.update.tool_call_id
+                    == (permission_request.params.tool_call.tool_call_id)
                     and r.params.update.status == "failed"
                 ),
                 None,
@@ -935,7 +946,7 @@ class TestCancellationStructure:
                     for r in responses
                     if isinstance(r, PromptJsonRpcResponse)
                     and r.result is not None
-                    and r.result.stopReason == "cancelled"
+                    and r.result.stop_reason == "cancelled"
                 ),
                 None,
             )

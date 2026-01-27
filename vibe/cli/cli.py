@@ -6,29 +6,26 @@ import sys
 from rich import print as rprint
 
 from vibe.cli.textual_ui.app import run_textual_ui
+from vibe.core.agent_loop import AgentLoop
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
     MissingAPIKeyError,
     MissingPromptFileError,
     VibeConfig,
     load_api_keys_from_env,
 )
-from vibe.core.interaction_logger import InteractionLogger
-from vibe.core.modes import AgentMode
-from vibe.core.paths.config_paths import CONFIG_FILE, HISTORY_FILE, INSTRUCTIONS_FILE
+from vibe.core.paths.config_paths import CONFIG_FILE, HISTORY_FILE
 from vibe.core.programmatic import run_programmatic
-from vibe.core.types import LLMMessage, OutputFormat
-from vibe.core.utils import ConversationLimitException
+from vibe.core.session.session_loader import SessionLoader
+from vibe.core.types import LLMMessage, OutputFormat, Role
+from vibe.core.utils import ConversationLimitException, logger
 from vibe.setup.onboarding import run_onboarding
 
 
-def get_initial_mode(args: argparse.Namespace) -> AgentMode:
-    if args.plan:
-        return AgentMode.PLAN
-    if args.auto_approve:
-        return AgentMode.AUTO_APPROVE
-    if args.prompt is not None:
-        return AgentMode.AUTO_APPROVE
-    return AgentMode.DEFAULT
+def get_initial_agent_name(args: argparse.Namespace) -> str:
+    if args.prompt is not None and args.agent == BuiltinAgentName.DEFAULT:
+        return BuiltinAgentName.AUTO_APPROVE
+    return args.agent
 
 
 def get_prompt_from_stdin() -> str | None:
@@ -46,14 +43,12 @@ def get_prompt_from_stdin() -> str | None:
     return None
 
 
-def load_config_or_exit(
-    agent: str | None = None, mode: AgentMode = AgentMode.DEFAULT
-) -> VibeConfig:
+def load_config_or_exit() -> VibeConfig:
     try:
-        return VibeConfig.load(agent, **mode.config_overrides)
+        return VibeConfig.load()
     except MissingAPIKeyError:
         run_onboarding()
-        return VibeConfig.load(agent, **mode.config_overrides)
+        return VibeConfig.load()
     except MissingPromptFileError as e:
         rprint(f"[yellow]Invalid system prompt id: {e}[/]")
         sys.exit(1)
@@ -68,13 +63,6 @@ def bootstrap_config_files() -> None:
             VibeConfig.save_updates(VibeConfig.create_default())
         except Exception as e:
             rprint(f"[yellow]Could not create default config file: {e}[/]")
-
-    if not INSTRUCTIONS_FILE.path.exists():
-        try:
-            INSTRUCTIONS_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-            INSTRUCTIONS_FILE.path.touch()
-        except Exception as e:
-            rprint(f"[yellow]Could not create instructions file: {e}[/]")
 
     if not HISTORY_FILE.path.exists():
         try:
@@ -99,7 +87,7 @@ def load_session(
 
     session_to_load = None
     if args.continue_session:
-        session_to_load = InteractionLogger.find_latest_session(config.session_logging)
+        session_to_load = SessionLoader.find_latest_session(config.session_logging)
         if not session_to_load:
             rprint(
                 f"[red]No previous sessions found in "
@@ -107,7 +95,7 @@ def load_session(
             )
             sys.exit(1)
     else:
-        session_to_load = InteractionLogger.find_session_by_id(
+        session_to_load = SessionLoader.find_session_by_id(
             args.resume, config.session_logging
         )
         if not session_to_load:
@@ -118,25 +106,32 @@ def load_session(
             sys.exit(1)
 
     try:
-        loaded_messages, _ = InteractionLogger.load_session(session_to_load)
+        loaded_messages, _ = SessionLoader.load_session(session_to_load)
         return loaded_messages
     except Exception as e:
         rprint(f"[red]Failed to load session: {e}[/]")
         sys.exit(1)
 
 
+def _load_messages_from_previous_session(
+    agent_loop: AgentLoop, loaded_messages: list[LLMMessage]
+) -> None:
+    non_system_messages = [msg for msg in loaded_messages if msg.role != Role.system]
+    agent_loop.messages.extend(non_system_messages)
+    logger.info("Loaded %d messages from previous session", len(non_system_messages))
+
+
 def run_cli(args: argparse.Namespace) -> None:
     load_api_keys_from_env()
+    bootstrap_config_files()
 
     if args.setup:
         run_onboarding()
         sys.exit(0)
 
     try:
-        bootstrap_config_files()
-
-        initial_mode = get_initial_mode(args)
-        config = load_config_or_exit(args.agent, initial_mode)
+        initial_agent_name = get_initial_agent_name(args)
+        config = load_config_or_exit()
 
         if args.enabled_tools:
             config.enabled_tools = args.enabled_tools
@@ -163,7 +158,7 @@ def run_cli(args: argparse.Namespace) -> None:
                     max_price=args.max_price,
                     output_format=output_format,
                     previous_messages=loaded_messages,
-                    mode=initial_mode,
+                    agent_name=initial_agent_name,
                 )
                 if final_response:
                     print(final_response)
@@ -175,12 +170,16 @@ def run_cli(args: argparse.Namespace) -> None:
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(1)
         else:
+            agent_loop = AgentLoop(
+                config, agent_name=initial_agent_name, enable_streaming=True
+            )
+
+            if loaded_messages:
+                _load_messages_from_previous_session(agent_loop, loaded_messages)
+
             run_textual_ui(
-                config,
-                initial_mode=initial_mode,
-                enable_streaming=True,
+                agent_loop=agent_loop,
                 initial_prompt=args.initial_prompt or stdin_prompt,
-                loaded_messages=loaded_messages,
             )
 
     except (KeyboardInterrupt, EOFError):

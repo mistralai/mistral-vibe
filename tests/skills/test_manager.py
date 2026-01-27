@@ -273,3 +273,191 @@ class TestSkillManagerGetSkill:
 
     def test_returns_none_for_unknown_skill(self, skill_manager: SkillManager) -> None:
         assert skill_manager.get_skill("nonexistent-skill") is None
+
+
+class TestSkillManagerFiltering:
+    def test_enabled_skills_filters_to_only_enabled(self, skills_dir: Path) -> None:
+        create_skill(skills_dir, "skill-a", "Skill A")
+        create_skill(skills_dir, "skill-b", "Skill B")
+        create_skill(skills_dir, "skill-c", "Skill C")
+
+        config = VibeConfig(
+            session_logging=SessionLoggingConfig(enabled=False),
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+            enabled_skills=["skill-a", "skill-c"],
+        )
+        manager = SkillManager(lambda: config)
+
+        skills = manager.available_skills
+        assert len(skills) == 2
+        assert "skill-a" in skills
+        assert "skill-b" not in skills
+        assert "skill-c" in skills
+
+    def test_disabled_skills_excludes_disabled(self, skills_dir: Path) -> None:
+        create_skill(skills_dir, "skill-a", "Skill A")
+        create_skill(skills_dir, "skill-b", "Skill B")
+        create_skill(skills_dir, "skill-c", "Skill C")
+
+        config = VibeConfig(
+            session_logging=SessionLoggingConfig(enabled=False),
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+            disabled_skills=["skill-b"],
+        )
+        manager = SkillManager(lambda: config)
+
+        skills = manager.available_skills
+        assert len(skills) == 2
+        assert "skill-a" in skills
+        assert "skill-b" not in skills
+        assert "skill-c" in skills
+
+    def test_enabled_skills_takes_precedence_over_disabled(
+        self, skills_dir: Path
+    ) -> None:
+        create_skill(skills_dir, "skill-a", "Skill A")
+        create_skill(skills_dir, "skill-b", "Skill B")
+
+        config = VibeConfig(
+            session_logging=SessionLoggingConfig(enabled=False),
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+            enabled_skills=["skill-a"],
+            disabled_skills=["skill-a"],  # Should be ignored
+        )
+        manager = SkillManager(lambda: config)
+
+        skills = manager.available_skills
+        assert len(skills) == 1
+        assert "skill-a" in skills
+
+    def test_glob_pattern_matching(self, skills_dir: Path) -> None:
+        create_skill(skills_dir, "search-code", "Search code")
+        create_skill(skills_dir, "search-docs", "Search docs")
+        create_skill(skills_dir, "other-skill", "Other skill")
+
+        config = VibeConfig(
+            session_logging=SessionLoggingConfig(enabled=False),
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+            enabled_skills=["search-*"],
+        )
+        manager = SkillManager(lambda: config)
+
+        skills = manager.available_skills
+        assert len(skills) == 2
+        assert "search-code" in skills
+        assert "search-docs" in skills
+        assert "other-skill" not in skills
+
+    def test_regex_pattern_matching(self, skills_dir: Path) -> None:
+        create_skill(skills_dir, "skill-v1", "Skill v1")
+        create_skill(skills_dir, "skill-v2", "Skill v2")
+        create_skill(skills_dir, "other-skill", "Other skill")
+
+        config = VibeConfig(
+            session_logging=SessionLoggingConfig(enabled=False),
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+            enabled_skills=["re:skill-v\\d+"],
+        )
+        manager = SkillManager(lambda: config)
+
+        skills = manager.available_skills
+        assert len(skills) == 2
+        assert "skill-v1" in skills
+        assert "skill-v2" in skills
+        assert "other-skill" not in skills
+
+    def test_get_skill_respects_filtering(self, skills_dir: Path) -> None:
+        create_skill(skills_dir, "enabled-skill", "Enabled")
+        create_skill(skills_dir, "disabled-skill", "Disabled")
+
+        config = VibeConfig(
+            session_logging=SessionLoggingConfig(enabled=False),
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+            disabled_skills=["disabled-skill"],
+        )
+        manager = SkillManager(lambda: config)
+
+        assert manager.get_skill("enabled-skill") is not None
+        assert manager.get_skill("disabled-skill") is None
+
+
+class TestSkillUserInvocable:
+    def test_user_invocable_defaults_to_true(self, skills_dir: Path) -> None:
+        create_skill(skills_dir, "default-skill", "A default skill")
+
+        config = VibeConfig(
+            session_logging=SessionLoggingConfig(enabled=False),
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+        )
+        manager = SkillManager(lambda: config)
+
+        skill = manager.get_skill("default-skill")
+        assert skill is not None
+        assert skill.user_invocable is True
+
+    def test_user_invocable_can_be_set_to_false(self, skills_dir: Path) -> None:
+        create_skill(skills_dir, "hidden-skill", "A hidden skill", user_invocable=False)
+
+        config = VibeConfig(
+            session_logging=SessionLoggingConfig(enabled=False),
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+        )
+        manager = SkillManager(lambda: config)
+
+        skill = manager.get_skill("hidden-skill")
+        assert skill is not None
+        assert skill.user_invocable is False
+
+    def test_user_invocable_can_be_explicitly_set_to_true(
+        self, skills_dir: Path
+    ) -> None:
+        create_skill(
+            skills_dir, "explicit-skill", "An explicit skill", user_invocable=True
+        )
+
+        config = VibeConfig(
+            session_logging=SessionLoggingConfig(enabled=False),
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+        )
+        manager = SkillManager(lambda: config)
+
+        skill = manager.get_skill("explicit-skill")
+        assert skill is not None
+        assert skill.user_invocable is True
+
+    def test_mixed_user_invocable_skills(self, skills_dir: Path) -> None:
+        create_skill(skills_dir, "visible-skill", "Visible", user_invocable=True)
+        create_skill(skills_dir, "hidden-skill", "Hidden", user_invocable=False)
+        create_skill(skills_dir, "default-skill", "Default")
+
+        config = VibeConfig(
+            session_logging=SessionLoggingConfig(enabled=False),
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+        )
+        manager = SkillManager(lambda: config)
+
+        skills = manager.available_skills
+        assert len(skills) == 3
+        assert skills["visible-skill"].user_invocable is True
+        assert skills["hidden-skill"].user_invocable is False
+        assert skills["default-skill"].user_invocable is True

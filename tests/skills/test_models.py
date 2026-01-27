@@ -18,6 +18,7 @@ class TestSkillMetadata:
         assert meta.compatibility is None
         assert meta.metadata == {}
         assert meta.allowed_tools == []
+        assert meta.user_invocable is True
 
     def test_creates_with_all_fields(self) -> None:
         meta = SkillMetadata(
@@ -27,6 +28,7 @@ class TestSkillMetadata:
             compatibility="Requires git",
             metadata={"author": "Test Author", "version": "1.0"},
             allowed_tools=["bash", "read_file"],
+            user_invocable=False,
         )
 
         assert meta.name == "full-skill"
@@ -35,6 +37,7 @@ class TestSkillMetadata:
         assert meta.compatibility == "Requires git"
         assert meta.metadata == {"author": "Test Author", "version": "1.0"}
         assert meta.allowed_tools == ["bash", "read_file"]
+        assert meta.user_invocable is False
 
     def test_raises_error_for_uppercase_name(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
@@ -144,6 +147,7 @@ class TestSkillInfo:
             compatibility="git, docker",
             metadata={"author": "Test"},
             allowed_tools=["bash"],
+            user_invocable=False,
             skill_path=skill_path,
         )
 
@@ -153,6 +157,7 @@ class TestSkillInfo:
         assert info.compatibility == "git, docker"
         assert info.metadata == {"author": "Test"}
         assert info.allowed_tools == ["bash"]
+        assert info.user_invocable is False
         assert info.skill_path == skill_path
         assert info.skill_dir == skill_path.parent.resolve()
 
@@ -179,6 +184,7 @@ class TestSkillInfo:
             compatibility="Requires Python 3.12",
             metadata={"key": "value"},
             allowed_tools=["bash", "grep"],
+            user_invocable=False,
         )
         info = SkillInfo.from_metadata(meta, skill_path)
 
@@ -186,3 +192,4 @@ class TestSkillInfo:
         assert info.compatibility == meta.compatibility
         assert info.metadata == meta.metadata
         assert info.allowed_tools == meta.allowed_tools
+        assert info.user_invocable == meta.user_invocable

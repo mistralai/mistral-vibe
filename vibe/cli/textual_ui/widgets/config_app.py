@@ -26,7 +26,6 @@ class SettingDefinition(TypedDict):
     label: str
     type: str
     options: list[str]
-    value: str
 
 
 class ConfigApp(Container):
@@ -69,14 +68,12 @@ class ConfigApp(Container):
                 "label": "Model",
                 "type": "cycle",
                 "options": [m.alias for m in self.config.models],
-                "value": self.config.active_model,
             },
             {
                 "key": "textual_theme",
                 "label": "Theme",
                 "type": "cycle",
                 "options": themes,
-                "value": self.config.textual_theme,
             },
         ]
 
@@ -115,7 +112,9 @@ class ConfigApp(Container):
             cursor = "› " if is_selected else "  "
 
             label: str = setting["label"]
-            value: str = self.changes.get(setting["key"], setting["value"])
+            value: str = self.changes.get(
+                setting["key"], getattr(self.config, setting["key"], "")
+            )
 
             text = f"{cursor}{label}: {value}"
 
@@ -141,7 +140,7 @@ class ConfigApp(Container):
     def action_toggle_setting(self) -> None:
         setting = self.settings[self.selected_index]
         key: str = setting["key"]
-        current: str = self.changes.get(key, setting["value"])
+        current: str = self.changes.get(key, getattr(self.config, key)) or ""
 
         options: list[str] = setting["options"]
         new_value = ""

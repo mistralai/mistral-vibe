@@ -10,23 +10,15 @@ import sys
 import time
 from typing import TYPE_CHECKING
 
-from vibe.core.llm.format import get_active_tool_classes
-from vibe.core.paths.config_paths import INSTRUCTIONS_FILE
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.trusted_folders import TRUSTABLE_FILENAMES, trusted_folders_manager
 from vibe.core.utils import is_dangerous_directory, is_windows
 
 if TYPE_CHECKING:
+    from vibe.core.agents import AgentManager
     from vibe.core.config import ProjectContextConfig, VibeConfig
     from vibe.core.skills.manager import SkillManager
     from vibe.core.tools.manager import ToolManager
-
-
-def _load_user_instructions() -> str:
-    try:
-        return INSTRUCTIONS_FILE.path.read_text("utf-8", errors="ignore")
-    except (FileNotFoundError, OSError):
-        return ""
 
 
 def _load_project_doc(workdir: Path, max_bytes: int) -> str:
@@ -336,12 +328,12 @@ def _get_platform_name() -> str:
 def _get_default_shell() -> str:
     """Get the default shell used by asyncio.create_subprocess_shell.
 
-    On Unix, this is always 'sh'.
+    On Unix, uses $SHELL env var and default to sh.
     On Windows, this is COMSPEC or cmd.exe.
     """
     if is_windows():
         return os.environ.get("COMSPEC", "cmd.exe")
-    return "sh"
+    return os.environ.get("SHELL", "sh")
 
 
 def _get_os_system_prompt() -> str:
@@ -379,10 +371,7 @@ def _add_commit_signature() -> str:
     )
 
 
-def _get_available_skills_section(skill_manager: SkillManager | None) -> str:
-    if skill_manager is None:
-        return ""
-
+def _get_available_skills_section(skill_manager: SkillManager) -> str:
     skills = skill_manager.available_skills
     if not skills:
         return ""
@@ -410,10 +399,24 @@ def _get_available_skills_section(skill_manager: SkillManager | None) -> str:
     return "\n".join(lines)
 
 
+def _get_available_subagents_section(agent_manager: AgentManager) -> str:
+    agents = agent_manager.get_subagents()
+    if not agents:
+        return ""
+
+    lines = ["# Available Subagents", ""]
+    lines.append("The following subagents can be spawned via the Task tool:")
+    for agent in agents:
+        lines.append(f"- **{agent.name}**: {agent.description}")
+
+    return "\n".join(lines)
+
+
 def get_universal_system_prompt(
     tool_manager: ToolManager,
     config: VibeConfig,
-    skill_manager: SkillManager | None = None,
+    skill_manager: SkillManager,
+    agent_manager: AgentManager,
 ) -> str:
     sections = [config.system_prompt]
 
@@ -426,20 +429,19 @@ def get_universal_system_prompt(
     if config.include_prompt_detail:
         sections.append(_get_os_system_prompt())
         tool_prompts = []
-        active_tools = get_active_tool_classes(tool_manager, config)
-        for tool_class in active_tools:
+        for tool_class in tool_manager.available_tools.values():
             if prompt := tool_class.get_tool_prompt():
                 tool_prompts.append(prompt)
         if tool_prompts:
             sections.append("\n---\n".join(tool_prompts))
 
-        user_instructions = config.instructions.strip() or _load_user_instructions()
-        if user_instructions.strip():
-            sections.append(user_instructions)
-
         skills_section = _get_available_skills_section(skill_manager)
         if skills_section:
             sections.append(skills_section)
+
+        subagents_section = _get_available_subagents_section(agent_manager)
+        if subagents_section:
+            sections.append(subagents_section)
 
     if config.include_project_context:
         is_dangerous, reason = is_dangerous_directory()
@@ -450,13 +452,13 @@ def get_universal_system_prompt(
             )
         else:
             context = ProjectContextProvider(
-                config=config.project_context, root_path=config.effective_workdir
+                config=config.project_context, root_path=Path.cwd()
             ).get_full_context()
 
         sections.append(context)
 
         project_doc = _load_project_doc(
-            config.effective_workdir, config.project_context.max_doc_bytes
+            Path.cwd(), config.project_context.max_doc_bytes
         )
         if project_doc.strip():
             sections.append(project_doc)

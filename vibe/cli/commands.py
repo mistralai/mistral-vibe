@@ -84,6 +84,7 @@ class CommandRegistry:
             "- `Ctrl+J` / `Shift+Enter` Insert newline",
             "- `Escape` Interrupt agent or close dialogs",
             "- `Ctrl+C` Quit (or clear input if text present)",
+            "- `Ctrl+G` Edit input in external editor",
             "- `Ctrl+O` Toggle tool output view",
             "- `Ctrl+T` Toggle todo view",
             "- `Shift+Tab` Toggle auto-approve mode",
