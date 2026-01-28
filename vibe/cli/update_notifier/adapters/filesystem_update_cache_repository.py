@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import anyio
 import json
 from pathlib import Path
 
@@ -14,11 +14,11 @@ from vibe.core.paths.global_paths import VIBE_HOME
 class FileSystemUpdateCacheRepository(UpdateCacheRepository):
     def __init__(self, base_path: Path | str | None = None) -> None:
         self._base_path = Path(base_path) if base_path is not None else VIBE_HOME.path
-        self._cache_file = self._base_path / "update_cache.json"
+        self._cache_file = anyio.Path(self._base_path / "update_cache.json")
 
     async def get(self) -> UpdateCache | None:
         try:
-            content = await asyncio.to_thread(self._cache_file.read_text)
+            content = await self._cache_file.read_text()
         except OSError:
             return None
 
@@ -57,6 +57,6 @@ class FileSystemUpdateCacheRepository(UpdateCacheRepository):
                 },
                 ensure_ascii=False,
             )
-            await asyncio.to_thread(self._cache_file.write_text, payload)
+            await self._cache_file.write_text(payload)
         except OSError:
             return None
