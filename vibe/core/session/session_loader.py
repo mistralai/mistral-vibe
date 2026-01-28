@@ -22,12 +22,12 @@ class SessionLoader:
             return False
 
         try:
-            with open(metadata_path) as f:
+            with open(metadata_path, encoding="utf-8", errors="ignore") as f:
                 metadata = json.load(f)
                 if not isinstance(metadata, dict):
                     return False
 
-            with open(messages_path) as f:
+            with open(messages_path, encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
                 if not lines:
                     return False
@@ -87,7 +87,7 @@ class SessionLoader:
         messages_filepath = filepath / MESSAGES_FILENAME
 
         try:
-            with messages_filepath.open("r", encoding="utf-8") as f:
+            with messages_filepath.open("r", encoding="utf-8", errors="ignore") as f:
                 content = f.readlines()
         except Exception as e:
             raise ValueError(
@@ -117,7 +117,9 @@ class SessionLoader:
 
         if metadata_filepath.exists():
             try:
-                with metadata_filepath.open("r", encoding="utf-8") as f:
+                with metadata_filepath.open(
+                    "r", encoding="utf-8", errors="ignore"
+                ) as f:
                     metadata = json.load(f)
             except json.JSONDecodeError as e:
                 raise ValueError(

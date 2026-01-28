@@ -182,7 +182,9 @@ class SessionLogger:
             if not messages_filepath.exists():
                 messages_filepath.touch()
 
-            async with await AsyncPath(messages_filepath).open("a") as f:
+            async with await AsyncPath(messages_filepath).open(
+                "a", encoding="utf-8"
+            ) as f:
                 for message in messages:
                     await f.write(json.dumps(message, ensure_ascii=False) + "\n")
                     await f.flush()
@@ -217,7 +219,9 @@ class SessionLogger:
         # Read old metadata and get total_messages
         try:
             if self.metadata_filepath.exists():
-                async with await AsyncPath(self.metadata_filepath).open() as f:
+                async with await AsyncPath(self.metadata_filepath).open(
+                    encoding="utf-8", errors="ignore"
+                ) as f:
                     old_metadata = json.loads(await f.read())
                     old_total_messages = old_metadata["total_messages"]
             else:

@@ -49,14 +49,11 @@ class FileSystemUpdateCacheRepository(UpdateCacheRepository):
 
     async def set(self, update_cache: UpdateCache) -> None:
         try:
-            payload = json.dumps(
-                {
-                    "latest_version": update_cache.latest_version,
-                    "stored_at_timestamp": update_cache.stored_at_timestamp,
-                    "seen_whats_new_version": update_cache.seen_whats_new_version,
-                },
-                ensure_ascii=False,
-            )
+            payload = json.dumps({
+                "latest_version": update_cache.latest_version,
+                "stored_at_timestamp": update_cache.stored_at_timestamp,
+                "seen_whats_new_version": update_cache.seen_whats_new_version,
+            })
             await asyncio.to_thread(self._cache_file.write_text, payload)
         except OSError:
             return None
