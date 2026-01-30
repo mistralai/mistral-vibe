@@ -233,7 +233,11 @@ class SessionLogger:
 
         try:
             # Append new messages
-            new_messages = messages[old_total_messages:]
+            start_index = old_total_messages
+            if messages and messages[0].role == Role.system:
+                start_index += 1
+
+            new_messages = messages[start_index:]
 
             messages_data = [
                 m.model_dump(exclude_none=True)
