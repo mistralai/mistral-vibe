@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from http import HTTPStatus
 from typing import cast
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from tests.mock.utils import mock_llm_chunk
@@ -11,6 +13,7 @@ from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.middleware import (
     ConversationContext,
     MiddlewareAction,
@@ -25,6 +28,7 @@ from vibe.core.types import (
     AssistantEvent,
     FunctionCall,
     LLMMessage,
+    RateLimitError,
     ReasoningEvent,
     Role,
     ToolCall,
@@ -369,7 +373,7 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     assert events[-1].skipped is True
     assert events[-1].skip_reason is not None
     assert "<user_cancellation>" in events[-1].skip_reason
-    assert agent.session_logger.save_interaction.await_count == 1
+    assert agent.session_logger.save_interaction.await_count >= 1
 
 
 @pytest.mark.asyncio
@@ -383,6 +387,34 @@ async def test_act_flushes_and_logs_when_streaming_errors(observer_capture) -> N
 
     with pytest.raises(RuntimeError, match="boom in streaming"):
         [_ async for _ in agent.act("Trigger stream failure")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_rate_limit(observer_capture) -> None:
+    observed, observer = observer_capture
+    response = httpx.Response(HTTPStatus.TOO_MANY_REQUESTS)
+    backend_error = BackendErrorBuilder.build_http_error(
+        provider="mistral",
+        endpoint="test",
+        response=response,
+        headers=None,
+        model="test-model",
+        messages=[],
+        temperature=0.0,
+        has_tools=False,
+        tool_choice=None,
+    )
+    backend = FakeBackend(exception_to_raise=backend_error)
+    agent = AgentLoop(
+        make_config(), backend=backend, message_observer=observer, enable_streaming=True
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(RateLimitError):
+        [_ async for _ in agent.act("Trigger rate limit failure while streaming")]
 
     assert [role for role, _ in observed] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1

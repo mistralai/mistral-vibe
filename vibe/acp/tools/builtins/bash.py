@@ -3,10 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
-import shlex
 
 from acp.schema import (
-    EnvVariable,
     TerminalToolCallContent,
     ToolCallProgress,
     ToolCallStart,
@@ -40,14 +38,11 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
 
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
-        env, command, cmd_args = self._parse_command(args.command)
 
         try:
             terminal_handle = await client.create_terminal(
                 session_id=session_id,
-                command=command,
-                args=cmd_args,
-                env=env,
+                command=args.command,
                 cwd=str(Path.cwd()),
                 output_byte_limit=max_bytes,
             )
@@ -83,25 +78,6 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
                 )
             except Exception as e:
                 logger.error(f"Failed to release terminal: {e!r}")
-
-    def _parse_command(
-        self, command_str: str
-    ) -> tuple[list[EnvVariable], str, list[str]]:
-        parts = shlex.split(command_str)
-        env: list[EnvVariable] = []
-        command: str = ""
-        args: list[str] = []
-
-        for part in parts:
-            if "=" in part and not command:
-                key, value = part.split("=", 1)
-                env.append(EnvVariable(name=key, value=value))
-            elif not command:
-                command = part
-            else:
-                args.append(part)
-
-        return env, command, args
 
     @classmethod
     def get_summary(cls, args: BashArgs) -> str:

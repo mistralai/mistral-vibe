@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from enum import StrEnum, auto
 import os
 from pathlib import Path
@@ -19,18 +20,28 @@ from pydantic_settings import (
 )
 import tomli_w
 
-from vibe.core.paths.config_paths import CONFIG_DIR, CONFIG_FILE, PROMPT_DIR
-from vibe.core.paths.global_paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
+from vibe.core.paths.config_paths import CONFIG_DIR, CONFIG_FILE, PROMPTS_DIR
+from vibe.core.paths.global_paths import (
+    GLOBAL_ENV_FILE,
+    GLOBAL_PROMPTS_DIR,
+    SESSION_LOG_DIR,
+)
 from vibe.core.prompts import SystemPrompt
 from vibe.core.tools.base import BaseToolConfig
 
 
-def load_api_keys_from_env() -> None:
-    if GLOBAL_ENV_FILE.path.is_file():
-        env_vars = dotenv_values(GLOBAL_ENV_FILE.path)
-        for key, value in env_vars.items():
-            if value:
-                os.environ.setdefault(key, value)
+def load_dotenv_values(
+    env_path: Path = GLOBAL_ENV_FILE.path,
+    environ: MutableMapping[str, str] = os.environ,
+) -> None:
+    if not env_path.is_file():
+        return
+
+    env_vars = dotenv_values(env_path)
+    for key, value in env_vars.items():
+        if not value:
+            continue
+        environ.update({key: value})
 
 
 class MissingAPIKeyError(RuntimeError):
@@ -43,11 +54,17 @@ class MissingAPIKeyError(RuntimeError):
 
 
 class MissingPromptFileError(RuntimeError):
-    def __init__(self, system_prompt_id: str, prompt_dir: str) -> None:
+    def __init__(
+        self, system_prompt_id: str, prompt_dir: str, global_prompt_dir: str
+    ) -> None:
+        extra_global_prompt_dir = (
+            f" or {global_prompt_dir}" if global_prompt_dir != prompt_dir else ""
+        )
+
         super().__init__(
             f"Invalid system_prompt_id value: '{system_prompt_id}'. "
             f"Must be one of the available prompts ({', '.join(f'{p.name.lower()}' for p in SystemPrompt)}), "
-            f"or correspond to a .md file in {prompt_dir}"
+            f"or correspond to a .md file in {prompt_dir}{extra_global_prompt_dir}"
         )
         self.system_prompt_id = system_prompt_id
         self.prompt_dir = prompt_dir
@@ -392,10 +409,16 @@ class VibeConfig(BaseSettings):
         except KeyError:
             pass
 
-        custom_sp_path = (PROMPT_DIR.path / self.system_prompt_id).with_suffix(".md")
-        if not custom_sp_path.is_file():
-            raise MissingPromptFileError(self.system_prompt_id, str(PROMPT_DIR.path))
-        return custom_sp_path.read_text()
+        for current_prompt_dir in [PROMPTS_DIR.path, GLOBAL_PROMPTS_DIR.path]:
+            custom_sp_path = (current_prompt_dir / self.system_prompt_id).with_suffix(
+                ".md"
+            )
+            if custom_sp_path.is_file():
+                return custom_sp_path.read_text()
+
+        raise MissingPromptFileError(
+            self.system_prompt_id, str(PROMPTS_DIR.path), str(GLOBAL_PROMPTS_DIR.path)
+        )
 
     def get_active_model(self) -> ModelConfig:
         for model in self.models:

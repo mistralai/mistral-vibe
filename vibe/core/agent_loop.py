@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable
 from enum import StrEnum, auto
+from http import HTTPStatus
 from threading import Thread
 import time
 from typing import cast
@@ -14,6 +15,7 @@ from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
 from vibe.core.config import VibeConfig
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
+from vibe.core.llm.exceptions import BackendError
 from vibe.core.llm.format import APIToolFormatHandler, ResolvedMessage, ResolvedToolCall
 from vibe.core.llm.types import BackendLike
 from vibe.core.middleware import (
@@ -54,6 +56,7 @@ from vibe.core.types import (
     LLMChunk,
     LLMMessage,
     LLMUsage,
+    RateLimitError,
     ReasoningEvent,
     Role,
     SyncApprovalCallback,
@@ -93,6 +96,10 @@ class AgentLoopStateError(AgentLoopError):
 
 class AgentLoopLLMResponseError(AgentLoopError):
     """Raised when LLM response is malformed or missing expected data."""
+
+
+def _should_raise_rate_limit_error(e: Exception) -> bool:
+    return isinstance(e, BackendError) and e.status == HTTPStatus.TOO_MANY_REQUESTS
 
 
 class AgentLoop:
@@ -193,7 +200,18 @@ class AgentLoop:
     def add_message(self, message: LLMMessage) -> None:
         self.messages.append(message)
 
-    def _flush_new_messages(self) -> None:
+    async def _save_messages(self) -> None:
+        await self.session_logger.save_interaction(
+            self.messages,
+            self.stats,
+            self._base_config,
+            self.tool_manager,
+            self.agent_profile,
+        )
+
+    async def _flush_new_messages(self) -> None:
+        await self._save_messages()
+
         if not self.message_observer:
             return
 
@@ -308,11 +326,10 @@ class AgentLoop:
                     if is_user_cancellation_event(event):
                         user_cancelled = True
                     yield event
+                    await self._flush_new_messages()
 
                 last_message = self.messages[-1]
                 should_break_loop = last_message.role != Role.tool
-
-                self._flush_new_messages()
 
                 if user_cancelled:
                     return
@@ -327,14 +344,7 @@ class AgentLoop:
                     return
 
         finally:
-            self._flush_new_messages()
-            await self.session_logger.save_interaction(
-                self.messages,
-                self.stats,
-                self._base_config,
-                self.tool_manager,
-                self.agent_profile,
-            )
+            await self._flush_new_messages()
 
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
         if self.enable_streaming:
@@ -593,6 +603,9 @@ class AgentLoop:
             return LLMChunk(message=processed_message, usage=result.usage)
 
         except Exception as e:
+            if _should_raise_rate_limit_error(e):
+                raise RateLimitError(provider.name, active_model.name) from e
+
             raise RuntimeError(
                 f"API error from {provider.name} (model: {active_model.name}): {e}"
             ) from e
@@ -642,6 +655,9 @@ class AgentLoop:
             self.messages.append(chunk_agg.message)
 
         except Exception as e:
+            if _should_raise_rate_limit_error(e):
+                raise RateLimitError(provider.name, active_model.name) from e
+
             raise RuntimeError(
                 f"API error from {provider.name} (model: {active_model.name}): {e}"
             ) from e

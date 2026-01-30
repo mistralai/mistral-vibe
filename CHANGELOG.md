@@ -5,11 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-01-30
+
+### Added
+
+- Allow environment variables to be overridden by dotenv files
+- Display custom rate limit messages depending on plan type
+
+### Changed
+
+- Made plan offer message more discreet in UI
+- Speed up latest session scan and harden validation
+- Updated pytest-xdist configuration to schedule single test chunks
+
+### Fixed
+
+- Prevent duplicate messages in persisted sessions
+- Fix ACP bash tool to pass full command string for chained commands
+- Fix global agent prompt not being loaded correctly
+- Do not propose to "resume" when there is nothing to resume
+
+
 ## [2.0.1] - 2026-01-28
 
 ### Fixed
 
-- Encoding issues in Windows
+- Fix encoding issues in Windows
 
 
 ## [2.0.0] - 2026-01-27

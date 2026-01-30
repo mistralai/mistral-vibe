@@ -29,28 +29,36 @@ ACTION_TO_URL: dict[PlanOfferAction, str] = {
 }
 
 
+class PlanType(StrEnum):
+    FREE = "free"
+    PRO = "pro"
+    UNKNOWN = "unknown"
+
+
 async def decide_plan_offer(
     api_key: str | None, gateway: WhoAmIGateway
-) -> PlanOfferAction:
+) -> tuple[PlanOfferAction, PlanType]:
     if not api_key:
-        return PlanOfferAction.UPGRADE
+        return PlanOfferAction.UPGRADE, PlanType.FREE
     try:
         response = await gateway.whoami(api_key)
     except WhoAmIGatewayUnauthorized:
-        return PlanOfferAction.UPGRADE
+        return PlanOfferAction.UPGRADE, PlanType.FREE
     except WhoAmIGatewayError:
         logger.warning("Failed to fetch plan status.", exc_info=True)
-        return PlanOfferAction.NONE
-    return _action_from_response(response)
+        return PlanOfferAction.NONE, PlanType.UNKNOWN
+    return _action_and_plan_from_response(response)
 
 
-def _action_from_response(response: WhoAmIResponse) -> PlanOfferAction:
+def _action_and_plan_from_response(
+    response: WhoAmIResponse,
+) -> tuple[PlanOfferAction, PlanType]:
     match response:
         case WhoAmIResponse(is_pro_plan=True):
-            return PlanOfferAction.NONE
+            return PlanOfferAction.NONE, PlanType.PRO
         case WhoAmIResponse(prompt_switching_to_pro_plan=True):
-            return PlanOfferAction.SWITCH_TO_PRO_KEY
+            return PlanOfferAction.SWITCH_TO_PRO_KEY, PlanType.PRO
         case WhoAmIResponse(advertise_pro_plan=True):
-            return PlanOfferAction.UPGRADE
+            return PlanOfferAction.UPGRADE, PlanType.FREE
         case _:
-            return PlanOfferAction.NONE
+            return PlanOfferAction.NONE, PlanType.UNKNOWN

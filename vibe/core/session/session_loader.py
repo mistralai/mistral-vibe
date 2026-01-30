@@ -22,40 +22,48 @@ class SessionLoader:
             return False
 
         try:
-            with open(metadata_path, encoding="utf-8", errors="ignore") as f:
+            with metadata_path.open("r", encoding="utf-8", errors="ignore") as f:
                 metadata = json.load(f)
-                if not isinstance(metadata, dict):
-                    return False
+            if not isinstance(metadata, dict):
+                return False
 
-            with open(messages_path, encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
-                if not lines:
-                    return False
-                messages = [json.loads(line) for line in lines]
-                if not isinstance(messages, list) or not all(
-                    isinstance(msg, dict) for msg in messages
-                ):
-                    return False
-        except json.JSONDecodeError:
+            with messages_path.open("r", encoding="utf-8", errors="ignore") as f:
+                has_messages = False
+                for line in f:
+                    has_messages = True
+                    message = json.loads(line)
+                    if not isinstance(message, dict):
+                        return False
+            if not has_messages:
+                return False
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return False
 
         return True
 
     @staticmethod
     def latest_session(session_dirs: list[Path]) -> Path | None:
-        latest_dir = None
-        latest_mtime = 0
+        sessions_with_mtime: list[tuple[Path, float]] = []
         for session in session_dirs:
-            if not SessionLoader._is_valid_session(session):
+            messages_path = session / MESSAGES_FILENAME
+            if not messages_path.is_file():
+                continue
+            try:
+                mtime = messages_path.stat().st_mtime
+                sessions_with_mtime.append((session, mtime))
+            except OSError:
                 continue
 
-            messages_path = session / MESSAGES_FILENAME
-            mtime = messages_path.stat().st_mtime
-            if mtime > latest_mtime:
-                latest_mtime = mtime
-                latest_dir = session
+        if not sessions_with_mtime:
+            return None
 
-        return latest_dir
+        sessions_with_mtime.sort(key=lambda x: x[1], reverse=True)
+
+        for session, _mtime in sessions_with_mtime:
+            if SessionLoader._is_valid_session(session):
+                return session
+
+        return None
 
     @staticmethod
     def find_latest_session(config: SessionLoggingConfig) -> Path | None:
@@ -72,14 +80,31 @@ class SessionLoader:
     def find_session_by_id(
         session_id: str, config: SessionLoggingConfig
     ) -> Path | None:
-        save_dir = Path(config.save_dir)
-        if not save_dir.exists():
-            return None
-
-        short_id = session_id[:8]
-        matches = list(save_dir.glob(f"{config.session_prefix}_*_{short_id}"))
+        matches = SessionLoader._find_session_dirs_by_short_id(session_id, config)
 
         return SessionLoader.latest_session(matches)
+
+    @staticmethod
+    def does_session_exist(
+        session_id: str, config: SessionLoggingConfig
+    ) -> Path | None:
+        for session_dir in SessionLoader._find_session_dirs_by_short_id(
+            session_id, config
+        ):
+            if (session_dir / MESSAGES_FILENAME).is_file():
+                return session_dir
+        return None
+
+    @staticmethod
+    def _find_session_dirs_by_short_id(
+        session_id: str, config: SessionLoggingConfig
+    ) -> list[Path]:
+        save_dir = Path(config.save_dir)
+        if not save_dir.exists():
+            return []
+
+        short_id = session_id[:8]
+        return list(save_dir.glob(f"{config.session_prefix}_*_{short_id}"))
 
     @staticmethod
     def load_session(filepath: Path) -> tuple[list[LLMMessage], dict[str, Any]]:
@@ -94,7 +119,7 @@ class SessionLoader:
                 f"Error reading session messages at {filepath}: {e}"
             ) from e
 
-        if not len(content):
+        if not content:
             raise ValueError(
                 f"Session messages file is empty (may have been corrupted by interruption): "
                 f"{filepath}"

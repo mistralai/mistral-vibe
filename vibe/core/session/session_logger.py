@@ -148,7 +148,7 @@ class SessionLogger:
     @staticmethod
     async def persist_metadata(metadata: Any, session_dir: Path) -> None:
         temp_metadata_filepath = None
-        metadata_filepath = session_dir / "meta.json"
+        metadata_filepath = session_dir / METADATA_FILENAME
         try:
             async with NamedTemporaryFile(
                 mode="w",
@@ -201,12 +201,12 @@ class SessionLogger:
         base_config: VibeConfig,
         tool_manager: ToolManager,
         agent_profile: AgentProfile,
-    ) -> str | None:
+    ) -> None:
         if not self.enabled or self.session_dir is None:
-            return None
+            return
 
         if self.session_metadata is None:
-            return None
+            return
 
         # If the session directory does not exist, create it
         try:
@@ -232,14 +232,14 @@ class SessionLogger:
             ) from e
 
         try:
+            non_system_messages = [m for m in messages if m.role != Role.system]
             # Append new messages
-            new_messages = messages[old_total_messages:]
+            new_messages = non_system_messages[old_total_messages:]
 
-            messages_data = [
-                m.model_dump(exclude_none=True)
-                for m in new_messages
-                if m.role != Role.system
-            ]
+            if len(new_messages) == 0:
+                return
+
+            messages_data = [m.model_dump(exclude_none=True) for m in new_messages]
             await SessionLogger.persist_messages(messages_data, self.session_dir)
 
             # If message update succeeded, write metadata
@@ -256,12 +256,12 @@ class SessionLogger:
             ]
 
             title = self._get_title(messages)
-            if messages[0].role == Role.system:
-                system_prompt = messages[0].model_dump()
-                total_messages = len(messages[1:])
-            else:
-                system_prompt = None
-                total_messages = len(messages)
+            system_prompt = (
+                messages[0].model_dump()
+                if len(messages) > 0 and messages[0].role == Role.system
+                else None
+            )
+            total_messages = len(non_system_messages)
 
             metadata_dump = {
                 **self.session_metadata.model_dump(),
@@ -285,8 +285,6 @@ class SessionLogger:
             ) from e
         finally:
             self.cleanup_tmp_files()
-
-        return str(self.session_dir)
 
     def reset_session(self, session_id: str) -> None:
         """Clear existing session info and setup a new session"""

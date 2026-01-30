@@ -65,7 +65,7 @@ from vibe.acp.utils import (
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
-from vibe.core.config import MissingAPIKeyError, VibeConfig, load_api_keys_from_env
+from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
     ApprovalResponse,
@@ -176,7 +176,7 @@ class VibeAcpAgentLoop(AcpAgent):
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio],
         **kwargs: Any,
     ) -> NewSessionResponse:
-        load_api_keys_from_env()
+        load_dotenv_values()
         os.chdir(cwd)
 
         try:

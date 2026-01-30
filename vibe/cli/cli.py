@@ -12,7 +12,7 @@ from vibe.core.config import (
     MissingAPIKeyError,
     MissingPromptFileError,
     VibeConfig,
-    load_api_keys_from_env,
+    load_dotenv_values,
 )
 from vibe.core.paths.config_paths import CONFIG_FILE, HISTORY_FILE
 from vibe.core.programmatic import run_programmatic
@@ -122,7 +122,7 @@ def _load_messages_from_previous_session(
 
 
 def run_cli(args: argparse.Namespace) -> None:
-    load_api_keys_from_env()
+    load_dotenv_values()
     bootstrap_config_files()
 
     if args.setup:

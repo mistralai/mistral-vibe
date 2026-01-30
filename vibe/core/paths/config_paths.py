@@ -62,5 +62,5 @@ def unlock_config_paths() -> None:
 
 CONFIG_FILE = ConfigPath(lambda: _resolve_config_path("config.toml", "file"))
 CONFIG_DIR = ConfigPath(lambda: CONFIG_FILE.path.parent)
-PROMPT_DIR = ConfigPath(lambda: _resolve_config_path("prompts", "dir"))
+PROMPTS_DIR = ConfigPath(lambda: _resolve_config_path("prompts", "dir"))
 HISTORY_FILE = ConfigPath(lambda: _resolve_config_path("vibehistory", "file"))

@@ -382,3 +382,12 @@ type SyncApprovalCallback = Callable[
 type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
 
 type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
+
+
+class RateLimitError(Exception):
+    def __init__(self, provider: str, model: str) -> None:
+        self.provider = provider
+        self.model = model
+        super().__init__(
+            "Rate limits exceeded. Please wait a moment before trying again."
+        )

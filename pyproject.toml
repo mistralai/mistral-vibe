@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.0.1"
+version = "2.0.2"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -159,5 +159,5 @@ max-nested-blocks = 4
 ignore_decorators = ["@*"]
 
 [tool.pytest.ini_options]
-addopts = "-vvvv -q -n auto --durations=5 --import-mode=importlib"
+addopts = "-vvvv -q -n auto --durations=10 --import-mode=importlib --maxschedchunk=1"
 timeout = 10

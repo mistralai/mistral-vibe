@@ -206,6 +206,83 @@ class TestSessionLoaderFindLatestSession:
         assert result is not None
         assert result == valid_session
 
+    def test_find_latest_session_skips_empty_messages_file(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        valid_session = create_test_session(session_dir, "valid123-session")
+        time.sleep(0.01)
+
+        empty_session = create_test_session(session_dir, "emptymss-session")
+        (empty_session / "messages.jsonl").write_text("")
+
+        result = SessionLoader.find_latest_session(session_config)
+        assert result is not None
+        assert result == valid_session
+
+    def test_find_latest_session_skips_messages_json_not_dict(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        valid_session = create_test_session(session_dir, "valid123-session")
+        time.sleep(0.01)
+
+        invalid_session = create_test_session(session_dir, "msglist-session")
+        (invalid_session / "messages.jsonl").write_text("[]\n")
+
+        result = SessionLoader.find_latest_session(session_config)
+        assert result is not None
+        assert result == valid_session
+
+    def test_find_latest_session_skips_metadata_json_not_dict(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        valid_session = create_test_session(session_dir, "valid123-session")
+        time.sleep(0.01)
+
+        invalid_session = create_test_session(session_dir, "metalist-session")
+        (invalid_session / "meta.json").write_text("[]")
+
+        result = SessionLoader.find_latest_session(session_config)
+        assert result is not None
+        assert result == valid_session
+
+    def test_find_latest_session_skips_unreadable_messages_file(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        valid_session = create_test_session(session_dir, "valid123-session")
+        time.sleep(0.01)
+
+        unreadable_session = create_test_session(session_dir, "unreadab-session")
+        unreadable_messages = unreadable_session / "messages.jsonl"
+        unreadable_messages.chmod(0)
+
+        result = SessionLoader.find_latest_session(session_config)
+        assert result is not None
+        assert result == valid_session
+
+    def test_find_latest_session_skips_unreadable_metadata_file(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        valid_session = create_test_session(session_dir, "valid123-session")
+        time.sleep(0.01)
+
+        unreadable_session = create_test_session(session_dir, "unreadab-session")
+        unreadable_metadata = unreadable_session / "meta.json"
+        unreadable_metadata.chmod(0)
+
+        result = SessionLoader.find_latest_session(session_config)
+        assert result is not None
+        assert result == valid_session
+
 
 class TestSessionLoaderFindSessionById:
     def test_find_session_by_id_exact_match(
@@ -283,6 +360,27 @@ class TestSessionLoaderFindSessionById:
 
         result = SessionLoader.find_session_by_id("test-session", bad_config)
         assert result is None
+
+
+class TestSessionLoaderDoesSessionExist:
+    def test_does_session_exist_no_messages(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = create_test_session(session_dir, "test-session-123")
+        (session_folder / "messages.jsonl").unlink()
+
+        result = SessionLoader.does_session_exist("test-session-123", session_config)
+        assert result is None
+
+    def test_does_session_exist_success(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = create_test_session(session_dir, "test-session-123")
+
+        result = SessionLoader.does_session_exist("test-session-123", session_config)
+        assert result == session_folder
 
 
 class TestSessionLoaderLoadSession:

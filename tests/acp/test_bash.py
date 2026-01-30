@@ -125,42 +125,6 @@ class TestAcpBashBasic:
         display = Bash.get_summary(args)
         assert display == "ls (timeout 10s)"
 
-    def test_parse_command_simple(self) -> None:
-        tool = Bash(config=BashToolConfig(), state=AcpBashState())
-        env, command, args = tool._parse_command("ls")
-        assert env == []
-        assert command == "ls"
-        assert args == []
-
-    def test_parse_command_with_args(self) -> None:
-        tool = Bash(config=BashToolConfig(), state=AcpBashState())
-        env, command, args = tool._parse_command("ls -la src")
-        assert env == []
-        assert command == "ls"
-        assert args == ["-la", "src"]
-
-    def test_parse_command_with_env(self) -> None:
-        tool = Bash(config=BashToolConfig(), state=AcpBashState())
-        env, command, args = tool._parse_command("NODE_ENV=test DEBUG=1 npm test")
-        assert len(env) == 2
-        assert env[0].name == "NODE_ENV"
-        assert env[0].value == "test"
-        assert env[1].name == "DEBUG"
-        assert env[1].value == "1"
-        assert command == "npm"
-        assert args == ["test"]
-
-    def test_parse_command_with_env_value_contains_equals(self) -> None:
-        tool = Bash(config=BashToolConfig(), state=AcpBashState())
-        env, command, args = tool._parse_command(
-            "PATH=/usr/bin:/usr/local/bin echo hello"
-        )
-        assert len(env) == 1
-        assert env[0].name == "PATH"
-        assert env[0].value == "/usr/bin:/usr/local/bin"
-        assert command == "echo"
-        assert args == ["hello"]
-
 
 class TestAcpBashExecution:
     @pytest.mark.asyncio
@@ -181,8 +145,7 @@ class TestAcpBashExecution:
         # Verify create_terminal was called correctly
         params = mock_client._last_create_params
         assert params["session_id"] == "test_session_123"
-        assert params["command"] == "echo"
-        assert params["args"] == ["hello"]
+        assert params["command"] == "echo hello"
         assert params["cwd"] == str(Path.cwd())  # effective_workdir defaults to cwd
 
     @pytest.mark.asyncio
@@ -200,16 +163,7 @@ class TestAcpBashExecution:
         await collect_result(tool.run(args))
 
         params = mock_client._last_create_params
-        env = params["env"]
-        assert env is not None
-        assert (
-            isinstance(env, list) and len(env) > 0 and isinstance(env[0], EnvVariable)
-        )
-        assert len(env) == 1
-        assert env[0].name == "NODE_ENV"
-        assert env[0].value == "test"
-        assert params["command"] == "npm"
-        assert params["args"] == ["run", "build"]
+        assert params["command"] == "NODE_ENV=test npm run build"
 
     @pytest.mark.asyncio
     async def test_run_with_nonzero_exit_code(self, mock_client: MockClient) -> None:

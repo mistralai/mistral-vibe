@@ -208,8 +208,7 @@ class TestSessionLoggerSaveInteraction:
             steps=1, session_prompt_tokens=10, session_completion_tokens=20
         )
 
-        # Test that save_interaction returns a path when enabled
-        result = await logger.save_interaction(
+        await logger.save_interaction(
             messages=messages,
             stats=stats,
             base_config=mock_vibe_config,
@@ -217,11 +216,7 @@ class TestSessionLoggerSaveInteraction:
             agent_profile=mock_agent_profile,
         )
 
-        # Verify the result
-        assert result is not None
-        assert str(logger.session_dir) in result
-
-        # Verify that files were created
+        # Verify behavior via file system
         assert logger.session_dir is not None
         messages_file = logger.session_dir / "messages.jsonl"
         metadata_file = logger.session_dir / "meta.json"
@@ -229,7 +224,6 @@ class TestSessionLoggerSaveInteraction:
         assert messages_file.exists()
         assert metadata_file.exists()
 
-        # Verify that metadata contains expected data
         with open(metadata_file) as f:
             metadata = json.load(f)
             assert metadata["session_id"] == session_id
@@ -261,7 +255,7 @@ class TestSessionLoggerSaveInteraction:
             steps=1, session_prompt_tokens=10, session_completion_tokens=20
         )
 
-        result = await logger.save_interaction(
+        await logger.save_interaction(
             messages=messages,
             stats=stats,
             base_config=mock_vibe_config,
@@ -269,10 +263,9 @@ class TestSessionLoggerSaveInteraction:
             agent_profile=mock_agent_profile,
         )
 
-        assert result is not None
         assert logger.session_dir is not None
-
         metadata_file = logger.session_dir / "meta.json"
+        assert metadata_file.exists()
         with open(metadata_file) as f:
             metadata = json.load(f)
             assert "system_prompt" in metadata
@@ -280,6 +273,7 @@ class TestSessionLoggerSaveInteraction:
             assert metadata["system_prompt"]["role"] == "system"
 
         messages_file = logger.session_dir / "messages.jsonl"
+        assert messages_file.exists()
         with open(messages_file) as f:
             lines = f.readlines()
             messages_data = [json.loads(line) for line in lines]
@@ -330,7 +324,7 @@ class TestSessionLoggerSaveInteraction:
             steps=2, session_prompt_tokens=20, session_completion_tokens=40
         )
 
-        result = await logger.save_interaction(
+        await logger.save_interaction(
             messages=all_messages,
             stats=updated_stats,
             base_config=mock_vibe_config,
@@ -338,16 +332,77 @@ class TestSessionLoggerSaveInteraction:
             agent_profile=mock_agent_profile,
         )
 
-        # Verify that the result is not None
-        assert result is not None
-
-        # Verify that metadata was updated
+        # Verify behavior via file system: metadata was updated
         assert logger.session_dir is not None
         metadata_file = logger.session_dir / "meta.json"
+        assert metadata_file.exists()
         with open(metadata_file) as f:
             metadata = json.load(f)
             assert metadata["total_messages"] == 4
             assert metadata["stats"]["steps"] == updated_stats.steps
+
+        messages_file = logger.session_dir / "messages.jsonl"
+        assert messages_file.exists()
+        with open(messages_file) as f:
+            lines = f.readlines()
+            assert len(lines) == 4
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_no_new_messages_is_noop(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        """Test that save_interaction does nothing when there are no new messages."""
+        session_id = "test-session-123"
+        logger = SessionLogger(session_config, session_id)
+
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="Hello"),
+            LLMMessage(role=Role.assistant, content="Hi there!"),
+        ]
+        stats = AgentStats(
+            steps=1, session_prompt_tokens=10, session_completion_tokens=20
+        )
+
+        await logger.save_interaction(
+            messages=messages,
+            stats=stats,
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_dir is not None
+        metadata_file = logger.session_dir / "meta.json"
+        messages_file = logger.session_dir / "messages.jsonl"
+
+        with open(metadata_file) as f:
+            meta_before = json.load(f)
+        with open(messages_file) as f:
+            lines_before = f.readlines()
+
+        # Call again with same messages: no new messages, should be no-op
+        await logger.save_interaction(
+            messages=messages,
+            stats=stats,
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        with open(metadata_file) as f:
+            meta_after = json.load(f)
+        with open(messages_file) as f:
+            lines_after = f.readlines()
+
+        assert len(lines_after) == len(lines_before) == 2
+        assert lines_after == lines_before
+        assert meta_after["total_messages"] == meta_before["total_messages"] == 2
+        assert meta_after == meta_before
 
     @pytest.mark.asyncio
     async def test_save_interaction_no_user_messages(
@@ -371,7 +426,7 @@ class TestSessionLoggerSaveInteraction:
             steps=1, session_prompt_tokens=10, session_completion_tokens=20
         )
 
-        result = await logger.save_interaction(
+        await logger.save_interaction(
             messages=messages,
             stats=stats,
             base_config=mock_vibe_config,
@@ -379,19 +434,21 @@ class TestSessionLoggerSaveInteraction:
             agent_profile=mock_agent_profile,
         )
 
-        # Verify the result
-        assert result is not None
-        assert str(logger.session_dir) in result
-
-        # Verify that metadata contains expected data
+        # Verify behavior via file system
         assert logger.session_dir is not None
         metadata_file = logger.session_dir / "meta.json"
+        assert metadata_file.exists()
         with open(metadata_file) as f:
             metadata = json.load(f)
             assert metadata["session_id"] == session_id
             assert metadata["total_messages"] == 1
             assert metadata["stats"]["steps"] == stats.steps
             assert metadata["title"] == "Untitled session"
+
+        messages_file = logger.session_dir / "messages.jsonl"
+        assert messages_file.exists()
+        with open(messages_file) as f:
+            assert len(f.readlines()) == 1
 
     @pytest.mark.asyncio
     async def test_save_interaction_long_user_message(
@@ -417,7 +474,7 @@ class TestSessionLoggerSaveInteraction:
             steps=1, session_prompt_tokens=10, session_completion_tokens=20
         )
 
-        result = await logger.save_interaction(
+        await logger.save_interaction(
             messages=messages,
             stats=stats,
             base_config=mock_vibe_config,
@@ -425,13 +482,10 @@ class TestSessionLoggerSaveInteraction:
             agent_profile=mock_agent_profile,
         )
 
-        # Verify the result
-        assert result is not None
-        assert str(logger.session_dir) in result
-
-        # Verify that metadata contains expected data
+        # Verify behavior via file system
         assert logger.session_dir is not None
         metadata_file = logger.session_dir / "meta.json"
+        assert metadata_file.exists()
         with open(metadata_file) as f:
             metadata = json.load(f)
             assert metadata["session_id"] == session_id
@@ -439,6 +493,11 @@ class TestSessionLoggerSaveInteraction:
             assert metadata["stats"]["steps"] == stats.steps
             expected_title = long_message[:50] + "…"
             assert metadata["title"] == expected_title
+
+        messages_file = logger.session_dir / "messages.jsonl"
+        assert messages_file.exists()
+        with open(messages_file) as f:
+            assert len(f.readlines()) == 2
 
 
 class TestSessionLoggerResetSession:

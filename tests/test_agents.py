@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tests.mock.utils import mock_llm_chunk
@@ -16,6 +18,8 @@ from vibe.core.agents.models import (
     _deep_merge,
 )
 from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.paths.config_paths import ConfigPath
+from vibe.core.paths.global_paths import GlobalPath
 from vibe.core.tools.base import ToolPermission
 from vibe.core.types import (
     FunctionCall,
@@ -162,6 +166,43 @@ class TestAgentProfile:
             BuiltinAgentName.ACCEPT_EDITS,
             BuiltinAgentName.AUTO_APPROVE,
         }
+
+
+class TestAgentApplyToConfig:
+    def test_custom_prompt_found_in_global_when_missing_from_project(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression test for https://github.com/mistralai/mistral-vibe/issues/288
+
+        When a custom prompt .md file is absent from the project-local prompts
+        directory, the system_prompt property should fall back to the global
+        ~/.vibe/prompts/ directory and load the file from there.
+        """
+        project_prompts = tmp_path / "project" / ".vibe" / "prompts"
+        project_prompts.mkdir(parents=True)
+
+        global_prompts = tmp_path / "home" / ".vibe" / "prompts"
+        global_prompts.mkdir(parents=True)
+        (global_prompts / "cc.md").write_text("Global custom prompt")
+
+        monkeypatch.setattr(
+            "vibe.core.config.PROMPTS_DIR", ConfigPath(lambda: project_prompts)
+        )
+        monkeypatch.setattr(
+            "vibe.core.config.GLOBAL_PROMPTS_DIR", GlobalPath(lambda: global_prompts)
+        )
+
+        base = VibeConfig(include_project_context=False, include_prompt_detail=False)
+        agent = AgentProfile(
+            name="cc",
+            display_name="Cc",
+            description="",
+            safety=AgentSafety.NEUTRAL,
+            overrides={"system_prompt_id": "cc"},
+        )
+        result = agent.apply_to_config(base)
+        assert result.system_prompt_id == "cc"
+        assert result.system_prompt == "Global custom prompt"
 
 
 class TestAgentProfileOverrides:

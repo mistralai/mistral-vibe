@@ -23,6 +23,7 @@ from vibe.cli.plan_offer.adapters.http_whoami_gateway import HttpWhoAmIGateway
 from vibe.cli.plan_offer.decide_plan_offer import (
     ACTION_TO_URL,
     PlanOfferAction,
+    PlanType,
     decide_plan_offer,
 )
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway
@@ -74,12 +75,19 @@ from vibe.core.agents import AgentProfile
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
 from vibe.core.paths.config_paths import HISTORY_FILE
+from vibe.core.session.session_loader import SessionLoader
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.builtins.ask_user_question import (
     AskUserQuestionArgs,
     AskUserQuestionResult,
 )
-from vibe.core.types import AgentStats, ApprovalResponse, LLMMessage, Role
+from vibe.core.types import (
+    AgentStats,
+    ApprovalResponse,
+    LLMMessage,
+    RateLimitError,
+    Role,
+)
 from vibe.core.utils import (
     CancellationReason,
     get_user_cancellation_message,
@@ -594,8 +602,16 @@ class VibeApp(App):  # noqa: PLR0904
                 await self._loading_widget.remove()
             if self.event_handler:
                 self.event_handler.stop_current_tool_call()
+
+            message = str(e)
+            if isinstance(e, RateLimitError):
+                if self.plan_type == PlanType.FREE:
+                    message = "Rate limits exceeded. Please wait a moment before trying again, or upgrade to Pro for higher rate limits and uninterrupted access."
+                else:
+                    message = "Rate limits exceeded. Please wait a moment before trying again."
+
             await self._mount_and_scroll(
-                ErrorMessage(str(e), collapsed=self._tools_collapsed)
+                ErrorMessage(message, collapsed=self._tools_collapsed)
             )
         finally:
             self._agent_running = False
@@ -772,6 +788,12 @@ class VibeApp(App):  # noqa: PLR0904
         if not self.agent_loop.session_logger.enabled:
             return None
         if not self.agent_loop.session_logger.session_id:
+            return None
+        session_config = self.agent_loop.session_logger.session_config
+        session_path = SessionLoader.does_session_exist(
+            self.agent_loop.session_logger.session_id, session_config
+        )
+        if session_path is None:
             return None
         return self.agent_loop.session_logger.session_id[:8]
 
@@ -1023,7 +1045,8 @@ class VibeApp(App):  # noqa: PLR0904
     async def _maybe_show_plan_offer(self) -> None:
         if self._plan_offer_shown:
             return
-        action = await self._resolve_plan_offer_action()
+        action, plan_type = await self._resolve_plan_offer_action()
+        self.plan_type = plan_type
         if action is PlanOfferAction.NONE:
             return
         url = ACTION_TO_URL[action]
@@ -1035,12 +1058,12 @@ class VibeApp(App):  # noqa: PLR0904
         await self._mount_and_scroll(PlanOfferMessage(text))
         self._plan_offer_shown = True
 
-    async def _resolve_plan_offer_action(self) -> PlanOfferAction:
+    async def _resolve_plan_offer_action(self) -> tuple[PlanOfferAction, PlanType]:
         try:
             active_model = self.config.get_active_model()
             provider = self.config.get_provider_for_model(active_model)
         except ValueError:
-            return PlanOfferAction.NONE
+            return PlanOfferAction.NONE, PlanType.UNKNOWN
 
         api_key_env = provider.api_key_env_var
         api_key = getenv(api_key_env) if api_key_env else None
@@ -1051,7 +1074,7 @@ class VibeApp(App):  # noqa: PLR0904
             logger.warning(
                 "Plan-offer check failed (%s).", type(exc).__name__, exc_info=True
             )
-            return PlanOfferAction.NONE
+            return PlanOfferAction.NONE, PlanType.UNKNOWN
 
     async def _finalize_current_streaming_message(self) -> None:
         if self._current_streaming_reasoning is not None:
