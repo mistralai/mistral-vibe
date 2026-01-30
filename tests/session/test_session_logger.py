@@ -349,6 +349,19 @@ class TestSessionLoggerSaveInteraction:
             assert metadata["total_messages"] == 4
             assert metadata["stats"]["steps"] == updated_stats.steps
 
+        # Verify messages file content to ensure no duplicates
+        messages_file = logger.session_dir / "messages.jsonl"
+        with open(messages_file) as f:
+            lines = f.readlines()
+            # Initial (User, Assistant) + New (User, Assistant) = 4 lines
+            assert len(lines) == 4
+
+            messages_data = [json.loads(line) for line in lines]
+            assert messages_data[0]["content"] == "Hello"
+            assert messages_data[1]["content"] == "Hi there!"
+            assert messages_data[2]["content"] == "How are you?"
+            assert messages_data[3]["content"] == "I'm fine, thanks!"
+
     @pytest.mark.asyncio
     async def test_save_interaction_no_user_messages(
         self,
