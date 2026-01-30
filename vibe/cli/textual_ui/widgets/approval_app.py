@@ -22,6 +22,8 @@ class ApprovalApp(Container):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "move_up", "Up", show=False),
         Binding("down", "move_down", "Down", show=False),
+        Binding("ctrl+p", "move_up", "Up", show=False),
+        Binding("ctrl+n", "move_down", "Down", show=False),
         Binding("enter", "select", "Select", show=False),
         Binding("1", "select_1", "Yes", show=False),
         Binding("y", "select_1", "Yes", show=False),
@@ -88,7 +90,8 @@ class ApprovalApp(Container):
             yield NoMarkupStatic("")
 
             self.help_widget = NoMarkupStatic(
-                "↑↓ navigate  Enter select  ESC reject", classes="approval-help"
+                "Navigate: ↑↓ or ^p^n | Select: Enter | Reject: ESC",
+                classes="approval-help",
             )
             yield self.help_widget
 

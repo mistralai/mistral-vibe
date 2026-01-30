@@ -35,6 +35,8 @@ class ConfigApp(Container):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "move_up", "Up", show=False),
         Binding("down", "move_down", "Down", show=False),
+        Binding("ctrl+p", "move_up", "Up", show=False),
+        Binding("ctrl+n", "move_down", "Down", show=False),
         Binding("space", "toggle_setting", "Toggle", show=False),
         Binding("enter", "cycle", "Next", show=False),
     ]
@@ -96,7 +98,8 @@ class ConfigApp(Container):
             yield NoMarkupStatic("")
 
             self.help_widget = NoMarkupStatic(
-                "↑↓ navigate  Space/Enter toggle  ESC exit", classes="settings-help"
+                "Navigate: ↑↓ or ^p^n | Toggle: Space/Enter | Exit: ESC",
+                classes="settings-help",
             )
             yield self.help_widget
 
