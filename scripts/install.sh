@@ -79,10 +79,32 @@ function install_uv() {
 }
 
 function install_vibe() {
-    info "Installing mistral-vibe from GitHub repository using uv..."
-    uv tool install mistral-vibe
+    if uv tool list | grep -q "mistral-vibe"; then
+        info "mistral-vibe is already installed. Checking for updates..."
+        CURRENT_VERSION=$(uv tool list | grep "mistral-vibe" | awk '{print $2}' | sed 's/v//g')
+        LATEST_VERSION=$(curl -s https://pypi.org/pypi/mistral-vibe/json | python3 -c "import sys, json; print(json.load(sys.stdin)['info']['version'])" 2>/dev/null || echo "$CURRENT_VERSION")
 
-    success "Mistral Vibe installed successfully! (commands: vibe, vibe-acp)"
+        if [[ "$CURRENT_VERSION" != "$LATEST_VERSION" ]]; then
+            warning "A new version is available: ${LATEST_VERSION} (Current: ${CURRENT_VERSION})"
+            read -p "Would you like to upgrade? (y/n): " choice
+            case "$choice" in
+                y|Y )
+                    info "Upgrading mistral-vibe..."
+                    uv tool upgrade mistral-vibe
+                    success "Mistral Vibe upgraded to $LATEST_VERSION"
+                    ;;
+                * )
+                    info "Skipping upgrade."
+                    ;;
+            esac
+        else
+            success "Mistral Vibe is already up to date (version $CURRENT_VERSION)."
+        fi
+    else
+        info "Installing mistral-vibe for the first time..."
+        uv tool install mistral-vibe
+        success "Mistral Vibe installed successfully!"
+    fi
 }
 
 function main() {
