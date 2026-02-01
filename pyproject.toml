@@ -46,6 +46,10 @@ dependencies = [
     "textual-speedups>=0.2.1",
     "tree-sitter>=0.25.2",
     "tree-sitter-bash>=0.25.1",
+    "networkx>=3.0",
+    "grep-ast>=0.3.3",
+    "diskcache>=5.6.3",
+    "pygments>=2.17.0",
 ]
 
 [project.urls]

@@ -43,6 +43,9 @@ class AgentStats(BaseModel):
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
 
+    repo_map_tokens: int = 0
+    repo_map_status: str = "ok"
+
     def __setattr__(self, name: str, value: Any) -> None:
         super().__setattr__(name, value)
         if name in self.listeners:

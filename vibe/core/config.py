@@ -100,6 +100,21 @@ class ProjectContextConfig(BaseSettings):
     timeout_seconds: float = 2.0
 
 
+class RepoMapConfig(BaseSettings):
+    enabled: bool = True
+    map_tokens: int = 1024
+    refresh_interval: int = 1  # Refresh every N turns
+    exclude_patterns: list[str] = [
+        "node_modules",
+        "__pycache__",
+        "*.pyc",
+        ".git",
+        "dist",
+        "build",
+        "coverage",
+    ]
+
+
 class SessionLoggingConfig(BaseSettings):
     save_dir: str = ""
     session_prefix: str = "session"
@@ -305,6 +320,7 @@ class VibeConfig(BaseSettings):
     models: list[ModelConfig] = Field(default_factory=lambda: list(DEFAULT_MODELS))
 
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
+    repo_map: RepoMapConfig = Field(default_factory=RepoMapConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
     tools: dict[str, BaseToolConfig] = Field(default_factory=dict)
     tool_paths: list[Path] = Field(

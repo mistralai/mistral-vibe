@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vibe.core.agents import AgentProfile
@@ -218,3 +220,194 @@ class MiddlewarePipeline:
                 return result
 
         return MiddlewareResult()
+
+class RepoMapMiddleware:
+    def __init__(self, config_getter: Callable[[], VibeConfig]) -> None:
+        self.config_getter = config_getter
+        self._repo_map_instance: Any = None
+        self._dependency_error: str | None = None
+        self._discover_files: Any = None
+        self._extract_mentions: Any = None
+
+        # Try importing on init to fail fast or memoize the failure
+        try:
+            from vibe.repomap import RepoMap, discover_files, extract_mentions_from_text
+
+            self._repo_map_class = RepoMap
+            self._discover_files = discover_files
+            self._extract_mentions = extract_mentions_from_text
+        except ImportError as e:
+            self._repo_map_class = None
+            self._dependency_error = str(e)
+
+    def _get_repo_map(self) -> Any:
+        if self._repo_map_instance:
+            return self._repo_map_instance
+
+        if self._repo_map_class is None:
+            return None
+
+        try:
+            # Initialize with current working directory and persistent cache
+            # We use a central cache directory in user's home
+            from vibe.core.paths.global_paths import VIBE_HOME
+
+            cache_dir = VIBE_HOME.path / "cache" / "repomap"
+            os.makedirs(cache_dir, exist_ok=True)
+
+            self._repo_map_instance = self._repo_map_class(
+                root=str(Path.cwd()),
+                verbose=False,
+                cache_dir=str(cache_dir),
+            )
+            return self._repo_map_instance
+        except Exception as e:
+            self._dependency_error = str(e)
+            return None
+
+    async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
+        config = self.config_getter().repo_map
+        if not config.enabled:
+            return MiddlewareResult()
+
+        # Check dependencies
+        if self._repo_map_class is None:
+            context.stats.repo_map_status = f"Missing deps: {self._dependency_error}"
+            return MiddlewareResult()
+
+        repo_map = self._get_repo_map()
+        if not repo_map:
+            context.stats.repo_map_status = "Failed to init"
+            return MiddlewareResult()
+
+        chat_files: set[str] = set()
+        # TODO: extracting chat files from messages would be good.
+
+        # Extract keywords from the last user message
+        mentioned_idents: set[str] = set()
+        if context.messages and self._extract_mentions:
+            last_msg = context.messages[-1]
+            if last_msg.role == "user" and last_msg.content:
+                mentioned_idents = self._extract_mentions(last_msg.content)
+
+        # Use the new discovery module with .gitignore support
+        cwd = Path.cwd()
+        if self._discover_files:
+            discovery_result = self._discover_files(
+                root=cwd,
+                additional_excludes=list(config.exclude_patterns),
+                respect_gitignore=True,
+            )
+            other_files = discovery_result.files
+
+            if discovery_result.errors:
+                context.stats.repo_map_status = (
+                    f"Discovery errors: {len(discovery_result.errors)}"
+                )
+        else:
+            # Fallback to simple walk if discovery not available
+            other_files = []
+            supported_extensions = {
+                # Python
+                ".py", ".pyi", ".pyw",
+                # JavaScript/TypeScript
+                ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+                # Go
+                ".go",
+                # C/C++
+                ".c", ".h", ".cpp", ".cxx", ".cc", ".hpp", ".hxx", ".hh",
+                # C#
+                ".cs",
+                # Java
+                ".java",
+                # Rust
+                ".rs",
+                # Ruby
+                ".rb", ".rake", ".gemspec",
+                # PHP
+                ".php", ".phtml", ".php3", ".php4", ".php5", ".phps",
+                # Kotlin
+                ".kt", ".kts",
+                # Swift
+                ".swift",
+                # Scala
+                ".scala", ".sc",
+                # Haskell
+                ".hs", ".lhs",
+                # Elixir/Erlang
+                ".ex", ".exs", ".erl", ".hrl",
+                # Shell
+                ".sh", ".bash", ".zsh",
+                # Lua
+                ".lua",
+                # Clojure
+                ".clj", ".cljs", ".cljc", ".edn",
+                # SQL
+                ".sql",
+            }
+            try:
+                for root, dirs, files in os.walk(cwd):
+                    dirs[:] = [
+                        d
+                        for d in dirs
+                        if d not in config.exclude_patterns
+                        and not d.startswith(".")
+                        and d not in {"venv", "env", ".venv", "test_env"}
+                        and "site-packages" not in root
+                    ]
+                    for f in files:
+                        ext = Path(f).suffix
+                        if ext in supported_extensions:
+                            other_files.append(str(Path(root) / f))
+            except Exception:
+                pass
+
+        try:
+            # Update status to indicate work is happening
+            context.stats.repo_map_status = "Scanning..."
+
+            # Run in thread to avoid blocking main event loop
+            import asyncio
+
+            result = await asyncio.to_thread(
+                repo_map.get_repo_map_with_diagnostics,
+                chat_files=list(chat_files),
+                other_files=other_files,
+                mentioned_fnames=set(),
+                mentioned_idents=mentioned_idents,
+            )
+
+            if result.content:
+                # Update stats
+                token_count = len(result.content) // 4
+                context.stats.repo_map_tokens = token_count
+
+                # Generate status with diagnostics
+                if result.errors:
+                    context.stats.repo_map_status = (
+                        f"Active ({result.files_processed} files, "
+                        f"{len(result.errors)} errors)"
+                    )
+                else:
+                    context.stats.repo_map_status = (
+                        f"Active ({result.files_processed} files)"
+                    )
+
+                message = f"<repo_map>\n{result.content}\n</repo_map>"
+                return MiddlewareResult(
+                    action=MiddlewareAction.INJECT_MESSAGE,
+                    message=message,
+                )
+            else:
+                context.stats.repo_map_status = "Empty"
+                return MiddlewareResult()
+
+        except Exception as e:
+            context.stats.repo_map_status = f"Error: {type(e).__name__}"
+            return MiddlewareResult()
+
+    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
+        return MiddlewareResult()
+
+    def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
+        pass

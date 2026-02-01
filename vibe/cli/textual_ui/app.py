@@ -55,6 +55,7 @@ from vibe.cli.textual_ui.widgets.messages import (
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+from vibe.cli.textual_ui.widgets.repomap_status import RepoMapStatus
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.cli.textual_ui.widgets.welcome import WelcomeBanner
 from vibe.cli.update_notifier import (
@@ -189,6 +190,7 @@ class VibeApp(App):  # noqa: PLR0904
         with Horizontal(id="bottom-bar"):
             yield PathDisplay(self.config.displayed_workdir or Path.cwd())
             yield NoMarkupStatic(id="spacer")
+            yield RepoMapStatus()
             yield ContextProgress()
 
     async def on_mount(self) -> None:
@@ -212,14 +214,19 @@ class VibeApp(App):  # noqa: PLR0904
         self._chat_input_container = self.query_one(ChatInputContainer)
         self._agent_indicator = self.query_one(AgentIndicator)
         context_progress = self.query_one(ContextProgress)
+        repomap_status = self.query_one(RepoMapStatus)
 
         def update_context_progress(stats: AgentStats) -> None:
             context_progress.tokens = TokenState(
                 max_tokens=self.config.auto_compact_threshold,
                 current_tokens=stats.context_tokens,
             )
+            repomap_status.tokens = stats.repo_map_tokens
+            repomap_status.status = stats.repo_map_status
 
         AgentStats.add_listener("context_tokens", update_context_progress)
+        AgentStats.add_listener("repo_map_tokens", update_context_progress)
+        AgentStats.add_listener("repo_map_status", update_context_progress)
         self.agent_loop.stats.trigger_listeners()
 
         self.agent_loop.set_approval_callback(self._approval_callback)

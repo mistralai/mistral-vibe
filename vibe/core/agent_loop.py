@@ -25,6 +25,7 @@ from vibe.core.middleware import (
     MiddlewareResult,
     PlanAgentMiddleware,
     PriceLimitMiddleware,
+    RepoMapMiddleware,
     ResetReason,
     TurnLimitMiddleware,
 )
@@ -229,6 +230,7 @@ class AgentLoop:
                 )
 
         self.middleware_pipeline.add(PlanAgentMiddleware(lambda: self.agent_profile))
+        self.middleware_pipeline.add(RepoMapMiddleware(lambda: self.config))
 
     async def _handle_middleware_result(
         self, result: MiddlewareResult
