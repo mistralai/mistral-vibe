@@ -11,6 +11,7 @@ import httpx
 import mistralai
 
 from vibe.core.llm.exceptions import BackendErrorBuilder
+from vibe.core.utils import async_retry, async_generator_retry
 from vibe.core.types import (
     AvailableTool,
     Content,
@@ -149,6 +150,24 @@ class MistralMapper:
         ]
 
 
+RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+def _is_retryable_mistral_error(e: Exception) -> bool:
+    """Check if an error from Mistral SDK or httpx is retryable.
+
+    Handles both mistralai.SDKError (which wraps HTTP errors from the SDK)
+    and httpx.HTTPStatusError for direct HTTP client errors.
+    """
+    if isinstance(e, mistralai.SDKError):
+        if hasattr(e, "raw_response") and e.raw_response is not None:
+            return e.raw_response.status_code in RETRYABLE_STATUS_CODES
+        return False
+    if isinstance(e, httpx.HTTPStatusError):
+        return e.response.status_code in RETRYABLE_STATUS_CODES
+    return False
+
+
 class MistralBackend:
     def __init__(self, provider: ProviderConfig, timeout: float = 720.0) -> None:
         self._client: mistralai.Mistral | None = None
@@ -205,6 +224,62 @@ class MistralBackend:
             )
         return self._client
 
+    @async_retry(
+        tries=5,
+        delay_seconds=1.0,
+        backoff_factor=2.0,
+        max_delay=60.0,
+        is_retryable=_is_retryable_mistral_error,
+    )
+    async def _complete_with_retry(
+        self,
+        *,
+        model: ModelConfig,
+        messages: list[LLMMessage],
+        temperature: float,
+        tools: list[AvailableTool] | None,
+        max_tokens: int | None,
+        tool_choice: StrToolChoice | AvailableTool | None,
+        extra_headers: dict[str, str] | None,
+    ) -> LLMChunk:
+        """Internal method that performs the API call with retry logic."""
+        response = await self._get_client().chat.complete_async(
+            model=model.name,
+            messages=[self._mapper.prepare_message(msg) for msg in messages],
+            temperature=temperature,
+            tools=[self._mapper.prepare_tool(tool) for tool in tools]
+            if tools
+            else None,
+            max_tokens=max_tokens,
+            tool_choice=self._mapper.prepare_tool_choice(tool_choice)
+            if tool_choice
+            else None,
+            http_headers=extra_headers,
+            stream=False,
+        )
+
+        parsed = (
+            self._mapper.parse_content(response.choices[0].message.content)
+            if response.choices[0].message.content
+            else ParsedContent(content="", reasoning_content=None)
+        )
+        return LLMChunk(
+            message=LLMMessage(
+                role=Role.assistant,
+                content=parsed.content,
+                reasoning_content=parsed.reasoning_content,
+                tool_calls=self._mapper.parse_tool_calls(
+                    response.choices[0].message.tool_calls
+                )
+                if response.choices[0].message.tool_calls
+                else None,
+            ),
+            usage=LLMUsage(
+                prompt_tokens=response.usage.prompt_tokens or 0,
+                completion_tokens=response.usage.completion_tokens or 0,
+            ),
+        )
+
     async def complete(
         self,
         *,
@@ -217,43 +292,15 @@ class MistralBackend:
         extra_headers: dict[str, str] | None,
     ) -> LLMChunk:
         try:
-            response = await self._get_client().chat.complete_async(
-                model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+            return await self._complete_with_retry(
+                model=model,
+                messages=messages,
                 temperature=temperature,
-                tools=[self._mapper.prepare_tool(tool) for tool in tools]
-                if tools
-                else None,
+                tools=tools,
                 max_tokens=max_tokens,
-                tool_choice=self._mapper.prepare_tool_choice(tool_choice)
-                if tool_choice
-                else None,
-                http_headers=extra_headers,
-                stream=False,
+                tool_choice=tool_choice,
+                extra_headers=extra_headers,
             )
-
-            parsed = (
-                self._mapper.parse_content(response.choices[0].message.content)
-                if response.choices[0].message.content
-                else ParsedContent(content="", reasoning_content=None)
-            )
-            return LLMChunk(
-                message=LLMMessage(
-                    role=Role.assistant,
-                    content=parsed.content,
-                    reasoning_content=parsed.reasoning_content,
-                    tool_calls=self._mapper.parse_tool_calls(
-                        response.choices[0].message.tool_calls
-                    )
-                    if response.choices[0].message.tool_calls
-                    else None,
-                ),
-                usage=LLMUsage(
-                    prompt_tokens=response.usage.prompt_tokens or 0,
-                    completion_tokens=response.usage.completion_tokens or 0,
-                ),
-            )
-
         except mistralai.SDKError as e:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
@@ -278,6 +325,64 @@ class MistralBackend:
                 tool_choice=tool_choice,
             ) from e
 
+    @async_generator_retry(
+        tries=5,
+        delay_seconds=1.0,
+        backoff_factor=2.0,
+        max_delay=60.0,
+        is_retryable=_is_retryable_mistral_error,
+    )
+    async def _complete_streaming_with_retry(
+        self,
+        *,
+        model: ModelConfig,
+        messages: list[LLMMessage],
+        temperature: float,
+        tools: list[AvailableTool] | None,
+        max_tokens: int | None,
+        tool_choice: StrToolChoice | AvailableTool | None,
+        extra_headers: dict[str, str] | None,
+    ) -> AsyncGenerator[LLMChunk, None]:
+        """Internal method that performs the streaming API call with retry logic."""
+        async for chunk in await self._get_client().chat.stream_async(
+            model=model.name,
+            messages=[self._mapper.prepare_message(msg) for msg in messages],
+            temperature=temperature,
+            tools=[self._mapper.prepare_tool(tool) for tool in tools]
+            if tools
+            else None,
+            max_tokens=max_tokens,
+            tool_choice=self._mapper.prepare_tool_choice(tool_choice)
+            if tool_choice
+            else None,
+            http_headers=extra_headers,
+        ):
+            parsed = (
+                self._mapper.parse_content(chunk.data.choices[0].delta.content)
+                if chunk.data.choices[0].delta.content
+                else ParsedContent(content="", reasoning_content=None)
+            )
+            yield LLMChunk(
+                message=LLMMessage(
+                    role=Role.assistant,
+                    content=parsed.content,
+                    reasoning_content=parsed.reasoning_content,
+                    tool_calls=self._mapper.parse_tool_calls(
+                        chunk.data.choices[0].delta.tool_calls
+                    )
+                    if chunk.data.choices[0].delta.tool_calls
+                    else None,
+                ),
+                usage=LLMUsage(
+                    prompt_tokens=chunk.data.usage.prompt_tokens or 0
+                    if chunk.data.usage
+                    else 0,
+                    completion_tokens=chunk.data.usage.completion_tokens or 0
+                    if chunk.data.usage
+                    else 0,
+                ),
+            )
+
     async def complete_streaming(
         self,
         *,
@@ -290,45 +395,16 @@ class MistralBackend:
         extra_headers: dict[str, str] | None,
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
-            async for chunk in await self._get_client().chat.stream_async(
-                model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+            async for chunk in self._complete_streaming_with_retry(
+                model=model,
+                messages=messages,
                 temperature=temperature,
-                tools=[self._mapper.prepare_tool(tool) for tool in tools]
-                if tools
-                else None,
+                tools=tools,
                 max_tokens=max_tokens,
-                tool_choice=self._mapper.prepare_tool_choice(tool_choice)
-                if tool_choice
-                else None,
-                http_headers=extra_headers,
+                tool_choice=tool_choice,
+                extra_headers=extra_headers,
             ):
-                parsed = (
-                    self._mapper.parse_content(chunk.data.choices[0].delta.content)
-                    if chunk.data.choices[0].delta.content
-                    else ParsedContent(content="", reasoning_content=None)
-                )
-                yield LLMChunk(
-                    message=LLMMessage(
-                        role=Role.assistant,
-                        content=parsed.content,
-                        reasoning_content=parsed.reasoning_content,
-                        tool_calls=self._mapper.parse_tool_calls(
-                            chunk.data.choices[0].delta.tool_calls
-                        )
-                        if chunk.data.choices[0].delta.tool_calls
-                        else None,
-                    ),
-                    usage=LLMUsage(
-                        prompt_tokens=chunk.data.usage.prompt_tokens or 0
-                        if chunk.data.usage
-                        else 0,
-                        completion_tokens=chunk.data.usage.completion_tokens or 0
-                        if chunk.data.usage
-                        else 0,
-                    ),
-                )
-
+                yield chunk
         except mistralai.SDKError as e:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
