@@ -1,0 +1,58 @@
+name: Bug Report
+description: Tell us about a defect in Mistral Vibe
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Thanks for filing a detailed bug. Fill out every section so we can
+        reproduce the issue quickly
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Mistral Vibe is affected?
+      options:
+        - CLI
+        - ACP
+        - Both
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong? Keep it short but specific.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: >
+        Commands, code, or payloads that trigger the bug. Include any relevant
+        input files or snippets (redact secrets).
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions / environment
+      description: >
+        Include Mistral Vibe version, uv or pip version and OS.
+      placeholder: "mistral-vibe 1.2.0, uv 0.9.0 on macOS 15.7"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs & screenshots
+      description: Paste relevant stack traces, JSON snippets, or console output.
+      render: shell

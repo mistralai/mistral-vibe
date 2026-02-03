@@ -8,6 +8,7 @@ from textual.containers import Center, Vertical
 from textual.timer import Timer
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.setup.onboarding.base import OnboardingScreen
 
 WELCOME_PREFIX = "Welcome to "
@@ -68,7 +69,7 @@ class WelcomeScreen(OnboardingScreen):
             with Center():
                 yield Static("", id="welcome-text")
             with Center():
-                yield Static("", id="enter-hint", classes="hidden")
+                yield NoMarkupStatic("", id="enter-hint", classes="hidden")
 
     def on_mount(self) -> None:
         self._welcome_text = self.query_one("#welcome-text", Static)

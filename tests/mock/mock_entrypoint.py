@@ -14,12 +14,15 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from tests import TESTS_ROOT
-from tests.mock.utils import MOCK_DATA_ENV_VAR
-from vibe.core.types import LLMChunk
+from vibe.core.paths.config_paths import unlock_config_paths
 
+if __name__ == "__main__":
+    unlock_config_paths()
 
-def mock_llm_output() -> None:
+    from tests import TESTS_ROOT
+    from tests.mock.utils import MOCK_DATA_ENV_VAR
+    from vibe.core.types import LLMChunk
+
     sys.path.insert(0, str(TESTS_ROOT))
 
     # Apply mocking before importing any vibe modules
@@ -56,10 +59,6 @@ def mock_llm_output() -> None:
         "vibe.core.llm.backend.generic.GenericBackend.complete_streaming",
         side_effect=mock_complete_streaming,
     ).start()
-
-
-if __name__ == "__main__":
-    mock_llm_output()
 
     from vibe.acp.entrypoint import main
 

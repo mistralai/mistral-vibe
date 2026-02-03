@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from datetime import timedelta
 import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -9,8 +11,15 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState, ToolError
+from vibe.core.tools.base import (
+    BaseTool,
+    BaseToolConfig,
+    BaseToolState,
+    InvokeContext,
+    ToolError,
+)
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
+from vibe.core.types import ToolStreamEvent
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -57,8 +66,12 @@ class RemoteTool(BaseModel):
             try:
                 v = dump()
             except Exception:
-                return {"type": "object", "properties": {}}
-        return v if isinstance(v, dict) else {"type": "object", "properties": {}}
+                raise ValueError(
+                    "inputSchema must be a dict or have a valid model_dump method"
+                )
+        if not isinstance(v, dict):
+            raise ValueError("inputSchema must be a dict")
+        return v
 
 
 class _MCPContentBlock(BaseModel):
@@ -100,10 +113,14 @@ def _parse_call_result(server: str, tool: str, result_obj: Any) -> MCPToolResult
 
 
 async def list_tools_http(
-    url: str, headers: dict[str, str] | None = None
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
+    timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     async with streamablehttp_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
+        async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
             await session.initialize()
             tools_resp = await session.list_tools()
             return [RemoteTool.model_validate(t) for t in tools_resp.tools]
@@ -115,11 +132,21 @@ async def call_tool_http(
     arguments: dict[str, Any],
     *,
     headers: dict[str, str] | None = None,
+    startup_timeout_sec: float | None = None,
+    tool_timeout_sec: float | None = None,
 ) -> MCPToolResult:
+    init_timeout = (
+        timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
+    )
+    call_timeout = timedelta(seconds=tool_timeout_sec) if tool_timeout_sec else None
     async with streamablehttp_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
+        async with ClientSession(
+            read, write, read_timeout_seconds=init_timeout
+        ) as session:
             await session.initialize()
-            result = await session.call_tool(tool_name, arguments)
+            result = await session.call_tool(
+                tool_name, arguments, read_timeout_seconds=call_timeout
+            )
             return _parse_call_result(url, tool_name, result)
 
 
@@ -130,6 +157,8 @@ def create_mcp_http_proxy_tool_class(
     alias: str | None = None,
     server_hint: str | None = None,
     headers: dict[str, str] | None = None,
+    startup_timeout_sec: float | None = None,
+    tool_timeout_sec: float | None = None,
 ) -> type[BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]]:
     from urllib.parse import urlparse
 
@@ -153,6 +182,8 @@ def create_mcp_http_proxy_tool_class(
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
         _headers: ClassVar[dict[str, str]] = dict(headers or {})
+        _startup_timeout_sec: ClassVar[float | None] = startup_timeout_sec
+        _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
 
         @classmethod
         def get_name(cls) -> str:
@@ -162,23 +193,25 @@ def create_mcp_http_proxy_tool_class(
         def get_parameters(cls) -> dict[str, Any]:
             return dict(cls._input_schema)
 
-        async def run(self, args: _OpenArgs) -> MCPToolResult:
+        async def run(
+            self, args: _OpenArgs, ctx: InvokeContext | None = None
+        ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult, None]:
             try:
                 payload = args.model_dump(exclude_none=True)
-                return await call_tool_http(
-                    self._mcp_url, self._remote_name, payload, headers=self._headers
+                yield await call_tool_http(
+                    self._mcp_url,
+                    self._remote_name,
+                    payload,
+                    headers=self._headers,
+                    startup_timeout_sec=self._startup_timeout_sec,
+                    tool_timeout_sec=self._tool_timeout_sec,
                 )
             except Exception as exc:
                 raise ToolError(f"MCP call failed: {exc}") from exc
 
         @classmethod
         def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-            return ToolCallDisplay(
-                summary=f"{published_name}",
-                details=event.args.model_dump()
-                if hasattr(event.args, "model_dump")
-                else {},
-            )
+            return ToolCallDisplay(summary=f"{published_name}")
 
         @classmethod
         def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -189,15 +222,7 @@ def create_mcp_http_proxy_tool_class(
                 )
 
             message = f"MCP tool {event.result.tool} completed"
-            details = {}
-            if event.result.text:
-                details["text"] = event.result.text
-            if event.result.structured:
-                details["structured"] = event.result.structured
-
-            return ToolResultDisplay(
-                success=event.result.ok, message=message, details=details
-            )
+            return ToolResultDisplay(success=event.result.ok, message=message)
 
         @classmethod
         def get_status_text(cls) -> str:
@@ -207,23 +232,43 @@ def create_mcp_http_proxy_tool_class(
     return MCPHttpProxyTool
 
 
-async def list_tools_stdio(command: list[str]) -> list[RemoteTool]:
-    params = StdioServerParameters(command=command[0], args=command[1:])
+async def list_tools_stdio(
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    startup_timeout_sec: float | None = None,
+) -> list[RemoteTool]:
+    params = StdioServerParameters(command=command[0], args=command[1:], env=env)
+    timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
+        async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
             await session.initialize()
             tools_resp = await session.list_tools()
             return [RemoteTool.model_validate(t) for t in tools_resp.tools]
 
 
 async def call_tool_stdio(
-    command: list[str], tool_name: str, arguments: dict[str, Any]
+    command: list[str],
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    env: dict[str, str] | None = None,
+    startup_timeout_sec: float | None = None,
+    tool_timeout_sec: float | None = None,
 ) -> MCPToolResult:
-    params = StdioServerParameters(command=command[0], args=command[1:])
+    params = StdioServerParameters(command=command[0], args=command[1:], env=env)
+    init_timeout = (
+        timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
+    )
+    call_timeout = timedelta(seconds=tool_timeout_sec) if tool_timeout_sec else None
     async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
+        async with ClientSession(
+            read, write, read_timeout_seconds=init_timeout
+        ) as session:
             await session.initialize()
-            result = await session.call_tool(tool_name, arguments)
+            result = await session.call_tool(
+                tool_name, arguments, read_timeout_seconds=call_timeout
+            )
             return _parse_call_result("stdio:" + " ".join(command), tool_name, result)
 
 
@@ -233,6 +278,9 @@ def create_mcp_stdio_proxy_tool_class(
     remote: RemoteTool,
     alias: str | None = None,
     server_hint: str | None = None,
+    env: dict[str, str] | None = None,
+    startup_timeout_sec: float | None = None,
+    tool_timeout_sec: float | None = None,
 ) -> type[BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]]:
     def _alias_from_command(cmd: list[str]) -> str:
         prog = Path(cmd[0]).name.replace(".", "_") if cmd else "mcp"
@@ -258,6 +306,9 @@ def create_mcp_stdio_proxy_tool_class(
         _stdio_command: ClassVar[list[str]] = command
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
+        _env: ClassVar[dict[str, str] | None] = env
+        _startup_timeout_sec: ClassVar[float | None] = startup_timeout_sec
+        _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
 
         @classmethod
         def get_name(cls) -> str:
@@ -267,24 +318,26 @@ def create_mcp_stdio_proxy_tool_class(
         def get_parameters(cls) -> dict[str, Any]:
             return dict(cls._input_schema)
 
-        async def run(self, args: _OpenArgs) -> MCPToolResult:
+        async def run(
+            self, args: _OpenArgs, ctx: InvokeContext | None = None
+        ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult, None]:
             try:
                 payload = args.model_dump(exclude_none=True)
                 result = await call_tool_stdio(
-                    self._stdio_command, self._remote_name, payload
+                    self._stdio_command,
+                    self._remote_name,
+                    payload,
+                    env=self._env,
+                    startup_timeout_sec=self._startup_timeout_sec,
+                    tool_timeout_sec=self._tool_timeout_sec,
                 )
-                return result
+                yield result
             except Exception as exc:
                 raise ToolError(f"MCP stdio call failed: {exc!r}") from exc
 
         @classmethod
         def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-            return ToolCallDisplay(
-                summary=f"{published_name}",
-                details=event.args.model_dump()
-                if hasattr(event.args, "model_dump")
-                else {},
-            )
+            return ToolCallDisplay(summary=f"{published_name}")
 
         @classmethod
         def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -295,15 +348,7 @@ def create_mcp_stdio_proxy_tool_class(
                 )
 
             message = f"MCP tool {event.result.tool} completed"
-            details = {}
-            if event.result.text:
-                details["text"] = event.result.text
-            if event.result.structured:
-                details["structured"] = event.result.structured
-
-            return ToolResultDisplay(
-                success=event.result.ok, message=message, details=details
-            )
+            return ToolResultDisplay(success=event.result.ok, message=message)
 
         @classmethod
         def get_status_text(cls) -> str:

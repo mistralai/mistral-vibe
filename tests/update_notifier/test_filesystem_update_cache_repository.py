@@ -24,6 +24,7 @@ async def test_reads_cache_from_file_when_present(tmp_path: Path) -> None:
     assert cache is not None
     assert cache.latest_version == "1.2.3"
     assert cache.stored_at_timestamp == 1_700_000_000
+    assert cache.seen_whats_new_version is None
 
 
 @pytest.mark.asyncio
@@ -62,6 +63,46 @@ async def test_overwrites_existing_cache(tmp_path: Path) -> None:
     content = json.loads(cache_file.read_text())
     assert content["latest_version"] == "1.1.0"
     assert content["stored_at_timestamp"] == 1_700_200_000
+    assert content.get("seen_whats_new_version") is None
+
+
+@pytest.mark.asyncio
+async def test_reads_cache_with_seen_whats_new_version(tmp_path: Path) -> None:
+    cache_file = tmp_path / "update_cache.json"
+    cache_file.write_text(
+        json.dumps({
+            "latest_version": "1.2.3",
+            "stored_at_timestamp": 1_700_000_000,
+            "seen_whats_new_version": "1.2.0",
+        })
+    )
+    repository = FileSystemUpdateCacheRepository(base_path=tmp_path)
+
+    cache = await repository.get()
+
+    assert cache is not None
+    assert cache.latest_version == "1.2.3"
+    assert cache.stored_at_timestamp == 1_700_000_000
+    assert cache.seen_whats_new_version == "1.2.0"
+
+
+@pytest.mark.asyncio
+async def test_writes_cache_with_seen_whats_new_version(tmp_path: Path) -> None:
+    repository = FileSystemUpdateCacheRepository(base_path=tmp_path)
+
+    await repository.set(
+        UpdateCache(
+            latest_version="1.1.0",
+            stored_at_timestamp=1_700_200_000,
+            seen_whats_new_version="1.1.0",
+        )
+    )
+
+    cache_file = tmp_path / "update_cache.json"
+    content = json.loads(cache_file.read_text())
+    assert content["latest_version"] == "1.1.0"
+    assert content["stored_at_timestamp"] == 1_700_200_000
+    assert content["seen_whats_new_version"] == "1.1.0"
 
 
 @pytest.mark.asyncio

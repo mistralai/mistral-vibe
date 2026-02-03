@@ -10,6 +10,7 @@ from textual.widgets import Markdown
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
+from vibe.core.agent_loop import AgentLoop
 from vibe.core.config import SessionLoggingConfig, VibeConfig
 
 
@@ -20,7 +21,8 @@ def vibe_config() -> VibeConfig:
 
 @pytest.fixture
 def vibe_app(vibe_config: VibeConfig) -> VibeApp:
-    return VibeApp(config=vibe_config)
+    agent_loop = AgentLoop(vibe_config)
+    return VibeApp(agent_loop=agent_loop)
 
 
 @pytest.mark.asyncio
@@ -29,13 +31,13 @@ async def test_popup_appears_with_matching_suggestions(vibe_app: VibeApp) -> Non
         chat_input = vibe_app.query_one(ChatInputContainer)
         popup = vibe_app.query_one(CompletionPopup)
 
-        await pilot.press(*"/sum")
+        await pilot.press(*"/com")
 
         popup_content = str(popup.render())
         assert popup.styles.display == "block"
-        assert "/summarize" in popup_content
+        assert "/compact" in popup_content
         assert "Compact conversation history by summarizing" in popup_content
-        assert chat_input.value == "/sum"
+        assert chat_input.value == "/com"
 
 
 @pytest.mark.asyncio
@@ -60,7 +62,7 @@ async def test_pressing_tab_writes_selected_command_and_keeps_popup_visible(
         await pilot.press(*"/co")
         await pilot.press("tab")
 
-        assert chat_input.value == "/config"
+        assert chat_input.value == "/compact"
         assert popup.styles.display == "block"
 
 
@@ -88,11 +90,11 @@ async def test_arrow_navigation_updates_selected_suggestion(vibe_app: VibeApp) -
 
         await pilot.press(*"/c")
 
-        ensure_selected_command(popup, "/cfg")
+        ensure_selected_command(popup, "/clear")
         await pilot.press("down")
-        ensure_selected_command(popup, "/config")
+        ensure_selected_command(popup, "/compact")
         await pilot.press("up")
-        ensure_selected_command(popup, "/cfg")
+        ensure_selected_command(popup, "/clear")
 
 
 @pytest.mark.asyncio
@@ -100,13 +102,13 @@ async def test_arrow_navigation_cycles_through_suggestions(vibe_app: VibeApp) ->
     async with vibe_app.run_test() as pilot:
         popup = vibe_app.query_one(CompletionPopup)
 
-        await pilot.press(*"/st")
+        await pilot.press(*"/co")
 
-        ensure_selected_command(popup, "/stats")
+        ensure_selected_command(popup, "/compact")
         await pilot.press("down")
-        ensure_selected_command(popup, "/status")
+        ensure_selected_command(popup, "/config")
         await pilot.press("up")
-        ensure_selected_command(popup, "/stats")
+        ensure_selected_command(popup, "/compact")
 
 
 @pytest.mark.asyncio

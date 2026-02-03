@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from abc import ABC
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+import copy
 from enum import StrEnum, auto
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from uuid import uuid4
+
+if TYPE_CHECKING:
+    from vibe.core.tools.base import BaseTool
+else:
+    BaseTool = Any
 
 from pydantic import (
     BaseModel,
@@ -14,24 +21,6 @@ from pydantic import (
     computed_field,
     model_validator,
 )
-
-from vibe.core.tools.base import BaseTool
-
-
-@dataclass
-class ResumeSessionInfo:
-    type: Literal["continue", "resume"]
-    session_id: str
-    session_time: str
-
-    def message(self) -> str:
-        action = None
-        match self.type:
-            case "continue":
-                action = "Continuing"
-            case "resume":
-                action = "Resuming"
-        return f"{action} session `{self.session_id}` from {self.session_time}"
 
 
 class AgentStats(BaseModel):
@@ -44,6 +33,7 @@ class AgentStats(BaseModel):
     tool_calls_succeeded: int = 0
 
     context_tokens: int = 0
+    listeners: ClassVar[dict[str, Callable[[AgentStats], None]]] = {}
 
     last_turn_prompt_tokens: int = 0
     last_turn_completion_tokens: int = 0
@@ -52,6 +42,21 @@ class AgentStats(BaseModel):
 
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        super().__setattr__(name, value)
+        if name in self.listeners:
+            self.listeners[name](self)
+
+    def trigger_listeners(self) -> None:
+        for listener in self.listeners.values():
+            listener(self)
+
+    @classmethod
+    def add_listener(
+        cls, attr_name: str, listener: Callable[[AgentStats], None]
+    ) -> None:
+        cls.listeners[attr_name] = listener
 
     @computed_field
     @property
@@ -119,7 +124,6 @@ class SessionMetadata(BaseModel):
     git_commit: str | None
     git_branch: str | None
     environment: dict[str, str | None]
-    auto_approve: bool = False
     username: str
 
 
@@ -183,9 +187,11 @@ class LLMMessage(BaseModel):
 
     role: Role
     content: Content | None = None
+    reasoning_content: Content | None = None
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
+    message_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -193,14 +199,72 @@ class LLMMessage(BaseModel):
         if isinstance(v, dict):
             v.setdefault("content", "")
             v.setdefault("role", "assistant")
+            if "message_id" not in v and v.get("role") != "tool":
+                v["message_id"] = str(uuid4())
             return v
+        role = str(getattr(v, "role", "assistant"))
         return {
-            "role": str(getattr(v, "role", "assistant")),
+            "role": role,
             "content": getattr(v, "content", ""),
+            "reasoning_content": getattr(v, "reasoning_content", None),
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
+            "message_id": getattr(v, "message_id", None)
+            or (str(uuid4()) if role != "tool" else None),
         }
+
+    def __add__(self, other: LLMMessage) -> LLMMessage:
+        """Careful: this is not commutative!"""
+        if self.role != other.role:
+            raise ValueError("Can't accumulate messages with different roles")
+
+        if self.name != other.name:
+            raise ValueError("Can't accumulate messages with different names")
+
+        if self.tool_call_id != other.tool_call_id:
+            raise ValueError("Can't accumulate messages with different tool_call_ids")
+
+        content = (self.content or "") + (other.content or "")
+        if not content:
+            content = None
+
+        reasoning_content = (self.reasoning_content or "") + (
+            other.reasoning_content or ""
+        )
+        if not reasoning_content:
+            reasoning_content = None
+
+        tool_calls_map = OrderedDict[int, ToolCall]()
+        for tool_calls in [self.tool_calls or [], other.tool_calls or []]:
+            for tc in tool_calls:
+                if tc.index is None:
+                    raise ValueError("Tool call chunk missing index")
+                if tc.index not in tool_calls_map:
+                    tool_calls_map[tc.index] = copy.deepcopy(tc)
+                else:
+                    existing_name = tool_calls_map[tc.index].function.name
+                    new_name = tc.function.name
+                    if existing_name and new_name and existing_name != new_name:
+                        raise ValueError(
+                            "Can't accumulate messages with different tool call names"
+                        )
+                    if new_name and not existing_name:
+                        tool_calls_map[tc.index].function.name = new_name
+                    new_args = (tool_calls_map[tc.index].function.arguments or "") + (
+                        tc.function.arguments or ""
+                    )
+                    tool_calls_map[tc.index].function.arguments = new_args
+
+        return LLMMessage(
+            role=self.role,
+            content=content,
+            reasoning_content=reasoning_content,
+            tool_calls=list(tool_calls_map.values()) or None,
+            name=self.name,
+            tool_call_id=self.tool_call_id,
+            message_id=self.message_id,
+        )
 
 
 class LLMUsage(BaseModel):
@@ -208,23 +272,52 @@ class LLMUsage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
 
+    def __add__(self, other: LLMUsage) -> LLMUsage:
+        return LLMUsage(
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+        )
+
 
 class LLMChunk(BaseModel):
     model_config = ConfigDict(frozen=True)
     message: LLMMessage
-    finish_reason: str | None = None
     usage: LLMUsage | None = None
+
+    def __add__(self, other: LLMChunk) -> LLMChunk:
+        if self.usage is None and other.usage is None:
+            new_usage = None
+        else:
+            new_usage = (self.usage or LLMUsage()) + (other.usage or LLMUsage())
+        return LLMChunk(message=self.message + other.message, usage=new_usage)
 
 
 class BaseEvent(BaseModel, ABC):
-    """Abstract base class for all agent events."""
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class UserMessageEvent(BaseEvent):
+    content: str
+    message_id: str
 
 
 class AssistantEvent(BaseEvent):
     content: str
     stopped_by_middleware: bool = False
+    message_id: str | None = None
+
+    def __add__(self, other: AssistantEvent) -> AssistantEvent:
+        return AssistantEvent(
+            content=self.content + other.content,
+            stopped_by_middleware=self.stopped_by_middleware
+            or other.stopped_by_middleware,
+            message_id=self.message_id or other.message_id,
+        )
+
+
+class ReasoningEvent(BaseEvent):
+    content: str
+    message_id: str | None = None
 
 
 class ToolCallEvent(BaseEvent):
@@ -245,15 +338,31 @@ class ToolResultEvent(BaseEvent):
     tool_call_id: str
 
 
+class ToolStreamEvent(BaseEvent):
+    tool_name: str
+    message: str
+    tool_call_id: str
+
+
 class CompactStartEvent(BaseEvent):
     current_context_tokens: int
     threshold: int
+    # WORKAROUND: Using tool_call to communicate compact events to the client.
+    # This should be revisited when the ACP protocol defines how compact events
+    # should be represented.
+    # [RFD](https://agentclientprotocol.com/rfds/session-usage)
+    tool_call_id: str
 
 
 class CompactEndEvent(BaseEvent):
     old_context_tokens: int
     new_context_tokens: int
     summary_length: int
+    # WORKAROUND: Using tool_call to communicate compact events to the client.
+    # This should be revisited when the ACP protocol defines how compact events
+    # should be represented.
+    # [RFD](https://agentclientprotocol.com/rfds/session-usage)
+    tool_call_id: str
 
 
 class OutputFormat(StrEnum):
@@ -263,11 +372,22 @@ class OutputFormat(StrEnum):
 
 
 type AsyncApprovalCallback = Callable[
-    [str, dict[str, Any], str], Awaitable[tuple[ApprovalResponse, str | None]]
+    [str, BaseModel, str], Awaitable[tuple[ApprovalResponse, str | None]]
 ]
 
 type SyncApprovalCallback = Callable[
-    [str, dict[str, Any], str], tuple[ApprovalResponse, str | None]
+    [str, BaseModel, str], tuple[ApprovalResponse, str | None]
 ]
 
 type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
+
+type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
+
+
+class RateLimitError(Exception):
+    def __init__(self, provider: str, model: str) -> None:
+        self.provider = provider
+        self.model = model
+        super().__init__(
+            "Rate limits exceeded. Please wait a moment before trying again."
+        )

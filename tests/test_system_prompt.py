@@ -4,7 +4,9 @@ import sys
 
 import pytest
 
+from vibe.core.agents import AgentManager
 from vibe.core.config import VibeConfig
+from vibe.core.skills.manager import SkillManager
 from vibe.core.system_prompt import get_universal_system_prompt
 from vibe.core.tools.manager import ToolManager
 
@@ -22,9 +24,13 @@ def test_get_universal_system_prompt_includes_windows_prompt_on_windows(
         include_model_info=False,
         include_commit_signature=False,
     )
-    tool_manager = ToolManager(config)
+    tool_manager = ToolManager(lambda: config)
+    skill_manager = SkillManager(lambda: config)
+    agent_manager = AgentManager(lambda: config)
 
-    prompt = get_universal_system_prompt(tool_manager, config)
+    prompt = get_universal_system_prompt(
+        tool_manager, config, skill_manager, agent_manager
+    )
 
     assert "You are Vibe, a super useful programming assistant." in prompt
     assert (

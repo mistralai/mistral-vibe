@@ -1,0 +1,48 @@
+name: Feature Request
+description: Pitch an improvement for Mistral Vibe
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Feature requests work best when they focus on the problem first. Tell us
+        what you're trying to achieve and why existing APIs aren't enough.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Mistral Vibe would this feature apply to?
+      options:
+        - CLI
+        - ACP
+        - Both
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: >
+        What use case is blocked? Provide a clear and concise description of the problem.
+      placeholder: "I want to be able to use the agent to write a blog post about the benefits of using Mistral Vibe"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: >
+        Sketch the feature you’d like to see. Code snippets welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Links, screenshots, related issues, etc.

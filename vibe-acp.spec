@@ -1,10 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_all
+
+# Collect all dependencies (including hidden imports and binaries) from builtins modules
+core_builtins_deps = collect_all('vibe.core.tools.builtins')
+acp_builtins_deps = collect_all('vibe.acp.tools.builtins')
+
+# Extract hidden imports and binaries, filtering to ensure only strings are in hiddenimports
+hidden_imports = []
+for item in core_builtins_deps[2] + acp_builtins_deps[2]:
+    if isinstance(item, str):
+        hidden_imports.append(item)
+
+binaries = core_builtins_deps[1] + acp_builtins_deps[1]
 
 a = Analysis(
     ['vibe/acp/entrypoint.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=[
         # By default, pyinstaller doesn't include the .md files
         ('vibe/core/prompts/*.md', 'vibe/core/prompts'),
@@ -15,7 +28,7 @@ a = Analysis(
         ('vibe/core/tools/builtins/*.py', 'vibe/core/tools/builtins'),
         ('vibe/acp/tools/builtins/*.py', 'vibe/acp/tools/builtins'),
     ],
-    hiddenimports=[],
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -1,22 +1,59 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
+from functools import lru_cache
 import os
-import re
 import signal
 import sys
 from typing import ClassVar, Literal, final
 
 from pydantic import BaseModel, Field
+from tree_sitter import Language, Node, Parser
+import tree_sitter_bash as tsbash
 
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
     BaseToolState,
+    InvokeContext,
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
+
+
+@lru_cache(maxsize=1)
+def _get_parser() -> Parser:
+    return Parser(Language(tsbash.language()))
+
+
+def _extract_commands(command: str) -> list[str]:
+    parser = _get_parser()
+    tree = parser.parse(command.encode("utf-8"))
+
+    commands: list[str] = []
+
+    def find_commands(node: Node) -> None:
+        if node.type == "command":
+            parts = []
+            for child in node.children:
+                if (
+                    child.type
+                    in {"command_name", "word", "string", "raw_string", "concatenation"}
+                    and child.text is not None
+                ):
+                    parts.append(child.text.decode("utf-8"))
+            if parts:
+                commands.append(" ".join(parts))
+
+        for child in node.children:
+            find_commands(child)
+
+    find_commands(tree.root_node)
+    return commands
 
 
 def _get_subprocess_encoding() -> str:
@@ -26,6 +63,12 @@ def _get_subprocess_encoding() -> str:
 
         return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
     return "utf-8"
+
+
+def _get_shell_executable() -> str | None:
+    if is_windows():
+        return None
+    return os.environ.get("SHELL")
 
 
 def _get_base_env() -> dict[str, str]:
@@ -134,7 +177,7 @@ class BashToolConfig(BaseToolConfig):
         default=16_000, description="Maximum bytes to capture from stdout and stderr."
     )
     default_timeout: int = Field(
-        default=30, description="Default timeout for commands in seconds."
+        default=300, description="Default timeout for commands in seconds."
     )
     allowlist: list[str] = Field(
         default_factory=_get_default_allowlist,
@@ -158,18 +201,43 @@ class BashArgs(BaseModel):
 
 
 class BashResult(BaseModel):
+    command: str
     stdout: str
     stderr: str
     returncode: int
 
 
-class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
+class Bash(
+    BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState],
+    ToolUIData[BashArgs, BashResult],
+):
     description: ClassVar[str] = "Run a one-off bash command and capture its output."
 
-    def check_allowlist_denylist(self, args: BashArgs) -> ToolPermission | None:
-        command_parts = re.split(r"(?:&&|\|\||;|\|)", args.command)
-        command_parts = [part.strip() for part in command_parts if part.strip()]
+    @classmethod
+    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
+        if not isinstance(event.args, BashArgs):
+            return ToolCallDisplay(summary="bash")
 
+        return ToolCallDisplay(summary=f"bash: {event.args.command}")
+
+    @classmethod
+    def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
+        if not isinstance(event.result, BashResult):
+            return ToolResultDisplay(
+                success=False, message=event.error or event.skip_reason or "No result"
+            )
+
+        return ToolResultDisplay(success=True, message=f"Ran {event.result.command}")
+
+    @classmethod
+    def get_status_text(cls) -> str:
+        return "Running command"
+
+    def check_allowlist_denylist(self, args: BashArgs) -> ToolPermission | None:
+        if is_windows():
+            return None
+
+        command_parts = _extract_commands(args.command)
         if not command_parts:
             return None
 
@@ -224,9 +292,13 @@ class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
                 error_msg += f"\nStdout: {stdout}"
             raise ToolError(error_msg.strip())
 
-        return BashResult(stdout=stdout, stderr=stderr, returncode=returncode)
+        return BashResult(
+            command=command, stdout=stdout, stderr=stderr, returncode=returncode
+        )
 
-    async def run(self, args: BashArgs) -> BashResult:
+    async def run(
+        self, args: BashArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
 
@@ -242,8 +314,8 @@ class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.DEVNULL,
-                cwd=self.config.effective_workdir,
                 env=_get_base_env(),
+                executable=_get_shell_executable(),
                 **kwargs,
             )
 
@@ -269,7 +341,7 @@ class Bash(BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState]):
 
             returncode = proc.returncode or 0
 
-            return self._build_result(
+            yield self._build_result(
                 command=args.command,
                 stdout=stdout,
                 stderr=stderr,

@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import ClassVar, final
 
-import aiofiles
+import anyio
 from pydantic import BaseModel, Field
 
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
     BaseToolState,
+    InvokeContext,
     ToolError,
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 
 
 class WriteFileArgs(BaseModel):
@@ -56,17 +58,10 @@ class WriteFile(
             return ToolCallDisplay(summary="Invalid arguments")
 
         args = event.args
-        file_ext = Path(args.path).suffix.lstrip(".")
 
         return ToolCallDisplay(
             summary=f"Writing {args.path}{' (overwrite)' if args.overwrite else ''}",
             content=args.content,
-            details={
-                "path": args.path,
-                "overwrite": args.overwrite,
-                "file_extension": file_ext,
-                "content": args.content,
-            },
         )
 
     @classmethod
@@ -74,13 +69,7 @@ class WriteFile(
         if isinstance(event.result, WriteFileResult):
             action = "Overwritten" if event.result.file_existed else "Created"
             return ToolResultDisplay(
-                success=True,
-                message=f"{action} {Path(event.result.path).name}",
-                details={
-                    "bytes_written": event.result.bytes_written,
-                    "path": event.result.path,
-                    "content": event.result.content,
-                },
+                success=True, message=f"{action} {Path(event.result.path).name}"
             )
 
         return ToolResultDisplay(success=True, message="File written")
@@ -94,7 +83,7 @@ class WriteFile(
 
         file_path = Path(args.path).expanduser()
         if not file_path.is_absolute():
-            file_path = self.config.effective_workdir / file_path
+            file_path = Path.cwd() / file_path
         file_str = str(file_path)
 
         for pattern in self.config.denylist:
@@ -108,7 +97,9 @@ class WriteFile(
         return None
 
     @final
-    async def run(self, args: WriteFileArgs) -> WriteFileResult:
+    async def run(
+        self, args: WriteFileArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | WriteFileResult, None]:
         file_path, file_existed, content_bytes = self._prepare_and_validate_path(args)
 
         await self._write_file(args, file_path)
@@ -118,7 +109,7 @@ class WriteFile(
         if len(self.state.recently_written_files) > BUFFER_SIZE:
             self.state.recently_written_files.pop(0)
 
-        return WriteFileResult(
+        yield WriteFileResult(
             path=str(file_path),
             bytes_written=content_bytes,
             file_existed=file_existed,
@@ -137,11 +128,11 @@ class WriteFile(
 
         file_path = Path(args.path).expanduser()
         if not file_path.is_absolute():
-            file_path = self.config.effective_workdir / file_path
+            file_path = Path.cwd() / file_path
         file_path = file_path.resolve()
 
         try:
-            file_path.relative_to(self.config.effective_workdir.resolve())
+            file_path.relative_to(Path.cwd().resolve())
         except ValueError:
             raise ToolError(f"Cannot write outside project directory: {file_path}")
 
@@ -161,7 +152,9 @@ class WriteFile(
 
     async def _write_file(self, args: WriteFileArgs, file_path: Path) -> None:
         try:
-            async with aiofiles.open(file_path, mode="w", encoding="utf-8") as f:
+            async with await anyio.Path(file_path).open(
+                mode="w", encoding="utf-8"
+            ) as f:
                 await f.write(args.content)
         except Exception as e:
             raise ToolError(f"Error writing {file_path}: {e}") from e

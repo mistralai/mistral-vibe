@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from pydantic import BaseModel
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -9,7 +10,8 @@ from textual.containers import Container, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.renderers import get_renderer
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.core.config import VibeConfig
 
 
@@ -29,14 +31,14 @@ class ApprovalApp(Container):
     ]
 
     class ApprovalGranted(Message):
-        def __init__(self, tool_name: str, tool_args: dict) -> None:
+        def __init__(self, tool_name: str, tool_args: BaseModel) -> None:
             super().__init__()
             self.tool_name = tool_name
             self.tool_args = tool_args
 
     class ApprovalGrantedAlwaysTool(Message):
         def __init__(
-            self, tool_name: str, tool_args: dict, save_permanently: bool
+            self, tool_name: str, tool_args: BaseModel, save_permanently: bool
         ) -> None:
             super().__init__()
             self.tool_name = tool_name
@@ -44,18 +46,17 @@ class ApprovalApp(Container):
             self.save_permanently = save_permanently
 
     class ApprovalRejected(Message):
-        def __init__(self, tool_name: str, tool_args: dict) -> None:
+        def __init__(self, tool_name: str, tool_args: BaseModel) -> None:
             super().__init__()
             self.tool_name = tool_name
             self.tool_args = tool_args
 
     def __init__(
-        self, tool_name: str, tool_args: dict, workdir: str, config: VibeConfig
+        self, tool_name: str, tool_args: BaseModel, config: VibeConfig
     ) -> None:
         super().__init__(id="approval-app")
         self.tool_name = tool_name
         self.tool_args = tool_args
-        self.workdir = workdir
         self.config = config
         self.selected_option = 0
         self.content_container: Vertical | None = None
@@ -66,7 +67,7 @@ class ApprovalApp(Container):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-content"):
-            self.title_widget = Static(
+            self.title_widget = NoMarkupStatic(
                 f"⚠ {self.tool_name} command", classes="approval-title"
             )
             yield self.title_widget
@@ -77,16 +78,16 @@ class ApprovalApp(Container):
                 )
                 yield self.tool_info_container
 
-            yield Static("")
+            yield NoMarkupStatic("")
 
             for _ in range(3):
-                widget = Static("", classes="approval-option")
+                widget = NoMarkupStatic("", classes="approval-option")
                 self.option_widgets.append(widget)
                 yield widget
 
-            yield Static("")
+            yield NoMarkupStatic("")
 
-            self.help_widget = Static(
+            self.help_widget = NoMarkupStatic(
                 "↑↓ navigate  Enter select  ESC reject", classes="approval-help"
             )
             yield self.help_widget
@@ -100,17 +101,14 @@ class ApprovalApp(Container):
         if not self.tool_info_container:
             return
 
-        renderer = get_renderer(self.tool_name)
-        widget_class, data = renderer.get_approval_widget(self.tool_args)
-
+        approval_widget = get_approval_widget(self.tool_name, self.tool_args)
         await self.tool_info_container.remove_children()
-        approval_widget = widget_class(data)
         await self.tool_info_container.mount(approval_widget)
 
     def _update_options(self) -> None:
         options = [
             ("Yes", "yes"),
-            (f"Yes and always allow {self.tool_name} this session", "yes"),
+            (f"Yes and always allow {self.tool_name} for this session", "yes"),
             ("No and tell the agent what to do instead", "no"),
         ]
 

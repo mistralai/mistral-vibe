@@ -9,19 +9,20 @@ from textual.widgets import Static
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
 from vibe.cli.textual_ui.widgets.messages import BashOutputMessage, ErrorMessage
+from vibe.core.agent_loop import AgentLoop
 from vibe.core.config import SessionLoggingConfig, VibeConfig
 
 
 @pytest.fixture
-def vibe_config(tmp_path: Path) -> VibeConfig:
-    return VibeConfig(
-        session_logging=SessionLoggingConfig(enabled=False), workdir=tmp_path
-    )
+def vibe_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> VibeConfig:
+    monkeypatch.chdir(tmp_path)
+    return VibeConfig(session_logging=SessionLoggingConfig(enabled=False))
 
 
 @pytest.fixture
 def vibe_app(vibe_config: VibeConfig) -> VibeApp:
-    return VibeApp(config=vibe_config)
+    agent_loop = AgentLoop(vibe_config)
+    return VibeApp(agent_loop=agent_loop)
 
 
 async def _wait_for_bash_output_message(

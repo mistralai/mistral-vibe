@@ -13,6 +13,8 @@ jobs:
   pre-commit:
     name: Pre-commit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -51,6 +53,8 @@ jobs:
   tests:
     name: Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -85,6 +89,8 @@ jobs:
   snapshot-tests:
     name: Snapshot Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository

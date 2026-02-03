@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from enum import StrEnum, auto
 from pathlib import Path
 import shutil
@@ -12,10 +13,12 @@ from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
     BaseToolState,
+    InvokeContext,
     ToolError,
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.types import ToolStreamEvent
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -114,7 +117,9 @@ class Grep(
             "Please install ripgrep: https://github.com/BurntSushi/ripgrep#installation"
         )
 
-    async def run(self, args: GrepArgs) -> GrepResult:
+    async def run(
+        self, args: GrepArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | GrepResult, None]:
         backend = self._detect_backend()
         self._validate_args(args)
         self.state.search_history.append(args.pattern)
@@ -123,7 +128,7 @@ class Grep(
         cmd = self._build_command(args, exclude_patterns, backend)
         stdout = await self._execute_search(cmd)
 
-        return self._parse_output(
+        yield self._parse_output(
             stdout, args.max_matches or self.config.default_max_matches
         )
 
@@ -133,7 +138,7 @@ class Grep(
 
         path_obj = Path(args.path).expanduser()
         if not path_obj.is_absolute():
-            path_obj = self.config.effective_workdir / path_obj
+            path_obj = Path.cwd() / path_obj
 
         if not path_obj.exists():
             raise ToolError(f"Path does not exist: {args.path}")
@@ -141,7 +146,7 @@ class Grep(
     def _collect_exclude_patterns(self) -> list[str]:
         patterns = list(self.config.exclude_patterns)
 
-        codeignore_path = self.config.effective_workdir / self.config.codeignore_file
+        codeignore_path = Path.cwd() / self.config.codeignore_file
         if codeignore_path.is_file():
             patterns.extend(self._load_codeignore_patterns(codeignore_path))
 
@@ -217,10 +222,7 @@ class Grep(
     async def _execute_search(self, cmd: list[str]) -> str:
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.config.effective_workdir),
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
 
             try:
@@ -276,7 +278,7 @@ class Grep(
         if not isinstance(event.args, GrepArgs):
             return ToolCallDisplay(summary="grep")
 
-        summary = f"grep: '{event.args.pattern}'"
+        summary = f"Grepping '{event.args.pattern}'"
         if event.args.path != ".":
             summary += f" in {event.args.path}"
         if event.args.max_matches:
@@ -284,15 +286,7 @@ class Grep(
         if not event.args.use_default_ignore:
             summary += " [no-ignore]"
 
-        return ToolCallDisplay(
-            summary=summary,
-            details={
-                "pattern": event.args.pattern,
-                "path": event.args.path,
-                "max_matches": event.args.max_matches,
-                "use_default_ignore": event.args.use_default_ignore,
-            },
-        )
+        return ToolCallDisplay(summary=summary)
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -309,18 +303,8 @@ class Grep(
         if event.result.was_truncated:
             warnings.append("Output was truncated due to size/match limits")
 
-        return ToolResultDisplay(
-            success=True,
-            message=message,
-            warnings=warnings,
-            details={
-                "match_count": event.result.match_count,
-                "was_truncated": event.result.was_truncated,
-                "matches": event.result.matches,
-            },
-        )
+        return ToolResultDisplay(success=True, message=message, warnings=warnings)
 
     @classmethod
     def get_status_text(cls) -> str:
-        """Return status message for spinner."""
         return "Searching files"

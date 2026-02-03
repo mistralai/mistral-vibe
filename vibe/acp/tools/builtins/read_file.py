@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from acp import ReadTextFileRequest
-
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
 from vibe.core.tools.base import ToolError
@@ -31,19 +29,17 @@ class ReadFile(CoreReadFileTool, BaseAcpTool[AcpReadFileState]):
         return AcpReadFileState
 
     async def _read_file(self, args: ReadFileArgs, file_path: Path) -> _ReadResult:
-        connection, session_id, _ = self._load_state()
+        client, session_id, _ = self._load_state()
 
         line = args.offset + 1 if args.offset > 0 else None
         limit = args.limit
 
-        read_request = ReadTextFileRequest(
-            sessionId=session_id, path=str(file_path), line=line, limit=limit
-        )
-
         await self._send_in_progress_session_update()
 
         try:
-            response = await connection.readTextFile(read_request)
+            response = await client.read_text_file(
+                session_id=session_id, path=str(file_path), line=line, limit=limit
+            )
         except Exception as e:
             raise ToolError(f"Error reading {file_path}: {e}") from e
 

@@ -1,21 +1,17 @@
 {
   description = "Mistral Vibe!";
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
     uv2nix = {
       url = "github:pyproject-nix/uv2nix";
       inputs.pyproject-nix.follows = "pyproject-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
     pyproject-build-systems = {
       url = "github:pyproject-nix/build-system-pkgs";
       inputs.pyproject-nix.follows = "pyproject-nix";
@@ -38,13 +34,17 @@
       system:
       let
         inherit (nixpkgs) lib;
+        pkgs = import nixpkgs { inherit system; };
 
+        # Load workspace
         workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./.; };
 
+        # Create overlay for dependencies
         overlay = workspace.mkPyprojectOverlay {
           sourcePreference = "wheel"; # sdist if you want
         };
 
+        # Manual overrides for specific packages
         pyprojectOverrides = final: prev: {
           # NOTE: If a package complains about a missing dependency (such
           # as setuptools), you can add it here.
@@ -53,15 +53,10 @@
           });
         };
 
-        pkgs = import nixpkgs {
-          inherit system;
-        };
-
         python = pkgs.python312;
 
         # Construct package set
         pythonSet =
-          # Use base package set from pyproject.nix builders
           (pkgs.callPackage pyproject-nix.build.packages {
             inherit python;
           }).overrideScope
@@ -73,9 +68,6 @@
               ]
             );
       in
-      let
-        vibe-env = pythonSet.mkVirtualEnv "mistralai-vibe-env" workspace.deps.default;
-      in
       {
         packages.default =
           let
@@ -85,75 +77,58 @@
             exec ${vibe-env}/bin/vibe "$@"
           '';
 
-        apps = {
-          default = {
-            type = "app";
-            program = "${self.packages.${system}.default}/bin/vibe";
-          };
+        apps.default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/vibe";
         };
 
-        devShells = {
-          default =
-            let
-              editableOverlay = workspace.mkEditablePyprojectOverlay {
-                root = "$REPO_ROOT";
-              };
-
-              editablePythonSet = pythonSet.overrideScope (
-                lib.composeManyExtensions [
-                  editableOverlay
-
-                  # Apply fixups for building an editable package of your workspace packages
-                  (final: prev: {
-                    mistralai-vibe = prev.mistralai-vibe.overrideAttrs (old: {
-                      # It's a good idea to filter the sources going into an editable build
-                      # so the editable package doesn't have to be rebuilt on every change.
-                      src = lib.fileset.toSource {
-                        root = old.src;
-                        fileset = lib.fileset.unions [
-                          (old.src + "/pyproject.toml")
-                          (old.src + "/README.md")
-                        ];
-                      };
-
-                      nativeBuildInputs =
-                        old.nativeBuildInputs
-                        ++ final.resolveBuildSystem {
-                          editables = [ ];
-                        };
-                    });
-                  })
-                ]
-              );
-
-              virtualenv = editablePythonSet.mkVirtualEnv "mistralai-vibe-dev-env" workspace.deps.all;
-            in
-            pkgs.mkShell {
-              packages = [
-                virtualenv
-                pkgs.uv
-              ];
-
-              env = {
-                # Don't create venv using uv
-                UV_NO_SYNC = "1";
-
-                # Force uv to use Python interpreter from venv
-                UV_PYTHON = "${virtualenv}/bin/python";
-
-                # Prevent uv from downloading managed Python's
-                UV_PYTHON_DOWNLOADS = "never";
-              };
-
-              shellHook = ''
-                # Undo dependency propagation by nixpkgs.
-                unset PYTHONPATH
-
-                # Get repository root using git. This is expanded at runtime by the editable `.pth` machinery.
-                export REPO_ROOT=$(git rev-parse --show-toplevel)
-              '';
+        devShells.default =
+          let
+            # Create an overlay for editable development
+            editableOverlay = workspace.mkEditablePyprojectOverlay {
+              root = "$REPO_ROOT";
             };
-        };
+
+            editablePythonSet = pythonSet.overrideScope (
+              lib.composeManyExtensions [
+                editableOverlay
+                # Apply fixups for building an editable package of your workspace packages
+                (final: prev: {
+                  mistralai-vibe = prev.mistralai-vibe.overrideAttrs (old: {
+                    src = lib.fileset.toSource {
+                      root = old.src;
+                      fileset = lib.fileset.unions [
+                        (old.src + "/pyproject.toml")
+                        (old.src + "/README.md")
+                      ];
+                    };
+                    nativeBuildInputs =
+                      (old.nativeBuildInputs or [ ])
+                      ++ final.resolveBuildSystem {
+                        editables = [ ];
+                      };
+                  });
+                })
+              ]
+            );
+
+            virtualenv = editablePythonSet.mkVirtualEnv "mistralai-vibe-dev-env" workspace.deps.all;
+          in
+          pkgs.mkShell {
+            packages = [
+              virtualenv
+              pkgs.uv
+            ];
+            env = {
+              UV_NO_SYNC = "1";
+              UV_PYTHON = "${virtualenv}/bin/python";
+              UV_PYTHON_DOWNLOADS = "never";
+            };
+            shellHook = ''
+              unset PYTHONPATH
+              export REPO_ROOT=$(git rev-parse --show-toplevel)
+            '';
+          };
       }
     );
 }

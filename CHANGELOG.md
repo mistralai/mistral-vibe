@@ -5,6 +5,177 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-01-30
+
+### Added
+
+- Allow environment variables to be overridden by dotenv files
+- Display custom rate limit messages depending on plan type
+
+### Changed
+
+- Made plan offer message more discreet in UI
+- Speed up latest session scan and harden validation
+- Updated pytest-xdist configuration to schedule single test chunks
+
+### Fixed
+
+- Prevent duplicate messages in persisted sessions
+- Fix ACP bash tool to pass full command string for chained commands
+- Fix global agent prompt not being loaded correctly
+- Do not propose to "resume" when there is nothing to resume
+
+
+## [2.0.1] - 2026-01-28
+
+### Fixed
+
+- Fix encoding issues in Windows
+
+
+## [2.0.0] - 2026-01-27
+
+### Added
+
+- Subagent support
+- AskUserQuestion tool for interactive user input
+- User-defined slash commands through skills
+- What's new message display on version update
+- Auto-update feature
+- Environment variables and timeout support for MCP servers
+- Editor shortcut support
+- Shift+enter support for VS Code Insiders
+- Message ID property for messages
+- Client notification of compaction events
+- debugpy support for macOS debugging
+
+### Changed
+
+- Mode system refactored to Agents
+- Standardized managers
+- Improved system prompt
+- Updated session storage to separate metadata from messages
+- Use shell environment to determine shell in bash tool
+- Expanded user input handling
+- Bumped agent-client-protocol to 0.7.1
+- Refactored UI to require AgentLoop at VibeApp construction
+- Updated README with new MCP server config
+- Improved readability of the AskUserQuerstion tool output
+
+### Fixed
+
+- Use ensure_ascii=False for all JSON dumps
+- Delete long-living temporary session files
+- Ignore system prompt when saving/loading session messages
+- Bash tool timeout handling
+- Clipboard: no markup parsing of selected texts
+- Canonical imports
+- Remove last user message from compaction
+- Pause tool timer while awaiting user action
+
+### Removed
+
+- instructions.md support
+- workdir setting in config file
+
+
+## [1.3.5] - 2026-01-12
+
+### Fixed
+
+- bash tool not discovered by vibe-acp
+
+## [1.3.4] - 2026-01-07
+
+### Fixed
+
+- markup in blinking messages
+- safety around Bash and AGENTS.md
+- explicit permissions to GitHub Actions workflows
+- improve render performance in long sessions
+
+## [1.3.3] - 2025-12-26
+
+### Fixed
+
+- Fix config desyncing issues
+
+## [1.3.2] - 2025-12-24
+
+### Added
+
+- User definable reasoning field
+
+### Fixed
+
+- Fix rendering issue with spinner
+
+## [1.3.1] - 2025-12-24
+
+### Fixed
+
+- Fix crash when continuing conversation
+- Fix Nix flake to not export python
+
+## [1.3.0] - 2025-12-23
+
+### Added
+
+- agentskills.io support
+- Reasoning support
+- Native terminal theme support
+- Issue templates for bug reports and feature requests
+- Auto update zed extension on release creation
+
+### Changed
+
+- Improve ToolUI system with better rendering and organization
+- Use pinned actions in CI workflows
+- Remove 100k -> 200k tokens config migration
+
+### Fixed
+
+- Fix `-p` mode to auto-approve tool calls
+- Fix crash when switching mode
+- Fix some cases where clipboard copy didn't work
+
+## [1.2.2] - 2025-12-22
+
+### Fixed
+
+- Remove dead code
+- Fix artefacts automatically attached to the release
+- Refactor agent post streaming
+
+## [1.2.1] - 2025-12-18
+
+### Fixed
+
+- Improve error message when running in home dir
+- Do not show trusted folder workflow in home dir
+
+## [1.2.0] - 2025-12-18
+
+### Added
+
+- Modular mode system
+- Trusted folder mechanism for local .vibe directories
+- Document public setup for vibe-acp in zed, jetbrains and neovim
+- `--version` flag
+
+### Changed
+
+- Improve UI based on feedback
+- Remove unnecessary logging and flushing for better performance
+- Update textual
+- Update nix flake
+- Automate binary attachment to GitHub releases
+
+### Fixed
+
+- Prevent segmentation fault on exit by shutting down thread pools
+- Fix extra spacing with assistant message
+
 ## [1.1.3] - 2025-12-12
 
 ### Added

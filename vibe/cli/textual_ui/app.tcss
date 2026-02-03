@@ -6,14 +6,14 @@ Screen {
     height: 1fr;
     width: 100%;
     background: $background;
-    padding: 0 2 0 2;
+    padding: 0;
 }
 
 #loading-area {
     height: auto;
     width: 100%;
     background: $background;
-    padding: 1 2 0 2;
+    padding: 1 0 0 0;
     layout: horizontal;
     align: left middle;
 }
@@ -26,14 +26,28 @@ Screen {
 
 #todo-area {
     height: auto;
-    max-height: 8;
+    max-height: 10;
     width: 100%;
     background: $background;
     margin: 0;
     padding: 0;
-    overflow-y: auto;
+    overflow: hidden;
     text-align: left;
     margin-top: 0;
+
+    .tool-result-border {
+        display: none;
+    }
+
+    &.loading-active .tool-result-border {
+        display: block;
+    }
+
+    .tool-result-content {
+        max-height: 9;
+        overflow-y: auto;
+        scrollbar-visibility: hidden;
+    }
 }
 
 #bottom-app-container {
@@ -46,7 +60,7 @@ Screen {
     height: auto;
     width: 100%;
     background: $background;
-    padding: 0 2 1 2;
+    padding: 0 0 1 0;
     align: left middle;
     layout: horizontal;
 }
@@ -71,7 +85,7 @@ Screen {
     width: 100%;
     background: $background;
     padding: 0;
-    margin: 0 2 1 2;
+    margin: 0;
 }
 
 #completion-popup {
@@ -84,11 +98,23 @@ Screen {
     height: auto;
     width: 100%;
     background: $background;
-    border: round $foreground-muted;
+    border-top: solid $foreground-muted;
+    border-bottom: solid $foreground-muted;
     padding: 0 1;
 
     &.border-warning {
-        border: round $warning;
+        border-top: solid $warning;
+        border-bottom: solid $warning;
+    }
+
+    &.border-safe {
+        border-top: solid $success;
+        border-bottom: solid $success;
+    }
+
+    &.border-error {
+        border-top: solid $error;
+        border-bottom: solid $error;
     }
 }
 
@@ -107,17 +133,18 @@ Screen {
 #input {
     width: 1fr;
     height: auto;
-    max-height: 16;
+    max-height: 50vh;
     background: transparent;
     color: $text;
     border: none;
     padding: 0;
+    scrollbar-visibility: hidden;
 }
 
 ToastRack {
     align: left bottom;
-    padding: 0 2;
-    margin: 0 2 6 2;
+    padding: 0;
+    margin: 0 0 6 0;
 }
 
 Markdown MarkdownFence {
@@ -128,8 +155,10 @@ Markdown MarkdownFence {
 
 .user-message {
     margin-top: 1;
+    padding: 1 0;
     width: 100%;
     height: auto;
+    background: $surface;
 
     &:first-child {
         margin-top: 0;
@@ -194,23 +223,194 @@ Markdown MarkdownFence {
     }
 }
 
+.assistant-message-content Markdown > *:last-child {
+    margin-bottom: 0;
+}
+
+.reasoning-message {
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+}
+
+.reasoning-message-wrapper {
+    width: 100%;
+    height: auto;
+}
+
+.reasoning-message-header {
+    width: 100%;
+    height: auto;
+}
+
+.reasoning-indicator {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    margin-right: 1;
+
+    &.success {
+        color: $text-success;
+    }
+}
+
+.reasoning-collapsed-text {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    text-style: italic;
+}
+
+.reasoning-triangle {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    text-style: italic;
+    margin-left: 1;
+}
+
+.reasoning-message-content {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    padding-left: 2;
+    margin: 0;
+    color: $text-muted;
+    text-style: italic;
+}
+
+.reasoning-message-content * {
+    color: $text-muted;
+    text-style: italic;
+}
+
+.reasoning-message-content > *:last-child {
+    margin-bottom: 0;
+}
+
 .interrupt-message {
     margin-top: 0;
     margin-bottom: 0;
-    margin-left: 2;
     height: auto;
-    padding: 1 2;
-    background: $warning 10%;
+    width: 100%;
+}
+
+.interrupt-container {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+.interrupt-border {
+    width: auto;
+    height: 100%;
+    padding: 0 1 0 2;
+    color: $foreground-muted;
+}
+
+.interrupt-content {
+    width: 1fr;
+    height: auto;
+    margin: 0;
     color: $text-warning;
 }
 
 .error-message {
-    margin-top: 1;
+    margin-top: 0;
+    margin-bottom: 0;
     height: auto;
-    padding: 1 2;
-    background: $error 10%;
+    width: 100%;
+}
+
+.error-container {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+.error-border {
+    width: auto;
+    height: 100%;
+    padding: 0 1 0 2;
+    color: $foreground-muted;
+}
+
+.error-content {
+    width: 1fr;
+    height: auto;
+    margin: 0;
     color: $error;
     text-style: bold;
+}
+
+.warning-message {
+    margin-top: 0;
+    margin-bottom: 0;
+    height: auto;
+    width: 100%;
+}
+
+.warning-container {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+.warning-border {
+    width: auto;
+    height: 100%;
+    padding: 0 1 0 2;
+    color: $foreground-muted;
+}
+
+.warning-content {
+    width: 1fr;
+    height: auto;
+    margin: 0;
+    color: $text-warning;
+}
+
+.user-command-message {
+    margin-top: 0;
+    margin-bottom: 0;
+    height: auto;
+    width: 100%;
+}
+
+.user-command-container {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+.user-command-border {
+    width: auto;
+    height: 100%;
+    padding: 0 1 0 2;
+    color: $foreground-muted;
+}
+
+.user-command-content {
+    width: 1fr;
+    height: auto;
+    margin: 0;
+
+    Markdown {
+        margin: 0;
+        padding: 0;
+    }
+
+    Markdown > *:first-child {
+        margin-top: 0;
+    }
+
+    Markdown > *:last-child {
+        margin-bottom: 0;
+    }
 }
 
 .bash-output-message {
@@ -280,7 +480,7 @@ Markdown MarkdownFence {
     color: $text-muted;
 }
 
-BlinkingMessage {
+StatusMessage {
     width: 100%;
     height: auto;
 
@@ -290,10 +490,11 @@ BlinkingMessage {
     }
 }
 
-.blink-dot {
+.status-indicator-icon {
     width: auto;
     height: auto;
     color: $foreground;
+    margin-right: 1;
 
     &.success {
         color: $text-success;
@@ -304,7 +505,7 @@ BlinkingMessage {
     }
 }
 
-.blink-text {
+.status-indicator-text {
     width: 1fr;
     height: auto;
     color: $foreground;
@@ -322,24 +523,54 @@ BlinkingMessage {
     margin-top: 1;
 }
 
+.tool-call-container {
+    width: 100%;
+    height: auto;
+}
+
+.tool-stream-message {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    padding-left: 2;
+}
+
 .tool-result {
     width: 100%;
     height: auto;
     margin-top: 0;
-    margin-left: 2;
-    padding: 1 2;
-    background: $surface;
+    margin-left: 0;
+    padding: 0;
+    background: transparent;
     color: $foreground;
 
     &.error-text {
-        background: $error 10%;
         color: $text-error;
     }
 
     &.warning-text {
-        background: $warning 10%;
         color: $text-warning;
     }
+}
+
+.tool-result-container {
+    width: 100%;
+    height: auto;
+    margin-top: 0;
+    padding: 0;
+}
+
+.tool-result-border {
+    width: auto;
+    height: 100%;
+    padding: 0 1 0 2;
+    color: $foreground-muted;
+}
+
+.tool-result-content {
+    width: 1fr;
+    height: auto;
+    padding: 0;
 }
 
 .tool-call-widget {
@@ -430,7 +661,6 @@ BlinkingMessage {
 
 #todo-area .tool-result {
     margin-left: 0;
-    background: $surface;
 }
 
 .loading-widget {
@@ -443,10 +673,11 @@ BlinkingMessage {
     height: auto;
 }
 
-.loading-star {
+.loading-indicator {
     width: auto;
     height: auto;
     color: $warning;
+    margin-right: 1;
 }
 
 .loading-status {
@@ -478,8 +709,8 @@ WelcomeBanner {
     border-title-align: center;
     text-align: center;
     content-align: center middle;
-    padding: 2 4;
-    margin: 1 1 0 1;
+    padding: 2 0;
+    margin: 1 0 0 0;
     color: $foreground;
 
     .muted {
@@ -493,7 +724,7 @@ WelcomeBanner {
     background: $background;
     border: round $foreground-muted;
     padding: 0 1;
-    margin: 0 2 1 2;
+    margin: 0 0 1 0;
 }
 
 #config-content {
@@ -556,7 +787,7 @@ WelcomeBanner {
     background: $background;
     border: round $foreground-muted;
     padding: 0 1;
-    margin: 0 2 1 2;
+    margin: 0 0 1 0;
 }
 
 #approval-content {
@@ -633,6 +864,81 @@ WelcomeBanner {
     color: $foreground;
 }
 
+#question-app {
+    width: 100%;
+    height: auto;
+    max-height: 16;
+    background: transparent;
+    border: round $foreground-muted;
+    padding: 0 1;
+    margin: 0 0 1 0;
+}
+
+#question-content {
+    width: 100%;
+    height: auto;
+}
+
+.question-tabs {
+    height: auto;
+    color: $primary;
+    margin-bottom: 1;
+}
+
+.question-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+    margin-bottom: 1;
+}
+
+.question-option {
+    height: auto;
+    color: $foreground;
+}
+
+.question-option-selected {
+    color: $primary;
+    text-style: bold;
+}
+
+.question-other-row {
+    width: 100%;
+    height: auto;
+}
+
+.question-other-prefix {
+    width: auto;
+    height: auto;
+    color: $foreground;
+}
+
+.question-other-input {
+    width: 1fr;
+    height: auto;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+.question-other-static {
+    width: auto;
+    height: auto;
+    color: $foreground;
+}
+
+.question-submit {
+    height: auto;
+    color: $foreground-muted;
+    margin-top: 1;
+}
+
+.question-help {
+    height: auto;
+    color: $foreground-muted;
+    margin-top: 1;
+}
+
 .code-block {
     height: auto;
     color: $foreground;
@@ -640,26 +946,65 @@ WelcomeBanner {
     padding: 1;
 }
 
+.whats-new-message {
+    background: $surface;
+    border-left: solid $warning;
+    margin-bottom: 1;
+}
+
+.plan-offer-message {
+    background: transparent;
+    border: none;
+    height: auto;
+    padding: 0;
+    margin-top: 0;
+    color: $foreground-muted;
+    text-style: dim;
+
+    Markdown > *:last-child {
+        margin-bottom: 0;
+        link-style: none;
+        link-color: $foreground-muted;
+        link-background-hover: transparent;
+        link-style-hover: underline;
+        link-color-hover: $warning;
+    }
+}
+
 Horizontal {
     width: 100%;
     height: auto;
 }
 
-ModeIndicator {
+ExpandingBorder {
+    width: auto;
+    height: 100%;
+    content-align: left bottom;
+}
+
+AgentIndicator {
     width: auto;
     height: auto;
     background: transparent;
     padding: 0;
     margin: 0 0 0 1;
-    color: $warning;
+    color: $text-muted;
     align: left middle;
 
-    &.mode-on {
+    &.agent-safe {
+        color: $success;
+    }
+
+    &.agent-neutral {
+        color: $text-muted;
+    }
+
+    &.agent-destructive {
         color: $warning;
     }
 
-    &.mode-off {
-        color: $text-muted;
+    &.agent-yolo {
+        color: $error;
     }
 }
 

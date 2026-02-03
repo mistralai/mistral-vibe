@@ -1,47 +1,23 @@
 from __future__ import annotations
 
-import enum
 from enum import StrEnum
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
-from acp.schema import PermissionOption, SessionMode
+from acp.schema import (
+    ContentToolCallContent,
+    PermissionOption,
+    SessionMode,
+    TextContentBlock,
+    ToolCallProgress,
+    ToolCallStart,
+)
 
+from vibe.core.agents.models import AgentProfile, AgentType
+from vibe.core.types import CompactEndEvent, CompactStartEvent
+from vibe.core.utils import compact_reduction_display
 
-class VibeSessionMode(enum.StrEnum):
-    APPROVAL_REQUIRED = enum.auto()
-    AUTO_APPROVE = enum.auto()
-
-    def to_acp_session_mode(self) -> SessionMode:
-        match self:
-            case self.APPROVAL_REQUIRED:
-                return SessionMode(
-                    id=VibeSessionMode.APPROVAL_REQUIRED,
-                    name="Approval Required",
-                    description="Requires user approval for tool executions",
-                )
-            case self.AUTO_APPROVE:
-                return SessionMode(
-                    id=VibeSessionMode.AUTO_APPROVE,
-                    name="Auto Approve",
-                    description="Automatically approves all tool executions",
-                )
-
-    @classmethod
-    def from_acp_session_mode(cls, session_mode: SessionMode) -> VibeSessionMode | None:
-        if not cls.is_valid(session_mode.id):
-            return None
-        return cls(session_mode.id)
-
-    @classmethod
-    def is_valid(cls, mode_id: str) -> bool:
-        try:
-            return cls(mode_id).to_acp_session_mode() is not None
-        except (ValueError, KeyError):
-            return False
-
-    @classmethod
-    def get_all_acp_session_modes(cls) -> list[SessionMode]:
-        return [mode.to_acp_session_mode() for mode in cls]
+if TYPE_CHECKING:
+    from vibe.core.agents.manager import AgentManager
 
 
 class ToolOption(StrEnum):
@@ -53,18 +29,85 @@ class ToolOption(StrEnum):
 
 TOOL_OPTIONS = [
     PermissionOption(
-        optionId=ToolOption.ALLOW_ONCE,
+        option_id=ToolOption.ALLOW_ONCE,
         name="Allow once",
         kind=cast(Literal["allow_once"], ToolOption.ALLOW_ONCE),
     ),
     PermissionOption(
-        optionId=ToolOption.ALLOW_ALWAYS,
+        option_id=ToolOption.ALLOW_ALWAYS,
         name="Allow always",
         kind=cast(Literal["allow_always"], ToolOption.ALLOW_ALWAYS),
     ),
     PermissionOption(
-        optionId=ToolOption.REJECT_ONCE,
+        option_id=ToolOption.REJECT_ONCE,
         name="Reject once",
         kind=cast(Literal["reject_once"], ToolOption.REJECT_ONCE),
     ),
 ]
+
+
+def agent_profile_to_acp(profile: AgentProfile) -> SessionMode:
+    return SessionMode(
+        id=profile.name, name=profile.display_name, description=profile.description
+    )
+
+
+def is_valid_acp_agent(agent_manager: AgentManager, agent_name: str) -> bool:
+    return agent_name in agent_manager.available_agents
+
+
+def get_all_acp_session_modes(agent_manager: AgentManager) -> list[SessionMode]:
+    return [
+        agent_profile_to_acp(profile)
+        for profile in agent_manager.available_agents.values()
+        if profile.agent_type == AgentType.AGENT
+    ]
+
+
+def create_compact_start_session_update(event: CompactStartEvent) -> ToolCallStart:
+    # WORKAROUND: Using tool_call to communicate compact events to the client.
+    # This should be revisited when the ACP protocol defines how compact events
+    # should be represented.
+    # [RFD](https://agentclientprotocol.com/rfds/session-usage)
+    return ToolCallStart(
+        session_update="tool_call",
+        tool_call_id=event.tool_call_id,
+        title="Compacting conversation history...",
+        kind="other",
+        status="in_progress",
+        content=[
+            ContentToolCallContent(
+                type="content",
+                content=TextContentBlock(
+                    type="text",
+                    text="Automatic context management, no approval required. This may take some time...",
+                ),
+            )
+        ],
+    )
+
+
+def create_compact_end_session_update(event: CompactEndEvent) -> ToolCallProgress:
+    # WORKAROUND: Using tool_call_update to communicate compact events to the client.
+    # This should be revisited when the ACP protocol defines how compact events
+    # should be represented.
+    # [RFD](https://agentclientprotocol.com/rfds/session-usage)
+    return ToolCallProgress(
+        session_update="tool_call_update",
+        tool_call_id=event.tool_call_id,
+        title="Compacted conversation history",
+        status="completed",
+        content=[
+            ContentToolCallContent(
+                type="content",
+                content=TextContentBlock(
+                    type="text",
+                    text=(
+                        compact_reduction_display(
+                            event.old_context_tokens, event.new_context_tokens
+                        )
+                    ),
+                ),
+            )
+        ],
+    )

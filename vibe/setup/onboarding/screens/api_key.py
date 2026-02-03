@@ -12,12 +12,13 @@ from textual.validation import Length
 from textual.widgets import Input, Link, Static
 
 from vibe.cli.clipboard import copy_selection_to_clipboard
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import VibeConfig
-from vibe.core.config_path import GLOBAL_ENV_FILE
+from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
 from vibe.setup.onboarding.base import OnboardingScreen
 
 PROVIDER_HELP = {
-    "mistral": ("https://console.mistral.ai/codestral/vibe", "Mistral AI Studio")
+    "mistral": ("https://console.mistral.ai/codestral/cli", "Mistral AI Studio")
 }
 CONFIG_DOCS_URL = (
     "https://github.com/mistralai/mistral-vibe?tab=readme-ov-file#configuration"
@@ -48,10 +49,10 @@ class ApiKeyScreen(OnboardingScreen):
             return
 
         help_url, help_name = PROVIDER_HELP[self.provider.name]
-        yield Static(f"Grab your {provider_name} API key from the {help_name}:")
+        yield NoMarkupStatic(f"Grab your {provider_name} API key from the {help_name}:")
         yield Center(
             Horizontal(
-                Static("→ ", classes="link-chevron"),
+                NoMarkupStatic("→ ", classes="link-chevron"),
                 Link(help_url, url=help_url),
                 classes="link-row",
             )
@@ -60,7 +61,7 @@ class ApiKeyScreen(OnboardingScreen):
     def _compose_config_docs(self) -> ComposeResult:
         yield Static("[dim]Learn more about Vibe configuration:[/]")
         yield Horizontal(
-            Static("→ ", classes="link-chevron"),
+            NoMarkupStatic("→ ", classes="link-chevron"),
             Link(CONFIG_DOCS_URL, url=CONFIG_DOCS_URL),
             classes="link-row",
         )
@@ -76,17 +77,17 @@ class ApiKeyScreen(OnboardingScreen):
         )
 
         with Vertical(id="api-key-outer"):
-            yield Static("", classes="spacer")
-            yield Center(Static("One last thing...", id="api-key-title"))
+            yield NoMarkupStatic("", classes="spacer")
+            yield Center(NoMarkupStatic("One last thing...", id="api-key-title"))
             with Center():
                 with Vertical(id="api-key-content"):
                     yield from self._compose_provider_link(provider_name)
-                    yield Static(
+                    yield NoMarkupStatic(
                         "...and paste it below to finish the setup:", id="paste-hint"
                     )
                     yield Center(Horizontal(self.input_widget, id="input-box"))
-                    yield Static("", id="feedback")
-            yield Static("", classes="spacer")
+                    yield NoMarkupStatic("", id="feedback")
+            yield NoMarkupStatic("", classes="spacer")
             yield Vertical(
                 Vertical(*self._compose_config_docs(), id="config-docs-group"),
                 id="config-docs-section",
@@ -96,7 +97,7 @@ class ApiKeyScreen(OnboardingScreen):
         self.input_widget.focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        feedback = self.query_one("#feedback", Static)
+        feedback = self.query_one("#feedback", NoMarkupStatic)
         input_box = self.query_one("#input-box")
 
         if event.validation_result is None:

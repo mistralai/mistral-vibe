@@ -5,7 +5,7 @@ import json
 import os
 import re
 import types
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import httpx
 import mistralai
@@ -27,6 +27,11 @@ if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
 
 
+class ParsedContent(NamedTuple):
+    content: Content
+    reasoning_content: Content | None
+
+
 class MistralMapper:
     def prepare_message(self, msg: LLMMessage) -> mistralai.Messages:
         match msg.role:
@@ -35,9 +40,25 @@ class MistralMapper:
             case Role.user:
                 return mistralai.UserMessage(role="user", content=msg.content)
             case Role.assistant:
+                content: mistralai.AssistantMessageContent
+                if msg.reasoning_content:
+                    content = [
+                        mistralai.ThinkChunk(
+                            type="thinking",
+                            thinking=[
+                                mistralai.TextChunk(
+                                    type="text", text=msg.reasoning_content
+                                )
+                            ],
+                        ),
+                        mistralai.TextChunk(type="text", text=msg.content or ""),
+                    ]
+                else:
+                    content = msg.content or ""
+
                 return mistralai.AssistantMessage(
                     role="assistant",
-                    content=msg.content,
+                    content=content,
                     tool_calls=[
                         mistralai.ToolCall(
                             function=mistralai.FunctionCall(
@@ -80,20 +101,37 @@ class MistralMapper:
             function=mistralai.FunctionName(name=tool_choice.function.name),
         )
 
-    def parse_content(self, content: mistralai.AssistantMessageContent) -> Content:
+    def _extract_thinking_text(self, chunk: mistralai.ThinkChunk) -> str:
+        thinking_content = getattr(chunk, "thinking", None)
+        if not thinking_content:
+            return ""
+        parts = []
+        for inner in thinking_content:
+            if hasattr(inner, "type") and inner.type == "text":
+                parts.append(getattr(inner, "text", ""))
+            elif isinstance(inner, str):
+                parts.append(inner)
+        return "".join(parts)
+
+    def parse_content(
+        self, content: mistralai.AssistantMessageContent
+    ) -> ParsedContent:
         if isinstance(content, str):
-            return content
+            return ParsedContent(content=content, reasoning_content=None)
 
         concat_content = ""
+        concat_reasoning = ""
         for chunk in content:
             if isinstance(chunk, mistralai.FileChunk):
                 continue
-            match chunk.type:
-                case "text":
-                    concat_content += chunk.text
-                case _:
-                    pass
-        return concat_content
+            if isinstance(chunk, mistralai.TextChunk):
+                concat_content += chunk.text
+            elif isinstance(chunk, mistralai.ThinkChunk):
+                concat_reasoning += self._extract_thinking_text(chunk)
+        return ParsedContent(
+            content=concat_content,
+            reasoning_content=concat_reasoning if concat_reasoning else None,
+        )
 
     def parse_tool_calls(self, tool_calls: list[mistralai.ToolCall]) -> list[ToolCall]:
         return [
@@ -103,7 +141,7 @@ class MistralMapper:
                     name=tool_call.function.name,
                     arguments=tool_call.function.arguments
                     if isinstance(tool_call.function.arguments, str)
-                    else json.dumps(tool_call.function.arguments),
+                    else json.dumps(tool_call.function.arguments, ensure_ascii=False),
                 ),
                 index=tool_call.index,
             )
@@ -121,6 +159,13 @@ class MistralBackend:
             if self._provider.api_key_env_var
             else None
         )
+
+        reasoning_field = getattr(provider, "reasoning_field_name", "reasoning_content")
+        if reasoning_field != "reasoning_content":
+            raise ValueError(
+                f"Mistral backend does not support custom reasoning_field_name "
+                f"(got '{reasoning_field}'). Mistral uses ThinkChunk for reasoning."
+            )
 
         # Mistral SDK takes server URL without api version as input
         url_pattern = r"(https?://[^/]+)(/v.*)"
@@ -187,14 +232,16 @@ class MistralBackend:
                 stream=False,
             )
 
+            parsed = (
+                self._mapper.parse_content(response.choices[0].message.content)
+                if response.choices[0].message.content
+                else ParsedContent(content="", reasoning_content=None)
+            )
             return LLMChunk(
                 message=LLMMessage(
                     role=Role.assistant,
-                    content=self._mapper.parse_content(
-                        response.choices[0].message.content
-                    )
-                    if response.choices[0].message.content
-                    else "",
+                    content=parsed.content,
+                    reasoning_content=parsed.reasoning_content,
                     tool_calls=self._mapper.parse_tool_calls(
                         response.choices[0].message.tool_calls
                     )
@@ -205,7 +252,6 @@ class MistralBackend:
                     prompt_tokens=response.usage.prompt_tokens or 0,
                     completion_tokens=response.usage.completion_tokens or 0,
                 ),
-                finish_reason=response.choices[0].finish_reason,
             )
 
         except mistralai.SDKError as e:
@@ -213,7 +259,7 @@ class MistralBackend:
                 provider=self._provider.name,
                 endpoint=self._server_url,
                 response=e.raw_response,
-                headers=dict(e.raw_response.headers.items()),
+                headers=e.raw_response.headers,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -257,14 +303,16 @@ class MistralBackend:
                 else None,
                 http_headers=extra_headers,
             ):
+                parsed = (
+                    self._mapper.parse_content(chunk.data.choices[0].delta.content)
+                    if chunk.data.choices[0].delta.content
+                    else ParsedContent(content="", reasoning_content=None)
+                )
                 yield LLMChunk(
                     message=LLMMessage(
                         role=Role.assistant,
-                        content=self._mapper.parse_content(
-                            chunk.data.choices[0].delta.content
-                        )
-                        if chunk.data.choices[0].delta.content
-                        else "",
+                        content=parsed.content,
+                        reasoning_content=parsed.reasoning_content,
                         tool_calls=self._mapper.parse_tool_calls(
                             chunk.data.choices[0].delta.tool_calls
                         )
@@ -279,7 +327,6 @@ class MistralBackend:
                         if chunk.data.usage
                         else 0,
                     ),
-                    finish_reason=chunk.data.choices[0].finish_reason,
                 )
 
         except mistralai.SDKError as e:
@@ -287,7 +334,7 @@ class MistralBackend:
                 provider=self._provider.name,
                 endpoint=self._server_url,
                 response=e.raw_response,
-                headers=dict(e.raw_response.headers.items()),
+                headers=e.raw_response.headers,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -325,8 +372,7 @@ class MistralBackend:
             tool_choice=tool_choice,
             extra_headers=extra_headers,
         )
-        assert result.usage is not None, (
-            "Usage should be present in non-streaming completions"
-        )
+        if result.usage is None:
+            raise ValueError("Missing usage in non streaming completion")
 
         return result.usage.prompt_tokens

@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, NamedTuple, final
 
-import aiofiles
+import anyio
 from pydantic import BaseModel, Field
 
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
     BaseToolState,
+    InvokeContext,
     ToolError,
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.types import ToolStreamEvent
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -70,14 +73,16 @@ class ReadFile(
     )
 
     @final
-    async def run(self, args: ReadFileArgs) -> ReadFileResult:
+    async def run(
+        self, args: ReadFileArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | ReadFileResult, None]:
         file_path = self._prepare_and_validate_path(args)
 
         read_result = await self._read_file(args, file_path)
 
         self._update_state_history(file_path)
 
-        return ReadFileResult(
+        yield ReadFileResult(
             path=str(file_path),
             content="".join(read_result.lines),
             lines_read=len(read_result.lines),
@@ -89,7 +94,7 @@ class ReadFile(
 
         file_path = Path(args.path).expanduser()
         if not file_path.is_absolute():
-            file_path = self.config.effective_workdir / file_path
+            file_path = Path.cwd() / file_path
         file_str = str(file_path)
 
         for pattern in self.config.denylist:
@@ -107,7 +112,7 @@ class ReadFile(
 
         file_path = Path(args.path).expanduser()
         if not file_path.is_absolute():
-            file_path = self.config.effective_workdir / file_path
+            file_path = Path.cwd() / file_path
 
         self._validate_path(file_path)
         return file_path
@@ -118,7 +123,9 @@ class ReadFile(
             bytes_read = 0
             was_truncated = False
 
-            async with aiofiles.open(file_path, encoding="utf-8", errors="ignore") as f:
+            async with await anyio.Path(file_path).open(
+                encoding="utf-8", errors="ignore"
+            ) as f:
                 line_index = 0
                 async for line in f:
                     if line_index < args.offset:
@@ -159,7 +166,7 @@ class ReadFile(
             resolved_path = file_path.resolve()
         except ValueError:
             raise ToolError(
-                f"Security error: Cannot read path '{file_path}' outside of the project directory '{self.config.effective_workdir}'."
+                f"Security error: Cannot read path '{file_path}' outside of the project directory '{Path.cwd()}'."
             )
         except FileNotFoundError:
             raise ToolError(f"File not found at: {file_path}")
@@ -179,7 +186,7 @@ class ReadFile(
         if not isinstance(event.args, ReadFileArgs):
             return ToolCallDisplay(summary="read_file")
 
-        summary = f"read_file: {event.args.path}"
+        summary = f"Reading {event.args.path}"
         if event.args.offset > 0 or event.args.limit is not None:
             parts = []
             if event.args.offset > 0:
@@ -188,14 +195,7 @@ class ReadFile(
                 parts.append(f"limit {event.args.limit} lines")
             summary += f" ({', '.join(parts)})"
 
-        return ToolCallDisplay(
-            summary=summary,
-            details={
-                "path": event.args.path,
-                "offset": event.args.offset,
-                "limit": event.args.limit,
-            },
-        )
+        return ToolCallDisplay(summary=summary)
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -215,15 +215,6 @@ class ReadFile(
             warnings=["File was truncated due to size limit"]
             if event.result.was_truncated
             else [],
-            details={
-                "path": str(event.result.path),
-                "lines_read": event.result.lines_read,
-                "was_truncated": event.result.was_truncated,
-                "content": event.result.content,
-                "file_extension": path_obj.suffix.lstrip(".")
-                if path_obj.suffix
-                else "text",
-            },
         )
 
     @classmethod

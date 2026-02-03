@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -9,10 +9,17 @@ from textual.events import Resize
 from textual.theme import BUILTIN_THEMES
 from textual.widgets import Markdown, Static
 
+from vibe.cli.textual_ui.terminal_theme import TERMINAL_THEME_NAME
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import VibeConfig
 from vibe.setup.onboarding.base import OnboardingScreen
 
-THEMES = sorted(k for k in BUILTIN_THEMES if k != "textual-ansi")
+if TYPE_CHECKING:
+    from vibe.setup.onboarding import OnboardingApp
+
+THEMES = [TERMINAL_THEME_NAME] + sorted(
+    k for k in BUILTIN_THEMES if k != "textual-ansi"
+)
 
 VISIBLE_NEIGHBORS = 3
 FADE_CLASSES = ["fade-1", "fade-2", "fade-3"]
@@ -61,19 +68,19 @@ class ThemeSelectionScreen(OnboardingScreen):
 
     def _compose_theme_list(self) -> ComposeResult:
         for _ in range(VISIBLE_NEIGHBORS * 2 + 1):
-            widget = Static("", classes="theme-item")
+            widget = NoMarkupStatic("", classes="theme-item")
             self._theme_widgets.append(widget)
             yield widget
 
     def compose(self) -> ComposeResult:
         with Center(id="theme-outer"):
             with Vertical(id="theme-content"):
-                yield Static("Select your preferred theme", id="theme-title")
+                yield NoMarkupStatic("Select your preferred theme", id="theme-title")
                 yield Center(
                     Horizontal(
-                        Static("Navigate ↑ ↓", id="nav-hint"),
+                        NoMarkupStatic("Navigate ↑ ↓", id="nav-hint"),
                         Vertical(*self._compose_theme_list(), id="theme-list"),
-                        Static("Press Enter ↵", id="enter-hint"),
+                        NoMarkupStatic("Press Enter \u21b5", id="enter-hint"),
                         id="theme-row",
                     )
                 )
@@ -83,10 +90,24 @@ class ThemeSelectionScreen(OnboardingScreen):
                     with preview:
                         yield Container(Markdown(PREVIEW_MARKDOWN), id="preview-inner")
 
+    @property
+    def _has_terminal_theme(self) -> bool:
+        app: OnboardingApp = self.app  # type: ignore[assignment]
+        return app._terminal_theme is not None
+
+    @property
+    def _available_themes(self) -> list[str]:
+        if self._has_terminal_theme:
+            return THEMES
+        return [t for t in THEMES if t != TERMINAL_THEME_NAME]
+
     def on_mount(self) -> None:
         current_theme = self.app.theme
-        if current_theme in THEMES:
-            self._theme_index = THEMES.index(current_theme)
+        themes = self._available_themes
+        if current_theme == TERMINAL_THEME_NAME:
+            self._theme_index = 0
+        elif current_theme in themes:
+            self._theme_index = themes.index(current_theme)
         self._update_display()
         self._update_preview_height()
         self.focus()
@@ -102,8 +123,9 @@ class ThemeSelectionScreen(OnboardingScreen):
         preview.styles.max_height = max(10, available)
 
     def _get_theme_at_offset(self, offset: int) -> str:
-        index = (self._theme_index + offset) % len(THEMES)
-        return THEMES[index]
+        themes = self._available_themes
+        index = (self._theme_index + offset) % len(themes)
+        return themes[index]
 
     def _update_display(self) -> None:
         for i, widget in enumerate(self._theme_widgets):
@@ -121,8 +143,10 @@ class ThemeSelectionScreen(OnboardingScreen):
                 widget.add_class(FADE_CLASSES[distance])
 
     def _navigate(self, direction: int) -> None:
-        self._theme_index = (self._theme_index + direction) % len(THEMES)
-        self.app.theme = THEMES[self._theme_index]
+        themes = self._available_themes
+        self._theme_index = (self._theme_index + direction) % len(themes)
+        theme = themes[self._theme_index]
+        self.app.theme = theme
         self._update_display()
 
     def action_next_theme(self) -> None:
@@ -132,7 +156,7 @@ class ThemeSelectionScreen(OnboardingScreen):
         self._navigate(-1)
 
     def action_next(self) -> None:
-        theme = THEMES[self._theme_index]
+        theme = self._available_themes[self._theme_index]
         try:
             VibeConfig.save_updates({"textual_theme": theme})
         except OSError:

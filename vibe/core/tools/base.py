@@ -1,17 +1,45 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
+from dataclasses import dataclass, field
 from enum import StrEnum, auto
 import functools
 import inspect
 from pathlib import Path
 import re
 import sys
-from typing import Any, ClassVar, cast, get_args, get_type_hints
+import types
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from vibe.core.types import ToolStreamEvent
+
+if TYPE_CHECKING:
+    from vibe.core.agents.manager import AgentManager
+    from vibe.core.types import ApprovalCallback, UserInputCallback
 
 ARGS_COUNT = 4
+
+
+@dataclass
+class InvokeContext:
+    """Context passed to tools during invocation."""
+
+    tool_call_id: str
+    approval_callback: ApprovalCallback | None = field(default=None)
+    agent_manager: AgentManager | None = field(default=None)
+    user_input_callback: UserInputCallback | None = field(default=None)
 
 
 class ToolError(Exception):
@@ -56,7 +84,6 @@ class BaseToolConfig(BaseModel):
 
     Attributes:
         permission: The permission level required to use the tool.
-        workdir: The working directory for the tool. If None, the current working directory is used.
         allowlist: Patterns that automatically allow tool execution.
         denylist: Patterns that automatically deny tool execution.
     """
@@ -64,24 +91,8 @@ class BaseToolConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     permission: ToolPermission = ToolPermission.ASK
-    workdir: Path | None = Field(default=None, exclude=True)
     allowlist: list[str] = Field(default_factory=list)
     denylist: list[str] = Field(default_factory=list)
-
-    @field_validator("workdir", mode="before")
-    @classmethod
-    def _expand_workdir(cls, v: Any) -> Path | None:
-        if v is None or (isinstance(v, str) and not v.strip()):
-            return None
-        if isinstance(v, str):
-            return Path(v).expanduser().resolve()
-        if isinstance(v, Path):
-            return v.expanduser().resolve()
-        return None
-
-    @property
-    def effective_workdir(self) -> Path:
-        return self.workdir if self.workdir is not None else Path.cwd()
 
 
 class BaseToolState(BaseModel):
@@ -109,9 +120,12 @@ class BaseTool[
         self.state = state
 
     @abstractmethod
-    async def run(self, args: ToolArgs) -> ToolResult:
-        """Invoke the tool with the given arguments. This method must be async."""
-        ...
+    async def run(
+        self, args: ToolArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | ToolResult, None]:
+        """Invoke the tool with the given arguments."""
+        raise NotImplementedError  # pragma: no cover
+        yield  # type: ignore[misc]
 
     @classmethod
     @functools.cache
@@ -134,10 +148,10 @@ class BaseTool[
 
         return None
 
-    async def invoke(self, **raw: Any) -> ToolResult:
-        """Validate arguments and run the tool.
-        Pattern checking is now handled by Agent._should_execute_tool.
-        """
+    async def invoke(
+        self, ctx: InvokeContext | None = None, **raw: Any
+    ) -> AsyncGenerator[ToolStreamEvent | ToolResult, None]:
+        """Validate arguments and run the tool."""
         try:
             args_model, _ = self._get_tool_args_results()
             args = args_model.model_validate(raw)
@@ -146,7 +160,8 @@ class BaseTool[
                 f"Validation error in tool {self.get_name()}: {err}"
             ) from err
 
-        return await self.run(args)
+        async for item in self.run(args, ctx):
+            yield item
 
     @classmethod
     def from_config(
@@ -212,27 +227,65 @@ class BaseTool[
         type_hints = get_type_hints(
             run_fn,
             globalns=vars(sys.modules[cls.__module__]),
-            localns={cls.__name__: cls},
+            localns={
+                cls.__name__: cls,
+                "InvokeContext": InvokeContext,
+                "AsyncGenerator": AsyncGenerator,
+                "ToolStreamEvent": ToolStreamEvent,
+            },
         )
 
         try:
             args_model = type_hints["args"]
-            result_model = type_hints["return"]
+            return_annotation = type_hints["return"]
         except KeyError as e:
             raise TypeError(
-                f"{cls.__name__}.run must be annotated as "
-                "`async def run(self, args: ToolArgs) -> ToolResult`"
+                f"{cls.__name__}.run must be annotated with args and return type"
             ) from e
 
-        if not (
-            issubclass(args_model, BaseModel) and issubclass(result_model, BaseModel)
-        ):
+        result_model = cls._extract_result_type(return_annotation)
+
+        if not issubclass(args_model, BaseModel):
             raise TypeError(
-                f"{cls.__name__}.run annotations must be Pydantic models; "
-                f"got {args_model!r}, {result_model!r}"
+                f"{cls.__name__}.run args annotation must be a Pydantic model; "
+                f"got {args_model!r}"
+            )
+
+        if not issubclass(result_model, BaseModel):
+            raise TypeError(
+                f"{cls.__name__}.run must yield a Pydantic model as result; "
+                f"got {result_model!r}"
             )
 
         return cast(type[ToolArgs], args_model), cast(type[ToolResult], result_model)
+
+    @classmethod
+    def _extract_result_type(cls, return_annotation: Any) -> type:
+        """Extract the ToolResult type from AsyncGenerator[ToolStreamEvent | ToolResult, None]."""
+        origin = get_origin(return_annotation)
+        if origin is not AsyncGenerator:
+            if isinstance(return_annotation, type):
+                return return_annotation
+            raise TypeError(f"Could not extract result type from {return_annotation!r}")
+
+        gen_args = get_args(return_annotation)
+        if not gen_args:
+            raise TypeError(f"Could not extract result type from {return_annotation!r}")
+
+        yield_type = gen_args[0]
+        yield_origin = get_origin(yield_type)
+
+        # Handle Union types (X | Y or Union[X, Y])
+        if yield_origin is Union or isinstance(yield_type, types.UnionType):
+            for arg in get_args(yield_type):
+                if arg is not ToolStreamEvent and isinstance(arg, type):
+                    return arg
+
+        # Handle single type
+        if isinstance(yield_type, type):
+            return yield_type
+
+        raise TypeError(f"Could not extract result type from {return_annotation!r}")
 
     @classmethod
     def get_parameters(cls) -> dict[str, Any]:

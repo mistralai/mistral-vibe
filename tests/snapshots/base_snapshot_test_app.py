@@ -3,10 +3,12 @@ from __future__ import annotations
 from rich.style import Style
 from textual.widgets.text_area import TextAreaTheme
 
+from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.stubs.fake_backend import FakeBackend
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatTextArea
-from vibe.core.agent import Agent
+from vibe.core.agent_loop import AgentLoop
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import SessionLoggingConfig, VibeConfig
 
 
@@ -29,17 +31,27 @@ def default_config() -> VibeConfig:
 
 class BaseSnapshotTestApp(VibeApp):
     CSS_PATH = "../../vibe/cli/textual_ui/app.tcss"
+    _current_agent_name: str = BuiltinAgentName.DEFAULT
 
-    def __init__(self, config: VibeConfig | None = None, **kwargs):
+    def __init__(
+        self,
+        config: VibeConfig | None = None,
+        backend: FakeBackend | None = None,
+        **kwargs,
+    ):
         config = config or default_config()
 
-        super().__init__(config=config, **kwargs)
-
-        self.agent = Agent(
+        agent_loop = AgentLoop(
             config,
-            auto_approve=self.auto_approve,
-            enable_streaming=self.enable_streaming,
-            backend=FakeBackend(),
+            agent_name=self._current_agent_name,
+            enable_streaming=kwargs.get("enable_streaming", False),
+            backend=backend or FakeBackend(),
+        )
+
+        plan_offer_gateway = kwargs.pop("plan_offer_gateway", FakeWhoAmIGateway())
+
+        super().__init__(
+            agent_loop=agent_loop, plan_offer_gateway=plan_offer_gateway, **kwargs
         )
 
     async def on_mount(self) -> None:

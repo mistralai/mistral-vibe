@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from enum import StrEnum, auto
 from typing import ClassVar
 
@@ -9,11 +10,12 @@ from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
     BaseToolState,
+    InvokeContext,
     ToolError,
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 
 
 class TodoStatus(StrEnum):
@@ -75,20 +77,12 @@ class Todo(
 
         match args.action:
             case "read":
-                return ToolCallDisplay(
-                    summary="Reading todos", details={"action": "read"}
-                )
+                return ToolCallDisplay(summary="Reading todos")
             case "write":
                 count = len(args.todos) if args.todos else 0
-                return ToolCallDisplay(
-                    summary=f"Writing {count} todos",
-                    details={"action": "write", "count": count},
-                )
+                return ToolCallDisplay(summary=f"Writing {count} todos")
             case _:
-                return ToolCallDisplay(
-                    summary=f"Unknown action: {args.action}",
-                    details={"action": args.action},
-                )
+                return ToolCallDisplay(summary=f"Unknown action: {args.action}")
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -97,27 +91,20 @@ class Todo(
 
         result = event.result
 
-        by_status = {"in_progress": [], "pending": [], "completed": [], "cancelled": []}
-
-        for todo in result.todos:
-            by_status[todo.status].append({"content": todo.content, "id": todo.id})
-
-        return ToolResultDisplay(
-            success=True,
-            message=result.message,
-            details={"todos_by_status": by_status, "total_count": result.total_count},
-        )
+        return ToolResultDisplay(success=True, message=result.message)
 
     @classmethod
     def get_status_text(cls) -> str:
         return "Managing todos"
 
-    async def run(self, args: TodoArgs) -> TodoResult:
+    async def run(
+        self, args: TodoArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | TodoResult, None]:
         match args.action:
             case "read":
-                return self._read_todos()
+                yield self._read_todos()
             case "write":
-                return self._write_todos(args.todos or [])
+                yield self._write_todos(args.todos or [])
             case _:
                 raise ToolError(
                     f"Invalid action '{args.action}'. Use 'read' or 'write'."

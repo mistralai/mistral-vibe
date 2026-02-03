@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 from typing import TYPE_CHECKING, Any, Protocol
 
+from vibe.core.agents import AgentProfile
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.utils import VIBE_WARNING_TAG
 
 if TYPE_CHECKING:
@@ -141,6 +144,37 @@ class ContextWarningMiddleware:
         self.has_warned = False
 
 
+PLAN_AGENT_REMINDER = f"""<{VIBE_WARNING_TAG}>Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received (for example, to make edits). Instead, you should:
+1. Answer the user's query comprehensively
+2. When you're done researching, present your plan by giving the full plan and not doing further tool calls to return input to the user. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.</{VIBE_WARNING_TAG}>"""
+
+
+class PlanAgentMiddleware:
+    def __init__(
+        self,
+        profile_getter: Callable[[], AgentProfile],
+        reminder: str = PLAN_AGENT_REMINDER,
+    ) -> None:
+        self._profile_getter = profile_getter
+        self.reminder = reminder
+
+    def _is_plan_agent(self) -> bool:
+        return self._profile_getter().name == BuiltinAgentName.PLAN
+
+    async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
+        if not self._is_plan_agent():
+            return MiddlewareResult()
+        return MiddlewareResult(
+            action=MiddlewareAction.INJECT_MESSAGE, message=self.reminder
+        )
+
+    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
+        return MiddlewareResult()
+
+    def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
+        pass
+
+
 class MiddlewarePipeline:
     def __init__(self) -> None:
         self.middlewares: list[ConversationMiddleware] = []
@@ -174,18 +208,13 @@ class MiddlewarePipeline:
         return MiddlewareResult()
 
     async def run_after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        messages_to_inject = []
-
         for mw in self.middlewares:
             result = await mw.after_turn(context)
-            if result.action == MiddlewareAction.INJECT_MESSAGE and result.message:
-                messages_to_inject.append(result.message)
-            elif result.action in {MiddlewareAction.STOP, MiddlewareAction.COMPACT}:
+            if result.action == MiddlewareAction.INJECT_MESSAGE:
+                raise ValueError(
+                    f"INJECT_MESSAGE not allowed in after_turn (from {type(mw).__name__})"
+                )
+            if result.action in {MiddlewareAction.STOP, MiddlewareAction.COMPACT}:
                 return result
-        if messages_to_inject:
-            combined_message = "\n\n".join(messages_to_inject)
-            return MiddlewareResult(
-                action=MiddlewareAction.INJECT_MESSAGE, message=combined_message
-            )
 
         return MiddlewareResult()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,18 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
 )
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
+from vibe.core.agents import AgentSafety
 from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
+
+SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
+    AgentSafety.SAFE: "border-safe",
+    AgentSafety.DESTRUCTIVE: "border-warning",
+    AgentSafety.YOLO: "border-error",
+}
 
 
 class ChatInputContainer(Vertical):
     ID_INPUT_BOX = "input-box"
-    BORDER_WARNING_CLASS = "border-warning"
 
     class Submitted(Message):
         def __init__(self, value: str) -> None:
@@ -32,34 +39,39 @@ class ChatInputContainer(Vertical):
         self,
         history_file: Path | None = None,
         command_registry: CommandRegistry | None = None,
-        show_warning: bool = False,
+        safety: AgentSafety = AgentSafety.NEUTRAL,
+        skill_entries_getter: Callable[[], list[tuple[str, str]]] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._history_file = history_file
         self._command_registry = command_registry or CommandRegistry()
-        self._show_warning = show_warning
-
-        command_entries = [
-            (alias, command.description)
-            for command in self._command_registry.commands.values()
-            for alias in sorted(command.aliases)
-        ]
+        self._safety = safety
+        self._skill_entries_getter = skill_entries_getter
 
         self._completion_manager = MultiCompletionManager([
-            SlashCommandController(CommandCompleter(command_entries), self),
+            SlashCommandController(CommandCompleter(self._get_slash_entries), self),
             PathCompletionController(PathCompleter(), self),
         ])
         self._completion_popup: CompletionPopup | None = None
         self._body: ChatInputBody | None = None
 
+    def _get_slash_entries(self) -> list[tuple[str, str]]:
+        entries = [
+            (alias, command.description)
+            for command in self._command_registry.commands.values()
+            for alias in sorted(command.aliases)
+        ]
+        if self._skill_entries_getter:
+            entries.extend(self._skill_entries_getter())
+        return sorted(entries)
+
     def compose(self) -> ComposeResult:
         self._completion_popup = CompletionPopup()
         yield self._completion_popup
 
-        with Vertical(
-            id=self.ID_INPUT_BOX, classes="border-warning" if self._show_warning else ""
-        ):
+        border_class = SAFETY_BORDER_CLASSES.get(self._safety, "")
+        with Vertical(id=self.ID_INPUT_BOX, classes=border_class):
             self._body = ChatInputBody(history_file=self._history_file, id="input-body")
 
             yield self._body
@@ -91,7 +103,7 @@ class ChatInputContainer(Vertical):
         widget = self._body.input_widget
         if widget:
             self._completion_manager.on_text_changed(
-                widget.text, widget.get_cursor_offset()
+                widget.get_full_text(), widget._get_full_cursor_offset()
             )
 
     def focus_input(self) -> None:
@@ -131,6 +143,9 @@ class ChatInputContainer(Vertical):
         widget = self.input_widget
         if not widget or not self._body:
             return
+        start, end, replacement = widget.adjust_from_full_text_coords(
+            start, end, replacement
+        )
 
         text = widget.text
         start = max(0, min(start, len(text)))
@@ -147,11 +162,16 @@ class ChatInputContainer(Vertical):
         event.stop()
         self.post_message(self.Submitted(event.value))
 
-    def set_show_warning(self, show_warning: bool) -> None:
-        self._show_warning = show_warning
+    def set_safety(self, safety: AgentSafety) -> None:
+        self._safety = safety
 
-        input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
-        if show_warning:
-            input_box.add_class(self.BORDER_WARNING_CLASS)
-        else:
-            input_box.remove_class(self.BORDER_WARNING_CLASS)
+        try:
+            input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
+        except Exception:
+            return
+
+        for border_class in SAFETY_BORDER_CLASSES.values():
+            input_box.remove_class(border_class)
+
+        if safety in SAFETY_BORDER_CLASSES:
+            input_box.add_class(SAFETY_BORDER_CLASSES[safety])
