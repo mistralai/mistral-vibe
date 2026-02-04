@@ -34,7 +34,7 @@ def load_dotenv_values(
     env_path: Path = GLOBAL_ENV_FILE.path,
     environ: MutableMapping[str, str] = os.environ,
 ) -> None:
-    if not env_path.is_file():
+    if not (env_path.is_file() or env_path.is_fifo()):
         return
 
     env_vars = dotenv_values(env_path)
