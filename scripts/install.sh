@@ -1,9 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
 # Mistral Vibe Installation Script
 # This script installs uv if not present and then installs mistral-vibe using uv
 
-set -euo pipefail
+set -e
 
 # Colors for output
 RED='\033[0;31m'
@@ -12,29 +12,29 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-function error() {
-    echo -e "${RED}[ERROR]${NC} $1" >&2
+error() {
+    printf "${RED}[ERROR]${NC} %s\n" "$1" >&2
 }
 
-function info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+info() {
+    printf "${BLUE}[INFO]${NC} %s\n" "$1"
 }
 
-function success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+success() {
+    printf "${GREEN}[SUCCESS]${NC} %s\n" "$1"
 }
 
-function warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
+warning() {
+    printf "${YELLOW}[WARNING]${NC} %s\n" "$1"
 }
 
-function check_platform() {
-    local platform=$(uname -s)
+check_platform() {
+    platform=$(uname -s)
 
-    if [[ "$platform" == "Linux" ]]; then
+    if [ "$platform" = "Linux" ]; then
         info "Detected Linux platform"
         PLATFORM="linux"
-    elif [[ "$platform" == "Darwin" ]]; then
+    elif [ "$platform" = "Darwin" ]; then
         info "Detected macOS platform"
         PLATFORM="macos"
     else
@@ -44,8 +44,8 @@ function check_platform() {
     fi
 }
 
-function check_uv_installed() {
-    if command -v uv &> /dev/null; then
+check_uv_installed() {
+    if command -v uv >/dev/null 2>&1; then
         info "uv is already installed: $(uv --version)"
         UV_INSTALLED=true
     else
@@ -54,10 +54,10 @@ function check_uv_installed() {
     fi
 }
 
-function install_uv() {
+install_uv() {
     info "Installing uv using the official Astral installer..."
 
-    if ! command -v curl &> /dev/null; then
+    if ! command -v curl >/dev/null 2>&1; then
         error "curl is required to install uv. Please install curl first."
         exit 1
     fi
@@ -67,7 +67,7 @@ function install_uv() {
 
         export PATH="$HOME/.local/bin:$PATH"
 
-        if ! command -v uv &> /dev/null; then
+        if ! command -v uv >/dev/null 2>&1; then
             warning "uv was installed but not found in PATH for this session"
             warning "You may need to restart your terminal or run:"
             warning "  export PATH=\"\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH\""
@@ -78,25 +78,27 @@ function install_uv() {
     fi
 }
 
-function install_vibe() {
+install_vibe() {
     info "Installing mistral-vibe from GitHub repository using uv..."
     uv tool install mistral-vibe
 
     success "Mistral Vibe installed successfully! (commands: vibe, vibe-acp)"
 }
 
-function main() {
-    echo
-    echo "██████████████████░░"
-    echo "██████████████████░░"
-    echo "████  ██████  ████░░"
-    echo "████    ██    ████░░"
-    echo "████          ████░░"
-    echo "████  ██  ██  ████░░"
-    echo "██      ██      ██░░"
-    echo "██████████████████░░"
-    echo "██████████████████░░"
-    echo
+main() {
+    cat << 'EOF'
+
+██████████████████░░
+██████████████████░░
+████  ██████  ████░░
+████    ██    ████░░
+████          ████░░
+████  ██  ██  ████░░
+██      ██      ██░░
+██████████████████░░
+██████████████████░░
+
+EOF
     echo "Starting Mistral Vibe installation..."
     echo
 
@@ -104,13 +106,13 @@ function main() {
 
     check_uv_installed
 
-    if [[ "$UV_INSTALLED" == "false" ]]; then
+    if [ "$UV_INSTALLED" = "false" ]; then
         install_uv
     fi
 
     install_vibe
 
-    if command -v vibe &> /dev/null; then
+    if command -v vibe >/dev/null 2>&1; then
         success "Installation completed successfully!"
         echo
         echo "You can now run vibe with:"
