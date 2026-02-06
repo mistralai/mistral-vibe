@@ -62,6 +62,11 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "scaffold": Command(
+                aliases=frozenset(["/scaffold"]),
+                description="Scaffold a new project using cookiecutter",
+                handler="_scaffold_project",
+            ),
         }
 
         for command in excluded_commands:

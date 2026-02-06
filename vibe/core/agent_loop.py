@@ -30,6 +30,7 @@ from vibe.core.middleware import (
     ResetReason,
     TurnLimitMiddleware,
 )
+from vibe.core.orchestrator.manager import Orchestrator, OrchestratorMiddleware
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.session.session_migration import migrate_sessions_entrypoint
@@ -130,6 +131,10 @@ class AgentLoop:
         self.message_observer = message_observer
         self._last_observed_message_index: int = 0
         self.enable_streaming = enable_streaming
+
+        self.orchestrator = Orchestrator()
+        self.orchestrator.initialize_project()
+
         self.middleware_pipeline = MiddlewarePipeline()
         self._setup_middleware()
 
@@ -247,6 +252,7 @@ class AgentLoop:
                 )
 
         self.middleware_pipeline.add(PlanAgentMiddleware(lambda: self.agent_profile))
+        self.middleware_pipeline.add(OrchestratorMiddleware(self.orchestrator))
 
     async def _handle_middleware_result(
         self, result: MiddlewareResult

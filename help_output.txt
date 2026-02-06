@@ -1,0 +1,38 @@
+usage: vibe [-h] [-v] [-p [TEXT]] [--max-turns N] [--max-price DOLLARS]
+            [--enabled-tools TOOL] [--output {text,json,streaming}]
+            [--agent NAME] [--setup] [--workdir DIR]
+            [-c | --resume SESSION_ID]
+            [PROMPT]
+
+Run the Mistral Vibe interactive CLI
+
+positional arguments:
+  PROMPT                Initial prompt to start the interactive session with.
+
+options:
+  -h, --help            show this help message and exit
+  -v, --version         show program's version number and exit
+  -p [TEXT], --prompt [TEXT]
+                        Run in programmatic mode: send prompt, auto-approve
+                        all tools, output response, and exit.
+  --max-turns N         Maximum number of assistant turns (only applies in
+                        programmatic mode with -p).
+  --max-price DOLLARS   Maximum cost in dollars (only applies in programmatic
+                        mode with -p). Session will be interrupted if cost
+                        exceeds this limit.
+  --enabled-tools TOOL  Enable specific tools. In programmatic mode (-p), this
+                        disables all other tools. Can use exact names, glob
+                        patterns (e.g., 'bash*'), or regex with 're:' prefix.
+                        Can be specified multiple times.
+  --output {text,json,streaming}
+                        Output format for programmatic mode (-p): 'text' for
+                        human-readable (default), 'json' for all messages at
+                        end, 'streaming' for newline-delimited JSON per
+                        message.
+  --agent NAME          Agent to use (builtin: default, plan, accept-edits,
+                        auto-approve, or custom from ~/.vibe/agents/NAME.toml)
+  --setup               Setup API key and exit
+  --workdir DIR         Change to this directory before running
+  -c, --continue        Continue from the most recent saved session
+  --resume SESSION_ID   Resume a specific session by its ID (supports partial
+                        matching)

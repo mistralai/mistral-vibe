@@ -735,6 +735,15 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
 
+    async def _scaffold_project(self) -> None:
+        """Trigger the agent to scaffold a project."""
+        prompt = (
+            "I want to scaffold a new project using cookiecutter. "
+            "Please list some popular templates (e.g. for Python, FastAPI) "
+            "and ask me which one to use, then run cookiecutter for me."
+        )
+        await self._handle_user_message(prompt)
+
     async def _compact_history(self) -> None:
         if self._agent_running:
             await self._mount_and_scroll(
