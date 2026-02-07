@@ -186,6 +186,8 @@ jobs:
           path: artifacts
 
       - name: Zip artifact
+        env:
+          VERSION: ${{ needs.sync-fork.outputs.version }}
         run: |
           echo "=== Artifact tree ==="
           find artifacts/ -type f
@@ -198,12 +200,10 @@ jobs:
             exit 1
           fi
 
-          # Derive artifact name from parent directory
-          ARTIFACT_DIR="$(dirname "$BINARY")"
-          ARTIFACT_NAME="$(basename "$ARTIFACT_DIR")"
+          ZIP_NAME="vibe-acp-linux-riscv64-${VERSION}.zip"
           chmod +x "$BINARY"
-          zip -j "release-assets/${ARTIFACT_NAME}.zip" "$BINARY"
-          echo "Created: release-assets/${ARTIFACT_NAME}.zip"
+          zip -j "release-assets/${ZIP_NAME}" "$BINARY"
+          echo "Created: release-assets/${ZIP_NAME}"
 
       - name: Decode upstream release notes
         id: notes
