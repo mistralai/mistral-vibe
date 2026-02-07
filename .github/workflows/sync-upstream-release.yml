@@ -94,7 +94,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      workflows: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -130,7 +129,6 @@ jobs:
 
           echo "Merge successful — pushing to fork"
           git push origin main
-          git push origin "$UPSTREAM_TAG" --force
 
       - name: Extract version from pyproject.toml
         id: version
@@ -264,6 +262,7 @@ jobs:
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
           tag_name: ${{ needs.check-upstream.outputs.upstream_tag }}
+          target_commitish: main
           name: "${{ needs.check-upstream.outputs.upstream_tag }} (RISC-V 64)"
           body_path: /tmp/release-body.md
           files: release-assets/*.zip
