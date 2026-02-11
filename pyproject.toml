@@ -32,7 +32,6 @@ dependencies = [
     "httpx>=0.28.1",
     "mcp>=1.14.0",
     "mistralai==1.9.11",
-    "pexpect>=4.9.0",
     "packaging>=24.1",
     "pydantic>=2.12.4",
     "pydantic-settings>=2.12.0",
