@@ -373,7 +373,7 @@ class GenericBackend:
         data: dict[str, Any]
         headers: dict[str, str]
 
-    @async_retry(tries=3)
+    @async_retry(tries=5, delay_seconds=1.0, backoff_factor=2.0, max_delay=60.0)
     async def _make_request(
         self, url: str, data: bytes, headers: dict[str, str]
     ) -> HTTPResponse:
@@ -385,7 +385,7 @@ class GenericBackend:
         response_body = response.json()
         return self.HTTPResponse(response_body, response_headers)
 
-    @async_generator_retry(tries=3)
+    @async_generator_retry(tries=5, delay_seconds=1.0, backoff_factor=2.0, max_delay=60.0)
     async def _make_streaming_request(
         self, url: str, data: bytes, headers: dict[str, str]
     ) -> AsyncGenerator[dict[str, Any]]:

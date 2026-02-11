@@ -9,6 +9,7 @@ from fnmatch import fnmatch
 import functools
 import logging
 from pathlib import Path
+import random
 import re
 import sys
 from typing import Any
@@ -162,16 +163,55 @@ def _is_retryable_http_error(e: Exception) -> bool:
     return False
 
 
+def _get_retry_after_delay(e: Exception) -> float | None:
+    """Extract delay from Retry-After header if present.
+
+    The Retry-After header can be either:
+    - An integer representing seconds to wait
+    - An HTTP-date representing when to retry
+
+    Returns the delay in seconds, or None if not present/parseable.
+    """
+    if not isinstance(e, httpx.HTTPStatusError):
+        return None
+
+    retry_after = e.response.headers.get("retry-after")
+    if not retry_after:
+        return None
+
+    try:
+        return float(retry_after)
+    except ValueError:
+        pass
+
+    from email.utils import parsedate_to_datetime
+    from datetime import datetime, timezone
+
+    try:
+        retry_date = parsedate_to_datetime(retry_after)
+        now = datetime.now(timezone.utc)
+        delay = (retry_date - now).total_seconds()
+        return max(0.0, delay)
+    except (ValueError, TypeError):
+        return None
+
+
 def async_retry[T, **P](
     tries: int = 3,
     delay_seconds: float = 0.5,
     backoff_factor: float = 2.0,
+    max_delay: float = 60.0,
+    respect_retry_after: bool = True,
     is_retryable: Callable[[Exception], bool] = _is_retryable_http_error,
 ) -> Callable[[Callable[P, Awaitable[T]]], Callable[P, Awaitable[T]]]:
-    """Args:
+    """Retry decorator with exponential backoff and Retry-After header support.
+
+    Args:
         tries: Number of retry attempts
         delay_seconds: Initial delay between retries in seconds
         backoff_factor: Multiplier for delay on each retry
+        max_delay: Maximum delay in seconds between retries
+        respect_retry_after: Whether to respect the Retry-After header from server
         is_retryable: Function to determine if an exception should trigger a retry
                      (defaults to checking for retryable HTTP errors from both urllib and httpx)
 
@@ -189,9 +229,26 @@ def async_retry[T, **P](
                 except Exception as e:
                     last_exc = e
                     if attempt < tries - 1 and is_retryable(e):
-                        current_delay = (delay_seconds * (backoff_factor**attempt)) + (
-                            0.05 * attempt
-                        )
+                        base_delay = delay_seconds * (backoff_factor**attempt)
+                        jitter = random.uniform(0, 0.1 * base_delay)
+
+                        if respect_retry_after:
+                            retry_after = _get_retry_after_delay(e)
+                            if retry_after is not None:
+                                current_delay = min(retry_after + jitter, max_delay)
+                                logger.info(
+                                    f"Rate limited. Retry-After header suggests {retry_after:.1f}s. "
+                                    f"Waiting {current_delay:.1f}s (attempt {attempt + 1}/{tries})"
+                                )
+                            else:
+                                current_delay = min(base_delay + jitter, max_delay)
+                                logger.info(
+                                    f"Request failed, retrying in {current_delay:.1f}s "
+                                    f"(attempt {attempt + 1}/{tries})"
+                                )
+                        else:
+                            current_delay = min(base_delay + jitter, max_delay)
+
                         await asyncio.sleep(current_delay)
                         continue
                     raise e
@@ -208,14 +265,18 @@ def async_generator_retry[T, **P](
     tries: int = 3,
     delay_seconds: float = 0.5,
     backoff_factor: float = 2.0,
+    max_delay: float = 60.0,
+    respect_retry_after: bool = True,
     is_retryable: Callable[[Exception], bool] = _is_retryable_http_error,
 ) -> Callable[[Callable[P, AsyncGenerator[T]]], Callable[P, AsyncGenerator[T]]]:
-    """Retry decorator for async generators.
+    """Retry decorator for async generators with exponential backoff and Retry-After support.
 
     Args:
         tries: Number of retry attempts
         delay_seconds: Initial delay between retries in seconds
         backoff_factor: Multiplier for delay on each retry
+        max_delay: Maximum delay in seconds between retries
+        respect_retry_after: Whether to respect the Retry-After header from server
         is_retryable: Function to determine if an exception should trigger a retry
                      (defaults to checking for retryable HTTP errors from both urllib and httpx)
 
@@ -237,9 +298,26 @@ def async_generator_retry[T, **P](
                 except Exception as e:
                     last_exc = e
                     if attempt < tries - 1 and is_retryable(e):
-                        current_delay = (delay_seconds * (backoff_factor**attempt)) + (
-                            0.05 * attempt
-                        )
+                        base_delay = delay_seconds * (backoff_factor**attempt)
+                        jitter = random.uniform(0, 0.1 * base_delay)
+
+                        if respect_retry_after:
+                            retry_after = _get_retry_after_delay(e)
+                            if retry_after is not None:
+                                current_delay = min(retry_after + jitter, max_delay)
+                                logger.info(
+                                    f"Rate limited. Retry-After header suggests {retry_after:.1f}s. "
+                                    f"Waiting {current_delay:.1f}s (attempt {attempt + 1}/{tries})"
+                                )
+                            else:
+                                current_delay = min(base_delay + jitter, max_delay)
+                                logger.info(
+                                    f"Request failed, retrying in {current_delay:.1f}s "
+                                    f"(attempt {attempt + 1}/{tries})"
+                                )
+                        else:
+                            current_delay = min(base_delay + jitter, max_delay)
+
                         await asyncio.sleep(current_delay)
                         continue
                     raise e
