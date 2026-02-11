@@ -40,14 +40,18 @@ class ChatInputContainer(Vertical):
         history_file: Path | None = None,
         command_registry: CommandRegistry | None = None,
         safety: AgentSafety = AgentSafety.NEUTRAL,
+        agent_name: str = "",
         skill_entries_getter: Callable[[], list[tuple[str, str]]] | None = None,
+        nuage_enabled: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._history_file = history_file
         self._command_registry = command_registry or CommandRegistry()
         self._safety = safety
+        self._agent_name = agent_name
         self._skill_entries_getter = skill_entries_getter
+        self._nuage_enabled = nuage_enabled
 
         self._completion_manager = MultiCompletionManager([
             SlashCommandController(CommandCompleter(self._get_slash_entries), self),
@@ -71,8 +75,13 @@ class ChatInputContainer(Vertical):
         yield self._completion_popup
 
         border_class = SAFETY_BORDER_CLASSES.get(self._safety, "")
-        with Vertical(id=self.ID_INPUT_BOX, classes=border_class):
-            self._body = ChatInputBody(history_file=self._history_file, id="input-body")
+        with Vertical(id=self.ID_INPUT_BOX, classes=border_class) as input_box:
+            input_box.border_title = self._agent_name
+            self._body = ChatInputBody(
+                history_file=self._history_file,
+                id="input-body",
+                nuage_enabled=self._nuage_enabled,
+            )
 
             yield self._body
 
@@ -175,3 +184,12 @@ class ChatInputContainer(Vertical):
 
         if safety in SAFETY_BORDER_CLASSES:
             input_box.add_class(SAFETY_BORDER_CLASSES[safety])
+
+    def set_agent_name(self, name: str) -> None:
+        self._agent_name = name
+
+        try:
+            input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
+            input_box.border_title = name
+        except Exception:
+            pass

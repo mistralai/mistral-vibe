@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import BUILTIN_AGENTS, EXPLORE, AgentSafety, AgentType
-from vibe.core.config import VibeConfig
 
 
 class TestAgentProfile:
@@ -31,7 +31,9 @@ class TestAgentProfile:
 class TestAgentManager:
     @pytest.fixture
     def manager(self) -> AgentManager:
-        config = VibeConfig(include_project_context=False, include_prompt_detail=False)
+        config = build_test_vibe_config(
+            include_project_context=False, include_prompt_detail=False
+        )
         return AgentManager(lambda: config)
 
     def test_get_subagents_returns_only_subagents(self, manager: AgentManager) -> None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Generator
 import logging
+from os import environ
 
 import pytest
 
@@ -9,8 +11,23 @@ from vibe.cli.plan_offer.decide_plan_offer import (
     PlanOfferAction,
     PlanType,
     decide_plan_offer,
+    resolve_api_key_for_plan,
 )
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIResponse
+from vibe.core.config import Backend, ProviderConfig
+
+
+@pytest.fixture
+def mistral_api_key_env() -> Generator[str, None, None]:
+    original_value = environ.get("MISTRAL_API_KEY")
+    test_api_key = "test_mistral_api_key"
+    environ["MISTRAL_API_KEY"] = test_api_key
+    yield test_api_key
+
+    if original_value is not None:
+        environ["MISTRAL_API_KEY"] = original_value
+    else:
+        del environ["MISTRAL_API_KEY"]
 
 
 @pytest.mark.asyncio
@@ -115,3 +132,51 @@ async def test_proposes_none_and_logs_warning_when_gateway_error_occurs(
     assert plan_type is PlanType.UNKNOWN
     assert gateway.calls == ["api-key"]
     assert "Failed to fetch plan status." in caplog.text
+
+
+def test_resolve_api_key_for_plan_with_mistral_backend(
+    mistral_api_key_env: str,
+) -> None:
+    test_api_key = mistral_api_key_env
+
+    provider = ProviderConfig(
+        name="test_mistral",
+        api_base="https://api.mistral.ai",
+        backend=Backend.MISTRAL,
+        api_key_env_var="MISTRAL_API_KEY",
+    )
+
+    result = resolve_api_key_for_plan(provider)
+    assert result == test_api_key
+
+
+def test_resolve_api_key_for_plan_with_non_mistral_backend(
+    mistral_api_key_env: str,
+) -> None:
+    provider = ProviderConfig(
+        name="test_generic",
+        api_base="https://api.generic.ai",
+        backend=Backend.GENERIC,
+        api_key_env_var="GENERIC_API_KEY",
+    )
+
+    result = resolve_api_key_for_plan(provider)
+    assert result == mistral_api_key_env
+
+
+def test_resolve_api_key_for_plan_with_missing_env_var() -> None:
+    previous_api_key = environ["MISTRAL_API_KEY"]
+    del environ["MISTRAL_API_KEY"]
+
+    provider = ProviderConfig(
+        name="test_mistral",
+        api_base="https://api.mistral.ai",
+        backend=Backend.MISTRAL,
+        api_key_env_var="MISTRAL_API_KEY",
+    )
+
+    result = resolve_api_key_for_plan(provider)
+    assert result is None
+
+    if previous_api_key is not None:
+        environ["MISTRAL_API_KEY"] = previous_api_key

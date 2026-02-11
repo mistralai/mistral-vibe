@@ -22,7 +22,7 @@ class CommandRegistry:
                 handler="_show_help",
             ),
             "config": Command(
-                aliases=frozenset(["/config", "/theme", "/model"]),
+                aliases=frozenset(["/config", "/model"]),
                 description="Edit config settings",
                 handler="_show_config",
             ),
@@ -62,6 +62,11 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "teleport": Command(
+                aliases=frozenset(["/teleport"]),
+                description="Teleport session to Vibe Nuage",
+                handler="_teleport_command",
+            ),
         }
 
         for command in excluded_commands:
@@ -86,7 +91,6 @@ class CommandRegistry:
             "- `Ctrl+C` Quit (or clear input if text present)",
             "- `Ctrl+G` Edit input in external editor",
             "- `Ctrl+O` Toggle tool output view",
-            "- `Ctrl+T` Toggle todo view",
             "- `Shift+Tab` Toggle auto-approve mode",
             "",
             "### Special Features",

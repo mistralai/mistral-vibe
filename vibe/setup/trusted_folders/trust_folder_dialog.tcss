@@ -1,6 +1,6 @@
 Screen {
     align: center middle;
-    background: $background 80%;
+    background: transparent 80%;
 }
 
 #trust-dialog {
@@ -8,8 +8,8 @@ Screen {
     max-width: 90%;
     min-width: 50;
     height: auto;
-    border: round $foreground-muted;
-    background: $background;
+    border: round ansi_bright_black;
+    background: transparent;
     padding: 1;
 }
 
@@ -17,7 +17,7 @@ Screen {
     width: 100%;
     height: auto;
     text-style: bold;
-    color: $warning;
+    color: ansi_yellow;
     text-align: center;
     margin-bottom: 1;
 }
@@ -25,7 +25,7 @@ Screen {
 #trust-dialog-path {
     width: 100%;
     height: auto;
-    color: $primary;
+    color: ansi_blue;
     text-align: center;
     text-wrap: wrap;
     margin-bottom: 1;
@@ -34,7 +34,7 @@ Screen {
 #trust-dialog-message {
     width: 100%;
     height: auto;
-    color: $foreground;
+    color: ansi_default;
     text-align: center;
     text-wrap: wrap;
     margin-bottom: 1;
@@ -50,24 +50,24 @@ Screen {
 .trust-option {
     height: auto;
     width: auto;
-    color: $foreground;
+    color: ansi_default;
     margin: 0 3;
     content-align: center middle;
 }
 
 .trust-cursor-selected {
-    color: $foreground;
+    color: ansi_default;
     text-style: bold;
 }
 
 .trust-option-selected {
-    color: $foreground;
+    color: ansi_default;
 }
 
 .trust-dialog-help {
     width: 100%;
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
     text-align: center;
     margin-bottom: 1;
 }
@@ -75,7 +75,7 @@ Screen {
 .trust-dialog-save-info {
     width: 100%;
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
     text-align: center;
     text-style: italic;
     text-wrap: wrap;

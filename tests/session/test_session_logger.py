@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from vibe.core.agents.models import AgentProfile, AgentSafety
 from vibe.core.config import SessionLoggingConfig, VibeConfig
 from vibe.core.session.session_logger import SessionLogger
@@ -62,7 +63,7 @@ def mock_tool_manager() -> ToolManager:
 @pytest.fixture
 def mock_vibe_config() -> VibeConfig:
     """Create a mock vibe config for testing."""
-    return VibeConfig(active_model="test-model", models=[], providers=[])
+    return build_test_vibe_config(active_model="test-model", models=[], providers=[])
 
 
 class TestSessionLoggerInitialization:
@@ -171,7 +172,9 @@ class TestSessionLoggerSaveInteraction:
         result = await logger.save_interaction(
             messages=[],
             stats=AgentStats(),
-            base_config=VibeConfig(active_model="test", models=[], providers=[]),
+            base_config=build_test_vibe_config(
+                active_model="test", models=[], providers=[]
+            ),
             tool_manager=MagicMock(),
             agent_profile=AgentProfile(
                 name="test",

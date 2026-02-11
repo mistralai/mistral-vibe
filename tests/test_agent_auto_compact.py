@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import SessionLoggingConfig, VibeConfig
 from vibe.core.types import (
     AssistantEvent,
     CompactEndEvent,
@@ -27,10 +26,10 @@ async def test_auto_compact_triggers_and_batches_observer() -> None:
         [mock_llm_chunk(content="<summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
-    cfg = VibeConfig(
-        session_logging=SessionLoggingConfig(enabled=False), auto_compact_threshold=1
+    cfg = build_test_vibe_config(auto_compact_threshold=1)
+    agent = build_test_agent_loop(
+        config=cfg, message_observer=observer, backend=backend
     )
-    agent = AgentLoop(cfg, message_observer=observer, backend=backend)
     agent.stats.context_tokens = 2
 
     events = [ev async for ev in agent.act("Hello")]

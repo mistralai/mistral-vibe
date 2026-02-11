@@ -7,6 +7,7 @@ from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.messages import AssistantMessage, ReasoningMessage
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
+from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import (
     AssistantEvent,
     BaseEvent,
@@ -29,15 +30,11 @@ class EventHandler:
         self,
         mount_callback: Callable,
         scroll_callback: Callable,
-        todo_area_callback: Callable,
         get_tools_collapsed: Callable[[], bool],
-        get_todos_collapsed: Callable[[], bool],
     ) -> None:
         self.mount_callback = mount_callback
         self.scroll_callback = scroll_callback
-        self.todo_area_callback = todo_area_callback
         self.get_tools_collapsed = get_tools_collapsed
-        self.get_todos_collapsed = get_todos_collapsed
         self.current_tool_call: ToolCallMessage | None = None
         self.current_compact: CompactMessage | None = None
 
@@ -93,35 +90,21 @@ class EventHandler:
         tool_call = ToolCallMessage(event)
 
         if loading_widget and event.tool_class:
-            from vibe.core.tools.ui import ToolUIDataAdapter
-
             adapter = ToolUIDataAdapter(event.tool_class)
             status_text = adapter.get_status_text()
             loading_widget.set_status(status_text)
 
-        # Don't show todo in messages
-        if event.tool_name != "todo":
-            await self.mount_callback(tool_call)
-
         self.current_tool_call = tool_call
+        await self.mount_callback(tool_call)
+
         return tool_call
 
     async def _handle_tool_result(self, event: ToolResultEvent) -> None:
-        if event.tool_name == "todo":
-            todos_collapsed = self.get_todos_collapsed()
-            tool_result = ToolResultMessage(
-                event, self.current_tool_call, collapsed=todos_collapsed
-            )
-            # Show in todo area
-            todo_area = self.todo_area_callback()
-            await todo_area.remove_children()
-            await todo_area.mount(tool_result)
-        else:
-            tools_collapsed = self.get_tools_collapsed()
-            tool_result = ToolResultMessage(
-                event, self.current_tool_call, collapsed=tools_collapsed
-            )
-            await self.mount_callback(tool_result)
+        tools_collapsed = self.get_tools_collapsed()
+        tool_result = ToolResultMessage(
+            event, self.current_tool_call, collapsed=tools_collapsed
+        )
+        await self.mount_callback(tool_result)
 
         self.current_tool_call = None
 
@@ -153,9 +136,9 @@ class EventHandler:
     async def _handle_unknown_event(self, event: BaseEvent) -> None:
         await self.mount_callback(NoMarkupStatic(str(event), classes="unknown-event"))
 
-    def stop_current_tool_call(self) -> None:
+    def stop_current_tool_call(self, success: bool = True) -> None:
         if self.current_tool_call:
-            self.current_tool_call.stop_spinning()
+            self.current_tool_call.stop_spinning(success=success)
             self.current_tool_call = None
 
     def stop_current_compact(self) -> None:

@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from tests.conftest import build_test_vibe_config
+from vibe.core.config import VibeConfig
 
 
 @pytest.fixture
@@ -18,8 +19,7 @@ def skills_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def skill_config(skills_dir: Path) -> VibeConfig:
-    return VibeConfig(
-        session_logging=SessionLoggingConfig(enabled=False),
+    return build_test_vibe_config(
         system_prompt_id="tests",
         include_project_context=False,
         skill_paths=[skills_dir],

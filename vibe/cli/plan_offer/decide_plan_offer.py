@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 import logging
+from os import getenv
 
 from vibe.cli.plan_offer.ports.whoami_gateway import (
     WhoAmIGateway,
@@ -9,6 +10,7 @@ from vibe.cli.plan_offer.ports.whoami_gateway import (
     WhoAmIGatewayUnauthorized,
     WhoAmIResponse,
 )
+from vibe.core.config import DEFAULT_MISTRAL_API_ENV_KEY, Backend, ProviderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -62,3 +64,24 @@ def _action_and_plan_from_response(
             return PlanOfferAction.UPGRADE, PlanType.FREE
         case _:
             return PlanOfferAction.NONE, PlanType.UNKNOWN
+
+
+def resolve_api_key_for_plan(provider: ProviderConfig) -> str | None:
+    api_env_key = DEFAULT_MISTRAL_API_ENV_KEY
+
+    if provider.backend == Backend.MISTRAL:
+        api_env_key = provider.api_key_env_var
+
+    return getenv(api_env_key)
+
+
+def plan_offer_cta(action: PlanOfferAction) -> str | None:
+    if action is PlanOfferAction.NONE:
+        return
+    url = ACTION_TO_URL[action]
+    match action:
+        case PlanOfferAction.UPGRADE:
+            text = f"### Unlock more with Vibe - [Upgrade to Le Chat Pro]({url})"
+        case PlanOfferAction.SWITCH_TO_PRO_KEY:
+            text = f"### Switch to your [Le Chat Pro API key]({url})"
+    return text

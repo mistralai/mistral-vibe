@@ -27,109 +27,13 @@ OnboardingScreen {
 }
 
 WelcomeScreen #enter-hint {
-    color: $text-muted;
+    color: ansi_bright_black;
     min-width: 16;
     text-align: center;
 }
 
 WelcomeScreen #enter-hint.hidden {
     visibility: hidden;
-}
-
-/* =============================================================================
-   Theme Selection Screen
-   ============================================================================= */
-
-#theme-outer {
-    width: 100%;
-    height: 100%;
-    align: center middle;
-    overflow-y: auto;
-}
-
-#theme-content {
-    width: auto;
-    height: auto;
-    padding: 1 0;
-}
-
-#theme-title {
-    text-align: center;
-    width: 100%;
-    margin-bottom: 2;
-}
-
-#theme-row {
-    width: auto;
-    height: auto;
-}
-
-#nav-hint {
-    color: $text-muted;
-    width: 16;
-    height: 100%;
-    content-align: right middle;
-    padding-right: 2;
-}
-
-#theme-list {
-    width: 24;
-    height: auto;
-}
-
-.theme-item {
-    text-align: center;
-    width: 100%;
-}
-
-.theme-item.selected {
-    color: $text;
-    text-style: bold;
-    border: round #555555;
-    padding: 0 2;
-}
-
-.theme-item.fade-1 {
-    text-opacity: 50%;
-}
-
-.theme-item.fade-2 {
-    text-opacity: 25%;
-}
-
-.theme-item.fade-3 {
-    text-opacity: 10%;
-}
-
-ThemeSelectionScreen #enter-hint {
-    color: $text-muted;
-    width: 16;
-    height: 100%;
-    content-align: left middle;
-    padding-left: 2;
-}
-
-#preview-center {
-    width: 100%;
-    height: auto;
-    margin-top: 2;
-    align: center middle;
-}
-
-#preview {
-    min-width: 50;
-    max-width: 70;
-    height: auto;
-    max-height: 100%;
-    overflow: auto;
-    border: round #555555;
-    border-title-align: center;
-}
-
-#preview-inner {
-    width: 100%;
-    height: auto;
-    padding: 0 1 0 1;
 }
 
 /* =============================================================================
@@ -177,11 +81,11 @@ ThemeSelectionScreen #enter-hint {
 }
 
 #input-box.valid {
-    border: round $success;
+    border: round ansi_green;
 }
 
 #input-box.invalid {
-    border: round $error;
+    border: round ansi_red;
 }
 
 #key {
@@ -202,11 +106,11 @@ ThemeSelectionScreen #enter-hint {
 }
 
 #feedback.error {
-    color: $error;
+    color: ansi_red;
 }
 
 #feedback.success {
-    color: $text-muted;
+    color: ansi_bright_black;
 }
 
 #config-docs-section {
@@ -222,7 +126,7 @@ ThemeSelectionScreen #enter-hint {
 }
 
 #config-docs-group Static {
-    color: $text-muted;
+    color: ansi_bright_black;
 }
 
 #config-docs-group .link-row {

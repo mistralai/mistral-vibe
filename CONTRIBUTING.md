@@ -31,11 +31,12 @@ If you encounter a bug, please open an issue with the following information:
 
 ### Feature Requests and Feedback
 
-We'd love to hear your ideas! When submitting feedback or feature requests:
+We'd love to hear your ideas! When submitting feedback or feature request discussions:
 
-1. **Clear Description**: Explain what you'd like to see or improve
-2. **Use Case**: Describe your use case and why this would be valuable
-3. **Alternatives**: If applicable, mention any alternatives you've considered
+1. **Avoid duplicates**: Check opened discussions before creating a new one
+2. **Clear Description**: Explain what you'd like to see or improve
+3. **Use Case**: Describe your use case and why this would be valuable
+4. **Alternatives**: If applicable, mention any alternatives you've considered
 
 ## Development Setup
 

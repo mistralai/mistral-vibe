@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
 import os
-import platform
-import shutil
-import subprocess
 
-import pyperclip
 from textual.app import App
 
 _PREVIEW_MAX_LENGTH = 40
@@ -24,33 +19,6 @@ def _copy_osc52(text: str) -> None:
         tty.flush()
 
 
-def _copy_x11_clipboard(text: str) -> None:
-    subprocess.run(
-        ["xclip", "-selection", "clipboard"], input=text.encode("utf-8"), check=True
-    )
-
-
-def _copy_wayland_clipboard(text: str) -> None:
-    subprocess.run(["wl-copy"], input=text.encode("utf-8"), check=True)
-
-
-def _has_cmd(cmd: str) -> bool:
-    return shutil.which(cmd) is not None
-
-
-def _get_copy_fns(app: App) -> list[Callable[[str], None]]:
-    copy_fns: list[Callable[[str], None]] = [
-        _copy_osc52,
-        pyperclip.copy,
-        app.copy_to_clipboard,
-    ]
-    if platform.system() == "Linux" and _has_cmd("wl-copy"):
-        copy_fns = [_copy_wayland_clipboard, *copy_fns]
-    if platform.system() == "Linux" and _has_cmd("xclip"):
-        copy_fns = [_copy_x11_clipboard, *copy_fns]
-    return copy_fns
-
-
 def _shorten_preview(texts: list[str]) -> str:
     dense_text = "⏎".join(texts).replace("\n", "⏎")
     if len(dense_text) > _PREVIEW_MAX_LENGTH:
@@ -58,7 +26,7 @@ def _shorten_preview(texts: list[str]) -> str:
     return dense_text
 
 
-def copy_selection_to_clipboard(app: App) -> None:
+def copy_selection_to_clipboard(app: App, show_toast: bool = True) -> None:
     selected_texts = []
 
     for widget in app.query("*"):
@@ -84,27 +52,16 @@ def copy_selection_to_clipboard(app: App) -> None:
 
     combined_text = "\n".join(selected_texts)
 
-    success = False
-    copy_fns = _get_copy_fns(app)
-
-    for copy_fn in copy_fns:
-        try:
-            copy_fn(combined_text)
-        except:
-            pass
-        else:
-            success = True
-
-    if success:
+    try:
+        _copy_osc52(combined_text)
+        if show_toast:
+            app.notify(
+                f'"{_shorten_preview(selected_texts)}" copied to clipboard',
+                severity="information",
+                timeout=2,
+                markup=False,
+            )
+    except Exception:
         app.notify(
-            f'"{_shorten_preview(selected_texts)}" copied to clipboard',
-            severity="information",
-            timeout=2,
-            markup=False,
-        )
-    else:
-        app.notify(
-            "Failed to copy - no clipboard method available",
-            severity="warning",
-            timeout=3,
+            "Failed to copy - clipboard not available", severity="warning", timeout=3
         )

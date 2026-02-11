@@ -5,12 +5,12 @@ from typing import Any
 from acp import (
     Agent as AcpAgent,
     Client,
+    CreateTerminalResponse,
     KillTerminalCommandResponse,
     ReadTextFileResponse,
     ReleaseTerminalResponse,
     RequestPermissionResponse,
     SessionNotification,
-    TerminalHandle,
     TerminalOutputResponse,
     WaitForTerminalExitResponse,
     WriteTextFileResponse,
@@ -20,6 +20,7 @@ from acp.schema import (
     AgentPlanUpdate,
     AgentThoughtChunk,
     AvailableCommandsUpdate,
+    ConfigOptionUpdate,
     CurrentModeUpdate,
     EnvVariable,
     PermissionOption,
@@ -27,6 +28,7 @@ from acp.schema import (
     ToolCallProgress,
     ToolCallStart,
     ToolCallUpdate,
+    UsageUpdate,
     UserMessageChunk,
 )
 
@@ -48,7 +50,9 @@ class FakeClient(Client):
         | AgentPlanUpdate
         | AvailableCommandsUpdate
         | CurrentModeUpdate
-        | SessionInfoUpdate,
+        | SessionInfoUpdate
+        | ConfigOptionUpdate
+        | UsageUpdate,
         **kwargs: Any,
     ) -> None:
         self._session_updates.append(
@@ -88,7 +92,7 @@ class FakeClient(Client):
         env: list[EnvVariable] | None = None,
         output_byte_limit: int | None = None,
         **kwargs: Any,
-    ) -> TerminalHandle:
+    ) -> CreateTerminalResponse:
         raise NotImplementedError()
 
     async def terminal_output(

@@ -20,10 +20,16 @@ class ChatInputBody(Widget):
             self.value = value
             super().__init__()
 
-    def __init__(self, history_file: Path | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        history_file: Path | None = None,
+        nuage_enabled: bool = False,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         self.input_widget: ChatTextArea | None = None
         self.prompt_widget: NoMarkupStatic | None = None
+        self._nuage_enabled = nuage_enabled
 
         if history_file:
             self.history = HistoryManager(history_file)
@@ -37,7 +43,9 @@ class ChatInputBody(Widget):
             self.prompt_widget = NoMarkupStatic(">", id="prompt")
             yield self.prompt_widget
 
-            self.input_widget = ChatTextArea(placeholder="Ask anything...", id="input")
+            self.input_widget = ChatTextArea(
+                id="input", nuage_enabled=self._nuage_enabled
+            )
             yield self.input_widget
 
     def on_mount(self) -> None:
@@ -49,6 +57,8 @@ class ChatInputBody(Widget):
             return "!", text[1:]
         elif text.startswith("/"):
             return "/", text[1:]
+        elif text.startswith("&") and self._nuage_enabled:
+            return "&", text[1:]
         else:
             return ">", text
 

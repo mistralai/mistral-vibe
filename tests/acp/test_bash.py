@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from acp import CreateTerminalResponse
 from acp.schema import EnvVariable, TerminalOutputResponse, WaitForTerminalExitResponse
 import pytest
 
@@ -58,7 +59,7 @@ class MockClient:
         env: list | None = None,
         output_byte_limit: int | None = None,
         **kwargs,
-    ) -> MockTerminalHandle:
+    ) -> CreateTerminalResponse:
         self._create_terminal_called = True
         self._last_create_params = {
             "command": command,
@@ -70,7 +71,7 @@ class MockClient:
         }
         if self._create_terminal_error:
             raise self._create_terminal_error
-        return self._terminal_handle
+        return CreateTerminalResponse(terminal_id=self._terminal_handle.id)
 
     async def terminal_output(
         self, session_id: str, terminal_id: str, **kwargs

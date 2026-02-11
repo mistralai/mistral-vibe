@@ -7,18 +7,12 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Container, Vertical
 from textual.message import Message
-from textual.theme import BUILTIN_THEMES
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.terminal_theme import TERMINAL_THEME_NAME
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
-
-_ALL_THEMES = [TERMINAL_THEME_NAME] + sorted(
-    k for k in BUILTIN_THEMES if k != "textual-ansi"
-)
 
 
 class SettingDefinition(TypedDict):
@@ -46,21 +40,15 @@ class ConfigApp(Container):
             self.value = value
 
     class ConfigClosed(Message):
-        def __init__(self, changes: dict[str, str]) -> None:
+        def __init__(self, changes: dict[str, str | bool]) -> None:
             super().__init__()
             self.changes = changes
 
-    def __init__(self, config: VibeConfig, *, has_terminal_theme: bool = False) -> None:
+    def __init__(self, config: VibeConfig) -> None:
         super().__init__(id="config-app")
         self.config = config
         self.selected_index = 0
         self.changes: dict[str, str] = {}
-
-        themes = (
-            _ALL_THEMES
-            if has_terminal_theme
-            else [t for t in _ALL_THEMES if t != TERMINAL_THEME_NAME]
-        )
 
         self.settings: list[SettingDefinition] = [
             {
@@ -70,10 +58,10 @@ class ConfigApp(Container):
                 "options": [m.alias for m in self.config.models],
             },
             {
-                "key": "textual_theme",
-                "label": "Theme",
+                "key": "autocopy_to_clipboard",
+                "label": "Auto-copy",
                 "type": "cycle",
-                "options": themes,
+                "options": ["On", "Off"],
             },
         ]
 
@@ -104,6 +92,15 @@ class ConfigApp(Container):
         self._update_display()
         self.focus()
 
+    def _get_display_value(self, setting: SettingDefinition) -> str:
+        key = setting["key"]
+        if key in self.changes:
+            return self.changes[key]
+        raw_value = getattr(self.config, key, "")
+        if isinstance(raw_value, bool):
+            return "On" if raw_value else "Off"
+        return str(raw_value)
+
     def _update_display(self) -> None:
         for i, (setting, widget) in enumerate(
             zip(self.settings, self.setting_widgets, strict=True)
@@ -112,9 +109,7 @@ class ConfigApp(Container):
             cursor = "› " if is_selected else "  "
 
             label: str = setting["label"]
-            value: str = self.changes.get(
-                setting["key"], getattr(self.config, setting["key"], "")
-            )
+            value: str = self._get_display_value(setting)
 
             text = f"{cursor}{label}: {value}"
 
@@ -140,7 +135,7 @@ class ConfigApp(Container):
     def action_toggle_setting(self) -> None:
         setting = self.settings[self.selected_index]
         key: str = setting["key"]
-        current: str = self.changes.get(key, getattr(self.config, key)) or ""
+        current: str = self._get_display_value(setting)
 
         options: list[str] = setting["options"]
         new_value = ""
@@ -160,8 +155,17 @@ class ConfigApp(Container):
     def action_cycle(self) -> None:
         self.action_toggle_setting()
 
+    def _convert_changes_for_save(self) -> dict[str, str | bool]:
+        result: dict[str, str | bool] = {}
+        for key, value in self.changes.items():
+            if value in {"On", "Off"}:
+                result[key] = value == "On"
+            else:
+                result[key] = value
+        return result
+
     def action_close(self) -> None:
-        self.post_message(self.ConfigClosed(changes=self.changes.copy()))
+        self.post_message(self.ConfigClosed(changes=self._convert_changes_for_save()))
 
     def on_blur(self, event: events.Blur) -> None:
         self.call_after_refresh(self.focus)

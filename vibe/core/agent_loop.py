@@ -6,7 +6,7 @@ from enum import StrEnum, auto
 from http import HTTPStatus
 from threading import Thread
 import time
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -75,6 +75,19 @@ from vibe.core.utils import (
     is_user_cancellation_event,
 )
 
+try:
+    from vibe.core.teleport.teleport import TeleportService as _TeleportService
+
+    _TELEPORT_AVAILABLE = True
+except ImportError:
+    _TELEPORT_AVAILABLE = False
+    _TeleportService = None
+
+if TYPE_CHECKING:
+    from vibe.core.teleport.nuage import TeleportSession
+    from vibe.core.teleport.teleport import TeleportService
+    from vibe.core.teleport.types import TeleportPushResponseEvent, TeleportYieldEvent
+
 
 class ToolExecutionResponse(StrEnum):
     SKIP = auto()
@@ -96,6 +109,10 @@ class AgentLoopStateError(AgentLoopError):
 
 class AgentLoopLLMResponseError(AgentLoopError):
     """Raised when LLM response is malformed or missing expected data."""
+
+
+class TeleportError(AgentLoopError):
+    """Raised when teleport to Vibe Nuage fails."""
 
 
 def _should_raise_rate_limit_error(e: Exception) -> bool:
@@ -134,7 +151,7 @@ class AgentLoop:
         self._setup_middleware()
 
         system_prompt = get_universal_system_prompt(
-            self.tool_manager, config, self.skill_manager, self.agent_manager
+            self.tool_manager, self.config, self.skill_manager, self.agent_manager
         )
         self.messages = [LLMMessage(role=Role.system, content=system_prompt)]
 
@@ -156,6 +173,7 @@ class AgentLoop:
         self.session_id = str(uuid4())
 
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
+        self._teleport_service: TeleportService | None = None
 
         thread = Thread(
             target=migrate_sessions_entrypoint,
@@ -226,6 +244,60 @@ class AgentLoop:
         self._clean_message_history()
         async for event in self._conversation_loop(msg):
             yield event
+
+    @property
+    def teleport_service(self) -> TeleportService:
+        if not _TELEPORT_AVAILABLE:
+            raise TeleportError(
+                "Teleport requires git to be installed. "
+                "Please install git and try again."
+            )
+
+        if self._teleport_service is None:
+            if _TeleportService is None:
+                raise TeleportError("_TeleportService is unexpectedly None")
+            self._teleport_service = _TeleportService(
+                session_logger=self.session_logger,
+                nuage_base_url=self.config.nuage_base_url,
+                nuage_workflow_id=self.config.nuage_workflow_id,
+                nuage_api_key=self.config.nuage_api_key,
+            )
+        return self._teleport_service
+
+    def teleport_to_vibe_nuage(
+        self, prompt: str | None
+    ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
+        from vibe.core.teleport.nuage import TeleportSession
+
+        session = TeleportSession(
+            metadata={
+                "agent": self.agent_profile.name,
+                "model": self.config.active_model,
+                "stats": self.stats.model_dump(),
+            },
+            messages=[msg.model_dump(exclude_none=True) for msg in self.messages[1:]],
+        )
+        return self._teleport_generator(prompt, session)
+
+    async def _teleport_generator(
+        self, prompt: str | None, session: TeleportSession
+    ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
+        from vibe.core.teleport.errors import ServiceTeleportError
+
+        try:
+            async with self.teleport_service:
+                gen = self.teleport_service.execute(prompt=prompt, session=session)
+                response: TeleportPushResponseEvent | None = None
+                while True:
+                    try:
+                        event = await gen.asend(response)
+                        response = yield event
+                    except StopAsyncIteration:
+                        break
+        except ServiceTeleportError as e:
+            raise TeleportError(str(e)) from e
+        finally:
+            self._teleport_service = None
 
     def _setup_middleware(self) -> None:
         """Configure middleware pipeline for this conversation."""
@@ -575,19 +647,18 @@ class AgentLoop:
 
         try:
             start_time = time.perf_counter()
-            async with self.backend as backend:
-                result = await backend.complete(
-                    model=active_model,
-                    messages=self.messages,
-                    temperature=active_model.temperature,
-                    tools=available_tools,
-                    tool_choice=tool_choice,
-                    extra_headers={
-                        "user-agent": get_user_agent(provider.backend),
-                        "x-affinity": self.session_id,
-                    },
-                    max_tokens=max_tokens,
-                )
+            result = await self.backend.complete(
+                model=active_model,
+                messages=self.messages,
+                temperature=active_model.temperature,
+                tools=available_tools,
+                tool_choice=tool_choice,
+                extra_headers={
+                    "user-agent": get_user_agent(provider.backend),
+                    "x-affinity": self.session_id,
+                },
+                max_tokens=max_tokens,
+            )
             end_time = time.perf_counter()
 
             if result.usage is None:
@@ -622,28 +693,25 @@ class AgentLoop:
             start_time = time.perf_counter()
             usage = LLMUsage()
             chunk_agg = LLMChunk(message=LLMMessage(role=Role.assistant))
-            async with self.backend as backend:
-                async for chunk in backend.complete_streaming(
-                    model=active_model,
-                    messages=self.messages,
-                    temperature=active_model.temperature,
-                    tools=available_tools,
-                    tool_choice=tool_choice,
-                    extra_headers={
-                        "user-agent": get_user_agent(provider.backend),
-                        "x-affinity": self.session_id,
-                    },
-                    max_tokens=max_tokens,
-                ):
-                    processed_message = (
-                        self.format_handler.process_api_response_message(chunk.message)
-                    )
-                    processed_chunk = LLMChunk(
-                        message=processed_message, usage=chunk.usage
-                    )
-                    chunk_agg += processed_chunk
-                    usage += chunk.usage or LLMUsage()
-                    yield processed_chunk
+            async for chunk in self.backend.complete_streaming(
+                model=active_model,
+                messages=self.messages,
+                temperature=active_model.temperature,
+                tools=available_tools,
+                tool_choice=tool_choice,
+                extra_headers={
+                    "user-agent": get_user_agent(provider.backend),
+                    "x-affinity": self.session_id,
+                },
+                max_tokens=max_tokens,
+            ):
+                processed_message = self.format_handler.process_api_response_message(
+                    chunk.message
+                )
+                processed_chunk = LLMChunk(message=processed_message, usage=chunk.usage)
+                chunk_agg += processed_chunk
+                usage += chunk.usage or LLMUsage()
+                yield processed_chunk
             end_time = time.perf_counter()
 
             if chunk_agg.usage is None:
@@ -851,13 +919,12 @@ class AgentLoop:
             active_model = self.config.get_active_model()
             provider = self.config.get_provider_for_model(active_model)
 
-            async with self.backend as backend:
-                actual_context_tokens = await backend.count_tokens(
-                    model=active_model,
-                    messages=self.messages,
-                    tools=self.format_handler.get_available_tools(self.tool_manager),
-                    extra_headers={"user-agent": get_user_agent(provider.backend)},
-                )
+            actual_context_tokens = await self.backend.count_tokens(
+                model=active_model,
+                messages=self.messages,
+                tools=self.format_handler.get_available_tools(self.tool_manager),
+                extra_headers={"user-agent": get_user_agent(provider.backend)},
+            )
 
             self.stats.context_tokens = actual_context_tokens
 
@@ -896,6 +963,12 @@ class AgentLoop:
         max_turns: int | None = None,
         max_price: float | None = None,
     ) -> None:
+        # Force an immediate yield to allow the UI to update before heavy sync work.
+        # When there are no messages, save_interaction returns early without any await,
+        # so the coroutine would run synchronously through ToolManager, SkillManager,
+        # and system prompt generation without yielding control to the event loop.
+        await asyncio.sleep(0)
+
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,

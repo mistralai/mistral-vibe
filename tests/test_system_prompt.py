@@ -4,8 +4,8 @@ import sys
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from vibe.core.agents import AgentManager
-from vibe.core.config import VibeConfig
 from vibe.core.skills.manager import SkillManager
 from vibe.core.system_prompt import get_universal_system_prompt
 from vibe.core.tools.manager import ToolManager
@@ -17,7 +17,7 @@ def test_get_universal_system_prompt_includes_windows_prompt_on_windows(
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("COMSPEC", "C:\\Windows\\System32\\cmd.exe")
 
-    config = VibeConfig(
+    config = build_test_vibe_config(
         system_prompt_id="tests",
         include_project_context=False,
         include_prompt_detail=True,

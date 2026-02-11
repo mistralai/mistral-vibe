@@ -180,6 +180,7 @@ def run_cli(args: argparse.Namespace) -> None:
             run_textual_ui(
                 agent_loop=agent_loop,
                 initial_prompt=args.initial_prompt or stdin_prompt,
+                teleport_on_start=args.teleport,
             )
 
     except (KeyboardInterrupt, EOFError):

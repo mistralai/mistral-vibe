@@ -34,7 +34,8 @@ def load_dotenv_values(
     env_path: Path = GLOBAL_ENV_FILE.path,
     environ: MutableMapping[str, str] = os.environ,
 ) -> None:
-    if not env_path.is_file():
+    # We allow FIFO path to support some environment management solutions (e.g. https://developer.1password.com/docs/environments/local-env-file/)
+    if not env_path.is_file() and not env_path.is_fifo():
         return
 
     env_vars = dotenv_values(env_path)
@@ -260,11 +261,14 @@ class ModelConfig(BaseModel):
         return data
 
 
+DEFAULT_MISTRAL_API_ENV_KEY = "MISTRAL_API_KEY"
+
+
 DEFAULT_PROVIDERS = [
     ProviderConfig(
         name="mistral",
         api_base="https://api.mistral.ai/v1",
-        api_key_env_var="MISTRAL_API_KEY",
+        api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
         backend=Backend.MISTRAL,
     ),
     ProviderConfig(
@@ -301,9 +305,9 @@ DEFAULT_MODELS = [
 
 class VibeConfig(BaseSettings):
     active_model: str = "devstral-2"
-    textual_theme: str = "terminal"
     vim_keybindings: bool = False
     disable_welcome_banner_animation: bool = False
+    autocopy_to_clipboard: bool = True
     displayed_workdir: str = ""
     auto_compact_threshold: int = 200_000
     context_warnings: bool = False
@@ -316,6 +320,14 @@ class VibeConfig(BaseSettings):
     enable_update_checks: bool = True
     enable_auto_update: bool = True
     api_timeout: float = 720.0
+
+    # TODO(vibe-nuage): remove exclude=True once the feature is publicly available
+    nuage_enabled: bool = Field(default=False, exclude=True)
+    nuage_base_url: str = Field(default="https://api.globalaegis.net", exclude=True)
+    nuage_workflow_id: str = Field(default="__shared-nuage-workflow", exclude=True)
+    # TODO(vibe-nuage): change default value to MISTRAL_API_KEY once prod has shared vibe-nuage workers
+    nuage_api_key_env_var: str = Field(default="STAGING_MISTRAL_API_KEY", exclude=True)
+
     providers: list[ProviderConfig] = Field(
         default_factory=lambda: list(DEFAULT_PROVIDERS)
     )
@@ -401,6 +413,10 @@ class VibeConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"
     )
+
+    @property
+    def nuage_api_key(self) -> str:
+        return os.getenv(self.nuage_api_key_env_var, "")
 
     @property
     def system_prompt(self) -> str:

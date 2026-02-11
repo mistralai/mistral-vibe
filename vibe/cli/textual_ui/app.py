@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from enum import StrEnum, auto
-from os import getenv
 from pathlib import Path
 import subprocess
 import time
 from typing import Any, ClassVar, assert_never, cast
+from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, VerticalGroup, VerticalScroll
 from textual.events import AppBlur, AppFocus, MouseUp
 from textual.widget import Widget
 from textual.widgets import Static
@@ -21,31 +21,27 @@ from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.plan_offer.adapters.http_whoami_gateway import HttpWhoAmIGateway
 from vibe.cli.plan_offer.decide_plan_offer import (
-    ACTION_TO_URL,
-    PlanOfferAction,
     PlanType,
     decide_plan_offer,
+    plan_offer_cta,
+    resolve_api_key_for_plan,
 )
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway
 from vibe.cli.terminal_setup import setup_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
-from vibe.cli.textual_ui.terminal_theme import (
-    TERMINAL_THEME_NAME,
-    capture_terminal_theme,
-)
-from vibe.cli.textual_ui.widgets.agent_indicator import AgentIndicator
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
+from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
+from vibe.cli.textual_ui.widgets.load_more import HistoryLoadMoreRequested
 from vibe.cli.textual_ui.widgets.loading import LoadingWidget, paused_timer
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     BashOutputMessage,
     ErrorMessage,
     InterruptMessage,
-    PlanOfferMessage,
     ReasoningMessage,
     StreamingMessageBase,
     UserCommandMessage,
@@ -56,8 +52,19 @@ from vibe.cli.textual_ui.widgets.messages import (
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
-from vibe.cli.textual_ui.widgets.welcome import WelcomeBanner
+from vibe.cli.textual_ui.windowing import (
+    HISTORY_RESUME_TAIL_MESSAGES,
+    LOAD_MORE_BATCH_SIZE,
+    HistoryLoadMoreManager,
+    SessionWindowing,
+    build_history_widgets,
+    create_resume_plan,
+    non_system_history_messages,
+    should_resume_history,
+    sync_backfill_state,
+)
 from vibe.cli.update_notifier import (
     FileSystemUpdateCacheRepository,
     PyPIUpdateGateway,
@@ -70,16 +77,29 @@ from vibe.cli.update_notifier import (
     should_show_whats_new,
 )
 from vibe.cli.update_notifier.update import do_update
-from vibe.core.agent_loop import AgentLoop
+from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents import AgentProfile
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
 from vibe.core.paths.config_paths import HISTORY_FILE
 from vibe.core.session.session_loader import SessionLoader
+from vibe.core.teleport.types import (
+    TeleportAuthCompleteEvent,
+    TeleportAuthRequiredEvent,
+    TeleportCheckingGitEvent,
+    TeleportCompleteEvent,
+    TeleportPushingEvent,
+    TeleportPushRequiredEvent,
+    TeleportPushResponseEvent,
+    TeleportSendingGithubTokenEvent,
+    TeleportStartingWorkflowEvent,
+)
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.builtins.ask_user_question import (
     AskUserQuestionArgs,
     AskUserQuestionResult,
+    Choice,
+    Question,
 )
 from vibe.core.types import (
     AgentStats,
@@ -110,6 +130,47 @@ class BottomApp(StrEnum):
     Question = auto()
 
 
+class ChatScroll(VerticalScroll):
+    """Optimized scroll container that skips cascading style recalculations."""
+
+    def update_node_styles(self, animate: bool = True) -> None:
+        pass
+
+
+PRUNE_LOW_MARK = 1000
+PRUNE_HIGH_MARK = 1500
+
+
+async def prune_by_height(messages_area: Widget, low_mark: int, high_mark: int) -> bool:
+    """Remove older children to keep virtual height within bounds.
+    Implementation from https://github.com/batrachianai/toad/blob/a335b56c9015514d5f38654e3909aaa78850c510/src/toad/widgets/conversation.py#L1495
+    """
+    height = messages_area.virtual_size.height
+    if height <= high_mark:
+        return False
+    prune_children: list[Widget] = []
+    bottom_margin = 0
+    prune_height = 0
+    for child in messages_area.children:
+        if not child.display:
+            prune_children.append(child)
+            continue
+        top, _, bottom, _ = child.styles.margin
+        child_height = child.outer_size.height
+        prune_height = (
+            (prune_height - bottom_margin + max(bottom_margin, top))
+            + bottom
+            + child_height
+        )
+        bottom_margin = bottom
+        if height - prune_height <= low_mark:
+            break
+        prune_children.append(child)
+    if prune_children:
+        await messages_area.remove_children(prune_children)
+    return bool(prune_children)
+
+
 class VibeApp(App):  # noqa: PLR0904
     ENABLE_COMMAND_PALETTE = False
     CSS_PATH = "app.tcss"
@@ -119,7 +180,8 @@ class VibeApp(App):  # noqa: PLR0904
         Binding("ctrl+d", "force_quit", "Quit", show=False, priority=True),
         Binding("escape", "interrupt", "Interrupt", show=False, priority=True),
         Binding("ctrl+o", "toggle_tool", "Toggle Tool", show=False),
-        Binding("ctrl+t", "toggle_todo", "Toggle Todo", show=False),
+        Binding("ctrl+y", "copy_selection", "Copy", show=False, priority=True),
+        Binding("ctrl+shift+c", "copy_selection", "Copy", show=False, priority=True),
         Binding("shift+tab", "cycle_mode", "Cycle Mode", show=False, priority=True),
         Binding("shift+up", "scroll_chat_up", "Scroll Up", show=False, priority=True),
         Binding(
@@ -131,6 +193,7 @@ class VibeApp(App):  # noqa: PLR0904
         self,
         agent_loop: AgentLoop,
         initial_prompt: str | None = None,
+        teleport_on_start: bool = False,
         update_notifier: UpdateGateway | None = None,
         update_cache_repository: UpdateCacheRepository | None = None,
         current_version: str = CORE_VERSION,
@@ -148,42 +211,51 @@ class VibeApp(App):  # noqa: PLR0904
         self._pending_question: asyncio.Future | None = None
 
         self.event_handler: EventHandler | None = None
-        self.commands = CommandRegistry()
+
+        excluded_commands = []
+        if not self.config.nuage_enabled:
+            excluded_commands.append("teleport")
+        self.commands = CommandRegistry(excluded_commands=excluded_commands)
 
         self._chat_input_container: ChatInputContainer | None = None
-        self._agent_indicator: AgentIndicator | None = None
         self._current_bottom_app: BottomApp = BottomApp.Input
 
         self.history_file = HISTORY_FILE.path
 
         self._tools_collapsed = True
-        self._todos_collapsed = False
         self._current_streaming_message: AssistantMessage | None = None
         self._current_streaming_reasoning: ReasoningMessage | None = None
+        self._windowing = SessionWindowing(load_more_batch_size=LOAD_MORE_BATCH_SIZE)
+        self._load_more = HistoryLoadMoreManager()
+        self._tool_call_map: dict[str, str] | None = None
+        self._history_widget_indices: WeakKeyDictionary[Widget, int] = (
+            WeakKeyDictionary()
+        )
         self._update_notifier = update_notifier
         self._update_cache_repository = update_cache_repository
         self._current_version = current_version
         self._plan_offer_gateway = plan_offer_gateway
-        self._plan_offer_shown = False
         self._initial_prompt = initial_prompt
+        self._teleport_on_start = teleport_on_start and self.config.nuage_enabled
         self._auto_scroll = True
         self._last_escape_time: float | None = None
-        self._terminal_theme = capture_terminal_theme()
+        self._banner: Banner | None = None
+        self._cached_messages_area: Widget | None = None
+        self._cached_chat: ChatScroll | None = None
+        self._cached_loading_area: Widget | None = None
 
     @property
     def config(self) -> VibeConfig:
         return self.agent_loop.config
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="chat"):
-            yield WelcomeBanner(self.config)
-            yield Static(id="messages")
+        with ChatScroll(id="chat"):
+            self._banner = Banner(self.config, self.agent_loop.skill_manager)
+            yield self._banner
+            yield VerticalGroup(id="messages")
 
         with Horizontal(id="loading-area"):
             yield Static(id="loading-area-content")
-            yield AgentIndicator(profile=self.agent_loop.agent_profile)
-
-        yield Static(id="todo-area")
 
         with Static(id="bottom-app-container"):
             yield ChatInputContainer(
@@ -191,7 +263,9 @@ class VibeApp(App):  # noqa: PLR0904
                 command_registry=self.commands,
                 id="input-container",
                 safety=self.agent_loop.agent_profile.safety,
+                agent_name=self.agent_loop.agent_profile.display_name.lower(),
                 skill_entries_getter=self._get_skill_entries,
+                nuage_enabled=self.config.nuage_enabled,
             )
 
         with Horizontal(id="bottom-bar"):
@@ -200,25 +274,19 @@ class VibeApp(App):  # noqa: PLR0904
             yield ContextProgress()
 
     async def on_mount(self) -> None:
-        if self._terminal_theme:
-            self.register_theme(self._terminal_theme)
+        self.theme = "textual-ansi"
 
-        if self.config.textual_theme == TERMINAL_THEME_NAME:
-            if self._terminal_theme:
-                self.theme = TERMINAL_THEME_NAME
-        else:
-            self.theme = self.config.textual_theme
+        self._cached_messages_area = self.query_one("#messages")
+        self._cached_chat = self.query_one("#chat", ChatScroll)
+        self._cached_loading_area = self.query_one("#loading-area-content")
 
         self.event_handler = EventHandler(
             mount_callback=self._mount_and_scroll,
             scroll_callback=self._scroll_to_bottom_deferred,
-            todo_area_callback=lambda: self.query_one("#todo-area"),
             get_tools_collapsed=lambda: self._tools_collapsed,
-            get_todos_collapsed=lambda: self._todos_collapsed,
         )
 
         self._chat_input_container = self.query_one(ChatInputContainer)
-        self._agent_indicator = self.query_one(AgentIndicator)
         context_progress = self.query_one(ContextProgress)
 
         def update_context_progress(stats: AgentStats) -> None:
@@ -227,7 +295,7 @@ class VibeApp(App):  # noqa: PLR0904
                 current_tokens=stats.context_tokens,
             )
 
-        AgentStats.add_listener("context_tokens", update_context_progress)
+        self.agent_loop.stats.add_listener("context_tokens", update_context_progress)
         self.agent_loop.stats.trigger_listeners()
 
         self.agent_loop.set_approval_callback(self._approval_callback)
@@ -237,17 +305,19 @@ class VibeApp(App):  # noqa: PLR0904
         chat_input_container = self.query_one(ChatInputContainer)
         chat_input_container.focus_input()
         await self._show_dangerous_directory_warning()
+        await self._resume_history_from_messages()
         await self._check_and_show_whats_new()
-        await self._maybe_show_plan_offer()
         self._schedule_update_notification()
 
-        await self._rebuild_history_from_messages()
-
-        if self._initial_prompt:
+        if self._initial_prompt or self._teleport_on_start:
             self.call_after_refresh(self._process_initial_prompt)
 
     def _process_initial_prompt(self) -> None:
-        if self._initial_prompt:
+        if self._teleport_on_start:
+            self.run_worker(
+                self._handle_teleport_command(self._initial_prompt), exclusive=False
+            )
+        elif self._initial_prompt:
             self.run_worker(
                 self._handle_user_message(self._initial_prompt), exclusive=False
             )
@@ -255,6 +325,9 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_chat_input_container_submitted(
         self, event: ChatInputContainer.Submitted
     ) -> None:
+        if self._banner:
+            self._banner.freeze_animation()
+
         value = event.value.strip()
         if not value:
             return
@@ -268,6 +341,11 @@ class VibeApp(App):  # noqa: PLR0904
         if value.startswith("!"):
             await self._handle_bash_command(value[1:])
             return
+
+        if value.startswith("&"):
+            if self.config.nuage_enabled:
+                await self._handle_teleport_command(value[1:])
+                return
 
         if await self._handle_command(value):
             return
@@ -330,29 +408,6 @@ class VibeApp(App):  # noqa: PLR0904
         if self._loading_widget and self._loading_widget.parent:
             await self._loading_widget.remove()
             self._loading_widget = None
-        self._hide_todo_area()
-
-    def _show_todo_area(self) -> None:
-        try:
-            todo_area = self.query_one("#todo-area")
-            todo_area.add_class("loading-active")
-        except Exception:
-            pass
-
-    def _hide_todo_area(self) -> None:
-        try:
-            todo_area = self.query_one("#todo-area")
-            todo_area.remove_class("loading-active")
-        except Exception:
-            pass
-
-    def on_config_app_setting_changed(self, message: ConfigApp.SettingChanged) -> None:
-        if message.key == "textual_theme":
-            if message.value == TERMINAL_THEME_NAME:
-                if self._terminal_theme:
-                    self.theme = TERMINAL_THEME_NAME
-            else:
-                self.theme = message.value
 
     async def on_config_app_config_closed(
         self, message: ConfigApp.ConfigClosed
@@ -370,7 +425,7 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_compact_message_completed(
         self, message: CompactMessage.Completed
     ) -> None:
-        messages_area = self.query_one("#messages")
+        messages_area = self._cached_messages_area or self.query_one("#messages")
         children = list(messages_area.children)
 
         try:
@@ -483,62 +538,62 @@ class VibeApp(App):  # noqa: PLR0904
                 self._handle_agent_loop_turn(message)
             )
 
-    async def _rebuild_history_from_messages(self) -> None:
-        if all(msg.role == Role.system for msg in self.agent_loop.messages):
+    async def _resume_history_from_messages(self) -> None:
+        messages_area = self._cached_messages_area or self.query_one("#messages")
+        if not should_resume_history(list(messages_area.children)):
             return
 
-        messages_area = self.query_one("#messages")
-        # Don't rebuild if messages are already displayed
-        if messages_area.children:
+        self._windowing.reset()
+        history_messages = non_system_history_messages(self.agent_loop.messages)
+        if (
+            plan := create_resume_plan(history_messages, HISTORY_RESUME_TAIL_MESSAGES)
+        ) is None:
             return
+        await self._mount_history_batch(
+            plan.tail_messages,
+            messages_area,
+            plan.tool_call_map,
+            start_index=plan.tail_start_index,
+        )
+        self.call_after_refresh(
+            lambda: self._align_chat_after_history_rebuild(plan.has_backfill)
+        )
+        self._tool_call_map = plan.tool_call_map
+        self._windowing.set_backfill(plan.backfill_messages)
+        await self._load_more.set_visible(
+            messages_area,
+            visible=self._windowing.has_backfill,
+            remaining=self._windowing.remaining,
+        )
 
-        tool_call_map: dict[str, str] = {}
+    async def _mount_history_batch(
+        self,
+        batch: list[LLMMessage],
+        messages_area: Widget,
+        tool_call_map: dict[str, str],
+        *,
+        start_index: int,
+        before: Widget | int | None = None,
+        after: Widget | None = None,
+    ) -> None:
+        widgets = build_history_widgets(
+            batch=batch,
+            tool_call_map=tool_call_map,
+            start_index=start_index,
+            tools_collapsed=self._tools_collapsed,
+            history_widget_indices=self._history_widget_indices,
+        )
 
         with self.batch_update():
-            for msg in self.agent_loop.messages:
-                if msg.role == Role.system:
-                    continue
-
-                match msg.role:
-                    case Role.user:
-                        if msg.content:
-                            await messages_area.mount(UserMessage(msg.content))
-
-                    case Role.assistant:
-                        await self._mount_history_assistant_message(
-                            msg, messages_area, tool_call_map
-                        )
-
-                    case Role.tool:
-                        tool_name = msg.name or tool_call_map.get(
-                            msg.tool_call_id or "", "tool"
-                        )
-                        await messages_area.mount(
-                            ToolResultMessage(
-                                tool_name=tool_name,
-                                content=msg.content,
-                                collapsed=self._tools_collapsed,
-                            )
-                        )
-
-    async def _mount_history_assistant_message(
-        self, msg: LLMMessage, messages_area: Widget, tool_call_map: dict[str, str]
-    ) -> None:
-        if msg.content:
-            widget = AssistantMessage(msg.content)
-            await messages_area.mount(widget)
-            await widget.write_initial_content()
-            await widget.stop_stream()
-
-        if not msg.tool_calls:
-            return
-
-        for tool_call in msg.tool_calls:
-            tool_name = tool_call.function.name or "unknown"
-            if tool_call.id:
-                tool_call_map[tool_call.id] = tool_name
-
-            await messages_area.mount(ToolCallMessage(tool_name=tool_name))
+            if not widgets:
+                return
+            if before is not None:
+                await messages_area.mount_all(widgets, before=before)
+                return
+            if after is not None:
+                await messages_area.mount_all(widgets, after=after)
+                return
+            await messages_area.mount_all(widgets)
 
     def _is_tool_enabled_in_main_agent(self, tool: str) -> bool:
         return tool in self.agent_loop.tool_manager.available_tools
@@ -574,12 +629,13 @@ class VibeApp(App):  # noqa: PLR0904
     async def _handle_agent_loop_turn(self, prompt: str) -> None:
         self._agent_running = True
 
-        loading_area = self.query_one("#loading-area-content")
+        loading_area = self._cached_loading_area or self.query_one(
+            "#loading-area-content"
+        )
 
         loading = LoadingWidget()
         self._loading_widget = loading
         await loading_area.mount(loading)
-        self._show_todo_area()
 
         try:
             rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
@@ -595,13 +651,13 @@ class VibeApp(App):  # noqa: PLR0904
             if self._loading_widget and self._loading_widget.parent:
                 await self._loading_widget.remove()
             if self.event_handler:
-                self.event_handler.stop_current_tool_call()
+                self.event_handler.stop_current_tool_call(success=False)
             raise
         except Exception as e:
             if self._loading_widget and self._loading_widget.parent:
                 await self._loading_widget.remove()
             if self.event_handler:
-                self.event_handler.stop_current_tool_call()
+                self.event_handler.stop_current_tool_call(success=False)
 
             message = str(e)
             if isinstance(e, RateLimitError):
@@ -620,8 +676,100 @@ class VibeApp(App):  # noqa: PLR0904
             if self._loading_widget:
                 await self._loading_widget.remove()
             self._loading_widget = None
-            self._hide_todo_area()
             await self._finalize_current_streaming_message()
+            await self._refresh_windowing_from_history()
+
+    async def _teleport_command(self) -> None:
+        await self._handle_teleport_command(show_message=False)
+
+    async def _handle_teleport_command(
+        self, value: str | None = None, show_message: bool = True
+    ) -> None:
+        has_history = any(msg.role != Role.system for msg in self.agent_loop.messages)
+        if not value:
+            if show_message:
+                await self._mount_and_scroll(UserMessage("/teleport"))
+            if not has_history:
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        "No conversation history to teleport.",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+                return
+        elif show_message:
+            await self._mount_and_scroll(UserMessage(value))
+        self.run_worker(self._teleport(value), exclusive=False)
+
+    async def _teleport(self, prompt: str | None = None) -> None:
+        loading_area = self._cached_loading_area or self.query_one(
+            "#loading-area-content"
+        )
+        loading = LoadingWidget()
+        await loading_area.mount(loading)
+
+        teleport_msg = TeleportMessage()
+        await self._mount_and_scroll(teleport_msg)
+
+        try:
+            gen = self.agent_loop.teleport_to_vibe_nuage(prompt)
+            async for event in gen:
+                match event:
+                    case TeleportCheckingGitEvent():
+                        teleport_msg.set_status("Checking git status...")
+                    case TeleportPushRequiredEvent(unpushed_count=count):
+                        await loading.remove()
+                        response = await self._ask_push_approval(count)
+                        await loading_area.mount(loading)
+                        teleport_msg.set_status("Teleporting...")
+                        await gen.asend(response)
+                    case TeleportPushingEvent():
+                        teleport_msg.set_status("Pushing to remote...")
+                    case TeleportAuthRequiredEvent(
+                        user_code=code, verification_uri=uri
+                    ):
+                        teleport_msg.set_status(
+                            f"GitHub auth required. Code: {code} (copied)\nOpen: {uri}"
+                        )
+                    case TeleportAuthCompleteEvent():
+                        teleport_msg.set_status("GitHub authenticated.")
+                    case TeleportStartingWorkflowEvent():
+                        teleport_msg.set_status("Starting Nuage workflow...")
+                    case TeleportSendingGithubTokenEvent():
+                        teleport_msg.set_status("Sending encrypted GitHub token...")
+                    case TeleportCompleteEvent(url=url):
+                        teleport_msg.set_complete(url)
+        except TeleportError as e:
+            await teleport_msg.remove()
+            await self._mount_and_scroll(
+                ErrorMessage(str(e), collapsed=self._tools_collapsed)
+            )
+        finally:
+            if loading.parent:
+                await loading.remove()
+
+    async def _ask_push_approval(self, count: int) -> TeleportPushResponseEvent:
+        word = f"commit{'s' if count != 1 else ''}"
+        push_label = "Push and continue"
+        result = await self._user_input_callback(
+            AskUserQuestionArgs(
+                questions=[
+                    Question(
+                        question=f"You have {count} unpushed {word}. Push to continue?",
+                        header="Push",
+                        options=[Choice(label=push_label), Choice(label="Cancel")],
+                        hide_other=True,
+                    )
+                ]
+            )
+        )
+        ok = (
+            isinstance(result, AskUserQuestionResult)
+            and not result.cancelled
+            and bool(result.answers)
+            and result.answers[0].answer == push_label
+        )
+        return TeleportPushResponseEvent(approved=ok)
 
     async def _interrupt_agent_loop(self) -> None:
         if not self._agent_running or self._interrupt_requested:
@@ -637,14 +785,15 @@ class VibeApp(App):  # noqa: PLR0904
                 pass
 
         if self.event_handler:
-            self.event_handler.stop_current_tool_call()
+            self.event_handler.stop_current_tool_call(success=False)
             self.event_handler.stop_current_compact()
 
         self._agent_running = False
-        loading_area = self.query_one("#loading-area-content")
+        loading_area = self._cached_loading_area or self.query_one(
+            "#loading-area-content"
+        )
         await loading_area.remove_children()
         self._loading_widget = None
-        self._hide_todo_area()
 
         await self._finalize_current_streaming_message()
         await self._mount_and_scroll(InterruptMessage())
@@ -676,10 +825,16 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _reload_config(self) -> None:
         try:
+            self._windowing.reset()
+            self._tool_call_map = None
+            self._history_widget_indices = WeakKeyDictionary()
+            await self._load_more.hide()
             base_config = VibeConfig.load()
 
             await self.agent_loop.reload_with_initial_messages(base_config=base_config)
 
+            if self._banner:
+                self._banner.set_state(base_config, self.agent_loop.skill_manager)
             await self._mount_and_scroll(UserCommandMessage("Configuration reloaded."))
         except Exception as e:
             await self._mount_and_scroll(
@@ -690,18 +845,19 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _clear_history(self) -> None:
         try:
+            self._windowing.reset()
+            self._tool_call_map = None
+            self._history_widget_indices = WeakKeyDictionary()
             await self.agent_loop.clear_history()
             await self._finalize_current_streaming_message()
-            messages_area = self.query_one("#messages")
+            messages_area = self._cached_messages_area or self.query_one("#messages")
             await messages_area.remove_children()
-            todo_area = self.query_one("#todo-area")
-            await todo_area.remove_children()
 
             await messages_area.mount(UserMessage("/clear"))
             await self._mount_and_scroll(
                 UserCommandMessage("Conversation history cleared!")
             )
-            chat = self.query_one("#chat", VerticalScroll)
+            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
             chat.scroll_home(animate=False)
 
         except Exception as e:
@@ -805,16 +961,14 @@ class VibeApp(App):  # noqa: PLR0904
 
         if result.success:
             if result.requires_restart:
+                message = f"{result.message or 'Set up Shift+Enter keybind'} (You may need to restart your terminal.)"
                 await self._mount_and_scroll(
-                    UserCommandMessage(
-                        f"{result.terminal.value}: Set up Shift+Enter keybind (You may need to restart your terminal.)"
-                    )
+                    UserCommandMessage(f"{result.terminal.value}: {message}")
                 )
             else:
+                message = result.message or "Shift+Enter keybind already set up"
                 await self._mount_and_scroll(
-                    WarningMessage(
-                        f"{result.terminal.value}: Shift+Enter keybind already set up"
-                    )
+                    WarningMessage(f"{result.terminal.value}: {message}")
                 )
         else:
             await self._mount_and_scroll(
@@ -828,9 +982,6 @@ class VibeApp(App):  # noqa: PLR0904
             self._chat_input_container.display = False
             self._chat_input_container.disabled = True
 
-        if self._agent_indicator:
-            self._agent_indicator.display = False
-
         self._current_bottom_app = BottomApp[type(widget).__name__.removesuffix("App")]
         await bottom_container.mount(widget)
 
@@ -843,9 +994,7 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         await self._mount_and_scroll(UserCommandMessage("Configuration opened..."))
-        await self._switch_from_input(
-            ConfigApp(self.config, has_terminal_theme=self._terminal_theme is not None)
-        )
+        await self._switch_from_input(ConfigApp(self.config))
 
     async def _switch_to_approval_app(
         self, tool_name: str, tool_args: BaseModel
@@ -865,9 +1014,6 @@ class VibeApp(App):  # noqa: PLR0904
                     await self.query_one(f"#{app.value}-app").remove()
                 except Exception:
                     pass
-
-        if self._agent_indicator:
-            self._agent_indicator.display = True
 
         if self._chat_input_container:
             self._chat_input_container.disabled = False
@@ -942,25 +1088,50 @@ class VibeApp(App):  # noqa: PLR0904
         self._scroll_to_bottom()
         self._focus_current_bottom_app()
 
+    async def on_history_load_more_requested(self, _: HistoryLoadMoreRequested) -> None:
+        self._load_more.set_enabled(False)
+        try:
+            if not self._windowing.has_backfill:
+                await self._load_more.hide()
+                return
+            if (batch := self._windowing.next_load_more_batch()) is None:
+                await self._load_more.hide()
+                return
+            messages_area = self._cached_messages_area or self.query_one("#messages")
+            if self._tool_call_map is None:
+                self._tool_call_map = {}
+            if self._load_more.widget:
+                before: Widget | int | None = None
+                after: Widget | None = self._load_more.widget
+            else:
+                before = 0
+                after = None
+            await self._mount_history_batch(
+                batch.messages,
+                messages_area,
+                self._tool_call_map,
+                start_index=batch.start_index,
+                before=before,
+                after=after,
+            )
+            if not self._windowing.has_backfill:
+                await self._load_more.hide()
+            else:
+                await self._load_more.show(messages_area, self._windowing.remaining)
+        finally:
+            self._load_more.set_enabled(True)
+
     async def action_toggle_tool(self) -> None:
         self._tools_collapsed = not self._tools_collapsed
 
         for result in self.query(ToolResultMessage):
-            if result.tool_name != "todo":
-                await result.set_collapsed(self._tools_collapsed)
+            await result.set_collapsed(self._tools_collapsed)
 
         try:
             for error_msg in self.query(ErrorMessage):
                 error_msg.set_collapsed(self._tools_collapsed)
         except Exception:
             pass
-
-    async def action_toggle_todo(self) -> None:
-        self._todos_collapsed = not self._todos_collapsed
-
-        for result in self.query(ToolResultMessage):
-            if result.tool_name == "todo":
-                await result.set_collapsed(self._todos_collapsed)
 
     def action_cycle_mode(self) -> None:
         if self._current_bottom_app != BottomApp.Input:
@@ -973,10 +1144,9 @@ class VibeApp(App):  # noqa: PLR0904
         self._update_profile_widgets(self.agent_loop.agent_profile)
 
     def _update_profile_widgets(self, profile: AgentProfile) -> None:
-        if self._agent_indicator:
-            self._agent_indicator.set_profile(profile)
         if self._chat_input_container:
             self._chat_input_container.set_safety(profile.safety)
+            self._chat_input_container.set_agent_name(profile.display_name.lower())
 
     async def _cycle_agent(self) -> None:
         new_profile = self.agent_loop.agent_manager.next_agent(
@@ -1005,7 +1175,7 @@ class VibeApp(App):  # noqa: PLR0904
 
     def action_scroll_chat_up(self) -> None:
         try:
-            chat = self.query_one("#chat", VerticalScroll)
+            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
             chat.scroll_relative(y=-5, animate=False)
             self._auto_scroll = False
         except Exception:
@@ -1013,7 +1183,7 @@ class VibeApp(App):  # noqa: PLR0904
 
     def action_scroll_chat_down(self) -> None:
         try:
-            chat = self.query_one("#chat", VerticalScroll)
+            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
             chat.scroll_relative(y=5, animate=False)
             if self._is_scrolled_to_bottom(chat):
                 self._auto_scroll = True
@@ -1039,42 +1209,37 @@ class VibeApp(App):  # noqa: PLR0904
 
         content = load_whats_new_content()
         if content is not None:
-            await self._mount_and_scroll(WhatsNewMessage(content))
+            whats_new_message = WhatsNewMessage(content)
+            plan_offer = await self._plan_offer_cta()
+            if plan_offer is not None:
+                whats_new_message = WhatsNewMessage(f"{content}\n\n{plan_offer}")
+            if self._history_widget_indices:
+                whats_new_message.add_class("after-history")
+            await self._mount_and_scroll(whats_new_message)
         await mark_version_as_seen(self._current_version, self._update_cache_repository)
 
-    async def _maybe_show_plan_offer(self) -> None:
-        if self._plan_offer_shown:
-            return
-        action, plan_type = await self._resolve_plan_offer_action()
-        self.plan_type = plan_type
-        if action is PlanOfferAction.NONE:
-            return
-        url = ACTION_TO_URL[action]
-        match action:
-            case PlanOfferAction.UPGRADE:
-                text = f"Upgrade to [Pro]({url})"
-            case PlanOfferAction.SWITCH_TO_PRO_KEY:
-                text = f"Switch to your [Pro API key]({url})"
-        await self._mount_and_scroll(PlanOfferMessage(text))
-        self._plan_offer_shown = True
+    async def _plan_offer_cta(self) -> str | None:
+        self.plan_type = PlanType.UNKNOWN
 
-    async def _resolve_plan_offer_action(self) -> tuple[PlanOfferAction, PlanType]:
+        if self._plan_offer_gateway is None:
+            return
+
         try:
             active_model = self.config.get_active_model()
             provider = self.config.get_provider_for_model(active_model)
-        except ValueError:
-            return PlanOfferAction.NONE, PlanType.UNKNOWN
 
-        api_key_env = provider.api_key_env_var
-        api_key = getenv(api_key_env) if api_key_env else None
-        gateway = self._plan_offer_gateway or HttpWhoAmIGateway()
-        try:
-            return await decide_plan_offer(api_key, gateway)
+            api_key = resolve_api_key_for_plan(provider)
+            action, plan_type = await decide_plan_offer(
+                api_key, self._plan_offer_gateway
+            )
+
+            self.plan_type = plan_type
+            return plan_offer_cta(action)
         except Exception as exc:
             logger.warning(
                 "Plan-offer check failed (%s).", type(exc).__name__, exc_info=True
             )
-            return PlanOfferAction.NONE, PlanType.UNKNOWN
+            return
 
     async def _finalize_current_streaming_message(self) -> None:
         if self._current_streaming_reasoning is not None:
@@ -1108,9 +1273,10 @@ class VibeApp(App):  # noqa: PLR0904
         return widget
 
     async def _mount_and_scroll(self, widget: Widget) -> None:
-        messages_area = self.query_one("#messages")
-        chat = self.query_one("#chat", VerticalScroll)
+        messages_area = self._cached_messages_area or self.query_one("#messages")
+        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
         was_at_bottom = self._is_scrolled_to_bottom(chat)
+        result: Widget | None = None
 
         if was_at_bottom:
             self._auto_scroll = True
@@ -1140,12 +1306,15 @@ class VibeApp(App):  # noqa: PLR0904
         else:
             await self._finalize_current_streaming_message()
             await messages_area.mount(widget)
+            result = widget
 
             is_tool_message = isinstance(widget, (ToolCallMessage, ToolResultMessage))
 
             if not is_tool_message:
                 self.call_after_refresh(self._scroll_to_bottom)
 
+        if result is not None:
+            self.call_after_refresh(self._try_prune)
         if was_at_bottom:
             self.call_after_refresh(self._anchor_if_scrollable)
 
@@ -1158,7 +1327,7 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _scroll_to_bottom(self) -> None:
         try:
-            chat = self.query_one("#chat")
+            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
             chat.scroll_end(animate=False)
         except Exception:
             pass
@@ -1166,14 +1335,47 @@ class VibeApp(App):  # noqa: PLR0904
     def _scroll_to_bottom_deferred(self) -> None:
         self.call_after_refresh(self._scroll_to_bottom)
 
+    async def _try_prune(self) -> None:
+        messages_area = self._cached_messages_area or self.query_one("#messages")
+        await prune_by_height(messages_area, PRUNE_LOW_MARK, PRUNE_HIGH_MARK)
+        if self._load_more.widget and not self._load_more.widget.parent:
+            self._load_more.widget = None
+
+    async def _refresh_windowing_from_history(self) -> None:
+        if self._load_more.widget is None:
+            return
+        messages_area = self._cached_messages_area or self.query_one("#messages")
+        has_backfill, tool_call_map = sync_backfill_state(
+            history_messages=non_system_history_messages(self.agent_loop.messages),
+            messages_children=list(messages_area.children),
+            history_widget_indices=self._history_widget_indices,
+            windowing=self._windowing,
+        )
+        self._tool_call_map = tool_call_map
+        await self._load_more.set_visible(
+            messages_area, visible=has_backfill, remaining=self._windowing.remaining
+        )
+
     def _anchor_if_scrollable(self) -> None:
         if not self._auto_scroll:
             return
         try:
-            chat = self.query_one("#chat", VerticalScroll)
+            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
             if chat.max_scroll_y == 0:
                 return
             chat.anchor()
+        except Exception:
+            pass
+
+    def _align_chat_after_history_rebuild(self, has_backfill: bool) -> None:
+        try:
+            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
+            if has_backfill and chat.max_scroll_y > 0:
+                chat.anchor(True)
+                chat.scroll_end(animate=False)
+                chat.anchor(False)
+                return
+            chat.scroll_end(animate=False)
         except Exception:
             pass
 
@@ -1227,8 +1429,12 @@ class VibeApp(App):  # noqa: PLR0904
             message, title="Update available", severity="information", timeout=10
         )
 
+    def action_copy_selection(self) -> None:
+        copy_selection_to_clipboard(self, show_toast=False)
+
     def on_mouse_up(self, event: MouseUp) -> None:
-        copy_selection_to_clipboard(self)
+        if self.config.autocopy_to_clipboard:
+            copy_selection_to_clipboard(self, show_toast=True)
 
     def on_app_blur(self, event: AppBlur) -> None:
         if self._chat_input_container and self._chat_input_container.input_widget:
@@ -1248,14 +1454,21 @@ def _print_session_resume_message(session_id: str | None) -> None:
     print(f"Or: vibe --resume {session_id}")
 
 
-def run_textual_ui(agent_loop: AgentLoop, initial_prompt: str | None = None) -> None:
+def run_textual_ui(
+    agent_loop: AgentLoop,
+    initial_prompt: str | None = None,
+    teleport_on_start: bool = False,
+) -> None:
     update_notifier = PyPIUpdateGateway(project_name="mistral-vibe")
     update_cache_repository = FileSystemUpdateCacheRepository()
+    plan_offer_gateway = HttpWhoAmIGateway()
     app = VibeApp(
         agent_loop=agent_loop,
         initial_prompt=initial_prompt,
+        teleport_on_start=teleport_on_start,
         update_notifier=update_notifier,
         update_cache_repository=update_cache_repository,
+        plan_offer_gateway=plan_offer_gateway,
     )
     session_id = app.run()
     _print_session_resume_message(session_id)

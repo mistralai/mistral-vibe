@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import getpass
 import json
 import os
@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from anyio import NamedTemporaryFile, Path as AsyncPath
 
 from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
-from vibe.core.utils import is_windows
+from vibe.core.utils import is_windows, utc_now
 
 if TYPE_CHECKING:
     from vibe.core.agents.models import AgentProfile
@@ -40,7 +40,7 @@ class SessionLogger:
         self.save_dir = Path(session_config.save_dir)
         self.session_prefix = session_config.session_prefix
         self.session_id = session_id
-        self.session_start_time = datetime.now().isoformat()
+        self.session_start_time = utc_now().isoformat()
 
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.session_dir = self.save_folder
@@ -53,7 +53,7 @@ class SessionLogger:
                 "Cannot get session save folder when logging is disabled"
             )
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         folder_name = f"{self.session_prefix}_{timestamp}_{self.session_id[:8]}"
         return self.save_dir / folder_name
 
@@ -265,7 +265,7 @@ class SessionLogger:
 
             metadata_dump = {
                 **self.session_metadata.model_dump(),
-                "end_time": datetime.now().isoformat(),
+                "end_time": utc_now().isoformat(),
                 "stats": stats.model_dump(),
                 "title": title,
                 "total_messages": total_messages,
@@ -292,7 +292,7 @@ class SessionLogger:
             return
 
         self.session_id = session_id
-        self.session_start_time = datetime.now().isoformat()
+        self.session_start_time = utc_now().isoformat()
         self.session_dir = self.save_folder
         self.session_metadata = self._initialize_session_metadata()
 
@@ -301,7 +301,7 @@ class SessionLogger:
         if not self.enabled or not self.save_dir:
             return
 
-        now = datetime.now()
+        now = utc_now()
         ago = now - timedelta(minutes=5)
 
         tmp_files = self.save_dir.glob("**/*.json.tmp")  # Recursive search
@@ -309,7 +309,9 @@ class SessionLogger:
         for file_path in tmp_files:
             if file_path.is_file():
                 try:
-                    file_mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+                    file_mtime = datetime.fromtimestamp(
+                        file_path.stat().st_mtime, tz=UTC
+                    )
                     if file_mtime < ago:
                         file_path.unlink()
                 except Exception:

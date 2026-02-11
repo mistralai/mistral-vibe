@@ -5,7 +5,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 import copy
 from enum import StrEnum, auto
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -18,6 +18,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    PrivateAttr,
     computed_field,
     model_validator,
 )
@@ -33,7 +34,6 @@ class AgentStats(BaseModel):
     tool_calls_succeeded: int = 0
 
     context_tokens: int = 0
-    listeners: ClassVar[dict[str, Callable[[AgentStats], None]]] = {}
 
     last_turn_prompt_tokens: int = 0
     last_turn_completion_tokens: int = 0
@@ -43,20 +43,23 @@ class AgentStats(BaseModel):
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
 
+    _listeners: dict[str, Callable[[AgentStats], None]] = PrivateAttr(
+        default_factory=dict
+    )
+
     def __setattr__(self, name: str, value: Any) -> None:
         super().__setattr__(name, value)
-        if name in self.listeners:
-            self.listeners[name](self)
+        if name in self._listeners:
+            self._listeners[name](self)
 
     def trigger_listeners(self) -> None:
-        for listener in self.listeners.values():
+        for listener in self._listeners.values():
             listener(self)
 
-    @classmethod
     def add_listener(
-        cls, attr_name: str, listener: Callable[[AgentStats], None]
+        self, attr_name: str, listener: Callable[[AgentStats], None]
     ) -> None:
-        cls.listeners[attr_name] = listener
+        self._listeners[attr_name] = listener
 
     @computed_field
     @property

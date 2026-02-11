@@ -66,6 +66,18 @@ class ApprovalApp(Container):
         self.help_widget: Static | None = None
 
     def compose(self) -> ComposeResult:
+        with Vertical(id="approval-options"):
+            yield NoMarkupStatic("")
+            for _ in range(3):
+                widget = NoMarkupStatic("", classes="approval-option")
+                self.option_widgets.append(widget)
+                yield widget
+            yield NoMarkupStatic("")
+            self.help_widget = NoMarkupStatic(
+                "↑↓ navigate  Enter select  ESC reject", classes="approval-help"
+            )
+            yield self.help_widget
+
         with Vertical(id="approval-content"):
             self.title_widget = NoMarkupStatic(
                 f"⚠ {self.tool_name} command", classes="approval-title"
@@ -77,20 +89,6 @@ class ApprovalApp(Container):
                     classes="approval-tool-info-container"
                 )
                 yield self.tool_info_container
-
-            yield NoMarkupStatic("")
-
-            for _ in range(3):
-                widget = NoMarkupStatic("", classes="approval-option")
-                self.option_widgets.append(widget)
-                yield widget
-
-            yield NoMarkupStatic("")
-
-            self.help_widget = NoMarkupStatic(
-                "↑↓ navigate  Enter select  ESC reject", classes="approval-help"
-            )
-            yield self.help_widget
 
     async def on_mount(self) -> None:
         await self._update_tool_info()

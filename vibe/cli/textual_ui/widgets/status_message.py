@@ -12,7 +12,7 @@ from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
 class StatusMessage(SpinnerMixin, NoMarkupStatic):
-    SPINNER_TYPE: ClassVar[SpinnerType] = SpinnerType.LINE
+    SPINNER_TYPE: ClassVar[SpinnerType] = SpinnerType.PULSE
 
     def __init__(self, initial_text: str = "", **kwargs: Any) -> None:
         self._initial_text = initial_text

@@ -4,9 +4,10 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Markdown, Static
+from textual.widgets import Static
 from textual.widgets._markdown import MarkdownStream
 
+from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown as Markdown
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
@@ -42,7 +43,6 @@ class UserMessage(Static):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="user-message-container"):
-            yield NonSelectableStatic("> ", classes="user-message-prompt")
             yield NoMarkupStatic(self._content, classes="user-message-content")
             if self._pending:
                 self.add_class("pending")
@@ -66,6 +66,7 @@ class StreamingMessageBase(Static):
         self._content = content
         self._markdown: Markdown | None = None
         self._stream: MarkdownStream | None = None
+        self._content_initialized = False
 
     def _get_markdown(self) -> Markdown:
         if self._markdown is None:
@@ -89,6 +90,8 @@ class StreamingMessageBase(Static):
             await stream.write(content)
 
     async def write_initial_content(self) -> None:
+        if self._content_initialized:
+            return
         if self._content and self._should_write_content():
             stream = self._ensure_stream()
             await stream.write(self._content)
@@ -110,16 +113,15 @@ class AssistantMessage(StreamingMessageBase):
         self.add_class("assistant-message")
 
     def compose(self) -> ComposeResult:
-        with Horizontal(classes="assistant-message-container"):
-            yield NonSelectableStatic("● ", classes="assistant-message-dot")
-            with Vertical(classes="assistant-message-content"):
-                markdown = Markdown("")
-                self._markdown = markdown
-                yield markdown
+        if self._content:
+            self._content_initialized = True
+        markdown = Markdown(self._content)
+        self._markdown = markdown
+        yield markdown
 
 
 class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
-    SPINNER_TYPE = SpinnerType.LINE
+    SPINNER_TYPE = SpinnerType.PULSE
     SPINNING_TEXT = "Thinking"
     COMPLETED_TEXT = "Thought"
 
@@ -207,19 +209,6 @@ class WhatsNewMessage(Static):
         yield Markdown(self._content)
 
 
-class PlanOfferMessage(Static):
-    def __init__(self, text: str) -> None:
-        super().__init__()
-        self.add_class("plan-offer-message")
-        self._text = text
-
-    def compose(self) -> ComposeResult:
-        yield Markdown(self._text)
-
-    def get_text(self) -> str:
-        return self._text
-
-
 class InterruptMessage(Static):
     def __init__(self) -> None:
         super().__init__()
@@ -240,30 +229,22 @@ class BashOutputMessage(Static):
         self.add_class("bash-output-message")
         self._command = command
         self._cwd = cwd
-        self._output = output
+        self._output = output.rstrip("\n")
         self._exit_code = exit_code
 
     def compose(self) -> ComposeResult:
-        with Vertical(classes="bash-output-container"):
-            with Horizontal(classes="bash-cwd-line"):
-                yield NoMarkupStatic(self._cwd, classes="bash-cwd")
-                yield NoMarkupStatic("", classes="bash-cwd-spacer")
-                if self._exit_code == 0:
-                    yield NoMarkupStatic("✓", classes="bash-exit-success")
-                else:
-                    yield NoMarkupStatic("✗", classes="bash-exit-failure")
-                    yield NoMarkupStatic(
-                        f" ({self._exit_code})", classes="bash-exit-code"
-                    )
-            with Horizontal(classes="bash-command-line"):
-                yield NoMarkupStatic("> ", classes="bash-chevron")
-                yield NoMarkupStatic(self._command, classes="bash-command")
-                yield NoMarkupStatic("", classes="bash-command-spacer")
+        status_class = "bash-success" if self._exit_code == 0 else "bash-error"
+        self.add_class(status_class)
+        with Horizontal(classes="bash-command-line"):
+            yield NonSelectableStatic("$ ", classes=f"bash-prompt {status_class}")
+            yield NoMarkupStatic(self._command, classes="bash-command")
+        with Horizontal(classes="bash-output-container"):
+            yield ExpandingBorder(classes="bash-output-border")
             yield NoMarkupStatic(self._output, classes="bash-output")
 
 
 class ErrorMessage(Static):
-    def __init__(self, error: str, collapsed: bool = True) -> None:
+    def __init__(self, error: str, collapsed: bool = False) -> None:
         super().__init__()
         self.add_class("error-message")
         self._error = error
@@ -274,22 +255,12 @@ class ErrorMessage(Static):
         with Horizontal(classes="error-container"):
             yield ExpandingBorder(classes="error-border")
             self._content_widget = NoMarkupStatic(
-                self._get_text(), classes="error-content"
+                f"Error: {self._error}", classes="error-content"
             )
             yield self._content_widget
 
-    def _get_text(self) -> str:
-        if self.collapsed:
-            return "Error. (ctrl+o to expand)"
-        return f"Error: {self._error}"
-
     def set_collapsed(self, collapsed: bool) -> None:
-        if self.collapsed == collapsed:
-            return
-
-        self.collapsed = collapsed
-        if self._content_widget:
-            self._content_widget.update(self._get_text())
+        pass
 
 
 class WarningMessage(Static):

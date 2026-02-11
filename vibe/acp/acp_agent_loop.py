@@ -24,6 +24,7 @@ from acp.helpers import ContentBlock, SessionUpdate
 from acp.schema import (
     AgentCapabilities,
     AgentMessageChunk,
+    AgentThoughtChunk,
     AllowedOutcome,
     AuthenticateResponse,
     AuthMethod,
@@ -73,6 +74,7 @@ from vibe.core.types import (
     AsyncApprovalCallback,
     CompactEndEvent,
     CompactStartEvent,
+    ReasoningEvent,
     ToolCallEvent,
     ToolResultEvent,
     ToolStreamEvent,
@@ -173,7 +175,7 @@ class VibeAcpAgentLoop(AcpAgent):
     async def new_session(
         self,
         cwd: str,
-        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio],
+        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> NewSessionResponse:
         load_dotenv_values()
@@ -295,8 +297,8 @@ class VibeAcpAgentLoop(AcpAgent):
     async def load_session(
         self,
         cwd: str,
-        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio],
         session_id: str,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> LoadSessionResponse | None:
         raise NotImplementedError()
@@ -460,6 +462,13 @@ class VibeAcpAgentLoop(AcpAgent):
             elif isinstance(event, AssistantEvent):
                 yield AgentMessageChunk(
                     session_update="agent_message_chunk",
+                    content=TextContentBlock(type="text", text=event.content),
+                    field_meta={"messageId": event.message_id},
+                )
+
+            elif isinstance(event, ReasoningEvent):
+                yield AgentThoughtChunk(
+                    session_update="agent_thought_chunk",
                     content=TextContentBlock(type="text", text=event.content),
                     field_meta={"messageId": event.message_id},
                 )

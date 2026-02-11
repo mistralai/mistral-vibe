@@ -593,7 +593,7 @@ Mistral Vibe can be used in text editors and IDEs that support [Agent Client Pro
 ## Resources
 
 - [CHANGELOG](CHANGELOG.md) - See what's new in each version
-- [CONTRIBUTING](CONTRIBUTING.md) - Guidelines for feedback and bug reports
+- [CONTRIBUTING](CONTRIBUTING.md) - Guidelines for feature requests, feedback and bug reports
 
 ## License
 

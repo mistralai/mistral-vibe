@@ -8,7 +8,6 @@ from vibe.cli.textual_ui.widgets.messages import ExpandingBorder, NonSelectableS
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
 from vibe.cli.textual_ui.widgets.tool_widgets import get_result_widget
-from vibe.cli.textual_ui.widgets.utils import DEFAULT_TOOL_SHORTCUT, TOOL_SHORTCUTS
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
@@ -44,6 +43,14 @@ class ToolCallMessage(StatusMessage):
             self._stream_widget.display = False
             yield self._stream_widget
 
+    def on_mount(self) -> None:
+        siblings = list(self.parent.children) if self.parent else []
+        idx = siblings.index(self) if self in siblings else -1
+        if idx > 0 and isinstance(
+            siblings[idx - 1], (ToolCallMessage, ToolResultMessage)
+        ):
+            self.add_class("no-gap")
+
     def get_content(self) -> str:
         if self._event and self._event.tool_class:
             adapter = ToolUIDataAdapter(self._event.tool_class)
@@ -62,6 +69,10 @@ class ToolCallMessage(StatusMessage):
         if self._stream_widget:
             self._stream_widget.display = False
         super().stop_spinning(success)
+
+    def set_result_text(self, text: str) -> None:
+        if self._text_widget:
+            self._text_widget.update(text)
 
 
 class ToolResultMessage(Static):
@@ -91,13 +102,6 @@ class ToolResultMessage(Static):
     def tool_name(self) -> str:
         return self._tool_name
 
-    def _shortcut(self) -> str:
-        return TOOL_SHORTCUTS.get(self._tool_name, DEFAULT_TOOL_SHORTCUT)
-
-    def _hint(self) -> str:
-        action = "expand" if self.collapsed else "collapse"
-        return f"({self._shortcut()} to {action})"
-
     def compose(self) -> ComposeResult:
         with Horizontal(classes="tool-result-container"):
             yield ExpandingBorder(classes="tool-result-border")
@@ -108,6 +112,8 @@ class ToolResultMessage(Static):
         if self._call_widget:
             success = self._determine_success()
             self._call_widget.stop_spinning(success=success)
+            result_text = self._get_result_text()
+            self._call_widget.set_result_text(result_text)
         await self._render_result()
 
     def _determine_success(self) -> bool:
@@ -121,6 +127,23 @@ class ToolResultMessage(Static):
             return display.success
         return True
 
+    def _get_result_text(self) -> str:
+        if self._event is None:
+            return f"{self._tool_name} completed"
+
+        if self._event.error:
+            return f"{self._tool_name}: error"
+
+        if self._event.skipped:
+            return f"{self._tool_name}: skipped"
+
+        if self._event.tool_class:
+            adapter = ToolUIDataAdapter(self._event.tool_class)
+            display = adapter.get_result_display(self._event)
+            return display.message
+
+        return f"{self._tool_name} completed"
+
     async def _render_result(self) -> None:
         if self._content_container is None:
             return
@@ -128,39 +151,29 @@ class ToolResultMessage(Static):
         await self._content_container.remove_children()
 
         if self._event is None:
-            await self._render_simple()
+            self.display = False
             return
 
         if self._event.error:
             self.add_class("error-text")
-            if self.collapsed:
-                await self._content_container.mount(
-                    NoMarkupStatic(f"Error. {self._hint()}")
-                )
-            else:
-                await self._content_container.mount(
-                    NoMarkupStatic(f"Error: {self._event.error}")
-                )
+            await self._content_container.mount(
+                NoMarkupStatic(f"Error: {self._event.error}")
+            )
+            self.display = True
             return
 
         if self._event.skipped:
             self.add_class("warning-text")
             reason = self._event.skip_reason or "User skipped"
-            if self.collapsed:
-                await self._content_container.mount(
-                    NoMarkupStatic(f"Skipped. {self._hint()}")
-                )
-            else:
-                await self._content_container.mount(
-                    NoMarkupStatic(f"Skipped: {reason}")
-                )
+            await self._content_container.mount(NoMarkupStatic(f"Skipped: {reason}"))
+            self.display = True
             return
 
         self.remove_class("error-text")
         self.remove_class("warning-text")
 
         if self._event.tool_class is None:
-            await self._render_simple()
+            self.display = False
             return
 
         adapter = ToolUIDataAdapter(self._event.tool_class)
@@ -175,23 +188,7 @@ class ToolResultMessage(Static):
             warnings=display.warnings,
         )
         await self._content_container.mount(widget)
-
-    async def _render_simple(self) -> None:
-        if self._content_container is None:
-            return
-
-        if self.collapsed:
-            await self._content_container.mount(
-                NoMarkupStatic(f"{self._tool_name} completed {self._hint()}")
-            )
-            return
-
-        if self._content:
-            await self._content_container.mount(NoMarkupStatic(self._content))
-        else:
-            await self._content_container.mount(
-                NoMarkupStatic(f"{self._tool_name} completed.")
-            )
+        self.display = bool(widget.children)
 
     async def set_collapsed(self, collapsed: bool) -> None:
         if self.collapsed == collapsed:

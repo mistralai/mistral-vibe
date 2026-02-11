@@ -1,7 +1,5 @@
-name: Feature Request
-description: Pitch an improvement for Mistral Vibe
-title: "feat: "
-labels: ["enhancement"]
+title: "[Feature Request]: "
+labels: []
 body:
   - type: markdown
     attributes:
@@ -37,7 +35,7 @@ body:
     attributes:
       label: Proposed solution
       description: >
-        Sketch the feature you’d like to see. Code snippets welcome.
+        Sketch the feature you'd like to see. Code snippets welcome.
     validations:
       required: true
 

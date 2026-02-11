@@ -272,117 +272,29 @@ def _setup_iterm2() -> SetupResult:
 
 
 def _setup_wezterm() -> SetupResult:
-    wezterm_config = Path.home() / ".wezterm.lua"
-
-    key_binding = """{
-    key = "Enter",
-    mods = "SHIFT",
-    action = wezterm.action.SendString("\\x1b[13;2u"),
-  }"""
-
-    try:
-        if wezterm_config.exists():
-            content = wezterm_config.read_text()
-
-            if 'mods = "SHIFT"' in content and 'key = "Enter"' in content:
-                return SetupResult(
-                    success=True,
-                    terminal=Terminal.WEZTERM,
-                    message="Shift+Enter already configured in WezTerm",
-                )
-
-            if "keys = {" in content:
-                content = content.replace("keys = {", f"keys = {{\n  {key_binding},")
-            else:
-                return SetupResult(
-                    success=False,
-                    terminal=Terminal.WEZTERM,
-                    message="Please manually add the following to your .wezterm.lua:\n\n"
-                    f"  keys = {{\n    {key_binding}\n  }}",
-                )
-        else:
-            content = f"""local wezterm = require 'wezterm'
-
-return {{
-  keys = {{
-    {key_binding}
-  }},
-}}
-"""
-
-        wezterm_config.write_text(content)
-
-        return SetupResult(
-            success=True,
-            terminal=Terminal.WEZTERM,
-            message=f"Added Shift+Enter binding to {wezterm_config}",
-            requires_restart=True,
-        )
-
-    except Exception as e:
-        return SetupResult(
-            success=False,
-            terminal=Terminal.WEZTERM,
-            message=f"Failed to configure WezTerm: {e}",
-        )
+    return SetupResult(
+        success=True,
+        terminal=Terminal.WEZTERM,
+        message="Please manually add the following to your .wezterm.lua:\n"
+        "local wezterm = require 'wezterm'\n"
+        "local config = wezterm.config_builder()\n\n"
+        "config.keys = {\n"
+        "    {\n"
+        '        key = "Enter",\n'
+        '        mods = "SHIFT",\n'
+        '        action = wezterm.action.SendString("\\x1b[13;2u"),\n'
+        "    }\n"
+        "}\n\n"
+        "return config",
+    )
 
 
 def _setup_ghostty() -> SetupResult:
-    system = platform.system()
-
-    if system == "Darwin":
-        config_path = (
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "com.mitchellh.ghostty"
-            / "config"
-        )
-    elif system == "Linux":
-        xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-        config_path = Path(xdg_config) / "ghostty" / "config"
-    else:
-        return SetupResult(
-            success=False,
-            terminal=Terminal.GHOSTTY,
-            message="Ghostty configuration path unknown for this OS",
-        )
-
-    keybind_line = "keybind = shift+enter=text:\\x1b[13;2u"
-
-    try:
-        if config_path.exists():
-            content = config_path.read_text()
-
-            if "shift+enter" in content.lower():
-                return SetupResult(
-                    success=True,
-                    terminal=Terminal.GHOSTTY,
-                    message="Shift+Enter already configured in Ghostty",
-                )
-
-            if not content.endswith("\n"):
-                content += "\n"
-            content += keybind_line + "\n"
-        else:
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            content = keybind_line + "\n"
-
-        config_path.write_text(content)
-
-        return SetupResult(
-            success=True,
-            terminal=Terminal.GHOSTTY,
-            message=f"Added Shift+Enter binding to {config_path}",
-            requires_restart=True,
-        )
-
-    except Exception as e:
-        return SetupResult(
-            success=False,
-            terminal=Terminal.GHOSTTY,
-            message=f"Failed to configure Ghostty: {e}",
-        )
+    return SetupResult(
+        success=True,
+        terminal=Terminal.GHOSTTY,
+        message="Shift+Enter is already configured in Ghostty",
+    )
 
 
 def setup_terminal() -> SetupResult:

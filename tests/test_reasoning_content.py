@@ -7,15 +7,10 @@ import mistralai
 import pytest
 import respx
 
+from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import (
-    ModelConfig,
-    ProviderConfig,
-    SessionLoggingConfig,
-    VibeConfig,
-)
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
 from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper, ParsedContent
 from vibe.core.llm.format import APIToolFormatHandler
@@ -23,8 +18,7 @@ from vibe.core.types import AssistantEvent, LLMMessage, ReasoningEvent, Role
 
 
 def make_config() -> VibeConfig:
-    return VibeConfig(
-        session_logging=SessionLoggingConfig(enabled=False),
+    return build_test_vibe_config(
         auto_compact_threshold=0,
         system_prompt_id="tests",
         include_project_context=False,
@@ -302,7 +296,9 @@ class TestAgentLoopStreamingReasoningEvents:
             mock_llm_chunk(content="", reasoning_content="Second thought."),
             mock_llm_chunk(content="Final answer."),
         ])
-        agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
+        agent = build_test_agent_loop(
+            config=make_config(), backend=backend, enable_streaming=True
+        )
 
         [_ async for _ in agent.act("Think and answer")]
 
@@ -316,7 +312,9 @@ class TestAgentLoopStreamingReasoningEvents:
             mock_llm_chunk(content="Hello "),
             mock_llm_chunk(content="world!"),
         ])
-        agent = AgentLoop(make_config(), backend=backend, enable_streaming=True)
+        agent = build_test_agent_loop(
+            config=make_config(), backend=backend, enable_streaming=True
+        )
 
         events = [event async for event in agent.act("Say hello")]
 

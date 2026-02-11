@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
-from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
@@ -17,7 +17,7 @@ from vibe.core.agents.models import (
     BuiltinAgentName,
     _deep_merge,
 )
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.config import VibeConfig
 from vibe.core.paths.config_paths import ConfigPath
 from vibe.core.paths.global_paths import GlobalPath
 from vibe.core.tools.base import ToolPermission
@@ -231,8 +231,7 @@ class TestAgentProfileOverrides:
 class TestAgentManagerCycling:
     @pytest.fixture
     def base_config(self) -> VibeConfig:
-        return VibeConfig(
-            session_logging=SessionLoggingConfig(enabled=False),
+        return build_test_vibe_config(
             auto_compact_threshold=0,
             include_project_context=False,
             include_prompt_detail=False,
@@ -250,8 +249,8 @@ class TestAgentManagerCycling:
     def test_get_agent_order_includes_primary_agents(
         self, base_config: VibeConfig, backend: FakeBackend
     ) -> None:
-        agent = AgentLoop(
-            base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+        agent = build_test_agent_loop(
+            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         order = agent.agent_manager.get_agent_order()
         assert len(order) == 4
@@ -263,8 +262,8 @@ class TestAgentManagerCycling:
     def test_next_agent_cycles_through_all(
         self, base_config: VibeConfig, backend: FakeBackend
     ) -> None:
-        agent = AgentLoop(
-            base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+        agent = build_test_agent_loop(
+            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         order = agent.agent_manager.get_agent_order()
         current = agent.agent_manager.active_profile
@@ -277,8 +276,8 @@ class TestAgentManagerCycling:
     def test_next_agent_wraps_around(
         self, base_config: VibeConfig, backend: FakeBackend
     ) -> None:
-        agent = AgentLoop(
-            base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+        agent = build_test_agent_loop(
+            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         order = agent.agent_manager.get_agent_order()
         last_profile = agent.agent_manager.get_agent(order[-1])
@@ -301,8 +300,7 @@ class TestAgentProfileConfig:
 class TestAgentSwitchAgent:
     @pytest.fixture
     def base_config(self) -> VibeConfig:
-        return VibeConfig(
-            session_logging=SessionLoggingConfig(enabled=False),
+        return build_test_vibe_config(
             auto_compact_threshold=0,
             include_project_context=False,
             include_prompt_detail=False,
@@ -321,8 +319,8 @@ class TestAgentSwitchAgent:
     async def test_switch_to_plan_agent_restricts_tools(
         self, base_config: VibeConfig, backend: FakeBackend
     ) -> None:
-        agent = AgentLoop(
-            base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+        agent = build_test_agent_loop(
+            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         initial_tool_names = set(agent.tool_manager.available_tools.keys())
         assert len(initial_tool_names) > len(PLAN_AGENT_TOOLS)
@@ -337,8 +335,8 @@ class TestAgentSwitchAgent:
     async def test_switch_from_plan_to_default_restores_tools(
         self, base_config: VibeConfig, backend: FakeBackend
     ) -> None:
-        agent = AgentLoop(
-            base_config, agent_name=BuiltinAgentName.PLAN, backend=backend
+        agent = build_test_agent_loop(
+            config=base_config, agent_name=BuiltinAgentName.PLAN, backend=backend
         )
         assert len(agent.tool_manager.available_tools) == len(PLAN_AGENT_TOOLS)
 
@@ -351,8 +349,8 @@ class TestAgentSwitchAgent:
     async def test_switch_agent_preserves_conversation_history(
         self, base_config: VibeConfig, backend: FakeBackend
     ) -> None:
-        agent = AgentLoop(
-            base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+        agent = build_test_agent_loop(
+            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         user_msg = LLMMessage(role=Role.user, content="Hello")
         assistant_msg = LLMMessage(role=Role.assistant, content="Hi there")
@@ -369,8 +367,8 @@ class TestAgentSwitchAgent:
     async def test_switch_to_same_agent_is_noop(
         self, base_config: VibeConfig, backend: FakeBackend
     ) -> None:
-        agent = AgentLoop(
-            base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+        agent = build_test_agent_loop(
+            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         original_config = agent.config
 
@@ -393,13 +391,11 @@ class TestAcceptEditsAgent:
     async def test_accept_edits_agent_auto_approves_write_file(self) -> None:
         backend = FakeBackend([])
 
-        config = VibeConfig(
-            session_logging=SessionLoggingConfig(enabled=False),
-            auto_compact_threshold=0,
-            enabled_tools=["write_file"],
+        config = build_test_vibe_config(
+            auto_compact_threshold=0, enabled_tools=["write_file"]
         )
-        agent = AgentLoop(
-            config, agent_name=BuiltinAgentName.ACCEPT_EDITS, backend=backend
+        agent = build_test_agent_loop(
+            config=config, agent_name=BuiltinAgentName.ACCEPT_EDITS, backend=backend
         )
 
         perm = agent.tool_manager.get_tool_config("write_file").permission
@@ -409,13 +405,11 @@ class TestAcceptEditsAgent:
     async def test_accept_edits_agent_requires_approval_for_other_tools(self) -> None:
         backend = FakeBackend([])
 
-        config = VibeConfig(
-            session_logging=SessionLoggingConfig(enabled=False),
-            auto_compact_threshold=0,
-            enabled_tools=["bash"],
+        config = build_test_vibe_config(
+            auto_compact_threshold=0, enabled_tools=["bash"]
         )
-        agent = AgentLoop(
-            config, agent_name=BuiltinAgentName.ACCEPT_EDITS, backend=backend
+        agent = build_test_agent_loop(
+            config=config, agent_name=BuiltinAgentName.ACCEPT_EDITS, backend=backend
         )
 
         perm = agent.tool_manager.get_tool_config("bash").permission
@@ -431,11 +425,10 @@ class TestPlanAgentToolRestriction:
                 usage=LLMUsage(prompt_tokens=10, completion_tokens=5),
             )
         ])
-        config = VibeConfig(
-            session_logging=SessionLoggingConfig(enabled=False),
-            auto_compact_threshold=0,
+        config = build_test_vibe_config(auto_compact_threshold=0)
+        agent = build_test_agent_loop(
+            config=config, agent_name=BuiltinAgentName.PLAN, backend=backend
         )
-        agent = AgentLoop(config, agent_name=BuiltinAgentName.PLAN, backend=backend)
 
         tool_names = set(agent.tool_manager.available_tools.keys())
 
@@ -457,11 +450,10 @@ class TestPlanAgentToolRestriction:
             mock_llm_chunk(content="Tool not available"),
         ])
 
-        config = VibeConfig(
-            session_logging=SessionLoggingConfig(enabled=False),
-            auto_compact_threshold=0,
+        config = build_test_vibe_config(auto_compact_threshold=0)
+        agent = build_test_agent_loop(
+            config=config, agent_name=BuiltinAgentName.PLAN, backend=backend
         )
-        agent = AgentLoop(config, agent_name=BuiltinAgentName.PLAN, backend=backend)
 
         events = [ev async for ev in agent.act("Run ls")]
 
@@ -476,7 +468,7 @@ class TestPlanAgentToolRestriction:
 
 class TestAgentManagerFiltering:
     def test_enabled_agents_filters_to_only_enabled(self) -> None:
-        config = VibeConfig(
+        config = build_test_vibe_config(
             include_project_context=False,
             include_prompt_detail=False,
             enabled_agents=["default", "plan"],
@@ -491,7 +483,7 @@ class TestAgentManagerFiltering:
         assert "accept-edits" not in agents
 
     def test_disabled_agents_excludes_disabled(self) -> None:
-        config = VibeConfig(
+        config = build_test_vibe_config(
             include_project_context=False,
             include_prompt_detail=False,
             disabled_agents=["auto-approve", "accept-edits"],
@@ -506,7 +498,7 @@ class TestAgentManagerFiltering:
         assert "accept-edits" not in agents
 
     def test_enabled_agents_takes_precedence_over_disabled(self) -> None:
-        config = VibeConfig(
+        config = build_test_vibe_config(
             include_project_context=False,
             include_prompt_detail=False,
             enabled_agents=["default"],
@@ -519,7 +511,7 @@ class TestAgentManagerFiltering:
         assert "default" in agents
 
     def test_glob_pattern_matching(self) -> None:
-        config = VibeConfig(
+        config = build_test_vibe_config(
             include_project_context=False,
             include_prompt_detail=False,
             disabled_agents=["auto-*", "accept-*"],
@@ -533,7 +525,7 @@ class TestAgentManagerFiltering:
         assert "accept-edits" not in agents
 
     def test_regex_pattern_matching(self) -> None:
-        config = VibeConfig(
+        config = build_test_vibe_config(
             include_project_context=False,
             include_prompt_detail=False,
             enabled_agents=["re:^(default|plan)$"],
@@ -546,7 +538,7 @@ class TestAgentManagerFiltering:
         assert "plan" in agents
 
     def test_empty_enabled_agents_returns_all(self) -> None:
-        config = VibeConfig(
+        config = build_test_vibe_config(
             include_project_context=False,
             include_prompt_detail=False,
             enabled_agents=[],
@@ -560,7 +552,7 @@ class TestAgentManagerFiltering:
         assert "explore" in agents
 
     def test_get_subagents_respects_filtering(self) -> None:
-        config = VibeConfig(
+        config = build_test_vibe_config(
             include_project_context=False,
             include_prompt_detail=False,
             disabled_agents=["explore"],
@@ -570,3 +562,57 @@ class TestAgentManagerFiltering:
         subagents = manager.get_subagents()
         names = [a.name for a in subagents]
         assert "explore" not in names
+
+
+class TestAgentLoopInitialization:
+    def test_agent_system_prompt_id_is_applied_on_init(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project_prompts = tmp_path / "project" / ".vibe" / "prompts"
+        project_prompts.mkdir(parents=True)
+
+        global_prompts = tmp_path / "home" / ".vibe" / "prompts"
+        global_prompts.mkdir(parents=True)
+        custom_prompt_content = "CUSTOM_AGENT_PROMPT_MARKER"
+        (global_prompts / "custom_agent.md").write_text(custom_prompt_content)
+
+        monkeypatch.setattr(
+            "vibe.core.config.PROMPTS_DIR", ConfigPath(lambda: project_prompts)
+        )
+        monkeypatch.setattr(
+            "vibe.core.config.GLOBAL_PROMPTS_DIR", GlobalPath(lambda: global_prompts)
+        )
+
+        custom_agent = AgentProfile(
+            name="custom_test_agent",
+            display_name="Custom Test",
+            description="Test agent with custom system prompt",
+            safety=AgentSafety.NEUTRAL,
+            overrides={"system_prompt_id": "custom_agent"},
+        )
+        patched_agents = {**BUILTIN_AGENTS, "custom_test_agent": custom_agent}
+        monkeypatch.setattr("vibe.core.agents.models.BUILTIN_AGENTS", patched_agents)
+        monkeypatch.setattr("vibe.core.agents.manager.BUILTIN_AGENTS", patched_agents)
+
+        config = build_test_vibe_config(
+            include_project_context=False, include_prompt_detail=False
+        )
+        assert config.system_prompt_id == "cli", (
+            "Base config should use default 'cli' prompt"
+        )
+
+        agent_loop = build_test_agent_loop(
+            config=config, agent_name="custom_test_agent"
+        )
+
+        assert agent_loop.config.system_prompt_id == "custom_agent", (
+            "Merged config should have the agent's system_prompt_id override"
+        )
+
+        system_message = agent_loop.messages[0]
+        assert system_message.role == Role.system
+        assert system_message.content is not None
+        assert custom_prompt_content in system_message.content, (
+            f"System message should contain custom prompt content. "
+            f"Expected '{custom_prompt_content}' to be in system message."
+        )

@@ -1,18 +1,40 @@
+$mistral_orange: #FF8205;
+
+* {
+    scrollbar-color: ansi_black;
+    scrollbar-color-hover: ansi_bright_black;
+    scrollbar-color-active: ansi_bright_black;
+    scrollbar-background: transparent;
+    scrollbar-background-hover: transparent;
+    scrollbar-background-active: transparent;
+    scrollbar-size: 1 1;
+}
+
 Screen {
-    background: $background;
+    background: transparent;
+}
+
+Horizontal {
+    width: 100%;
+    height: auto;
+}
+
+TextArea > .text-area--cursor {
+    color: ansi_default;
 }
 
 #chat {
+    layout: stream;
     height: 1fr;
     width: 100%;
-    background: $background;
+    background: transparent;
     padding: 0;
 }
 
 #loading-area {
     height: auto;
     width: 100%;
-    background: $background;
+    background: transparent;
     padding: 1 0 0 0;
     layout: horizontal;
     align: left middle;
@@ -24,43 +46,18 @@ Screen {
     align: left middle;
 }
 
-#todo-area {
-    height: auto;
-    max-height: 10;
-    width: 100%;
-    background: $background;
-    margin: 0;
-    padding: 0;
-    overflow: hidden;
-    text-align: left;
-    margin-top: 0;
-
-    .tool-result-border {
-        display: none;
-    }
-
-    &.loading-active .tool-result-border {
-        display: block;
-    }
-
-    .tool-result-content {
-        max-height: 9;
-        overflow-y: auto;
-        scrollbar-visibility: hidden;
-    }
-}
-
-#bottom-app-container {
+#bottom-app-container,
+#input-container {
     height: auto;
     width: 100%;
-    background: $background;
+    background: transparent;
 }
 
 #bottom-bar {
     height: auto;
     width: 100%;
-    background: $background;
-    padding: 0 0 1 0;
+    background: transparent;
+    padding: 0;
     align: left middle;
     layout: horizontal;
 }
@@ -81,40 +78,38 @@ Screen {
 }
 
 #input-container {
-    height: auto;
-    width: 100%;
-    background: $background;
     padding: 0;
     margin: 0;
 }
 
 #completion-popup {
     width: 100%;
-    padding: 1 1 1 1;
-    color: $text;
+    padding: 1;
+    color: ansi_default;
 }
 
 #input-box {
     height: auto;
     width: 100%;
-    background: $background;
-    border-top: solid $foreground-muted;
-    border-bottom: solid $foreground-muted;
+    background: transparent;
+    border: solid ansi_bright_black;
+    border-title-align: right;
+    border-title-color: ansi_bright_black;
     padding: 0 1;
 
     &.border-warning {
-        border-top: solid $warning;
-        border-bottom: solid $warning;
+        border: solid ansi_yellow;
+        border-title-color: ansi_yellow;
     }
 
     &.border-safe {
-        border-top: solid $success;
-        border-bottom: solid $success;
+        border: solid ansi_green;
+        border-title-color: ansi_green;
     }
 
     &.border-error {
-        border-top: solid $error;
-        border-bottom: solid $error;
+        border: solid ansi_red;
+        border-title-color: ansi_red;
     }
 }
 
@@ -125,7 +120,7 @@ Screen {
 #prompt {
     width: auto;
     background: transparent;
-    color: $primary;
+    color: $mistral_orange;
     text-style: bold;
     padding: 0 1 0 0;
 }
@@ -133,9 +128,10 @@ Screen {
 #input {
     width: 1fr;
     height: auto;
+    min-height: 3;
     max-height: 50vh;
     background: transparent;
-    color: $text;
+    color: ansi_default;
     border: none;
     padding: 0;
     scrollbar-visibility: hidden;
@@ -147,22 +143,45 @@ ToastRack {
     margin: 0 0 6 0;
 }
 
-Markdown MarkdownFence {
-    overflow-x: auto;
-    scrollbar-size-horizontal: 1;
-    max-width: 95%;
+Markdown {
+    color: ansi_default;
+
+    .code_inline {
+        color: ansi_default;
+        background: ansi_bright_black;
+    }
+
+    MarkdownFence {
+        overflow-x: auto;
+        scrollbar-size-horizontal: 1;
+        max-width: 95%;
+        background: transparent;
+
+        & > Label {
+            padding: 0;
+        }
+    }
+
+    MarkdownTable {
+        background: transparent;
+    }
+
+    MarkdownBlockQuote {
+        background: transparent;
+        border-left: outer ansi_bright_black;
+    }
+
+    MarkdownBullet,
+    MarkdownBulletList,
+    MarkdownOrderedList {
+        color: ansi_default;
+    }
 }
 
 .user-message {
     margin-top: 1;
-    padding: 1 0;
     width: 100%;
     height: auto;
-    background: $surface;
-
-    &:first-child {
-        margin-top: 0;
-    }
 
     &.pending {
         .user-message-prompt,
@@ -180,51 +199,35 @@ Markdown MarkdownFence {
 
 .user-message-prompt {
     width: auto;
-    height: auto;
-    color: $primary;
+    height: 100%;
     text-style: bold;
 }
 
 .user-message-content {
     width: 1fr;
     height: auto;
-    color: $foreground;
     text-style: bold;
+    padding-left: 1;
+    border-left: heavy $mistral_orange;
+    color: $mistral_orange;
 }
 
 .assistant-message {
+    layout: stream;
     margin-top: 1;
     width: 100%;
     height: auto;
-}
-
-.assistant-message-container {
-    width: 100%;
-    height: auto;
-    align: left top;
-}
-
-.assistant-message-dot {
-    width: auto;
-    height: auto;
-    color: $foreground;
-}
-
-.assistant-message-content {
-    width: 1fr;
-    height: auto;
-    padding: 0;
 
     Markdown {
         width: 100%;
         height: auto;
         padding: 0;
         margin: 0;
-    }
-}
 
-.assistant-message-content Markdown > *:last-child {
-    margin-bottom: 0;
+        & > *:last-child {
+            margin-bottom: 0;
+        }
+    }
 }
 
 .reasoning-message {
@@ -233,11 +236,7 @@ Markdown MarkdownFence {
     height: auto;
 }
 
-.reasoning-message-wrapper {
-    width: 100%;
-    height: auto;
-}
-
+.reasoning-message-wrapper,
 .reasoning-message-header {
     width: 100%;
     height: auto;
@@ -246,133 +245,48 @@ Markdown MarkdownFence {
 .reasoning-indicator {
     width: auto;
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
     margin-right: 1;
 
     &.success {
-        color: $text-success;
+        color: ansi_green;
     }
 }
 
-.reasoning-collapsed-text {
+.reasoning-collapsed-text,
+.reasoning-triangle {
     width: auto;
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
     text-style: italic;
 }
 
 .reasoning-triangle {
-    width: auto;
-    height: auto;
-    color: $text-muted;
-    text-style: italic;
     margin-left: 1;
 }
 
 .reasoning-message-content {
+    layout: stream;
     width: 100%;
     height: auto;
-    padding: 0;
-    padding-left: 2;
+    padding: 0 0 0 2;
     margin: 0;
-    color: $text-muted;
+    color: ansi_bright_black;
     text-style: italic;
+
+    * {
+        color: ansi_bright_black;
+        text-style: italic;
+    }
+
+    & > *:last-child {
+        margin-bottom: 0;
+    }
 }
 
-.reasoning-message-content * {
-    color: $text-muted;
-    text-style: italic;
-}
-
-.reasoning-message-content > *:last-child {
-    margin-bottom: 0;
-}
-
-.interrupt-message {
-    margin-top: 0;
-    margin-bottom: 0;
-    height: auto;
-    width: 100%;
-}
-
-.interrupt-container {
-    width: 100%;
-    height: auto;
-    margin: 0;
-    padding: 0;
-}
-
-.interrupt-border {
-    width: auto;
-    height: 100%;
-    padding: 0 1 0 2;
-    color: $foreground-muted;
-}
-
-.interrupt-content {
-    width: 1fr;
-    height: auto;
-    margin: 0;
-    color: $text-warning;
-}
-
-.error-message {
-    margin-top: 0;
-    margin-bottom: 0;
-    height: auto;
-    width: 100%;
-}
-
-.error-container {
-    width: 100%;
-    height: auto;
-    margin: 0;
-    padding: 0;
-}
-
-.error-border {
-    width: auto;
-    height: 100%;
-    padding: 0 1 0 2;
-    color: $foreground-muted;
-}
-
-.error-content {
-    width: 1fr;
-    height: auto;
-    margin: 0;
-    color: $error;
-    text-style: bold;
-}
-
-.warning-message {
-    margin-top: 0;
-    margin-bottom: 0;
-    height: auto;
-    width: 100%;
-}
-
-.warning-container {
-    width: 100%;
-    height: auto;
-    margin: 0;
-    padding: 0;
-}
-
-.warning-border {
-    width: auto;
-    height: 100%;
-    padding: 0 1 0 2;
-    color: $foreground-muted;
-}
-
-.warning-content {
-    width: 1fr;
-    height: auto;
-    margin: 0;
-    color: $text-warning;
-}
-
+.interrupt-message,
+.error-message,
+.warning-message,
 .user-command-message {
     margin-top: 0;
     margin-bottom: 0;
@@ -380,6 +294,9 @@ Markdown MarkdownFence {
     width: 100%;
 }
 
+.interrupt-container,
+.error-container,
+.warning-container,
 .user-command-container {
     width: 100%;
     height: auto;
@@ -387,11 +304,36 @@ Markdown MarkdownFence {
     padding: 0;
 }
 
+.interrupt-border,
+.error-border,
+.warning-border,
 .user-command-border {
     width: auto;
     height: 100%;
     padding: 0 1 0 2;
-    color: $foreground-muted;
+    color: ansi_bright_black;
+}
+
+.interrupt-content {
+    width: 1fr;
+    height: auto;
+    margin: 0;
+    color: ansi_yellow;
+}
+
+.error-content {
+    width: 1fr;
+    height: auto;
+    margin: 0;
+    color: ansi_red;
+    text-style: bold;
+}
+
+.warning-content {
+    width: 1fr;
+    height: auto;
+    margin: 0;
+    color: ansi_yellow;
 }
 
 .user-command-content {
@@ -402,14 +344,14 @@ Markdown MarkdownFence {
     Markdown {
         margin: 0;
         padding: 0;
-    }
 
-    Markdown > *:first-child {
-        margin-top: 0;
-    }
+        & > *:first-child {
+            margin-top: 0;
+        }
 
-    Markdown > *:last-child {
-        margin-bottom: 0;
+        & > *:last-child {
+            margin-bottom: 0;
+        }
     }
 }
 
@@ -417,67 +359,57 @@ Markdown MarkdownFence {
     margin-top: 1;
     width: 100%;
     height: auto;
+
+    &:first-child {
+        margin-top: 0;
+    }
+}
+
+.bash-command-line {
+    width: 100%;
+    height: auto;
+    margin: 0;
+}
+
+.bash-prompt {
+    width: auto;
+    height: auto;
+
+    &.bash-success {
+        color: ansi_green;
+    }
+
+    &.bash-error {
+        color: ansi_red;
+    }
+}
+
+.bash-command {
+    width: 1fr;
+    height: auto;
 }
 
 .bash-output-container {
     width: 100%;
     height: auto;
-    padding: 1 2;
-    background: $surface;
+    margin: 0;
 }
 
-.bash-cwd-line,
-.bash-command-line {
-    width: 100%;
-    height: auto;
-    margin-bottom: 1;
-    align: left middle;
-}
-
-.bash-cwd {
+.bash-output-border {
     width: auto;
-    color: $text-muted;
-}
-
-.bash-cwd-spacer,
-.bash-command-spacer {
-    width: 1fr;
-}
-
-.bash-chevron {
-    width: auto;
-    color: $primary;
-    text-style: bold;
-}
-
-.bash-command {
-    width: auto;
-    color: $foreground;
+    height: 100%;
+    padding: 0 1 0 2;
+    color: ansi_bright_black;
 }
 
 .bash-output {
-    width: 100%;
-    color: $foreground;
-}
-
-.bash-exit-success {
-    width: auto;
-    color: $text-success;
-}
-
-.bash-exit-failure {
-    width: auto;
-    color: $text-error;
-}
-
-.bash-exit-code {
-    width: auto;
-    color: $text-muted;
+    width: 1fr;
+    height: auto;
 }
 
 .unknown-event {
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
 }
 
 StatusMessage {
@@ -493,34 +425,33 @@ StatusMessage {
 .status-indicator-icon {
     width: auto;
     height: auto;
-    color: $foreground;
+    color: ansi_default;
     margin-right: 1;
 
     &.success {
-        color: $text-success;
+        color: ansi_green;
     }
 
     &.error {
-        color: $text-error;
+        color: ansi_red;
     }
 }
 
 .status-indicator-text {
     width: 1fr;
     height: auto;
-    color: $foreground;
+    color: ansi_default;
 }
 
-.compact-message {
-    width: 100%;
-    height: auto;
-    margin-top: 1;
-}
-
+.compact-message,
 .tool-call {
     width: 100%;
     height: auto;
     margin-top: 1;
+}
+
+.tool-call.no-gap {
+    margin-top: 0;
 }
 
 .tool-call-container {
@@ -531,7 +462,7 @@ StatusMessage {
 .tool-stream-message {
     width: 100%;
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
     padding-left: 2;
 }
 
@@ -542,14 +473,14 @@ StatusMessage {
     margin-left: 0;
     padding: 0;
     background: transparent;
-    color: $foreground;
+    color: ansi_default;
 
     &.error-text {
-        color: $text-error;
+        color: ansi_red;
     }
 
     &.warning-text {
-        color: $text-warning;
+        color: ansi_yellow;
     }
 }
 
@@ -564,7 +495,7 @@ StatusMessage {
     width: auto;
     height: 100%;
     padding: 0 1 0 2;
-    color: $foreground-muted;
+    color: ansi_bright_black;
 }
 
 .tool-result-content {
@@ -573,110 +504,97 @@ StatusMessage {
     padding: 0;
 }
 
-.tool-call-widget {
-    width: 100%;
-    height: auto;
-    color: $foreground;
-}
-
-.tool-call-detail {
-    height: auto;
-    color: $text-muted;
-}
-
+.tool-call-widget,
 .tool-result-widget {
     width: 100%;
     height: auto;
-    color: $foreground;
+    color: ansi_default;
+}
 
-    Static {
-        height: auto;
-    }
+.tool-result-widget Static {
+    height: auto;
+}
+
+.tool-call-detail,
+.tool-result-detail {
+    height: auto;
+    color: ansi_bright_black;
 }
 
 .tool-result-detail {
-    height: auto;
     margin-top: 0;
-    color: $text-muted;
 }
 
 .tool-result-error {
-    color: $text-error;
+    color: ansi_red;
 }
 
 .tool-result-warning {
-    color: $text-warning;
+    color: ansi_yellow;
 }
 
 .diff-header {
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
     text-style: bold;
 }
 
 .diff-removed {
     height: auto;
-    color: $text-error;
+    color: ansi_red;
 }
 
 .diff-added {
     height: auto;
-    color: $text-success;
+    color: ansi_green;
 }
 
 .diff-range {
     height: auto;
-    color: $primary;
+    color: ansi_blue;
 }
 
 .diff-context {
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
 }
 
-.todo-empty {
+.todo-empty,
+.todo-cancelled {
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
 }
 
 .todo-pending {
     height: auto;
-    color: $foreground;
+    color: ansi_default;
 }
 
 .todo-in_progress {
     height: auto;
-    color: $warning;
+    color: ansi_yellow;
 }
 
 .todo-completed {
     height: auto;
-    color: $success;
-}
-
-.todo-cancelled {
-    height: auto;
-    color: $text-muted;
-}
-
-#todo-area .tool-result {
-    margin-left: 0;
+    color: ansi_green;
 }
 
 .loading-widget {
     width: 100%;
     height: auto;
+    color: ansi_bright_black;
 }
 
-.loading-container {
+.loading-container,
+.loading-indicator,
+.loading-status,
+.loading-hint {
     width: auto;
     height: auto;
 }
 
 .loading-indicator {
-    width: auto;
-    height: auto;
-    color: $warning;
     margin-right: 1;
 }
 
@@ -690,41 +608,46 @@ StatusMessage {
     height: auto;
 }
 
-.loading-ellipsis {
-    width: auto;
-    height: auto;
-    color: $text-muted;
-}
-
 .loading-hint {
     width: auto;
     height: auto;
     color: $foreground;
 }
 
-WelcomeBanner {
+.history-load-more-message {
     width: 100%;
     height: auto;
-    border: round $surface;
-    border-title-align: center;
     text-align: center;
     content-align: center middle;
-    padding: 2 0;
-    margin: 1 0 0 0;
-    color: $foreground;
+    margin: 1 0;
+}
 
-    .muted {
-        color: $text-muted;
-    }
+.history-load-more-container {
+    width: 100%;
+    height: auto;
+    content-align: center middle;
+}
+
+.history-load-more-button {
+    background: transparent;
+    border: none;
+    color: ansi_yellow;
+    text-style: bold;
+    pointer: pointer;
+    padding: 1;
+}
+
+.history-load-more-button:hover {
+
 }
 
 #config-app {
     width: 100%;
     height: auto;
-    background: $background;
-    border: round $foreground-muted;
+    background: transparent;
+    border: solid ansi_bright_black;
     padding: 0 1;
-    margin: 0 0 1 0;
+    margin: 0;
 }
 
 #config-content {
@@ -735,59 +658,65 @@ WelcomeBanner {
 .settings-title {
     height: auto;
     text-style: bold;
-    color: $primary;
+    color: ansi_blue;
 }
 
 .settings-option {
     height: auto;
-    color: $foreground;
+    color: ansi_default;
 }
 
 .settings-cursor-selected {
-    color: $primary;
+    color: ansi_blue;
     text-style: bold;
 }
 
 .settings-label-selected {
-    color: $text;
+    color: ansi_default;
     text-style: bold;
 }
 
 .settings-value-toggle-on-selected {
-    color: $text-success;
+    color: ansi_green;
     text-style: bold;
 }
 
 .settings-value-toggle-on-unselected {
-    color: $success;
+    color: ansi_green;
 }
 
 .settings-value-toggle-off {
-    color: $text-muted;
+    color: ansi_bright_black;
 }
 
 .settings-value-cycle-selected {
-    color: $primary;
+    color: ansi_blue;
     text-style: bold;
 }
 
 .settings-value-cycle-unselected {
-    color: $primary;
+    color: ansi_blue;
 }
 
 .settings-help {
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
 }
 
 #approval-app {
     width: 100%;
     height: auto;
-    max-height: 16;
-    background: $background;
-    border: round $foreground-muted;
+    max-height: 70vh;
+    background: transparent;
+    border: solid ansi_bright_black;
     padding: 0 1;
-    margin: 0 0 1 0;
+    margin: 0;
+}
+
+#approval-options {
+    width: 100%;
+    height: auto;
+    dock: bottom;
 }
 
 #approval-content {
@@ -798,13 +727,13 @@ WelcomeBanner {
 .approval-tool-info-scroll {
     width: 100%;
     height: auto;
-    max-height: 8;
+    max-height: 50vh;
 }
 
 .approval-title {
     height: auto;
     text-style: bold;
-    color: $warning;
+    color: ansi_yellow;
 }
 
 .approval-tool-info-container {
@@ -816,11 +745,7 @@ WelcomeBanner {
     width: 100%;
     height: auto;
 
-    Static {
-        width: 100%;
-        height: auto;
-    }
-
+    Static,
     Vertical {
         width: 100%;
         height: auto;
@@ -829,49 +754,56 @@ WelcomeBanner {
 
 .approval-option {
     height: auto;
-    color: $foreground;
+    color: ansi_default;
 }
 
 .approval-cursor-selected {
     &.approval-option-yes {
-        color: $text-success;
+        color: ansi_green;
         text-style: bold;
     }
 
     &.approval-option-no {
-        color: $text-error;
+        color: ansi_red;
         text-style: bold;
     }
 }
 
 .approval-option-selected {
     &.approval-option-yes {
-        color: $success;
+        color: ansi_green;
     }
 
     &.approval-option-no {
-        color: $error;
+        color: ansi_red;
     }
 }
 
 .approval-help {
     height: auto;
-    color: $text-muted;
+    color: ansi_bright_black;
 }
 
 .approval-description {
     height: auto;
-    color: $foreground;
+    color: ansi_default;
+}
+
+.code-block {
+    height: auto;
+    color: ansi_default;
+    background: transparent;
+    padding: 1;
 }
 
 #question-app {
     width: 100%;
     height: auto;
-    max-height: 16;
+    max-height: 70vh;
     background: transparent;
-    border: round $foreground-muted;
+    border: solid ansi_bright_black;
     padding: 0 1;
-    margin: 0 0 1 0;
+    margin: 0;
 }
 
 #question-content {
@@ -881,24 +813,24 @@ WelcomeBanner {
 
 .question-tabs {
     height: auto;
-    color: $primary;
+    color: ansi_blue;
     margin-bottom: 1;
 }
 
 .question-title {
     height: auto;
     text-style: bold;
-    color: $primary;
+    color: ansi_blue;
     margin-bottom: 1;
 }
 
 .question-option {
     height: auto;
-    color: $foreground;
+    color: ansi_default;
 }
 
 .question-option-selected {
-    color: $primary;
+    color: ansi_blue;
     text-style: bold;
 }
 
@@ -910,7 +842,7 @@ WelcomeBanner {
 .question-other-prefix {
     width: auto;
     height: auto;
-    color: $foreground;
+    color: ansi_default;
 }
 
 .question-other-input {
@@ -924,56 +856,19 @@ WelcomeBanner {
 .question-other-static {
     width: auto;
     height: auto;
-    color: $foreground;
+    color: ansi_bright_black;
 }
 
 .question-submit {
     height: auto;
-    color: $foreground-muted;
+    color: ansi_default;
     margin-top: 1;
 }
 
 .question-help {
     height: auto;
-    color: $foreground-muted;
+    color: ansi_bright_black;
     margin-top: 1;
-}
-
-.code-block {
-    height: auto;
-    color: $foreground;
-    background: $surface;
-    padding: 1;
-}
-
-.whats-new-message {
-    background: $surface;
-    border-left: solid $warning;
-    margin-bottom: 1;
-}
-
-.plan-offer-message {
-    background: transparent;
-    border: none;
-    height: auto;
-    padding: 0;
-    margin-top: 0;
-    color: $foreground-muted;
-    text-style: dim;
-
-    Markdown > *:last-child {
-        margin-bottom: 0;
-        link-style: none;
-        link-color: $foreground-muted;
-        link-background-hover: transparent;
-        link-style-hover: underline;
-        link-color-hover: $warning;
-    }
-}
-
-Horizontal {
-    width: 100%;
-    height: auto;
 }
 
 ExpandingBorder {
@@ -982,46 +877,106 @@ ExpandingBorder {
     content-align: left bottom;
 }
 
-AgentIndicator {
-    width: auto;
-    height: auto;
-    background: transparent;
-    padding: 0;
-    margin: 0 0 0 1;
-    color: $text-muted;
-    align: left middle;
-
-    &.agent-safe {
-        color: $success;
-    }
-
-    &.agent-neutral {
-        color: $text-muted;
-    }
-
-    &.agent-destructive {
-        color: $warning;
-    }
-
-    &.agent-yolo {
-        color: $error;
-    }
-}
-
-PathDisplay {
-    width: auto;
-    height: auto;
-    background: transparent;
-    padding: 0;
-    margin: 0;
-    color: $primary;
-}
-
+PathDisplay,
 ContextProgress {
     width: auto;
     height: auto;
     background: transparent;
     padding: 0;
     margin: 0;
-    color: $foreground;
+    color: ansi_bright_black;
+}
+
+#banner-container {
+    align: left middle;
+    padding: 0 1 0 0;
+    width: auto;
+}
+
+.banner-chat {
+    width: auto;
+}
+
+#banner-info {
+    width: auto;
+    height: auto;
+    margin-left: 2;
+    content-align: left middle;
+}
+
+.banner-line {
+    width: auto;
+    height: auto;
+}
+
+#banner-brand {
+    color: $mistral_orange;
+    text-style: bold;
+    width: auto;
+}
+
+.banner-spacer {
+    width: 1;
+    color: transparent;
+}
+
+.banner-meta {
+    color: ansi_default;
+    width: auto;
+}
+
+#banner-model {
+    color: ansi_cyan;
+    width: auto;
+}
+
+#banner-meta-counts {
+    width: auto;
+}
+
+.banner-cmd {
+    color: ansi_cyan;
+    width: auto;
+}
+
+.petit-chat {
+    color: ansi_default;
+    width: 12;
+}
+
+.whats-new-message {
+    border-left: heavy $mistral_orange;
+    margin-bottom: 1;
+
+    Markdown {
+        padding: 0 0 0 1;
+        margin: 0;
+
+        & > *:first-child {
+            margin-top: 0;
+        }
+
+        & > *:last-child {
+            margin-bottom: 0;
+        }
+
+        MarkdownBulletList,
+        MarkdownOrderedList {
+            margin-top: 1;
+            margin-bottom: 1;
+        }
+
+        MarkdownH1 {
+            content-align: left middle;
+        }
+    }
+
+    link-style: none;
+    link-background-hover: transparent;
+    link-style-hover: underline;
+    link-color-hover: $mistral_orange;
+}
+
+.whats-new-message.after-history {
+    margin-top: 1;
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 import concurrent.futures
+from datetime import UTC, datetime
 from enum import Enum, auto
 from fnmatch import fnmatch
 import functools
@@ -306,6 +307,37 @@ def name_matches(name: str, patterns: list[str]) -> bool:
     return False
 
 
+class AsyncExecutor:
+    """Run sync functions in a thread pool with timeout. Supports async context manager."""
+
+    def __init__(
+        self, max_workers: int = 4, timeout: float = 60.0, name: str = "async-executor"
+    ) -> None:
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix=name
+        )
+        self._timeout = timeout
+
+    async def __aenter__(self) -> AsyncExecutor:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        self.shutdown(wait=False)
+
+    async def run[T](self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(
+            self._executor, functools.partial(fn, *args, **kwargs)
+        )
+        try:
+            return await asyncio.wait_for(future, timeout=self._timeout)
+        except TimeoutError as e:
+            raise TimeoutError(f"Operation timed out after {self._timeout}s") from e
+
+    def shutdown(self, wait: bool = True) -> None:
+        self._executor.shutdown(wait=wait)
+
+
 def compact_reduction_display(old_tokens: int | None, new_tokens: int | None) -> str:
     if old_tokens is None or new_tokens is None:
         return "Compaction complete"
@@ -316,3 +348,7 @@ def compact_reduction_display(old_tokens: int | None, new_tokens: int | None) ->
         f"Compaction complete: {old_tokens:,} → "
         f"{new_tokens:,} tokens ({-reduction_pct:+#0.2g}%)"
     )
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)

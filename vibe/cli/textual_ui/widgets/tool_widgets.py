@@ -6,10 +6,10 @@ from pathlib import Path
 from pydantic import BaseModel
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.widgets import Markdown, Static
+from textual.widgets import Static
 
+from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown as Markdown
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.cli.textual_ui.widgets.utils import DEFAULT_TOOL_SHORTCUT, TOOL_SHORTCUTS
 from vibe.core.tools.builtins.ask_user_question import AskUserQuestionResult
 from vibe.core.tools.builtins.bash import BashArgs, BashResult
 from vibe.core.tools.builtins.grep import GrepArgs, GrepResult
@@ -23,13 +23,13 @@ from vibe.core.tools.builtins.todo import TodoArgs, TodoResult
 from vibe.core.tools.builtins.write_file import WriteFileArgs, WriteFileResult
 
 
-def _truncate_lines(content: str, max_lines: int) -> str:
-    """Truncate content to max_lines, adding indicator if truncated."""
+def _truncate_lines(content: str, max_lines: int) -> tuple[str, str | None]:
+    """Truncate content to max_lines, returning (content, truncation_info)."""
     lines = content.split("\n")
     if len(lines) <= max_lines:
-        return content
+        return content, None
     remaining = len(lines) - max_lines
-    return "\n".join(lines[:max_lines] + [f"… ({remaining} more lines)"])
+    return "\n".join(lines[:max_lines]), f"… ({remaining} more lines)"
 
 
 def parse_search_replace_to_diff(content: str) -> list[str]:
@@ -90,8 +90,6 @@ class ToolApprovalWidget[TArgs: BaseModel](Vertical):
 class ToolResultWidget[TResult: BaseModel](Static):
     """Base class for result widgets with typed result."""
 
-    SHORTCUT = DEFAULT_TOOL_SHORTCUT
-
     def __init__(
         self,
         result: TResult | None,
@@ -108,21 +106,13 @@ class ToolResultWidget[TResult: BaseModel](Static):
         self.warnings = warnings or []
         self.add_class("tool-result-widget")
 
-    def _hint(self) -> str:
-        action = "expand" if self.collapsed else "collapse"
-        return f"({self.SHORTCUT} to {action})"
-
-    def _header(self) -> ComposeResult:
-        """Yield the standard header. Subclasses can call this then add content."""
-        if self.collapsed:
-            yield NoMarkupStatic(f"{self.message} {self._hint()}")
-        else:
-            yield NoMarkupStatic(self.message)
+    def _footer(self, extra: str | None = None) -> ComposeResult:
+        """Yield the footer with optional extra info."""
+        if extra:
+            yield NoMarkupStatic(extra, classes="tool-result-hint")
 
     def compose(self) -> ComposeResult:
-        """Default: show message and optionally result fields."""
-        yield from self._header()
-
+        """Default: show result fields."""
         if not self.collapsed and self.result:
             for field_name in type(self.result).model_fields:
                 value = getattr(self.result, field_name)
@@ -130,6 +120,7 @@ class ToolResultWidget[TResult: BaseModel](Static):
                     yield NoMarkupStatic(
                         f"{field_name}: {value}", classes="tool-result-detail"
                     )
+        yield from self._footer()
 
 
 class BashApprovalWidget(ToolApprovalWidget[BashArgs]):
@@ -139,8 +130,17 @@ class BashApprovalWidget(ToolApprovalWidget[BashArgs]):
 
 class BashResultWidget(ToolResultWidget[BashResult]):
     def compose(self) -> ComposeResult:
-        yield from self._header()
-        if self.collapsed or not self.result:
+        if not self.result:
+            yield from self._footer()
+            return
+        if self.collapsed:
+            truncation_info = None
+            if self.result.stdout:
+                content, truncation_info = _truncate_lines(self.result.stdout, 10)
+                yield NoMarkupStatic(content, classes="tool-result-detail")
+            else:
+                yield NoMarkupStatic("(no content)", classes="tool-result-detail")
+            yield from self._footer(truncation_info)
             return
         yield NoMarkupStatic(
             f"returncode: {self.result.returncode}", classes="tool-result-detail"
@@ -155,6 +155,7 @@ class BashResultWidget(ToolResultWidget[BashResult]):
             yield NoMarkupStatic(
                 f"stderr:{sep}{self.result.stderr}", classes="tool-result-detail"
             )
+        yield from self._footer()
 
 
 class WriteFileApprovalWidget(ToolApprovalWidget[WriteFileArgs]):
@@ -169,8 +170,16 @@ class WriteFileApprovalWidget(ToolApprovalWidget[WriteFileArgs]):
 
 class WriteFileResultWidget(ToolResultWidget[WriteFileResult]):
     def compose(self) -> ComposeResult:
-        yield from self._header()
-        if self.collapsed or not self.result:
+        if not self.result:
+            yield from self._footer()
+            return
+        ext = Path(self.result.path).suffix.lstrip(".") or "text"
+        if self.collapsed:
+            truncation_info = None
+            if self.result.content:
+                content, truncation_info = _truncate_lines(self.result.content, 10)
+                yield Markdown(f"```{ext}\n{content}\n```")
+            yield from self._footer(truncation_info)
             return
         yield NoMarkupStatic(f"Path: {self.result.path}", classes="tool-result-detail")
         yield NoMarkupStatic(
@@ -178,8 +187,9 @@ class WriteFileResultWidget(ToolResultWidget[WriteFileResult]):
         )
         if self.result.content:
             yield NoMarkupStatic("")
-            ext = Path(self.result.path).suffix.lstrip(".") or "text"
-            yield Markdown(f"```{ext}\n{_truncate_lines(self.result.content, 10)}\n```")
+            content, _ = _truncate_lines(self.result.content, 10)
+            yield Markdown(f"```{ext}\n{content}\n```")
+        yield from self._footer()
 
 
 class SearchReplaceApprovalWidget(ToolApprovalWidget[SearchReplaceArgs]):
@@ -196,23 +206,15 @@ class SearchReplaceApprovalWidget(ToolApprovalWidget[SearchReplaceArgs]):
 
 class SearchReplaceResultWidget(ToolResultWidget[SearchReplaceResult]):
     def compose(self) -> ComposeResult:
-        yield from self._header()
-        if self.collapsed or not self.result:
+        if not self.result:
+            yield from self._footer()
             return
-        yield NoMarkupStatic(f"File: {self.result.file}", classes="tool-result-detail")
-        yield NoMarkupStatic(
-            f"Blocks applied: {self.result.blocks_applied}",
-            classes="tool-result-detail",
-        )
-        yield NoMarkupStatic(
-            f"Lines changed: {self.result.lines_changed}", classes="tool-result-detail"
-        )
-        for warning in self.result.warnings:
+        for warning in self.warnings:
             yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
         if self.result.content:
-            yield NoMarkupStatic("")
             for line in parse_search_replace_to_diff(self.result.content):
                 yield render_diff_line(line)
+        yield from self._footer()
 
 
 class TodoApprovalWidget(ToolApprovalWidget[TodoArgs]):
@@ -227,41 +229,30 @@ class TodoApprovalWidget(ToolApprovalWidget[TodoArgs]):
 
 
 class TodoResultWidget(ToolResultWidget[TodoResult]):
-    SHORTCUT = TOOL_SHORTCUTS["todo"]
-
     def compose(self) -> ComposeResult:
-        if self.collapsed:
-            yield NoMarkupStatic(f"{self.message} {self._hint()}")
-        else:
-            yield NoMarkupStatic(f"{self.message} {self._hint()}")
-            yield NoMarkupStatic("")
+        if not self.result or not self.result.todos:
+            yield NoMarkupStatic("No todos", classes="todo-empty")
+            yield from self._footer()
+            return
 
-            if not self.result or not self.result.todos:
-                yield NoMarkupStatic("No todos", classes="todo-empty")
-                return
+        by_status: dict[str, list] = {
+            "in_progress": [],
+            "pending": [],
+            "completed": [],
+            "cancelled": [],
+        }
+        for todo in self.result.todos:
+            status = (
+                todo.status.value if hasattr(todo.status, "value") else str(todo.status)
+            )
+            if status in by_status:
+                by_status[status].append(todo)
 
-            # Group todos by status
-            by_status: dict[str, list] = {
-                "in_progress": [],
-                "pending": [],
-                "completed": [],
-                "cancelled": [],
-            }
-            for todo in self.result.todos:
-                status = (
-                    todo.status.value
-                    if hasattr(todo.status, "value")
-                    else str(todo.status)
-                )
-                if status in by_status:
-                    by_status[status].append(todo)
-
-            for status in ["in_progress", "pending", "completed", "cancelled"]:
-                for todo in by_status[status]:
-                    icon = self._get_status_icon(status)
-                    yield NoMarkupStatic(
-                        f"{icon} {todo.content}", classes=f"todo-{status}"
-                    )
+        for status in ["in_progress", "pending", "completed", "cancelled"]:
+            for todo in by_status[status]:
+                icon = self._get_status_icon(status)
+                yield NoMarkupStatic(f"{icon} {todo.content}", classes=f"todo-{status}")
+        yield from self._footer()
 
     def _get_status_icon(self, status: str) -> str:
         icons = {"pending": "☐", "in_progress": "☐", "completed": "☑", "cancelled": "☒"}
@@ -283,8 +274,8 @@ class ReadFileApprovalWidget(ToolApprovalWidget[ReadFileArgs]):
 
 class ReadFileResultWidget(ToolResultWidget[ReadFileResult]):
     def compose(self) -> ComposeResult:
-        yield from self._header()
         if self.collapsed:
+            yield from self._footer()
             return
         if self.result:
             yield NoMarkupStatic(
@@ -292,10 +283,13 @@ class ReadFileResultWidget(ToolResultWidget[ReadFileResult]):
             )
         for warning in self.warnings:
             yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
+        truncation_info = None
         if self.result and self.result.content:
             yield NoMarkupStatic("")
             ext = Path(self.result.path).suffix.lstrip(".") or "text"
-            yield Markdown(f"```{ext}\n{_truncate_lines(self.result.content, 10)}\n```")
+            content, truncation_info = _truncate_lines(self.result.content, 10)
+            yield Markdown(f"```{ext}\n{content}\n```")
+        yield from self._footer(truncation_info)
 
 
 class GrepApprovalWidget(ToolApprovalWidget[GrepArgs]):
@@ -312,20 +306,24 @@ class GrepApprovalWidget(ToolApprovalWidget[GrepArgs]):
 
 class GrepResultWidget(ToolResultWidget[GrepResult]):
     def compose(self) -> ComposeResult:
-        yield from self._header()
-        if self.collapsed:
-            return
         for warning in self.warnings:
             yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
-        if self.result and self.result.matches:
-            yield NoMarkupStatic("")
-            yield Markdown(f"```\n{_truncate_lines(self.result.matches, 30)}\n```")
+        if not self.result or not self.result.matches:
+            yield from self._footer()
+            return
+        max_lines = 10 if self.collapsed else None
+        if max_lines:
+            content, truncation_info = _truncate_lines(self.result.matches, max_lines)
+        else:
+            content, truncation_info = self.result.matches, None
+        yield NoMarkupStatic(content, classes="tool-result-detail")
+        yield from self._footer(truncation_info)
 
 
 class AskUserQuestionResultWidget(ToolResultWidget[AskUserQuestionResult]):
     def compose(self) -> ComposeResult:
         if self.collapsed or not self.result:
-            yield from self._header()
+            yield from self._footer()
             return
 
         for answer in self.result.answers:
@@ -333,6 +331,7 @@ class AskUserQuestionResultWidget(ToolResultWidget[AskUserQuestionResult]):
                 yield NoMarkupStatic(answer.question, classes="tool-result-detail")
             prefix = "(Other) " if answer.is_other else ""
             yield NoMarkupStatic(f"{prefix}{answer.answer}", classes="ask-user-answer")
+        yield from self._footer()
 
 
 APPROVAL_WIDGETS: dict[str, type[ToolApprovalWidget]] = {

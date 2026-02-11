@@ -6,12 +6,13 @@ import json
 from pydantic import BaseModel
 import pytest
 
+from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_tool import FakeTool
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.config import VibeConfig
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tools.builtins.todo import TodoItem
 from vibe.core.types import (
@@ -34,8 +35,7 @@ async def act_and_collect_events(agent_loop: AgentLoop, prompt: str) -> list[Bas
 
 
 def make_config(todo_permission: ToolPermission = ToolPermission.ALWAYS) -> VibeConfig:
-    return VibeConfig(
-        session_logging=SessionLoggingConfig(enabled=False),
+    return build_test_vibe_config(
         auto_compact_threshold=0,
         enabled_tools=["todo"],
         tools={"todo": BaseToolConfig(permission=todo_permission)},
@@ -64,8 +64,8 @@ def make_agent_loop(
     agent_name = (
         BuiltinAgentName.AUTO_APPROVE if auto_approve else BuiltinAgentName.DEFAULT
     )
-    agent_loop = AgentLoop(
-        make_config(todo_permission=todo_permission),
+    agent_loop = build_test_agent_loop(
+        config=make_config(todo_permission=todo_permission),
         agent_name=agent_name,
         backend=backend,
     )
@@ -410,13 +410,11 @@ async def test_tool_call_can_be_interrupted() -> None:
     tool_call = ToolCall(
         id="call_8", index=0, function=FunctionCall(name="stub_tool", arguments="{}")
     )
-    config = VibeConfig(
-        session_logging=SessionLoggingConfig(enabled=False),
-        auto_compact_threshold=0,
-        enabled_tools=["stub_tool"],
+    config = build_test_vibe_config(
+        auto_compact_threshold=0, enabled_tools=["stub_tool"]
     )
-    agent_loop = AgentLoop(
-        config,
+    agent_loop = build_test_agent_loop(
+        config=config,
         agent_name=BuiltinAgentName.AUTO_APPROVE,
         backend=FakeBackend([
             [mock_llm_chunk(content="Let me use the tool.", tool_calls=[tool_call])],
@@ -444,8 +442,8 @@ async def test_tool_call_can_be_interrupted() -> None:
 
 @pytest.mark.asyncio
 async def test_fill_missing_tool_responses_inserts_placeholders() -> None:
-    agent_loop = AgentLoop(
-        make_config(),
+    agent_loop = build_test_agent_loop(
+        config=make_config(),
         agent_name=BuiltinAgentName.AUTO_APPROVE,
         backend=FakeBackend(mock_llm_chunk(content="ok")),
     )
@@ -480,8 +478,8 @@ async def test_fill_missing_tool_responses_inserts_placeholders() -> None:
 
 @pytest.mark.asyncio
 async def test_ensure_assistant_after_tool_appends_understood() -> None:
-    agent_loop = AgentLoop(
-        make_config(),
+    agent_loop = build_test_agent_loop(
+        config=make_config(),
         agent_name=BuiltinAgentName.AUTO_APPROVE,
         backend=FakeBackend(mock_llm_chunk(content="ok")),
     )

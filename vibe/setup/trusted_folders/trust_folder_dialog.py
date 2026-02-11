@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import tomllib
 from typing import Any, ClassVar
 
 from textual import events
@@ -11,12 +10,8 @@ from textual.containers import CenterMiddle, Horizontal
 from textual.message import Message
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.terminal_theme import (
-    TERMINAL_THEME_NAME,
-    capture_terminal_theme,
-)
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.paths.global_paths import GLOBAL_CONFIG_FILE, TRUSTED_FOLDERS_FILE
+from vibe.core.paths.global_paths import TRUSTED_FOLDERS_FILE
 
 
 class TrustDialogQuitException(Exception):
@@ -154,32 +149,9 @@ class TrustFolderApp(App):
         self.folder_path = folder_path
         self._result: bool | None = None
         self._quit_without_saving = False
-        self._terminal_theme = capture_terminal_theme()
-        self._load_theme()
 
-    def _load_theme(self) -> None:
-        if self._terminal_theme:
-            self.register_theme(self._terminal_theme)
-
-        config_file = GLOBAL_CONFIG_FILE.path
-        if not config_file.is_file():
-            return
-
-        try:
-            with config_file.open("rb") as f:
-                config_data = tomllib.load(f)
-        except (OSError, tomllib.TOMLDecodeError):
-            return
-
-        textual_theme = config_data.get("textual_theme")
-        if not textual_theme:
-            return
-
-        if textual_theme == TERMINAL_THEME_NAME:
-            if self._terminal_theme:
-                self.theme = TERMINAL_THEME_NAME
-        else:
-            self.theme = textual_theme
+    def on_mount(self) -> None:
+        self.theme = "textual-ansi"
 
     def compose(self) -> ComposeResult:
         yield TrustFolderDialog(self.folder_path)

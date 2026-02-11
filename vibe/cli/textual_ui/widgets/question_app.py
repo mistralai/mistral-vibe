@@ -70,25 +70,35 @@ class QuestionApp(Container):
         return self.questions[self.current_question_idx]
 
     @property
+    def _has_other(self) -> bool:
+        return not self._current_question.hide_other
+
+    @property
     def _total_options(self) -> int:
-        base = len(self._current_question.options) + 1
+        base = len(self._current_question.options)
+        if self._has_other:
+            base += 1
         if self._current_question.multi_select:
-            return base + 1
+            base += 1
         return base
 
     @property
     def _other_option_idx(self) -> int:
+        if not self._has_other:
+            return -1
         return len(self._current_question.options)
 
     @property
     def _submit_option_idx(self) -> int:
         if not self._current_question.multi_select:
             return -1
-        return self._other_option_idx + 1
+        if self._has_other:
+            return self._other_option_idx + 1
+        return len(self._current_question.options)
 
     @property
     def _is_other_selected(self) -> bool:
-        return self.selected_option == self._other_option_idx
+        return self._has_other and self.selected_option == self._other_option_idx
 
     @property
     def _is_submit_selected(self) -> bool:
@@ -217,6 +227,12 @@ class QuestionApp(Container):
         if not self.other_prefix or not self.other_input or not self.other_static:
             return
 
+        if not self._has_other:
+            self.other_prefix.display = False
+            self.other_input.display = False
+            self.other_static.display = False
+            return
+
         q = self._current_question
         is_multi = q.multi_select
         multi_selected = self.multi_selections.get(self.current_question_idx, set())
@@ -235,6 +251,7 @@ class QuestionApp(Container):
 
         show_input = is_focused or bool(stored_text)
 
+        self.other_prefix.display = True
         self.other_input.display = show_input
         self.other_static.display = not show_input
 

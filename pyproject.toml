@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.0.2"
+version = "2.1.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "agent-client-protocol==0.7.1",
+    "agent-client-protocol==0.8.0",
     "anyio>=4.12.0",
     "httpx>=0.28.1",
     "mcp>=1.14.0",
@@ -46,6 +46,11 @@ dependencies = [
     "textual-speedups>=0.2.1",
     "tree-sitter>=0.25.2",
     "tree-sitter-bash>=0.25.1",
+    "keyring>=25.6.0",
+    "cryptography>=44.0.0",
+    "zstandard>=0.25.0",
+    "gitpython>=3.1.46",
+    "giturlparse>=0.14.0",
 ]
 
 [project.urls]
@@ -134,6 +139,8 @@ ignore = ["D203", "D205", "D213", "ANN401", "PLR6301"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN", "PLR"]
+# Textual parent classes don't use ClassVar, so we can't either without breaking pyright
+"vibe/cli/textual_ui/ansi_markdown.py" = ["RUF012"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

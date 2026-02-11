@@ -40,7 +40,7 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
         max_bytes = self.config.max_output_bytes
 
         try:
-            terminal_handle = await client.create_terminal(
+            terminal = await client.create_terminal(
                 session_id=session_id,
                 command=args.command,
                 cwd=str(Path.cwd()),
@@ -49,7 +49,7 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
         except Exception as e:
             raise ToolError(f"Failed to create terminal: {e!r}") from e
 
-        terminal_id = terminal_handle.id
+        terminal_id = terminal.terminal_id
 
         await self._send_in_progress_session_update([
             TerminalToolCallContent(type="terminal", terminal_id=terminal_id)

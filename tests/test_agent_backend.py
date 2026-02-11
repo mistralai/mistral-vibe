@@ -2,21 +2,16 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import build_test_agent_loop
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import SessionLoggingConfig, VibeConfig
-
-
-@pytest.fixture
-def vibe_config() -> VibeConfig:
-    return VibeConfig(session_logging=SessionLoggingConfig(enabled=False))
+from vibe.core.config import VibeConfig
 
 
 @pytest.mark.asyncio
 async def test_passes_x_affinity_header_when_asking_an_answer(vibe_config: VibeConfig):
     backend = FakeBackend([mock_llm_chunk(content="Response")])
-    agent = AgentLoop(vibe_config, backend=backend)
+    agent = build_test_agent_loop(config=vibe_config, backend=backend)
 
     [_ async for _ in agent.act("Hello")]
 
@@ -32,7 +27,9 @@ async def test_passes_x_affinity_header_when_asking_an_answer_streaming(
     vibe_config: VibeConfig,
 ):
     backend = FakeBackend([mock_llm_chunk(content="Response")])
-    agent = AgentLoop(vibe_config, backend=backend, enable_streaming=True)
+    agent = build_test_agent_loop(
+        config=vibe_config, backend=backend, enable_streaming=True
+    )
 
     [_ async for _ in agent.act("Hello")]
 
@@ -47,7 +44,7 @@ async def test_passes_x_affinity_header_when_asking_an_answer_streaming(
 async def test_updates_tokens_stats_based_on_backend_response(vibe_config: VibeConfig):
     chunk = mock_llm_chunk(content="Response", prompt_tokens=100, completion_tokens=50)
     backend = FakeBackend([chunk])
-    agent = AgentLoop(vibe_config, backend=backend)
+    agent = build_test_agent_loop(config=vibe_config, backend=backend)
 
     [_ async for _ in agent.act("Hello")]
 
@@ -62,7 +59,9 @@ async def test_updates_tokens_stats_based_on_backend_response_streaming(
         content="Complete", prompt_tokens=200, completion_tokens=75
     )
     backend = FakeBackend([final_chunk])
-    agent = AgentLoop(vibe_config, backend=backend, enable_streaming=True)
+    agent = build_test_agent_loop(
+        config=vibe_config, backend=backend, enable_streaming=True
+    )
 
     [_ async for _ in agent.act("Hello")]
 

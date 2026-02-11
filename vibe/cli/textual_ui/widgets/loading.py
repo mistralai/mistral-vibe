@@ -15,9 +15,21 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
+def _format_elapsed(seconds: int) -> str:
+    if seconds < 60:  # noqa: PLR2004
+        return f"{seconds}s"
+
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:  # noqa: PLR2004
+        return f"{minutes}m{secs}s"
+
+    hours, mins = divmod(minutes, 60)
+    return f"{hours}h{mins}m{secs}s"
+
+
 class LoadingWidget(SpinnerMixin, Static):
     TARGET_COLORS = ("#FFD800", "#FFAF00", "#FF8205", "#FA500F", "#E10500")
-    SPINNER_TYPE = SpinnerType.BRAILLE
+    SPINNER_TYPE = SpinnerType.SNAKE
 
     EASTER_EGGS: ClassVar[list[str]] = [
         "Eating a chocolatine",
@@ -173,7 +185,9 @@ class LoadingWidget(SpinnerMixin, Static):
             elapsed = int(time() - self.start_time - paused)
             if elapsed != self._last_elapsed:
                 self._last_elapsed = elapsed
-                self.hint_widget.update(f"({elapsed}s esc to interrupt)")
+                self.hint_widget.update(
+                    f"({_format_elapsed(elapsed)} esc to interrupt)"
+                )
 
 
 @contextmanager

@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-02-11
+
+### Added
+
+- Incremental load of long sessions: windowing (20 messages), "Load more" to fetch older messages, scroll to bottom when resuming
+- ACP support for thinking (agent-client-protocol 0.8.0)
+- Support for FIFO path for env file
+
+### Changed
+
+- **UI redesign**: new look and layout for the CLI
+- Textual UI optimizations: ChatScroll to reduce style recalculations, VerticalGroup for messages, stream layout for streaming blocks, cached DOM queries
+- Bumped agent-client-protocol to 0.8.0
+- Use UTC date for timestamps
+- Clipboard behavior improvements
+- Docs updated for GitHub discussions
+- Made the Upgrade to Pro banner less prominent
+
+### Fixed
+
+- Fixed inaccurate token count in UI in some cases
+- Fixed agent prompt overrides being ignored
+- Terminal setup: avoid overwriting Wezterm config
+
+### Removed
+
+- Legacy terminal theme module and agent indicator widget
+- Standalone onboarding theme selection screen (replaced by redesign)
+
+
 ## [2.0.2] - 2026-01-30
 
 ### Added

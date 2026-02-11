@@ -39,6 +39,9 @@ class Question(BaseModel):
     multi_select: bool = Field(
         default=False, description="If true, user can select multiple options"
     )
+    hide_other: bool = Field(
+        default=False, description="If true, hide the 'Other' free text option"
+    )
 
 
 class AskUserQuestionArgs(BaseModel):
