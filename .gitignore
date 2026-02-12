@@ -77,6 +77,8 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+**/__snapshots__/
+*.snap
 
 # Translations
 *.mo
