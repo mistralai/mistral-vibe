@@ -6,7 +6,8 @@ from functools import lru_cache
 import os
 import signal
 import sys
-from typing import ClassVar, Literal, final
+import time
+from typing import ClassVar, final
 
 from pydantic import BaseModel, Field
 from tree_sitter import Language, Node, Parser
@@ -23,6 +24,8 @@ from vibe.core.tools.base import (
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
+
+_PROGRESS_UPDATE_INTERVAL_SECONDS = 5
 
 
 @lru_cache(maxsize=1)
@@ -231,7 +234,7 @@ class Bash(
 
     @classmethod
     def get_status_text(cls) -> str:
-        return "Running command"
+        return "Running command (Ctrl+C to interrupt)"
 
     def check_allowlist_denylist(self, args: BashArgs) -> ToolPermission | None:
         if is_windows():
@@ -300,15 +303,10 @@ class Bash(
         self, args: BashArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
         timeout = args.timeout or self.config.default_timeout
-        max_bytes = self.config.max_output_bytes
 
-        proc = None
+        proc: asyncio.subprocess.Process | None = None
+        communicate_task: asyncio.Task[tuple[bytes, bytes]] | None = None
         try:
-            # start_new_session is Unix-only, on Windows it's ignored
-            kwargs: dict[Literal["start_new_session"], bool] = (
-                {} if is_windows() else {"start_new_session": True}
-            )
-
             proc = await asyncio.create_subprocess_shell(
                 args.command,
                 stdout=asyncio.subprocess.PIPE,
@@ -316,36 +314,65 @@ class Bash(
                 stdin=asyncio.subprocess.DEVNULL,
                 env=_get_base_env(),
                 executable=_get_shell_executable(),
-                **kwargs,
+                # start_new_session is Unix-only, on Windows it's ignored
+                **({} if is_windows() else {"start_new_session": True}),
             )
 
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
-            except TimeoutError:
-                await _kill_process_tree(proc)
-                raise self._build_timeout_error(args.command, timeout)
+            communicate_task = asyncio.create_task(proc.communicate())
+            started_at = time.monotonic()
+            next_progress_at = _PROGRESS_UPDATE_INTERVAL_SECONDS
+
+            while True:
+                remaining = timeout - (time.monotonic() - started_at)
+                if remaining <= 0:
+                    await _kill_process_tree(proc)
+                    raise self._build_timeout_error(args.command, timeout)
+
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        asyncio.shield(communicate_task),
+                        timeout=min(1.0, remaining),
+                    )
+                    break
+                except TimeoutError:
+                    if not ctx or not ctx.tool_call_id:
+                        continue
+
+                    elapsed_seconds = int(time.monotonic() - started_at)
+                    if elapsed_seconds < next_progress_at:
+                        continue
+
+                    yield ToolStreamEvent(
+                        tool_name=self.get_name(),
+                        tool_call_id=ctx.tool_call_id,
+                        message=(
+                            f"{elapsed_seconds}s elapsed "
+                            f"(timeout: {timeout}s). Press Ctrl+C to interrupt."
+                        ),
+                    )
+                    next_progress_at += _PROGRESS_UPDATE_INTERVAL_SECONDS
 
             encoding = _get_subprocess_encoding()
             stdout = (
-                stdout_bytes.decode(encoding, errors="replace")[:max_bytes]
+                stdout_bytes.decode(encoding, errors="replace")[
+                    : self.config.max_output_bytes
+                ]
                 if stdout_bytes
                 else ""
             )
             stderr = (
-                stderr_bytes.decode(encoding, errors="replace")[:max_bytes]
+                stderr_bytes.decode(encoding, errors="replace")[
+                    : self.config.max_output_bytes
+                ]
                 if stderr_bytes
                 else ""
             )
-
-            returncode = proc.returncode or 0
 
             yield self._build_result(
                 command=args.command,
                 stdout=stdout,
                 stderr=stderr,
-                returncode=returncode,
+                returncode=proc.returncode or 0,
             )
 
         except (ToolError, asyncio.CancelledError):
@@ -353,5 +380,7 @@ class Bash(
         except Exception as exc:
             raise ToolError(f"Error running command {args.command!r}: {exc}") from exc
         finally:
+            if communicate_task and not communicate_task.done():
+                communicate_task.cancel()
             if proc is not None:
                 await _kill_process_tree(proc)

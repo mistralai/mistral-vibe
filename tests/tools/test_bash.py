@@ -3,8 +3,13 @@ from __future__ import annotations
 import pytest
 
 from tests.mock.utils import collect_result
-from vibe.core.tools.base import BaseToolState, ToolError, ToolPermission
-from vibe.core.tools.builtins.bash import Bash, BashArgs, BashToolConfig
+from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError, ToolPermission
+from vibe.core.tools.builtins.bash import (
+    Bash,
+    BashArgs,
+    BashToolConfig,
+)
+from vibe.core.types import ToolStreamEvent
 
 
 @pytest.fixture
@@ -89,3 +94,31 @@ def test_check_allowlist_denylist():
     assert denylisted is ToolPermission.NEVER
     assert mixed is None
     assert empty is None
+
+
+@pytest.mark.asyncio
+async def test_streams_progress_for_long_running_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.tools.builtins.bash._PROGRESS_UPDATE_INTERVAL_SECONDS",
+        1,
+    )
+    config = BashToolConfig()
+    bash_tool = Bash(config=config, state=BaseToolState())
+    ctx = InvokeContext(tool_call_id="call-123")
+
+    stream_events: list[ToolStreamEvent] = []
+    result = None
+    async for item in bash_tool.run(BashArgs(command="sleep 1.2"), ctx=ctx):
+        if isinstance(item, ToolStreamEvent):
+            stream_events.append(item)
+        else:
+            result = item
+
+    assert result is not None
+    assert stream_events
+    assert stream_events[0].tool_name == "bash"
+    assert stream_events[0].tool_call_id == "call-123"
+    assert "elapsed" in stream_events[0].message
+    assert "Ctrl+C" in stream_events[0].message
