@@ -4,8 +4,11 @@ import difflib
 from pathlib import Path
 
 from pydantic import BaseModel
+from rich.console import Console, ConsoleOptions, RenderResult
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.events import Resize
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown as Markdown
@@ -21,6 +24,8 @@ from vibe.core.tools.builtins.search_replace import (
 )
 from vibe.core.tools.builtins.todo import TodoArgs, TodoResult
 from vibe.core.tools.builtins.write_file import WriteFileArgs, WriteFileResult
+
+from .diff import get_diff
 
 
 def _truncate_lines(content: str, max_lines: int) -> tuple[str, str | None]:
@@ -192,16 +197,28 @@ class WriteFileResultWidget(ToolResultWidget[WriteFileResult]):
         yield from self._footer()
 
 
+class DiffWidget(Static):
+    def __init__(self, file_path, content) -> None:
+        super().__init__()
+        self._file_path = file_path
+        self._content = content
+
+    def on_resize(self, event: Resize) -> None:
+        diff_lines = parse_search_replace_to_diff(self._content)
+        lines = [Text.from_ansi(line) for line in get_diff(self._file_path, diff_lines, event.size.width)]
+        self.update(Diff(lines))
+
+class Diff:
+    def __init__(self, lines: list[Text]) -> None:
+        self.lines = lines
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        for line in self.lines:
+            yield line
+
 class SearchReplaceApprovalWidget(ToolApprovalWidget[SearchReplaceArgs]):
     def compose(self) -> ComposeResult:
-        yield NoMarkupStatic(
-            f"File: {self.args.file_path}", classes="approval-description"
-        )
-        yield NoMarkupStatic("")
-
-        diff_lines = parse_search_replace_to_diff(self.args.content)
-        for line in diff_lines:
-            yield render_diff_line(line)
+        yield DiffWidget(self.args.file_path, self.args.content)
 
 
 class SearchReplaceResultWidget(ToolResultWidget[SearchReplaceResult]):
@@ -212,8 +229,7 @@ class SearchReplaceResultWidget(ToolResultWidget[SearchReplaceResult]):
         for warning in self.warnings:
             yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
         if self.result.content:
-            for line in parse_search_replace_to_diff(self.result.content):
-                yield render_diff_line(line)
+            yield DiffWidget(self.result.file, self.result.content)
         yield from self._footer()
 
 
