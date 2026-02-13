@@ -691,7 +691,6 @@ class AgentLoop:
         tool_choice = self.format_handler.get_tool_choice()
         try:
             start_time = time.perf_counter()
-            usage = LLMUsage()
             chunk_agg = LLMChunk(message=LLMMessage(role=Role.assistant))
             async for chunk in self.backend.complete_streaming(
                 model=active_model,
@@ -710,7 +709,6 @@ class AgentLoop:
                 )
                 processed_chunk = LLMChunk(message=processed_message, usage=chunk.usage)
                 chunk_agg += processed_chunk
-                usage += chunk.usage or LLMUsage()
                 yield processed_chunk
             end_time = time.perf_counter()
 
@@ -718,7 +716,7 @@ class AgentLoop:
                 raise AgentLoopLLMResponseError(
                     "Usage data missing in final chunk of streamed completion"
                 )
-            self._update_stats(usage=usage, time_seconds=end_time - start_time)
+            self._update_stats(usage=chunk_agg.usage, time_seconds=end_time - start_time)
 
             self.messages.append(chunk_agg.message)
 
