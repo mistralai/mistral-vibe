@@ -106,6 +106,31 @@ def test_budget_truncation(injector: MemoryInjector, store: MemoryStore) -> None
     assert len(result) < 500  # should be truncated
 
 
+def test_seed_respects_budget(injector: MemoryInjector, store: MemoryStore) -> None:
+    state = store.get_or_create_user_state("user1")
+    state.seed = Seed(user_model="x" * 5000)
+    store.update_user_state(state)
+    store.get_or_create_context_memory("project:test", "user1")
+
+    result = injector.build_memory_block("user1", "project:test", budget_tokens=30)
+    assert result
+    assert len(result) <= 150
+
+
+def test_escapes_xml_content(injector: MemoryInjector, store: MemoryStore) -> None:
+    state = store.get_or_create_user_state("user1")
+    state.seed = Seed(user_model="uses <FastAPI> & SQLAlchemy")
+    state.fields = [UserField(key="pref", value="likes <xml> & tags")]
+    store.update_user_state(state)
+    store.add_sensory("project:test", "user1", "recent <unsafe> & content")
+
+    result = injector.build_memory_block("user1", "project:test")
+    assert "&lt;FastAPI&gt;" in result
+    assert "&amp;" in result
+    assert "<FastAPI>" not in result
+    assert "<unsafe>" not in result
+
+
 # -- Sensory injection tests --
 
 

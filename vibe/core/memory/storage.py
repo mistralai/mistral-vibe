@@ -111,22 +111,26 @@ class MemoryStore:
 
     def _init_schema(self) -> None:
         assert self._conn is not None
+        self._conn.executescript(_SCHEMA_SQL)
+
         with self._conn:
-            self._conn.executescript(_SCHEMA_SQL)
             row = self._conn.execute(
                 "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
             ).fetchone()
-            current = row["version"] if row else 0
-            if current < _SCHEMA_VERSION:
-                self._migrate(current)
-                if row is None:
+            current_version = row["version"] if row else 0
+            has_version_row = row is not None
+
+        if current_version < _SCHEMA_VERSION:
+            self._migrate(current_version)
+            with self._conn:
+                if has_version_row:
                     self._conn.execute(
-                        "INSERT INTO schema_version (version) VALUES (?)",
+                        "UPDATE schema_version SET version = ?",
                         (_SCHEMA_VERSION,),
                     )
                 else:
                     self._conn.execute(
-                        "UPDATE schema_version SET version = ?",
+                        "INSERT INTO schema_version (version) VALUES (?)",
                         (_SCHEMA_VERSION,),
                     )
 
@@ -239,15 +243,58 @@ class MemoryStore:
             observations.sort(key=lambda o: o.get("importance", 0), reverse=True)
             return [Observation(**o) for o in observations[:limit]]
 
-    def clear_observations(self, user_id: str) -> None:
-        """Remove all pending observations for a user (after reflection)."""
+    def clear_observations(
+        self, user_id: str, processed: list[Observation] | None = None
+    ) -> int:
+        """Remove pending observations.
+
+        When processed is None, clears all observations for the user.
+        Otherwise removes the top-N observations by the same importance ordering
+        used by get_pending_observations (N=len(processed)).
+        Returns the number of removed observations.
+        """
         with self._lock:
             assert self._conn is not None
+            row = self._conn.execute(
+                "SELECT observations_json FROM user_states WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return 0
+
+            observations = json.loads(row["observations_json"])
+            if not observations:
+                return 0
+
+            if processed is None:
+                removed = len(observations)
+                updated = []
+            else:
+                remove_count = min(len(processed), len(observations))
+                ranked_indices = sorted(
+                    enumerate(observations),
+                    key=lambda item: item[1].get("importance", 0),
+                    reverse=True,
+                )
+                to_remove_indices = {
+                    index for index, _ in ranked_indices[:remove_count]
+                }
+                updated = [
+                    obs
+                    for index, obs in enumerate(observations)
+                    if index not in to_remove_indices
+                ]
+                removed = len(observations) - len(updated)
+
+            if removed == 0:
+                return 0
+
             with self._conn:
                 self._conn.execute(
-                    "UPDATE user_states SET observations_json='[]' WHERE user_id=?",
-                    (user_id,),
+                    "UPDATE user_states SET observations_json=? WHERE user_id=?",
+                    (compact_dumps(updated), user_id),
                 )
+            return removed
 
     # -- Context Memory --
 
@@ -276,7 +323,7 @@ class MemoryStore:
                 updated_at=datetime.fromisoformat(now),
             )
 
-    def update_context_memory(self, ctx_mem: ContextMemory) -> None:
+    def update_context_memory(self, ctx_mem: ContextMemory) -> bool:
         with self._lock:
             assert self._conn is not None
             lt_value = (
@@ -306,6 +353,8 @@ class MemoryStore:
                         ctx_mem.context_key,
                         ctx_mem.version,
                     )
+                    return False
+            return True
 
     def add_sensory(
         self, context_key: str, user_id: str, content: str, cap: int = 50
@@ -327,7 +376,7 @@ class MemoryStore:
                 ctx_mem.sensory = ctx_mem.sensory[-cap:]
             with self._conn:
                 self._conn.execute(
-                    "UPDATE context_memories SET sensory_json=?, updated_at=? "
+                    "UPDATE context_memories SET sensory_json=?, version=version+1, updated_at=? "
                     "WHERE user_id=? AND context_key=?",
                     (compact_dumps(ctx_mem.sensory), _now_iso(), user_id, context_key),
                 )

@@ -534,13 +534,16 @@ async def test_observe_survives_db_closure(tmp_path: Path) -> None:
     """If the DB connection is lost, observe() should fail silently."""
     llm, _ = _make_mock_llm()
     mgr = MemoryManager(_make_config(tmp_path), llm)
-    mgr._store.close()  # simulate connection loss
+    try:
+        mgr._store.close()  # simulate connection loss
 
-    # Should not raise
-    await mgr.observe("I prefer Python", "user")
-    block = mgr.get_memory_block()
-    assert block == ""  # graceful empty return
-    await mgr.on_session_end()
+        # Should not raise
+        await mgr.observe("I prefer Python", "user")
+        block = mgr.get_memory_block()
+        assert block == ""  # graceful empty return
+        await mgr.on_session_end()
+    finally:
+        mgr.close()
 
 
 @pytest.mark.asyncio

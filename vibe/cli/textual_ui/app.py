@@ -966,8 +966,21 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def action_toggle_memory(self) -> None:
         mm = self.agent_loop.memory_manager
-        mm.enabled = not mm.enabled
-        state = "ON" if mm.enabled else "OFF"
+
+        if not mm.enabled:
+            if not mm.config.enabled or mm._store is None:
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        "Memory is disabled in config and cannot be enabled from UI."
+                    )
+                )
+                return
+            mm.enabled = True
+            await self._mount_and_scroll(UserCommandMessage("Memory: **ON**"))
+            return
+
+        mm.enabled = False
+        state = "OFF"
         msg = f"Memory: **{state}**"
         if not mm.enabled:
             m = mm.metrics
@@ -1091,10 +1104,9 @@ class VibeApp(App):  # noqa: PLR0904
         if not hasattr(self, "agent_loop"):
             return
         mm = self.agent_loop.memory_manager
-        if not mm.enabled:
-            return
         try:
-            await mm.on_session_end()
+            if mm.enabled:
+                await mm.on_session_end()
             await mm.aclose()
         except Exception:
             logger.warning("Memory shutdown flush failed", exc_info=True)

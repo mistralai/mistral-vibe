@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from xml.sax.saxutils import escape
 
 from vibe.core.memory.models import Seed, UserField
 from vibe.core.memory.storage import MemoryStore
@@ -24,11 +25,11 @@ class MemoryInjector:
         ctx_mem = self._store.get_or_create_context_memory(context_key, user_id)
 
         # Build sections by priority (highest first — trimmed from bottom)
-        seed_section = self._format_seed(state.seed)
-        fields_section = self._format_fields(state.fields)
-        active_section = self._format_short_term(ctx_mem.short_term)
-        knowledge_section = ctx_mem.long_term.strip()
-        sensory_section = self._format_sensory(ctx_mem.sensory)
+        seed_section = escape(self._format_seed(state.seed))
+        fields_section = escape(self._format_fields(state.fields))
+        active_section = escape(self._format_short_term(ctx_mem.short_term))
+        knowledge_section = escape(ctx_mem.long_term.strip())
+        sensory_section = escape(self._format_sensory(ctx_mem.sensory))
 
         # Nothing to inject
         if not any([seed_section, fields_section, active_section, knowledge_section, sensory_section]):
@@ -40,34 +41,36 @@ class MemoryInjector:
         parts: list[str] = []
         remaining = budget_chars
 
-        if seed_section and remaining > 0:
-            parts.append(f"<seed>{seed_section}</seed>")
-            remaining -= len(seed_section) + 14
-
-        if fields_section and remaining > 0:
-            trimmed = fields_section[:remaining]
-            parts.append(f"<fields>{trimmed}</fields>")
-            remaining -= len(trimmed) + 16
-
-        if active_section and remaining > 0:
-            trimmed = active_section[:remaining]
-            parts.append(f"<active>{trimmed}</active>")
-            remaining -= len(trimmed) + 16
-
-        if knowledge_section and remaining > 0:
-            trimmed = knowledge_section[:remaining]
-            parts.append(f"<knowledge>{trimmed}</knowledge>")
-            remaining -= len(trimmed) + 22
-
-        if sensory_section and remaining > 0:
-            trimmed = sensory_section[:remaining]
-            parts.append(f"<recent>{trimmed}</recent>")
-            remaining -= len(trimmed) + 16
+        remaining = self._append_section(parts, "seed", seed_section, remaining)
+        remaining = self._append_section(parts, "fields", fields_section, remaining)
+        remaining = self._append_section(parts, "active", active_section, remaining)
+        remaining = self._append_section(
+            parts, "knowledge", knowledge_section, remaining
+        )
+        remaining = self._append_section(parts, "recent", sensory_section, remaining)
 
         if not parts:
             return ""
 
         return "<memory>\n" + "\n".join(parts) + "\n</memory>"
+
+    @staticmethod
+    def _append_section(
+        parts: list[str], tag: str, section: str, remaining: int
+    ) -> int:
+        if not section:
+            return remaining
+
+        overhead = (len(tag) * 2) + 5  # "<tag>" + "</tag>"
+        if remaining <= overhead:
+            return remaining
+
+        trimmed = section[: remaining - overhead]
+        if not trimmed:
+            return remaining
+
+        parts.append(f"<{tag}>{trimmed}</{tag}>")
+        return remaining - (len(trimmed) + overhead)
 
     @staticmethod
     def _format_seed(seed: Seed) -> str:

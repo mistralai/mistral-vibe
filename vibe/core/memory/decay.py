@@ -8,6 +8,8 @@ from vibe.core.memory.models import FieldMeta, UserField
 
 def compute_retention(meta: FieldMeta, now: datetime) -> float:
     """Ebbinghaus retention: R = e^(-t/S) where t = days since last access, S = strength."""
+    if meta.strength <= 0:
+        return 0.0
     t = (now - meta.last_accessed).total_seconds() / 86400.0
     if t <= 0:
         return 1.0

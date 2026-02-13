@@ -224,6 +224,21 @@ async def test_observations_cleared_after_reflection(store: MemoryStore) -> None
 
 
 @pytest.mark.asyncio
+async def test_reflection_only_clears_processed_observations(store: MemoryStore) -> None:
+    store.get_or_create_user_state("user1")
+    _seed_observations(store, "user1", count=25, importance=10)
+
+    engine = _make_engine(store, response=json.dumps({"seed_updates": {}, "field_updates": []}))
+    config = MemoryConfig(enabled=True, reflection_trigger=150)
+
+    await engine.maybe_reflect("user1", config)
+
+    # Reflection processes top 20 observations; remaining 5 should still be pending.
+    obs = store.get_pending_observations("user1", limit=100)
+    assert len(obs) == 5
+
+
+@pytest.mark.asyncio
 async def test_llm_failure_returns_false(store: MemoryStore) -> None:
     store.get_or_create_user_state("user1")
     _seed_observations(store, "user1", count=20, importance=10)

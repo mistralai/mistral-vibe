@@ -73,3 +73,36 @@ async def test_ctrl_c_with_nonempty_input_clears_input_without_quit(
 
     mm.on_session_end.assert_not_awaited()
     mm.aclose.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_memory_even_when_toggled_off(vibe_app: VibeApp) -> None:
+    mm = vibe_app.agent_loop.memory_manager
+    mm.enabled = False
+    mm.on_session_end = AsyncMock()
+    mm.aclose = AsyncMock()
+
+    async with vibe_app.run_test() as pilot:
+        await pilot.press("ctrl+d")
+        await pilot.pause(0.1)
+
+    mm.on_session_end.assert_not_awaited()
+    mm.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_toggle_memory_blocked_when_disabled_in_config() -> None:
+    app = VibeApp(
+        agent_loop=AgentLoop(
+            VibeConfig(
+                session_logging=SessionLoggingConfig(enabled=False),
+                memory=MemoryConfig(enabled=False),
+            )
+        )
+    )
+    app._mount_and_scroll = AsyncMock()
+
+    await app.action_toggle_memory()
+
+    assert app.agent_loop.memory_manager.enabled is False
+    app._mount_and_scroll.assert_awaited()

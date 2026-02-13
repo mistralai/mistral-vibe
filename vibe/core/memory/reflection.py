@@ -48,7 +48,7 @@ class ReflectionEngine:
             return False
 
         try:
-            self._apply_result(user_id, state, result, config)
+            self._apply_result(user_id, state, result, observations, config)
         except Exception:
             logger.warning("Reflection apply failed", exc_info=True)
             return False
@@ -74,7 +74,12 @@ class ReflectionEngine:
         return self._parse_response(raw)
 
     def _apply_result(
-        self, user_id: str, state: UserState, result: dict, config: MemoryConfig
+        self,
+        user_id: str,
+        state: UserState,
+        result: dict,
+        observations: list[Observation],
+        config: MemoryConfig,
     ) -> None:
         now = datetime.now(UTC)
 
@@ -142,13 +147,12 @@ class ReflectionEngine:
 
         # Audit log (before clearing observations)
         obs_summary = json.dumps(
-            [{"content": o.content, "importance": o.importance}
-             for o in self._store.get_pending_observations(user_id)]
+            [{"content": o.content, "importance": o.importance} for o in observations]
         )
         self._store.log_reflection(user_id, obs_summary, json.dumps(result))
 
-        # Clear processed observations
-        self._store.clear_observations(user_id)
+        # Clear only processed observations so unprocessed backlog is preserved.
+        self._store.clear_observations(user_id, processed=observations)
 
     @staticmethod
     def _format_state(state: UserState) -> str:

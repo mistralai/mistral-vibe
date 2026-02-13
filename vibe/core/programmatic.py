@@ -52,8 +52,11 @@ def run_programmatic(
             if agent_loop.memory_manager.enabled:
                 try:
                     await agent_loop.memory_manager.on_session_end()
+                except Exception:
+                    logger.warning("Memory session end failed", exc_info=True)
+                try:
                     await agent_loop.memory_manager.aclose()
                 except Exception:
-                    pass
+                    logger.warning("Memory close failed", exc_info=True)
 
     return asyncio.run(_async_run())

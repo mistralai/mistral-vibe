@@ -107,7 +107,7 @@ def test_update_context_memory(store: MemoryStore) -> None:
     ctx = store.get_or_create_context_memory("project:foo", "user1")
     ctx.short_term = ["point 1", "point 2"]
     ctx.long_term = "This is a summary."
-    store.update_context_memory(ctx)
+    assert store.update_context_memory(ctx) is True
 
     loaded = store.get_or_create_context_memory("project:foo", "user1")
     assert loaded.short_term == ["point 1", "point 2"]
@@ -130,15 +130,24 @@ def test_optimistic_locking(store: MemoryStore) -> None:
     ctx = store.get_or_create_context_memory("project:lock", "user1")
     assert ctx.version == 0
 
-    store.update_context_memory(ctx)
+    assert store.update_context_memory(ctx) is True
     loaded = store.get_or_create_context_memory("project:lock", "user1")
     assert loaded.version == 1
 
-    # Stale version should fail silently (logged warning)
+    # Stale version should fail and report it.
     ctx.long_term = "stale update"
-    store.update_context_memory(ctx)  # version 0 != current 1
+    assert store.update_context_memory(ctx) is False  # version 0 != current 1
     final = store.get_or_create_context_memory("project:lock", "user1")
     assert final.long_term == ""  # stale update was not applied
+
+
+def test_add_sensory_bumps_version(store: MemoryStore) -> None:
+    ctx = store.get_or_create_context_memory("project:sensory", "user1")
+    assert ctx.version == 0
+
+    assert store.add_sensory("project:sensory", "user1", "hello world") is True
+    loaded = store.get_or_create_context_memory("project:sensory", "user1")
+    assert loaded.version == 1
 
 
 def test_log_reflection(store: MemoryStore) -> None:

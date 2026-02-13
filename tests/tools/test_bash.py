@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import os
+
 import pytest
 
 from tests.mock.utils import collect_result
@@ -102,15 +105,45 @@ async def test_streams_progress_for_long_running_command(
 ) -> None:
     monkeypatch.setattr(
         "vibe.core.tools.builtins.bash._PROGRESS_UPDATE_INTERVAL_SECONDS",
-        1,
+        0,
     )
+    wait_for_calls = 0
+    original_wait_for = asyncio.wait_for
+
+    class _FakeProcess:
+        returncode = 0
+        pid = os.getpid()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.sleep(0)
+            return b"", b""
+
+    async def _fake_create_subprocess_shell(*_args, **_kwargs) -> _FakeProcess:
+        return _FakeProcess()
+
+    async def _fake_wait_for(awaitable, timeout=None):
+        nonlocal wait_for_calls
+        wait_for_calls += 1
+        if wait_for_calls == 1:
+            raise TimeoutError
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(
+        "vibe.core.tools.builtins.bash.asyncio.create_subprocess_shell",
+        _fake_create_subprocess_shell,
+    )
+    monkeypatch.setattr(
+        "vibe.core.tools.builtins.bash.asyncio.wait_for",
+        _fake_wait_for,
+    )
+
     config = BashToolConfig()
     bash_tool = Bash(config=config, state=BaseToolState())
     ctx = InvokeContext(tool_call_id="call-123")
 
     stream_events: list[ToolStreamEvent] = []
     result = None
-    async for item in bash_tool.run(BashArgs(command="sleep 1.2"), ctx=ctx):
+    async for item in bash_tool.run(BashArgs(command="echo ok"), ctx=ctx):
         if isinstance(item, ToolStreamEvent):
             stream_events.append(item)
         else:
