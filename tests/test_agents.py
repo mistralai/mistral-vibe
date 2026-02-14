@@ -377,6 +377,19 @@ class TestAgentSwitchAgent:
         assert agent.config is original_config
         assert agent.agent_profile.name == BuiltinAgentName.DEFAULT
 
+    @pytest.mark.asyncio
+    async def test_switch_agent_reuses_tool_manager_instance(
+        self, base_config: VibeConfig, backend: FakeBackend
+    ) -> None:
+        agent = build_test_agent_loop(
+            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+        )
+        original_tool_manager = agent.tool_manager
+
+        await agent.switch_agent(BuiltinAgentName.PLAN)
+
+        assert agent.tool_manager is original_tool_manager
+
 
 class TestAcceptEditsAgent:
     def test_accept_edits_config_sets_write_file_always(self) -> None:
