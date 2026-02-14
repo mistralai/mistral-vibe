@@ -139,6 +139,8 @@ def _setup_signal_handlers() -> None:
             # Try to restore terminal to a sane state
             import termios
             import tty
+            import sys
+            import os
             
             # Get stdin fileno, handle cases where stdin might not be available
             try:
@@ -150,9 +152,20 @@ def _setup_signal_handlers() -> None:
             try:
                 # Get current terminal settings
                 attr = termios.tcgetattr(fd)
-                # Restore sane defaults
+                # Restore sane defaults for proper terminal operation
                 attr[3] = attr[3] | termios.ICANON | termios.ECHO  # Enable canonical mode and echo
+                # Also ensure other flags are set correctly
+                attr[0] = attr[0] | termios.IGNBRK  # Ignore break conditions
                 termios.tcsetattr(fd, termios.TCSANOW, attr)
+                
+                # Try to restore terminal to foreground
+                try:
+                    # Put our process group in foreground
+                    os.tcsetpgrp(fd, os.getpgrp())
+                except (termios.error, OSError):
+                    # If we can't set foreground, that's okay
+                    pass
+                    
             except (termios.error, OSError):
                 # If we can't restore terminal settings, that's okay
                 pass
