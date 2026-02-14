@@ -152,9 +152,19 @@ class WriteFile(
 
     async def _write_file(self, args: WriteFileArgs, file_path: Path) -> None:
         try:
+            # Strip trailing whitespace from each line while preserving line structure
+            content_to_write = self._strip_trailing_whitespace(args.content)
+            
             async with await anyio.Path(file_path).open(
                 mode="w", encoding="utf-8"
             ) as f:
-                await f.write(args.content)
+                await f.write(content_to_write)
         except Exception as e:
             raise ToolError(f"Error writing {file_path}: {e}") from e
+
+    @staticmethod
+    def _strip_trailing_whitespace(content: str) -> str:
+        """Strip trailing whitespace from each line while preserving line structure."""
+        lines = content.split('\n')
+        stripped_lines = [line.rstrip() for line in lines]
+        return '\n'.join(stripped_lines)

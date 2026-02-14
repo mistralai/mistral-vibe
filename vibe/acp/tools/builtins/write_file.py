@@ -42,8 +42,11 @@ class WriteFile(CoreWriteFileTool, BaseAcpTool[AcpWriteFileState]):
         await self._send_in_progress_session_update()
 
         try:
+            # Strip trailing whitespace from each line while preserving line structure
+            content_to_write = self._strip_trailing_whitespace(args.content)
+            
             await client.write_text_file(
-                session_id=session_id, path=str(file_path), content=args.content
+                session_id=session_id, path=str(file_path), content=content_to_write
             )
         except Exception as e:
             raise ToolError(f"Error writing {file_path}: {e}") from e
