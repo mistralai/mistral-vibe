@@ -251,8 +251,12 @@ class ChatTextArea(TextArea):
             event.stop()
             
             # Explicitly trigger the suspension action
-            if hasattr(self.app, 'action_suspend_process'):
-                self.app.action_suspend_process()
+            try:
+                if hasattr(self.app, 'action_suspend_process'):
+                    self.app.action_suspend_process()
+            except Exception:
+                # If direct call fails, at least we prevented the undo
+                pass
             
             return
 
