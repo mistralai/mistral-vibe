@@ -684,18 +684,22 @@ class TestStatsEdgeCases:
         backend = FakeBackend([])
         original_config = make_config(active_model="devstral-latest")
         agent = build_test_agent_loop(config=original_config, backend=backend)
+        original_tool_manager = agent.tool_manager
 
         await agent.reload_with_initial_messages(base_config=None)
 
         assert agent.config.active_model == "devstral-latest"
+        assert agent.tool_manager is original_tool_manager
 
     @pytest.mark.asyncio
     async def test_reload_with_new_config_updates_it(self) -> None:
         backend = FakeBackend([])
         original_config = make_config(active_model="devstral-latest")
         agent = build_test_agent_loop(config=original_config, backend=backend)
+        original_tool_manager = agent.tool_manager
 
         new_config = make_config(active_model="devstral-small")
         await agent.reload_with_initial_messages(base_config=new_config)
 
         assert agent.config.active_model == "devstral-small"
+        assert agent.tool_manager is not original_tool_manager
