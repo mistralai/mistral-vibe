@@ -29,6 +29,7 @@ from vibe.cli.plan_offer.decide_plan_offer import (
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway
 from vibe.cli.terminal_setup import setup_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
+from vibe.cli.textual_ui.widgets.agent_app import AgentApp
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
@@ -128,6 +129,7 @@ class BottomApp(StrEnum):
     Config = auto()
     Input = auto()
     Question = auto()
+    Agent = auto()
 
 
 class ChatScroll(VerticalScroll):
@@ -418,6 +420,64 @@ class VibeApp(App):  # noqa: PLR0904
         else:
             await self._mount_and_scroll(
                 UserCommandMessage("Configuration closed (no changes saved).")
+            )
+
+        await self._switch_to_input_app()
+
+    async def _handle_agent_change(self, agent_name: str) -> None:
+        """Handle agent change with proper error handling."""
+        # Find the agent by display name (handle format "display_name - description")
+        available_agents = self.agent_loop.agent_manager.available_agents
+        for name, agent in available_agents.items():
+            # Extract just the display name part (before " - ")
+            agent_display_name = agent_name.split(" - ")[0].strip()
+            if agent.display_name == agent_display_name:
+                try:
+                    await self.agent_loop.switch_agent(name)
+                    # Update UI to reflect the new agent profile
+                    self._update_profile_widgets(self.agent_loop.agent_profile)
+                except Exception as e:
+                    await self._mount_and_scroll(
+                        ErrorMessage(
+                            f"Failed to switch agent: {e}",
+                            collapsed=self._tools_collapsed,
+                        )
+                    )
+                break
+
+    async def on_agent_app_agent_closed(self, message: AgentApp.AgentClosed) -> None:
+        changes_made = False
+
+        # Handle agent changes
+        if message.agent_changes:
+            agent_name = message.agent_changes.get("agent", "")
+            if agent_name:
+                await self._handle_agent_change(agent_name)
+                changes_made = True
+
+        # Handle model changes
+        if message.model_changes:
+            model_alias = message.model_changes.get("active_model", "")
+            if model_alias and model_alias != self.agent_loop.config.active_model:
+                try:
+                    VibeConfig.save_updates({"active_model": model_alias})
+                    await self._reload_config()
+                    changes_made = True
+                except Exception as e:
+                    await self._mount_and_scroll(
+                        ErrorMessage(
+                            f"Failed to change model: {e}",
+                            collapsed=self._tools_collapsed,
+                        )
+                    )
+
+        if changes_made:
+            await self._mount_and_scroll(
+                UserCommandMessage("Agent and model settings updated!")
+            )
+        else:
+            await self._mount_and_scroll(
+                UserCommandMessage("Agent settings closed (no changes made).")
             )
 
         await self._switch_to_input_app()
@@ -996,6 +1056,12 @@ class VibeApp(App):  # noqa: PLR0904
         await self._mount_and_scroll(UserCommandMessage("Configuration opened..."))
         await self._switch_from_input(ConfigApp(self.config))
 
+    async def _switch_to_agent_app(self) -> None:
+        if self._current_bottom_app == BottomApp.Agent:
+            return
+        await self._mount_and_scroll(UserCommandMessage("Agent settings opened..."))
+        await self._switch_from_input(AgentApp(self.agent_loop))
+
     async def _switch_to_approval_app(
         self, tool_name: str, tool_args: BaseModel
     ) -> None:
@@ -1028,6 +1094,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(ChatInputContainer).focus_input()
                 case BottomApp.Config:
                     self.query_one(ConfigApp).focus()
+                case BottomApp.Agent:
+                    self.query_one(AgentApp).focus()
                 case BottomApp.Approval:
                     self.query_one(ApprovalApp).focus()
                 case BottomApp.Question:
@@ -1044,6 +1112,15 @@ class VibeApp(App):  # noqa: PLR0904
             try:
                 config_app = self.query_one(ConfigApp)
                 config_app.action_close()
+            except Exception:
+                pass
+            self._last_escape_time = None
+            return
+
+        if self._current_bottom_app == BottomApp.Agent:
+            try:
+                agent_app = self.query_one(AgentApp)
+                agent_app.action_close()
             except Exception:
                 pass
             self._last_escape_time = None

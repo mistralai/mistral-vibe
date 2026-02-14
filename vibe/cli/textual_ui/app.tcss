@@ -641,7 +641,8 @@ StatusMessage {
 
 }
 
-#config-app {
+#config-app,
+#agent-app {
     width: 100%;
     height: auto;
     background: transparent;
@@ -651,6 +652,11 @@ StatusMessage {
 }
 
 #config-content {
+    width: 100%;
+    height: auto;
+}
+
+#agent-content {
     width: 100%;
     height: auto;
 }

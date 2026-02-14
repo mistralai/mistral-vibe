@@ -67,6 +67,11 @@ class CommandRegistry:
                 description="Teleport session to Vibe Nuage",
                 handler="_teleport_command",
             ),
+            "agent": Command(
+                aliases=frozenset(["/agent"]),
+                description="Change agent and model settings",
+                handler="_switch_to_agent_app",
+            ),
         }
 
         for command in excluded_commands:
