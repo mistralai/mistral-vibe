@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import sys
 
 from rich import print as rprint
@@ -121,7 +123,52 @@ def _load_messages_from_previous_session(
     logger.info("Loaded %d messages from previous session", len(non_system_messages))
 
 
+def _setup_signal_handlers() -> None:
+    """Set up signal handlers for proper terminal suspension support.
+    
+    This allows Ctrl+Z to work naturally by:
+    - Letting SIGTSTP work with default behavior (suspend process)
+    - Handling SIGCONT to restore terminal state when resumed
+    """
+    
+    def handle_sigcont(signum, frame) -> None:
+        """Handle SIGCONT signal when process is resumed from suspension."""
+        # Restore terminal settings if needed
+        # The default SIGCONT handler will continue the process
+        try:
+            # Try to restore terminal to a sane state
+            import termios
+            import tty
+            
+            # Get stdin fileno, handle cases where stdin might not be available
+            try:
+                fd = sys.stdin.fileno()
+            except (IOError, OSError, AttributeError):
+                # stdin not available (e.g., in tests, redirected input)
+                return
+            
+            try:
+                # Get current terminal settings
+                attr = termios.tcgetattr(fd)
+                # Restore sane defaults
+                attr[3] = attr[3] | termios.ICANON | termios.ECHO  # Enable canonical mode and echo
+                termios.tcsetattr(fd, termios.TCSANOW, attr)
+            except (termios.error, OSError):
+                # If we can't restore terminal settings, that's okay
+                pass
+        except ImportError:
+            # termios not available (Windows), ignore
+            pass
+    
+    # Set up SIGCONT handler to ensure proper terminal restoration
+    signal.signal(signal.SIGCONT, handle_sigcont)
+    
+    # Let SIGTSTP use default behavior (suspend process)
+    # We don't set a custom handler for SIGTSTP to allow natural suspension
+
+
 def run_cli(args: argparse.Namespace) -> None:
+    _setup_signal_handlers()
     load_dotenv_values()
     bootstrap_config_files()
 

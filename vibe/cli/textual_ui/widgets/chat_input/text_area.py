@@ -26,6 +26,11 @@ class ChatTextArea(TextArea):
             priority=True,
         ),
         Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
+        # Remap undo/redo to avoid conflict with app-level suspension binding
+        # On macOS: cmd+z/cmd+shift+z (standard macOS undo/redo)
+        # On other platforms: ctrl+alt+z/ctrl+alt+shift+z
+        Binding("ctrl+alt+z,super+z", "undo", "Undo", show=False),
+        Binding("ctrl+alt+shift+z,super+shift+z", "redo", "Redo", show=False),
     ]
 
     DEFAULT_MODE: ClassVar[Literal[">"]] = ">"
