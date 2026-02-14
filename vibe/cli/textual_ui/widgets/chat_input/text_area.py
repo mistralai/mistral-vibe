@@ -26,7 +26,10 @@ class ChatTextArea(TextArea):
             priority=True,
         ),
         Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
-        # Remap undo/redo to avoid conflict with app-level suspension binding
+        # Override TextArea's Ctrl+Z binding to prevent conflict with app-level suspension
+        # This allows Ctrl+Z to reach the app for process suspension
+        Binding("ctrl+z", "no_op", "", show=False, priority=True),
+        # Remap undo/redo to alternative keys
         # On macOS: cmd+z/cmd+shift+z (standard macOS undo/redo)
         # On other platforms: ctrl+alt+z/ctrl+alt+shift+z
         Binding("ctrl+alt+z,super+z", "undo", "Undo", show=False),
@@ -90,6 +93,10 @@ class ChatTextArea(TextArea):
 
     def action_insert_newline(self) -> None:
         self.insert("\n")
+
+    def action_no_op(self) -> None:
+        """No-operation action to override inherited key bindings."""
+        pass
 
     def action_open_external_editor(self) -> None:
         editor = ExternalEditor()
