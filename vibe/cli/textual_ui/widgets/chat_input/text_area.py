@@ -243,11 +243,17 @@ class ChatTextArea(TextArea):
             event.stop()
             return
 
-        # Allow Ctrl+Z to pass through to app-level suspension handling
-        # by not processing it in the text area
+        # Handle Ctrl+Z explicitly to trigger process suspension
+        # This ensures suspension works even if binding dispatch doesn't
         if event.key == "ctrl+z":
-            # Don't call super()._on_key() for Ctrl+Z to prevent undo
-            # This allows the app-level Ctrl+Z binding to handle suspension
+            # Prevent the parent TextArea from processing Ctrl+Z as undo
+            event.prevent_default()
+            event.stop()
+            
+            # Explicitly trigger the suspension action
+            if hasattr(self.app, 'action_suspend_process'):
+                self.app.action_suspend_process()
+            
             return
 
         await super()._on_key(event)
