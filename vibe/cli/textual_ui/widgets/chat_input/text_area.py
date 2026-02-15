@@ -26,6 +26,11 @@ class ChatTextArea(TextArea):
             priority=True,
         ),
         Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
+        # Remap undo/redo to alternative keys to avoid conflict with app-level suspension
+        # On macOS: cmd+z/cmd+shift+z (standard macOS undo/redo)
+        # On other platforms: ctrl+alt+z/ctrl+alt+shift+z
+        Binding("ctrl+alt+z,super+z", "undo", "Undo", show=False),
+        Binding("ctrl+alt+shift+z,super+shift+z", "redo", "Redo", show=False),
     ]
 
     DEFAULT_MODE: ClassVar[Literal[">"]] = ">"
@@ -236,6 +241,23 @@ class ChatTextArea(TextArea):
         if event.key == "down" and self._handle_history_down():
             event.prevent_default()
             event.stop()
+            return
+
+        # Handle Ctrl+Z explicitly to trigger process suspension
+        # This ensures suspension works even if binding dispatch doesn't
+        if event.key == "ctrl+z":
+            # Prevent the parent TextArea from processing Ctrl+Z as undo
+            event.prevent_default()
+            event.stop()
+            
+            # Explicitly trigger the suspension action
+            try:
+                if hasattr(self.app, 'action_suspend_process'):
+                    self.app.action_suspend_process()
+            except Exception:
+                # If direct call fails, at least we prevented the undo
+                pass
+            
             return
 
         await super()._on_key(event)

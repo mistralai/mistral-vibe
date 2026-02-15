@@ -187,6 +187,7 @@ class VibeApp(App):  # noqa: PLR0904
         Binding(
             "shift+down", "scroll_chat_down", "Scroll Down", show=False, priority=True
         ),
+        Binding("ctrl+z", "suspend_process", "Suspend", show=False),
     ]
 
     def __init__(
