@@ -170,8 +170,16 @@ def _setup_signal_handlers() -> None:
                 try:
                     import textual.app
                     app = textual.app.active_app.get(None)
-                    if app and hasattr(app, '_resume_signal'):
-                        app._resume_signal()
+                    if app:
+                        # Trigger resume signal
+                        if hasattr(app, '_resume_signal'):
+                            app._resume_signal()
+                        # Explicitly refresh the app to ensure proper redraw
+                        if hasattr(app, 'refresh'):
+                            app.refresh()
+                        # Also try to force a render if needed
+                        if hasattr(app, 'render'):
+                            app.render()
                 except Exception:
                     # If we can't access the app, that's okay
                     pass
