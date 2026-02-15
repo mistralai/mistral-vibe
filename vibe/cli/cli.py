@@ -165,6 +165,16 @@ def _setup_signal_handlers() -> None:
                 except (termios.error, OSError):
                     # If we can't set foreground, that's okay
                     pass
+                
+                # Try to trigger Textual app refresh if available
+                try:
+                    import textual.app
+                    app = textual.app.active_app.get(None)
+                    if app and hasattr(app, '_resume_signal'):
+                        app._resume_signal()
+                except Exception:
+                    # If we can't access the app, that's okay
+                    pass
                     
             except (termios.error, OSError):
                 # If we can't restore terminal settings, that's okay
