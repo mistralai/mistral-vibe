@@ -24,7 +24,7 @@ Mistral Vibe is a command-line coding assistant powered by Mistral's models. It 
 > [!WARNING]
 > Mistral Vibe works on Windows, but we officially support and target UNIX environments.
 > 
-> Consider using [gnuwin32-coreutils](https://sourceforge.net/projects/gnuwin32/files/coreutils/5.3.0/coreutils-5.3.0.exe/download) [(chocolatey package)](https://community.chocolatey.org/packages/gnuwin32-coreutils.install) and [grep](https://community.chocolatey.org/packages/grep) (check PATH afterwards) to avoid Vibe's tool usage errors on Windows.
+> Consider using [gnuwin32-coreutils](https://sourceforge.net/projects/gnuwin32/files/coreutils/5.3.0/coreutils-5.3.0.exe/download) [(chocolatey package)](https://community.chocolatey.org/packages/gnuwin32-coreutils.install), [grep](https://community.chocolatey.org/packages/grep) and [sed](https://community.chocolatey.org/packages/sed) (check PATH afterwards) to avoid Vibe's tool usage errors on Windows.
 
 ### One-line install (recommended)
 
