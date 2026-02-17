@@ -17,7 +17,6 @@ from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.middleware import (
     ConversationContext,
     MiddlewareAction,
-    MiddlewarePipeline,
     MiddlewareResult,
     ResetReason,
 )
@@ -47,9 +46,6 @@ class InjectBeforeMiddleware:
         return MiddlewareResult(
             action=MiddlewareAction.INJECT_MESSAGE, message=self.injected_message
         )
-
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        return MiddlewareResult()
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         return None
@@ -99,15 +95,17 @@ async def test_act_flushes_batched_messages_with_injection_middleware(
     async for _ in agent.act("How can you help?"):
         pass
 
-    assert len(observed) == 3
-    assert [r for r, _ in observed] == [Role.system, Role.user, Role.assistant]
+    assert len(observed) == 4
+    assert [r for r, _ in observed] == [
+        Role.system,
+        Role.user,
+        Role.user,
+        Role.assistant,
+    ]
     assert observed[0][1] == "You are Vibe, a super useful programming assistant."
-    # injected content should be appended to the user's message before emission
-    assert (
-        observed[1][1]
-        == f"How can you help?\n\n{InjectBeforeMiddleware.injected_message}"
-    )
-    assert observed[2][1] == "I can write very efficient code."
+    assert observed[1][1] == "How can you help?"
+    assert observed[2][1] == InjectBeforeMiddleware.injected_message
+    assert observed[3][1] == "I can write very efficient code."
 
 
 @pytest.mark.asyncio
@@ -318,17 +316,12 @@ async def test_act_merges_streamed_tool_call_arguments() -> None:
 
 @pytest.mark.asyncio
 async def test_act_handles_user_cancellation_during_streaming() -> None:
-    class CountingMiddleware(MiddlewarePipeline):
+    class CountingMiddleware:
         def __init__(self) -> None:
             self.before_calls = 0
-            self.after_calls = 0
 
         async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
             self.before_calls += 1
-            return MiddlewareResult()
-
-        async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-            self.after_calls += 1
             return MiddlewareResult()
 
         def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
@@ -371,7 +364,6 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
         ToolResultEvent,
     ]
     assert middleware.before_calls == 1
-    assert middleware.after_calls == 0
     assert isinstance(events[-1], ToolResultEvent)
     assert events[-1].skipped is True
     assert events[-1].skip_reason is not None

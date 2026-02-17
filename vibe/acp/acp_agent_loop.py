@@ -20,7 +20,7 @@ from acp import (
     SetSessionModeResponse,
     run_agent,
 )
-from acp.helpers import ContentBlock, SessionUpdate
+from acp.helpers import ContentBlock, SessionUpdate, update_available_commands
 from acp.schema import (
     AgentCapabilities,
     AgentMessageChunk,
@@ -28,6 +28,8 @@ from acp.schema import (
     AllowedOutcome,
     AuthenticateResponse,
     AuthMethod,
+    AvailableCommand,
+    AvailableCommandInput,
     ClientCapabilities,
     ContentToolCallContent,
     ForkSessionResponse,
@@ -38,6 +40,9 @@ from acp.schema import (
     ModelInfo,
     PromptCapabilities,
     ResumeSessionResponse,
+    SessionCapabilities,
+    SessionInfo,
+    SessionListCapabilities,
     SessionModelState,
     SessionModeState,
     SseMcpServer,
@@ -45,6 +50,7 @@ from acp.schema import (
     TextResourceContents,
     ToolCallProgress,
     ToolCallUpdate,
+    UnstructuredCommandInput,
     UserMessageChunk,
 )
 from pydantic import BaseModel, ConfigDict
@@ -58,15 +64,33 @@ from vibe.acp.tools.session_update import (
 from vibe.acp.utils import (
     TOOL_OPTIONS,
     ToolOption,
+    create_assistant_message_replay,
     create_compact_end_session_update,
     create_compact_start_session_update,
+    create_reasoning_replay,
+    create_tool_call_replay,
+    create_tool_result_replay,
+    create_user_message_replay,
     get_all_acp_session_modes,
+    get_proxy_help_text,
     is_valid_acp_agent,
 )
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
-from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
+from vibe.core.config import (
+    MissingAPIKeyError,
+    SessionLoggingConfig,
+    VibeConfig,
+    load_dotenv_values,
+)
+from vibe.core.proxy_setup import (
+    ProxySetupError,
+    parse_proxy_command,
+    set_proxy_var,
+    unset_proxy_var,
+)
+from vibe.core.session.session_loader import SessionLoader
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
     ApprovalResponse,
@@ -74,7 +98,9 @@ from vibe.core.types import (
     AsyncApprovalCallback,
     CompactEndEvent,
     CompactStartEvent,
+    LLMMessage,
     ReasoningEvent,
+    Role,
     ToolCallEvent,
     ToolResultEvent,
     ToolStreamEvent,
@@ -150,9 +176,12 @@ class VibeAcpAgentLoop(AcpAgent):
 
         response = InitializeResponse(
             agent_capabilities=AgentCapabilities(
-                load_session=False,
+                load_session=True,
                 prompt_capabilities=PromptCapabilities(
                     audio=False, embedded_context=True, image=False
+                ),
+                session_capabilities=SessionCapabilities(
+                    list=SessionListCapabilities()
                 ),
             ),
             protocol_version=PROTOCOL_VERSION,
@@ -171,6 +200,44 @@ class VibeAcpAgentLoop(AcpAgent):
     ) -> AuthenticateResponse | None:
         raise NotImplementedError("Not implemented yet")
 
+    def _load_config(self) -> VibeConfig:
+        try:
+            config = VibeConfig.load(disabled_tools=["ask_user_question"])
+            config.tool_paths.extend(self._get_acp_tool_overrides())
+            return config
+        except MissingAPIKeyError as e:
+            raise RequestError.auth_required({
+                "message": "You must be authenticated before creating a session"
+            }) from e
+
+    async def _create_acp_session(
+        self, session_id: str, agent_loop: AgentLoop
+    ) -> AcpSessionLoop:
+        session = AcpSessionLoop(id=session_id, agent_loop=agent_loop)
+        self.sessions[session.id] = session
+
+        if not agent_loop.auto_approve:
+            agent_loop.set_approval_callback(self._create_approval_callback(session.id))
+
+        asyncio.create_task(self._send_available_commands(session.id))
+
+        return session
+
+    def _build_session_model_state(self, agent_loop: AgentLoop) -> SessionModelState:
+        return SessionModelState(
+            current_model_id=agent_loop.config.active_model,
+            available_models=[
+                ModelInfo(model_id=model.alias, name=model.alias)
+                for model in agent_loop.config.models
+            ],
+        )
+
+    def _build_session_mode_state(self, session: AcpSessionLoop) -> SessionModeState:
+        return SessionModeState(
+            current_mode_id=session.agent_loop.agent_profile.name,
+            available_modes=get_all_acp_session_modes(session.agent_loop.agent_manager),
+        )
+
     @override
     async def new_session(
         self,
@@ -181,13 +248,7 @@ class VibeAcpAgentLoop(AcpAgent):
         load_dotenv_values()
         os.chdir(cwd)
 
-        try:
-            config = VibeConfig.load(disabled_tools=["ask_user_question"])
-            config.tool_paths.extend(self._get_acp_tool_overrides())
-        except MissingAPIKeyError as e:
-            raise RequestError.auth_required({
-                "message": "You must be authenticated before creating a new session"
-            }) from e
+        config = self._load_config()
 
         agent_loop = AgentLoop(
             config=config, agent_name=BuiltinAgentName.DEFAULT, enable_streaming=True
@@ -196,29 +257,14 @@ class VibeAcpAgentLoop(AcpAgent):
         # We should just use agent_loop.session_id everywhere, but it can still change during
         # session lifetime (e.g. agent_loop.compact is called).
         # We should refactor agent_loop.session_id to make it immutable in ACP context.
-        session = AcpSessionLoop(id=agent_loop.session_id, agent_loop=agent_loop)
-        self.sessions[session.id] = session
+        session = await self._create_acp_session(agent_loop.session_id, agent_loop)
+        agent_loop.emit_new_session_telemetry("acp")
 
-        if not agent_loop.auto_approve:
-            agent_loop.set_approval_callback(
-                self._create_approval_callback(agent_loop.session_id)
-            )
-
-        response = NewSessionResponse(
-            session_id=agent_loop.session_id,
-            models=SessionModelState(
-                current_model_id=agent_loop.config.active_model,
-                available_models=[
-                    ModelInfo(model_id=model.alias, name=model.alias)
-                    for model in agent_loop.config.models
-                ],
-            ),
-            modes=SessionModeState(
-                current_mode_id=session.agent_loop.agent_profile.name,
-                available_modes=get_all_acp_session_modes(agent_loop.agent_manager),
-            ),
+        return NewSessionResponse(
+            session_id=session.id,
+            models=self._build_session_model_state(agent_loop),
+            modes=self._build_session_mode_state(session),
         )
-        return response
 
     def _get_acp_tool_overrides(self) -> list[Path]:
         overrides = ["todo"]
@@ -293,6 +339,85 @@ class VibeAcpAgentLoop(AcpAgent):
             raise RequestError.invalid_params({"session": "Not found"})
         return self.sessions[session_id]
 
+    async def _replay_tool_calls(self, session_id: str, msg: LLMMessage) -> None:
+        if not msg.tool_calls:
+            return
+        for tool_call in msg.tool_calls:
+            if tool_call.id and tool_call.function.name:
+                update = create_tool_call_replay(
+                    tool_call.id, tool_call.function.name, tool_call.function.arguments
+                )
+                await self.client.session_update(session_id=session_id, update=update)
+
+    async def _replay_conversation_history(
+        self, session_id: str, messages: list[LLMMessage]
+    ) -> None:
+        for msg in messages:
+            if msg.role == Role.user:
+                update = create_user_message_replay(msg)
+                await self.client.session_update(session_id=session_id, update=update)
+
+            elif msg.role == Role.assistant:
+                if text_update := create_assistant_message_replay(msg):
+                    await self.client.session_update(
+                        session_id=session_id, update=text_update
+                    )
+                if reasoning_update := create_reasoning_replay(msg):
+                    await self.client.session_update(
+                        session_id=session_id, update=reasoning_update
+                    )
+                await self._replay_tool_calls(session_id, msg)
+
+            elif msg.role == Role.tool:
+                if result_update := create_tool_result_replay(msg):
+                    await self.client.session_update(
+                        session_id=session_id, update=result_update
+                    )
+
+    async def _send_available_commands(self, session_id: str) -> None:
+        commands = [
+            AvailableCommand(
+                name="proxy-setup",
+                description="Configure proxy and SSL certificate settings",
+                input=AvailableCommandInput(
+                    root=UnstructuredCommandInput(
+                        hint="KEY value to set, KEY to unset, or empty for help"
+                    )
+                ),
+            )
+        ]
+
+        update = update_available_commands(commands)
+        await self.client.session_update(session_id=session_id, update=update)
+
+    async def _handle_proxy_setup_command(
+        self, session_id: str, text_prompt: str
+    ) -> PromptResponse:
+        args = text_prompt.strip()[len("/proxy-setup") :].strip()
+
+        try:
+            if not args:
+                message = get_proxy_help_text()
+            else:
+                key, value = parse_proxy_command(args)
+                if value is not None:
+                    set_proxy_var(key, value)
+                    message = f"Set `{key}={value}` in ~/.vibe/.env\n\nPlease start a new chat for changes to take effect."
+                else:
+                    unset_proxy_var(key)
+                    message = f"Removed `{key}` from ~/.vibe/.env\n\nPlease start a new chat for changes to take effect."
+        except ProxySetupError as e:
+            message = f"Error: {e}"
+
+        await self.client.session_update(
+            session_id=session_id,
+            update=AgentMessageChunk(
+                session_update="agent_message_chunk",
+                content=TextContentBlock(type="text", text=message),
+            ),
+        )
+        return PromptResponse(stop_reason="end_turn")
+
     @override
     async def load_session(
         self,
@@ -301,7 +426,44 @@ class VibeAcpAgentLoop(AcpAgent):
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> LoadSessionResponse | None:
-        raise NotImplementedError()
+        load_dotenv_values()
+        os.chdir(cwd)
+
+        config = self._load_config()
+
+        session_dir = SessionLoader.find_session_by_id(
+            session_id, config.session_logging
+        )
+        if session_dir is None:
+            raise RequestError.invalid_params({
+                "session_id": f"Session not found: {session_id}"
+            })
+
+        try:
+            loaded_messages, _ = SessionLoader.load_session(session_dir)
+        except ValueError as e:
+            raise RequestError.invalid_params({
+                "session_id": f"Failed to load session: {e}"
+            }) from e
+
+        agent_loop = AgentLoop(
+            config=config, agent_name=BuiltinAgentName.DEFAULT, enable_streaming=True
+        )
+
+        non_system_messages = [
+            msg for msg in loaded_messages if msg.role != Role.system
+        ]
+
+        agent_loop.messages.extend(non_system_messages)
+
+        session = await self._create_acp_session(session_id, agent_loop)
+
+        await self._replay_conversation_history(session_id, non_system_messages)
+
+        return LoadSessionResponse(
+            models=self._build_session_model_state(agent_loop),
+            modes=self._build_session_mode_state(session),
+        )
 
     @override
     async def set_session_mode(
@@ -348,7 +510,27 @@ class VibeAcpAgentLoop(AcpAgent):
     async def list_sessions(
         self, cursor: str | None = None, cwd: str | None = None, **kwargs: Any
     ) -> ListSessionsResponse:
-        raise NotImplementedError()
+        try:
+            config = VibeConfig.load()
+            session_logging_config = config.session_logging
+        except MissingAPIKeyError:
+            session_logging_config = SessionLoggingConfig()
+
+        session_data = SessionLoader.list_sessions(session_logging_config, cwd=cwd)
+
+        sessions = [
+            SessionInfo(
+                session_id=s["session_id"],
+                cwd=s["cwd"],
+                title=s.get("title"),
+                updated_at=s.get("end_time"),
+            )
+            for s in sorted(
+                session_data, key=lambda s: s.get("end_time") or "", reverse=True
+            )
+        ]
+
+        return ListSessionsResponse(sessions=sessions)
 
     @override
     async def prompt(
@@ -362,6 +544,9 @@ class VibeAcpAgentLoop(AcpAgent):
             )
 
         text_prompt = self._build_text_prompt(prompt)
+
+        if text_prompt.strip().lower().startswith("/proxy-setup"):
+            return await self._handle_proxy_setup_command(session_id, text_prompt)
 
         temp_user_message_id: str | None = kwargs.get("messageId")
 

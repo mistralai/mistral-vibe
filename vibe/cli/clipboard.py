@@ -26,7 +26,7 @@ def _shorten_preview(texts: list[str]) -> str:
     return dense_text
 
 
-def copy_selection_to_clipboard(app: App, show_toast: bool = True) -> None:
+def copy_selection_to_clipboard(app: App, show_toast: bool = True) -> str | None:
     selected_texts = []
 
     for widget in app.query("*"):
@@ -48,7 +48,7 @@ def copy_selection_to_clipboard(app: App, show_toast: bool = True) -> None:
             selected_texts.append(selected_text)
 
     if not selected_texts:
-        return
+        return None
 
     combined_text = "\n".join(selected_texts)
 
@@ -61,7 +61,9 @@ def copy_selection_to_clipboard(app: App, show_toast: bool = True) -> None:
                 timeout=2,
                 markup=False,
             )
+        return combined_text
     except Exception:
         app.notify(
             "Failed to copy - clipboard not available", severity="warning", timeout=3
         )
+        return None

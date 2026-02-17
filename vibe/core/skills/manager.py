@@ -5,7 +5,7 @@ from logging import getLogger
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from vibe.core.paths.config_paths import resolve_local_skills_dir
+from vibe.core.paths.config_paths import resolve_local_skills_dirs
 from vibe.core.paths.global_paths import GLOBAL_SKILLS_DIR
 from vibe.core.skills.models import SkillInfo, SkillMetadata
 from vibe.core.skills.parser import SkillParseError, parse_frontmatter
@@ -58,8 +58,7 @@ class SkillManager:
             if path.is_dir():
                 paths.append(path)
 
-        if (skills_dir := resolve_local_skills_dir(Path.cwd())) is not None:
-            paths.append(skills_dir)
+        paths.extend(resolve_local_skills_dirs(Path.cwd()))
 
         if GLOBAL_SKILLS_DIR.path.is_dir():
             paths.append(GLOBAL_SKILLS_DIR.path)

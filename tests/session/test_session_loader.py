@@ -67,8 +67,8 @@ def create_test_session():
         if metadata is None:
             metadata = {
                 "session_id": session_id,
-                "start_time": "2023-01-01T12:00:00",
-                "end_time": "2023-01-01T12:05:00",
+                "start_time": "2023-01-01T12:00:00Z",
+                "end_time": "2023-01-01T12:05:00Z",
                 "total_messages": 2,
                 "stats": {
                     "steps": 1,
@@ -635,3 +635,190 @@ class TestSessionLoaderEdgeCases:
         assert messages[0].content == "Hello"
         assert messages[1].role == Role.assistant
         assert messages[1].content == "Hi there!"
+
+
+@pytest.fixture
+def create_test_session_with_cwd():
+    def _create_session(
+        session_dir: Path,
+        session_id: str,
+        cwd: str,
+        title: str | None = None,
+        end_time: str | None = None,
+    ) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_folder = session_dir / f"test_{timestamp}_{session_id[:8]}"
+        session_folder.mkdir(exist_ok=True)
+
+        messages_file = session_folder / "messages.jsonl"
+        messages_file.write_text('{"role": "user", "content": "Hello"}\n')
+
+        metadata = {
+            "session_id": session_id,
+            "start_time": "2024-01-01T12:00:00Z",
+            "end_time": end_time or "2024-01-01T12:05:00Z",
+            "environment": {"working_directory": cwd},
+            "title": title,
+        }
+
+        metadata_file = session_folder / "meta.json"
+        with metadata_file.open("w", encoding="utf-8") as f:
+            json.dump(metadata, f)
+
+        return session_folder
+
+    return _create_session
+
+
+class TestSessionLoaderListSessions:
+    def test_list_sessions_empty(self, session_config: SessionLoggingConfig) -> None:
+        result = SessionLoader.list_sessions(session_config)
+        assert result == []
+
+    def test_list_sessions_returns_all_sessions(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir,
+            "aaaaaaaa-1111",
+            "/home/user/project1",
+            title="First session",
+            end_time="2024-01-01T12:00:00Z",
+        )
+        create_test_session_with_cwd(
+            session_dir,
+            "bbbbbbbb-2222",
+            "/home/user/project2",
+            title="Second session",
+            end_time="2024-01-01T13:00:00Z",
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert len(result) == 2
+        session_ids = {s["session_id"] for s in result}
+        assert "aaaaaaaa-1111" in session_ids
+        assert "bbbbbbbb-2222" in session_ids
+
+    def test_list_sessions_filters_by_cwd(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir,
+            "aaaaaaaa-proj1",
+            "/home/user/project1",
+            title="Project 1 session",
+        )
+        create_test_session_with_cwd(
+            session_dir,
+            "bbbbbbbb-proj2",
+            "/home/user/project2",
+            title="Project 2 session",
+        )
+        create_test_session_with_cwd(
+            session_dir,
+            "cccccccc-proj1",
+            "/home/user/project1",
+            title="Another Project 1 session",
+        )
+
+        result = SessionLoader.list_sessions(session_config, cwd="/home/user/project1")
+
+        assert len(result) == 2
+        for session in result:
+            assert session["cwd"] == "/home/user/project1"
+
+    def test_list_sessions_includes_all_fields(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir,
+            "test-session-123",
+            "/home/user/project",
+            title="Test Session Title",
+            end_time="2024-01-15T10:30:00Z",
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert len(result) == 1
+        session = result[0]
+        assert session["session_id"] == "test-session-123"
+        assert session["cwd"] == "/home/user/project"
+        assert session["title"] == "Test Session Title"
+
+    def test_list_sessions_skips_invalid_sessions(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir, "valid-se", "/home/user/project", title="Valid Session"
+        )
+
+        invalid_session = session_dir / "test_20240101_120000_invalid1"
+        invalid_session.mkdir()
+        (invalid_session / "meta.json").write_text('{"session_id": "invalid"}')
+
+        no_id_session = session_dir / "test_20240101_120001_noid0000"
+        no_id_session.mkdir()
+        (no_id_session / "messages.jsonl").write_text(
+            '{"role": "user", "content": "Hello"}\n'
+        )
+        (no_id_session / "meta.json").write_text(
+            '{"environment": {"working_directory": "/test"}}'
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert len(result) == 1
+        assert result[0]["session_id"] == "valid-se"
+
+    def test_list_sessions_nonexistent_save_dir(self) -> None:
+        bad_config = SessionLoggingConfig(
+            save_dir="/nonexistent/path", session_prefix="test", enabled=True
+        )
+
+        result = SessionLoader.list_sessions(bad_config)
+        assert result == []
+
+    def test_list_sessions_handles_missing_environment(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        session_folder = session_dir / "test_20240101_120000_noenv000"
+        session_folder.mkdir()
+        (session_folder / "messages.jsonl").write_text(
+            '{"role": "user", "content": "Hello"}\n'
+        )
+        (session_folder / "meta.json").write_text(
+            '{"session_id": "noenv000", "end_time": "2024-01-01T12:00:00Z"}'
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert len(result) == 1
+        assert result[0]["session_id"] == "noenv000"
+        assert result[0]["cwd"] == ""  # Empty string when no working_directory
+
+    def test_list_sessions_handles_none_title(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir, "notitle0", "/home/user/project", title=None
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert len(result) == 1
+        assert result[0]["session_id"] == "notitle0"
+        assert result[0]["title"] is None

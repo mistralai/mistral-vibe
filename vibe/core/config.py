@@ -148,6 +148,8 @@ class ProviderConfig(BaseModel):
     api_style: str = "openai"
     backend: Backend = Backend.GENERIC
     reasoning_field_name: str = "reasoning_content"
+    project_id: str = ""
+    region: str = ""
 
 
 class _MCPBase(BaseModel):
@@ -251,6 +253,7 @@ class ModelConfig(BaseModel):
     temperature: float = 0.2
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
+    thinking: Literal["off", "low", "medium", "high"] = "off"
 
     @model_validator(mode="before")
     @classmethod
@@ -312,6 +315,7 @@ class VibeConfig(BaseSettings):
     auto_compact_threshold: int = 200_000
     context_warnings: bool = False
     auto_approve: bool = False
+    enable_telemetry: bool = True
     system_prompt_id: str = "cli"
     include_commit_signature: bool = True
     include_model_info: bool = True

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+import contextlib
 from datetime import timedelta
 import hashlib
+from logging import getLogger
+import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+import threading
+from typing import TYPE_CHECKING, Any, ClassVar, TextIO
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -23,6 +27,37 @@ from vibe.core.types import ToolStreamEvent
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
+
+logger = getLogger("vibe")
+
+
+def _stderr_logger_thread(read_fd: int) -> None:
+    with open(read_fd, "rb") as f:
+        for line in iter(f.readline, b""):
+            decoded = line.decode("utf-8", errors="replace").rstrip()
+            if decoded:
+                logger.debug(f"[MCP stderr] {decoded}")
+
+
+@contextlib.asynccontextmanager
+async def _mcp_stderr_capture() -> AsyncGenerator[TextIO, None]:
+    r, w = os.pipe()
+    errlog = None
+    thread_started = False
+    try:
+        thread = threading.Thread(target=_stderr_logger_thread, args=(r,), daemon=True)
+        thread.start()
+        thread_started = True
+        errlog = os.fdopen(w, "w")
+        yield errlog
+    finally:
+        if errlog is not None:
+            errlog.close()
+        elif thread_started:
+            os.close(w)
+        else:
+            os.close(r)
+            os.close(w)
 
 
 class _OpenArgs(BaseModel):
@@ -240,11 +275,14 @@ async def list_tools_stdio(
 ) -> list[RemoteTool]:
     params = StdioServerParameters(command=command[0], args=command[1:], env=env)
     timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
-            await session.initialize()
-            tools_resp = await session.list_tools()
-            return [RemoteTool.model_validate(t) for t in tools_resp.tools]
+    async with (
+        _mcp_stderr_capture() as errlog,
+        stdio_client(params, errlog=errlog) as (read, write),
+        ClientSession(read, write, read_timeout_seconds=timeout) as session,
+    ):
+        await session.initialize()
+        tools_resp = await session.list_tools()
+        return [RemoteTool.model_validate(t) for t in tools_resp.tools]
 
 
 async def call_tool_stdio(
@@ -261,15 +299,16 @@ async def call_tool_stdio(
         timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     )
     call_timeout = timedelta(seconds=tool_timeout_sec) if tool_timeout_sec else None
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(
-            read, write, read_timeout_seconds=init_timeout
-        ) as session:
-            await session.initialize()
-            result = await session.call_tool(
-                tool_name, arguments, read_timeout_seconds=call_timeout
-            )
-            return _parse_call_result("stdio:" + " ".join(command), tool_name, result)
+    async with (
+        _mcp_stderr_capture() as errlog,
+        stdio_client(params, errlog=errlog) as (read, write),
+        ClientSession(read, write, read_timeout_seconds=init_timeout) as session,
+    ):
+        await session.initialize()
+        result = await session.call_tool(
+            tool_name, arguments, read_timeout_seconds=call_timeout
+        )
+        return _parse_call_result("stdio:" + " ".join(command), tool_name, result)
 
 
 def create_mcp_stdio_proxy_tool_class(

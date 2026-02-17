@@ -67,6 +67,11 @@ class CommandRegistry:
                 description="Teleport session to Vibe Nuage",
                 handler="_teleport_command",
             ),
+            "proxy-setup": Command(
+                aliases=frozenset(["/proxy-setup"]),
+                description="Configure proxy and SSL certificate settings",
+                handler="_show_proxy_setup",
+            ),
         }
 
         for command in excluded_commands:
@@ -78,8 +83,11 @@ class CommandRegistry:
                 self._alias_map[alias] = cmd_name
 
     def find_command(self, user_input: str) -> Command | None:
-        cmd_name = self._alias_map.get(user_input.lower().strip())
+        cmd_name = self.get_command_name(user_input)
         return self.commands.get(cmd_name) if cmd_name else None
+
+    def get_command_name(self, user_input: str) -> str | None:
+        return self._alias_map.get(user_input.lower().strip())
 
     def get_help_text(self) -> str:
         lines: list[str] = [

@@ -378,9 +378,7 @@ class TestReloadPreservesMessages:
         assert agent.messages[0].role == Role.system
 
     @pytest.mark.asyncio
-    async def test_reload_notifies_observer_with_all_messages(
-        self, observer_capture
-    ) -> None:
+    async def test_reload_does_not_reemit_to_observer(self, observer_capture) -> None:
         observed, observer = observer_capture
         backend = FakeBackend(mock_llm_chunk(content="Response"))
         agent = build_test_agent_loop(
@@ -394,10 +392,7 @@ class TestReloadPreservesMessages:
 
         await agent.reload_with_initial_messages()
 
-        assert len(observed) == 3
-        assert observed[0].role == Role.system
-        assert observed[1].role == Role.user
-        assert observed[2].role == Role.assistant
+        assert len(observed) == 0
 
 
 class TestCompactStatsHandling:

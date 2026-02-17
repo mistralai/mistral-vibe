@@ -51,6 +51,7 @@ from vibe.cli.textual_ui.widgets.messages import (
 )
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
+from vibe.cli.textual_ui.widgets.proxy_setup_app import ProxySetupApp
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
@@ -127,6 +128,7 @@ class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
     Input = auto()
+    ProxySetup = auto()
     Question = auto()
 
 
@@ -308,6 +310,7 @@ class VibeApp(App):  # noqa: PLR0904
         await self._resume_history_from_messages()
         await self._check_and_show_whats_new()
         self._schedule_update_notification()
+        self.agent_loop.emit_new_session_telemetry("cli")
 
         if self._initial_prompt or self._teleport_on_start:
             self.call_after_refresh(self._process_initial_prompt)
@@ -422,6 +425,24 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._switch_to_input_app()
 
+    async def on_proxy_setup_app_proxy_setup_closed(
+        self, message: ProxySetupApp.ProxySetupClosed
+    ) -> None:
+        if message.error:
+            await self._mount_and_scroll(
+                ErrorMessage(f"Failed to save proxy settings: {message.error}")
+            )
+        elif message.saved:
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    "Proxy settings saved. Restart the CLI for changes to take effect."
+                )
+            )
+        else:
+            await self._mount_and_scroll(UserCommandMessage("Proxy setup cancelled."))
+
+        await self._switch_to_input_app()
+
     async def on_compact_message_completed(
         self, message: CompactMessage.Completed
     ) -> None:
@@ -449,6 +470,10 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _handle_command(self, user_input: str) -> bool:
         if command := self.commands.find_command(user_input):
+            if cmd_name := self.commands.get_command_name(user_input):
+                self.agent_loop.telemetry_client.send_slash_command_used(
+                    cmd_name, "builtin"
+                )
             await self._mount_and_scroll(UserMessage(user_input))
             handler = getattr(self, command.handler)
             if asyncio.iscoroutinefunction(handler):
@@ -478,6 +503,8 @@ class VibeApp(App):  # noqa: PLR0904
         skill_info = self.agent_loop.skill_manager.get_skill(skill_name)
         if not skill_info:
             return False
+
+        self.agent_loop.telemetry_client.send_slash_command_used(skill_name, "skill")
 
         try:
             skill_content = skill_info.skill_path.read_text(encoding="utf-8")
@@ -823,6 +850,11 @@ class VibeApp(App):  # noqa: PLR0904
             return
         await self._switch_to_config_app()
 
+    async def _show_proxy_setup(self) -> None:
+        if self._current_bottom_app == BottomApp.ProxySetup:
+            return
+        await self._switch_to_proxy_setup_app()
+
     async def _reload_config(self) -> None:
         try:
             self._windowing.reset()
@@ -996,6 +1028,13 @@ class VibeApp(App):  # noqa: PLR0904
         await self._mount_and_scroll(UserCommandMessage("Configuration opened..."))
         await self._switch_from_input(ConfigApp(self.config))
 
+    async def _switch_to_proxy_setup_app(self) -> None:
+        if self._current_bottom_app == BottomApp.ProxySetup:
+            return
+
+        await self._mount_and_scroll(UserCommandMessage("Proxy setup opened..."))
+        await self._switch_from_input(ProxySetupApp())
+
     async def _switch_to_approval_app(
         self, tool_name: str, tool_args: BaseModel
     ) -> None:
@@ -1020,6 +1059,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._chat_input_container.display = True
             self._current_bottom_app = BottomApp.Input
             self.call_after_refresh(self._chat_input_container.focus_input)
+            self.call_after_refresh(self._scroll_to_bottom)
 
     def _focus_current_bottom_app(self) -> None:
         try:
@@ -1028,6 +1068,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(ChatInputContainer).focus_input()
                 case BottomApp.Config:
                     self.query_one(ConfigApp).focus()
+                case BottomApp.ProxySetup:
+                    self.query_one(ProxySetupApp).focus()
                 case BottomApp.Approval:
                     self.query_one(ApprovalApp).focus()
                 case BottomApp.Question:
@@ -1037,34 +1079,66 @@ class VibeApp(App):  # noqa: PLR0904
         except Exception:
             pass
 
+    def _handle_config_app_escape(self) -> None:
+        try:
+            config_app = self.query_one(ConfigApp)
+            config_app.action_close()
+        except Exception:
+            pass
+        self._last_escape_time = None
+
+    def _handle_approval_app_escape(self) -> None:
+        try:
+            approval_app = self.query_one(ApprovalApp)
+            approval_app.action_reject()
+        except Exception:
+            pass
+        self.agent_loop.telemetry_client.send_user_cancelled_action("reject_approval")
+        self._last_escape_time = None
+
+    def _handle_question_app_escape(self) -> None:
+        try:
+            question_app = self.query_one(QuestionApp)
+            question_app.action_cancel()
+        except Exception:
+            pass
+        self.agent_loop.telemetry_client.send_user_cancelled_action("cancel_question")
+        self._last_escape_time = None
+
+    def _handle_input_app_escape(self) -> None:
+        try:
+            input_widget = self.query_one(ChatInputContainer)
+            input_widget.value = ""
+        except Exception:
+            pass
+        self._last_escape_time = None
+
+    def _handle_agent_running_escape(self) -> None:
+        self.agent_loop.telemetry_client.send_user_cancelled_action("interrupt_agent")
+        self.run_worker(self._interrupt_agent_loop(), exclusive=False)
+
     def action_interrupt(self) -> None:
         current_time = time.monotonic()
 
         if self._current_bottom_app == BottomApp.Config:
+            self._handle_config_app_escape()
+            return
+
+        if self._current_bottom_app == BottomApp.ProxySetup:
             try:
-                config_app = self.query_one(ConfigApp)
-                config_app.action_close()
+                proxy_setup_app = self.query_one(ProxySetupApp)
+                proxy_setup_app.action_close()
             except Exception:
                 pass
             self._last_escape_time = None
             return
 
         if self._current_bottom_app == BottomApp.Approval:
-            try:
-                approval_app = self.query_one(ApprovalApp)
-                approval_app.action_reject()
-            except Exception:
-                pass
-            self._last_escape_time = None
+            self._handle_approval_app_escape()
             return
 
         if self._current_bottom_app == BottomApp.Question:
-            try:
-                question_app = self.query_one(QuestionApp)
-                question_app.action_cancel()
-            except Exception:
-                pass
-            self._last_escape_time = None
+            self._handle_question_app_escape()
             return
 
         if (
@@ -1072,17 +1146,11 @@ class VibeApp(App):  # noqa: PLR0904
             and self._last_escape_time is not None
             and (current_time - self._last_escape_time) < 0.2  # noqa: PLR2004
         ):
-            try:
-                input_widget = self.query_one(ChatInputContainer)
-                if input_widget.value:
-                    input_widget.value = ""
-                    self._last_escape_time = None
-                    return
-            except Exception:
-                pass
+            self._handle_input_app_escape()
+            return
 
         if self._agent_running:
-            self.run_worker(self._interrupt_agent_loop(), exclusive=False)
+            self._handle_agent_running_escape()
 
         self._last_escape_time = current_time
         self._scroll_to_bottom()
@@ -1430,11 +1498,15 @@ class VibeApp(App):  # noqa: PLR0904
         )
 
     def action_copy_selection(self) -> None:
-        copy_selection_to_clipboard(self, show_toast=False)
+        copied_text = copy_selection_to_clipboard(self, show_toast=False)
+        if copied_text is not None:
+            self.agent_loop.telemetry_client.send_user_copied_text(copied_text)
 
     def on_mouse_up(self, event: MouseUp) -> None:
         if self.config.autocopy_to_clipboard:
-            copy_selection_to_clipboard(self, show_toast=True)
+            copied_text = copy_selection_to_clipboard(self, show_toast=True)
+            if copied_text is not None:
+                self.agent_loop.telemetry_client.send_user_copied_text(copied_text)
 
     def on_app_blur(self, event: AppBlur) -> None:
         if self._chat_input_container and self._chat_input_container.input_widget:

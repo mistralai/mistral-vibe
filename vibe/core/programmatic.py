@@ -32,20 +32,25 @@ def run_programmatic(
     logger.info("USER: %s", prompt)
 
     async def _async_run() -> str | None:
-        if previous_messages:
-            non_system_messages = [
-                msg for msg in previous_messages if not (msg.role == Role.system)
-            ]
-            agent_loop.messages.extend(non_system_messages)
-            logger.info(
-                "Loaded %d messages from previous session", len(non_system_messages)
-            )
+        try:
+            if previous_messages:
+                non_system_messages = [
+                    msg for msg in previous_messages if not (msg.role == Role.system)
+                ]
+                agent_loop.messages.extend(non_system_messages)
+                logger.info(
+                    "Loaded %d messages from previous session", len(non_system_messages)
+                )
 
-        async for event in agent_loop.act(prompt):
-            formatter.on_event(event)
-            if isinstance(event, AssistantEvent) and event.stopped_by_middleware:
-                raise ConversationLimitException(event.content)
+            agent_loop.emit_new_session_telemetry("programmatic")
 
-        return formatter.finalize()
+            async for event in agent_loop.act(prompt):
+                formatter.on_event(event)
+                if isinstance(event, AssistantEvent) and event.stopped_by_middleware:
+                    raise ConversationLimitException(event.content)
+
+            return formatter.finalize()
+        finally:
+            await agent_loop.telemetry_client.aclose()
 
     return asyncio.run(_async_run())

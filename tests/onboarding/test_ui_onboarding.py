@@ -41,7 +41,6 @@ async def test_ui_gets_through_the_onboarding_successfully() -> None:
 
     async with app.run_test() as pilot:
         await pass_welcome_screen(pilot)
-
         api_screen = app.screen
         input_widget = api_screen.query_one("#key", Input)
         await pilot.press(*api_key_value)

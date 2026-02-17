@@ -11,7 +11,7 @@ import time
 from typing import TYPE_CHECKING
 
 from vibe.core.prompts import UtilityPrompt
-from vibe.core.trusted_folders import TRUSTABLE_FILENAMES, trusted_folders_manager
+from vibe.core.trusted_folders import AGENTS_MD_FILENAMES, trusted_folders_manager
 from vibe.core.utils import is_dangerous_directory, is_windows
 
 if TYPE_CHECKING:
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 def _load_project_doc(workdir: Path, max_bytes: int) -> str:
     if not trusted_folders_manager.is_trusted(workdir):
         return ""
-    for name in TRUSTABLE_FILENAMES:
+    for name in AGENTS_MD_FILENAMES:
         path = workdir / name
         try:
             return path.read_text("utf-8", errors="ignore")[:max_bytes]

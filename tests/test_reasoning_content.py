@@ -267,6 +267,7 @@ class TestAPIToolFormatHandlerReasoningContent:
         mock_message.role = "assistant"
         mock_message.content = "The answer is 42."
         mock_message.reasoning_content = "Let me think..."
+        mock_message.reasoning_signature = None
         mock_message.tool_calls = None
 
         result = handler.process_api_response_message(mock_message)

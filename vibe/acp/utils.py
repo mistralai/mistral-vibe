@@ -4,16 +4,20 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, cast
 
 from acp.schema import (
+    AgentMessageChunk,
+    AgentThoughtChunk,
     ContentToolCallContent,
     PermissionOption,
     SessionMode,
     TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
+    UserMessageChunk,
 )
 
 from vibe.core.agents.models import AgentProfile, AgentType
-from vibe.core.types import CompactEndEvent, CompactStartEvent
+from vibe.core.proxy_setup import SUPPORTED_PROXY_VARS, get_current_proxy_settings
+from vibe.core.types import CompactEndEvent, CompactStartEvent, LLMMessage
 from vibe.core.utils import compact_reduction_display
 
 if TYPE_CHECKING:
@@ -110,4 +114,100 @@ def create_compact_end_session_update(event: CompactEndEvent) -> ToolCallProgres
                 ),
             )
         ],
+    )
+
+
+def get_proxy_help_text() -> str:
+    lines = [
+        "## Proxy Configuration",
+        "",
+        "Configure proxy and SSL settings for HTTP requests.",
+        "",
+        "### Usage:",
+        "- `/proxy-setup` - Show this help and current settings",
+        "- `/proxy-setup KEY value` - Set an environment variable",
+        "- `/proxy-setup KEY` - Remove an environment variable",
+        "",
+        "### Supported Variables:",
+    ]
+
+    for key, description in SUPPORTED_PROXY_VARS.items():
+        lines.append(f"- `{key}`: {description}")
+
+    lines.extend(["", "### Current Settings:"])
+
+    current = get_current_proxy_settings()
+    any_set = False
+    for key, value in current.items():
+        if value:
+            lines.append(f"- `{key}={value}`")
+            any_set = True
+
+    if not any_set:
+        lines.append("- (none configured)")
+
+    return "\n".join(lines)
+
+
+def create_user_message_replay(msg: LLMMessage) -> UserMessageChunk:
+    content = msg.content if isinstance(msg.content, str) else ""
+    return UserMessageChunk(
+        session_update="user_message_chunk",
+        content=TextContentBlock(type="text", text=content),
+        field_meta={"messageId": msg.message_id} if msg.message_id else {},
+    )
+
+
+def create_assistant_message_replay(msg: LLMMessage) -> AgentMessageChunk | None:
+    content = msg.content if isinstance(msg.content, str) else ""
+    if not content:
+        return None
+
+    return AgentMessageChunk(
+        session_update="agent_message_chunk",
+        content=TextContentBlock(type="text", text=content),
+        field_meta={"messageId": msg.message_id} if msg.message_id else {},
+    )
+
+
+def create_reasoning_replay(msg: LLMMessage) -> AgentThoughtChunk | None:
+    if not isinstance(msg.reasoning_content, str) or not msg.reasoning_content:
+        return None
+
+    return AgentThoughtChunk(
+        session_update="agent_thought_chunk",
+        content=TextContentBlock(type="text", text=msg.reasoning_content),
+        field_meta={"messageId": msg.message_id} if msg.message_id else {},
+    )
+
+
+def create_tool_call_replay(
+    tool_call_id: str, tool_name: str, arguments: str | None
+) -> ToolCallStart:
+    return ToolCallStart(
+        session_update="tool_call",
+        title=tool_name,
+        tool_call_id=tool_call_id,
+        kind="other",
+        raw_input=arguments,
+    )
+
+
+def create_tool_result_replay(msg: LLMMessage) -> ToolCallProgress | None:
+    if not msg.tool_call_id:
+        return None
+
+    content = msg.content if isinstance(msg.content, str) else ""
+    return ToolCallProgress(
+        session_update="tool_call_update",
+        tool_call_id=msg.tool_call_id,
+        status="completed",
+        raw_output=content,
+        content=[
+            ContentToolCallContent(
+                type="content", content=TextContentBlock(type="text", text=content)
+            )
+        ]
+        if content
+        else None,
     )

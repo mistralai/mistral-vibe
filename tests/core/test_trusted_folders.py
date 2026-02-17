@@ -8,7 +8,12 @@ import pytest
 import tomli_w
 
 from vibe.core.paths.global_paths import TRUSTED_FOLDERS_FILE
-from vibe.core.trusted_folders import TrustedFoldersManager
+from vibe.core.trusted_folders import (
+    AGENTS_MD_FILENAMES,
+    TrustedFoldersManager,
+    has_agents_md_file,
+    has_trustable_content,
+)
 
 
 class TestTrustedFoldersManager:
@@ -203,3 +208,48 @@ class TestTrustedFoldersManager:
             manager.add_trusted(tmp_path)
 
         assert manager.is_trusted(tmp_path) is True
+
+
+class TestHasAgentsMdFile:
+    def test_returns_false_for_empty_directory(self, tmp_path: Path) -> None:
+        assert has_agents_md_file(tmp_path) is False
+
+    def test_returns_true_when_agents_md_exists(self, tmp_path: Path) -> None:
+        (tmp_path / "AGENTS.md").write_text("# Agents", encoding="utf-8")
+        assert has_agents_md_file(tmp_path) is True
+
+    def test_returns_true_when_vibe_md_exists(self, tmp_path: Path) -> None:
+        (tmp_path / "VIBE.md").write_text("# Vibe", encoding="utf-8")
+        assert has_agents_md_file(tmp_path) is True
+
+    def test_returns_true_when_dot_vibe_md_exists(self, tmp_path: Path) -> None:
+        (tmp_path / ".vibe.md").write_text("# Vibe", encoding="utf-8")
+        assert has_agents_md_file(tmp_path) is True
+
+    def test_returns_false_when_only_other_files_exist(self, tmp_path: Path) -> None:
+        (tmp_path / "README.md").write_text("", encoding="utf-8")
+        (tmp_path / ".vibe").mkdir()
+        assert has_agents_md_file(tmp_path) is False
+
+    def test_agents_md_filenames_constant(self) -> None:
+        assert AGENTS_MD_FILENAMES == ["AGENTS.md", "VIBE.md", ".vibe.md"]
+
+
+class TestHasTrustableContent:
+    def test_returns_true_when_vibe_dir_exists(self, tmp_path: Path) -> None:
+        (tmp_path / ".vibe").mkdir()
+        assert has_trustable_content(tmp_path) is True
+
+    def test_returns_true_when_agents_dir_exists(self, tmp_path: Path) -> None:
+        (tmp_path / ".agents").mkdir()
+        assert has_trustable_content(tmp_path) is True
+
+    def test_returns_true_when_agents_md_filename_exists(self, tmp_path: Path) -> None:
+        for name in AGENTS_MD_FILENAMES:
+            (tmp_path / name).write_text("", encoding="utf-8")
+            assert has_trustable_content(tmp_path) is True
+            (tmp_path / name).unlink()
+
+    def test_returns_false_when_no_trustable_content(self, tmp_path: Path) -> None:
+        (tmp_path / "other.txt").write_text("", encoding="utf-8")
+        assert has_trustable_content(tmp_path) is False

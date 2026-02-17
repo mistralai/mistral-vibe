@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import logging
+import os
+import threading
+import time
+from unittest.mock import MagicMock, patch
 
 from pydantic import ValidationError
 import pytest
@@ -9,7 +13,9 @@ from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp
 from vibe.core.tools.mcp import (
     MCPToolResult,
     RemoteTool,
+    _mcp_stderr_capture,
     _parse_call_result,
+    _stderr_logger_thread,
     create_mcp_http_proxy_tool_class,
     create_mcp_stdio_proxy_tool_class,
 )
@@ -119,6 +125,66 @@ class TestParseCallResult:
         result = _parse_call_result("server", "tool", mock_result)
 
         assert result.text == "line1\nline2"
+
+
+class TestMCPStderrCapture:
+    """Tests for _mcp_stderr_capture and _stderr_logger_thread."""
+
+    @pytest.mark.asyncio
+    async def test_mcp_stderr_capture_returns_writable_stream(self):
+        async with _mcp_stderr_capture() as stream:
+            assert stream is not None
+            assert callable(getattr(stream, "write", None))
+            stream.write("test\n")
+
+    def test_stderr_logger_thread_logs_decoded_lines(self):
+        r_fd, w_fd = os.pipe()
+        try:
+            vibe_logger = logging.getLogger("vibe")
+            with patch.object(vibe_logger, "debug") as debug_mock:
+                thread = threading.Thread(
+                    target=_stderr_logger_thread, args=(r_fd,), daemon=True
+                )
+                thread.start()
+                try:
+                    w = os.fdopen(w_fd, "wb")
+                    w_fd = -1
+                    w.write(b"hello stderr\n")
+                    w.write(b"second line\n")
+                    w.close()
+                    w = None
+                finally:
+                    time.sleep(0.05)
+                debug_mock.assert_any_call("[MCP stderr] hello stderr")
+                debug_mock.assert_any_call("[MCP stderr] second line")
+        finally:
+            if w_fd >= 0:
+                try:
+                    os.close(w_fd)
+                except OSError:
+                    pass
+            try:
+                os.close(r_fd)
+            except OSError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_mcp_stderr_capture_logs_written_data(self):
+        vibe_logger = logging.getLogger("vibe")
+        with patch.object(vibe_logger, "debug") as debug_mock:
+            async with _mcp_stderr_capture() as stream:
+                stream.write("captured line\n")
+            time.sleep(0.05)
+            debug_mock.assert_called_with("[MCP stderr] captured line")
+
+    @pytest.mark.asyncio
+    async def test_mcp_stderr_capture_ignores_empty_lines(self):
+        vibe_logger = logging.getLogger("vibe")
+        with patch.object(vibe_logger, "debug") as debug_mock:
+            async with _mcp_stderr_capture() as stream:
+                stream.write("\n\n")
+            time.sleep(0.05)
+            debug_mock.assert_not_called()
 
 
 class TestCreateMCPHttpProxyToolClass:

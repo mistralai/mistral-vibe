@@ -13,8 +13,9 @@ from textual.widgets import Input, Link, Static
 
 from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import VibeConfig
+from vibe.core.config import Backend, VibeConfig
 from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
+from vibe.core.telemetry.send import TelemetryClient
 from vibe.setup.onboarding.base import OnboardingScreen
 
 PROVIDER_HELP = {
@@ -129,6 +130,12 @@ class ApiKeyScreen(OnboardingScreen):
         except OSError as err:
             self.app.exit(f"save_error:{err}")
             return
+        if self.provider.backend == Backend.MISTRAL:
+            try:
+                telemetry = TelemetryClient(config_getter=VibeConfig)
+                telemetry.send_onboarding_api_key_added()
+            except Exception:
+                pass  # Telemetry is fire-and-forget; don't fail onboarding
         self.app.exit("completed")
 
     def on_mouse_up(self, event: MouseUp) -> None:

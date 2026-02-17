@@ -703,6 +703,44 @@ StatusMessage {
     color: ansi_bright_black;
 }
 
+#proxysetup-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
+#proxysetup-content {
+    width: 100%;
+    height: auto;
+}
+
+.proxy-label {
+    height: auto;
+    color: ansi_blue;
+    text-style: bold;
+}
+
+.proxy-description {
+    height: auto;
+    color: ansi_bright_black;
+}
+
+.proxy-label-line {
+    height: auto;
+}
+
+.proxy-input {
+    width: 100%;
+    height: auto;
+    border: none;
+    border-left: wide ansi_bright_black;
+    margin-top: 1;
+    padding: 0 0 0 1;
+}
+
 #approval-app {
     width: 100%;
     height: auto;

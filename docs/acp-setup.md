@@ -22,9 +22,19 @@ For usage in Zed, we recommend using the [Mistral Vibe Zed's extension](https://
 }
 ```
 
-2. In the `New Thread` pane on the right, select the `vibe` agent and start the conversation.
+1. In the `New Thread` pane on the right, select the `vibe` agent and start the conversation.
 
 ## JetBrains IDEs
+
+For using Mistral Vibe in JetBrains IDEs, you'll need to have the [Jetbrains AI Assistant extension](https://plugins.jetbrains.com/plugin/22282-jetbrains-ai-assistant) installed
+
+### Version 2025.3 or later
+
+1. Open settings, then go to `Tools > AI Assistant > Agents`. Search for `Mistral Vibe`, click install
+
+2. Open AI Assistant. You should be able to select Mistral Vibe from the agent selector (if you're not authenticated yet, you will be prompted to do so).
+
+### Legacy method
 
 1. Add the following snippet to your JetBrains IDE acp.json ([documentation](https://www.jetbrains.com/help/ai-assistant/acp.html)):
 
@@ -38,7 +48,7 @@ For usage in Zed, we recommend using the [Mistral Vibe Zed's extension](https://
 }
 ```
 
-2. In the AI Chat agent selector, select the new Mistral Vibe agent and start the conversation.
+1. In the AI Chat agent selector, select the new Mistral Vibe agent and start the conversation.
 
 ## Neovim (using avante.nvim)
 

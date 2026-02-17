@@ -1,9 +1,5 @@
-# What's New in 2.1.0
+# What's New in 2.2.0
 
-- **UI redesign** — Refreshed interface with a cleaner layout and better performance when streaming.
+- **Agent Skills standard** — Vibe now discovers skills from `.agents/skills/` (agentskills.io) as well as `.vibe/skills/`.
 
-- **Themes removed** — Application themes have been removed; the UI now follows your terminal’s theme (colors and appearance).
-
-- **Clipboard** — You can now disable autocopying in /config, and copy with Ctrl+Shift+C or Cmd+C (in terminals that support it).
-
-- **Performance** — Various optimizations throughout the app for a more responsive UI.
+Optional: usage and tool events are sent to our datalake to improve the product if you have a valid Mistral API key; set `disable_telemetry = true` in config to opt out.

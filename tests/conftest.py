@@ -94,6 +94,22 @@ def _mock_update_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("vibe.cli.update_notifier.update.UPDATE_COMMANDS", ["true"])
 
 
+@pytest.fixture(autouse=True)
+def telemetry_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+
+    def record_telemetry(
+        self: Any, event_name: str, properties: dict[str, Any]
+    ) -> None:
+        events.append({"event_name": event_name, "properties": properties})
+
+    monkeypatch.setattr(
+        "vibe.core.telemetry.send.TelemetryClient.send_telemetry_event",
+        record_telemetry,
+    )
+    return events
+
+
 @pytest.fixture
 def vibe_app() -> VibeApp:
     return build_test_vibe_app()

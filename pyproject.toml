@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.1.0"
+version = "2.2.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,28 +29,30 @@ classifiers = [
 dependencies = [
     "agent-client-protocol==0.8.0",
     "anyio>=4.12.0",
-    "httpx>=0.28.1",
-    "mcp>=1.14.0",
-    "mistralai==1.9.11",
-    "pexpect>=4.9.0",
-    "packaging>=24.1",
-    "pydantic>=2.12.4",
-    "pydantic-settings>=2.12.0",
-    "pyyaml>=6.0.0",
-    "python-dotenv>=1.0.0",
-    "rich>=14.0.0",
-    "textual>=1.0.0",
-    "tomli-w>=1.2.0",
-    "watchfiles>=1.1.1",
-    "pyperclip>=1.11.0",
-    "textual-speedups>=0.2.1",
-    "tree-sitter>=0.25.2",
-    "tree-sitter-bash>=0.25.1",
-    "keyring>=25.6.0",
-    "cryptography>=44.0.0",
-    "zstandard>=0.25.0",
+    "cryptography>=44.0.0,<=46.0.3",
     "gitpython>=3.1.46",
     "giturlparse>=0.14.0",
+    "google-auth>=2.0.0",
+    "httpx>=0.28.1",
+    "keyring>=25.6.0",
+    "mcp>=1.14.0",
+    "mistralai==1.9.11",
+    "packaging>=24.1",
+    "pexpect>=4.9.0",
+    "pydantic>=2.12.4",
+    "pydantic-settings>=2.12.0",
+    "pyperclip>=1.11.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
+    "requests>=2.20.0",
+    "rich>=14.0.0",
+    "textual>=1.0.0",
+    "textual-speedups>=0.2.1",
+    "tomli-w>=1.2.0",
+    "tree-sitter>=0.25.2",
+    "tree-sitter-bash>=0.25.1",
+    "watchfiles>=1.1.1",
+    "zstandard>=0.25.0",
 ]
 
 [project.urls]
@@ -58,7 +60,6 @@ Homepage = "https://github.com/mistralai/mistral-vibe"
 Repository = "https://github.com/mistralai/mistral-vibe"
 Issues = "https://github.com/mistralai/mistral-vibe/issues"
 Documentation = "https://github.com/mistralai/mistral-vibe#readme"
-
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "editables"]
@@ -83,19 +84,19 @@ required-version = ">=0.8.0"
 
 [dependency-groups]
 dev = [
+    "debugpy>=1.8.19",
     "pre-commit>=4.2.0",
     "pyright>=1.1.403",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.2.0",
-    "pytest-timeout>=2.4.0",
     "pytest-textual-snapshot>=1.1.0",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
     "respx>=0.22.0",
     "ruff>=0.14.5",
     "twine>=5.0.0",
     "typos>=1.34.0",
     "vulture>=2.14",
-    "pytest-xdist>=3.8.0",
-    "debugpy>=1.8.19",
 ]
 
 build = ["pyinstaller>=6.17.0"]

@@ -44,8 +44,6 @@ class MiddlewareResult:
 class ConversationMiddleware(Protocol):
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult: ...
 
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult: ...
-
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None: ...
 
 
@@ -59,9 +57,6 @@ class TurnLimitMiddleware:
                 action=MiddlewareAction.STOP,
                 reason=f"Turn limit of {self.max_turns} reached",
             )
-        return MiddlewareResult()
-
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
         return MiddlewareResult()
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
@@ -78,9 +73,6 @@ class PriceLimitMiddleware:
                 action=MiddlewareAction.STOP,
                 reason=f"Price limit exceeded: ${context.stats.session_cost:.4f} > ${self.max_price:.2f}",
             )
-        return MiddlewareResult()
-
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
         return MiddlewareResult()
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
@@ -100,9 +92,6 @@ class AutoCompactMiddleware:
                     "threshold": self.threshold,
                 },
             )
-        return MiddlewareResult()
-
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
         return MiddlewareResult()
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
@@ -137,9 +126,6 @@ class ContextWarningMiddleware:
 
         return MiddlewareResult()
 
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        return MiddlewareResult()
-
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         self.has_warned = False
 
@@ -148,31 +134,46 @@ PLAN_AGENT_REMINDER = f"""<{VIBE_WARNING_TAG}>Plan mode is active. The user indi
 1. Answer the user's query comprehensively
 2. When you're done researching, present your plan by giving the full plan and not doing further tool calls to return input to the user. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.</{VIBE_WARNING_TAG}>"""
 
+PLAN_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Plan mode has ended. If you have a plan ready, you can now start executing it. If not, you can now use editing tools and make changes to the system.</{VIBE_WARNING_TAG}>"""
+
 
 class PlanAgentMiddleware:
     def __init__(
         self,
         profile_getter: Callable[[], AgentProfile],
         reminder: str = PLAN_AGENT_REMINDER,
+        exit_message: str = PLAN_AGENT_EXIT,
     ) -> None:
         self._profile_getter = profile_getter
         self.reminder = reminder
+        self.exit_message = exit_message
+        self._was_plan_agent = False
 
     def _is_plan_agent(self) -> bool:
         return self._profile_getter().name == BuiltinAgentName.PLAN
 
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
-        if not self._is_plan_agent():
-            return MiddlewareResult()
-        return MiddlewareResult(
-            action=MiddlewareAction.INJECT_MESSAGE, message=self.reminder
-        )
+        is_plan = self._is_plan_agent()
+        was_plan = self._was_plan_agent
 
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
+        if was_plan and not is_plan:
+            self._was_plan_agent = False
+            return MiddlewareResult(
+                action=MiddlewareAction.INJECT_MESSAGE, message=self.exit_message
+            )
+
+        if is_plan and not was_plan:
+            self._was_plan_agent = True
+            return MiddlewareResult(
+                action=MiddlewareAction.INJECT_MESSAGE, message=self.reminder
+            )
+
+        self._was_plan_agent = is_plan
+
         return MiddlewareResult()
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
-        pass
+        self._was_plan_agent = False
 
 
 class MiddlewarePipeline:
@@ -204,17 +205,5 @@ class MiddlewarePipeline:
             return MiddlewareResult(
                 action=MiddlewareAction.INJECT_MESSAGE, message=combined_message
             )
-
-        return MiddlewareResult()
-
-    async def run_after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        for mw in self.middlewares:
-            result = await mw.after_turn(context)
-            if result.action == MiddlewareAction.INJECT_MESSAGE:
-                raise ValueError(
-                    f"INJECT_MESSAGE not allowed in after_turn (from {type(mw).__name__})"
-                )
-            if result.action in {MiddlewareAction.STOP, MiddlewareAction.COMPACT}:
-                return result
 
         return MiddlewareResult()

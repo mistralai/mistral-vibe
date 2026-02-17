@@ -74,7 +74,8 @@ def test_copy_selection_to_clipboard_no_notification(
         del widgets[0].text_selection
     mock_app.query.return_value = widgets
 
-    copy_selection_to_clipboard(mock_app)
+    result = copy_selection_to_clipboard(mock_app)
+    assert result is None
     mock_app.notify.assert_not_called()
 
 
@@ -87,8 +88,9 @@ def test_copy_selection_to_clipboard_success(
     )
     mock_app.query.return_value = [widget]
 
-    copy_selection_to_clipboard(mock_app)
+    result = copy_selection_to_clipboard(mock_app)
 
+    assert result == "selected text"
     mock_copy_osc52.assert_called_once_with("selected text")
     mock_app.notify.assert_called_once_with(
         '"selected text" copied to clipboard',
@@ -109,8 +111,9 @@ def test_copy_selection_to_clipboard_failure(
 
     mock_copy_osc52.side_effect = Exception("OSC52 failed")
 
-    copy_selection_to_clipboard(mock_app)
+    result = copy_selection_to_clipboard(mock_app)
 
+    assert result is None
     mock_copy_osc52.assert_called_once_with("selected text")
     mock_app.notify.assert_called_once_with(
         "Failed to copy - clipboard not available", severity="warning", timeout=3
@@ -129,8 +132,9 @@ def test_copy_selection_to_clipboard_multiple_widgets(mock_app: MagicMock) -> No
     mock_app.query.return_value = [widget1, widget2, widget3]
 
     with patch("vibe.cli.clipboard._copy_osc52") as mock_copy_osc52:
-        copy_selection_to_clipboard(mock_app)
+        result = copy_selection_to_clipboard(mock_app)
 
+        assert result == "first selection\nsecond selection"
         mock_copy_osc52.assert_called_once_with("first selection\nsecond selection")
         mock_app.notify.assert_called_once_with(
             '"first selection\u23cesecond selection" copied to clipboard',
@@ -148,8 +152,9 @@ def test_copy_selection_to_clipboard_preview_shortening(mock_app: MagicMock) -> 
     mock_app.query.return_value = [widget]
 
     with patch("vibe.cli.clipboard._copy_osc52") as mock_copy_osc52:
-        copy_selection_to_clipboard(mock_app)
+        result = copy_selection_to_clipboard(mock_app)
 
+        assert result == long_text
         mock_copy_osc52.assert_called_once_with(long_text)
         notification_call = mock_app.notify.call_args
         assert notification_call is not None

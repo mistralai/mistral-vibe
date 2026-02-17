@@ -84,6 +84,7 @@ pip install mistral-vibe
   - [Custom Vibe Home Directory](#custom-vibe-home-directory)
 - [Editors/IDEs](#editorsides)
 - [Resources](#resources)
+- [Data collection & usage](#data-collection--usage)
 - [License](#license)
 
 ## Features
@@ -328,9 +329,10 @@ This skill helps analyze code quality and suggest improvements.
 
 Vibe discovers skills from multiple locations:
 
-1. **Global skills directory**: `~/.vibe/skills/`
-2. **Local project skills**: `.vibe/skills/` in your project
-3. **Custom paths**: Configured in `config.toml`
+1. **Custom paths**: Configured in `config.toml` via `skill_paths`
+2. **Standard Agent Skills path** (project root, trusted folders only): `.agents/skills/` — [Agent Skills](https://agentskills.io) standard
+3. **Local project skills** (project root, trusted folders only): `.vibe/skills/` in your project
+4. **Global skills directory**: `~/.vibe/skills/`
 
 ```toml
 skill_paths = ["/path/to/custom/skills"]
@@ -594,6 +596,10 @@ Mistral Vibe can be used in text editors and IDEs that support [Agent Client Pro
 
 - [CHANGELOG](CHANGELOG.md) - See what's new in each version
 - [CONTRIBUTING](CONTRIBUTING.md) - Guidelines for feature requests, feedback and bug reports
+
+## Data collection & usage
+
+Use of Vibe is subject to our [Privacy Policy](https://legal.mistral.ai/terms/privacy-policy) and may include the collection and processing of data related to your use of the service, such as usage data, to operate, maintain, and improve Vibe. You can disable telemetry in your `config.toml` by setting `enable_telemetry = false`.
 
 ## License
 

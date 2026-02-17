@@ -35,6 +35,6 @@ GLOBAL_PROMPTS_DIR = GlobalPath(lambda: VIBE_HOME.path / "prompts")
 SESSION_LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs" / "session")
 TRUSTED_FOLDERS_FILE = GlobalPath(lambda: VIBE_HOME.path / "trusted_folders.toml")
 LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs")
-LOG_FILE = GlobalPath(lambda: VIBE_HOME.path / "vibe.log")
+LOG_FILE = GlobalPath(lambda: VIBE_HOME.path / "logs" / "vibe.log")
 
 DEFAULT_TOOL_DIR = GlobalPath(lambda: VIBE_ROOT / "core" / "tools" / "builtins")

@@ -191,6 +191,7 @@ class LLMMessage(BaseModel):
     role: Role
     content: Content | None = None
     reasoning_content: Content | None = None
+    reasoning_signature: str | None = None
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
@@ -210,6 +211,7 @@ class LLMMessage(BaseModel):
             "role": role,
             "content": getattr(v, "content", ""),
             "reasoning_content": getattr(v, "reasoning_content", None),
+            "reasoning_signature": getattr(v, "reasoning_signature", None),
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
@@ -238,6 +240,12 @@ class LLMMessage(BaseModel):
         if not reasoning_content:
             reasoning_content = None
 
+        reasoning_signature = (self.reasoning_signature or "") + (
+            other.reasoning_signature or ""
+        )
+        if not reasoning_signature:
+            reasoning_signature = None
+
         tool_calls_map = OrderedDict[int, ToolCall]()
         for tool_calls in [self.tool_calls or [], other.tool_calls or []]:
             for tc in tool_calls:
@@ -263,6 +271,7 @@ class LLMMessage(BaseModel):
             role=self.role,
             content=content,
             reasoning_content=reasoning_content,
+            reasoning_signature=reasoning_signature,
             tool_calls=list(tool_calls_map.values()) or None,
             name=self.name,
             tool_call_id=self.tool_call_id,

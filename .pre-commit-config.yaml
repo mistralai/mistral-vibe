@@ -32,3 +32,4 @@ repos:
     hooks:
       - id: typos
         args: [--write-changes]
+        exclude: __snapshots__/.*\.svg$

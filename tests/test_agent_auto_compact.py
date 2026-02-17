@@ -16,7 +16,9 @@ from vibe.core.types import (
 
 
 @pytest.mark.asyncio
-async def test_auto_compact_triggers_and_batches_observer() -> None:
+async def test_auto_compact_triggers_and_batches_observer(
+    telemetry_events: list[dict],
+) -> None:
     observed: list[tuple[Role, str | None]] = []
 
     def observer(msg: LLMMessage) -> None:
@@ -52,3 +54,10 @@ async def test_auto_compact_triggers_and_batches_observer() -> None:
     assert roles == [Role.system, Role.user, Role.assistant]
     assert observed[1][1] is not None and "<summary>" in observed[1][1]
     assert observed[2][1] == "<final>"
+
+    auto_compact = [
+        e
+        for e in telemetry_events
+        if e.get("event_name") == "vibe/auto_compact_triggered"
+    ]
+    assert len(auto_compact) == 1

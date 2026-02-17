@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-02-17
+
+### Added
+
+- Google Vertex AI support
+- Telemetry: user interaction and tool usage events sent to datalake (configurable via `disable_telemetry`)
+- Skill discovery from `.agents/skills/` (Agent Skills standard) in addition to `.vibe/skills/`
+- ACP: `session/load` and `session/list` for loading and listing sessions
+- New model behavior prompts (CLI and explore)
+- Proxy Wizard (PoC) for CLI and for ACP
+- Proxy setup documentation
+- Documentation for JetBrains ACP registry
+
+### Changed
+
+- Trusted folders: presence of `.agents` is now considered trustable content
+- Logging handling updated
+- Pin `cryptography` to >=44.0.0,<=46.0.3; uv sync for cryptography
+
+### Fixed
+
+- Auto scroll when switching to input
+- MCP stdio: redirect stderr to logger to avoid unwanted console output
+- Align `pyproject.toml` minimum versions with `uv.lock` for pip installs
+- Middleware injection: use standalone user messages instead of mutating flushed messages
+- Revert cryptography 46.0.5 bump for compatibility
+- Pin banner version in UI snapshot tests for stability
+
+
 ## [2.1.0] - 2026-02-11
 
 ### Added

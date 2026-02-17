@@ -39,12 +39,14 @@ def resolve_local_tools_dir(dir: Path) -> Path | None:
     return None
 
 
-def resolve_local_skills_dir(dir: Path) -> Path | None:
+def resolve_local_skills_dirs(dir: Path) -> list[Path]:
     if not trusted_folders_manager.is_trusted(dir):
-        return None
-    if (candidate := dir / ".vibe" / "skills").is_dir():
-        return candidate
-    return None
+        return []
+    return [
+        candidate
+        for candidate in [dir / ".vibe" / "skills", dir / ".agents" / "skills"]
+        if candidate.is_dir()
+    ]
 
 
 def resolve_local_agents_dir(dir: Path) -> Path | None:

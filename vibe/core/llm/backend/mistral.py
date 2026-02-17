@@ -11,6 +11,7 @@ import httpx
 import mistralai
 
 from vibe.core.llm.exceptions import BackendErrorBuilder
+from vibe.core.llm.message_utils import merge_consecutive_user_messages
 from vibe.core.types import (
     AvailableTool,
     Content,
@@ -217,9 +218,10 @@ class MistralBackend:
         extra_headers: dict[str, str] | None,
     ) -> LLMChunk:
         try:
+            merged_messages = merge_consecutive_user_messages(messages)
             response = await self._get_client().chat.complete_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+                messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools
@@ -290,9 +292,10 @@ class MistralBackend:
         extra_headers: dict[str, str] | None,
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
+            merged_messages = merge_consecutive_user_messages(messages)
             async for chunk in await self._get_client().chat.stream_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+                messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools
