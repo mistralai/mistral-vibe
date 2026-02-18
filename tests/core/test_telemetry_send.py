@@ -47,7 +47,7 @@ class TestTelemetryClient:
     def test_send_telemetry_event_does_nothing_when_api_key_is_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         env_key = config.get_provider_for_model(
             config.get_active_model()
         ).api_key_env_var
@@ -65,7 +65,7 @@ class TestTelemetryClient:
     def test_send_telemetry_event_does_nothing_when_disabled(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=True)
+        config = build_test_vibe_config(enable_telemetry=False)
         env_key = config.get_provider_for_model(
             config.get_active_model()
         ).api_key_env_var
@@ -86,7 +86,7 @@ class TestTelemetryClient:
         monkeypatch.setattr(
             TelemetryClient, "send_telemetry_event", _original_send_telemetry_event
         )
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         env_key = config.get_provider_for_model(
             config.get_active_model()
         ).api_key_env_var
@@ -113,7 +113,7 @@ class TestTelemetryClient:
     def test_send_tool_call_finished_payload_shape(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
         tool_call = _make_resolved_tool_call("todo", {})
         decision = ToolDecision(
@@ -142,7 +142,7 @@ class TestTelemetryClient:
     def test_send_tool_call_finished_nb_files_created_write_file_new(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
         tool_call = _make_resolved_tool_call("write_file", {"overwrite": False})
 
@@ -160,7 +160,7 @@ class TestTelemetryClient:
     def test_send_tool_call_finished_nb_files_modified_write_file_overwrite(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
         tool_call = _make_resolved_tool_call("write_file", {"overwrite": True})
 
@@ -178,7 +178,7 @@ class TestTelemetryClient:
     def test_send_tool_call_finished_decision_none(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
         tool_call = _make_resolved_tool_call("todo", {})
 
@@ -195,7 +195,7 @@ class TestTelemetryClient:
     def test_send_user_copied_text_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_user_copied_text("hello world")
@@ -207,7 +207,7 @@ class TestTelemetryClient:
     def test_send_user_cancelled_action_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_user_cancelled_action("interrupt_agent")
@@ -219,7 +219,7 @@ class TestTelemetryClient:
     def test_send_auto_compact_triggered_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_auto_compact_triggered()
@@ -230,7 +230,7 @@ class TestTelemetryClient:
     def test_send_slash_command_used_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_slash_command_used("help", "builtin")
@@ -246,7 +246,7 @@ class TestTelemetryClient:
     def test_send_new_session_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_new_session(
