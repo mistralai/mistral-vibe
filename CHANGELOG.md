@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Google Vertex AI support
-- Telemetry: user interaction and tool usage events sent to datalake (configurable via `disable_telemetry`)
+- Telemetry: user interaction and tool usage events sent to datalake (configurable via `enable_telemetry`)
 - Skill discovery from `.agents/skills/` (Agent Skills standard) in addition to `.vibe/skills/`
 - ACP: `session/load` and `session/list` for loading and listing sessions
 - New model behavior prompts (CLI and explore)

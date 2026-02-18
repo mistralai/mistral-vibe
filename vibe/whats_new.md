@@ -2,4 +2,4 @@
 
 - **Agent Skills standard** — Vibe now discovers skills from `.agents/skills/` (agentskills.io) as well as `.vibe/skills/`.
 
-Optional: usage and tool events are sent to our datalake to improve the product if you have a valid Mistral API key; set `disable_telemetry = true` in config to opt out.
+Optional: usage and tool events are sent to our datalake to improve the product if you have a valid Mistral API key; set `enable_telemetry = false` in config to opt out.
