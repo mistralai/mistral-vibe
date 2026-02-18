@@ -152,15 +152,15 @@ class MistralMapper:
 
 class MistralBackend:
     def __init__(self, provider: ProviderConfig, timeout: float = 720.0) -> None:
-        self._client: mistralai.Mistral | None = None
+  self._client: mistralai.Mistral | None = None
         self._provider = provider
         self._mapper = MistralMapper()
+        self._timeout = timeout
         self._api_key = (
             os.getenv(self._provider.api_key_env_var)
             if self._provider.api_key_env_var
             else None
         )
-
         reasoning_field = getattr(provider, "reasoning_field_name", "reasoning_content")
         if reasoning_field != "reasoning_content":
             raise ValueError(
@@ -168,7 +168,6 @@ class MistralBackend:
                 f"(got '{reasoning_field}'). Mistral uses ThinkChunk for reasoning."
             )
 
-        # Mistral SDK takes server URL without api version as input
         url_pattern = r"(https?://[^/]+)(/v.*)"
         match = re.match(url_pattern, self._provider.api_base)
         if not match:
@@ -177,17 +176,17 @@ class MistralBackend:
                 "Expected format: <server_url>/v<api_version>"
             )
         self._server_url = match.group(1)
-        self._timeout = timeout
 
     async def __aenter__(self) -> MistralBackend:
+        # We maken hier de client aan MET de expliciete async_client die SSL negeert
         self._client = mistralai.Mistral(
             api_key=self._api_key,
             server_url=self._server_url,
             timeout_ms=int(self._timeout * 1000),
+            async_client=httpx.AsyncClient(verify=False)
         )
         await self._client.__aenter__()
         return self
-
     async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
@@ -201,11 +200,13 @@ class MistralBackend:
 
     def _get_client(self) -> mistralai.Mistral:
         if self._client is None:
+            # Ook voor de luie initialisatie gebruiken we de SSL bypass
             self._client = mistralai.Mistral(
-                api_key=self._api_key, server_url=self._server_url
+                api_key=self._api_key, 
+                server_url=self._server_url,
+                async_client=httpx.AsyncClient(verify=False)
             )
         return self._client
-
     async def complete(
         self,
         *,
