@@ -1015,8 +1015,10 @@ class AgentLoop:
         if max_price is not None:
             self._max_price = max_price
 
-        self.tool_manager = ToolManager(lambda: self.config)
-        self.skill_manager = SkillManager(lambda: self.config)
+        should_rebuild_managers = base_config is not None
+        if should_rebuild_managers:
+            self.tool_manager = ToolManager(lambda: self.config)
+            self.skill_manager = SkillManager(lambda: self.config)
 
         new_system_prompt = get_universal_system_prompt(
             self.tool_manager, self.config, self.skill_manager, self.agent_manager
