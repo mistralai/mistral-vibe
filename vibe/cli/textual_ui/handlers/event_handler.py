@@ -27,16 +27,14 @@ if TYPE_CHECKING:
 
 class EventHandler:
     def __init__(
-        self,
-        mount_callback: Callable,
-        scroll_callback: Callable,
-        get_tools_collapsed: Callable[[], bool],
+        self, mount_callback: Callable, get_tools_collapsed: Callable[[], bool]
     ) -> None:
         self.mount_callback = mount_callback
-        self.scroll_callback = scroll_callback
         self.get_tools_collapsed = get_tools_collapsed
         self.current_tool_call: ToolCallMessage | None = None
         self.current_compact: CompactMessage | None = None
+        self.current_streaming_message: AssistantMessage | None = None
+        self.current_streaming_reasoning: ReasoningMessage | None = None
 
     async def handle_event(
         self,
@@ -45,24 +43,29 @@ class EventHandler:
         loading_widget: LoadingWidget | None = None,
     ) -> ToolCallMessage | None:
         match event:
-            case ToolCallEvent():
-                return await self._handle_tool_call(event, loading_widget)
-            case ToolResultEvent():
-                sanitized_event = self._sanitize_event(event)
-                await self._handle_tool_result(sanitized_event)
-            case ToolStreamEvent():
-                await self._handle_tool_stream(event)
             case ReasoningEvent():
                 await self._handle_reasoning_message(event)
             case AssistantEvent():
                 await self._handle_assistant_message(event)
+            case ToolCallEvent():
+                await self.finalize_streaming()
+                return await self._handle_tool_call(event, loading_widget)
+            case ToolResultEvent():
+                await self.finalize_streaming()
+                sanitized_event = self._sanitize_event(event)
+                await self._handle_tool_result(sanitized_event)
+            case ToolStreamEvent():
+                await self._handle_tool_stream(event)
             case CompactStartEvent():
+                await self.finalize_streaming()
                 await self._handle_compact_start()
             case CompactEndEvent():
+                await self.finalize_streaming()
                 await self._handle_compact_end(event)
             case UserMessageEvent():
-                pass
+                await self.finalize_streaming()
             case _:
+                await self.finalize_streaming()
                 await self._handle_unknown_event(event)
         return None
 
@@ -113,13 +116,30 @@ class EventHandler:
             self.current_tool_call.set_stream_message(event.message)
 
     async def _handle_assistant_message(self, event: AssistantEvent) -> None:
-        await self.mount_callback(AssistantMessage(event.content))
+        if self.current_streaming_reasoning is not None:
+            self.current_streaming_reasoning.stop_spinning()
+            await self.current_streaming_reasoning.stop_stream()
+            self.current_streaming_reasoning = None
+
+        if self.current_streaming_message is None:
+            msg = AssistantMessage(event.content)
+            self.current_streaming_message = msg
+            await self.mount_callback(msg)
+        else:
+            await self.current_streaming_message.append_content(event.content)
 
     async def _handle_reasoning_message(self, event: ReasoningEvent) -> None:
-        tools_collapsed = self.get_tools_collapsed()
-        await self.mount_callback(
-            ReasoningMessage(event.content, collapsed=tools_collapsed)
-        )
+        if self.current_streaming_message is not None:
+            await self.current_streaming_message.stop_stream()
+            self.current_streaming_message = None
+
+        if self.current_streaming_reasoning is None:
+            tools_collapsed = self.get_tools_collapsed()
+            msg = ReasoningMessage(event.content, collapsed=tools_collapsed)
+            self.current_streaming_reasoning = msg
+            await self.mount_callback(msg)
+        else:
+            await self.current_streaming_reasoning.append_content(event.content)
 
     async def _handle_compact_start(self) -> None:
         compact_msg = CompactMessage()
@@ -135,6 +155,15 @@ class EventHandler:
 
     async def _handle_unknown_event(self, event: BaseEvent) -> None:
         await self.mount_callback(NoMarkupStatic(str(event), classes="unknown-event"))
+
+    async def finalize_streaming(self) -> None:
+        if self.current_streaming_reasoning is not None:
+            self.current_streaming_reasoning.stop_spinning()
+            await self.current_streaming_reasoning.stop_stream()
+            self.current_streaming_reasoning = None
+        if self.current_streaming_message is not None:
+            await self.current_streaming_message.stop_stream()
+            self.current_streaming_message = None
 
     def stop_current_tool_call(self, success: bool = True) -> None:
         if self.current_tool_call:

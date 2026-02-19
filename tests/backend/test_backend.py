@@ -13,8 +13,10 @@ the tests will be. Always prefer real API data over manually constructed example
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock, patch
 
 import httpx
+from mistralai.utils.retries import BackoffStrategy, RetryConfig
 import pytest
 import respx
 
@@ -42,6 +44,16 @@ from vibe.core.utils import get_user_agent
 
 
 class TestBackend:
+    @staticmethod
+    def _build_fast_retry_config() -> RetryConfig:
+        return RetryConfig(
+            strategy="backoff",
+            backoff=BackoffStrategy(
+                initial_interval=1, max_interval=1, exponent=1, max_elapsed_time=1
+            ),
+            retry_connection_errors=False,
+        )
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "base_url,json_response,result_data",
@@ -230,6 +242,8 @@ class TestBackend:
                 api_key_env_var="API_KEY",
             )
             backend = backend_class(provider=provider)
+            if isinstance(backend, MistralBackend):
+                backend._retry_config = self._build_fast_retry_config()
             model = ModelConfig(
                 name="model_name", provider="provider_name", alias="model_alias"
             )
@@ -396,3 +410,28 @@ class TestBackend:
                 pass
 
             assert mock_api.calls.last.request.headers["user-agent"] == user_agent
+
+
+class TestMistralRetry:
+    @staticmethod
+    def _create_test_backend() -> MistralBackend:
+        provider = ProviderConfig(
+            name="test_provider",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="API_KEY",
+        )
+        return MistralBackend(provider=provider)
+
+    @pytest.mark.asyncio
+    async def test_client_creation_includes_timeout_and_retry_config(self):
+        backend = self._create_test_backend()
+
+        with patch("mistralai.Mistral") as mock_mistral_class:
+            mock_mistral_class.return_value = MagicMock()
+            backend._get_client()
+            mock_mistral_class.assert_called_once_with(
+                api_key=backend._api_key,
+                server_url=backend._server_url,
+                timeout_ms=720000,
+                retry_config=backend._retry_config,
+            )

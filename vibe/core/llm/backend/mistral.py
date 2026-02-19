@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 
 import httpx
 import mistralai
+from mistralai.utils.retries import BackoffStrategy, RetryConfig
 
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.llm.message_utils import merge_consecutive_user_messages
@@ -178,13 +179,22 @@ class MistralBackend:
             )
         self._server_url = match.group(1)
         self._timeout = timeout
+        self._retry_config = self._build_retry_config()
+
+    def _build_retry_config(self) -> RetryConfig:
+        return RetryConfig(
+            strategy="backoff",
+            backoff=BackoffStrategy(
+                initial_interval=500,
+                max_interval=30000,
+                exponent=1.5,
+                max_elapsed_time=300000,
+            ),
+            retry_connection_errors=True,
+        )
 
     async def __aenter__(self) -> MistralBackend:
-        self._client = mistralai.Mistral(
-            api_key=self._api_key,
-            server_url=self._server_url,
-            timeout_ms=int(self._timeout * 1000),
-        )
+        self._client = self._create_mistral_client()
         await self._client.__aenter__()
         return self
 
@@ -199,11 +209,17 @@ class MistralBackend:
                 exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb
             )
 
+    def _create_mistral_client(self) -> mistralai.Mistral:
+        return mistralai.Mistral(
+            api_key=self._api_key,
+            server_url=self._server_url,
+            timeout_ms=int(self._timeout * 1000),
+            retry_config=self._retry_config,
+        )
+
     def _get_client(self) -> mistralai.Mistral:
         if self._client is None:
-            self._client = mistralai.Mistral(
-                api_key=self._api_key, server_url=self._server_url
-            )
+            self._client = self._create_mistral_client()
         return self._client
 
     async def complete(

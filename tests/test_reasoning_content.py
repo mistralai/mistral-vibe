@@ -323,7 +323,7 @@ class TestAgentLoopStreamingReasoningEvents:
         assert len(reasoning_events) == 0
 
         assistant_events = [e for e in events if isinstance(e, AssistantEvent)]
-        assert len(assistant_events) == 1
+        assert len(assistant_events) == 2
 
         assistant_msg = next(m for m in agent.messages if m.role == Role.assistant)
         assert assistant_msg.reasoning_content is None

@@ -160,14 +160,14 @@
     <g transform="translate(9, 41)" clip-path="url(#terminal-clip-terminal)">
     
     <g class="terminal-matrix">
-    <text class="terminal-r1" x="0" y="20" textLength="134.2" clip-path="url(#terminal-line-0)">&#160;&#160;⡠⣒⠄&#160;&#160;⡔⢄⠔⡄</text><text class="terminal-r2" x="170.8" y="20" textLength="146.4" clip-path="url(#terminal-line-0)">Mistral&#160;Vibe</text><text class="terminal-r1" x="317.2" y="20" textLength="122" clip-path="url(#terminal-line-0)">&#160;v0.0.0&#160;·&#160;</text><text class="terminal-r3" x="439.2" y="20" textLength="183" clip-path="url(#terminal-line-0)">devstral-latest</text><text class="terminal-r1" x="1464" y="20" textLength="12.2" clip-path="url(#terminal-line-0)">
-</text><text class="terminal-r1" x="0" y="44.4" textLength="134.2" clip-path="url(#terminal-line-1)">&#160;⢸⠸⣀⡔⢉⠱⣃⡢⣂⡣</text><text class="terminal-r1" x="170.8" y="44.4" textLength="414.8" clip-path="url(#terminal-line-1)">1&#160;model&#160;·&#160;0&#160;MCP&#160;servers&#160;·&#160;0&#160;skills</text><text class="terminal-r1" x="1464" y="44.4" textLength="12.2" clip-path="url(#terminal-line-1)">
-</text><text class="terminal-r1" x="0" y="68.8" textLength="134.2" clip-path="url(#terminal-line-2)">&#160;&#160;⠉⠒⠣⠤⠵⠤⠬⠮⠆</text><text class="terminal-r1" x="170.8" y="68.8" textLength="61" clip-path="url(#terminal-line-2)">Type&#160;</text><text class="terminal-r3" x="231.8" y="68.8" textLength="61" clip-path="url(#terminal-line-2)">/help</text><text class="terminal-r1" x="292.8" y="68.8" textLength="256.2" clip-path="url(#terminal-line-2)">&#160;for&#160;more&#160;information</text><text class="terminal-r1" x="1464" y="68.8" textLength="12.2" clip-path="url(#terminal-line-2)">
+    <text class="terminal-r1" x="1464" y="20" textLength="12.2" clip-path="url(#terminal-line-0)">
+</text><text class="terminal-r1" x="1464" y="44.4" textLength="12.2" clip-path="url(#terminal-line-1)">
+</text><text class="terminal-r1" x="1464" y="68.8" textLength="12.2" clip-path="url(#terminal-line-2)">
 </text><text class="terminal-r1" x="1464" y="93.2" textLength="12.2" clip-path="url(#terminal-line-3)">
 </text><text class="terminal-r1" x="1464" y="117.6" textLength="12.2" clip-path="url(#terminal-line-4)">
-</text><text class="terminal-r4" x="0" y="142" textLength="12.2" clip-path="url(#terminal-line-5)">┃</text><text class="terminal-r2" x="24.4" y="142" textLength="305" clip-path="url(#terminal-line-5)">Hello&#160;there,&#160;who&#160;are&#160;you?</text><text class="terminal-r1" x="1464" y="142" textLength="12.2" clip-path="url(#terminal-line-5)">
+</text><text class="terminal-r1" x="1464" y="142" textLength="12.2" clip-path="url(#terminal-line-5)">
 </text><text class="terminal-r1" x="1464" y="166.4" textLength="12.2" clip-path="url(#terminal-line-6)">
-</text><text class="terminal-r1" x="0" y="190.8" textLength="500.2" clip-path="url(#terminal-line-7)">I&#x27;m&#160;the&#160;Vibe&#160;agent&#160;and&#160;I&#x27;m&#160;ready&#160;to&#160;help.</text><text class="terminal-r1" x="1464" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">
+</text><text class="terminal-r1" x="1464" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">
 </text><text class="terminal-r1" x="1464" y="215.2" textLength="12.2" clip-path="url(#terminal-line-8)">
 </text><text class="terminal-r1" x="1464" y="239.6" textLength="12.2" clip-path="url(#terminal-line-9)">
 </text><text class="terminal-r1" x="1464" y="264" textLength="12.2" clip-path="url(#terminal-line-10)">
@@ -180,14 +180,14 @@
 </text><text class="terminal-r1" x="1464" y="434.8" textLength="12.2" clip-path="url(#terminal-line-17)">
 </text><text class="terminal-r1" x="1464" y="459.2" textLength="12.2" clip-path="url(#terminal-line-18)">
 </text><text class="terminal-r1" x="1464" y="483.6" textLength="12.2" clip-path="url(#terminal-line-19)">
-</text><text class="terminal-r1" x="1464" y="508" textLength="12.2" clip-path="url(#terminal-line-20)">
-</text><text class="terminal-r1" x="1464" y="532.4" textLength="12.2" clip-path="url(#terminal-line-21)">
-</text><text class="terminal-r1" x="1464" y="556.8" textLength="12.2" clip-path="url(#terminal-line-22)">
+</text><text class="terminal-r1" x="0" y="508" textLength="134.2" clip-path="url(#terminal-line-20)">&#160;&#160;⡠⣒⠄&#160;&#160;⡔⢄⠔⡄</text><text class="terminal-r2" x="170.8" y="508" textLength="146.4" clip-path="url(#terminal-line-20)">Mistral&#160;Vibe</text><text class="terminal-r1" x="317.2" y="508" textLength="122" clip-path="url(#terminal-line-20)">&#160;v0.0.0&#160;·&#160;</text><text class="terminal-r3" x="439.2" y="508" textLength="183" clip-path="url(#terminal-line-20)">devstral-latest</text><text class="terminal-r1" x="1464" y="508" textLength="12.2" clip-path="url(#terminal-line-20)">
+</text><text class="terminal-r1" x="0" y="532.4" textLength="134.2" clip-path="url(#terminal-line-21)">&#160;⢸⠸⣀⡔⢉⠱⣃⡢⣂⡣</text><text class="terminal-r1" x="170.8" y="532.4" textLength="414.8" clip-path="url(#terminal-line-21)">1&#160;model&#160;·&#160;0&#160;MCP&#160;servers&#160;·&#160;0&#160;skills</text><text class="terminal-r1" x="1464" y="532.4" textLength="12.2" clip-path="url(#terminal-line-21)">
+</text><text class="terminal-r1" x="0" y="556.8" textLength="134.2" clip-path="url(#terminal-line-22)">&#160;&#160;⠉⠒⠣⠤⠵⠤⠬⠮⠆</text><text class="terminal-r1" x="170.8" y="556.8" textLength="61" clip-path="url(#terminal-line-22)">Type&#160;</text><text class="terminal-r3" x="231.8" y="556.8" textLength="61" clip-path="url(#terminal-line-22)">/help</text><text class="terminal-r1" x="292.8" y="556.8" textLength="256.2" clip-path="url(#terminal-line-22)">&#160;for&#160;more&#160;information</text><text class="terminal-r1" x="1464" y="556.8" textLength="12.2" clip-path="url(#terminal-line-22)">
 </text><text class="terminal-r1" x="1464" y="581.2" textLength="12.2" clip-path="url(#terminal-line-23)">
 </text><text class="terminal-r1" x="1464" y="605.6" textLength="12.2" clip-path="url(#terminal-line-24)">
-</text><text class="terminal-r1" x="1464" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">
+</text><text class="terminal-r4" x="0" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">┃</text><text class="terminal-r2" x="24.4" y="630" textLength="305" clip-path="url(#terminal-line-25)">Hello&#160;there,&#160;who&#160;are&#160;you?</text><text class="terminal-r1" x="1464" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">
 </text><text class="terminal-r1" x="1464" y="654.4" textLength="12.2" clip-path="url(#terminal-line-26)">
-</text><text class="terminal-r1" x="1464" y="678.8" textLength="12.2" clip-path="url(#terminal-line-27)">
+</text><text class="terminal-r1" x="0" y="678.8" textLength="500.2" clip-path="url(#terminal-line-27)">I&#x27;m&#160;the&#160;Vibe&#160;agent&#160;and&#160;I&#x27;m&#160;ready&#160;to&#160;help.</text><text class="terminal-r1" x="1464" y="678.8" textLength="12.2" clip-path="url(#terminal-line-27)">
 </text><text class="terminal-r1" x="1464" y="703.2" textLength="12.2" clip-path="url(#terminal-line-28)">
 </text><text class="terminal-r1" x="1464" y="727.6" textLength="12.2" clip-path="url(#terminal-line-29)">
 </text><text class="terminal-r5" x="0" y="752" textLength="1464" clip-path="url(#terminal-line-30)">┌────────────────────────────────────────────────────────────────────────────────────────────────────────────&#160;default&#160;─┐</text><text class="terminal-r1" x="1464" y="752" textLength="12.2" clip-path="url(#terminal-line-30)">

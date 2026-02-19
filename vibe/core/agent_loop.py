@@ -474,54 +474,21 @@ class AgentLoop:
     async def _stream_assistant_events(
         self,
     ) -> AsyncGenerator[AssistantEvent | ReasoningEvent]:
-        content_buffer = ""
-        reasoning_buffer = ""
-        chunks_with_content = 0
-        chunks_with_reasoning = 0
         message_id: str | None = None
-        BATCH_SIZE = 5
 
         async for chunk in self._chat_streaming():
             if message_id is None:
                 message_id = chunk.message.message_id
 
             if chunk.message.reasoning_content:
-                if content_buffer:
-                    yield AssistantEvent(content=content_buffer, message_id=message_id)
-                    content_buffer = ""
-                    chunks_with_content = 0
-
-                reasoning_buffer += chunk.message.reasoning_content
-                chunks_with_reasoning += 1
-
-                if chunks_with_reasoning >= BATCH_SIZE:
-                    yield ReasoningEvent(
-                        content=reasoning_buffer, message_id=message_id
-                    )
-                    reasoning_buffer = ""
-                    chunks_with_reasoning = 0
+                yield ReasoningEvent(
+                    content=chunk.message.reasoning_content, message_id=message_id
+                )
 
             if chunk.message.content:
-                if reasoning_buffer:
-                    yield ReasoningEvent(
-                        content=reasoning_buffer, message_id=message_id
-                    )
-                    reasoning_buffer = ""
-                    chunks_with_reasoning = 0
-
-                content_buffer += chunk.message.content
-                chunks_with_content += 1
-
-                if chunks_with_content >= BATCH_SIZE:
-                    yield AssistantEvent(content=content_buffer, message_id=message_id)
-                    content_buffer = ""
-                    chunks_with_content = 0
-
-        if reasoning_buffer:
-            yield ReasoningEvent(content=reasoning_buffer, message_id=message_id)
-
-        if content_buffer:
-            yield AssistantEvent(content=content_buffer, message_id=message_id)
+                yield AssistantEvent(
+                    content=chunk.message.content, message_id=message_id
+                )
 
     async def _get_assistant_event(self) -> AssistantEvent:
         llm_result = await self._chat()
@@ -933,7 +900,7 @@ class AgentLoop:
         )
         self.messages = self.messages[:1]
 
-        self.stats = AgentStats()
+        self.stats = AgentStats.create_fresh(self.stats)
         self.stats.trigger_listeners()
 
         try:

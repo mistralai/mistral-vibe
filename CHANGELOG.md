@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-02-18
+
+### Added
+
+- Multiple clipboard copy strategies: OSC52 first, then pyperclip fallback when system clipboard is available (e.g. local GUI, SSH without OSC52)
+- Ctrl+Z to put Vibe in background
+
+### Changed
+
+- Improve performance around streaming and scrolling
+- File watcher is now opt-out by default; opt-in via config
+- Bump Textual version in dependencies
+- Inline code styling: yellow bold with transparent background for better readability
+
+### Fixed
+
+- Banner: sync skills count after initial app mount (fixes wrong count in some cases)
+- Collapsed tool results: strip newlines in truncation to remove extra blank line
+- Context token widget: preserve stats listeners across `/clear` so token percentage updates correctly
+- Vertex AI: cache credentials to avoid blocking the event loop on every LLM request
+- Bash tool: remove `NO_COLOR` from subprocess env to fix snapshot tests and colored output
+
+
 ## [2.2.0] - 2026-02-17
 
 ### Added
