@@ -72,13 +72,7 @@ def _get_shell_executable() -> str | None:
 
 
 def _get_base_env() -> dict[str, str]:
-    base_env = {
-        **os.environ,
-        "CI": "true",
-        "NONINTERACTIVE": "1",
-        "NO_TTY": "1",
-        "NO_COLOR": "1",
-    }
+    base_env = {**os.environ, "CI": "true", "NONINTERACTIVE": "1", "NO_TTY": "1"}
 
     if is_windows():
         base_env["GIT_PAGER"] = "more"

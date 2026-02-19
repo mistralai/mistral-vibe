@@ -311,6 +311,7 @@ class VibeConfig(BaseSettings):
     vim_keybindings: bool = False
     disable_welcome_banner_animation: bool = False
     autocopy_to_clipboard: bool = True
+    file_watcher_for_autocomplete: bool = False
     displayed_workdir: str = ""
     auto_compact_threshold: int = 200_000
     context_warnings: bool = False

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import atexit
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +23,11 @@ class _RebuildTask:
 
 
 class FileIndexer:
-    def __init__(self, mass_change_threshold: int = 200) -> None:
+    def __init__(
+        self,
+        mass_change_threshold: int = 200,
+        should_enable_watcher: Callable[[], bool] | None = None,
+    ) -> None:
         self._lock = RLock()  # guards _store snapshot access and watcher callbacks.
         self._stats = FileIndexStats()
         self._ignore_rules = IgnoreRules()
@@ -40,6 +44,7 @@ class FileIndexer:
         )  # coordinates updates to _active_rebuilds and _target_root.
         self._target_root: Path | None = None
         self._shutdown = False
+        self._should_enable_watcher = should_enable_watcher or (lambda: False)
 
         atexit.register(self.shutdown)
 
@@ -74,7 +79,10 @@ class FileIndexer:
             self._start_background_rebuild(resolved_root)
             self._wait_for_rebuild(resolved_root)
 
-        self._watcher.start(resolved_root)
+        if self._should_enable_watcher():
+            self._watcher.start(resolved_root)
+        else:
+            self._watcher.stop()
 
         with self._lock:  # ensure root reference is fresh before snapshotting
             return self._store.snapshot()

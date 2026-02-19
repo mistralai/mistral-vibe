@@ -25,9 +25,9 @@ from vibe.core.tools.builtins.write_file import WriteFileArgs, WriteFileResult
 
 def _truncate_lines(content: str, max_lines: int) -> tuple[str, str | None]:
     """Truncate content to max_lines, returning (content, truncation_info)."""
-    lines = content.split("\n")
+    lines = content.strip("\n").split("\n")
     if len(lines) <= max_lines:
-        return content, None
+        return "\n".join(lines), None
     remaining = len(lines) - max_lines
     return "\n".join(lines[:max_lines]), f"… ({remaining} more lines)"
 

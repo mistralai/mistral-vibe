@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
 from vibe.core.config import ProviderConfig
 from vibe.core.llm.backend.vertex import (
     VertexAnthropicAdapter,
+    VertexCredentials,
     build_vertex_base_url,
     build_vertex_endpoint,
 )
@@ -16,7 +17,14 @@ from vibe.core.types import AvailableFunction, AvailableTool, LLMMessage, Role
 
 @pytest.fixture
 def adapter():
-    return VertexAnthropicAdapter()
+    adapter = VertexAnthropicAdapter()
+    with patch.object(
+        VertexCredentials,
+        "access_token",
+        new_callable=PropertyMock,
+        return_value="fake-token",
+    ):
+        yield adapter
 
 
 @pytest.fixture
@@ -66,11 +74,7 @@ class TestBuildVertexEndpoint:
 
 
 class TestPrepareRequest:
-    @patch(
-        "vibe.core.llm.backend.vertex.get_vertex_access_token",
-        return_value="fake-token",
-    )
-    def test_basic_request(self, mock_token, adapter, provider):
+    def test_basic_request(self, adapter, provider):
         messages = [LLMMessage(role=Role.user, content="Hello")]
         req = adapter.prepare_request(
             model_name="claude-3-5-sonnet",
@@ -94,11 +98,7 @@ class TestPrepareRequest:
         assert "streamRawPredict" not in req.endpoint
         assert req.base_url == "https://us-central1-aiplatform.googleapis.com"
 
-    @patch(
-        "vibe.core.llm.backend.vertex.get_vertex_access_token",
-        return_value="fake-token",
-    )
-    def test_streaming_request(self, mock_token, adapter, provider):
+    def test_streaming_request(self, adapter, provider):
         messages = [LLMMessage(role=Role.user, content="Hello")]
         req = adapter.prepare_request(
             model_name="claude-3-5-sonnet",
@@ -115,11 +115,7 @@ class TestPrepareRequest:
         assert payload.get("stream") is True
         assert "streamRawPredict" in req.endpoint
 
-    @patch(
-        "vibe.core.llm.backend.vertex.get_vertex_access_token",
-        return_value="fake-token",
-    )
-    def test_no_beta_features_for_vertex(self, mock_token, adapter, provider):
+    def test_no_beta_features_for_vertex(self, adapter, provider):
         """Vertex AI doesn't support the same beta features as direct Anthropic API."""
         messages = [LLMMessage(role=Role.user, content="Hello")]
         req = adapter.prepare_request(
@@ -136,11 +132,7 @@ class TestPrepareRequest:
         # Vertex AI doesn't support prompt-caching or other beta features
         assert req.headers.get("anthropic-beta", "") == ""
 
-    @patch(
-        "vibe.core.llm.backend.vertex.get_vertex_access_token",
-        return_value="fake-token",
-    )
-    def test_with_extended_thinking(self, mock_token, adapter, provider):
+    def test_with_extended_thinking(self, adapter, provider):
         messages = [LLMMessage(role=Role.user, content="Hello")]
         req = adapter.prepare_request(
             model_name="claude-3-5-sonnet",
@@ -159,11 +151,7 @@ class TestPrepareRequest:
         assert payload["max_tokens"] == 1024
         assert payload["temperature"] == 1
 
-    @patch(
-        "vibe.core.llm.backend.vertex.get_vertex_access_token",
-        return_value="fake-token",
-    )
-    def test_with_tools(self, mock_token, adapter, provider):
+    def test_with_tools(self, adapter, provider):
         messages = [LLMMessage(role=Role.user, content="Hello")]
         tools = [
             AvailableTool(
@@ -227,11 +215,7 @@ class TestPrepareRequest:
                 provider=provider,
             )
 
-    @patch(
-        "vibe.core.llm.backend.vertex.get_vertex_access_token",
-        return_value="fake-token",
-    )
-    def test_default_max_tokens(self, mock_token, adapter, provider):
+    def test_default_max_tokens(self, adapter, provider):
         messages = [LLMMessage(role=Role.user, content="Hello")]
         req = adapter.prepare_request(
             model_name="claude-3-5-sonnet",
@@ -589,3 +573,65 @@ class TestHelperMethods:
         messages: list[dict] = []
         adapter._add_cache_control_to_last_user_message(messages)
         assert messages == []
+
+
+class TestVertexCredentials:
+    def _make_creds(
+        self, *, valid: bool = True, token: str | None = "tok"
+    ) -> MagicMock:
+        creds = MagicMock()
+        creds.valid = valid
+        creds.token = token
+        return creds
+
+    @patch("vibe.core.llm.backend.vertex.google.auth.default")
+    def test_initializes_credentials_on_first_access(self, mock_default: MagicMock):
+        creds = self._make_creds()
+        mock_default.return_value = (creds, "project")
+
+        vc = VertexCredentials()
+        token = vc.access_token
+
+        assert token == "tok"
+        mock_default.assert_called_once()
+
+    @patch("vibe.core.llm.backend.vertex.google.auth.default")
+    def test_caches_credentials_across_calls(self, mock_default: MagicMock):
+        creds = self._make_creds()
+        mock_default.return_value = (creds, "project")
+
+        vc = VertexCredentials()
+        _ = vc.access_token
+        _ = vc.access_token
+        _ = vc.access_token
+
+        mock_default.assert_called_once()
+
+    @patch("vibe.core.llm.backend.vertex.google.auth.default")
+    def test_refreshes_when_token_invalid(self, mock_default: MagicMock):
+        creds = self._make_creds(valid=False)
+        mock_default.return_value = (creds, "project")
+
+        vc = VertexCredentials()
+        _ = vc.access_token
+
+        creds.refresh.assert_called_once()
+
+    @patch("vibe.core.llm.backend.vertex.google.auth.default")
+    def test_skips_refresh_when_token_valid(self, mock_default: MagicMock):
+        creds = self._make_creds(valid=True)
+        mock_default.return_value = (creds, "project")
+
+        vc = VertexCredentials()
+        _ = vc.access_token
+
+        creds.refresh.assert_not_called()
+
+    @patch("vibe.core.llm.backend.vertex.google.auth.default")
+    def test_raises_when_token_is_none(self, mock_default: MagicMock):
+        creds = self._make_creds(valid=True, token=None)
+        mock_default.return_value = (creds, "project")
+
+        vc = VertexCredentials()
+        with pytest.raises(RuntimeError, match="did not produce a token"):
+            _ = vc.access_token

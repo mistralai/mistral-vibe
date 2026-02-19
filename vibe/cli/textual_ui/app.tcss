@@ -29,6 +29,7 @@ TextArea > .text-area--cursor {
     width: 100%;
     background: transparent;
     padding: 0;
+    align-vertical: bottom;
 }
 
 #loading-area {
@@ -147,8 +148,9 @@ Markdown {
     color: ansi_default;
 
     .code_inline {
-        color: ansi_default;
-        background: ansi_bright_black;
+        color: ansi_yellow;
+        background: transparent;
+        text-style: bold;
     }
 
     MarkdownFence {

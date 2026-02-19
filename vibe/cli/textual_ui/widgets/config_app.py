@@ -63,6 +63,12 @@ class ConfigApp(Container):
                 "type": "cycle",
                 "options": ["On", "Off"],
             },
+            {
+                "key": "file_watcher_for_autocomplete",
+                "label": "Autocomplete watcher (may delay first autocompletion)",
+                "type": "cycle",
+                "options": ["On", "Off"],
+            },
         ]
 
         self.title_widget: Static | None = None

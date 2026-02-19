@@ -71,8 +71,9 @@ class PathCompleter(Completer):
         self,
         max_entries_to_process: int = DEFAULT_MAX_ENTRIES_TO_PROCESS,
         target_matches: int = DEFAULT_TARGET_MATCHES,
+        watcher_enabled_getter: Callable[[], bool] | None = None,
     ) -> None:
-        self._indexer = FileIndexer()
+        self._indexer = FileIndexer(should_enable_watcher=watcher_enabled_getter)
         self._max_entries_to_process = max_entries_to_process
         self._target_matches = target_matches
 

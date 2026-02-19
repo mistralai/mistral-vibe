@@ -1,24 +1,17 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, ClassVar
 
 import google.auth
+import google.auth.credentials
 from google.auth.transport.requests import Request
 
 from vibe.core.config import ProviderConfig
 from vibe.core.llm.backend.anthropic import AnthropicAdapter
 from vibe.core.llm.backend.base import PreparedRequest
 from vibe.core.types import AvailableTool, LLMMessage, StrToolChoice
-
-
-def get_vertex_access_token() -> str:
-
-    credentials, _ = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    credentials.refresh(Request())
-    return credentials.token
 
 
 def build_vertex_base_url(region: str) -> str:
@@ -37,12 +30,38 @@ def build_vertex_endpoint(
     )
 
 
+class VertexCredentials:
+    def __init__(self) -> None:
+        self._credentials: google.auth.credentials.Credentials | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def access_token(self) -> str:
+        with self._lock:
+            creds = self._credentials
+            if creds is None:
+                creds, _ = google.auth.default(
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+                self._credentials = creds
+            if not creds.valid:
+                creds.refresh(Request())
+            if creds.token is None:
+                raise RuntimeError(
+                    "Vertex AI credential refresh did not produce a token"
+                )
+            return creds.token
+
+
 class VertexAnthropicAdapter(AnthropicAdapter):
     """Vertex AI adapter — inherits all streaming/parsing from AnthropicAdapter."""
 
     endpoint: ClassVar[str] = ""
-    # Vertex AI doesn't support beta features
     BETA_FEATURES: ClassVar[str] = ""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.credentials = VertexCredentials()
 
     def prepare_request(  # noqa: PLR0913
         self,
@@ -70,7 +89,6 @@ class VertexAnthropicAdapter(AnthropicAdapter):
         converted_tools = self._mapper.prepare_tools(tools)
         converted_tool_choice = self._mapper.prepare_tool_choice(tool_choice)
 
-        # Build vertex-specific payload (no "model" key, uses anthropic_version)
         payload: dict[str, Any] = {
             "anthropic_version": "vertex-2023-10-16",
             "messages": converted_messages,
@@ -98,11 +116,9 @@ class VertexAnthropicAdapter(AnthropicAdapter):
 
         self._add_cache_control_to_last_user_message(converted_messages)
 
-        access_token = get_vertex_access_token()
-
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
+            "Authorization": f"Bearer {self.credentials.access_token}",
             "anthropic-beta": self.BETA_FEATURES,
         }
 

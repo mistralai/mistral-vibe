@@ -724,7 +724,7 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "2.2.0"
+version = "2.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -796,7 +796,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "requests", specifier = ">=2.20.0" },
     { name = "rich", specifier = ">=14.0.0" },
-    { name = "textual", specifier = ">=1.0.0" },
+    { name = "textual", specifier = ">=7.4.0" },
     { name = "textual-speedups", specifier = ">=0.2.1" },
     { name = "tomli-w", specifier = ">=1.2.0" },
     { name = "tree-sitter", specifier = ">=0.25.2" },

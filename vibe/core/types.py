@@ -61,6 +61,12 @@ class AgentStats(BaseModel):
     ) -> None:
         self._listeners[attr_name] = listener
 
+    @staticmethod
+    def create_fresh(previous: AgentStats) -> AgentStats:
+        fresh = AgentStats()
+        fresh._listeners = previous._listeners.copy()
+        return fresh
+
     @computed_field
     @property
     def session_total_llm_tokens(self) -> int:

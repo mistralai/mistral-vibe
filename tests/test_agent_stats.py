@@ -536,6 +536,27 @@ class TestAutoCompactIntegration:
 
 class TestClearHistoryFullReset:
     @pytest.mark.asyncio
+    async def test_clear_history_preserves_listeners(self) -> None:
+        backend = FakeBackend(mock_llm_chunk(content="Response"))
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
+
+        listener_calls: list[int] = []
+        agent.stats.add_listener(
+            "context_tokens", lambda s: listener_calls.append(s.context_tokens)
+        )
+
+        async for _ in agent.act("Hello"):
+            pass
+
+        assert agent.stats.context_tokens > 0
+        listener_calls.clear()
+
+        await agent.clear_history()
+
+        assert agent.stats.context_tokens == 0
+        assert any(v == 0 for v in listener_calls)
+
+    @pytest.mark.asyncio
     async def test_clear_history_fully_resets_stats(self) -> None:
         backend = FakeBackend(mock_llm_chunk(content="Response"))
         agent = build_test_agent_loop(config=make_config(), backend=backend)
