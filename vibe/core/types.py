@@ -207,12 +207,23 @@ class LLMMessage(BaseModel):
     @classmethod
     def _from_any(cls, v: Any) -> dict[str, Any] | Any:
         if isinstance(v, dict):
+            # Handle cases where the 'role' field is None
+            if v.get("role") is None:
+                # If it's a tool message, retain None; otherwise set default value
+                if v.get("name") is not None:
+                    # This is a tool response message, so 'role' should remain None or be set to 'tool'
+                    v["role"] = "tool"
+                else:
+                    # Default to 'assistant' for other cases
+                    v["role"] = "assistant"
             v.setdefault("content", "")
-            v.setdefault("role", "assistant")
             if "message_id" not in v and v.get("role") != "tool":
                 v["message_id"] = str(uuid4())
             return v
         role = str(getattr(v, "role", "assistant"))
+        # Ensure 'role' is not None
+        if role is None:
+            role = "assistant"
         return {
             "role": role,
             "content": getattr(v, "content", ""),
