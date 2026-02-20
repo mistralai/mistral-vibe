@@ -303,10 +303,9 @@ class LLMChunk(BaseModel):
     usage: LLMUsage | None = None
 
     def __add__(self, other: LLMChunk) -> LLMChunk:
-        if self.usage is None and other.usage is None:
-            new_usage = None
-        else:
-            new_usage = (self.usage or LLMUsage()) + (other.usage or LLMUsage())
+        # For usage, take the latest (other) since SSE chunks have cumulative totals
+        # Don't accumulate - just use the most recent usage data
+        new_usage = other.usage if other.usage is not None else self.usage
         return LLMChunk(message=self.message + other.message, usage=new_usage)
 
 
