@@ -185,9 +185,9 @@ Most modern terminals should work, but older or minimal terminal emulators may h
 
 3. If this is your first time running Vibe, it will:
 
-   - Create a default configuration file at `~/.vibe/config.toml`
+   - Create a default configuration file at `$VIBE_HOME/config.toml`
    - Prompt you to enter your API key if it's not already configured
-   - Save your API key to `~/.vibe/.env` for future use
+   - Save your API key to `$VIBE_HOME/.env` for future use
 
    Alternatively, you can configure your API key separately using `vibe --setup`.
 
@@ -231,7 +231,7 @@ vibe "Refactor the main function in cli/main.py to be more modular."
 
 Vibe includes a trust folder system to ensure you only run the agent in directories you trust. When you first run Vibe in a new directory which contains a `.vibe` subfolder, it may ask you to confirm whether you trust the folder.
 
-Trusted folders are remembered for future sessions. You can manage trusted folders through its configuration file `~/.vibe/trusted_folders.toml`.
+Trusted folders are remembered for future sessions. You can manage trusted folders through its configuration file `$VIBE_HOME/trusted_folders.toml`.
 
 This safety feature helps prevent accidental execution in sensitive directories.
 
@@ -305,7 +305,7 @@ Vibe follows the [Agent Skills specification](https://agentskills.io/specificati
 
 ### Creating Skills
 
-Skills are defined in directories with a `SKILL.md` file containing metadata in YAML frontmatter. For example, `~/.vibe/skills/code-review/SKILL.md`:
+Skills are defined in directories with a `SKILL.md` file containing metadata in YAML frontmatter. For example, `$VIBE_HOME/skills/code-review/SKILL.md`:
 
 ```markdown
 ---
@@ -332,7 +332,7 @@ Vibe discovers skills from multiple locations:
 1. **Custom paths**: Configured in `config.toml` via `skill_paths`
 2. **Standard Agent Skills path** (project root, trusted folders only): `.agents/skills/` — [Agent Skills](https://agentskills.io) standard
 3. **Local project skills** (project root, trusted folders only): `.vibe/skills/` in your project
-4. **Global skills directory**: `~/.vibe/skills/`
+4. **Global skills directory**: `$VIBE_HOME/skills/`
 
 ```toml
 skill_paths = ["/path/to/custom/skills"]
@@ -356,7 +356,7 @@ Skills support the same pattern matching as tools (exact names, glob patterns, a
 
 ### Configuration File Location
 
-Vibe is configured via a `config.toml` file. It looks for this file first in `./.vibe/config.toml` and then falls back to `~/.vibe/config.toml`.
+Vibe is configured via a `config.toml` file. It looks for this file first in `./.vibe/config.toml` and then falls back to `$VIBE_HOME/config.toml`.
 
 ### API Key Configuration
 
@@ -366,7 +366,7 @@ You can configure your API key using `vibe --setup`, or through one of the metho
 
 Vibe supports multiple ways to configure your API keys:
 
-1. **Interactive Setup (Recommended for first-time users)**: When you run Vibe for the first time or if your API key is missing, Vibe will prompt you to enter it. The key will be securely saved to `~/.vibe/.env` for future sessions.
+1. **Interactive Setup (Recommended for first-time users)**: When you run Vibe for the first time or if your API key is missing, Vibe will prompt you to enter it. The key will be securely saved to `$VIBE_HOME/.env` for future sessions.
 
 2. **Environment Variables**: Set your API key as an environment variable:
 
@@ -374,19 +374,19 @@ Vibe supports multiple ways to configure your API keys:
    export MISTRAL_API_KEY="your_mistral_api_key"
    ```
 
-3. **`.env` File**: Create a `.env` file in `~/.vibe/` and add your API keys:
+3. **`.env` File**: Create a `.env` file in `$VIBE_HOME/` and add your API keys:
 
    ```bash
    MISTRAL_API_KEY=your_mistral_api_key
    ```
 
-   Vibe automatically loads API keys from `~/.vibe/.env` on startup. Environment variables take precedence over the `.env` file if both are set.
+   Vibe automatically loads API keys from `$VIBE_HOME/.env` on startup. Environment variables take precedence over the `.env` file if both are set.
 
 **Note**: The `.env` file is specifically for API keys and other provider credentials. General Vibe configuration should be done in `config.toml`.
 
 ### Custom System Prompts
 
-You can create custom system prompts to replace the default one (`prompts/cli.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
+You can create custom system prompts to replace the default one (`prompts/cli.md`). Create a markdown file in the `$VIBE_HOME/prompts/` directory with your custom prompt content.
 
 To use a custom system prompt, set the `system_prompt_id` in your configuration to match the filename (without the `.md` extension):
 
@@ -395,11 +395,11 @@ To use a custom system prompt, set the `system_prompt_id` in your configuration 
 system_prompt_id = "my_custom_prompt"
 ```
 
-This will load the prompt from `~/.vibe/prompts/my_custom_prompt.md`.
+This will load the prompt from `$VIBE_HOME/prompts/my_custom_prompt.md`.
 
 ### Custom Agent Configurations
 
-You can create custom agent configurations for specific use cases (e.g., red-teaming, specialized tasks) by adding agent-specific TOML files in the `~/.vibe/agents/` directory.
+You can create custom agent configurations for specific use cases (e.g., red-teaming, specialized tasks) by adding agent-specific TOML files in the `$VIBE_HOME/agents/` directory.
 
 To use a custom agent, run Vibe with the `--agent` flag:
 
@@ -409,7 +409,7 @@ vibe --agent my_custom_agent
 
 Vibe will look for a file named `my_custom_agent.toml` in the agents directory and apply its configuration.
 
-Example custom agent configuration (`~/.vibe/agents/redteam.toml`):
+Example custom agent configuration (`$VIBE_HOME/agents/redteam.toml`):
 
 ```toml
 # Custom agent configuration for red-teaming
@@ -427,7 +427,7 @@ permission = "always"
 permission = "always"
 ```
 
-Note: This implies that you have set up a redteam prompt named `~/.vibe/prompts/redteam.md`.
+Note: This implies that you have set up a redteam prompt named `$VIBE_HOME/prompts/redteam.md`.
 
 ### Tool Management
 
@@ -573,7 +573,13 @@ enable_auto_update = false
 
 ### Custom Vibe Home Directory
 
-By default, Vibe stores its configuration in `~/.vibe/`. You can override this by setting the `VIBE_HOME` environment variable:
+Vibe stores global configuration under `VIBE_HOME`. Path resolution order:
+
+1. If `VIBE_HOME` is set, use that value.
+2. Otherwise, if `~/.vibe/` already exists, use `~/.vibe/` (legacy compatibility).
+3. Otherwise, use `$XDG_CONFIG_HOME/vibe/` or `~/.config/vibe/` when `XDG_CONFIG_HOME` is not set.
+
+You can always override this by setting the `VIBE_HOME` environment variable:
 
 ```bash
 export VIBE_HOME="/path/to/custom/vibe/home"
