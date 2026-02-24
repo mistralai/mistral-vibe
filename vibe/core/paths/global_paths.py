@@ -19,10 +19,21 @@ class GlobalPath:
 _DEFAULT_VIBE_HOME = Path.home() / ".vibe"
 
 
+def _get_xdg_vibe_home() -> Path:
+    if xdg_config_home := os.getenv("XDG_CONFIG_HOME"):
+        return Path(xdg_config_home).expanduser().resolve() / "vibe"
+    return (Path.home() / ".config" / "vibe").resolve()
+
+
 def _get_vibe_home() -> Path:
     if vibe_home := os.getenv("VIBE_HOME"):
         return Path(vibe_home).expanduser().resolve()
-    return _DEFAULT_VIBE_HOME
+
+    legacy_home = _DEFAULT_VIBE_HOME.expanduser().resolve()
+    if legacy_home.exists():
+        return legacy_home
+
+    return _get_xdg_vibe_home()
 
 
 VIBE_HOME = GlobalPath(_get_vibe_home)
