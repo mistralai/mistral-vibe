@@ -271,11 +271,32 @@ def _setup_iterm2() -> SetupResult:
         )
 
 
+def _get_wezterm_config_path() -> Path:
+    if env_config_file := os.environ.get("WEZTERM_CONFIG_FILE"):
+        return Path(env_config_file).expanduser()
+
+    if xdg_config_home := os.environ.get("XDG_CONFIG_HOME"):
+        return Path(xdg_config_home).expanduser() / "wezterm" / "wezterm.lua"
+
+    home = Path.home()
+    xdg_default = home / ".config" / "wezterm" / "wezterm.lua"
+    legacy = home / ".wezterm.lua"
+
+    if xdg_default.exists():
+        return xdg_default
+    if legacy.exists():
+        return legacy
+
+    return xdg_default
+
+
 def _setup_wezterm() -> SetupResult:
+    config_path = _get_wezterm_config_path()
+
     return SetupResult(
         success=True,
         terminal=Terminal.WEZTERM,
-        message="Please manually add the following to your .wezterm.lua:\n"
+        message=f"Please manually add the following to {config_path}:\n"
         "local wezterm = require 'wezterm'\n"
         "local config = wezterm.config_builder()\n\n"
         "config.keys = {\n"
