@@ -44,6 +44,7 @@ class ChatInputContainer(Vertical):
         skill_entries_getter: Callable[[], list[tuple[str, str]]] | None = None,
         file_watcher_for_autocomplete_getter: Callable[[], bool] | None = None,
         nuage_enabled: bool = False,
+        voice_mode: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -56,6 +57,7 @@ class ChatInputContainer(Vertical):
             file_watcher_for_autocomplete_getter
         )
         self._nuage_enabled = nuage_enabled
+        self._voice_mode = voice_mode
 
         self._completion_manager = MultiCompletionManager([
             SlashCommandController(CommandCompleter(self._get_slash_entries), self),
@@ -90,6 +92,7 @@ class ChatInputContainer(Vertical):
                 history_file=self._history_file,
                 id="input-body",
                 nuage_enabled=self._nuage_enabled,
+                voice_mode=self._voice_mode,
             )
 
             yield self._body
@@ -200,5 +203,31 @@ class ChatInputContainer(Vertical):
         try:
             input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
             input_box.border_title = name
+        except Exception:
+            pass
+
+    def set_voice_recording(self, recording: bool) -> None:
+        if self._body:
+            self._body.set_voice_recording(recording)
+
+    def set_voice_transcribing(self, transcribing: bool) -> None:
+        if self._body:
+            self._body.set_voice_transcribing(transcribing)
+
+    def update_voice_prompt(self, text: str) -> None:
+        if self._body:
+            self._body.update_voice_prompt(text)
+
+    def set_border_title(self, title: str) -> None:
+        try:
+            box = self.get_widget_by_id(self.ID_INPUT_BOX)
+            box.border_title = title
+        except Exception:
+            pass
+
+    def restore_border_title(self) -> None:
+        try:
+            box = self.get_widget_by_id(self.ID_INPUT_BOX)
+            box.border_title = self._agent_name
         except Exception:
             pass

@@ -55,9 +55,16 @@ class ChatTextArea(TextArea):
             self.mode = mode
             super().__init__()
 
-    def __init__(self, nuage_enabled: bool = False, **kwargs: Any) -> None:
+    class VoiceToggle(Message):
+        """Sent when the user toggles voice recording (space on empty input)."""
+
+    def __init__(
+        self, nuage_enabled: bool = False, voice_mode: bool = False, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self._nuage_enabled = nuage_enabled
+        self._voice_mode = voice_mode
+        self._voice_recording = False
         self._input_mode: InputMode = self.DEFAULT_MODE
         self._history_prefix: str | None = None
         self._last_text = ""
@@ -197,6 +204,9 @@ class ChatTextArea(TextArea):
                         self.post_message(self.Submitted(value))
                     return
 
+        if self._handle_voice_key(event):
+            return
+
         if event.key == "enter":
             event.prevent_default()
             event.stop()
@@ -240,6 +250,35 @@ class ChatTextArea(TextArea):
 
         await super()._on_key(event)
         self._mark_cursor_moved_if_needed()
+
+    def _handle_voice_key(self, event: events.Key) -> bool:
+        """Intercept keys for voice recording toggle.
+
+        Returns True if the event was consumed.
+        """
+        if not self._voice_mode:
+            return False
+
+        # While recording, space/enter/escape all stop it
+        if self._voice_recording and event.key in {"space", "enter", "escape"}:
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.VoiceToggle())
+            return True
+
+        # On empty input, space starts recording
+        if (
+            event.key == "space"
+            and not self.text
+            and self._input_mode == self.DEFAULT_MODE
+            and not self._voice_recording
+        ):
+            event.prevent_default()
+            event.stop()
+            self.post_message(self.VoiceToggle())
+            return True
+
+        return False
 
     def set_completion_manager(self, manager: MultiCompletionManager | None) -> None:
         self._completion_manager = manager
