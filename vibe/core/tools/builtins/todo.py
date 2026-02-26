@@ -112,7 +112,7 @@ class Todo(
 
     def _read_todos(self) -> TodoResult:
         return TodoResult(
-            message=f"Retrieved {len(self.state.todos)} todos",
+            message=f"Retrieved {len(self.state.todos)} todos (ctrl+t to toggle)",
             todos=self.state.todos,
             total_count=len(self.state.todos),
         )
@@ -128,7 +128,7 @@ class Todo(
         self.state.todos = todos
 
         return TodoResult(
-            message=f"Updated {len(todos)} todos",
+            message=f"Updated {len(todos)} todos (ctrl+t to toggle)",
             todos=self.state.todos,
             total_count=len(self.state.todos),
         )
