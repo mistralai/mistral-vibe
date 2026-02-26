@@ -17,6 +17,7 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalGroup, VerticalScroll
 from textual.driver import Driver
 from textual.events import AppBlur, AppFocus, MouseUp
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -33,9 +34,10 @@ from vibe.cli.plan_offer.decide_plan_offer import (
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway
 from vibe.cli.terminal_setup import setup_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
+from vibe.cli.textual_ui.voice import SOUNDDEVICE_AVAILABLE, AudioRecorder
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
-from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
+from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer, ChatTextArea
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
@@ -117,6 +119,7 @@ from vibe.core.utils import (
     is_dangerous_directory,
     logger,
 )
+from vibe.core.voice import transcribe as voxtral_transcribe
 
 
 class BottomApp(StrEnum):
@@ -241,6 +244,12 @@ class VibeApp(App):  # noqa: PLR0904
         self._initial_prompt = initial_prompt
         self._teleport_on_start = teleport_on_start and self.config.nuage_enabled
         self._last_escape_time: float | None = None
+        self._voice_recorder: AudioRecorder | None = None
+        self._voice_anim_timer: Timer | None = None
+        self._voice_anim_frame: int = 0
+        self._smoothed_levels: list[float] = []
+        if self.config.voice_mode and SOUNDDEVICE_AVAILABLE:
+            self._voice_recorder = AudioRecorder()
         self._banner: Banner | None = None
         self._whats_new_message: WhatsNewMessage | None = None
         self._cached_messages_area: Widget | None = None
@@ -270,6 +279,7 @@ class VibeApp(App):  # noqa: PLR0904
                 skill_entries_getter=self._get_skill_entries,
                 file_watcher_for_autocomplete_getter=self._is_file_watcher_enabled,
                 nuage_enabled=self.config.nuage_enabled,
+                voice_mode=self.config.voice_mode and SOUNDDEVICE_AVAILABLE,
             )
 
         with Horizontal(id="bottom-bar"):
@@ -367,6 +377,144 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         await self._handle_user_message(value)
+
+    def on_chat_text_area_voice_toggle(self, event: ChatTextArea.VoiceToggle) -> None:
+        event.stop()
+        if not self._voice_recorder:
+            return
+
+        if self._voice_recorder.is_recording:
+            self._stop_voice_recording()
+        else:
+            self._start_voice_recording()
+
+    # -- voice animation (runs on the App event loop) -------------------------
+
+    _SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    _BARS = "▁▂▃▄▅▆▇█"
+    _NUM_METER_BARS: int = 7
+    _SILENCE_THRESHOLD: float = 1e-4
+    _smoothed_levels: list[float]
+
+    def _stop_voice_anim(self) -> None:
+        if self._voice_anim_timer is not None:
+            self._voice_anim_timer.stop()
+            self._voice_anim_timer = None
+        self._smoothed_levels = []
+
+    @staticmethod
+    def _log_scale(peak: float) -> float:
+        """Map raw 0-1 peak to a perceptual 0-1 level using log scale."""
+        import math
+
+        if peak < VibeApp._SILENCE_THRESHOLD:
+            return 0.0
+        db = 20.0 * math.log10(peak)
+        return max(0.0, min(1.0, (db + 50.0) / 50.0))
+
+    def _tick_voice_meter(self) -> None:
+        if not self._chat_input_container or not self._voice_recorder:
+            return
+
+        raw = self._voice_recorder.peak
+        level = self._log_scale(raw)
+
+        n = self._NUM_METER_BARS
+        if not self._smoothed_levels:
+            self._smoothed_levels = [0.0] * n
+
+        # Shift history left and push new sample on the right
+        self._smoothed_levels.pop(0)
+        self._smoothed_levels.append(level)
+
+        bars = self._BARS
+        top = len(bars) - 1
+        parts: list[str] = []
+        for lv in self._smoothed_levels:
+            # Smooth each bar: fast attack, slow decay
+            idx = int(lv * top)
+            idx = max(0, min(idx, top))
+            parts.append(bars[idx])
+
+        self._chat_input_container.update_voice_prompt(f"● recording {''.join(parts)}")
+
+    def _tick_voice_spinner(self) -> None:
+        if not self._chat_input_container:
+            return
+        frame = self._SPINNER[self._voice_anim_frame % len(self._SPINNER)]
+        self._chat_input_container.update_voice_prompt(f"{frame} transcribing")
+        self._voice_anim_frame += 1
+
+    # -----------------------------------------------------------------------
+
+    def _start_voice_recording(self) -> None:
+        if not self._voice_recorder or not self._chat_input_container:
+            return
+        try:
+            self._voice_recorder.start()
+            self._chat_input_container.set_voice_recording(True)
+            self._voice_anim_timer = self.set_interval(0.1, self._tick_voice_meter)
+        except Exception as e:
+            logger.warning("Failed to start voice recording: %s", e)
+            self.run_worker(
+                self._mount_and_scroll(
+                    ErrorMessage(
+                        f"Voice recording failed: {e}", collapsed=self._tools_collapsed
+                    )
+                ),
+                exclusive=False,
+            )
+
+    def _stop_voice_recording(self) -> None:
+        if not self._voice_recorder or not self._chat_input_container:
+            return
+        self._stop_voice_anim()
+        self._chat_input_container.set_voice_recording(False)
+        self._chat_input_container.set_voice_transcribing(True)
+        self._voice_anim_frame = 0
+        self._voice_anim_timer = self.set_interval(0.1, self._tick_voice_spinner)
+        self.run_worker(self._voice_transcribe(), exclusive=False)
+
+    async def _voice_transcribe(self) -> None:
+        if not self._voice_recorder:
+            return
+
+        wav_data = self._voice_recorder.stop()
+        if not wav_data:
+            self._stop_voice_anim()
+            if self._chat_input_container:
+                self._chat_input_container.set_voice_transcribing(False)
+            return
+
+        try:
+            active_model = self.config.get_active_model()
+            provider = self.config.get_provider_for_model(active_model)
+            api_key = os.getenv(provider.api_key_env_var, "")
+            if not api_key:
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        "No API key available for voice transcription.",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+                return
+
+            text = await voxtral_transcribe(wav_data, api_key)
+            if text and self._chat_input_container:
+                widget = self._chat_input_container.input_widget
+                if widget:
+                    widget.insert(text)
+        except Exception as e:
+            logger.warning("Voice transcription failed: %s", e)
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Voice transcription failed: {e}", collapsed=self._tools_collapsed
+                )
+            )
+        finally:
+            self._stop_voice_anim()
+            if self._chat_input_container:
+                self._chat_input_container.set_voice_transcribing(False)
 
     async def on_approval_app_approval_granted(
         self, message: ApprovalApp.ApprovalGranted

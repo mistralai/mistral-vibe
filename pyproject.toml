@@ -55,6 +55,11 @@ dependencies = [
     "zstandard>=0.25.0",
 ]
 
+[project.optional-dependencies]
+voice = [
+    "sounddevice>=0.5.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/mistralai/mistral-vibe"
 Repository = "https://github.com/mistralai/mistral-vibe"

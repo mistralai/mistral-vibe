@@ -124,6 +124,16 @@ TextArea > .text-area--cursor {
     color: $mistral_orange;
     text-style: bold;
     padding: 0 1 0 0;
+
+    &.voice-recording {
+        color: ansi_red;
+        min-width: 8;
+    }
+
+    &.voice-transcribing {
+        color: ansi_yellow;
+        min-width: 3;
+    }
 }
 
 #input {
