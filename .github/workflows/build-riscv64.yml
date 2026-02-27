@@ -1,8 +1,6 @@
 name: Build RISC-V 64
 
 on:
-  release:
-    types: [published]
   push:
     branches: [main]
   pull_request:
@@ -19,6 +17,8 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout repository
@@ -41,33 +41,119 @@ jobs:
           name: vibe-acp-linux-riscv64-${{ steps.version.outputs.version }}
           path: dist/vibe-acp
 
-  attach-to-release:
+  create-release:
+    name: Create fork release
     needs: build-riscv64
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
 
     steps:
+      - name: Check if release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.build-riscv64.outputs.version }}
+        run: |
+          TAG="v${VERSION}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" &>/dev/null; then
+            echo "Release $TAG already exists — skipping"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release for $TAG — will create"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Download artifact
+        if: steps.check.outputs.exists == 'false'
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           path: artifacts
 
       - name: Zip artifact
+        if: steps.check.outputs.exists == 'false'
+        env:
+          VERSION: ${{ needs.build-riscv64.outputs.version }}
         run: |
           mkdir -p release-assets
-          for dir in artifacts/*; do
-            name=$(basename "$dir")
-            if [ -f "$dir/vibe-acp" ]; then
-              chmod +x "$dir/vibe-acp"
-              zip -j "release-assets/${name}.zip" "$dir/vibe-acp"
-            fi
-          done
+          BINARY="$(find artifacts/ -name 'vibe-acp' -type f | head -1)"
+          if [[ -z "$BINARY" ]]; then
+            echo "::error::No vibe-acp binary found in artifacts/"
+            exit 1
+          fi
 
-      - name: Attach binary to release
+          ZIP_NAME="vibe-acp-linux-riscv64-${VERSION}.zip"
+          chmod +x "$BINARY"
+          zip -j "release-assets/${ZIP_NAME}" "$BINARY"
+          echo "Created: release-assets/${ZIP_NAME}"
+
+      - name: Fetch upstream release notes
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          gh release view "$TAG" --repo mistralai/mistral-vibe --json body --jq '.body' \
+            > /tmp/upstream-notes.md 2>/dev/null || true
+
+      - name: Generate release notes
+        if: steps.check.outputs.exists == 'false'
+        env:
+          VERSION: ${{ needs.build-riscv64.outputs.version }}
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          ARTIFACT="$(ls release-assets/*.zip 2>/dev/null | head -1)"
+          ARTIFACT_NAME="$(basename "$ARTIFACT")"
+
+          cat > /tmp/release-body.md <<BODY_EOF
+          RISC-V 64 build of Mistral Vibe — the open-source CLI coding assistant by Mistral AI.
+
+          ## Download
+
+          | Platform | Architecture | File |
+          |----------|-------------|------|
+          | Linux | riscv64 | \`${ARTIFACT_NAME}\` |
+
+          ## Installation
+
+          \`\`\`bash
+          unzip ${ARTIFACT_NAME}
+          chmod +x vibe-acp
+          sudo mv vibe-acp /usr/local/bin/
+          vibe-acp --version
+          \`\`\`
+
+          ## Upstream Release
+
+          This build is based on [${TAG}](https://github.com/mistralai/mistral-vibe/releases/tag/${TAG}) from [mistralai/mistral-vibe](https://github.com/mistralai/mistral-vibe).
+
+          For other platforms (x86_64, aarch64, macOS, Windows), see the [upstream release](https://github.com/mistralai/mistral-vibe/releases/tag/${TAG}).
+          BODY_EOF
+
+          if [[ -s /tmp/upstream-notes.md ]]; then
+            {
+              echo ""
+              echo "---"
+              echo ""
+              echo "<details>"
+              echo "<summary>Upstream release notes</summary>"
+              echo ""
+              cat /tmp/upstream-notes.md
+              echo ""
+              echo "</details>"
+            } >> /tmp/release-body.md
+          fi
+
+      - name: Create release
+        if: steps.check.outputs.exists == 'false'
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
+          tag_name: ${{ steps.check.outputs.tag }}
+          target_commitish: main
+          name: "${{ steps.check.outputs.tag }} (RISC-V 64)"
+          body_path: /tmp/release-body.md
           files: release-assets/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
