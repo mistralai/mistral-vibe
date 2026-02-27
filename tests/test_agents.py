@@ -126,8 +126,9 @@ class TestAgentSafety:
 
 
 class TestAgentProfile:
-    def test_all_builtin_agents_exist(self) -> None:
-        assert set(BUILTIN_AGENTS.keys()) == set(BuiltinAgentName)
+    def test_all_builtin_agents_have_valid_names(self) -> None:
+        acp_only = {BuiltinAgentName.CHAT}
+        assert set(BUILTIN_AGENTS.keys()) == set(BuiltinAgentName) - acp_only
 
     def test_display_name_property(self) -> None:
         assert BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].display_name == "Default"

@@ -34,7 +34,10 @@ def acp_agent_with_session_config(
         models=[
             ModelConfig(
                 name="devstral-latest", provider="mistral", alias="devstral-latest"
-            )
+            ),
+            ModelConfig(
+                name="devstral-small", provider="mistral", alias="devstral-small"
+            ),
         ],
         session_logging=session_config,
     )
@@ -58,7 +61,7 @@ def acp_agent_with_session_config(
 
 class TestLoadSession:
     @pytest.mark.asyncio
-    async def test_load_session_returns_response_with_models_and_modes(
+    async def test_load_session_response_structure(
         self,
         acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
         temp_session_dir: Path,
@@ -76,9 +79,49 @@ class TestLoadSession:
 
         assert response is not None
         assert response.models is not None
+        assert len(response.models.available_models) == 2
+
         assert response.models.current_model_id == "devstral-latest"
+        assert response.models.available_models[0].model_id == "devstral-latest"
+        assert response.models.available_models[0].name == "devstral-latest"
+        assert response.models.available_models[1].model_id == "devstral-small"
+        assert response.models.available_models[1].name == "devstral-small"
+
         assert response.modes is not None
         assert response.modes.current_mode_id == BuiltinAgentName.DEFAULT
+        modes_ids = {m.id for m in response.modes.available_modes}
+        assert modes_ids == {
+            BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.CHAT,
+            BuiltinAgentName.AUTO_APPROVE,
+            BuiltinAgentName.PLAN,
+            BuiltinAgentName.ACCEPT_EDITS,
+        }
+
+        assert response.config_options is not None
+        assert len(response.config_options) == 2
+        assert response.config_options[0].root.id == "mode"
+        assert response.config_options[0].root.category == "mode"
+        assert response.config_options[0].root.current_value == BuiltinAgentName.DEFAULT
+        assert len(response.config_options[0].root.options) == 5
+        mode_option_values = {
+            opt.value for opt in response.config_options[0].root.options
+        }
+        assert mode_option_values == {
+            BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.CHAT,
+            BuiltinAgentName.AUTO_APPROVE,
+            BuiltinAgentName.PLAN,
+            BuiltinAgentName.ACCEPT_EDITS,
+        }
+        assert response.config_options[1].root.id == "model"
+        assert response.config_options[1].root.category == "model"
+        assert response.config_options[1].root.current_value == "devstral-latest"
+        assert len(response.config_options[1].root.options) == 2
+        model_option_values = {
+            opt.value for opt in response.config_options[1].root.options
+        }
+        assert model_option_values == {"devstral-latest", "devstral-small"}
 
     @pytest.mark.asyncio
     async def test_load_session_registers_session_with_original_id(

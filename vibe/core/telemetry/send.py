@@ -141,25 +141,25 @@ class TelemetryClient:
             "nb_files_created": nb_files_created,
             "nb_files_modified": nb_files_modified,
         }
-        self.send_telemetry_event("vibe/tool_call_finished", payload)
+        self.send_telemetry_event("vibe.tool_call_finished", payload)
 
     def send_user_copied_text(self, text: str) -> None:
         payload = {"text_length": len(text)}
-        self.send_telemetry_event("vibe/user_copied_text", payload)
+        self.send_telemetry_event("vibe.user_copied_text", payload)
 
     def send_user_cancelled_action(self, action: str) -> None:
         payload = {"action": action}
-        self.send_telemetry_event("vibe/user_cancelled_action", payload)
+        self.send_telemetry_event("vibe.user_cancelled_action", payload)
 
     def send_auto_compact_triggered(self) -> None:
         payload = {}
-        self.send_telemetry_event("vibe/auto_compact_triggered", payload)
+        self.send_telemetry_event("vibe.auto_compact_triggered", payload)
 
     def send_slash_command_used(
         self, command: str, command_type: Literal["builtin", "skill"]
     ) -> None:
         payload = {"command": command.lstrip("/"), "command_type": command_type}
-        self.send_telemetry_event("vibe/slash_command_used", payload)
+        self.send_telemetry_event("vibe.slash_command_used", payload)
 
     def send_new_session(
         self,
@@ -167,7 +167,8 @@ class TelemetryClient:
         nb_skills: int,
         nb_mcp_servers: int,
         nb_models: int,
-        entrypoint: Literal["cli", "acp", "programmatic"],
+        entrypoint: Literal["cli", "acp", "programmatic", "unknown"],
+        terminal_emulator: str | None = None,
     ) -> None:
         payload = {
             "has_agents_md": has_agents_md,
@@ -176,10 +177,11 @@ class TelemetryClient:
             "nb_models": nb_models,
             "entrypoint": entrypoint,
             "version": __version__,
+            "terminal_emulator": terminal_emulator,
         }
-        self.send_telemetry_event("vibe/new_session", payload)
+        self.send_telemetry_event("vibe.new_session", payload)
 
     def send_onboarding_api_key_added(self) -> None:
         self.send_telemetry_event(
-            "vibe/onboarding_api_key_added", {"version": __version__}
+            "vibe.onboarding_api_key_added", {"version": __version__}
         )

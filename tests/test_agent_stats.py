@@ -531,7 +531,7 @@ class TestAutoCompactIntegration:
 
         roles = [r for r, _ in observed]
         assert roles == [Role.system, Role.user, Role.assistant]
-        assert observed[1][1] is not None and "<summary>" in observed[1][1]
+        assert observed[1][1] == "Hello"
 
 
 class TestClearHistoryFullReset:
@@ -621,6 +621,37 @@ class TestClearHistoryFullReset:
 
         assert agent.session_id != original_session_id
         assert agent.session_id == agent.session_logger.session_id
+
+
+class TestClearHistoryObserverBugfix:
+    @pytest.mark.asyncio
+    async def test_clear_history_observer_sees_new_messages(
+        self, observer_capture
+    ) -> None:
+        """Bug fix: clear_history previously left a stale index, so new messages
+        appended after clearing were never observed.
+        """
+        observed, observer = observer_capture
+        backend = FakeBackend([
+            [mock_llm_chunk(content="First")],
+            [mock_llm_chunk(content="Second")],
+        ])
+        agent = build_test_agent_loop(
+            config=make_config(), message_observer=observer, backend=backend
+        )
+
+        async for _ in agent.act("Hello"):
+            pass
+
+        await agent.clear_history()
+        observed.clear()
+
+        async for _ in agent.act("After clear"):
+            pass
+
+        roles = [msg.role for msg in observed]
+        assert Role.user in roles
+        assert Role.assistant in roles
 
 
 class TestStatsEdgeCases:

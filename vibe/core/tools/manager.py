@@ -4,28 +4,20 @@ from collections.abc import Callable, Iterator
 import hashlib
 import importlib.util
 import inspect
-from logging import getLogger
 from pathlib import Path
 import re
 import sys
 from typing import TYPE_CHECKING, Any
 
-from vibe.core.paths.config_paths import resolve_local_tools_dir
+from vibe.core.logger import logger
+from vibe.core.paths.config_paths import discover_local_tools_dirs
 from vibe.core.paths.global_paths import DEFAULT_TOOL_DIR, GLOBAL_TOOLS_DIR
 from vibe.core.tools.base import BaseTool, BaseToolConfig
-from vibe.core.tools.mcp import (
-    RemoteTool,
-    create_mcp_http_proxy_tool_class,
-    create_mcp_stdio_proxy_tool_class,
-    list_tools_http,
-    list_tools_stdio,
-)
-from vibe.core.utils import name_matches, run_sync
-
-logger = getLogger("vibe")
+from vibe.core.tools.mcp import MCPRegistry
+from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
-    from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp, VibeConfig
+    from vibe.core.config import VibeConfig
 
 
 def _try_canonical_module_name(path: Path) -> str | None:
@@ -73,8 +65,13 @@ class ToolManager:
     should have its own ToolManager instance.
     """
 
-    def __init__(self, config_getter: Callable[[], VibeConfig]) -> None:
+    def __init__(
+        self,
+        config_getter: Callable[[], VibeConfig],
+        mcp_registry: MCPRegistry | None = None,
+    ) -> None:
         self._config_getter = config_getter
+        self._mcp_registry = mcp_registry or MCPRegistry()
         self._instances: dict[str, BaseTool] = {}
         self._search_paths: list[Path] = self._compute_search_paths(self._config)
 
@@ -92,10 +89,7 @@ class ToolManager:
         paths: list[Path] = [DEFAULT_TOOL_DIR.path]
 
         paths.extend(config.tool_paths)
-
-        if (tools_dir := resolve_local_tools_dir(Path.cwd())) is not None:
-            paths.append(tools_dir)
-
+        paths.extend(discover_local_tools_dirs(Path.cwd()))
         paths.append(GLOBAL_TOOLS_DIR.path)
 
         unique: list[Path] = []
@@ -180,122 +174,38 @@ class ToolManager:
 
     @property
     def available_tools(self) -> dict[str, type[BaseTool]]:
+        runtime_available = {
+            name: cls for name, cls in self._available.items() if cls.is_available()
+        }
+
         if self._config.enabled_tools:
             return {
                 name: cls
-                for name, cls in self._available.items()
+                for name, cls in runtime_available.items()
                 if name_matches(name, self._config.enabled_tools)
             }
         if self._config.disabled_tools:
             return {
                 name: cls
-                for name, cls in self._available.items()
+                for name, cls in runtime_available.items()
                 if not name_matches(name, self._config.disabled_tools)
             }
-        return dict(self._available)
+        return runtime_available
 
     def _integrate_mcp(self) -> None:
         if not self._config.mcp_servers:
             return
-        run_sync(self._integrate_mcp_async())
-
-    async def _integrate_mcp_async(self) -> None:
-        try:
-            http_count = 0
-            stdio_count = 0
-
-            for srv in self._config.mcp_servers:
-                match srv.transport:
-                    case "http" | "streamable-http":
-                        http_count += await self._register_http_server(srv)
-                    case "stdio":
-                        stdio_count += await self._register_stdio_server(srv)
-                    case _:
-                        logger.warning("Unsupported MCP transport: %r", srv.transport)
-
-            logger.info(
-                "MCP integration registered %d tools (http=%d, stdio=%d)",
-                http_count + stdio_count,
-                http_count,
-                stdio_count,
-            )
-        except Exception as exc:
-            logger.warning("Failed to integrate MCP tools: %s", exc)
-
-    async def _register_http_server(self, srv: MCPHttp | MCPStreamableHttp) -> int:
-        url = (srv.url or "").strip()
-        if not url:
-            logger.warning("MCP server '%s' missing url for http transport", srv.name)
-            return 0
-
-        headers = srv.http_headers()
-        try:
-            tools: list[RemoteTool] = await list_tools_http(
-                url, headers=headers, startup_timeout_sec=srv.startup_timeout_sec
-            )
-        except Exception as exc:
-            logger.warning("MCP HTTP discovery failed for %s: %s", url, exc)
-            return 0
-
-        added = 0
-        for remote in tools:
-            try:
-                proxy_cls = create_mcp_http_proxy_tool_class(
-                    url=url,
-                    remote=remote,
-                    alias=srv.name,
-                    server_hint=srv.prompt,
-                    headers=headers,
-                    startup_timeout_sec=srv.startup_timeout_sec,
-                    tool_timeout_sec=srv.tool_timeout_sec,
-                )
-                self._available[proxy_cls.get_name()] = proxy_cls
-                added += 1
-            except Exception as exc:
-                logger.warning(
-                    "Failed to register MCP HTTP tool '%s' from %s: %r",
-                    getattr(remote, "name", "<unknown>"),
-                    url,
-                    exc,
-                )
-        return added
-
-    async def _register_stdio_server(self, srv: MCPStdio) -> int:
-        cmd = srv.argv()
-        if not cmd:
-            logger.warning("MCP stdio server '%s' has invalid/empty command", srv.name)
-            return 0
 
         try:
-            tools: list[RemoteTool] = await list_tools_stdio(
-                cmd, env=srv.env or None, startup_timeout_sec=srv.startup_timeout_sec
-            )
+            mcp_tools = self._mcp_registry.get_tools(self._config.mcp_servers)
         except Exception as exc:
-            logger.warning("MCP stdio discovery failed for %r: %s", cmd, exc)
-            return 0
+            logger.warning("MCP integration failed: %s", exc)
+            return
 
-        added = 0
-        for remote in tools:
-            try:
-                proxy_cls = create_mcp_stdio_proxy_tool_class(
-                    command=cmd,
-                    remote=remote,
-                    alias=srv.name,
-                    server_hint=srv.prompt,
-                    env=srv.env or None,
-                    startup_timeout_sec=srv.startup_timeout_sec,
-                    tool_timeout_sec=srv.tool_timeout_sec,
-                )
-                self._available[proxy_cls.get_name()] = proxy_cls
-                added += 1
-            except Exception as exc:
-                logger.warning(
-                    "Failed to register MCP stdio tool '%s' from %r: %r",
-                    getattr(remote, "name", "<unknown>"),
-                    cmd,
-                    exc,
-                )
-        return added
+        self._available.update(mcp_tools)
+        logger.info(
+            "MCP integration registered %d tools (via registry)", len(mcp_tools)
+        )
 
     def get_tool_config(self, tool_name: str) -> BaseToolConfig:
         tool_class = self._available.get(tool_name)

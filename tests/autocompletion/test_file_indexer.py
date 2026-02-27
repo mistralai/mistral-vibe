@@ -89,11 +89,15 @@ def test_updates_index_on_file_rename(
     old_file.rename(new_file)
 
     assert _wait_for(
-        lambda: all(
-            entry.rel != old_file.name for entry in file_indexer.get_index(Path("."))
-        )
-        and any(
-            entry.rel == new_file.name for entry in file_indexer.get_index(Path("."))
+        lambda: (
+            all(
+                entry.rel != old_file.name
+                for entry in file_indexer.get_index(Path("."))
+            )
+            and any(
+                entry.rel == new_file.name
+                for entry in file_indexer.get_index(Path("."))
+            )
         )
     )
 

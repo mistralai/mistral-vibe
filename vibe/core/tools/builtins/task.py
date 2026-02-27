@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+import fnmatch
 from typing import ClassVar
 
 from pydantic import BaseModel, Field
 
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.agents.models import AgentType
+from vibe.core.agents.models import AgentType, BuiltinAgentName
 from vibe.core.config import SessionLoggingConfig, VibeConfig
 from vibe.core.tools.base import (
     BaseTool,
@@ -47,6 +48,7 @@ class TaskResult(BaseModel):
 
 class TaskToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
+    allowlist: list[str] = Field(default=[BuiltinAgentName.EXPLORE])
 
 
 class Task(
@@ -56,8 +58,8 @@ class Task(
     description: ClassVar[str] = (
         "Delegate a task to a subagent for independent execution. "
         "Useful for exploration, research, or parallel work that doesn't "
-        "require user interaction. The subagent runs in-memory without "
-        "saving interaction logs."
+        "require user interaction. The subagent runs in-memory and "
+        "saves interaction logs."
     )
 
     @classmethod
@@ -87,6 +89,19 @@ class Task(
     def get_status_text(cls) -> str:
         return "Running subagent"
 
+    def resolve_permission(self, args: TaskArgs) -> ToolPermission | None:
+        agent_name = args.agent
+
+        for pattern in self.config.denylist:
+            if fnmatch.fnmatch(agent_name, pattern):
+                return ToolPermission.NEVER
+
+        for pattern in self.config.allowlist:
+            if fnmatch.fnmatch(agent_name, pattern):
+                return ToolPermission.ALWAYS
+
+        return None
+
     async def run(
         self, args: TaskArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | TaskResult, None]:
@@ -107,10 +122,17 @@ class Task(
                 f"This is a security constraint to prevent recursive spawning."
             )
 
-        base_config = VibeConfig.load(
-            session_logging=SessionLoggingConfig(enabled=False)
+        session_logging = SessionLoggingConfig(
+            save_dir=str(ctx.session_dir / "agents") if ctx.session_dir else "",
+            session_prefix=args.agent,
+            enabled=ctx.session_dir is not None,
         )
-        subagent_loop = AgentLoop(config=base_config, agent_name=args.agent)
+        base_config = VibeConfig.load(session_logging=session_logging)
+        subagent_loop = AgentLoop(
+            config=base_config,
+            agent_name=args.agent,
+            entrypoint_metadata=ctx.entrypoint_metadata,
+        )
 
         if ctx and ctx.approval_callback:
             subagent_loop.set_approval_callback(ctx.approval_callback)

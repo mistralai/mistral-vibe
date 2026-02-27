@@ -69,6 +69,7 @@ class LoadingWidget(SpinnerMixin, Static):
         self.init_spinner()
         self.status = status or self._get_default_status()
         self.current_color_index = 0
+        self._color_direction = 1
         self.transition_progress = 0
         self._status_widget: Static | None = None
         self.hint_widget: Static | None = None
@@ -141,11 +142,12 @@ class LoadingWidget(SpinnerMixin, Static):
             return
         self._update_animation()
 
+    def _next_color_index(self) -> int:
+        return self.current_color_index + self._color_direction
+
     def _get_color_for_position(self, position: int) -> str:
         current_color = self.TARGET_COLORS[self.current_color_index]
-        next_color = self.TARGET_COLORS[
-            (self.current_color_index + 1) % len(self.TARGET_COLORS)
-        ]
+        next_color = self.TARGET_COLORS[self._next_color_index()]
         if position < self.transition_progress:
             return next_color
         return current_color
@@ -173,9 +175,9 @@ class LoadingWidget(SpinnerMixin, Static):
 
         self.transition_progress += 1
         if self.transition_progress > total_elements:
-            self.current_color_index = (self.current_color_index + 1) % len(
-                self.TARGET_COLORS
-            )
+            self.current_color_index = self._next_color_index()
+            if not 0 < self.current_color_index < len(self.TARGET_COLORS) - 1:
+                self._color_direction *= -1
             self.transition_progress = 0
 
         if self.hint_widget and self.start_time is not None:

@@ -4,19 +4,18 @@ from pathlib import Path
 
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
-from vibe.core.tools.base import ToolError
+from vibe.core.tools.base import BaseToolState, ToolError
 from vibe.core.tools.builtins.read_file import (
     ReadFile as CoreReadFileTool,
     ReadFileArgs,
     ReadFileResult,
-    ReadFileState,
     _ReadResult,
 )
 
 ReadFileResult = ReadFileResult
 
 
-class AcpReadFileState(ReadFileState, AcpToolState):
+class AcpReadFileState(BaseToolState, AcpToolState):
     pass
 
 

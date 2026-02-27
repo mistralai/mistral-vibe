@@ -7,8 +7,14 @@ from acp.schema import (
     AgentMessageChunk,
     AgentThoughtChunk,
     ContentToolCallContent,
+    ModelInfo,
     PermissionOption,
+    SessionConfigOption,
+    SessionConfigOptionSelect,
+    SessionConfigSelectOption,
     SessionMode,
+    SessionModelState,
+    SessionModeState,
     TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
@@ -21,7 +27,7 @@ from vibe.core.types import CompactEndEvent, CompactStartEvent, LLMMessage
 from vibe.core.utils import compact_reduction_display
 
 if TYPE_CHECKING:
-    from vibe.core.agents.manager import AgentManager
+    from vibe.core.config import ModelConfig
 
 
 class ToolOption(StrEnum):
@@ -50,22 +56,80 @@ TOOL_OPTIONS = [
 ]
 
 
-def agent_profile_to_acp(profile: AgentProfile) -> SessionMode:
-    return SessionMode(
-        id=profile.name, name=profile.display_name, description=profile.description
+def is_valid_acp_mode(profiles: list[AgentProfile], mode_name: str) -> bool:
+    return any(
+        p.name == mode_name and p.agent_type == AgentType.AGENT for p in profiles
     )
 
 
-def is_valid_acp_agent(agent_manager: AgentManager, agent_name: str) -> bool:
-    return agent_name in agent_manager.available_agents
+def make_mode_response(
+    profiles: list[AgentProfile], current_mode_id: str
+) -> tuple[SessionModeState, SessionConfigOption]:
+    session_modes: list[SessionMode] = []
+    config_options: list[SessionConfigSelectOption] = []
+
+    for profile in profiles:
+        if profile.agent_type != AgentType.AGENT:
+            continue
+        session_modes.append(
+            SessionMode(
+                id=profile.name,
+                name=profile.display_name,
+                description=profile.description,
+            )
+        )
+        config_options.append(
+            SessionConfigSelectOption(
+                value=profile.name,
+                name=profile.display_name,
+                description=profile.description,
+            )
+        )
+
+    state = SessionModeState(
+        current_mode_id=current_mode_id, available_modes=session_modes
+    )
+    config = SessionConfigOption(
+        root=SessionConfigOptionSelect(
+            id="mode",
+            name="Session Mode",
+            current_value=current_mode_id,
+            category="mode",
+            type="select",
+            options=config_options,
+        )
+    )
+    return state, config
 
 
-def get_all_acp_session_modes(agent_manager: AgentManager) -> list[SessionMode]:
-    return [
-        agent_profile_to_acp(profile)
-        for profile in agent_manager.available_agents.values()
-        if profile.agent_type == AgentType.AGENT
-    ]
+def make_model_response(
+    models: list[ModelConfig], current_model_id: str
+) -> tuple[SessionModelState, SessionConfigOption]:
+    model_infos: list[ModelInfo] = []
+    config_options: list[SessionConfigSelectOption] = []
+
+    for model in models:
+        model_infos.append(ModelInfo(model_id=model.alias, name=model.alias))
+        config_options.append(
+            SessionConfigSelectOption(
+                value=model.alias, name=model.alias, description=model.name
+            )
+        )
+
+    state = SessionModelState(
+        current_model_id=current_model_id, available_models=model_infos
+    )
+    config_option = SessionConfigOption(
+        root=SessionConfigOptionSelect(
+            id="model",
+            name="Model",
+            current_value=current_model_id,
+            category="model",
+            type="select",
+            options=config_options,
+        )
+    )
+    return state, config_option
 
 
 def create_compact_start_session_update(event: CompactStartEvent) -> ToolCallStart:

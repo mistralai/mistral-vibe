@@ -144,8 +144,9 @@ async def test_ui_session_incremental_loader_load_more_batches_until_done(
             app.post_message(HistoryLoadMoreRequested())
             await _wait_until(
                 pilot.pause,
-                lambda current_count=current_count: len(app.query(UserMessage))
-                > current_count,
+                lambda current_count=current_count: (
+                    len(app.query(UserMessage)) > current_count
+                ),
             )
 
         await _wait_until(

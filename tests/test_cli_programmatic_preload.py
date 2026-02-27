@@ -79,7 +79,7 @@ def test_run_programmatic_preload_streaming_is_batched(
         ]
 
         new_session = [
-            e for e in telemetry_events if e.get("event_name") == "vibe/new_session"
+            e for e in telemetry_events if e.get("event_name") == "vibe.new_session"
         ]
         assert len(new_session) == 1
         assert new_session[0]["properties"]["entrypoint"] == "programmatic"

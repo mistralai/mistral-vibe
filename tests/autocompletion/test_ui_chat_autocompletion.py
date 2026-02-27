@@ -118,7 +118,7 @@ async def test_pressing_enter_submits_selected_command_and_hides_popup(
         slash_used = [
             e
             for e in telemetry_events
-            if e.get("event_name") == "vibe/slash_command_used"
+            if e.get("event_name") == "vibe.slash_command_used"
         ]
         assert any(
             e.get("properties", {}).get("command") == "help"

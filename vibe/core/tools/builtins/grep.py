@@ -21,7 +21,7 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolStreamEvent
 
 if TYPE_CHECKING:
-    from vibe.core.types import ToolCallEvent, ToolResultEvent
+    from vibe.core.types import ToolResultEvent
 
 
 class GrepBackend(StrEnum):
@@ -75,10 +75,6 @@ class GrepToolConfig(BaseToolConfig):
     )
 
 
-class GrepState(BaseToolState):
-    search_history: list[str] = Field(default_factory=list)
-
-
 class GrepArgs(BaseModel):
     pattern: str
     path: str = "."
@@ -99,7 +95,7 @@ class GrepResult(BaseModel):
 
 
 class Grep(
-    BaseTool[GrepArgs, GrepResult, GrepToolConfig, GrepState],
+    BaseTool[GrepArgs, GrepResult, GrepToolConfig, BaseToolState],
     ToolUIData[GrepArgs, GrepResult],
 ):
     description: ClassVar[str] = (
@@ -122,7 +118,6 @@ class Grep(
     ) -> AsyncGenerator[ToolStreamEvent | GrepResult, None]:
         backend = self._detect_backend()
         self._validate_args(args)
-        self.state.search_history.append(args.pattern)
 
         exclude_patterns = self._collect_exclude_patterns()
         cmd = self._build_command(args, exclude_patterns, backend)
@@ -274,18 +269,14 @@ class Grep(
         )
 
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-        if not isinstance(event.args, GrepArgs):
-            return ToolCallDisplay(summary="grep")
-
-        summary = f"Grepping '{event.args.pattern}'"
-        if event.args.path != ".":
-            summary += f" in {event.args.path}"
-        if event.args.max_matches:
-            summary += f" (max {event.args.max_matches} matches)"
-        if not event.args.use_default_ignore:
+    def format_call_display(cls, args: GrepArgs) -> ToolCallDisplay:
+        summary = f"Grepping '{args.pattern}'"
+        if args.path != ".":
+            summary += f" in {args.path}"
+        if args.max_matches:
+            summary += f" (max {args.max_matches} matches)"
+        if not args.use_default_ignore:
             summary += " [no-ignore]"
-
         return ToolCallDisplay(summary=summary)
 
     @classmethod

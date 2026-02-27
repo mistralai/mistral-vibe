@@ -15,7 +15,7 @@ from vibe.core.tools.base import (
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
+from vibe.core.types import ToolResultEvent, ToolStreamEvent
 
 
 class TodoStatus(StrEnum):
@@ -69,12 +69,7 @@ class Todo(
     )
 
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-        if not isinstance(event.args, TodoArgs):
-            return ToolCallDisplay(summary="Invalid arguments")
-
-        args = event.args
-
+    def format_call_display(cls, args: TodoArgs) -> ToolCallDisplay:
         match args.action:
             case "read":
                 return ToolCallDisplay(summary="Reading todos")

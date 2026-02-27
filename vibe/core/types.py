@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from abc import ABC
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 import copy
 from enum import StrEnum, auto
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, overload
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -136,6 +137,18 @@ class SessionMetadata(BaseModel):
     username: str
 
 
+class ClientMetadata(BaseModel):
+    name: str
+    version: str
+
+
+class EntrypointMetadata(BaseModel):
+    agent_entrypoint: Literal["cli", "acp", "programmatic"]
+    agent_version: str
+    client_name: str
+    client_version: str
+
+
 StrToolChoice = Literal["auto", "none", "any", "required"]
 
 
@@ -159,7 +172,7 @@ class ToolCall(BaseModel):
     id: str | None = None
     index: int | None = None
     function: FunctionCall = Field(default_factory=FunctionCall)
-    type: str = "function"
+    type: Literal["function"] = "function"
 
 
 def _content_before(v: Any) -> str:
@@ -339,10 +352,11 @@ class ReasoningEvent(BaseEvent):
 
 
 class ToolCallEvent(BaseEvent):
+    tool_call_id: str
     tool_name: str
     tool_class: type[BaseTool]
-    args: BaseModel
-    tool_call_id: str
+    tool_call_index: int | None = None
+    args: BaseModel | None = None
 
 
 class ToolResultEvent(BaseEvent):
@@ -400,6 +414,68 @@ type SyncApprovalCallback = Callable[
 type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
 
 type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
+
+
+class MessageList(Sequence[LLMMessage]):
+    def __init__(
+        self,
+        initial: list[LLMMessage] | None = None,
+        observer: Callable[[LLMMessage], None] | None = None,
+    ) -> None:
+        self._data: list[LLMMessage] = list(initial) if initial else []
+        self._observer = observer
+        self._silent = False
+        if self._observer:
+            for msg in self._data:
+                self._observer(msg)
+
+    def _notify(self, msg: LLMMessage) -> None:
+        if not self._silent and self._observer is not None:
+            self._observer(msg)
+
+    def append(self, msg: LLMMessage) -> None:
+        self._data.append(msg)
+        self._notify(msg)
+
+    def insert(self, i: int, msg: LLMMessage) -> None:
+        self._data.insert(i, msg)
+
+    def extend(self, msgs: list[LLMMessage]) -> None:
+        for msg in msgs:
+            self.append(msg)
+
+    def reset(self, new: list[LLMMessage]) -> None:
+        """Replace contents silently (never notifies)."""
+        self._data = list(new)
+
+    @contextmanager
+    def silent(self) -> Iterator[None]:
+        """Context manager that suppresses notifications."""
+        prev = self._silent
+        self._silent = True
+        try:
+            yield
+        finally:
+            self._silent = prev
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    @overload
+    def __getitem__(self, index: int) -> LLMMessage: ...
+    @overload
+    def __getitem__(self, index: slice) -> list[LLMMessage]: ...
+    def __getitem__(self, index: int | slice) -> LLMMessage | list[LLMMessage]:
+        return self._data[index]
+
+    def __iter__(self) -> Iterator[LLMMessage]:
+        return iter(self._data)
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._data
+
+    def __bool__(self) -> bool:
+        return bool(self._data)
 
 
 class RateLimitError(Exception):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from http import HTTPStatus
 import json
 from typing import Any
@@ -114,7 +114,7 @@ class BackendErrorBuilder:
         response: httpx.Response,
         headers: Mapping[str, str] | None,
         model: str,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         has_tools: bool,
         tool_choice: StrToolChoice | AvailableTool | None,
@@ -146,7 +146,7 @@ class BackendErrorBuilder:
         endpoint: str,
         error: httpx.RequestError,
         model: str,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         has_tools: bool,
         tool_choice: StrToolChoice | AvailableTool | None,
@@ -179,7 +179,7 @@ class BackendErrorBuilder:
     @staticmethod
     def _payload_summary(
         model_name: str,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         has_tools: bool,
         tool_choice: StrToolChoice | AvailableTool | None,

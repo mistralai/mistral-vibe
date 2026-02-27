@@ -7,8 +7,8 @@ import sys
 
 from vibe import __version__
 from vibe.core.config import VibeConfig
+from vibe.core.logger import logger
 from vibe.core.paths.config_paths import CONFIG_FILE, HISTORY_FILE, unlock_config_paths
-from vibe.core.utils import logger
 
 # Configure line buffering for subprocess communication
 sys.stdout.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]

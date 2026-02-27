@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from vibe.core.types import LLMMessage, Role
 
 
-def merge_consecutive_user_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
+def merge_consecutive_user_messages(messages: Sequence[LLMMessage]) -> list[LLMMessage]:
     """Merge consecutive user messages into a single message.
 
     This handles cases where middleware injects messages resulting in

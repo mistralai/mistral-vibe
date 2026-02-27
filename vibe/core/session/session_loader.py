@@ -5,11 +5,14 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from vibe.core.session.session_logger import MESSAGES_FILENAME, METADATA_FILENAME
-from vibe.core.types import LLMMessage
+from vibe.core.types import LLMMessage, SessionMetadata
 
 if TYPE_CHECKING:
     from vibe.core.config import SessionLoggingConfig
+
+
+METADATA_FILENAME = "meta.json"
+MESSAGES_FILENAME = "messages.jsonl"
 
 
 class SessionInfo(TypedDict):
@@ -172,6 +175,22 @@ class SessionLoader:
         return sessions
 
     @staticmethod
+    def load_metadata(session_dir: Path) -> SessionMetadata:
+        metadata_path = session_dir / METADATA_FILENAME
+        if not metadata_path.exists():
+            raise ValueError(f"Session metadata not found at {session_dir}")
+
+        try:
+            metadata_content = metadata_path.read_text()
+            return SessionMetadata.model_validate_json(metadata_content)
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(
+                f"Failed to load session metadata at {session_dir}: {e}"
+            ) from e
+
+    @staticmethod
     def load_session(filepath: Path) -> tuple[list[LLMMessage], dict[str, Any]]:
         # Load session messages from MESSAGES_FILENAME
         messages_filepath = filepath / MESSAGES_FILENAME
@@ -220,3 +239,37 @@ class SessionLoader:
             metadata = {}
 
         return messages, metadata
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        text = text.strip().replace("\n", " ")
+        return text or "(empty message)"
+
+    @staticmethod
+    def _extract_text_from_content(content: str | None) -> str | None:
+        if not content:
+            return None
+        return SessionLoader._clean_text(content)
+
+    @staticmethod
+    def get_first_user_message(session_id: str, config: SessionLoggingConfig) -> str:
+        """Get the first user message from a session for preview."""
+        session_path = SessionLoader.find_session_by_id(session_id, config)
+        if not session_path:
+            return "(session not found)"
+
+        try:
+            messages, _ = SessionLoader.load_session(session_path)
+
+            for msg in messages:
+                if msg.role != "user":
+                    continue
+                text = SessionLoader._extract_text_from_content(msg.content)
+                if text:
+                    return text
+
+            return "(no user messages)"
+        except ValueError:
+            return "(corrupted session)"
+        except OSError:
+            return "(error reading session)"
