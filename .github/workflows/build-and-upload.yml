@@ -100,10 +100,60 @@ jobs:
           name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version_windows.outputs.version }}
           path: dist/vibe-acp.exe
 
-  attach-to-release:
-    needs: build-and-upload
+  build-riscv64:
+    name: linux-riscv64
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    timeout-minutes: 240
+    if: >-
+      github.repository == 'mistralai/mistral-vibe' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+
+      - name: Set up QEMU for riscv64
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          platforms: riscv64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build vibe-acp in riscv64 container
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: scripts/Dockerfile.riscv64
+          platforms: linux/riscv64
+          target: output
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=local,dest=dist-output
+
+      - name: Get package version
+        id: get_version
+        run: |
+          VERSION="$(grep -m1 '^version' pyproject.toml | sed 's/.*= *"\(.*\)"/\1/')"
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: vibe-acp-linux-riscv64-${{ steps.get_version.outputs.version }}
+          path: dist-output/vibe-acp
+
+  attach-to-release:
+    needs: [build-and-upload, build-riscv64]
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'release' &&
+      !cancelled() &&
+      needs.build-and-upload.result == 'success' &&
+      needs.build-riscv64.result != 'failure'
     permissions:
       contents: write
     steps:
