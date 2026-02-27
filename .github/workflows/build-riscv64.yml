@@ -45,7 +45,9 @@ jobs:
     name: Create fork release
     needs: build-riscv64
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
 
@@ -107,30 +109,30 @@ jobs:
           ARTIFACT="$(ls release-assets/*.zip 2>/dev/null | head -1)"
           ARTIFACT_NAME="$(basename "$ARTIFACT")"
 
-          cat > /tmp/release-body.md <<BODY_EOF
-          RISC-V 64 build of Mistral Vibe — the open-source CLI coding assistant by Mistral AI.
-
-          ## Download
-
-          | Platform | Architecture | File |
-          |----------|-------------|------|
-          | Linux | riscv64 | \`${ARTIFACT_NAME}\` |
-
-          ## Installation
-
-          \`\`\`bash
-          unzip ${ARTIFACT_NAME}
-          chmod +x vibe-acp
-          sudo mv vibe-acp /usr/local/bin/
-          vibe-acp --version
-          \`\`\`
-
-          ## Upstream Release
-
-          This build is based on [${TAG}](https://github.com/mistralai/mistral-vibe/releases/tag/${TAG}) from [mistralai/mistral-vibe](https://github.com/mistralai/mistral-vibe).
-
-          For other platforms (x86_64, aarch64, macOS, Windows), see the [upstream release](https://github.com/mistralai/mistral-vibe/releases/tag/${TAG}).
-          BODY_EOF
+          {
+            echo "RISC-V 64 build of Mistral Vibe — the open-source CLI coding assistant by Mistral AI."
+            echo ""
+            echo "## Download"
+            echo ""
+            echo "| Platform | Architecture | File |"
+            echo "|----------|-------------|------|"
+            echo "| Linux | riscv64 | \`${ARTIFACT_NAME}\` |"
+            echo ""
+            echo "## Installation"
+            echo ""
+            echo '```bash'
+            echo "unzip ${ARTIFACT_NAME}"
+            echo "chmod +x vibe-acp"
+            echo "sudo mv vibe-acp /usr/local/bin/"
+            echo "vibe-acp --version"
+            echo '```'
+            echo ""
+            echo "## Upstream Release"
+            echo ""
+            echo "This build is based on [${TAG}](https://github.com/mistralai/mistral-vibe/releases/tag/${TAG}) from [mistralai/mistral-vibe](https://github.com/mistralai/mistral-vibe)."
+            echo ""
+            echo "For other platforms (x86_64, aarch64, macOS, Windows), see the [upstream release](https://github.com/mistralai/mistral-vibe/releases/tag/${TAG})."
+          } > /tmp/release-body.md
 
           if [[ -s /tmp/upstream-notes.md ]]; then
             {

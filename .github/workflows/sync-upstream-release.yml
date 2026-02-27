@@ -87,6 +87,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     steps:
       - name: Checkout fork (full history for merge)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -121,4 +122,13 @@ jobs:
           echo "Merge successful — pushing to fork"
           git push origin main
 
-      # Push to main triggers build-riscv64.yml, which handles the build and release
+      # GITHUB_TOKEN pushes don't trigger other workflows (anti-recursion rule),
+      # so explicitly dispatch build-riscv64.yml via workflow_dispatch (which IS
+      # allowed to trigger new runs even with GITHUB_TOKEN).
+      - name: Trigger riscv64 build workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Dispatching build-riscv64 workflow..."
+          gh workflow run build-riscv64.yml --repo "$GITHUB_REPOSITORY" --ref main
+          echo "Build workflow dispatched"
