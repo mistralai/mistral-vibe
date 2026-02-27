@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vibe.core.paths.config_paths import resolve_local_skills_dirs
-from vibe.core.paths.global_paths import GLOBAL_SKILLS_DIR
+from vibe.core.paths.global_paths import GLOBAL_AGENTS_SKILLS_DIR, GLOBAL_SKILLS_DIR
 from vibe.core.skills.models import SkillInfo, SkillMetadata
 from vibe.core.skills.parser import SkillParseError, parse_frontmatter
 from vibe.core.utils import name_matches
@@ -62,6 +62,9 @@ class SkillManager:
 
         if GLOBAL_SKILLS_DIR.path.is_dir():
             paths.append(GLOBAL_SKILLS_DIR.path)
+
+        if GLOBAL_AGENTS_SKILLS_DIR.path.is_dir():
+            paths.append(GLOBAL_AGENTS_SKILLS_DIR.path)
 
         unique: list[Path] = []
         for p in paths:
