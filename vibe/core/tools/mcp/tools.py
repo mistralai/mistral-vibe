@@ -4,17 +4,17 @@ from collections.abc import AsyncGenerator
 import contextlib
 from datetime import timedelta
 import hashlib
-from logging import getLogger
 import os
 from pathlib import Path
 import threading
 from typing import TYPE_CHECKING, Any, ClassVar, TextIO
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
+from vibe.core.logger import logger
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -22,13 +22,12 @@ from vibe.core.tools.base import (
     InvokeContext,
     ToolError,
 )
-from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
+from vibe.core.tools.mcp_sampling import MCPSamplingHandler
+from vibe.core.tools.ui import ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolStreamEvent
 
 if TYPE_CHECKING:
-    from vibe.core.types import ToolCallEvent, ToolResultEvent
-
-logger = getLogger("vibe")
+    from vibe.core.types import ToolResultEvent
 
 
 def _stderr_logger_thread(read_fd: int) -> None:
@@ -169,6 +168,7 @@ async def call_tool_http(
     headers: dict[str, str] | None = None,
     startup_timeout_sec: float | None = None,
     tool_timeout_sec: float | None = None,
+    sampling_callback: MCPSamplingHandler | None = None,
 ) -> MCPToolResult:
     init_timeout = (
         timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
@@ -176,7 +176,10 @@ async def call_tool_http(
     call_timeout = timedelta(seconds=tool_timeout_sec) if tool_timeout_sec else None
     async with streamablehttp_client(url, headers=headers) as (read, write, _):
         async with ClientSession(
-            read, write, read_timeout_seconds=init_timeout
+            read,
+            write,
+            read_timeout_seconds=init_timeout,
+            sampling_callback=sampling_callback,
         ) as session:
             await session.initialize()
             result = await session.call_tool(
@@ -194,6 +197,7 @@ def create_mcp_http_proxy_tool_class(
     headers: dict[str, str] | None = None,
     startup_timeout_sec: float | None = None,
     tool_timeout_sec: float | None = None,
+    sampling_enabled: bool = True,
 ) -> type[BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]]:
     from urllib.parse import urlparse
 
@@ -206,7 +210,8 @@ def create_mcp_http_proxy_tool_class(
     published_name = f"{(alias or _alias_from_url(url))}_{remote.name}"
 
     class MCPHttpProxyTool(
-        BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]
+        BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState],
+        ToolUIData[_OpenArgs, MCPToolResult],
     ):
         description: ClassVar[str] = (
             (f"[{alias}] " if alias else "")
@@ -219,6 +224,7 @@ def create_mcp_http_proxy_tool_class(
         _headers: ClassVar[dict[str, str]] = dict(headers or {})
         _startup_timeout_sec: ClassVar[float | None] = startup_timeout_sec
         _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
+        _sampling_enabled: ClassVar[bool] = sampling_enabled
 
         @classmethod
         def get_name(cls) -> str:
@@ -232,6 +238,9 @@ def create_mcp_http_proxy_tool_class(
             self, args: _OpenArgs, ctx: InvokeContext | None = None
         ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult, None]:
             try:
+                sampling_callback = (
+                    ctx.sampling_callback if ctx and self._sampling_enabled else None
+                )
                 payload = args.model_dump(exclude_none=True)
                 yield await call_tool_http(
                     self._mcp_url,
@@ -240,13 +249,10 @@ def create_mcp_http_proxy_tool_class(
                     headers=self._headers,
                     startup_timeout_sec=self._startup_timeout_sec,
                     tool_timeout_sec=self._tool_timeout_sec,
+                    sampling_callback=sampling_callback,
                 )
             except Exception as exc:
                 raise ToolError(f"MCP call failed: {exc}") from exc
-
-        @classmethod
-        def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-            return ToolCallDisplay(summary=f"{published_name}")
 
         @classmethod
         def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -293,6 +299,7 @@ async def call_tool_stdio(
     env: dict[str, str] | None = None,
     startup_timeout_sec: float | None = None,
     tool_timeout_sec: float | None = None,
+    sampling_callback: MCPSamplingHandler | None = None,
 ) -> MCPToolResult:
     params = StdioServerParameters(command=command[0], args=command[1:], env=env)
     init_timeout = (
@@ -302,7 +309,12 @@ async def call_tool_stdio(
     async with (
         _mcp_stderr_capture() as errlog,
         stdio_client(params, errlog=errlog) as (read, write),
-        ClientSession(read, write, read_timeout_seconds=init_timeout) as session,
+        ClientSession(
+            read,
+            write,
+            read_timeout_seconds=init_timeout,
+            sampling_callback=sampling_callback,
+        ) as session,
     ):
         await session.initialize()
         result = await session.call_tool(
@@ -320,6 +332,7 @@ def create_mcp_stdio_proxy_tool_class(
     env: dict[str, str] | None = None,
     startup_timeout_sec: float | None = None,
     tool_timeout_sec: float | None = None,
+    sampling_enabled: bool = True,
 ) -> type[BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]]:
     def _alias_from_command(cmd: list[str]) -> str:
         prog = Path(cmd[0]).name.replace(".", "_") if cmd else "mcp"
@@ -332,7 +345,8 @@ def create_mcp_stdio_proxy_tool_class(
     published_name = f"{computed_alias}_{remote.name}"
 
     class MCPStdioProxyTool(
-        BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState]
+        BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState],
+        ToolUIData[_OpenArgs, MCPToolResult],
     ):
         description: ClassVar[str] = (
             (f"[{computed_alias}] " if computed_alias else "")
@@ -348,6 +362,7 @@ def create_mcp_stdio_proxy_tool_class(
         _env: ClassVar[dict[str, str] | None] = env
         _startup_timeout_sec: ClassVar[float | None] = startup_timeout_sec
         _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
+        _sampling_enabled: ClassVar[bool] = sampling_enabled
 
         @classmethod
         def get_name(cls) -> str:
@@ -361,6 +376,9 @@ def create_mcp_stdio_proxy_tool_class(
             self, args: _OpenArgs, ctx: InvokeContext | None = None
         ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult, None]:
             try:
+                sampling_callback = (
+                    ctx.sampling_callback if ctx and self._sampling_enabled else None
+                )
                 payload = args.model_dump(exclude_none=True)
                 result = await call_tool_stdio(
                     self._stdio_command,
@@ -369,14 +387,11 @@ def create_mcp_stdio_proxy_tool_class(
                     env=self._env,
                     startup_timeout_sec=self._startup_timeout_sec,
                     tool_timeout_sec=self._tool_timeout_sec,
+                    sampling_callback=sampling_callback,
                 )
                 yield result
             except Exception as exc:
                 raise ToolError(f"MCP stdio call failed: {exc!r}") from exc
-
-        @classmethod
-        def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-            return ToolCallDisplay(summary=f"{published_name}")
 
         @classmethod
         def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:

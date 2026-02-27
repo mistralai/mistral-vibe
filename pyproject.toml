@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.2.1"
+version = "2.3.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,16 +27,18 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "agent-client-protocol==0.8.0",
+    "agent-client-protocol==0.8.1",
     "anyio>=4.12.0",
+    "cachetools>=5.5.0",
     "cryptography>=44.0.0,<=46.0.3",
     "gitpython>=3.1.46",
     "giturlparse>=0.14.0",
     "google-auth>=2.0.0",
     "httpx>=0.28.1",
     "keyring>=25.6.0",
+    "markdownify>=1.2.2",
     "mcp>=1.14.0",
-    "mistralai==1.9.11",
+    "mistralai==1.12.4",
     "packaging>=24.1",
     "pexpect>=4.9.0",
     "pydantic>=2.12.4",
@@ -169,3 +171,7 @@ ignore_decorators = ["@*"]
 [tool.pytest.ini_options]
 addopts = "-vvvv -q -n auto --durations=10 --import-mode=importlib --maxschedchunk=1"
 timeout = 10
+filterwarnings = [
+    # (e2e) streaming mock server is started in a thread; and the cli is spawn in a fork
+    "ignore:This process \\(pid=.*\\) is multi-threaded, use of forkpty\\(\\) may lead to deadlocks in the child\\.:DeprecationWarning",
+]

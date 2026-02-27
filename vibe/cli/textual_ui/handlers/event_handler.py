@@ -31,7 +31,7 @@ class EventHandler:
     ) -> None:
         self.mount_callback = mount_callback
         self.get_tools_collapsed = get_tools_collapsed
-        self.current_tool_call: ToolCallMessage | None = None
+        self.tool_calls: dict[str, ToolCallMessage] = {}
         self.current_compact: CompactMessage | None = None
         self.current_streaming_message: AssistantMessage | None = None
         self.current_streaming_reasoning: ReasoningMessage | None = None
@@ -90,30 +90,40 @@ class EventHandler:
     async def _handle_tool_call(
         self, event: ToolCallEvent, loading_widget: LoadingWidget | None = None
     ) -> ToolCallMessage | None:
-        tool_call = ToolCallMessage(event)
+        tool_call_id = event.tool_call_id
+        existing_tool_call = self.tool_calls.get(tool_call_id) if tool_call_id else None
+        if existing_tool_call:
+            existing_tool_call.update_event(event)
+            tool_call = existing_tool_call
+        else:
+            tool_call = ToolCallMessage(event)
+            if tool_call_id:
+                self.tool_calls[tool_call_id] = tool_call
+            await self.mount_callback(tool_call)
 
         if loading_widget and event.tool_class:
             adapter = ToolUIDataAdapter(event.tool_class)
-            status_text = adapter.get_status_text()
-            loading_widget.set_status(status_text)
-
-        self.current_tool_call = tool_call
-        await self.mount_callback(tool_call)
+            loading_widget.set_status(adapter.get_status_text())
 
         return tool_call
 
     async def _handle_tool_result(self, event: ToolResultEvent) -> None:
         tools_collapsed = self.get_tools_collapsed()
-        tool_result = ToolResultMessage(
-            event, self.current_tool_call, collapsed=tools_collapsed
-        )
-        await self.mount_callback(tool_result)
 
-        self.current_tool_call = None
+        call_widget = (
+            self.tool_calls.get(event.tool_call_id) if event.tool_call_id else None
+        )
+
+        tool_result = ToolResultMessage(event, call_widget, collapsed=tools_collapsed)
+        await self.mount_callback(tool_result, after=call_widget)
+
+        if event.tool_call_id and event.tool_call_id in self.tool_calls:
+            del self.tool_calls[event.tool_call_id]
 
     async def _handle_tool_stream(self, event: ToolStreamEvent) -> None:
-        if self.current_tool_call:
-            self.current_tool_call.set_stream_message(event.message)
+        tool_call = self.tool_calls.get(event.tool_call_id)
+        if tool_call:
+            tool_call.set_stream_message(event.message)
 
     async def _handle_assistant_message(self, event: AssistantEvent) -> None:
         if self.current_streaming_reasoning is not None:
@@ -131,6 +141,8 @@ class EventHandler:
     async def _handle_reasoning_message(self, event: ReasoningEvent) -> None:
         if self.current_streaming_message is not None:
             await self.current_streaming_message.stop_stream()
+            if self.current_streaming_message.is_stripped_content_empty():
+                await self.current_streaming_message.remove()
             self.current_streaming_message = None
 
         if self.current_streaming_reasoning is None:
@@ -166,9 +178,9 @@ class EventHandler:
             self.current_streaming_message = None
 
     def stop_current_tool_call(self, success: bool = True) -> None:
-        if self.current_tool_call:
-            self.current_tool_call.stop_spinning(success=success)
-            self.current_tool_call = None
+        for tool_call in self.tool_calls.values():
+            tool_call.stop_spinning(success=success)
+        self.tool_calls.clear()
 
     def stop_current_compact(self) -> None:
         if self.current_compact:

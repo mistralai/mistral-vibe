@@ -52,3 +52,11 @@ class TestCommandRegistry:
         assert registry.get_command_name("/exit") is None
         assert registry.find_command("/exit") is None
         assert registry.get_command_name("/help") == "help"
+
+    def test_resume_command_registration(self) -> None:
+        registry = CommandRegistry()
+        assert registry.get_command_name("/resume") == "resume"
+        assert registry.get_command_name("/continue") == "resume"
+        cmd = registry.find_command("/resume")
+        assert cmd is not None
+        assert cmd.handler == "_show_session_picker"

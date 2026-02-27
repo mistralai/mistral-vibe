@@ -21,7 +21,7 @@ from vibe.core.tools.base import (
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
+from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
 
 
@@ -208,11 +208,8 @@ class Bash(
     description: ClassVar[str] = "Run a one-off bash command and capture its output."
 
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-        if not isinstance(event.args, BashArgs):
-            return ToolCallDisplay(summary="bash")
-
-        return ToolCallDisplay(summary=f"bash: {event.args.command}")
+    def format_call_display(cls, args: BashArgs) -> ToolCallDisplay:
+        return ToolCallDisplay(summary=f"bash: {args.command}")
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -227,7 +224,7 @@ class Bash(
     def get_status_text(cls) -> str:
         return "Running command"
 
-    def check_allowlist_denylist(self, args: BashArgs) -> ToolPermission | None:
+    def resolve_permission(self, args: BashArgs) -> ToolPermission | None:
         if is_windows():
             return None
 

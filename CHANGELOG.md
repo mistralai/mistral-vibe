@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-02-27
+
+### Added
+
+- /resume command to choose which session to resume
+- Web search and web fetch tools for retrieving and searching web content
+- MCP sampling support: MCP servers can request LLM completions via the sampling protocol
+- MCP server discovery cache (`MCPRegistry`): survives agent switches without re-discovering unchanged servers
+- Chat mode for ACP (`session/set_config_options` with `mode=chat`)
+- ACP `session/set_config_options` support for switching mode and model
+- Tool call streaming: tool call arguments are now streamed incrementally in the UI
+- Notification indicator in CLI: terminal bell and window title change on action required or completion
+- Subagent traces saved in `agents/` subfolder of parent session directory
+- IDE detection in `new_session` telemetry
+- Discover agents, tools, and skills in subfolders of trusted directories (monorepo support)
+- E2E test infrastructure for CLI TUI
+
+### Changed
+
+- System prompts rewritten for improved model behavior (3-phase Orient/Plan/Execute workflow, brevity rules)
+- Tool call display refactored with `ToolCallDisplay`/`ToolResultDisplay` models and per-tool UI customization
+- Middleware pipeline replaces observer pattern for system message injections
+- Improved permission handling for `write_file`, `read_file`, `search_replace` (allowlist/denylist globs, out-of-cwd detection)
+- Proxy setup UI updated with guided bottom-panel wizard
+- Smoother color transitions in CLI loader animation
+- Dead tool state classes removed (`Grep`, `ReadFile`, `WriteFile` state)
+
+### Fixed
+
+- Agent switch (Shift+Tab) no longer freezes the UI (moved to thread worker)
+- Empty assistant messages are no longer displayed
+- Tool results returned to LLM in correct order matching tool calls
+- Auto-scroll suspended when user has scrolled up; resumes at bottom
+- Retry and timeout handling in Mistral backend (backoff strategy, configurable timeout)
+
+### Removed
+
+
 ## [2.2.1] - 2026-02-18
 
 ### Added
@@ -33,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Google Vertex AI support
-- Telemetry: user interaction and tool usage events sent to datalake (configurable via `disable_telemetry`)
+- Telemetry: user interaction and tool usage events sent to datalake (configurable via `enable_telemetry`)
 - Skill discovery from `.agents/skills/` (Agent Skills standard) in addition to `.vibe/skills/`
 - ACP: `session/load` and `session/list` for loading and listing sessions
 - New model behavior prompts (CLI and explore)

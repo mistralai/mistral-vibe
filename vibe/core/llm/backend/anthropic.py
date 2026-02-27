@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 import json
 import re
 from typing import Any, ClassVar
@@ -22,7 +23,7 @@ class AnthropicMapper:
     """Shared mapper for converting messages to/from Anthropic API format."""
 
     def prepare_messages(
-        self, messages: list[LLMMessage]
+        self, messages: Sequence[LLMMessage]
     ) -> tuple[str | None, list[dict[str, Any]]]:
         system_prompt: str | None = None
         converted: list[dict[str, Any]] = []
@@ -457,7 +458,7 @@ class AnthropicAdapter(APIAdapter):
         self,
         *,
         model_name: str,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         tools: list[AvailableTool] | None,
         max_tokens: int | None,

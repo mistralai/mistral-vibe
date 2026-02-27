@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vibe.core.utils import StructuredLogFormatter, apply_logging_config
+from vibe.core.logger import StructuredLogFormatter, apply_logging_config
 
 
 @pytest.fixture
@@ -19,8 +19,8 @@ def mock_log_dir(tmp_path: Path):
     mock_file = MagicMock()
     mock_file.path = tmp_path / "vibe.log"
     with (
-        patch("vibe.core.utils.LOG_DIR", mock_dir),
-        patch("vibe.core.utils.LOG_FILE", mock_file),
+        patch("vibe.core.logger.LOG_DIR", mock_dir),
+        patch("vibe.core.logger.LOG_FILE", mock_file),
     ):
         yield tmp_path
 
@@ -222,8 +222,8 @@ class TestApplyLoggingConfig:
         mock_file = MagicMock()
         mock_file.path = log_dir / "vibe.log"
         with (
-            patch("vibe.core.utils.LOG_DIR", mock_dir),
-            patch("vibe.core.utils.LOG_FILE", mock_file),
+            patch("vibe.core.logger.LOG_DIR", mock_dir),
+            patch("vibe.core.logger.LOG_FILE", mock_file),
         ):
             monkeypatch.setenv("LOG_LEVEL", "DEBUG")
             test_logger = logging.getLogger("test_mkdir")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 import json
 import threading
 from typing import Any, ClassVar
@@ -67,7 +68,7 @@ class VertexAnthropicAdapter(AnthropicAdapter):
         self,
         *,
         model_name: str,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         tools: list[AvailableTool] | None,
         max_tokens: int | None,

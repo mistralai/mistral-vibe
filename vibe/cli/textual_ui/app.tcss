@@ -118,7 +118,8 @@ TextArea > .text-area--cursor {
     height: auto;
 }
 
-#prompt {
+#prompt,
+#prompt-spinner {
     width: auto;
     background: transparent;
     color: $mistral_orange;
@@ -719,17 +720,6 @@ StatusMessage {
     height: auto;
 }
 
-.proxy-label {
-    height: auto;
-    color: ansi_blue;
-    text-style: bold;
-}
-
-.proxy-description {
-    height: auto;
-    color: ansi_bright_black;
-}
-
 .proxy-label-line {
     height: auto;
 }
@@ -739,7 +729,6 @@ StatusMessage {
     height: auto;
     border: none;
     border-left: wide ansi_bright_black;
-    margin-top: 1;
     padding: 0 0 0 1;
 }
 
@@ -1018,5 +1007,38 @@ ContextProgress {
 }
 
 .whats-new-message.after-history {
+    margin-top: 1;
+}
+
+#sessionpicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
+#sessionpicker-content {
+    width: 100%;
+    height: auto;
+}
+
+#sessionpicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
+}
+
+#sessionpicker-options:focus {
+    border: none;
+}
+
+.sessionpicker-help {
+    width: 100%;
+    height: auto;
+    color: ansi_bright_black;
     margin-top: 1;
 }

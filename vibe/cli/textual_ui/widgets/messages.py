@@ -106,6 +106,9 @@ class StreamingMessageBase(Static):
     def _should_write_content(self) -> bool:
         return True
 
+    def is_stripped_content_empty(self) -> bool:
+        return self._content.strip() == ""
+
 
 class AssistantMessage(StreamingMessageBase):
     def __init__(self, content: str) -> None:

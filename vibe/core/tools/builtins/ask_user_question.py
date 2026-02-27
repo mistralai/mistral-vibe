@@ -14,7 +14,7 @@ from vibe.core.tools.base import (
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.types import ToolResultEvent
 
 
 class Choice(BaseModel):
@@ -84,16 +84,10 @@ class AskUserQuestion(
     )
 
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-        if not isinstance(event.args, AskUserQuestionArgs):
-            return ToolCallDisplay(summary="Asking user")
-
-        args = event.args
+    def format_call_display(cls, args: AskUserQuestionArgs) -> ToolCallDisplay:
         count = len(args.questions)
-
         if count == 1:
             return ToolCallDisplay(summary=f"Asking: {args.questions[0].question}")
-
         return ToolCallDisplay(summary=f"Asking {count} questions")
 
     @classmethod

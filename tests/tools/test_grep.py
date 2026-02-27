@@ -5,21 +5,15 @@ import shutil
 import pytest
 
 from tests.mock.utils import collect_result
-from vibe.core.tools.base import ToolError
-from vibe.core.tools.builtins.grep import (
-    Grep,
-    GrepArgs,
-    GrepBackend,
-    GrepState,
-    GrepToolConfig,
-)
+from vibe.core.tools.base import BaseToolState, ToolError
+from vibe.core.tools.builtins.grep import Grep, GrepArgs, GrepBackend, GrepToolConfig
 
 
 @pytest.fixture
 def grep(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = GrepToolConfig()
-    return Grep(config=config, state=GrepState())
+    return Grep(config=config, state=BaseToolState())
 
 
 @pytest.fixture
@@ -34,7 +28,7 @@ def grep_gnu_only(tmp_path, monkeypatch):
 
     monkeypatch.setattr("shutil.which", mock_which)
     config = GrepToolConfig()
-    return Grep(config=config, state=GrepState())
+    return Grep(config=config, state=BaseToolState())
 
 
 def test_detects_ripgrep_when_available(grep):
@@ -143,7 +137,7 @@ async def test_truncates_to_max_matches(grep, tmp_path):
 async def test_truncates_to_max_output_bytes(grep, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = GrepToolConfig(max_output_bytes=100)
-    grep_tool = Grep(config=config, state=GrepState())
+    grep_tool = Grep(config=config, state=BaseToolState())
     (tmp_path / "test.py").write_text("\n".join("x" * 100 for _ in range(10)))
 
     result = await collect_result(grep_tool.run(GrepArgs(pattern="x")))
@@ -192,21 +186,10 @@ async def test_ignores_comments_in_vibeignore(grep, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tracks_search_history(grep, tmp_path):
-    (tmp_path / "test.py").write_text("content\n")
-
-    await collect_result(grep.run(GrepArgs(pattern="first")))
-    await collect_result(grep.run(GrepArgs(pattern="second")))
-    await collect_result(grep.run(GrepArgs(pattern="third")))
-
-    assert grep.state.search_history == ["first", "second", "third"]
-
-
-@pytest.mark.asyncio
 async def test_uses_effective_workdir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = GrepToolConfig()
-    grep_tool = Grep(config=config, state=GrepState())
+    grep_tool = Grep(config=config, state=BaseToolState())
     (tmp_path / "test.py").write_text("match\n")
 
     result = await collect_result(grep_tool.run(GrepArgs(pattern="match", path=".")))

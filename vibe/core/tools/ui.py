@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, Field
 
@@ -19,15 +21,46 @@ class ToolResultDisplay(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
-@runtime_checkable
-class ToolUIData[TArgs: BaseModel, TResult: BaseModel](Protocol):
+class ToolUIData[TArgs: BaseModel, TResult: BaseModel](ABC):
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay: ...
+    def _display_name(cls) -> str:
+        get_name = cast(Callable[[], str] | None, getattr(cls, "get_name", None))
+        return get_name() if get_name is not None else cls.__name__.lower()
 
     @classmethod
+    def get_no_args_display(cls) -> ToolCallDisplay:
+        return ToolCallDisplay(summary=cls._display_name())
+
+    @classmethod
+    def get_invalid_args_display(cls) -> ToolCallDisplay:
+        return ToolCallDisplay(summary="Invalid Arguments")
+
+    @classmethod
+    def format_call_display(cls, args: TArgs) -> ToolCallDisplay:
+        return ToolCallDisplay(summary=cls._display_name())
+
+    @classmethod
+    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
+        if event.args is None:
+            return cls.get_no_args_display()
+
+        introspect = cast(
+            Callable[[], tuple[type, ...]] | None,
+            getattr(cls, "_get_tool_args_results", None),
+        )
+        if introspect is not None:
+            expected_type = introspect()[0]
+            if not isinstance(event.args, expected_type):
+                return cls.get_invalid_args_display()
+
+        return cls.format_call_display(cast(TArgs, event.args))
+
+    @classmethod
+    @abstractmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay: ...
 
     @classmethod
+    @abstractmethod
     def get_status_text(cls) -> str: ...
 
 
@@ -42,7 +75,11 @@ class ToolUIDataAdapter:
         if self.ui_data_class:
             return self.ui_data_class.get_call_display(event)
 
-        args_dict = event.args.model_dump() if hasattr(event.args, "model_dump") else {}
+        args_dict = (
+            event.args.model_dump()
+            if event.args and hasattr(event.args, "model_dump")
+            else {}
+        )
         args_str = ", ".join(f"{k}={v!r}" for k, v in list(args_dict.items())[:3])
         return ToolCallDisplay(summary=f"{event.tool_name}({args_str})")
 

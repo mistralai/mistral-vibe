@@ -8,10 +8,10 @@ from acp.helpers import SessionUpdate, ToolCallContentVariant
 from acp.schema import ToolCallProgress
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
+from vibe.core.logger import logger
 from vibe.core.tools.base import BaseTool, ToolError
 from vibe.core.tools.manager import ToolManager
 from vibe.core.types import ToolCallEvent, ToolResultEvent
-from vibe.core.utils import logger
 
 
 @runtime_checkable

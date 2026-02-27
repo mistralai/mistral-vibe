@@ -165,6 +165,10 @@ class _MCPBase(BaseModel):
     tool_timeout_sec: float = Field(
         default=60.0, gt=0, description="Timeout in seconds for tool execution."
     )
+    sampling_enabled: bool = Field(
+        default=True,
+        description="Allow this MCP server to request LLM completions via sampling/createMessage.",
+    )
 
     @field_validator("name", mode="after")
     @classmethod
@@ -324,6 +328,7 @@ class VibeConfig(BaseSettings):
     include_prompt_detail: bool = True
     enable_update_checks: bool = True
     enable_auto_update: bool = True
+    enable_notifications: bool = True
     api_timeout: float = 720.0
 
     # TODO(vibe-nuage): remove exclude=True once the feature is publicly available

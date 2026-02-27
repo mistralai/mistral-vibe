@@ -50,7 +50,7 @@ def tool_call_session_update(event: ToolCallEvent) -> SessionUpdate | None:
         content=content,
         tool_call_id=event.tool_call_id,
         kind=TOOL_KIND.get(event.tool_name, "other"),
-        raw_input=event.args.model_dump_json(),
+        raw_input=event.args.model_dump_json() if event.args else None,
     )
 
 

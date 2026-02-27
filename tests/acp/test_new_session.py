@@ -48,7 +48,7 @@ class TestACPNewSession:
         )
 
         new_session_events = [
-            e for e in telemetry_events if e.get("event_name") == "vibe/new_session"
+            e for e in telemetry_events if e.get("event_name") == "vibe.new_session"
         ]
         assert len(new_session_events) == 1
         assert new_session_events[0]["properties"]["entrypoint"] == "acp"
@@ -84,17 +84,46 @@ class TestACPNewSession:
         assert session_response.modes is not None
         assert session_response.modes.current_mode_id is not None
         assert session_response.modes.available_modes is not None
-        assert len(session_response.modes.available_modes) == 4
+        assert len(session_response.modes.available_modes) == 5
 
         assert session_response.modes.current_mode_id == BuiltinAgentName.DEFAULT
         # Check that all primary agents are available (order may vary)
         mode_ids = {m.id for m in session_response.modes.available_modes}
         assert mode_ids == {
             BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.CHAT,
             BuiltinAgentName.AUTO_APPROVE,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
         }
+
+        # Check config_options
+        assert session_response.config_options is not None
+        assert len(session_response.config_options) == 2
+
+        # Mode config option
+        mode_config = session_response.config_options[0]
+        assert mode_config.root.id == "mode"
+        assert mode_config.root.category == "mode"
+        assert mode_config.root.current_value == BuiltinAgentName.DEFAULT
+        assert len(mode_config.root.options) == 5
+        mode_option_values = {opt.value for opt in mode_config.root.options}
+        assert mode_option_values == {
+            BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.CHAT,
+            BuiltinAgentName.AUTO_APPROVE,
+            BuiltinAgentName.PLAN,
+            BuiltinAgentName.ACCEPT_EDITS,
+        }
+
+        # Model config option
+        model_config = session_response.config_options[1]
+        assert model_config.root.id == "model"
+        assert model_config.root.category == "model"
+        assert model_config.root.current_value == "devstral-latest"
+        assert len(model_config.root.options) == 2
+        model_option_values = {opt.value for opt in model_config.root.options}
+        assert model_option_values == {"devstral-latest", "devstral-small"}
 
     @pytest.mark.skip(reason="TODO: Fix this test")
     @pytest.mark.asyncio

@@ -822,3 +822,133 @@ class TestSessionLoaderListSessions:
         assert len(result) == 1
         assert result[0]["session_id"] == "notitle0"
         assert result[0]["title"] is None
+
+
+class TestSessionLoaderGetFirstUserMessage:
+    """Tests for SessionLoader.get_first_user_message method."""
+
+    def test_returns_first_user_message(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test that get_first_user_message returns the first user message."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="First user message"),
+            LLMMessage(role=Role.assistant, content="First response"),
+            LLMMessage(role=Role.user, content="Second user message"),
+            LLMMessage(role=Role.assistant, content="Second response"),
+        ]
+        create_test_session(session_dir, "test-sess", messages=messages)
+
+        result = SessionLoader.get_first_user_message("test-sess", session_config)
+
+        assert result == "First user message"
+
+    def test_returns_fallback_for_missing_session(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        """Test that get_first_user_message returns fallback when session not found."""
+        result = SessionLoader.get_first_user_message("nonexistent", session_config)
+
+        assert result == "(session not found)"
+
+    def test_returns_no_user_messages_fallback(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test fallback when session has no user messages."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.assistant, content="Assistant only"),
+        ]
+        create_test_session(session_dir, "no-user0", messages=messages)
+
+        result = SessionLoader.get_first_user_message("no-user0", session_config)
+
+        assert result == "(no user messages)"
+
+    def test_replaces_newlines_with_spaces(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test that newlines in messages are replaced with spaces."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="Line one\nLine two\nLine three"),
+        ]
+        create_test_session(session_dir, "newline0", messages=messages)
+
+        result = SessionLoader.get_first_user_message("newline0", session_config)
+
+        assert "\n" not in result
+        assert "Line one Line two Line three" == result
+
+    def test_handles_empty_user_message(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test handling of empty user message content."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content=""),
+        ]
+        create_test_session(session_dir, "empty-ms", messages=messages)
+
+        result = SessionLoader.get_first_user_message("empty-ms", session_config)
+
+        assert result == "(no user messages)"
+
+    def test_handles_whitespace_only_message(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test handling of whitespace-only user message."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="   \n\t  "),
+        ]
+        create_test_session(session_dir, "whitespc", messages=messages)
+
+        result = SessionLoader.get_first_user_message("whitespc", session_config)
+
+        assert result == "(empty message)"
+
+    def test_handles_invalid_session_as_not_found(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        """Test that invalid sessions (bad JSON) are treated as not found.
+
+        Note: Sessions with invalid JSON are filtered out by _is_valid_session
+        during find_session_by_id, so they return 'not found' rather than
+        'corrupted'. This is the expected behavior.
+        """
+        session_dir = Path(session_config.save_dir)
+
+        # Create a session with invalid JSON - will fail validation
+        session_folder = session_dir / "test_20230101_120000_corrupt0"
+        session_folder.mkdir()
+        (session_folder / "messages.jsonl").write_text("{invalid json}")
+        (session_folder / "meta.json").write_text('{"session_id": "corrupt0"}')
+
+        result = SessionLoader.get_first_user_message("corrupt0", session_config)
+
+        # Invalid sessions are filtered by _is_valid_session, so not found
+        assert result == "(session not found)"
+
+    def test_skips_non_user_messages(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test that only user messages are considered, not assistant/system."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="User question"),
+            LLMMessage(role=Role.assistant, content="Assistant response"),
+        ]
+        create_test_session(session_dir, "skip-non", messages=messages)
+
+        result = SessionLoader.get_first_user_message("skip-non", session_config)
+
+        # Should return "User question", not "Assistant response"
+        assert result == "User question"

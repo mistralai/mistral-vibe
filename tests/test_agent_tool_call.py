@@ -113,7 +113,7 @@ async def test_single_tool_call_executes_under_auto_approve(
     assert "total_count" in (tool_msgs[-1].content or "")
 
     tool_finished = [
-        e for e in telemetry_events if e.get("event_name") == "vibe/tool_call_finished"
+        e for e in telemetry_events if e.get("event_name") == "vibe.tool_call_finished"
     ]
     assert len(tool_finished) == 1
     assert tool_finished[0]["properties"]["tool_name"] == "todo"
@@ -158,7 +158,7 @@ async def test_tool_call_requires_approval_if_not_auto_approved(
     assert agent_loop.stats.tool_calls_succeeded == 0
 
     tool_finished = [
-        e for e in telemetry_events if e.get("event_name") == "vibe/tool_call_finished"
+        e for e in telemetry_events if e.get("event_name") == "vibe.tool_call_finished"
     ]
     assert len(tool_finished) == 1
     assert tool_finished[0]["properties"]["approval_type"] == "ask"
@@ -198,7 +198,7 @@ async def test_tool_call_approved_by_callback(telemetry_events: list[dict]) -> N
     assert agent_loop.stats.tool_calls_succeeded == 1
 
     tool_finished = [
-        e for e in telemetry_events if e.get("event_name") == "vibe/tool_call_finished"
+        e for e in telemetry_events if e.get("event_name") == "vibe.tool_call_finished"
     ]
     assert len(tool_finished) == 1
     assert tool_finished[0]["properties"]["approval_type"] == "ask"
@@ -243,7 +243,7 @@ async def test_tool_call_rejected_when_auto_approve_disabled_and_rejected_by_cal
     assert agent_loop.stats.tool_calls_succeeded == 0
 
     tool_finished = [
-        e for e in telemetry_events if e.get("event_name") == "vibe/tool_call_finished"
+        e for e in telemetry_events if e.get("event_name") == "vibe.tool_call_finished"
     ]
     assert len(tool_finished) == 1
     assert tool_finished[0]["properties"]["approval_type"] == "ask"
@@ -287,7 +287,7 @@ async def test_tool_call_skipped_when_permission_is_never(
     assert agent_loop.stats.tool_calls_succeeded == 0
 
     tool_finished = [
-        e for e in telemetry_events if e.get("event_name") == "vibe/tool_call_finished"
+        e for e in telemetry_events if e.get("event_name") == "vibe.tool_call_finished"
     ]
     assert len(tool_finished) == 1
     assert tool_finished[0]["properties"]["approval_type"] == "never"
@@ -492,14 +492,14 @@ async def test_fill_missing_tool_responses_inserts_placeholders() -> None:
     assistant_msg = LLMMessage(
         role=Role.assistant, content="Calling tools...", tool_calls=tool_calls_messages
     )
-    agent_loop.messages = [
+    agent_loop.messages.reset([
         agent_loop.messages[0],
         assistant_msg,
         # only one tool responded: the second is missing
         LLMMessage(
             role=Role.tool, tool_call_id="tc1", name="todo", content="Retrieved 0 todos"
         ),
-    ]
+    ])
 
     await act_and_collect_events(agent_loop, "Proceed")
 
@@ -524,7 +524,7 @@ async def test_ensure_assistant_after_tool_appends_understood() -> None:
     tool_msg = LLMMessage(
         role=Role.tool, tool_call_id="tc_z", name="todo", content="Done"
     )
-    agent_loop.messages = [agent_loop.messages[0], tool_msg]
+    agent_loop.messages.reset([agent_loop.messages[0], tool_msg])
 
     await act_and_collect_events(agent_loop, "Next")
 

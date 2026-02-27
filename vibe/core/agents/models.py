@@ -34,6 +34,7 @@ class AgentType(StrEnum):
 
 class BuiltinAgentName(StrEnum):
     DEFAULT = "default"
+    CHAT = "chat"
     PLAN = "plan"
     ACCEPT_EDITS = "accept-edits"
     AUTO_APPROVE = "auto-approve"
@@ -69,6 +70,7 @@ class AgentProfile:
         )
 
 
+CHAT_AGENT_TOOLS = ["grep", "read_file", "ask_user_question", "task"]
 PLAN_AGENT_TOOLS = ["grep", "read_file", "todo", "ask_user_question", "task"]
 
 DEFAULT = AgentProfile(
@@ -83,6 +85,13 @@ PLAN = AgentProfile(
     "Read-only agent for exploration and planning",
     AgentSafety.SAFE,
     overrides={"auto_approve": True, "enabled_tools": PLAN_AGENT_TOOLS},
+)
+CHAT = AgentProfile(
+    BuiltinAgentName.CHAT,
+    "Chat",
+    "Read-only conversational mode for questions and discussions",
+    AgentSafety.SAFE,
+    overrides={"auto_approve": True, "enabled_tools": CHAT_AGENT_TOOLS},
 )
 ACCEPT_EDITS = AgentProfile(
     BuiltinAgentName.ACCEPT_EDITS,

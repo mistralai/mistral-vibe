@@ -72,6 +72,11 @@ class CommandRegistry:
                 description="Configure proxy and SSL certificate settings",
                 handler="_show_proxy_setup",
             ),
+            "resume": Command(
+                aliases=frozenset(["/resume", "/continue"]),
+                description="Browse and resume past sessions",
+                handler="_show_session_picker",
+            ),
         }
 
         for command in excluded_commands:

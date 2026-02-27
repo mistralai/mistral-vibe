@@ -16,9 +16,11 @@ from vibe.core.tools.base import (
     BaseToolState,
     InvokeContext,
     ToolError,
+    ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
+from vibe.core.tools.utils import resolve_file_tool_permission
+from vibe.core.types import ToolResultEvent, ToolStreamEvent
 
 SEARCH_REPLACE_BLOCK_RE = re.compile(
     r"<{5,} SEARCH\r?\n(.*?)\r?\n?={5,}\r?\n(.*?)\r?\n?>{5,} REPLACE", flags=re.DOTALL
@@ -68,13 +70,9 @@ class SearchReplaceConfig(BaseToolConfig):
     fuzzy_threshold: float = 0.9
 
 
-class SearchReplaceState(BaseToolState):
-    pass
-
-
 class SearchReplace(
     BaseTool[
-        SearchReplaceArgs, SearchReplaceResult, SearchReplaceConfig, SearchReplaceState
+        SearchReplaceArgs, SearchReplaceResult, SearchReplaceConfig, BaseToolState
     ],
     ToolUIData[SearchReplaceArgs, SearchReplaceResult],
 ):
@@ -85,13 +83,8 @@ class SearchReplace(
     )
 
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-        if not isinstance(event.args, SearchReplaceArgs):
-            return ToolCallDisplay(summary="Invalid arguments")
-
-        args = event.args
+    def format_call_display(cls, args: SearchReplaceArgs) -> ToolCallDisplay:
         blocks = cls._parse_search_replace_blocks(args.content)
-
         return ToolCallDisplay(
             summary=f"Patching {args.file_path} ({len(blocks)} blocks)",
             content=args.content,
@@ -111,6 +104,14 @@ class SearchReplace(
     @classmethod
     def get_status_text(cls) -> str:
         return "Editing files"
+
+    def resolve_permission(self, args: SearchReplaceArgs) -> ToolPermission | None:
+        return resolve_file_tool_permission(
+            args.file_path,
+            allowlist=self.config.allowlist,
+            denylist=self.config.denylist,
+            config_permission=self.config.permission,
+        )
 
     @final
     async def run(

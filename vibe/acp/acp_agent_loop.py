@@ -37,14 +37,12 @@ from acp.schema import (
     Implementation,
     ListSessionsResponse,
     McpServerStdio,
-    ModelInfo,
     PromptCapabilities,
     ResumeSessionResponse,
     SessionCapabilities,
     SessionInfo,
     SessionListCapabilities,
-    SessionModelState,
-    SessionModeState,
+    SetSessionConfigOptionResponse,
     SseMcpServer,
     TextContentBlock,
     TextResourceContents,
@@ -56,6 +54,7 @@ from acp.schema import (
 from pydantic import BaseModel, ConfigDict
 
 from vibe import VIBE_ROOT, __version__
+from vibe.acp.acp_logger import acp_message_observer
 from vibe.acp.tools.base import BaseAcpTool
 from vibe.acp.tools.session_update import (
     tool_call_session_update,
@@ -71,12 +70,13 @@ from vibe.acp.utils import (
     create_tool_call_replay,
     create_tool_result_replay,
     create_user_message_replay,
-    get_all_acp_session_modes,
     get_proxy_help_text,
-    is_valid_acp_agent,
+    is_valid_acp_mode,
+    make_mode_response,
+    make_model_response,
 )
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import CHAT as CHAT_AGENT, BuiltinAgentName
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import (
     MissingAPIKeyError,
@@ -98,6 +98,7 @@ from vibe.core.types import (
     AsyncApprovalCallback,
     CompactEndEvent,
     CompactStartEvent,
+    EntrypointMetadata,
     LLMMessage,
     ReasoningEvent,
     Role,
@@ -121,7 +122,8 @@ class VibeAcpAgentLoop(AcpAgent):
 
     def __init__(self) -> None:
         self.sessions: dict[str, AcpSessionLoop] = {}
-        self.client_capabilities = None
+        self.client_capabilities: ClientCapabilities | None = None
+        self.client_info: Implementation | None = None
 
     @override
     async def initialize(
@@ -132,6 +134,7 @@ class VibeAcpAgentLoop(AcpAgent):
         **kwargs: Any,
     ) -> InitializeResponse:
         self.client_capabilities = client_capabilities
+        self.client_info = client_info
 
         # The ACP Agent process can be launched in 3 different ways, depending on installation
         #  - dev mode: `uv run vibe-acp`, ran from the project root
@@ -200,6 +203,14 @@ class VibeAcpAgentLoop(AcpAgent):
     ) -> AuthenticateResponse | None:
         raise NotImplementedError("Not implemented yet")
 
+    def _build_entrypoint_metadata(self) -> EntrypointMetadata:
+        return EntrypointMetadata(
+            agent_entrypoint="acp",
+            agent_version=__version__,
+            client_name=self.client_info.name if self.client_info else "",
+            client_version=self.client_info.version if self.client_info else "",
+        )
+
     def _load_config(self) -> VibeConfig:
         try:
             config = VibeConfig.load(disabled_tools=["ask_user_question"])
@@ -223,21 +234,6 @@ class VibeAcpAgentLoop(AcpAgent):
 
         return session
 
-    def _build_session_model_state(self, agent_loop: AgentLoop) -> SessionModelState:
-        return SessionModelState(
-            current_model_id=agent_loop.config.active_model,
-            available_models=[
-                ModelInfo(model_id=model.alias, name=model.alias)
-                for model in agent_loop.config.models
-            ],
-        )
-
-    def _build_session_mode_state(self, session: AcpSessionLoop) -> SessionModeState:
-        return SessionModeState(
-            current_mode_id=session.agent_loop.agent_profile.name,
-            available_modes=get_all_acp_session_modes(session.agent_loop.agent_manager),
-        )
-
     @override
     async def new_session(
         self,
@@ -251,19 +247,32 @@ class VibeAcpAgentLoop(AcpAgent):
         config = self._load_config()
 
         agent_loop = AgentLoop(
-            config=config, agent_name=BuiltinAgentName.DEFAULT, enable_streaming=True
+            config=config,
+            agent_name=BuiltinAgentName.DEFAULT,
+            enable_streaming=True,
+            entrypoint_metadata=self._build_entrypoint_metadata(),
         )
+        agent_loop.agent_manager.register_agent(CHAT_AGENT)
         # NOTE: For now, we pin session.id to agent_loop.session_id right after init time.
         # We should just use agent_loop.session_id everywhere, but it can still change during
         # session lifetime (e.g. agent_loop.compact is called).
         # We should refactor agent_loop.session_id to make it immutable in ACP context.
         session = await self._create_acp_session(agent_loop.session_id, agent_loop)
-        agent_loop.emit_new_session_telemetry("acp")
+        agent_loop.emit_new_session_telemetry()
+
+        modes_state, modes_config = make_mode_response(
+            list(agent_loop.agent_manager.available_agents.values()),
+            session.agent_loop.agent_profile.name,
+        )
+        models_state, models_config = make_model_response(
+            agent_loop.config.models, agent_loop.config.active_model
+        )
 
         return NewSessionResponse(
             session_id=session.id,
-            models=self._build_session_model_state(agent_loop),
-            modes=self._build_session_mode_state(session),
+            models=models_state,
+            modes=modes_state,
+            config_options=[modes_config, models_config],
         )
 
     def _get_acp_tool_overrides(self) -> list[Path]:
@@ -447,8 +456,12 @@ class VibeAcpAgentLoop(AcpAgent):
             }) from e
 
         agent_loop = AgentLoop(
-            config=config, agent_name=BuiltinAgentName.DEFAULT, enable_streaming=True
+            config=config,
+            agent_name=BuiltinAgentName.DEFAULT,
+            enable_streaming=True,
+            entrypoint_metadata=self._build_entrypoint_metadata(),
         )
+        agent_loop.agent_manager.register_agent(CHAT_AGENT)
 
         non_system_messages = [
             msg for msg in loaded_messages if msg.role != Role.system
@@ -460,19 +473,24 @@ class VibeAcpAgentLoop(AcpAgent):
 
         await self._replay_conversation_history(session_id, non_system_messages)
 
-        return LoadSessionResponse(
-            models=self._build_session_model_state(agent_loop),
-            modes=self._build_session_mode_state(session),
+        modes_state, modes_config = make_mode_response(
+            list(agent_loop.agent_manager.available_agents.values()),
+            session.agent_loop.agent_profile.name,
+        )
+        models_state, models_config = make_model_response(
+            agent_loop.config.models, agent_loop.config.active_model
         )
 
-    @override
-    async def set_session_mode(
-        self, mode_id: str, session_id: str, **kwargs: Any
-    ) -> SetSessionModeResponse | None:
-        session = self._get_session(session_id)
+        return LoadSessionResponse(
+            models=models_state,
+            modes=modes_state,
+            config_options=[modes_config, models_config],
+        )
 
-        if not is_valid_acp_agent(session.agent_loop.agent_manager, mode_id):
-            return None
+    async def _apply_mode_change(self, session: AcpSessionLoop, mode_id: str) -> bool:
+        profiles = list(session.agent_loop.agent_manager.available_agents.values())
+        if not is_valid_acp_mode(profiles, mode_id):
+            return False
 
         await session.agent_loop.switch_agent(mode_id)
 
@@ -483,17 +501,12 @@ class VibeAcpAgentLoop(AcpAgent):
                 self._create_approval_callback(session.id)
             )
 
-        return SetSessionModeResponse()
+        return True
 
-    @override
-    async def set_session_model(
-        self, model_id: str, session_id: str, **kwargs: Any
-    ) -> SetSessionModelResponse | None:
-        session = self._get_session(session_id)
-
+    async def _apply_model_change(self, session: AcpSessionLoop, model_id: str) -> bool:
         model_aliases = [model.alias for model in session.agent_loop.config.models]
         if model_id not in model_aliases:
-            return None
+            return False
 
         VibeConfig.save_updates({"active_model": model_id})
 
@@ -504,7 +517,58 @@ class VibeAcpAgentLoop(AcpAgent):
 
         await session.agent_loop.reload_with_initial_messages(base_config=new_config)
 
+        return True
+
+    @override
+    async def set_session_mode(
+        self, mode_id: str, session_id: str, **kwargs: Any
+    ) -> SetSessionModeResponse | None:
+        session = self._get_session(session_id)
+
+        if not await self._apply_mode_change(session, mode_id):
+            return None
+
+        return SetSessionModeResponse()
+
+    @override
+    async def set_session_model(
+        self, model_id: str, session_id: str, **kwargs: Any
+    ) -> SetSessionModelResponse | None:
+        session = self._get_session(session_id)
+
+        if not await self._apply_model_change(session, model_id):
+            return None
+
         return SetSessionModelResponse()
+
+    @override
+    async def set_config_option(
+        self, config_id: str, session_id: str, value: str, **kwargs: Any
+    ) -> SetSessionConfigOptionResponse | None:
+        session = self._get_session(session_id)
+
+        match config_id:
+            case "mode":
+                success = await self._apply_mode_change(session, value)
+            case "model":
+                success = await self._apply_model_change(session, value)
+            case _:
+                success = False
+
+        if not success:
+            return None
+
+        profiles = list(session.agent_loop.agent_manager.available_agents.values())
+        _, modes_config = make_mode_response(
+            profiles, session.agent_loop.agent_profile.name
+        )
+        _, models_config = make_model_response(
+            session.agent_loop.config.models, session.agent_loop.config.active_model
+        )
+
+        return SetSessionConfigOptionResponse(
+            config_options=[modes_config, models_config]
+        )
 
     @override
     async def list_sessions(
@@ -736,7 +800,13 @@ class VibeAcpAgentLoop(AcpAgent):
 
 def run_acp_server() -> None:
     try:
-        asyncio.run(run_agent(agent=VibeAcpAgentLoop(), use_unstable_protocol=True))
+        asyncio.run(
+            run_agent(
+                agent=VibeAcpAgentLoop(),
+                use_unstable_protocol=True,
+                observers=[acp_message_observer],
+            )
+        )
     except KeyboardInterrupt:
         # This is expected when the server is terminated
         pass

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from logging import getLogger
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,14 +10,13 @@ from vibe.core.agents.models import (
     AgentType,
     BuiltinAgentName,
 )
-from vibe.core.paths.config_paths import resolve_local_agents_dir
+from vibe.core.logger import logger
+from vibe.core.paths.config_paths import discover_local_agents_dirs
 from vibe.core.paths.global_paths import GLOBAL_AGENTS_DIR
 from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
-
-logger = getLogger("vibe")
 
 
 class AgentManager:
@@ -77,6 +75,10 @@ class AgentManager:
         self.active_profile = self.get_agent(name)
         self._cached_config = None
 
+    def register_agent(self, profile: AgentProfile) -> None:
+        self._available[profile.name] = profile
+        self._cached_config = None
+
     def invalidate_config(self) -> None:
         self._cached_config = None
 
@@ -86,8 +88,7 @@ class AgentManager:
         for path in config.agent_paths:
             if path.is_dir():
                 paths.append(path)
-        if (agents_dir := resolve_local_agents_dir(Path.cwd())) is not None:
-            paths.append(agents_dir)
+        paths.extend(discover_local_agents_dirs(Path.cwd()))
         if GLOBAL_AGENTS_DIR.path.is_dir():
             paths.append(GLOBAL_AGENTS_DIR.path)
         unique: list[Path] = []

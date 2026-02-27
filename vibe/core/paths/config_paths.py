@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 from vibe.core.paths.global_paths import VIBE_HOME, GlobalPath
+from vibe.core.paths.local_config_walk import walk_local_config_dirs_all
 from vibe.core.trusted_folders import trusted_folders_manager
 
 _config_paths_locked: bool = True
@@ -31,30 +32,24 @@ def _resolve_config_path(basename: str, type: Literal["file", "dir"]) -> Path:
     return VIBE_HOME.path / basename
 
 
-def resolve_local_tools_dir(dir: Path) -> Path | None:
-    if not trusted_folders_manager.is_trusted(dir):
-        return None
-    if (candidate := dir / ".vibe" / "tools").is_dir():
-        return candidate
-    return None
+def _discover_local_config_dirs_all(
+    root: Path,
+) -> tuple[tuple[Path, ...], tuple[Path, ...], tuple[Path, ...]]:
+    if not trusted_folders_manager.is_trusted(root):
+        return ((), (), ())
+    return walk_local_config_dirs_all(root)
 
 
-def resolve_local_skills_dirs(dir: Path) -> list[Path]:
-    if not trusted_folders_manager.is_trusted(dir):
-        return []
-    return [
-        candidate
-        for candidate in [dir / ".vibe" / "skills", dir / ".agents" / "skills"]
-        if candidate.is_dir()
-    ]
+def discover_local_tools_dirs(root: Path) -> list[Path]:
+    return list(_discover_local_config_dirs_all(root)[0])
 
 
-def resolve_local_agents_dir(dir: Path) -> Path | None:
-    if not trusted_folders_manager.is_trusted(dir):
-        return None
-    if (candidate := dir / ".vibe" / "agents").is_dir():
-        return candidate
-    return None
+def discover_local_skills_dirs(root: Path) -> list[Path]:
+    return list(_discover_local_config_dirs_all(root)[1])
+
+
+def discover_local_agents_dirs(root: Path) -> list[Path]:
+    return list(_discover_local_config_dirs_all(root)[2])
 
 
 def unlock_config_paths() -> None:

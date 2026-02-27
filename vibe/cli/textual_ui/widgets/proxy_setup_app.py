@@ -43,25 +43,19 @@ class ProxySetupApp(Container):
 
         with Vertical(id="proxysetup-content"):
             yield NoMarkupStatic("Proxy Configuration", classes="settings-title")
-            yield NoMarkupStatic("")
 
             for key, description in SUPPORTED_PROXY_VARS.items():
-                yield Static(
-                    f"[bold ansi_blue]{key}[/]  [dim]{description}[/dim]",
-                    classes="proxy-label-line",
-                )
+                yield Static(f"[bold ansi_blue]{key}[/]", classes="proxy-label-line")
 
                 initial_value = self.initial_values.get(key) or ""
                 input_widget = Input(
                     value=initial_value,
-                    placeholder="NOT SET",
+                    placeholder=description,
                     id=f"proxy-input-{key}",
                     classes="proxy-input",
                 )
                 self.inputs[key] = input_widget
                 yield input_widget
-
-                yield NoMarkupStatic("")
 
             yield NoMarkupStatic(
                 "↑↓ navigate  Enter save & exit  ESC cancel", classes="settings-help"
@@ -92,7 +86,7 @@ class ProxySetupApp(Container):
             prev_idx = (idx - 1) % len(inputs)
             inputs[prev_idx].focus()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_input_submitted(self, _event: Input.Submitted) -> None:
         self._save_and_close()
 
     def on_blur(self, _event: events.Blur) -> None:

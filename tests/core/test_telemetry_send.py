@@ -47,7 +47,7 @@ class TestTelemetryClient:
     def test_send_telemetry_event_does_nothing_when_api_key_is_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         env_key = config.get_provider_for_model(
             config.get_active_model()
         ).api_key_env_var
@@ -57,7 +57,7 @@ class TestTelemetryClient:
         client._client = MagicMock()
         client._client.post = AsyncMock()
 
-        client.send_telemetry_event("vibe/test", {})
+        client.send_telemetry_event("vibe.test", {})
         _run_telemetry_tasks()
 
         client._client.post.assert_not_called()
@@ -65,7 +65,10 @@ class TestTelemetryClient:
     def test_send_telemetry_event_does_nothing_when_disabled(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=True)
+        monkeypatch.setattr(
+            TelemetryClient, "send_telemetry_event", _original_send_telemetry_event
+        )
+        config = build_test_vibe_config(enable_telemetry=False)
         env_key = config.get_provider_for_model(
             config.get_active_model()
         ).api_key_env_var
@@ -74,7 +77,7 @@ class TestTelemetryClient:
         client._client = MagicMock()
         client._client.post = AsyncMock()
 
-        client.send_telemetry_event("vibe/test", {})
+        client.send_telemetry_event("vibe.test", {})
         _run_telemetry_tasks()
 
         client._client.post.assert_not_called()
@@ -86,7 +89,7 @@ class TestTelemetryClient:
         monkeypatch.setattr(
             TelemetryClient, "send_telemetry_event", _original_send_telemetry_event
         )
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         env_key = config.get_provider_for_model(
             config.get_active_model()
         ).api_key_env_var
@@ -97,12 +100,12 @@ class TestTelemetryClient:
         client._client.post = mock_post
         client._client.aclose = AsyncMock()
 
-        client.send_telemetry_event("vibe/test_event", {"key": "value"})
+        client.send_telemetry_event("vibe.test_event", {"key": "value"})
         await client.aclose()
 
         mock_post.assert_called_once_with(
             DATALAKE_EVENTS_URL,
-            json={"event": "vibe/test_event", "properties": {"key": "value"}},
+            json={"event": "vibe.test_event", "properties": {"key": "value"}},
             headers={
                 "Content-Type": "application/json",
                 "Authorization": "Bearer sk-test",
@@ -113,7 +116,7 @@ class TestTelemetryClient:
     def test_send_tool_call_finished_payload_shape(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
         tool_call = _make_resolved_tool_call("todo", {})
         decision = ToolDecision(
@@ -129,7 +132,7 @@ class TestTelemetryClient:
 
         assert len(telemetry_events) == 1
         event_name = telemetry_events[0]["event_name"]
-        assert event_name == "vibe/tool_call_finished"
+        assert event_name == "vibe.tool_call_finished"
         properties = telemetry_events[0]["properties"]
         assert properties["tool_name"] == "todo"
         assert properties["status"] == "success"
@@ -142,7 +145,7 @@ class TestTelemetryClient:
     def test_send_tool_call_finished_nb_files_created_write_file_new(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
         tool_call = _make_resolved_tool_call("write_file", {"overwrite": False})
 
@@ -160,7 +163,7 @@ class TestTelemetryClient:
     def test_send_tool_call_finished_nb_files_modified_write_file_overwrite(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
         tool_call = _make_resolved_tool_call("write_file", {"overwrite": True})
 
@@ -178,7 +181,7 @@ class TestTelemetryClient:
     def test_send_tool_call_finished_decision_none(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
         tool_call = _make_resolved_tool_call("todo", {})
 
@@ -195,49 +198,49 @@ class TestTelemetryClient:
     def test_send_user_copied_text_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_user_copied_text("hello world")
 
         assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe/user_copied_text"
+        assert telemetry_events[0]["event_name"] == "vibe.user_copied_text"
         assert telemetry_events[0]["properties"]["text_length"] == 11
 
     def test_send_user_cancelled_action_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_user_cancelled_action("interrupt_agent")
 
         assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe/user_cancelled_action"
+        assert telemetry_events[0]["event_name"] == "vibe.user_cancelled_action"
         assert telemetry_events[0]["properties"]["action"] == "interrupt_agent"
 
     def test_send_auto_compact_triggered_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_auto_compact_triggered()
 
         assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe/auto_compact_triggered"
+        assert telemetry_events[0]["event_name"] == "vibe.auto_compact_triggered"
 
     def test_send_slash_command_used_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_slash_command_used("help", "builtin")
         client.send_slash_command_used("my_skill", "skill")
 
         assert len(telemetry_events) == 2
-        assert telemetry_events[0]["event_name"] == "vibe/slash_command_used"
+        assert telemetry_events[0]["event_name"] == "vibe.slash_command_used"
         assert telemetry_events[0]["properties"]["command"] == "help"
         assert telemetry_events[0]["properties"]["command_type"] == "builtin"
         assert telemetry_events[1]["properties"]["command"] == "my_skill"
@@ -246,7 +249,7 @@ class TestTelemetryClient:
     def test_send_new_session_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(disable_telemetry=False)
+        config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_new_session(
@@ -255,15 +258,17 @@ class TestTelemetryClient:
             nb_mcp_servers=1,
             nb_models=3,
             entrypoint="cli",
+            terminal_emulator="vscode",
         )
 
         assert len(telemetry_events) == 1
         event_name = telemetry_events[0]["event_name"]
-        assert event_name == "vibe/new_session"
+        assert event_name == "vibe.new_session"
         properties = telemetry_events[0]["properties"]
         assert properties["has_agents_md"] is True
         assert properties["nb_skills"] == 2
         assert properties["nb_mcp_servers"] == 1
         assert properties["nb_models"] == 3
         assert properties["entrypoint"] == "cli"
+        assert properties["terminal_emulator"] == "vscode"
         assert "version" in properties

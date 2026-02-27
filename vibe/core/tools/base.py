@@ -27,7 +27,8 @@ from vibe.core.types import ToolStreamEvent
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
-    from vibe.core.types import ApprovalCallback, UserInputCallback
+    from vibe.core.tools.mcp_sampling import MCPSamplingHandler
+    from vibe.core.types import ApprovalCallback, EntrypointMetadata, UserInputCallback
 
 ARGS_COUNT = 4
 
@@ -40,6 +41,9 @@ class InvokeContext:
     approval_callback: ApprovalCallback | None = field(default=None)
     agent_manager: AgentManager | None = field(default=None)
     user_input_callback: UserInputCallback | None = field(default=None)
+    sampling_callback: MCPSamplingHandler | None = field(default=None)
+    session_dir: Path | None = field(default=None)
+    entrypoint_metadata: EntrypointMetadata | None = field(default=None)
 
 
 class ToolError(Exception):
@@ -317,20 +321,23 @@ class BaseTool[
         return snake_case
 
     @classmethod
+    def is_available(cls) -> bool:
+        return True
+
+    @classmethod
     def create_config_with_permission(
         cls, permission: ToolPermission
     ) -> BaseToolConfig:
         config_class = cls._get_tool_config_class()
         return config_class(permission=permission)
 
-    def check_allowlist_denylist(self, args: ToolArgs) -> ToolPermission | None:
-        """Check if args match allowlist/denylist patterns.
+    def resolve_permission(self, args: ToolArgs) -> ToolPermission | None:
+        """Per-invocation permission override, checked before config-level permission.
 
         Returns:
-            ToolPermission.ALWAYS if allowlisted
-            ToolPermission.NEVER if denylisted
-            None if no match (proceed with normal permission check)
+            ALWAYS if auto-approved, NEVER if blocked, ASK to force approval,
+            or None to fall through to config permission.
 
-        Base implementation returns None. Override in subclasses for specific logic.
+        Override in subclasses for domain-specific rules (e.g. workdir checks).
         """
         return None

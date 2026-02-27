@@ -571,6 +571,16 @@ To disable auto-updates, add this to your `config.toml`:
 enable_auto_update = false
 ```
 
+### Notification Settings
+
+Vibe can notify you when the agent needs your attention (awaiting approval, asking a question, or task complete). This is useful when you switch to another window while the agent works.
+
+To disable notifications:
+
+```toml
+enable_notifications = false
+```
+
 ### Custom Vibe Home Directory
 
 By default, Vibe stores its configuration in `~/.vibe/`. You can override this by setting the `VIBE_HOME` environment variable:

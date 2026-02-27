@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol
 
 from vibe.core.types import AvailableTool, LLMChunk, LLMMessage, StrToolChoice
@@ -22,7 +23,7 @@ class APIAdapter(Protocol):
         self,
         *,
         model_name: str,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         tools: list[AvailableTool] | None,
         max_tokens: int | None,

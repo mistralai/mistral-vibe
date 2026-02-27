@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from http import HTTPStatus
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -181,6 +182,27 @@ async def test_act_streams_chunks_in_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_act_streaming_does_not_cleanup_tmp_files_directly() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(content="Hello"),
+        mock_llm_chunk(content=" from"),
+        mock_llm_chunk(content=" Vibe"),
+    ])
+    agent = build_test_agent_loop(
+        config=make_config(), backend=backend, enable_streaming=True
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+    cleanup_spy = Mock()
+    agent.session_logger.maybe_cleanup_tmp_files = cleanup_spy
+
+    events = [event async for event in agent.act("Stream, please.")]
+
+    assistant_events = [event for event in events if isinstance(event, AssistantEvent)]
+    assert len(assistant_events) == 3
+    assert cleanup_spy.call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_act_handles_streaming_with_tool_call_events_in_sequence() -> None:
     todo_tool_call = ToolCall(
         id="tc_stream",
@@ -210,6 +232,7 @@ async def test_act_handles_streaming_with_tool_call_events_in_sequence() -> None
         UserMessageEvent,
         AssistantEvent,
         ToolCallEvent,
+        ToolCallEvent,
         ToolResultEvent,
         AssistantEvent,
     ]
@@ -217,12 +240,17 @@ async def test_act_handles_streaming_with_tool_call_events_in_sequence() -> None
     assert isinstance(events[1], AssistantEvent)
     assert events[1].content == "Checking your todos."
     assert isinstance(events[2], ToolCallEvent)
+    assert events[2].args is None  # streaming event
+    assert events[2].tool_call_id == "tc_stream"
     assert events[2].tool_name == "todo"
-    assert isinstance(events[3], ToolResultEvent)
-    assert events[3].error is None
-    assert events[3].skipped is False
-    assert isinstance(events[4], AssistantEvent)
-    assert events[4].content == "Done reviewing todos."
+    assert isinstance(events[3], ToolCallEvent)
+    assert events[3].args is not None
+    assert events[3].tool_name == "todo"
+    assert isinstance(events[4], ToolResultEvent)
+    assert events[4].error is None
+    assert events[4].skipped is False
+    assert isinstance(events[5], AssistantEvent)
+    assert events[5].content == "Done reviewing todos."
     assert agent.messages[-1].content == "Done reviewing todos."
 
 
@@ -250,21 +278,27 @@ async def test_act_handles_tool_call_chunk_with_content() -> None:
 
     events = [event async for event in agent.act("Check todos with content.")]
 
-    assert [type(event) for event in events] == [
-        UserMessageEvent,
-        AssistantEvent,
-        AssistantEvent,
-        AssistantEvent,
-        ToolCallEvent,
-        ToolResultEvent,
-    ]
-    assert isinstance(events[0], UserMessageEvent)
-    assert isinstance(events[1], AssistantEvent)
-    assert isinstance(events[2], AssistantEvent)
-    assert isinstance(events[3], AssistantEvent)
-    assert events[1].content == "Preparing "
-    assert events[2].content == "todo request"
-    assert events[3].content == " complete"
+    event_types = [type(e) for e in events]
+    assert Counter(event_types) == Counter({
+        UserMessageEvent: 1,
+        AssistantEvent: 3,
+        ToolCallEvent: 2,
+        ToolResultEvent: 1,
+    })
+
+    tool_call_events = [e for e in events if isinstance(e, ToolCallEvent)]
+    assert len(tool_call_events) == 2
+    assert any(
+        tc.args is None and tc.tool_call_id == "tc_content" for tc in tool_call_events
+    )
+    assert any(tc.args is not None for tc in tool_call_events)
+
+    assistant_events = [e for e in events if isinstance(e, AssistantEvent)]
+    assistant_contents = {e.content for e in assistant_events}
+    assert "Preparing " in assistant_contents
+    assert "todo request" in assistant_contents
+    assert " complete" in assistant_contents
+
     assert any(
         m.role == Role.assistant and m.content == "Preparing todo request complete"
         for m in agent.messages
@@ -304,17 +338,21 @@ async def test_act_merges_streamed_tool_call_arguments() -> None:
         UserMessageEvent,
         AssistantEvent,
         ToolCallEvent,
+        ToolCallEvent,
         ToolResultEvent,
     ]
     assert isinstance(events[0], UserMessageEvent)
-    call_event = events[2]
+    assert isinstance(events[2], ToolCallEvent)
+    assert events[2].args is None  # streaming event
+    assert events[2].tool_call_id == "tc_merge"
+    call_event = events[3]
     assert isinstance(call_event, ToolCallEvent)
     assert call_event.tool_call_id == "tc_merge"
     call_args = cast(TodoArgs, call_event.args)
     assert call_args.action == "read"
-    assert isinstance(events[3], ToolResultEvent)
-    assert events[3].error is None
-    assert events[3].skipped is False
+    assert isinstance(events[4], ToolResultEvent)
+    assert events[4].error is None
+    assert events[4].skipped is False
     assistant_with_calls = next(
         m for m in agent.messages if m.role == Role.assistant and m.tool_calls
     )
@@ -371,6 +409,7 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     assert [type(event) for event in events] == [
         UserMessageEvent,
         AssistantEvent,
+        ToolCallEvent,
         AssistantEvent,
         ToolCallEvent,
         ToolResultEvent,
