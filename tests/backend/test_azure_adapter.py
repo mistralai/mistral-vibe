@@ -5,7 +5,11 @@ import json
 import pytest
 
 from vibe.core.config import ProviderConfig
-from vibe.core.llm.backend.azure import AzureOpenAIAdapter
+from vibe.core.llm.backend.azure import (
+    AzureOpenAIAdapter,
+    build_azure_base_url,
+    build_azure_endpoint,
+)
 from vibe.core.types import AvailableFunction, AvailableTool, LLMMessage, Role
 
 
@@ -18,11 +22,25 @@ def adapter():
 def provider():
     return ProviderConfig(
         name="azure",
-        api_base="https://api.azure.com",
+        api_base="",
         api_key_env_var="AZURE_API_KEY",
         api_style="azure",
-        api_version="2024-02-01",  # Mock API version
+        resource_name="test-resource",
+        api_version="2024-02-01",
     )
+
+
+class TestBuildAzureEndpoint:
+    def test_endpoint_url(self):
+        endpoint = build_azure_endpoint("gpt-4", "2024-02-01")
+        assert (
+            endpoint
+            == "/openai/deployments/gpt-4/chat/completions?api-version=2024-02-01"
+        )
+
+    def test_base_url(self):
+        base_url = build_azure_base_url("test-resource")
+        assert base_url == "https://test-resource.openai.azure.com"
 
 
 class TestAdapterBuildPayload:
@@ -118,7 +136,7 @@ class TestAdapterReasoningConversion:
             "reasoning_content": "thinking...",
         }
         result = adapter._reasoning_to_api(msg_dict, "reasoning_content")
-        assert result == msg_dict  # Should remain unchanged when field names match
+        assert result == msg_dict
 
     def test_reasoning_to_api_custom_field(self, adapter):
         msg_dict = {
@@ -137,7 +155,7 @@ class TestAdapterReasoningConversion:
             "reasoning_content": "thinking...",
         }
         result = adapter._reasoning_from_api(msg_dict, "reasoning_content")
-        assert result == msg_dict  # Should remain unchanged when field names match
+        assert result == msg_dict
 
     def test_reasoning_from_api_custom_field(self, adapter):
         msg_dict = {
@@ -169,8 +187,10 @@ class TestAdapterPrepareRequest:
         assert payload["max_tokens"] == 1024
         assert payload["temperature"] == 0.5
         assert (
-            req.endpoint == "/deployments/gpt-4/chat/completions?api-version=2024-02-01"
+            req.endpoint
+            == "/openai/deployments/gpt-4/chat/completions?api-version=2024-02-01"
         )
+        assert req.base_url == "https://test-resource.openai.azure.com"
         assert req.headers["Content-Type"] == "application/json"
 
     def test_streaming_request(self, adapter, provider):
@@ -232,7 +252,6 @@ class TestAdapterPrepareRequest:
         assert payload["tools"][0]["function"]["name"] == "test_tool"
 
     def test_with_reasoning_field(self, adapter, provider):
-        # Test with custom reasoning field name
         provider.reasoning_field_name = "custom_reasoning"
         messages = [
             LLMMessage(role=Role.user, content="Hello"),
@@ -251,7 +270,6 @@ class TestAdapterPrepareRequest:
             provider=provider,
         )
         payload = json.loads(req.body)
-        # The reasoning content should be converted to the custom field name
         assert payload["messages"][1]["custom_reasoning"] == "thinking..."
         assert "reasoning_content" not in payload["messages"][1]
 

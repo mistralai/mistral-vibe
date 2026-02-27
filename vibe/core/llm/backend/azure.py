@@ -18,8 +18,18 @@ if TYPE_CHECKING:
     from vibe.core.config import ProviderConfig
 
 
+def build_azure_base_url(resource_name: str) -> str:
+    return f"https://{resource_name}.openai.azure.com"
+
+
+def build_azure_endpoint(model_name: str, api_version: str) -> str:
+    return (
+        f"/openai/deployments/{model_name}/chat/completions?api-version={api_version}"
+    )
+
+
 class AzureOpenAIAdapter(APIAdapter):
-    endpoint: ClassVar[str] = "/chat/completions"
+    endpoint: ClassVar[str] = ""
 
     def build_payload(
         self,
@@ -105,9 +115,10 @@ class AzureOpenAIAdapter(APIAdapter):
 
         headers = self.build_headers(api_key)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        url = f"/deployments/{model_name}{self.endpoint}?api-version={provider.api_version}"
+        endpoint = build_azure_endpoint(model_name, provider.api_version)
+        base_url = build_azure_base_url(provider.resource_name)
 
-        return PreparedRequest(url, headers, body)
+        return PreparedRequest(endpoint, headers, body, base_url=base_url)
 
     def _parse_message(
         self, data: dict[str, Any], field_name: str
