@@ -283,6 +283,11 @@ DEFAULT_PROVIDERS = [
         api_base="http://127.0.0.1:8080/v1",
         api_key_env_var="",  # NOTE: if you wish to use --api-key in llama-server, change this value
     ),
+    ProviderConfig(
+        name="ollama",
+        api_base="http://localhost:11434/v1",
+        api_key_env_var="",  # Ollama doesn't require authentication by default
+    ),
 ]
 
 DEFAULT_MODELS = [
@@ -304,6 +309,31 @@ DEFAULT_MODELS = [
         name="devstral",
         provider="llamacpp",
         alias="local",
+        input_price=0.0,
+        output_price=0.0,
+    ),
+    # Ollama models - run `ollama pull <model>` to download
+    # Vision & Architecture - thinking + vision combo
+    ModelConfig(
+        name="qwen3-next:80b-cloud",
+        provider="ollama",
+        alias="ollama-qwen3-vision",
+        input_price=0.0,
+        output_price=0.0,
+    ),
+    # Code, Reasoning, Security, Performance - DeepSeek with thinking mode
+    ModelConfig(
+        name="deepseek-v3.2:cloud",
+        provider="ollama",
+        alias="ollama-deepseek",
+        input_price=0.0,
+        output_price=0.0,
+    ),
+    # General purpose - 675B powerhouse
+    ModelConfig(
+        name="mistral-large-3:675b-cloud",
+        provider="ollama",
+        alias="ollama-mistral-large",
         input_price=0.0,
         output_price=0.0,
     ),
