@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 import httpx
 
 from vibe.core.llm.backend.anthropic import AnthropicAdapter
+from vibe.core.llm.backend.azure import AzureOpenAIAdapter
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
 from vibe.core.llm.backend.vertex import VertexAnthropicAdapter
 from vibe.core.llm.exceptions import BackendErrorBuilder
@@ -91,6 +92,7 @@ class OpenAIAdapter(APIAdapter):
         provider: ProviderConfig,
         api_key: str | None = None,
         thinking: str = "off",
+        api_version: str = "",
     ) -> PreparedRequest:
         merged_messages = merge_consecutive_user_messages(messages)
         field_name = provider.reasoning_field_name
@@ -158,6 +160,7 @@ class OpenAIAdapter(APIAdapter):
 ADAPTERS: dict[str, APIAdapter] = {
     "openai": OpenAIAdapter(),
     "anthropic": AnthropicAdapter(),
+    "azure": AzureOpenAIAdapter(),
     "vertex-anthropic": VertexAnthropicAdapter(),
 }
 

@@ -150,6 +150,7 @@ class ProviderConfig(BaseModel):
     reasoning_field_name: str = "reasoning_content"
     project_id: str = ""
     region: str = ""
+    api_version: str = ""
 
 
 class _MCPBase(BaseModel):
