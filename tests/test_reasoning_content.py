@@ -11,8 +11,9 @@ from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
-from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
+from vibe.core.llm.backend.generic import GenericBackend
 from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper, ParsedContent
+from vibe.core.llm.backend.openai import OpenAIAdapter
 from vibe.core.llm.format import APIToolFormatHandler
 from vibe.core.types import AssistantEvent, LLMMessage, ReasoningEvent, Role
 
