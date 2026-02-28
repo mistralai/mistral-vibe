@@ -68,6 +68,8 @@ class SearchReplaceConfig(BaseToolConfig):
     max_content_size: int = 100_000
     create_backup: bool = False
     fuzzy_threshold: float = 0.9
+    normalize_whitespace: bool = False
+    debug_context_lines: int = 5
 
 
 class SearchReplace(
@@ -126,6 +128,8 @@ class SearchReplace(
             search_replace_blocks,
             file_path,
             self.config.fuzzy_threshold,
+            self.config.normalize_whitespace,
+            self.config.debug_context_lines,
         )
 
         if block_result.errors:
@@ -243,6 +247,8 @@ class SearchReplace(
         blocks: list[SearchReplaceBlock],
         filepath: Path,
         fuzzy_threshold: float = 0.9,
+        normalize_whitespace: bool = False,
+        debug_context_lines: int = 5,
     ) -> BlockApplyResult:
         applied = 0
         errors: list[str] = []
@@ -250,8 +256,20 @@ class SearchReplace(
         current_content = content
 
         for i, (search, replace) in enumerate(blocks, 1):
-            if search not in current_content:
-                context = SearchReplace._find_search_context(current_content, search)
+            search_text = search
+            
+            # Apply whitespace normalization if enabled
+            if normalize_whitespace:
+                search_text = SearchReplace._normalize_whitespace(search)
+                current_content_normalized = SearchReplace._normalize_whitespace(current_content)
+                found_in_normalized = search_text in current_content_normalized
+            else:
+                found_in_normalized = False
+            
+            found_exact = search in current_content
+            
+            if not found_exact and not found_in_normalized:
+                context = SearchReplace._find_search_context(current_content, search, debug_context_lines)
                 fuzzy_context = SearchReplace._find_fuzzy_match_context(
                     current_content, search, fuzzy_threshold
                 )
@@ -270,27 +288,66 @@ class SearchReplace(
                     "1. Check for exact whitespace/indentation match\n"
                     "2. Verify line endings match the file exactly (\\r\\n vs \\n)\n"
                     "3. Ensure the search text hasn't been modified by previous blocks or user edits\n"
-                    "4. Check for typos or case sensitivity issues"
+                    "4. Check for typos or case sensitivity issues\n"
+                    "5. Consider enabling normalize_whitespace in tool config for more flexible matching"
                 )
 
                 errors.append(error_msg)
                 continue
+            
+            # If found in normalized version, use that for replacement
+            if found_in_normalized:
+                # Find the actual position in original content
+                normalized_lines = current_content_normalized.split('\n')
+                search_lines = search_text.split('\n')
+                original_lines = current_content.split('\n')
+                
+                # Find matching line range
+                for start_idx in range(len(normalized_lines) - len(search_lines) + 1):
+                    match = True
+                    for j, (norm_line, search_line) in enumerate(zip(normalized_lines[start_idx:start_idx+len(search_lines)], search_lines)):
+                        if norm_line.rstrip() != search_line.rstrip():
+                            match = False
+                            break
+                    if match:
+                        # Replace in original content
+                        replacement_lines = replace.split('\n')
+                        new_lines = original_lines[:start_idx] + replacement_lines + original_lines[start_idx+len(search_lines):]
+                        current_content = '\n'.join(new_lines)
+                        break
+            else:
+                # Standard replacement
+                occurrences = current_content.count(search)
+                if occurrences > 1:
+                    warning_msg = (
+                        f"Search text in block {i} appears {occurrences} times in the file. "
+                        f"Only the first occurrence will be replaced. Consider making your "
+                        f"search pattern more specific to avoid unintended changes."
+                    )
+                    warnings.append(warning_msg)
 
-            occurrences = current_content.count(search)
-            if occurrences > 1:
-                warning_msg = (
-                    f"Search text in block {i} appears {occurrences} times in the file. "
-                    f"Only the first occurrence will be replaced. Consider making your "
-                    f"search pattern more specific to avoid unintended changes."
-                )
-                warnings.append(warning_msg)
-
-            current_content = current_content.replace(search, replace, 1)
+                current_content = current_content.replace(search, replace, 1)
+            
             applied += 1
 
         return BlockApplyResult(
             content=current_content, applied=applied, errors=errors, warnings=warnings
         )
+
+    @final
+    @staticmethod
+    def _normalize_whitespace(text: str) -> str:
+        """Normalize whitespace for more flexible matching."""
+        lines = text.split('\n')
+        normalized_lines = []
+        
+        for line in lines:
+            # Preserve indentation but normalize trailing whitespace
+            stripped = line.rstrip()
+            # Keep leading whitespace (indentation) but remove trailing
+            normalized_lines.append(stripped)
+        
+        return '\n'.join(normalized_lines)
 
     @final
     @staticmethod
@@ -338,8 +395,9 @@ class SearchReplace(
         )
 
         candidate_starts = set()
-        spread = 5
+        spread = 10  # Increased from 5 to 10 for better coverage
 
+        # Look for anchor lines in content
         for i, line in enumerate(content_lines):
             if first_anchor in line or last_anchor in line:
                 start_min = max(0, i - spread)
@@ -348,7 +406,8 @@ class SearchReplace(
                     candidate_starts.add(s)
 
         if not candidate_starts:
-            max_positions = min(len(content_lines) - window_size + 1, 100)
+            # If no anchors found, search more broadly
+            max_positions = min(len(content_lines) - window_size + 1, 200)  # Increased from 100 to 200
             candidate_starts = set(range(0, max_positions))
 
         best_match = None
@@ -358,8 +417,16 @@ class SearchReplace(
             end = start + window_size
             window_text = "\n".join(content_lines[start:end])
 
+            # Try both exact and normalized matching
             matcher = difflib.SequenceMatcher(None, search_text, window_text)
             similarity = matcher.ratio()
+
+            # Also try with whitespace normalization for better matching
+            search_normalized = "\n".join(line.rstrip() for line in search_lines)
+            window_normalized = "\n".join(line.rstrip() for line in content_lines[start:end])
+            matcher_normalized = difflib.SequenceMatcher(None, search_normalized, window_normalized)
+            similarity_normalized = matcher_normalized.ratio()
+            similarity = max(similarity, similarity_normalized)
 
             if similarity >= threshold and similarity > best_similarity:
                 best_similarity = similarity
@@ -436,22 +503,68 @@ class SearchReplace(
         if not first_search_line:
             return "First line of search text is empty or whitespace only"
 
+        # Look for any of the search lines, not just the first one
+        all_search_anchors = [line.strip() for line in search_lines if line.strip()]
+        if not all_search_anchors:
+            return "Search text contains only whitespace"
+
         matches = []
-        for i, line in enumerate(lines):
-            if first_search_line in line:
-                matches.append(i)
+        for anchor in all_search_anchors[:3]:  # Check first 3 non-empty lines
+            for i, line in enumerate(lines):
+                if anchor in line:
+                    matches.append((i, anchor))
 
         if not matches:
-            return f"First search line '{first_search_line}' not found anywhere in file"
+            # Provide more detailed analysis of what wasn't found
+            missing_info = []
+            for i, anchor in enumerate(all_search_anchors[:3]):
+                if i == 0:
+                    missing_info.append(f"First search line '{anchor}' not found")
+                else:
+                    missing_info.append(f"Search line {i+1} '{anchor}' not found")
+            return "\n".join(missing_info)
 
         context_lines = []
-        for match_idx in matches[:3]:
+        for match_idx, anchor in matches[:5]:  # Show up to 5 potential matches
             start = max(0, match_idx - max_context)
             end = min(len(lines), match_idx + max_context + 1)
 
-            context_lines.append(f"\nPotential match area around line {match_idx + 1}:")
+            context_lines.append(f"\nPotential match area around line {match_idx + 1} (contains '{anchor}'):")
             for i in range(start, end):
                 marker = ">>>" if i == match_idx else "   "
                 context_lines.append(f"{marker} {i + 1:3d}: {lines[i]}")
 
+        # Add line ending analysis
+        line_ending_info = SearchReplace._analyze_line_endings(content, search_text)
+        if line_ending_info:
+            context_lines.append(f"\n{line_ending_info}")
+
         return "\n".join(context_lines)
+
+    @final
+    @staticmethod
+    def _analyze_line_endings(content: str, search_text: str) -> str:
+        """Analyze potential line ending mismatches."""
+        # Note: When reading files in text mode, Python automatically converts \r\n to \n on Unix
+        # So we can only detect line ending issues in the search text itself
+        
+        search_has_crlf = "\r\n" in search_text
+        search_has_lf = "\n" in search_text and not search_has_crlf
+        
+        messages = []
+        
+        # Check if search text has mixed line endings
+        if search_has_crlf and search_has_lf:
+            messages.append("Search text has mixed line endings (both \\r\\n and \\n)")
+        elif search_has_crlf:
+            messages.append("Search text uses Windows line endings (\\r\\n)")
+        elif search_has_lf:
+            messages.append("Search text uses Unix line endings (\\n)")
+        
+        # Check for trailing whitespace issues
+        search_lines = search_text.split("\n")
+        trailing_whitespace_lines = [i+1 for i, line in enumerate(search_lines) if line != line.rstrip() and line.strip()]
+        if trailing_whitespace_lines:
+            messages.append(f"Search text has trailing whitespace on lines: {trailing_whitespace_lines}")
+        
+        return "; ".join(messages) if messages else ""
