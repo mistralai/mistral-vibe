@@ -51,3 +51,29 @@ class TestResolveConfigFile:
         assert VIBE_HOME.path != tmp_path
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         assert VIBE_HOME.path == tmp_path
+
+    def test_prefers_legacy_vibe_home_when_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        legacy_home = tmp_path / ".vibe"
+        legacy_home.mkdir()
+
+        monkeypatch.setattr(
+            "vibe.core.paths.global_paths._DEFAULT_VIBE_HOME", legacy_home
+        )
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+        assert VIBE_HOME.path == legacy_home.resolve()
+
+    def test_uses_xdg_config_home_when_legacy_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        legacy_home = tmp_path / ".vibe-missing"
+        xdg_home = tmp_path / "xdg"
+
+        monkeypatch.setattr(
+            "vibe.core.paths.global_paths._DEFAULT_VIBE_HOME", legacy_home
+        )
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_home))
+
+        assert VIBE_HOME.path == (xdg_home / "vibe").resolve()
