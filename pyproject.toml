@@ -29,6 +29,7 @@ classifiers = [
 dependencies = [
     "agent-client-protocol==0.8.1",
     "anyio>=4.12.0",
+    "ast-grep-py>=0.41.0",
     "cachetools>=5.5.0",
     "cryptography>=44.0.0,<=46.0.3",
     "gitpython>=3.1.46",
