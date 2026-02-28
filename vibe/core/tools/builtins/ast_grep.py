@@ -227,6 +227,7 @@ class AstGrep(
         except Exception as e:
             raise ToolError(f"Error running ast-grep Python API: {e}") from e
 
+    @classmethod
     def format_call_display(cls, args: AstGrepArgs) -> ToolCallDisplay:
         summary = f"AST search '{args.pattern}'"
         if args.path != ".":
