@@ -1,0 +1,71 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Nunito:wght@700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Nunito", sans-serif;
+
+  --color-amber-brand: #F5A623;
+  --color-amber-dark: #C4831A;
+  --color-amber-light: #FDE8B8;
+
+  --color-board-beige: #F0E6CC;
+  --color-board-beige-mid: #D4C5A0;
+  --color-board-beige-dark: #B8A87A;
+
+  --color-player-red: #E8334A;
+  --color-player-blue: #2979FF;
+  --color-player-yellow: #FFD600;
+  --color-player-green: #00C853;
+
+  --color-navy-deep: #1A1F3C;
+  --color-navy-mid: #3D4566;
+  --color-navy-light: #8C93B8;
+
+  --color-surface-white: #FFFFFF;
+  --color-surface-cream: #FAFAF7;
+  --color-surface-card: #FFFFFF;
+
+  --shadow-iso-1: 4px 4px 8px rgba(30, 30, 60, 0.15);
+  --shadow-iso-2: 8px 8px 16px rgba(30, 30, 60, 0.15);
+  --shadow-iso-3: 16px 16px 32px rgba(30, 30, 60, 0.15);
+}
+
+@layer base {
+  body {
+    @apply bg-surface-cream text-navy-deep font-sans antialiased;
+  }
+
+  h1, h2, h3 {
+    @apply font-display font-bold;
+  }
+}
+
+.isometric-container {
+  perspective: 1000px;
+}
+
+.isometric-card {
+  transform: rotateX(30deg) rotateZ(-45deg);
+  transform-style: preserve-3d;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.isometric-card:hover {
+  transform: rotateX(30deg) rotateZ(-45deg) translateZ(10px);
+}
+
+.board-surface {
+  background: var(--color-board-beige);
+  position: relative;
+}
+
+.board-edge-left {
+  background: var(--color-board-beige-mid);
+  transform: skewY(45deg);
+}
+
+.board-edge-right {
+  background: var(--color-board-beige-dark);
+  transform: skewY(-45deg);
+}

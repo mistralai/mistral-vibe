@@ -24,6 +24,18 @@ Mistral Vibe is a command-line coding assistant powered by Mistral's models. It 
 > [!WARNING]
 > Mistral Vibe works on Windows, but we officially support and target UNIX environments.
 
+## Additional Apps
+
+This repository now also contains a standalone frontend app at `apps/boardgame-ai-moderator`.
+
+It is a separate Vite + React project and can be run independently from the Python CLI:
+
+```bash
+cd apps/boardgame-ai-moderator
+npm install
+npm run dev
+```
+
 ### One-line install (recommended)
 
 **Linux and macOS**

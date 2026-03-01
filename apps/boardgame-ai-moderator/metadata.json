@@ -1,0 +1,5 @@
+{
+  "name": "BoardGame AI Moderator",
+  "description": "An AI-powered board game moderator that helps manage turns, rules, and game state with an isometric UI.",
+  "requestFramePermissions": ["microphone"]
+}
