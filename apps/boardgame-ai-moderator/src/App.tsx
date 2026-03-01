@@ -13,8 +13,8 @@ import {
   Trash2,
   Settings
 } from 'lucide-react';
-import { GoogleGenAI } from "@google/genai";
 import { Player, PlayerColor, GameState, ChatMessage } from './types';
+import { askRule } from './api';
 import { SplashScreen } from './components/SplashScreen';
 import { HomeScreen } from './components/HomeScreen';
 import { SearchScreen } from './components/SearchScreen';
@@ -24,8 +24,6 @@ import { StepByStepScreen } from './components/StepByStepScreen';
 import { SimulationScreen } from './components/SimulationScreen';
 import { ActiveSessionScreen } from './components/ActiveSessionScreen';
 import { PostGameSummary } from './components/PostGameSummary';
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const PLAYER_COLORS = {
   [PlayerColor.RED]: 'bg-player-red',
@@ -74,22 +72,10 @@ export default function App() {
     setInputText('');
 
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: `Current Game State: ${JSON.stringify(gameState)}. User says: ${text}` }]
-          }
-        ],
-        config: {
-          systemInstruction: "You are a professional board game moderator. You help track scores, turns, and explain rules. Keep responses concise and helpful for a mobile app interface. If the user suggests a game action (like scoring points or ending a turn), acknowledge it and I will update the state. Be encouraging!",
-        }
-      });
-
+      const result = await askRule(selectedGame, text);
       const modelResponse: ChatMessage = { 
         role: 'model', 
-        text: response.text || "I'm not sure how to respond to that.", 
+        text: result.answer, 
         timestamp: Date.now() 
       };
       setMessages(prev => [...prev, modelResponse]);
@@ -213,5 +199,5 @@ export default function App() {
     );
   }
 
-  return <HomeScreen onSearch={() => setScreen('search')} />;
+  return <HomeScreen onSearch={() => setScreen('search')} onSelectGame={(name) => { setSelectedGame(name); setScreen('detail'); }} />;
 }

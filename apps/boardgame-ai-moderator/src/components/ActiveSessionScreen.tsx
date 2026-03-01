@@ -224,25 +224,28 @@ export const ActiveSessionScreen = ({ gameName = "Catan", onExit, onFinish }: Ac
       {/* Rule Q&A Overlay */}
       <RuleQAOverlay 
         isOpen={isQAOpen} 
-        onClose={() => setIsQAOpen(false)} 
+        onClose={() => setIsQAOpen(false)}
+        gameName={gameName}
       />
 
       {/* Dispute Resolution Screen */}
       <DisputeResolutionScreen 
         isOpen={isDisputeOpen} 
-        onClose={() => setIsDisputeOpen(false)} 
+        onClose={() => setIsDisputeOpen(false)}
+        gameName={gameName}
         players={players.map(p => ({
           id: p.id,
           name: p.name,
           color: p.color,
-          colorClass: p.colorClass
+          colorClass: `bg-[${p.color}]`
         }))}
       />
 
       {/* House Rules Manager */}
       <HouseRulesManager 
         isOpen={isHouseRulesOpen} 
-        onClose={() => setIsHouseRulesOpen(false)} 
+        onClose={() => setIsHouseRulesOpen(false)}
+        gameName={gameName}
       />
     </div>
   );

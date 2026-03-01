@@ -9,6 +9,7 @@ import {
   ChevronRight,
   ArrowDown
 } from 'lucide-react';
+import { resolveDispute } from '../api';
 
 interface Player {
   id: number;
@@ -21,6 +22,7 @@ interface DisputeResolutionScreenProps {
   isOpen: boolean;
   onClose: () => void;
   players: Player[];
+  gameName?: string;
 }
 
 const CITATION_LAYERS = [
@@ -30,7 +32,7 @@ const CITATION_LAYERS = [
   { id: 'house', label: 'Your House Rules', color: 'bg-purple-400', textColor: 'text-white' },
 ];
 
-export const DisputeResolutionScreen = ({ isOpen, onClose, players }: DisputeResolutionScreenProps) => {
+export const DisputeResolutionScreen = ({ isOpen, onClose, players, gameName = "Catan" }: DisputeResolutionScreenProps) => {
   const [disputeText, setDisputeText] = useState('');
   const [selectedPlayers, setSelectedPlayers] = useState<number[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -50,15 +52,26 @@ export const DisputeResolutionScreen = ({ isOpen, onClose, players }: DisputeRes
     if (!disputeText.trim()) return;
     
     setIsProcessing(true);
-    // Simulate processing
-    setTimeout(() => {
-      setRuling({
-        title: "Trade Timing Restriction",
-        body: "Official rules for Catan state that the active player may only trade with other players. Non-active players cannot trade amongst themselves. Since Bob is not the active player, he cannot initiate a trade with Alice.",
-        source: 'official'
-      });
-      setIsProcessing(false);
-    }, 1500);
+    const involvedNames = selectedPlayers
+      .map(id => players.find(p => p.id === id)?.name)
+      .filter(Boolean) as string[];
+    
+    resolveDispute(gameName, disputeText, involvedNames)
+      .then((result) => {
+        setRuling({
+          title: result.title,
+          body: result.body,
+          source: result.source,
+        });
+      })
+      .catch(() => {
+        setRuling({
+          title: "Unable to Process",
+          body: "Could not connect to the AI backend. Please check the server is running.",
+          source: "official",
+        });
+      })
+      .finally(() => setIsProcessing(false));
   };
 
   return (

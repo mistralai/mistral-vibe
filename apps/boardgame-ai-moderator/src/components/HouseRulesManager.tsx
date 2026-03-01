@@ -11,6 +11,7 @@ import {
   Sparkles,
   ChevronDown
 } from 'lucide-react';
+import { validateHouseRule } from '../api';
 
 interface HouseRule {
   id: string;
@@ -20,11 +21,12 @@ interface HouseRule {
 interface HouseRulesManagerProps {
   isOpen: boolean;
   onClose: () => void;
+  gameName?: string;
 }
 
 type ValidationState = 'idle' | 'validating' | 'valid' | 'conflict';
 
-export const HouseRulesManager = ({ isOpen, onClose }: HouseRulesManagerProps) => {
+export const HouseRulesManager = ({ isOpen, onClose, gameName = "Catan" }: HouseRulesManagerProps) => {
   const [ruleText, setRuleText] = useState('');
   const [activeRules, setActiveRules] = useState<HouseRule[]>([
     { id: '1', text: 'Friendly Robber: No robber on players with < 3 points.' },
@@ -36,14 +38,15 @@ export const HouseRulesManager = ({ isOpen, onClose }: HouseRulesManagerProps) =
     if (!ruleText.trim()) return;
     setValidationState('validating');
     
-    // Simulate validation logic
-    setTimeout(() => {
-      if (ruleText.toLowerCase().includes('robber') || ruleText.toLowerCase().includes('trade')) {
-        setValidationState('conflict');
-      } else {
+    const existingTexts = activeRules.map(r => r.text);
+    validateHouseRule(gameName, ruleText, existingTexts)
+      .then((result) => {
+        setValidationState(result.is_valid ? 'valid' : 'conflict');
+      })
+      .catch(() => {
+        // Fallback — treat as valid on API error
         setValidationState('valid');
-      }
-    }, 1200);
+      });
   };
 
   const handleAddRule = () => {

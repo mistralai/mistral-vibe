@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   ArrowRight
 } from 'lucide-react';
+import { askRule } from '../api';
 
 interface Message {
   id: string;
@@ -20,9 +21,11 @@ interface Message {
 interface RuleQAOverlayProps {
   isOpen: boolean;
   onClose: () => void;
+  gameName?: string;
+  houseRules?: string[];
 }
 
-export const RuleQAOverlay = ({ isOpen, onClose }: RuleQAOverlayProps) => {
+export const RuleQAOverlay = ({ isOpen, onClose, gameName = "Catan", houseRules = [] }: RuleQAOverlayProps) => {
   const [inputText, setInputText] = useState('');
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -57,18 +60,27 @@ export const RuleQAOverlay = ({ isOpen, onClose }: RuleQAOverlayProps) => {
     };
     
     setMessages([...messages, newMessage]);
+    const questionText = inputText;
     setInputText('');
     
-    // Simulate AI response
-    setTimeout(() => {
-      const aiResponse: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        text: "That's a great question! In this specific scenario, the rules state that you must have at least one settlement adjacent to the hex to collect resources.",
-        citation: "Official Rule 4.1"
-      };
-      setMessages(prev => [...prev, aiResponse]);
-    }, 1000);
+    askRule(gameName, questionText, houseRules)
+      .then((result) => {
+        const aiResponse: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'model',
+          text: result.answer,
+          citation: result.citation ?? undefined,
+          hasConflict: result.has_house_rule_conflict,
+        };
+        setMessages(prev => [...prev, aiResponse]);
+      })
+      .catch(() => {
+        setMessages(prev => [...prev, {
+          id: (Date.now() + 1).toString(),
+          role: 'model',
+          text: "Sorry, I couldn't process that question. Please try again.",
+        }]);
+      });
   };
 
   return (

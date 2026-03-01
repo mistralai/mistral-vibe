@@ -12,95 +12,26 @@ import {
   Dices,
   Trophy
 } from 'lucide-react';
+import { getGameInfo, type StepData } from '../gameDatabase';
 
-interface Step {
-  id: number;
-  title: string;
-  description: string;
-  illustration: React.ReactNode;
-  proTip?: string;
-  accentColor: string;
+const ACCENT_COLORS = ["bg-amber-light", "bg-blue-50", "bg-green-50", "bg-purple-50", "bg-rose-50", "bg-cyan-50"];
+
+const STEP_ICONS = [Box, Layout, Dices, Hand, Trophy, Layers];
+
+function makeIllustration(stepIndex: number, accentColor: string) {
+  const Icon = STEP_ICONS[stepIndex % STEP_ICONS.length];
+  return (
+    <div className="isometric-container scale-110">
+      <motion.div 
+        initial={{ rotateX: 45, rotateZ: -45, y: 20, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        className="w-48 h-48 bg-board-beige border-4 border-board-beige-dark shadow-iso-2 relative flex items-center justify-center"
+      >
+        <Icon size={64} className="text-amber-brand opacity-60" />
+      </motion.div>
+    </div>
+  );
 }
-
-const steps: Step[] = [
-  {
-    id: 1,
-    title: "Set up the board",
-    description: "Place the hexagonal terrain tiles in a random pattern to create the island of Catan. Surround them with the ocean tiles.",
-    accentColor: "bg-amber-light",
-    proTip: "Try to keep similar resources apart for a more balanced game!",
-    illustration: (
-      <div className="isometric-container scale-110">
-        <motion.div 
-          initial={{ rotateX: 45, rotateZ: -45, y: 20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          className="w-48 h-48 bg-board-beige border-4 border-board-beige-dark shadow-iso-2 relative"
-        >
-          <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 gap-1 p-2">
-            {Array.from({ length: 9 }).map((_, i) => (
-              <div key={i} className="bg-emerald-500/20 border border-emerald-600/30 rounded-sm" />
-            ))}
-          </div>
-        </motion.div>
-      </div>
-    )
-  },
-  {
-    id: 2,
-    title: "Place your settlements",
-    description: "Each player places two settlements and two roads. Settlements must be at least two intersections apart.",
-    accentColor: "bg-blue-50",
-    illustration: (
-      <div className="isometric-container scale-110">
-        <div className="relative w-48 h-48 bg-board-beige border-4 border-board-beige-dark shadow-iso-2">
-          <motion.div 
-            initial={{ scale: 0, y: -20 }}
-            animate={{ scale: 1, y: 0 }}
-            className="absolute top-4 left-4 w-6 h-6 bg-player-red rounded-sm shadow-md"
-            style={{ transform: 'translateZ(10px)' }}
-          />
-          <motion.div 
-            initial={{ scale: 0, y: -20 }}
-            animate={{ scale: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-            className="absolute bottom-10 right-10 w-6 h-6 bg-player-blue rounded-sm shadow-md"
-            style={{ transform: 'translateZ(10px)' }}
-          />
-        </div>
-      </div>
-    )
-  },
-  {
-    id: 3,
-    title: "Roll for resources",
-    description: "On your turn, roll both dice. The sum determines which terrain hexes produce resources for players with adjacent settlements.",
-    accentColor: "bg-green-50",
-    proTip: "Numbers 6 and 8 are rolled most frequently!",
-    illustration: (
-      <div className="isometric-container scale-110">
-        <div className="flex gap-4">
-          <motion.div 
-            animate={{ rotate: [0, 90, 180, 270, 360], y: [0, -20, 0] }}
-            transition={{ duration: 2, repeat: Infinity }}
-            className="w-12 h-12 bg-white rounded-lg shadow-iso-2 flex items-center justify-center border-2 border-navy-deep/5"
-          >
-            <div className="w-2 h-2 bg-navy-deep rounded-full" />
-          </motion.div>
-          <motion.div 
-            animate={{ rotate: [360, 270, 180, 90, 0], y: [0, -20, 0] }}
-            transition={{ duration: 2, repeat: Infinity, delay: 0.1 }}
-            className="w-12 h-12 bg-white rounded-lg shadow-iso-2 flex items-center justify-center border-2 border-navy-deep/5"
-          >
-            <div className="grid grid-cols-2 gap-1">
-              <div className="w-2 h-2 bg-navy-deep rounded-full" />
-              <div className="w-2 h-2 bg-navy-deep rounded-full" />
-            </div>
-          </motion.div>
-        </div>
-      </div>
-    )
-  }
-];
 
 interface StepByStepScreenProps {
   onBack: () => void;
@@ -110,8 +41,18 @@ interface StepByStepScreenProps {
 
 export const StepByStepScreen = ({ onBack, onComplete, gameName = "Catan" }: StepByStepScreenProps) => {
   const [currentStep, setCurrentStep] = useState(0);
-  const step = steps[currentStep];
-  const totalSteps = steps.length;
+  const game = getGameInfo(gameName);
+  
+  const dynamicSteps = game?.steps ?? [
+    { id: 1, title: `Set up ${gameName}`, description: `Prepare the ${gameName} board and components according to the rulebook.` },
+    { id: 2, title: "Learn the basics", description: `Understand the core mechanics and turn structure of ${gameName}.` },
+    { id: 3, title: "Play your first turn", description: "Follow the turn sequence and make your first moves." },
+    { id: 4, title: "Win the game", description: `Work towards the victory condition and enjoy ${gameName}!` },
+  ];
+  
+  const step = dynamicSteps[currentStep];
+  const totalSteps = dynamicSteps.length;
+  const accentColor = ACCENT_COLORS[currentStep % ACCENT_COLORS.length];
 
   const handleNext = () => {
     if (currentStep < totalSteps - 1) {
@@ -132,7 +73,7 @@ export const StepByStepScreen = ({ onBack, onComplete, gameName = "Catan" }: Ste
   return (
     <div className="flex flex-col h-screen bg-surface-cream overflow-hidden max-w-md mx-auto relative">
       {/* Top Illustration Zone (50%) */}
-      <div className={`h-1/2 w-full ${step.accentColor} transition-colors duration-500 flex items-center justify-center relative`}>
+      <div className={`h-1/2 w-full ${accentColor} transition-colors duration-500 flex items-center justify-center relative`}>
         <AnimatePresence mode="wait">
           <motion.div
             key={currentStep}
@@ -142,7 +83,7 @@ export const StepByStepScreen = ({ onBack, onComplete, gameName = "Catan" }: Ste
             transition={{ duration: 0.4, ease: "easeOut" }}
             className="w-full h-full flex items-center justify-center"
           >
-            {step.illustration}
+            {makeIllustration(currentStep, accentColor)}
           </motion.div>
         </AnimatePresence>
         
@@ -207,7 +148,7 @@ export const StepByStepScreen = ({ onBack, onComplete, gameName = "Catan" }: Ste
 
           {/* Step Dots */}
           <div className="flex gap-2">
-            {steps.map((_, i) => (
+            {dynamicSteps.map((_, i) => (
               <div 
                 key={i}
                 className={`w-2 h-2 rounded-full transition-all duration-300 ${

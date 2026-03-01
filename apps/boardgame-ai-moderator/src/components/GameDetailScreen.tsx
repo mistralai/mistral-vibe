@@ -14,6 +14,7 @@ import {
   Settings
 } from 'lucide-react';
 import { HouseRulesManager } from './HouseRulesManager';
+import { getGameInfo } from '../gameDatabase';
 
 const ModeTile = ({ 
   icon: Icon, 
@@ -57,6 +58,11 @@ interface GameDetailScreenProps {
 export const GameDetailScreen = ({ onBack, onStartSession, onSelectMode, gameName = "Catan" }: GameDetailScreenProps) => {
   const [houseRulesEnabled, setHouseRulesEnabled] = useState(false);
   const [isHouseRulesOpen, setIsHouseRulesOpen] = useState(false);
+  const gameInfo = getGameInfo(gameName);
+  const description = gameInfo?.description ?? `Search and explore the rules for ${gameName}. Select a learning mode below to get started.`;
+  const playerCount = gameInfo?.playerCount ?? '2-6 players';
+  const duration = gameInfo?.duration ?? '60 min';
+  const complexityLabel = !gameInfo ? 'Medium' : gameInfo.complexity === 1 ? 'Easy' : gameInfo.complexity === 3 ? 'Complex' : 'Medium';
 
   return (
     <div className="flex flex-col h-screen bg-surface-cream overflow-hidden max-w-md mx-auto relative">
@@ -93,15 +99,15 @@ export const GameDetailScreen = ({ onBack, onStartSession, onSelectMode, gameNam
         <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-2 px-4">
           <div className="bg-white text-navy-deep px-3 py-2 rounded-[20px] shadow-iso-1 flex items-center gap-1.5 border border-navy-deep/5">
             <Users size={14} />
-            <span className="text-[12px] font-sans font-medium">2–6 Players</span>
+            <span className="text-[12px] font-sans font-medium">{playerCount}</span>
           </div>
           <div className="bg-white text-navy-deep px-3 py-2 rounded-[20px] shadow-iso-1 flex items-center gap-1.5 border border-navy-deep/5">
             <Hourglass size={14} />
-            <span className="text-[12px] font-sans font-medium">90 min avg</span>
+            <span className="text-[12px] font-sans font-medium">{duration}</span>
           </div>
           <div className="bg-white text-navy-deep px-3 py-2 rounded-[20px] shadow-iso-1 flex items-center gap-1.5 border border-navy-deep/5">
             <Layers size={14} />
-            <span className="text-[12px] font-sans font-medium">Medium</span>
+            <span className="text-[12px] font-sans font-medium">{complexityLabel}</span>
           </div>
         </div>
       </section>
@@ -112,7 +118,7 @@ export const GameDetailScreen = ({ onBack, onStartSession, onSelectMode, gameNam
           {gameName}
         </h1>
         <p className="font-sans text-[14px] text-navy-mid leading-relaxed mb-8">
-          In Catan, players try to be the dominant force on the island of Catan by building settlements, cities, and roads. On each turn dice are rolled to determine what resources the island produces.
+          {description}
         </p>
 
         {/* Mode Selection */}
@@ -172,7 +178,8 @@ export const GameDetailScreen = ({ onBack, onStartSession, onSelectMode, gameNam
       {/* House Rules Manager */}
       <HouseRulesManager 
         isOpen={isHouseRulesOpen} 
-        onClose={() => setIsHouseRulesOpen(false)} 
+        onClose={() => setIsHouseRulesOpen(false)}
+        gameName={gameName}
       />
 
       {/* Sticky Bottom CTA */}

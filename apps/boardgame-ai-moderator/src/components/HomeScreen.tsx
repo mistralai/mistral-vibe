@@ -11,6 +11,7 @@ import {
   ChevronRight,
   Users
 } from 'lucide-react';
+import { allGames } from '../gameDatabase';
 
 const IsometricBoardIcon = ({ size = 32, color = "currentColor" }: { size?: number, color?: string }) => (
   <div className="relative" style={{ width: size, height: size, perspective: '1000px' }}>
@@ -32,10 +33,12 @@ const IsometricBoardIcon = ({ size = 32, color = "currentColor" }: { size?: numb
   </div>
 );
 
-const GameCard = ({ name, players, complexity }: { name: string, players: string, complexity: number }) => (
+const GameCard = ({ name, players, complexity, onClick }: { name: string, players: string, complexity: number, onClick?: () => void }) => (
   <motion.div 
     whileHover={{ y: -5 }}
-    className="min-w-[160px] h-[200px] bg-white rounded-[16px] shadow-iso-1 overflow-hidden flex flex-col"
+    whileTap={{ scale: 0.97 }}
+    onClick={onClick}
+    className="min-w-[160px] h-[200px] bg-white rounded-[16px] shadow-iso-1 overflow-hidden flex flex-col cursor-pointer"
   >
     <div className="h-[60%] bg-amber-light flex items-center justify-center p-4">
       <div className="isometric-container">
@@ -67,9 +70,16 @@ const GameCard = ({ name, players, complexity }: { name: string, players: string
 
 interface HomeScreenProps {
   onSearch: () => void;
+  onSelectGame?: (gameName: string) => void;
 }
 
-export const HomeScreen = ({ onSearch }: HomeScreenProps) => {
+export const HomeScreen = ({ onSearch, onSelectGame }: HomeScreenProps) => {
+  const popularGames = allGames().slice(0, 6);
+
+  const handleGameClick = (name: string) => {
+    if (onSelectGame) onSelectGame(name);
+  };
+
   return (
     <div className="flex flex-col h-screen bg-surface-cream overflow-hidden max-w-md mx-auto relative">
       {/* Top Navigation Bar */}
@@ -128,13 +138,12 @@ export const HomeScreen = ({ onSearch }: HomeScreenProps) => {
 
         {/* Search Bar */}
         <div className="px-6 mt-6">
-          <div className="h-14 bg-white rounded-[16px] border-[1.5px] border-navy-deep/10 shadow-iso-1 flex items-center px-4 gap-3">
+          <div 
+            onClick={onSearch}
+            className="h-14 bg-white rounded-[16px] border-[1.5px] border-navy-deep/10 shadow-iso-1 flex items-center px-4 gap-3 cursor-pointer"
+          >
             <IsometricBoardIcon size={20} color="#8C93B8" />
-            <input 
-              type="text" 
-              placeholder="Search for a game..." 
-              className="flex-1 bg-transparent border-none focus:ring-0 text-[15px] placeholder:text-navy-light text-navy-deep"
-            />
+            <span className="flex-1 text-[15px] text-navy-light">Search for a game...</span>
             <button className="text-amber-brand p-1">
               <Mic size={20} />
             </button>
@@ -149,10 +158,15 @@ export const HomeScreen = ({ onSearch }: HomeScreenProps) => {
             </h3>
           </div>
           <div className="flex gap-4 overflow-x-auto px-6 pb-4 scrollbar-hide">
-            <GameCard name="Catan" players="3-4 players" complexity={2} />
-            <GameCard name="Chess" players="2 players" complexity={3} />
-            <GameCard name="Monopoly" players="2-6 players" complexity={1} />
-            <GameCard name="Wingspan" players="1-5 players" complexity={2} />
+            {popularGames.map((game) => (
+              <GameCard 
+                key={game.name}
+                name={game.name} 
+                players={game.playerCount} 
+                complexity={game.complexity} 
+                onClick={() => handleGameClick(game.name)}
+              />
+            ))}
           </div>
         </section>
 
@@ -168,7 +182,11 @@ export const HomeScreen = ({ onSearch }: HomeScreenProps) => {
               { name: 'Catan', date: 'Played 2h ago' },
               { name: 'Ticket to Ride', date: 'Played yesterday' }
             ].map((game, i) => (
-              <div key={i} className="h-[72px] bg-white rounded-[16px] shadow-sm flex items-center p-3 gap-4 border border-navy-deep/5">
+              <div 
+                key={i}
+                onClick={() => handleGameClick(game.name)}
+                className="h-[72px] bg-white rounded-[16px] shadow-sm flex items-center p-3 gap-4 border border-navy-deep/5 cursor-pointer active:scale-[0.99] transition-transform"
+              >
                 <div className="w-12 h-12 bg-amber-light rounded-[12px] flex items-center justify-center shrink-0">
                   <IsometricBoardIcon size={24} />
                 </div>
@@ -176,7 +194,10 @@ export const HomeScreen = ({ onSearch }: HomeScreenProps) => {
                   <h4 className="font-display font-bold text-[14px] text-navy-deep">{game.name}</h4>
                   <p className="font-sans text-[12px] text-navy-light">{game.date}</p>
                 </div>
-                <button className="h-8 px-4 bg-amber-brand text-white text-[12px] font-bold rounded-[12px] shadow-sm active:scale-95 transition-transform">
+                <button 
+                  onClick={(e) => { e.stopPropagation(); handleGameClick(game.name); }}
+                  className="h-8 px-4 bg-amber-brand text-white text-[12px] font-bold rounded-[12px] shadow-sm active:scale-95 transition-transform"
+                >
                   Continue
                 </button>
               </div>

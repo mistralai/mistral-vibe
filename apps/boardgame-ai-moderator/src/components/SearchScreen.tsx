@@ -1,11 +1,14 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { 
   ArrowLeft, 
   SlidersHorizontal, 
   Mic,
-  Users
+  Users,
+  Loader2
 } from 'lucide-react';
+import { searchGames, type SearchResult } from '../api';
+import { localSearch } from '../gameDatabase';
 
 const IsometricBoardIcon = ({ size = 32, color = "currentColor" }: { size?: number, color?: string }) => (
   <div className="relative" style={{ width: size, height: size, perspective: '1000px' }}>
@@ -76,15 +79,47 @@ interface SearchScreenProps {
   searchQuery?: string;
 }
 
-export const SearchScreen = ({ onBack, onSelectGame, searchQuery = "Catan" }: SearchScreenProps) => {
-  const results = [
-    { name: "Catan", players: "3-4 players", complexity: 2 },
-    { name: "Catan: Seafarers", players: "3-4 players", complexity: 2 },
-    { name: "Catan: Cities & Knights", players: "3-4 players", complexity: 3 },
-    { name: "Catan Junior", players: "2-4 players", complexity: 1 },
-    { name: "Catan: Rivals", players: "2 players", complexity: 2 },
-    { name: "Catan: Starfarers", players: "2-4 players", complexity: 3 },
-  ];
+export const SearchScreen = ({ onBack, onSelectGame, searchQuery = "" }: SearchScreenProps) => {
+  const [query, setQuery] = useState(searchQuery);
+  const [results, setResults] = useState<{ name: string; players: string; complexity: number }[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Instant local search + optional API enrichment
+  useEffect(() => {
+    // Immediately show local results
+    const local = localSearch(query).map((g) => ({
+      name: g.name,
+      players: g.playerCount,
+      complexity: g.complexity,
+    }));
+    setResults(local);
+
+    // If query is non-empty, also try the API for potentially richer results
+    if (!query.trim()) return;
+
+    const timer = setTimeout(() => {
+      setIsLoading(true);
+      searchGames(query)
+        .then((apiResults) => {
+          if (apiResults.length > 0) {
+            // Merge: API results first (deduplicated), then local-only
+            const apiMapped = apiResults.map((r) => ({
+              name: r.name,
+              players: r.player_count,
+              complexity: r.complexity,
+            }));
+            const apiNames = new Set(apiMapped.map((r) => r.name.toLowerCase()));
+            const localOnly = local.filter((r) => !apiNames.has(r.name.toLowerCase()));
+            setResults([...apiMapped, ...localOnly]);
+          }
+        })
+        .catch(() => {
+          // Keep local results — already shown
+        })
+        .finally(() => setIsLoading(false));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [query]);
 
   return (
     <div className="flex flex-col h-screen bg-surface-cream overflow-hidden max-w-md mx-auto relative">
@@ -105,7 +140,8 @@ export const SearchScreen = ({ onBack, onSelectGame, searchQuery = "Catan" }: Se
           <IsometricBoardIcon size={20} color="#8C93B8" />
           <input 
             type="text" 
-            defaultValue={searchQuery}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
             placeholder="Search for a game..." 
             className="flex-1 bg-transparent border-none focus:ring-0 text-[15px] placeholder:text-navy-light text-navy-deep"
           />
@@ -117,11 +153,17 @@ export const SearchScreen = ({ onBack, onSelectGame, searchQuery = "Catan" }: Se
 
       {/* Results Grid */}
       <main className="flex-1 overflow-y-auto px-6 pb-8">
-        <div className="grid grid-cols-2 gap-4 mt-2">
-          {results.map((game, i) => (
-            <ResultCard key={i} name={game.name} players={game.players} complexity={game.complexity} onClick={() => onSelectGame(game.name)} />
-          ))}
-        </div>
+        {isLoading ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 size={32} className="animate-spin text-amber-brand" />
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-4 mt-2">
+            {results.map((game, i) => (
+              <ResultCard key={i} name={game.name} players={game.players} complexity={game.complexity} onClick={() => onSelectGame(game.name)} />
+            ))}
+          </div>
+        )}
       </main>
     </div>
   );

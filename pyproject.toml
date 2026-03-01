@@ -57,6 +57,14 @@ dependencies = [
     "zstandard>=0.25.0",
 ]
 
+[project.optional-dependencies]
+backend = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "sqlalchemy>=2.0",
+    "python-multipart>=0.0.9",
+]
+
 [project.urls]
 Homepage = "https://github.com/mistralai/mistral-vibe"
 Repository = "https://github.com/mistralai/mistral-vibe"
@@ -71,7 +79,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-include = ["vibe/"]
+include = ["vibe/", "backend/"]
 
 
 [project.scripts]
@@ -107,12 +115,12 @@ build = ["pyinstaller>=6.17.0"]
 pythonVersion = "3.12"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
-include = ["vibe/**/*.py", "tests/**/*.py"]
+include = ["vibe/**/*.py", "backend/**/*.py", "tests/**/*.py"]
 venvPath = "."
 venv = ".venv"
 
 [tool.ruff]
-include = ["vibe/**/*.py", "tests/**/*.py"]
+include = ["vibe/**/*.py", "backend/**/*.py", "tests/**/*.py"]
 line-length = 88
 target-version = "py312"
 preview = true

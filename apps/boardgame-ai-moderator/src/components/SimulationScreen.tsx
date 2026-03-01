@@ -7,38 +7,7 @@ import {
   ChevronRight,
   X
 } from 'lucide-react';
-
-interface SimulationStep {
-  id: number;
-  player: string;
-  playerColor: string;
-  narration: string;
-  piecePosition: { x: number; y: number };
-}
-
-const simulationSteps: SimulationStep[] = [
-  {
-    id: 1,
-    player: "PLAYER 1",
-    playerColor: "text-player-red",
-    narration: "Player 1 rolls a 6 and moves their pawn forward, landing on a bonus square.",
-    piecePosition: { x: 20, y: 20 }
-  },
-  {
-    id: 2,
-    player: "PLAYER 2",
-    playerColor: "text-player-blue",
-    narration: "Player 2 rolls a 4 and lands on a resource tile, collecting one wood.",
-    piecePosition: { x: 60, y: 40 }
-  },
-  {
-    id: 3,
-    player: "PLAYER 1",
-    playerColor: "text-player-red",
-    narration: "Player 1 uses their bonus to build a road, extending their reach towards the mountains.",
-    piecePosition: { x: 40, y: 60 }
-  }
-];
+import { getGameInfo, type SimStep } from '../gameDatabase';
 
 interface SimulationScreenProps {
   onExit: () => void;
@@ -49,6 +18,13 @@ interface SimulationScreenProps {
 export const SimulationScreen = ({ onExit, onStartRealGame, gameName = "Catan" }: SimulationScreenProps) => {
   const [currentStep, setCurrentStep] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  
+  const game = getGameInfo(gameName);
+  const simulationSteps: SimStep[] = game?.simulationSteps ?? [
+    { id: 1, player: "PLAYER 1", playerColor: "text-player-red", narration: `Player 1 takes their first action in ${gameName}.`, piecePosition: { x: 20, y: 20 } },
+    { id: 2, player: "PLAYER 2", playerColor: "text-player-blue", narration: `Player 2 responds with a strategic move.`, piecePosition: { x: 60, y: 40 } },
+    { id: 3, player: "PLAYER 1", playerColor: "text-player-red", narration: `Player 1 builds on their advantage and advances their position.`, piecePosition: { x: 40, y: 60 } },
+  ];
   
   const step = simulationSteps[currentStep];
 

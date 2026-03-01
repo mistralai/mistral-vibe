@@ -8,6 +8,7 @@ import {
   Crown,
   Users
 } from 'lucide-react';
+import { getGameInfo } from '../gameDatabase';
 
 const IsometricPawn = ({ active, completed }: { active?: boolean, completed?: boolean, key?: React.Key }) => (
   <motion.div 
@@ -66,6 +67,8 @@ interface QuickStartScreenProps {
 
 export const QuickStartScreen = ({ onBack, onSkip, onNext, gameName = "Catan" }: QuickStartScreenProps) => {
   const [step, setStep] = useState(0);
+  const game = getGameInfo(gameName);
+  const qs = game?.quickStart;
 
   return (
     <div className="flex flex-col h-screen bg-surface-cream overflow-hidden max-w-md mx-auto relative">
@@ -91,25 +94,23 @@ export const QuickStartScreen = ({ onBack, onSkip, onNext, gameName = "Catan" }:
       <main className="flex-1 overflow-y-auto p-4 space-y-4 pb-32">
         <QuickStartCard 
           label="THE GOAL" 
-          title="Be the first to 10 points" 
-          description={`In ${gameName}, you win by building settlements and cities to earn victory points. The first player to reach 10 points on their turn is the winner!`}
+          title={qs ? "Your objective" : "Be the first to win"}
+          description={qs?.goal ?? `In ${gameName}, compete against other players to achieve the victory condition. Learn the goal and start playing!`}
           icon={Trophy}
         />
 
         <QuickStartCard 
           label="HOW TURNS WORK" 
-          title="Roll, Trade, Build" 
-          description="Each turn follows a simple sequence: Roll the dice for resources, trade with other players or the bank, and then build roads or settlements."
+          title="Turn structure"
+          description={qs?.turns ?? `Each turn in ${gameName} follows a sequence of actions. Take your actions, then pass to the next player.`}
           icon={RotateCw}
         >
           <div className="relative w-full h-full flex items-center justify-center">
             <div className="absolute inset-0 bg-amber-light/50" />
             <div className="relative w-40 h-40 flex items-center justify-center">
-              {/* Table Representation */}
               <div className="w-32 h-32 rounded-full border-4 border-board-beige-dark bg-board-beige shadow-lg flex items-center justify-center">
                 <Users size={40} className="text-navy-mid opacity-20" />
               </div>
-              {/* Animated Turn Arrow */}
               <motion.div 
                 className="absolute inset-0 border-[3px] border-dashed border-amber-brand rounded-full"
                 animate={{ rotate: 360 }}
@@ -124,8 +125,8 @@ export const QuickStartScreen = ({ onBack, onSkip, onNext, gameName = "Catan" }:
 
         <QuickStartCard 
           label="HOW TO WIN" 
-          title="Expand your empire" 
-          description="Connect your settlements with roads to claim more territory. Use development cards to gain secret advantages and surprise your opponents."
+          title="Path to victory"
+          description={qs?.winning ?? `Master the strategy of ${gameName} to outplay your opponents and claim victory!`}
           icon={Crown}
         />
       </main>
