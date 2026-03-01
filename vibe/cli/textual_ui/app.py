@@ -391,6 +391,9 @@ class VibeApp(App):  # noqa: PLR0904
                 await self._handle_teleport_command(value[1:])
                 return
 
+        if await self._handle_plugin_command(value):
+            return
+
         if await self._handle_command(value):
             return
 
@@ -527,11 +530,71 @@ class VibeApp(App):  # noqa: PLR0904
     def _get_skill_entries(self) -> list[tuple[str, str]]:
         if not self.agent_loop:
             return []
-        return [
+        entries = [
             (f"/{name}", info.description)
             for name, info in self.agent_loop.skill_manager.available_skills.items()
             if info.user_invocable
         ]
+        # Add /plugin <skill> variants for intuitive access
+        entries.append(("/plugin", "Plugins: /plugin <command> [args]"))
+        for name, info in self.agent_loop.skill_manager.available_skills.items():
+            if info.user_invocable:
+                entries.append((f"/plugin {name}", info.description))
+        return entries
+
+    async def _handle_plugin_command(self, user_input: str) -> bool:
+        """Handle /plugin and /plugin <skill> [args] for intuitive plugin access."""
+        if not user_input.strip().lower().startswith("/plugin"):
+            return False
+        if not self.agent_loop:
+            return False
+
+        rest = user_input[len("/plugin"):].strip()
+        if not rest:
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    "Available plugins: "
+                    + ", ".join(
+                        name
+                        for name, info in self.agent_loop.skill_manager.available_skills.items()
+                        if info.user_invocable
+                    )
+                    + ". E.g.: /plugin ui-ux screenshot.png"
+                )
+            )
+            return True
+
+        parts = rest.split(maxsplit=1)
+        skill_name = parts[0].lower()
+        args = parts[1] if len(parts) > 1 else ""
+
+        skill_info = self.agent_loop.skill_manager.get_skill(skill_name)
+        if not skill_info:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Unknown plugin: {skill_name}. "
+                    "E.g.: /plugin ui-ux, /plugin context-awareness",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return True
+
+        self.agent_loop.telemetry_client.send_slash_command_used(skill_name, "skill")
+        try:
+            skill_content = skill_info.skill_path.read_text(encoding="utf-8")
+        except OSError as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to read plugin: {e}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return True
+
+        if args:
+            skill_content = f"{skill_content}\n\n---\nContexte utilisateur: {args}"
+        await self._handle_user_message(skill_content)
+        return True
 
     async def _handle_skill(self, user_input: str) -> bool:
         if not user_input.startswith("/"):

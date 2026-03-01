@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from vibe.core.logger import logger
 from vibe.core.paths.config_paths import discover_local_skills_dirs
-from vibe.core.paths.global_paths import GLOBAL_SKILLS_DIR
+from vibe.core.paths.global_paths import BUNDLED_SKILLS_DIR, GLOBAL_SKILLS_DIR
 from vibe.core.skills.models import SkillInfo, SkillMetadata
 from vibe.core.skills.parser import SkillParseError, parse_frontmatter
 from vibe.core.utils import name_matches
@@ -51,6 +51,10 @@ class SkillManager:
     @staticmethod
     def _compute_search_paths(config: VibeConfig) -> list[Path]:
         paths: list[Path] = []
+
+        # Bundled skills (e.g. ux-designer) when enabled
+        if config.include_bundled_skills and BUNDLED_SKILLS_DIR.path.is_dir():
+            paths.append(BUNDLED_SKILLS_DIR.path)
 
         for path in config.skill_paths:
             if path.is_dir():
