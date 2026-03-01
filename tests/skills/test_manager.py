@@ -14,7 +14,9 @@ from vibe.core.trusted_folders import trusted_folders_manager
 @pytest.fixture
 def config() -> VibeConfig:
     return build_test_vibe_config(
-        system_prompt_id="tests", include_project_context=False
+        system_prompt_id="tests",
+        include_project_context=False,
+        include_bundled_skills=False,
     )
 
 
@@ -35,6 +37,7 @@ class TestSkillManagerDiscovery:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -50,6 +53,7 @@ class TestSkillManagerDiscovery:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -71,6 +75,7 @@ class TestSkillManagerDiscovery:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -90,6 +95,7 @@ class TestSkillManagerDiscovery:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -114,6 +120,7 @@ class TestSkillManagerParsing:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -133,6 +140,7 @@ class TestSkillManagerParsing:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -154,6 +162,7 @@ class TestSkillManagerParsing:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -175,6 +184,7 @@ class TestSkillManagerParsing:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -194,7 +204,7 @@ class TestSkillManagerSearchPaths:
         create_skill(vibe_skills, "vibe-skill", "Skill from .vibe/skills")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False, skill_paths=[]
+            system_prompt_id="tests", include_project_context=False, include_bundled_skills=False, skill_paths=[]
         )
         manager = SkillManager(lambda: config)
 
@@ -213,7 +223,7 @@ class TestSkillManagerSearchPaths:
         create_skill(agents_skills, "agents-skill", "Skill from .agents/skills")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False, skill_paths=[]
+            system_prompt_id="tests", include_project_context=False, include_bundled_skills=False, skill_paths=[]
         )
         manager = SkillManager(lambda: config)
 
@@ -235,7 +245,7 @@ class TestSkillManagerSearchPaths:
         create_skill(agents_skills, "agents-only", "From .agents")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False, skill_paths=[]
+            system_prompt_id="tests", include_project_context=False, include_bundled_skills=False, skill_paths=[]
         )
         manager = SkillManager(lambda: config)
 
@@ -255,7 +265,7 @@ class TestSkillManagerSearchPaths:
         create_skill(agents_skills, "shared-skill", "Second from .agents")
 
         config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False, skill_paths=[]
+            system_prompt_id="tests", include_project_context=False, include_bundled_skills=False, skill_paths=[]
         )
         manager = SkillManager(lambda: config)
 
@@ -277,6 +287,7 @@ class TestSkillManagerSearchPaths:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir_1, skills_dir_2],
         )
         manager = SkillManager(lambda: config)
@@ -299,6 +310,7 @@ class TestSkillManagerSearchPaths:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir_1, skills_dir_2],
         )
         manager = SkillManager(lambda: config)
@@ -315,6 +327,7 @@ class TestSkillManagerSearchPaths:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir, tmp_path / "nonexistent"],
         )
         manager = SkillManager(lambda: config)
@@ -330,6 +343,7 @@ class TestSkillManagerGetSkill:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -351,6 +365,7 @@ class TestSkillManagerFiltering:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
             enabled_skills=["skill-a", "skill-c"],
         )
@@ -370,6 +385,7 @@ class TestSkillManagerFiltering:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
             disabled_skills=["skill-b"],
         )
@@ -390,6 +406,7 @@ class TestSkillManagerFiltering:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
             enabled_skills=["skill-a"],
             disabled_skills=["skill-a"],  # Should be ignored
@@ -408,6 +425,7 @@ class TestSkillManagerFiltering:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
             enabled_skills=["search-*"],
         )
@@ -427,6 +445,7 @@ class TestSkillManagerFiltering:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
             enabled_skills=["re:skill-v\\d+"],
         )
@@ -445,6 +464,7 @@ class TestSkillManagerFiltering:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
             disabled_skills=["disabled-skill"],
         )
@@ -461,6 +481,7 @@ class TestSkillUserInvocable:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -475,6 +496,7 @@ class TestSkillUserInvocable:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -493,6 +515,7 @@ class TestSkillUserInvocable:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
@@ -509,6 +532,7 @@ class TestSkillUserInvocable:
         config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
+            include_bundled_skills=False,
             skill_paths=[skills_dir],
         )
         manager = SkillManager(lambda: config)
