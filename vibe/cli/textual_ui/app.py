@@ -123,7 +123,7 @@ from vibe.core.utils import (
     get_user_cancellation_message,
     is_dangerous_directory,
 )
-
+from vibe.cli.textual_ui.voice_handler import MistralVoiceHandler
 
 class BottomApp(StrEnum):
     """Bottom panel app types.
@@ -201,6 +201,7 @@ class VibeApp(App):  # noqa: PLR0904
         Binding("ctrl+d", "force_quit", "Quit", show=False, priority=True),
         Binding("ctrl+z", "suspend_with_message", "Suspend", show=False, priority=True),
         Binding("escape", "interrupt", "Interrupt", show=False, priority=True),
+        Binding("ctrl+s", "toggle_voice_ptt", "Voice", show=False, priority=True),
         Binding("ctrl+o", "toggle_tool", "Toggle Tool", show=False),
         Binding("ctrl+y", "copy_selection", "Copy", show=False, priority=True),
         Binding("ctrl+shift+c", "copy_selection", "Copy", show=False, priority=True),
@@ -269,7 +270,9 @@ class VibeApp(App):  # noqa: PLR0904
         self._cached_messages_area: Widget | None = None
         self._cached_chat: ChatScroll | None = None
         self._cached_loading_area: Widget | None = None
+        self._mic_indicator: NoMarkupStatic | None = None
         self._switch_agent_generation = 0
+        self.voice_handler = MistralVoiceHandler(on_text_callback=self._on_voice_text)
 
     @property
     def config(self) -> VibeConfig:
@@ -299,6 +302,7 @@ class VibeApp(App):  # noqa: PLR0904
         with Horizontal(id="bottom-bar"):
             yield PathDisplay(self.config.displayed_workdir or Path.cwd())
             yield NoMarkupStatic(id="spacer")
+            yield NoMarkupStatic("●", id="mic-indicator")
             yield ContextProgress()
 
     async def on_mount(self) -> None:
@@ -315,6 +319,8 @@ class VibeApp(App):  # noqa: PLR0904
         )
 
         self._chat_input_container = self.query_one(ChatInputContainer)
+        self._mic_indicator = self.query_one("#mic-indicator", NoMarkupStatic)
+        self._set_mic_indicator(False)
         context_progress = self.query_one(ContextProgress)
 
         def update_context_progress(stats: AgentStats) -> None:
@@ -1629,6 +1635,76 @@ class VibeApp(App):  # noqa: PLR0904
         # force a full layout refresh so the UI isn't garbled.
         self.refresh(layout=True)
 
+    def action_toggle_voice_ptt(self) -> None:
+        self._toggle_voice_transcription()
+
+    def _toggle_voice_transcription(self) -> None:
+        if not self.voice_handler.is_recording:
+            self.notify("Mic on", severity = "information")
+            self._set_mic_indicator(True)
+            self.run_worker(
+                self.voice_handler.start_recording(),
+                name="voice_transcription",
+            )
+        else:
+            self.voice_handler.stop_recording()
+            self._set_mic_indicator(False)
+            self.notify("Mic off", severity= "warning")
+
+    def _set_mic_indicator(self, is_active: bool) -> None:
+        if not self._mic_indicator:
+            return
+
+        self._mic_indicator.styles.display = "block" if is_active else "none"
+
+    def _on_voice_text(self, text: str) -> None:
+        """Append transcribed text to the current input."""
+        if not text:
+            return
+
+        if not self._chat_input_container:
+            return
+
+        current_value = self._chat_input_container.value
+        self._chat_input_container.value = self._merge_voice_chunk(current_value, text)
+
+        if input_widget := self._chat_input_container.input_widget:
+            input_widget.set_cursor_offset(len(input_widget.text))
+
+    @staticmethod
+    def _merge_voice_chunk(current_value: str, chunk: str) -> str:
+        if not current_value:
+            return chunk
+
+        if not chunk:
+            return current_value
+
+        if chunk.startswith((" ", "\t")):
+            chunk = f" {chunk.lstrip(' \t')}"
+
+        if current_value.endswith((" ", "\t", "\n")) and chunk.startswith((" ", "\t")):
+            chunk = chunk.lstrip(" \t")
+            if not chunk:
+                return current_value
+
+        first_char = chunk[0]
+        last_char = current_value[-1]
+
+        if first_char.isspace() or first_char in ".,!?;:)]}":
+            return f"{current_value}{chunk}"
+
+        if last_char.isspace() or last_char in "([{":
+            return f"{current_value}{chunk}"
+
+        if (
+            last_char.isalpha()
+            and first_char.isalpha()
+            and first_char.islower()
+            and len(chunk) <= 4
+        ):
+            return f"{current_value}{chunk}"
+
+        return f"{current_value} {chunk}"
 
 def _print_session_resume_message(session_id: str | None) -> None:
     if not session_id:

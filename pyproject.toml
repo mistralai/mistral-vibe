@@ -38,9 +38,11 @@ dependencies = [
     "keyring>=25.6.0",
     "markdownify>=1.2.2",
     "mcp>=1.14.0",
-    "mistralai==1.12.4",
+    "mistralai[realtime]==1.12.4",
     "packaging>=24.1",
     "pexpect>=4.9.0",
+    "pvrecorder>=1.2.7",
+    "pyaudio>=0.2.14",
     "pydantic>=2.12.4",
     "pydantic-settings>=2.12.0",
     "pyperclip>=1.11.0",
@@ -75,7 +77,7 @@ include = ["vibe/"]
 
 
 [project.scripts]
-vibe = "vibe.cli.entrypoint:main"
+vibemic = "vibe.cli.entrypoint:main"
 vibe-acp = "vibe.acp.entrypoint:main"
 
 
