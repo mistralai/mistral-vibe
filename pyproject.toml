@@ -144,6 +144,7 @@ ignore = ["D203", "D205", "D213", "ANN401", "PLR6301"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN", "PLR"]
+"vibe/core/tools/builtins/ux/*" = ["PLR0912", "PLR1702", "PLR2004"]
 # Textual parent classes don't use ClassVar, so we can't either without breaking pyright
 "vibe/cli/textual_ui/ansi_markdown.py" = ["RUF012"]
 

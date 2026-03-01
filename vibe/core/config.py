@@ -419,6 +419,10 @@ class VibeConfig(BaseSettings):
             " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
+    include_bundled_skills: bool = Field(
+        default=True,
+        description="Include bundled skills (e.g. ux-designer) in discovery.",
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"

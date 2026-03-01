@@ -38,3 +38,4 @@ LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs")
 LOG_FILE = GlobalPath(lambda: VIBE_HOME.path / "logs" / "vibe.log")
 
 DEFAULT_TOOL_DIR = GlobalPath(lambda: VIBE_ROOT / "core" / "tools" / "builtins")
+BUNDLED_SKILLS_DIR = GlobalPath(lambda: VIBE_ROOT / "skills")
