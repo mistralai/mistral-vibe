@@ -1,0 +1,2 @@
+The king moves one square in any direction. The queen moves any number of squares.
+A move is illegal if it leaves your king in check. You win by checkmating the enemy king.

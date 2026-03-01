@@ -1,0 +1,2 @@
+In riichi mahjong, players draw and discard tiles. A player can call pon, chii, or kan.
+A player in tenpai with a closed hand may declare riichi.
