@@ -74,7 +74,7 @@ This section is for developers who want to set up the repository for local devel
 
 ### Logging Configuration
 
-Logs are written to `~/.vibe/logs/vibe.log` by default. Control logging via environment variables:
+Logs are written to `$VIBE_HOME/logs/vibe.log`. By default, `VIBE_HOME` resolves to `~/.vibe/` when that legacy directory exists, otherwise `$XDG_CONFIG_HOME/vibe/` (or `~/.config/vibe/`). Control logging via environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
