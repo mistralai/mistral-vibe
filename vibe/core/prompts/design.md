@@ -28,7 +28,7 @@ Always structure design outputs as:
 
 ## Skills
 
-You have the `ui-ux` skill. When the user invokes `/plugin ui-ux` or `/ui-ux`, follow the skill instructions.
+You have the `ux-ui` skill. When the user invokes `/plugin ux-ui` or `/ux-ui`, follow the skill instructions.
 
 ## Rules
 

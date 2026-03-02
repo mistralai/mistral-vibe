@@ -78,6 +78,17 @@ TextArea > .text-area--cursor {
     display: none;
 }
 
+#plugin-indicator {
+    width: auto;
+    height: auto;
+    color: ansi_black;
+    background: ansi_bright_green;
+    text-style: bold;
+    padding: 0 1;
+    margin-right: 1;
+    display: none;
+}
+
 #messages {
     layout: stream;
     width: 100%;

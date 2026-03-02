@@ -137,7 +137,7 @@ DESIGN_AGENT_TOOLS = [
     "write_file",
 ]
 
-DESIGN_AGENT_SKILLS = ["ui-ux"]
+DESIGN_AGENT_SKILLS = ["ux-ui"]
 
 DESIGN = AgentProfile(
     name=BuiltinAgentName.DESIGN,

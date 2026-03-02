@@ -271,6 +271,9 @@ class VibeApp(App):  # noqa: PLR0904
         self._cached_chat: ChatScroll | None = None
         self._cached_loading_area: Widget | None = None
         self._mic_indicator: NoMarkupStatic | None = None
+        self._plugin_indicator: NoMarkupStatic | None = None
+        self._active_plugin_name: str | None = None
+        self._active_plugin_prompt: str | None = None
         self._switch_agent_generation = 0
         self.voice_handler = MistralVoiceHandler(on_text_callback=self._on_voice_text)
 
@@ -302,6 +305,7 @@ class VibeApp(App):  # noqa: PLR0904
         with Horizontal(id="bottom-bar"):
             yield PathDisplay(self.config.displayed_workdir or Path.cwd())
             yield NoMarkupStatic(id="spacer")
+            yield NoMarkupStatic(" UX/UI MODE ", id="plugin-indicator")
             yield NoMarkupStatic("●", id="mic-indicator")
             yield ContextProgress()
 
@@ -320,7 +324,9 @@ class VibeApp(App):  # noqa: PLR0904
 
         self._chat_input_container = self.query_one(ChatInputContainer)
         self._mic_indicator = self.query_one("#mic-indicator", NoMarkupStatic)
+        self._plugin_indicator = self.query_one("#plugin-indicator", NoMarkupStatic)
         self._set_mic_indicator(False)
+        self._set_plugin_indicator(False)
         context_progress = self.query_one(ContextProgress)
 
         def update_context_progress(stats: AgentStats) -> None:
@@ -530,16 +536,17 @@ class VibeApp(App):  # noqa: PLR0904
     def _get_skill_entries(self) -> list[tuple[str, str]]:
         if not self.agent_loop:
             return []
+        plugin_name = "ux-ui"
         entries = [
             (f"/{name}", info.description)
             for name, info in self.agent_loop.skill_manager.available_skills.items()
             if info.user_invocable
         ]
-        # Add /plugin <skill> variants for intuitive access
-        entries.append(("/plugin", "Plugins: /plugin <command> [args]"))
-        for name, info in self.agent_loop.skill_manager.available_skills.items():
-            if info.user_invocable:
-                entries.append((f"/plugin {name}", info.description))
+        entries.append(("/plugin", "Plugin commands: /plugin ux-ui [args], /plugin off"))
+        if skill_info := self.agent_loop.skill_manager.get_skill(plugin_name):
+            if skill_info.user_invocable:
+                entries.append((f"/plugin {plugin_name}", skill_info.description))
+        entries.append(("/plugin off", "Disable active plugin mode"))
         return entries
 
     async def _handle_plugin_command(self, user_input: str) -> bool:
@@ -548,18 +555,14 @@ class VibeApp(App):  # noqa: PLR0904
             return False
         if not self.agent_loop:
             return False
+        plugin_name = "ux-ui"
 
         rest = user_input[len("/plugin"):].strip()
         if not rest:
             await self._mount_and_scroll(
                 UserCommandMessage(
-                    "Available plugins: "
-                    + ", ".join(
-                        name
-                        for name, info in self.agent_loop.skill_manager.available_skills.items()
-                        if info.user_invocable
-                    )
-                    + ". E.g.: /plugin ui-ux screenshot.png"
+                    f"Available plugin: {plugin_name}. "
+                    f"Use /plugin {plugin_name} [args] to enable, or /plugin off to disable."
                 )
             )
             return True
@@ -568,18 +571,35 @@ class VibeApp(App):  # noqa: PLR0904
         skill_name = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
 
-        skill_info = self.agent_loop.skill_manager.get_skill(skill_name)
-        if not skill_info:
+        if skill_name == "off":
+            self._active_plugin_name = None
+            self._active_plugin_prompt = None
+            self._set_plugin_indicator(False)
+            await self._mount_and_scroll(
+                UserCommandMessage("Plugin mode disabled.")
+            )
+            return True
+
+        if skill_name != plugin_name:
             await self._mount_and_scroll(
                 ErrorMessage(
-                    f"Unknown plugin: {skill_name}. "
-                    "E.g.: /plugin ui-ux, /plugin context-awareness",
+                    f"Unknown plugin: {skill_name}. Use /plugin {plugin_name} or /plugin off.",
                     collapsed=self._tools_collapsed,
                 )
             )
             return True
 
-        self.agent_loop.telemetry_client.send_slash_command_used(skill_name, "skill")
+        skill_info = self.agent_loop.skill_manager.get_skill(plugin_name)
+        if not skill_info:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Plugin not available: {plugin_name}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return True
+
+        self.agent_loop.telemetry_client.send_slash_command_used(plugin_name, "skill")
         try:
             skill_content = skill_info.skill_path.read_text(encoding="utf-8")
         except OSError as e:
@@ -592,8 +612,17 @@ class VibeApp(App):  # noqa: PLR0904
             return True
 
         if args:
-            skill_content = f"{skill_content}\n\n---\nContexte utilisateur: {args}"
-        await self._handle_user_message(skill_content)
+            skill_content = f"{skill_content}\n\n---\nPersistent user context: {args}"
+
+        self._active_plugin_name = plugin_name
+        self._active_plugin_prompt = skill_content
+        self._set_plugin_indicator(True, " UX/UI MODE ")
+
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                "Plugin ux-ui enabled. Next messages will use UX/UI context."
+            )
+        )
         return True
 
     async def _handle_skill(self, user_input: str) -> bool:
@@ -664,10 +693,24 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._mount_and_scroll(user_message)
 
+        prompt = message
+        if self._active_plugin_name == "ux-ui" and self._active_plugin_prompt:
+            prompt = (
+                f"{self._active_plugin_prompt}\n\n---\n"
+                f"User message:\n{message}"
+            )
+
         if not self._agent_running:
             self._agent_task = asyncio.create_task(
-                self._handle_agent_loop_turn(message)
+                self._handle_agent_loop_turn(prompt)
             )
+
+    def _set_plugin_indicator(self, is_active: bool, label: str = "") -> None:
+        if not self._plugin_indicator:
+            return
+
+        self._plugin_indicator.update(label)
+        self._plugin_indicator.styles.display = "block" if is_active else "none"
 
     def _reset_ui_state(self) -> None:
         self._windowing.reset()
