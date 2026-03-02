@@ -73,7 +73,7 @@ def parse_arguments() -> argparse.Namespace:
         "--agent",
         metavar="NAME",
         default=BuiltinAgentName.DEFAULT,
-        help="Agent to use (builtin: default, plan, accept-edits, auto-approve, "
+        help="Agent to use (builtin: default, design, plan, accept-edits, auto-approve, "
         "or custom from ~/.vibe/agents/NAME.toml)",
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")

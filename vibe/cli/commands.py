@@ -104,6 +104,7 @@ class CommandRegistry:
             "- `Ctrl+C` Quit (or clear input if text present)",
             "- `Ctrl+G` Edit input in external editor",
             "- `Ctrl+O` Toggle tool output view",
+            "- `Ctrl+S` Toggle push-to-talk voice transcription",
             "- `Shift+Tab` Toggle auto-approve mode",
             "",
             "### Special Features",

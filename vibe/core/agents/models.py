@@ -35,6 +35,7 @@ class AgentType(StrEnum):
 class BuiltinAgentName(StrEnum):
     DEFAULT = "default"
     CHAT = "chat"
+    DESIGN = "design"
     PLAN = "plan"
     ACCEPT_EDITS = "accept-edits"
     AUTO_APPROVE = "auto-approve"
@@ -122,7 +123,45 @@ EXPLORE = AgentProfile(
     overrides={"enabled_tools": ["grep", "read_file"], "system_prompt_id": "explore"},
 )
 
+DESIGN_AGENT_TOOLS = [
+    "grep",
+    "read_file",
+    "ask_user_question",
+    "analyze_design",
+    "accessibility_audit",
+    "component_recommender",
+    "design_system_check",
+    "color_palette_analyzer",
+    "typography_auditor",
+    "search_replace",
+    "write_file",
+]
+
+DESIGN_AGENT_SKILLS = ["ux-ui"]
+
+DESIGN = AgentProfile(
+    name=BuiltinAgentName.DESIGN,
+    display_name="Design",
+    description="UI/UX expert: audits, accessibility, design systems, components",
+    safety=AgentSafety.NEUTRAL,
+    overrides={
+        "system_prompt_id": "design",
+        "enabled_tools": DESIGN_AGENT_TOOLS,
+        "enabled_skills": DESIGN_AGENT_SKILLS,
+        "auto_approve": True,
+        "tools": {
+            "analyze_design": {"permission": "always"},
+            "accessibility_audit": {"permission": "always"},
+            "component_recommender": {"permission": "always"},
+            "design_system_check": {"permission": "always"},
+            "color_palette_analyzer": {"permission": "always"},
+            "typography_auditor": {"permission": "always"},
+        },
+    },
+)
+
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
+    BuiltinAgentName.DESIGN: DESIGN,
     BuiltinAgentName.DEFAULT: DEFAULT,
     BuiltinAgentName.PLAN: PLAN,
     BuiltinAgentName.ACCEPT_EDITS: ACCEPT_EDITS,

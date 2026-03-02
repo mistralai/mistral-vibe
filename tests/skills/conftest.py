@@ -22,6 +22,7 @@ def skill_config(skills_dir: Path) -> VibeConfig:
     return build_test_vibe_config(
         system_prompt_id="tests",
         include_project_context=False,
+        include_bundled_skills=False,
         skill_paths=[skills_dir],
     )
 

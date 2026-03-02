@@ -69,6 +69,26 @@ TextArea > .text-area--cursor {
     background: transparent;
 }
 
+#mic-indicator {
+    width: auto;
+    height: auto;
+    color: ansi_red;
+    text-style: bold;
+    padding: 0 1;
+    display: none;
+}
+
+#plugin-indicator {
+    width: auto;
+    height: auto;
+    color: ansi_black;
+    background: ansi_bright_green;
+    text-style: bold;
+    padding: 0 1;
+    margin-right: 1;
+    display: none;
+}
+
 #messages {
     layout: stream;
     width: 100%;

@@ -60,3 +60,13 @@ class TestCommandRegistry:
         cmd = registry.find_command("/resume")
         assert cmd is not None
         assert cmd.handler == "_show_session_picker"
+
+    def test_voice_command_not_registered(self) -> None:
+        registry = CommandRegistry()
+        assert registry.get_command_name("/voice") is None
+        assert registry.find_command("/voice") is None
+
+    def test_help_text_mentions_ctrl_s_voice_shortcut(self) -> None:
+        registry = CommandRegistry()
+        help_text = registry.get_help_text()
+        assert "Ctrl+S" in help_text

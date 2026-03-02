@@ -123,7 +123,7 @@ from vibe.core.utils import (
     get_user_cancellation_message,
     is_dangerous_directory,
 )
-
+from vibe.cli.textual_ui.voice_handler import MistralVoiceHandler
 
 class BottomApp(StrEnum):
     """Bottom panel app types.
@@ -201,6 +201,7 @@ class VibeApp(App):  # noqa: PLR0904
         Binding("ctrl+d", "force_quit", "Quit", show=False, priority=True),
         Binding("ctrl+z", "suspend_with_message", "Suspend", show=False, priority=True),
         Binding("escape", "interrupt", "Interrupt", show=False, priority=True),
+        Binding("ctrl+s", "toggle_voice_ptt", "Voice", show=False, priority=True),
         Binding("ctrl+o", "toggle_tool", "Toggle Tool", show=False),
         Binding("ctrl+y", "copy_selection", "Copy", show=False, priority=True),
         Binding("ctrl+shift+c", "copy_selection", "Copy", show=False, priority=True),
@@ -269,7 +270,12 @@ class VibeApp(App):  # noqa: PLR0904
         self._cached_messages_area: Widget | None = None
         self._cached_chat: ChatScroll | None = None
         self._cached_loading_area: Widget | None = None
+        self._mic_indicator: NoMarkupStatic | None = None
+        self._plugin_indicator: NoMarkupStatic | None = None
+        self._active_plugin_name: str | None = None
+        self._active_plugin_prompt: str | None = None
         self._switch_agent_generation = 0
+        self.voice_handler = MistralVoiceHandler(on_text_callback=self._on_voice_text)
 
     @property
     def config(self) -> VibeConfig:
@@ -299,6 +305,8 @@ class VibeApp(App):  # noqa: PLR0904
         with Horizontal(id="bottom-bar"):
             yield PathDisplay(self.config.displayed_workdir or Path.cwd())
             yield NoMarkupStatic(id="spacer")
+            yield NoMarkupStatic(" UX/UI MODE ", id="plugin-indicator")
+            yield NoMarkupStatic("●", id="mic-indicator")
             yield ContextProgress()
 
     async def on_mount(self) -> None:
@@ -315,6 +323,10 @@ class VibeApp(App):  # noqa: PLR0904
         )
 
         self._chat_input_container = self.query_one(ChatInputContainer)
+        self._mic_indicator = self.query_one("#mic-indicator", NoMarkupStatic)
+        self._plugin_indicator = self.query_one("#plugin-indicator", NoMarkupStatic)
+        self._set_mic_indicator(False)
+        self._set_plugin_indicator(False)
         context_progress = self.query_one(ContextProgress)
 
         def update_context_progress(stats: AgentStats) -> None:
@@ -384,6 +396,9 @@ class VibeApp(App):  # noqa: PLR0904
             if self.config.nuage_enabled:
                 await self._handle_teleport_command(value[1:])
                 return
+
+        if await self._handle_plugin_command(value):
+            return
 
         if await self._handle_command(value):
             return
@@ -521,11 +536,94 @@ class VibeApp(App):  # noqa: PLR0904
     def _get_skill_entries(self) -> list[tuple[str, str]]:
         if not self.agent_loop:
             return []
-        return [
+        plugin_name = "ux-ui"
+        entries = [
             (f"/{name}", info.description)
             for name, info in self.agent_loop.skill_manager.available_skills.items()
             if info.user_invocable
         ]
+        entries.append(("/plugin", "Plugin commands: /plugin ux-ui [args], /plugin off"))
+        if skill_info := self.agent_loop.skill_manager.get_skill(plugin_name):
+            if skill_info.user_invocable:
+                entries.append((f"/plugin {plugin_name}", skill_info.description))
+        entries.append(("/plugin off", "Disable active plugin mode"))
+        return entries
+
+    async def _handle_plugin_command(self, user_input: str) -> bool:
+        """Handle /plugin and /plugin <skill> [args] for intuitive plugin access."""
+        if not user_input.strip().lower().startswith("/plugin"):
+            return False
+        if not self.agent_loop:
+            return False
+        plugin_name = "ux-ui"
+
+        rest = user_input[len("/plugin"):].strip()
+        if not rest:
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    f"Available plugin: {plugin_name}. "
+                    f"Use /plugin {plugin_name} [args] to enable, or /plugin off to disable."
+                )
+            )
+            return True
+
+        parts = rest.split(maxsplit=1)
+        skill_name = parts[0].lower()
+        args = parts[1] if len(parts) > 1 else ""
+
+        if skill_name == "off":
+            self._active_plugin_name = None
+            self._active_plugin_prompt = None
+            self._set_plugin_indicator(False)
+            await self._mount_and_scroll(
+                UserCommandMessage("Plugin mode disabled.")
+            )
+            return True
+
+        if skill_name != plugin_name:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Unknown plugin: {skill_name}. Use /plugin {plugin_name} or /plugin off.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return True
+
+        skill_info = self.agent_loop.skill_manager.get_skill(plugin_name)
+        if not skill_info:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Plugin not available: {plugin_name}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return True
+
+        self.agent_loop.telemetry_client.send_slash_command_used(plugin_name, "skill")
+        try:
+            skill_content = skill_info.skill_path.read_text(encoding="utf-8")
+        except OSError as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to read plugin: {e}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return True
+
+        if args:
+            skill_content = f"{skill_content}\n\n---\nPersistent user context: {args}"
+
+        self._active_plugin_name = plugin_name
+        self._active_plugin_prompt = skill_content
+        self._set_plugin_indicator(True, " UX/UI MODE ")
+
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                "Plugin ux-ui enabled. Next messages will use UX/UI context."
+            )
+        )
+        return True
 
     async def _handle_skill(self, user_input: str) -> bool:
         if not user_input.startswith("/"):
@@ -595,10 +693,24 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._mount_and_scroll(user_message)
 
+        prompt = message
+        if self._active_plugin_name == "ux-ui" and self._active_plugin_prompt:
+            prompt = (
+                f"{self._active_plugin_prompt}\n\n---\n"
+                f"User message:\n{message}"
+            )
+
         if not self._agent_running:
             self._agent_task = asyncio.create_task(
-                self._handle_agent_loop_turn(message)
+                self._handle_agent_loop_turn(prompt)
             )
+
+    def _set_plugin_indicator(self, is_active: bool, label: str = "") -> None:
+        if not self._plugin_indicator:
+            return
+
+        self._plugin_indicator.update(label)
+        self._plugin_indicator.styles.display = "block" if is_active else "none"
 
     def _reset_ui_state(self) -> None:
         self._windowing.reset()
@@ -1629,6 +1741,76 @@ class VibeApp(App):  # noqa: PLR0904
         # force a full layout refresh so the UI isn't garbled.
         self.refresh(layout=True)
 
+    def action_toggle_voice_ptt(self) -> None:
+        self._toggle_voice_transcription()
+
+    def _toggle_voice_transcription(self) -> None:
+        if not self.voice_handler.is_recording:
+            self.notify("Mic on", severity = "information")
+            self._set_mic_indicator(True)
+            self.run_worker(
+                self.voice_handler.start_recording(),
+                name="voice_transcription",
+            )
+        else:
+            self.voice_handler.stop_recording()
+            self._set_mic_indicator(False)
+            self.notify("Mic off", severity= "warning")
+
+    def _set_mic_indicator(self, is_active: bool) -> None:
+        if not self._mic_indicator:
+            return
+
+        self._mic_indicator.styles.display = "block" if is_active else "none"
+
+    def _on_voice_text(self, text: str) -> None:
+        """Append transcribed text to the current input."""
+        if not text:
+            return
+
+        if not self._chat_input_container:
+            return
+
+        current_value = self._chat_input_container.value
+        self._chat_input_container.value = self._merge_voice_chunk(current_value, text)
+
+        if input_widget := self._chat_input_container.input_widget:
+            input_widget.set_cursor_offset(len(input_widget.text))
+
+    @staticmethod
+    def _merge_voice_chunk(current_value: str, chunk: str) -> str:
+        if not current_value:
+            return chunk
+
+        if not chunk:
+            return current_value
+
+        if chunk.startswith((" ", "\t")):
+            chunk = f" {chunk.lstrip(' \t')}"
+
+        if current_value.endswith((" ", "\t", "\n")) and chunk.startswith((" ", "\t")):
+            chunk = chunk.lstrip(" \t")
+            if not chunk:
+                return current_value
+
+        first_char = chunk[0]
+        last_char = current_value[-1]
+
+        if first_char.isspace() or first_char in ".,!?;:)]}":
+            return f"{current_value}{chunk}"
+
+        if last_char.isspace() or last_char in "([{":
+            return f"{current_value}{chunk}"
+
+        if (
+            last_char.isalpha()
+            and first_char.isalpha()
+            and first_char.islower()
+            and len(chunk) <= 4
+        ):
+            return f"{current_value}{chunk}"
+
+        return f"{current_value} {chunk}"
 
 def _print_session_resume_message(session_id: str | None) -> None:
     if not session_id:
