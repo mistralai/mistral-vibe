@@ -12,8 +12,8 @@ This project was built for the **Mistral San Francisco Hackathon**.
 ### 1) Clone
 
 ```bash
-git clone <your-repo-url>
-cd mistral-vibe
+git clone https://github.com/mtarotML/mistral-vibe-mic
+cd mistral-vibe-mic
 ```
 
 ### 2) Install `uv` (if needed)
