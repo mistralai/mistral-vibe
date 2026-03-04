@@ -419,6 +419,13 @@ class VibeConfig(BaseSettings):
             " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
+    plan_agent_tools: list[str] = Field(
+        default_factory=lambda: ["grep", "read_file", "todo", "ask_user_question", "task"],
+        description=(
+            "List of tools available to the plan agent. "
+            "These tools are used when the plan agent is active."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"
