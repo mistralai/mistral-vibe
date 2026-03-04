@@ -181,7 +181,7 @@ class SessionLoader:
             raise ValueError(f"Session metadata not found at {session_dir}")
 
         try:
-            metadata_content = metadata_path.read_text()
+            metadata_content = metadata_path.read_text(encoding="utf-8")
             return SessionMetadata.model_validate_json(metadata_content)
         except ValueError:
             raise

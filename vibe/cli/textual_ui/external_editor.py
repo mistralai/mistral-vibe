@@ -18,13 +18,13 @@ class ExternalEditor:
         editor = self.get_editor()
         fd, filepath = tempfile.mkstemp(suffix=".md", prefix="vibe_")
         try:
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(initial_content)
 
             parts = shlex.split(editor)
             subprocess.run([*parts, filepath], check=True)
 
-            content = Path(filepath).read_text().rstrip()
+            content = Path(filepath).read_text(encoding="utf-8").rstrip()
             return content if content != initial_content else None
         except (OSError, subprocess.CalledProcessError):
             return
