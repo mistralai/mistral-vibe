@@ -53,7 +53,14 @@ class AgentProfile:
     def apply_to_config(self, base: VibeConfig) -> VibeConfig:
         from vibe.core.config import VibeConfig as VC
 
-        merged = _deep_merge(base.model_dump(), self.overrides)
+        # Start with base config overrides
+        processed_overrides = self.overrides.copy()
+        
+        # Special handling for plan agent tools
+        if self.name == "plan" and hasattr(base, 'plan_agent_tools'):
+            processed_overrides["enabled_tools"] = base.plan_agent_tools
+        
+        merged = _deep_merge(base.model_dump(), processed_overrides)
         return VC.model_validate(merged)
 
     @classmethod
@@ -84,7 +91,7 @@ PLAN = AgentProfile(
     "Plan",
     "Read-only agent for exploration and planning",
     AgentSafety.SAFE,
-    overrides={"auto_approve": True, "enabled_tools": PLAN_AGENT_TOOLS},
+    overrides={"auto_approve": True},
 )
 CHAT = AgentProfile(
     BuiltinAgentName.CHAT,
