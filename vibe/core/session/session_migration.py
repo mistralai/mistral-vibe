@@ -22,7 +22,7 @@ async def migrate_sessions(session_config: SessionLoggingConfig) -> int:
     session_files = list(Path(save_dir).glob(f"{session_config.session_prefix}_*.json"))
     for session_file in session_files:
         try:
-            with open(session_file) as f:
+            with open(session_file, encoding="utf-8") as f:
                 session_data = f.read()
             session_json = json.loads(session_data)
             metadata = session_json["metadata"]
