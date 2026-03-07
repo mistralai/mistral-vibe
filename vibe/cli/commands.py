@@ -77,6 +77,21 @@ class CommandRegistry:
                 description="Browse and resume past sessions",
                 handler="_show_session_picker",
             ),
+            "memory-list": Command(
+                aliases=frozenset(["/memory-list", "/memories"]),
+                description="List all memories",
+                handler="_list_memories",
+            ),
+            "memory-add": Command(
+                aliases=frozenset(["/memory-add", "/add-memory"]),
+                description="Add a new memory",
+                handler="_add_memory",
+            ),
+            "memory-remove": Command(
+                aliases=frozenset(["/memory-remove", "/remove-memory"]),
+                description="Remove a memory",
+                handler="_remove_memory",
+            ),
         }
 
         for command in excluded_commands:
