@@ -201,7 +201,32 @@ def main() -> None:
 
     from vibe.cli.cli import run_cli
 
-    run_cli(args, worktree_path=worktree_path)
+    try:
+        run_cli(args, worktree_path=worktree_path)
+    finally:
+        if worktree_path and worktree_path.exists() and args.prompt is not None:
+            _cleanup_worktree_prompt(worktree_path)
+
+
+def _cleanup_worktree_prompt(worktree_path: Path) -> None:
+    from vibe.core.git_worktree import GitWorktreeManager
+
+    try:
+        if sys.stdin.isatty():
+            rprint(f"\n[bold]Worktree at: {worktree_path}[/]")
+            answer = input("Delete this worktree? [Y/n] ").strip().lower()
+            should_delete = answer in {"", "y", "yes"}
+        else:
+            should_delete = True
+
+        if should_delete:
+            wt_manager = GitWorktreeManager(worktree_path.parent)
+            wt_manager.remove_worktree(worktree_path, force=True)
+            rprint(f"[dim]Removed worktree: {worktree_path}[/]")
+        else:
+            rprint(f"[dim]Worktree kept at: {worktree_path}[/]")
+    except Exception as e:
+        rprint(f"[yellow]Failed to remove worktree: {e}[/]")
 
 
 if __name__ == "__main__":

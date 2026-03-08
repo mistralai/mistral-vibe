@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from enum import StrEnum, auto
 import os
 from pathlib import Path
@@ -141,6 +142,12 @@ class BottomApp(StrEnum):
     SessionPicker = auto()
 
 
+@dataclass
+class AppExitResult:
+    session_id: str | None = None
+    worktree_cleanup: bool = True
+
+
 class ChatScroll(VerticalScroll):
     """Optimized scroll container that skips cascading style recalculations."""
 
@@ -265,6 +272,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._initial_prompt = initial_prompt
         self._teleport_on_start = teleport_on_start and self.config.nuage_enabled
         self._worktree_path = worktree_path
+        self._worktree_cleanup_approved: bool = True
         self._last_escape_time: float | None = None
         self._banner: Banner | None = None
         self._whats_new_message: WhatsNewMessage | None = None
@@ -1175,7 +1183,50 @@ class VibeApp(App):  # noqa: PLR0904
         return self.agent_loop.session_logger.session_id[:8]
 
     async def _exit_app(self) -> None:
-        self.exit(result=self._get_session_resume_info())
+        if self._worktree_path and self.config.worktree_auto_cleanup:
+            await self._ask_worktree_cleanup()
+            return
+        self._do_exit()
+
+    async def _ask_worktree_cleanup(self) -> None:
+        self._pending_question = asyncio.Future()
+        await self._switch_to_question_app(
+            AskUserQuestionArgs(
+                questions=[
+                    Question(
+                        question=f"Delete worktree at {self._worktree_path}?",
+                        header="Worktree Cleanup",
+                        options=[
+                            Choice(label="Delete worktree"),
+                            Choice(label="Keep worktree"),
+                        ],
+                        hide_other=True,
+                    )
+                ]
+            )
+        )
+        result = await self._pending_question
+        self._pending_question = None
+
+        if (
+            isinstance(result, AskUserQuestionResult)
+            and not result.cancelled
+            and result.answers
+            and result.answers[0].answer == "Delete worktree"
+        ):
+            self._worktree_cleanup_approved = True
+        else:
+            self._worktree_cleanup_approved = False
+
+        self._do_exit()
+
+    def _do_exit(self) -> None:
+        self.exit(
+            result=AppExitResult(
+                session_id=self._get_session_resume_info(),
+                worktree_cleanup=self._worktree_cleanup_approved,
+            )
+        )
 
     async def _setup_terminal(self) -> None:
         result = setup_terminal()
@@ -1475,21 +1526,11 @@ class VibeApp(App):  # noqa: PLR0904
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
 
-        self.exit(result=self._get_session_resume_info())
+        if self._worktree_path and self.config.worktree_auto_cleanup:
+            self.run_worker(self._ask_worktree_cleanup(), exclusive=False)
+            return
+        self._do_exit()
 
-    async def on_unmount(self) -> None:
-        """Clean up worktree when the app exits."""
-        if self._worktree_path:
-            try:
-                from vibe.core.git_worktree import GitWorktreeManager
-
-                wt_manager = GitWorktreeManager()
-                # Remove the worktree if it still exists
-                if self._worktree_path.exists():
-                    wt_manager.remove_worktree(self._worktree_path, force=True)
-            except Exception:
-                # Silently ignore cleanup errors
-                pass
 
     def action_scroll_chat_up(self) -> None:
         try:
@@ -1722,5 +1763,20 @@ def run_textual_ui(
         update_cache_repository=update_cache_repository,
         plan_offer_gateway=plan_offer_gateway,
     )
-    session_id = app.run()
-    _print_session_resume_message(session_id)
+    result: AppExitResult | None = app.run()
+    if result is None:
+        result = AppExitResult()
+
+    if worktree_path and worktree_path.exists() and result.worktree_cleanup:
+        try:
+            from vibe.core.git_worktree import GitWorktreeManager
+
+            wt_manager = GitWorktreeManager(worktree_path.parent)
+            wt_manager.remove_worktree(worktree_path, force=True)
+            rprint(f"[dim]Removed worktree: {worktree_path}[/]")
+        except Exception as e:
+            rprint(f"[yellow]Failed to remove worktree: {e}[/]")
+    elif worktree_path and worktree_path.exists():
+        rprint(f"[dim]Worktree kept at: {worktree_path}[/]")
+
+    _print_session_resume_message(result.session_id)
