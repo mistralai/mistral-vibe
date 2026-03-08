@@ -216,6 +216,7 @@ class VibeApp(App):  # noqa: PLR0904
         agent_loop: AgentLoop,
         initial_prompt: str | None = None,
         teleport_on_start: bool = False,
+        worktree_path: Path | None = None,
         update_notifier: UpdateGateway | None = None,
         update_cache_repository: UpdateCacheRepository | None = None,
         current_version: str = CORE_VERSION,
@@ -263,6 +264,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._plan_offer_gateway = plan_offer_gateway
         self._initial_prompt = initial_prompt
         self._teleport_on_start = teleport_on_start and self.config.nuage_enabled
+        self._worktree_path = worktree_path
         self._last_escape_time: float | None = None
         self._banner: Banner | None = None
         self._whats_new_message: WhatsNewMessage | None = None
@@ -297,7 +299,9 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
         with Horizontal(id="bottom-bar"):
-            yield PathDisplay(self.config.displayed_workdir or Path.cwd())
+            # Show worktree path if in worktree mode, otherwise show working directory
+            display_path = self._worktree_path or self.config.displayed_workdir or Path.cwd()
+            yield PathDisplay(display_path)
             yield NoMarkupStatic(id="spacer")
             yield ContextProgress()
 
@@ -994,7 +998,54 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         await self._switch_to_input_app()
 
-        await self._mount_and_scroll(UserCommandMessage("Resume cancelled."))
+    async def _worktree_command(self) -> None:
+        """Handle the /worktree command to manage git worktrees."""
+        from vibe.core.git_worktree import GitWorktreeError, GitWorktreeManager
+
+        try:
+            wt_manager = GitWorktreeManager()
+            
+            if not wt_manager.is_git_repository():
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        "Not in a git repository. Worktrees require a git repository.",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+                return
+
+            # List all Vibe worktrees
+            vibe_worktrees = wt_manager.get_vibe_worktrees()
+            
+            if not vibe_worktrees:
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        "No Vibe worktrees found. Start a session with --worktree flag."
+                    )
+                )
+                return
+
+            lines = ["**Vibe Worktrees:**", ""]
+            for wt in vibe_worktrees:
+                status = " (current)" if wt.is_current else ""
+                locked = " 🔒" if wt.is_locked else ""
+                lines.append(
+                    f"- `{wt.worktree_name}`{status}{locked}\n"
+                    f"  - Branch: `{wt.branch}`\n"
+                    f"  - Path: `{wt.path}`\n"
+                    f"  - Commit: `{wt.commit[:8]}`"
+                )
+
+            await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+
+        except GitWorktreeError as e:
+            await self._mount_and_scroll(
+                ErrorMessage(f"Worktree error: {e}", collapsed=self._tools_collapsed)
+            )
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(f"Unexpected error: {e}", collapsed=self._tools_collapsed)
+            )
 
     async def _reload_config(self) -> None:
         try:
@@ -1426,6 +1477,20 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.exit(result=self._get_session_resume_info())
 
+    async def on_unmount(self) -> None:
+        """Clean up worktree when the app exits."""
+        if self._worktree_path:
+            try:
+                from vibe.core.git_worktree import GitWorktreeManager
+
+                wt_manager = GitWorktreeManager()
+                # Remove the worktree if it still exists
+                if self._worktree_path.exists():
+                    wt_manager.remove_worktree(self._worktree_path, force=True)
+            except Exception:
+                # Silently ignore cleanup errors
+                pass
+
     def action_scroll_chat_up(self) -> None:
         try:
             chat = self._cached_chat or self.query_one("#chat", ChatScroll)
@@ -1643,6 +1708,7 @@ def run_textual_ui(
     agent_loop: AgentLoop,
     initial_prompt: str | None = None,
     teleport_on_start: bool = False,
+    worktree_path: Path | None = None,
 ) -> None:
     update_notifier = PyPIUpdateGateway(project_name="mistral-vibe")
     update_cache_repository = FileSystemUpdateCacheRepository()
@@ -1651,6 +1717,7 @@ def run_textual_ui(
         agent_loop=agent_loop,
         initial_prompt=initial_prompt,
         teleport_on_start=teleport_on_start,
+        worktree_path=worktree_path,
         update_notifier=update_notifier,
         update_cache_repository=update_cache_repository,
         plan_offer_gateway=plan_offer_gateway,

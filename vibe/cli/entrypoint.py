@@ -83,6 +83,25 @@ def parse_arguments() -> argparse.Namespace:
         metavar="DIR",
         help="Change to this directory before running",
     )
+    parser.add_argument(
+        "--worktree",
+        action="store_true",
+        help="Create a new git worktree for this session, allowing multiple "
+        "concurrent sessions in the same repository. Each session gets its own "
+        "working directory and branch.",
+    )
+    parser.add_argument(
+        "--worktree-branch",
+        metavar="BRANCH",
+        help="Branch name for the worktree (only with --worktree). "
+        "If not specified, a new branch is created.",
+    )
+    parser.add_argument(
+        "--worktree-name",
+        metavar="NAME",
+        help="Custom name for the worktree (only with --worktree). "
+        "If not specified, a unique name is generated.",
+    )
 
     # Feature flag for teleport, not exposed to the user yet
     parser.add_argument("--teleport", action="store_true", help=argparse.SUPPRESS)
@@ -149,6 +168,32 @@ def main() -> None:
             sys.exit(1)
         os.chdir(workdir)
 
+    # Handle worktree mode
+    worktree_path = None
+    if args.worktree:
+        from vibe.core.git_worktree import GitWorktreeError, GitWorktreeManager
+
+        try:
+            wt_manager = GitWorktreeManager()
+            if not wt_manager.is_git_repository():
+                rprint(
+                    "[red]Error: --worktree requires a git repository.[/]\n"
+                    "[yellow]Please run vibe --worktree from within a git repository.[/]"
+                )
+                sys.exit(1)
+
+            worktree_info = wt_manager.create_worktree(
+                branch=args.worktree_branch,
+                name=args.worktree_name,
+            )
+            worktree_path = worktree_info.path
+            os.chdir(worktree_path)
+            rprint(f"[dim]Created worktree at: {worktree_path}[/]")
+            rprint(f"[dim]Branch: {worktree_info.branch}[/]")
+        except GitWorktreeError as e:
+            rprint(f"[red]Error creating worktree: {e}[/]")
+            sys.exit(1)
+
     is_interactive = args.prompt is None
     if is_interactive:
         check_and_resolve_trusted_folder()
@@ -156,7 +201,7 @@ def main() -> None:
 
     from vibe.cli.cli import run_cli
 
-    run_cli(args)
+    run_cli(args, worktree_path=worktree_path)
 
 
 if __name__ == "__main__":

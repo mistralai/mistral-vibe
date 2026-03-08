@@ -331,6 +331,16 @@ class VibeConfig(BaseSettings):
     enable_notifications: bool = True
     api_timeout: float = 720.0
 
+    # Worktree configuration
+    worktree_auto_cleanup: bool = Field(
+        default=True,
+        description="Automatically clean up worktrees when session ends."
+    )
+    worktree_max_age_hours: int = Field(
+        default=24,
+        description="Maximum age in hours before a worktree is considered stale."
+    )
+
     # TODO(vibe-nuage): remove exclude=True once the feature is publicly available
     nuage_enabled: bool = Field(default=False, exclude=True)
     nuage_base_url: str = Field(default="https://api.globalaegis.net", exclude=True)
