@@ -258,6 +258,7 @@ class ModelConfig(BaseModel):
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
     thinking: Literal["off", "low", "medium", "high"] = "off"
+    supports_vision: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -309,9 +310,94 @@ DEFAULT_MODELS = [
     ),
 ]
 
+MISTRAL_VISION_MODELS: list[ModelConfig] = [
+    ModelConfig(
+        name="pixtral-large-2411",
+        provider="mistral",
+        alias="pixtral-large",
+        supports_vision=True,
+        input_price=2.0,
+        output_price=6.0,
+    ),
+    ModelConfig(
+        name="mistral-large-2512",
+        provider="mistral",
+        alias="mistral-large-3",
+        supports_vision=True,
+        input_price=2.0,
+        output_price=6.0,
+    ),
+    ModelConfig(
+        name="mistral-medium-2508",
+        provider="mistral",
+        alias="mistral-medium-3",
+        supports_vision=True,
+        input_price=0.4,
+        output_price=2.0,
+    ),
+    ModelConfig(
+        name="mistral-small-2506",
+        provider="mistral",
+        alias="mistral-small-3",
+        supports_vision=True,
+        input_price=0.1,
+        output_price=0.3,
+    ),
+    ModelConfig(
+        name="ministral-14b-2512",
+        provider="mistral",
+        alias="ministral-14b",
+        supports_vision=True,
+        input_price=0.15,
+        output_price=0.15,
+    ),
+    ModelConfig(
+        name="ministral-8b-2512",
+        provider="mistral",
+        alias="ministral-8b",
+        supports_vision=True,
+        input_price=0.1,
+        output_price=0.1,
+    ),
+    ModelConfig(
+        name="ministral-3b-2512",
+        provider="mistral",
+        alias="ministral-3b",
+        supports_vision=True,
+        input_price=0.04,
+        output_price=0.04,
+    ),
+]
+
+IMAGE_EXTENSIONS: frozenset[str] = frozenset({
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".tiff",
+    ".tif",
+})
+
+VISION_MODEL_CATEGORIES: dict[str, list[ModelConfig]] = {
+    "Premier": [
+        m
+        for m in MISTRAL_VISION_MODELS
+        if m.alias
+        in {"pixtral-large", "mistral-large-3", "mistral-medium-3", "mistral-small-3"}
+    ],
+    "Efficient": [
+        m
+        for m in MISTRAL_VISION_MODELS
+        if m.alias in {"ministral-14b", "ministral-8b", "ministral-3b"}
+    ],
+}
+
 
 class VibeConfig(BaseSettings):
     active_model: str = "devstral-2"
+    active_vision_model: str = ""
     vim_keybindings: bool = False
     disable_welcome_banner_animation: bool = False
     autocopy_to_clipboard: bool = True
@@ -452,6 +538,15 @@ class VibeConfig(BaseSettings):
                 return model
         raise ValueError(
             f"Active model '{self.active_model}' not found in configuration."
+        )
+
+    def get_active_vision_model(self) -> ModelConfig | None:
+        """Return the saved default vision model, or None if none is set."""
+        if not self.active_vision_model:
+            return None
+        return next(
+            (m for m in MISTRAL_VISION_MODELS if m.alias == self.active_vision_model),
+            None,
         )
 
     def get_provider_for_model(self, model: ModelConfig) -> ProviderConfig:

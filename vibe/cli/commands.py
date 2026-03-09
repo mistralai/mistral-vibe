@@ -26,6 +26,11 @@ class CommandRegistry:
                 description="Edit config settings",
                 handler="_show_config",
             ),
+            "vision-model": Command(
+                aliases=frozenset(["/vision-model"]),
+                description="Editthe active vision model",
+                handler="_show_vision_model_picker",
+            ),
             "reload": Command(
                 aliases=frozenset(["/reload"]),
                 description="Reload configuration from disk",

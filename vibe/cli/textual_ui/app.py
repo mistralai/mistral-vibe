@@ -4,6 +4,7 @@ import asyncio
 from enum import StrEnum, auto
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import time
@@ -89,7 +90,13 @@ from vibe.cli.update_notifier.update import do_update
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents import AgentProfile
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
-from vibe.core.config import VibeConfig
+from vibe.core.config import (
+    IMAGE_EXTENSIONS,
+    MISTRAL_VISION_MODELS,
+    VISION_MODEL_CATEGORIES,
+    ModelConfig,
+    VibeConfig,
+)
 from vibe.core.logger import logger
 from vibe.core.paths.config_paths import HISTORY_FILE
 from vibe.core.session.session_loader import SessionLoader
@@ -237,6 +244,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._loading_widget: LoadingWidget | None = None
         self._pending_approval: asyncio.Future | None = None
         self._pending_question: asyncio.Future | None = None
+        self._pending_vision_choice: asyncio.Future | None = None
 
         self.event_handler: EventHandler | None = None
 
@@ -328,6 +336,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.agent_loop.set_approval_callback(self._approval_callback)
         self.agent_loop.set_user_input_callback(self._user_input_callback)
+        self.agent_loop.set_vision_model_callback(self._vision_model_callback)
         self._refresh_profile_widgets()
 
         chat_input_container = self.query_one(ChatInputContainer)
@@ -428,6 +437,11 @@ class VibeApp(App):  # noqa: PLR0904
             await self._remove_loading_widget()
 
     async def on_question_app_answered(self, message: QuestionApp.Answered) -> None:
+        if self._pending_vision_choice and not self._pending_vision_choice.done():
+            self._pending_vision_choice.set_result(message)
+            # UI teardown is handled by _vision_model_callback between steps.
+            return
+
         if self._pending_question and not self._pending_question.done():
             result = AskUserQuestionResult(answers=message.answers, cancelled=False)
             self._pending_question.set_result(result)
@@ -435,6 +449,11 @@ class VibeApp(App):  # noqa: PLR0904
         await self._switch_to_input_app()
 
     async def on_question_app_cancelled(self, message: QuestionApp.Cancelled) -> None:
+        if self._pending_vision_choice and not self._pending_vision_choice.done():
+            self._pending_vision_choice.set_result(None)
+            # UI teardown is handled by _vision_model_callback.
+            return
+
         if self._pending_question and not self._pending_question.done():
             result = AskUserQuestionResult(answers=[], cancelled=True)
             self._pending_question.set_result(result)
@@ -590,8 +609,21 @@ class VibeApp(App):  # noqa: PLR0904
                 ErrorMessage(f"Command failed: {e}", collapsed=self._tools_collapsed)
             )
 
+    @staticmethod
+    def _image_filenames_from_prompt(prompt: str) -> list[str]:
+        """Return the bare filenames of any @image.ext refs in *prompt*.
+
+        Does NOT load files — only needed for display purposes.
+        """
+        return [
+            Path(m.group(1)).name
+            for m in re.finditer(r"@(\S+)", prompt)
+            if Path(m.group(1)).suffix.lower() in IMAGE_EXTENSIONS
+        ]
+
     async def _handle_user_message(self, message: str) -> None:
-        user_message = UserMessage(message)
+        image_filenames = self._image_filenames_from_prompt(message)
+        user_message = UserMessage(message, image_filenames=image_filenames)
 
         await self._mount_and_scroll(user_message)
 
@@ -693,6 +725,200 @@ class VibeApp(App):  # noqa: PLR0904
         self._pending_question = None
         return result
 
+    async def _ask_vision_question(
+        self, args: AskUserQuestionArgs
+    ) -> QuestionApp.Answered | None:
+        """Show a QuestionApp for vision model selection and return the result.
+
+        Handles the full lifecycle: create future → show app → await → teardown.
+        Returns None if the user cancelled.
+        """
+        self._pending_vision_choice = asyncio.Future()
+        with paused_timer(self._loading_widget):
+            await self._switch_to_question_app(args)
+            result = await self._pending_vision_choice
+        self._pending_vision_choice = None
+        await self._switch_to_input_app()
+        return result
+
+    async def _vision_model_callback(self) -> ModelConfig | None:
+        """Ask the user what to do when the active model does not support vision.
+
+        Flow:
+          1. Drop this task  -or-  Use a vision model for this message
+          2. (if no saved default) Pick category: Premier / Efficient
+          3. (if no saved default) Pick model within that category
+          4. (if no saved default) Save as default for future tasks?
+
+        If a default vision model is already saved, all steps are skipped.
+        The active model is never changed; the override is for this turn only.
+        """
+        saved_default = self.config.get_active_vision_model()
+        if saved_default is not None:
+            return saved_default
+
+        # Step 1: drop or use a vision model
+        result1 = await self._ask_vision_question(
+            AskUserQuestionArgs(
+                questions=[
+                    Question(
+                        question="The active model does not support vision. What would you like to do?",
+                        options=[
+                            Choice(
+                                label="Use a vision model for this message",
+                                description="Active model stays unchanged",
+                            ),
+                            Choice(label="Drop this task"),
+                        ],
+                        hide_other=True,
+                    )
+                ]
+            )
+        )
+        if result1 is None or result1.answers[0].answer == "Drop this task":
+            return None
+
+        chosen_model = await self._pick_vision_model_from_categories(
+            "Select a vision model (active model stays unchanged):"
+        )
+        if chosen_model is None:
+            return None
+
+        # Step 4: offer to save as default
+        result_save = await self._ask_vision_question(
+            AskUserQuestionArgs(
+                questions=[
+                    Question(
+                        question=f"Save {chosen_model.alias} as your default vision model?",
+                        options=[
+                            Choice(
+                                label="Yes, save as default",
+                                description="Skip model selection on future vision tasks",
+                            ),
+                            Choice(label="No, just use it this time"),
+                        ],
+                        hide_other=True,
+                    )
+                ]
+            )
+        )
+        if (
+            result_save is not None
+            and result_save.answers[0].answer == "Yes, save as default"
+        ):
+            VibeConfig.save_updates({"active_vision_model": chosen_model.alias})
+            self.agent_loop.config.active_vision_model = chosen_model.alias
+
+        return chosen_model
+
+    async def _pick_vision_model_from_categories(
+        self, question: str
+    ) -> ModelConfig | None:
+        """Two-step picker: category then specific model. Returns None if cancelled."""
+        result_cat = await self._ask_vision_question(
+            AskUserQuestionArgs(
+                questions=[
+                    Question(
+                        question=question,
+                        options=[
+                            Choice(
+                                label=cat,
+                                description=" · ".join(m.alias for m in models),
+                            )
+                            for cat, models in VISION_MODEL_CATEGORIES.items()
+                        ],
+                        hide_other=True,
+                    )
+                ]
+            )
+        )
+        if result_cat is None:
+            return None
+
+        category = result_cat.answers[0].answer
+        group = VISION_MODEL_CATEGORIES[category]
+
+        result_model = await self._ask_vision_question(
+            AskUserQuestionArgs(
+                questions=[
+                    Question(
+                        question=f"Select a {category.lower()} vision model:",
+                        options=[
+                            Choice(label=m.alias, description=m.name) for m in group
+                        ],
+                        hide_other=True,
+                    )
+                ]
+            )
+        )
+        if result_model is None:
+            return None
+
+        chosen_alias = result_model.answers[0].answer
+        return next((m for m in MISTRAL_VISION_MODELS if m.alias == chosen_alias), None)
+
+    async def _show_vision_model_picker(self) -> None:
+        """Schedule the vision model picker as a task so the event handler returns immediately."""
+        asyncio.create_task(self._run_vision_model_picker())
+
+    async def _run_vision_model_picker(self) -> None:
+        """Let the user change or clear the default vision model via /vision-model."""
+        current = self.config.active_vision_model
+        current_label = current if current else "none — always ask"
+
+        # Step 1: category or clear
+        result1 = await self._ask_vision_question(
+            AskUserQuestionArgs(
+                questions=[
+                    Question(
+                        question=f"Default vision model (current: {current_label}):",
+                        options=[
+                            Choice(
+                                label=cat,
+                                description=" · ".join(m.alias for m in models),
+                            )
+                            for cat, models in VISION_MODEL_CATEGORIES.items()
+                        ]
+                        + [
+                            Choice(
+                                label="none — always ask",
+                                description="Clear saved default, prompt on each vision task",
+                            )
+                        ],
+                        hide_other=True,
+                    )
+                ]
+            )
+        )
+        if result1 is None:
+            return
+
+        category = result1.answers[0].answer
+
+        if category == "none — always ask":
+            chosen_alias = ""
+        else:
+            model = await self._pick_vision_model_from_categories(
+                f"Select a {category.lower()} vision model:"
+            )
+            if model is None:
+                return
+            chosen_alias = model.alias
+
+        VibeConfig.save_updates({"active_vision_model": chosen_alias})
+        self.agent_loop.config.active_vision_model = chosen_alias
+
+        if chosen_alias:
+            await self._mount_and_scroll(
+                UserCommandMessage(f"Default vision model set to **{chosen_alias}**.")
+            )
+        else:
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    "Default vision model cleared. You will be prompted on each vision task."
+                )
+            )
+
     async def _handle_agent_loop_turn(self, prompt: str) -> None:
         self._agent_running = True
 
@@ -705,8 +931,17 @@ class VibeApp(App):  # noqa: PLR0904
         await loading_area.mount(loading)
 
         try:
-            rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
-            async for event in self.agent_loop.act(rendered_prompt):
+            # Extract image refs BEFORE render_path_prompt so they are not
+            # converted into plain-text URI blocks by the path renderer.
+            from vibe.core.agent_loop import AgentLoop as _AgentLoop
+
+            prompt_text, image_parts = _AgentLoop._resolve_image_references(prompt)
+            rendered_prompt = render_path_prompt(
+                prompt_text or prompt, base_dir=Path.cwd()
+            )
+            async for event in self.agent_loop.act(
+                rendered_prompt, image_parts=image_parts if image_parts else None
+            ):
                 if self.event_handler:
                     await self.event_handler.handle_event(
                         event,

@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, overload
 from uuid import uuid4
 
 if TYPE_CHECKING:
+    from vibe.core.config import ModelConfig
     from vibe.core.tools.base import BaseTool
 else:
     BaseTool = Any
+    ModelConfig = Any
 
 from pydantic import (
     BaseModel,
@@ -175,6 +177,13 @@ class ToolCall(BaseModel):
     type: Literal["function"] = "function"
 
 
+class ImageContentPart(BaseModel):
+    """A single image attached to a user message, encoded as a data URL."""
+
+    image_url: str  # "data:<mime>;base64,<b64>"
+    media_type: str = "image/png"
+
+
 def _content_before(v: Any) -> str:
     if isinstance(v, str):
         return v
@@ -215,6 +224,7 @@ class LLMMessage(BaseModel):
     name: str | None = None
     tool_call_id: str | None = None
     message_id: str | None = None
+    image_parts: list[ImageContentPart] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -414,6 +424,8 @@ type SyncApprovalCallback = Callable[
 type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
 
 type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
+
+type VisionModelCallback = Callable[[], Awaitable["ModelConfig | None"]]
 
 
 class MessageList(Sequence[LLMMessage]):
