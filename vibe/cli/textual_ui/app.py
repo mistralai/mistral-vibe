@@ -455,7 +455,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         if message.changes:
             VibeConfig.save_updates(message.changes)
-            await self._reload_config()
+            await self._reload_config(**message.changes)
         else:
             await self._mount_and_scroll(
                 UserCommandMessage("Configuration closed (no changes saved).")
@@ -1005,11 +1005,11 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._mount_and_scroll(UserCommandMessage("Resume cancelled."))
 
-    async def _reload_config(self) -> None:
+    async def _reload_config(self, **overrides: Any) -> None:
         try:
             self._reset_ui_state()
             await self._load_more.hide()
-            base_config = VibeConfig.load()
+            base_config = VibeConfig.load(**overrides)
 
             await self.agent_loop.reload_with_initial_messages(base_config=base_config)
             await self._resolve_plan()

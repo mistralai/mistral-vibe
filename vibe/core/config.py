@@ -20,6 +20,7 @@ from pydantic_settings import (
 )
 import tomli_w
 
+from vibe.core.logger import logger
 from vibe.core.paths.config_paths import CONFIG_DIR, CONFIG_FILE, PROMPTS_DIR
 from vibe.core.paths.global_paths import (
     GLOBAL_ENV_FILE,
@@ -534,6 +535,12 @@ class VibeConfig(BaseSettings):
     @classmethod
     def save_updates(cls, updates: dict[str, Any]) -> None:
         CONFIG_DIR.path.mkdir(parents=True, exist_ok=True)
+        # try:
+        #     CONFIG_DIR.path.mkdir(parents=True, exist_ok=True)
+        # except OSError as exc:
+        #     logger.warning(
+        #         "Could not create config directory %s: %s", CONFIG_DIR.path, exc
+        #     )
         current_config = TomlFileSettingsSource(cls).toml_data
 
         def deep_merge(target: dict, source: dict) -> None:
@@ -563,8 +570,11 @@ class VibeConfig(BaseSettings):
 
     @classmethod
     def dump_config(cls, config: dict[str, Any]) -> None:
-        with CONFIG_FILE.path.open("wb") as f:
-            tomli_w.dump(config, f)
+        try:
+            with CONFIG_FILE.path.open("wb") as f:
+                tomli_w.dump(config, f)
+        except OSError as exc:
+            logger.warning("Could not write config file %s: %s", CONFIG_FILE.path, exc)
 
     @classmethod
     def _migrate(cls) -> None:
