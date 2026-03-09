@@ -132,7 +132,7 @@ def _resume_previous_session(
     )
 
 
-def run_cli(args: argparse.Namespace) -> None:
+def run_cli(args: argparse.Namespace, worktree_path: Path | None = None) -> None:
     load_dotenv_values()
     bootstrap_config_files()
 
@@ -201,6 +201,7 @@ def run_cli(args: argparse.Namespace) -> None:
                 agent_loop=agent_loop,
                 initial_prompt=args.initial_prompt or stdin_prompt,
                 teleport_on_start=args.teleport,
+                worktree_path=worktree_path,
             )
 
     except (KeyboardInterrupt, EOFError):

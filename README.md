@@ -559,6 +559,61 @@ vibe --workdir /path/to/project
 
 This is useful when you want to run Vibe from a different location than your current directory.
 
+#### Worktree Mode for Concurrent Sessions
+
+Use the `--worktree` option to create an isolated git worktree for your session:
+
+```bash
+vibe --worktree
+```
+
+This allows you to run multiple Vibe sessions concurrently in the same repository without conflicts. Each session gets its own:
+
+- **Isolated working directory**: Changes in one session don't affect others
+- **Separate branch**: Work on different branches simultaneously
+- **Independent session state**: Each worktree has its own conversation history
+
+Additional worktree options:
+
+```bash
+# Specify a branch name
+vibe --worktree --worktree-branch feature/my-feature
+
+# Custom worktree name
+vibe --worktree --worktree-name my-session-1
+```
+
+The worktree is automatically cleaned up when you exit the session.
+
+**Managing Worktrees**
+
+Use the `/worktree` slash command during a session to list all Vibe-managed worktrees:
+
+```
+> /worktree
+
+**Vibe Worktrees:**
+
+- `vibe-session-20260308-143022` (current)
+  - Branch: `feature/my-feature`
+  - Path: `/path/to/repo/.git/vibe-session-20260308-143022`
+  - Commit: `abc12345`
+```
+
+**Configuration**
+
+Control worktree behavior in your `config.toml`:
+
+```toml
+# Automatically clean up worktrees when session ends (default: true)
+worktree_auto_cleanup = true
+
+# Maximum age in hours before a worktree is considered stale (default: 24)
+worktree_max_age_hours = 24
+```
+
+**Note**: Worktree mode requires a git repository. If you're not in a git repository, the `--worktree` flag will be ignored.
+
 ### Update Settings
 
 #### Auto-Update

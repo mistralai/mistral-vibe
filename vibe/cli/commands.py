@@ -77,6 +77,11 @@ class CommandRegistry:
                 description="Browse and resume past sessions",
                 handler="_show_session_picker",
             ),
+            "worktree": Command(
+                aliases=frozenset(["/worktree"]),
+                description="Manage git worktrees for concurrent sessions",
+                handler="_worktree_command",
+            ),
         }
 
         for command in excluded_commands:
