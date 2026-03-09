@@ -114,6 +114,10 @@ class TestAcpSearchReplaceExecution:
         assert isinstance(result, SearchReplaceResult)
         assert result.file == str(test_file)
         assert result.blocks_applied == 1
+        assert (
+            result.file_content_before
+            == "original line 1\noriginal line 2\noriginal line 3"
+        )
         assert mock_client._read_text_file_called
         assert mock_client._write_text_file_called
         assert mock_client._session_update_called
@@ -314,6 +318,7 @@ class TestAcpSearchReplaceSessionUpdates:
             lines_changed=1,
             content=search_replace_content,
             warnings=[],
+            file_content_before="old text",
         )
 
         event = ToolResultEvent(

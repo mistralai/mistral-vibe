@@ -4,7 +4,11 @@ from collections.abc import Callable
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_config,
+    make_test_models,
+)
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.models import BuiltinAgentName
@@ -49,6 +53,7 @@ def make_config(
             alias="devstral-latest",
             input_price=input_price,
             output_price=output_price,
+            auto_compact_threshold=auto_compact_threshold,
         ),
         ModelConfig(
             name="devstral-small-latest",
@@ -56,6 +61,7 @@ def make_config(
             alias="devstral-small",
             input_price=0.1,
             output_price=0.3,
+            auto_compact_threshold=auto_compact_threshold,
         ),
         ModelConfig(
             name="strawberry",
@@ -63,6 +69,7 @@ def make_config(
             alias="strawberry",
             input_price=2.5,
             output_price=10.0,
+            auto_compact_threshold=auto_compact_threshold,
         ),
     ]
     providers = [
@@ -81,7 +88,6 @@ def make_config(
     ]
     return build_test_vibe_config(
         session_logging=SessionLoggingConfig(enabled=not disable_logging),
-        auto_compact_threshold=auto_compact_threshold,
         system_prompt_id=system_prompt_id,
         include_project_context=include_project_context,
         include_prompt_detail=include_prompt_detail,
@@ -505,7 +511,7 @@ class TestAutoCompactIntegration:
             [mock_llm_chunk(content="<summary>")],
             [mock_llm_chunk(content="<final>")],
         ])
-        cfg = build_test_vibe_config(auto_compact_threshold=1)
+        cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
         agent = build_test_agent_loop(
             config=cfg, message_observer=observer, backend=backend
         )

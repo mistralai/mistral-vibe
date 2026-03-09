@@ -107,6 +107,36 @@ class TestACPSetConfigOptionMode:
         assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.PLAN
 
     @pytest.mark.asyncio
+    async def test_set_config_option_mode_to_chat(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+        assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.DEFAULT
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="mode", value=BuiltinAgentName.CHAT
+        )
+
+        assert response is not None
+        assert response.config_options is not None
+        assert len(response.config_options) == 2
+        assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.CHAT
+        assert (
+            acp_session.agent_loop.auto_approve is True
+        )  # Chat mode auto-approves read-only tools
+
+        mode_config = response.config_options[0]
+        assert mode_config.root.id == "mode"
+        assert mode_config.root.current_value == BuiltinAgentName.CHAT
+
+    @pytest.mark.asyncio
     async def test_set_config_option_mode_invalid_returns_none(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:

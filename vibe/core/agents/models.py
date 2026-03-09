@@ -6,6 +6,8 @@ from pathlib import Path
 import tomllib
 from typing import TYPE_CHECKING, Any
 
+from vibe.core.paths.global_paths import PLANS_DIR
+
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
 
@@ -71,7 +73,17 @@ class AgentProfile:
 
 
 CHAT_AGENT_TOOLS = ["grep", "read_file", "ask_user_question", "task"]
-PLAN_AGENT_TOOLS = ["grep", "read_file", "todo", "ask_user_question", "task"]
+
+
+def _plan_overrides() -> dict[str, Any]:
+    plans_pattern = str(PLANS_DIR.path / "*")
+    return {
+        "tools": {
+            "write_file": {"permission": "never", "allowlist": [plans_pattern]},
+            "search_replace": {"permission": "never", "allowlist": [plans_pattern]},
+        }
+    }
+
 
 DEFAULT = AgentProfile(
     BuiltinAgentName.DEFAULT,
@@ -84,7 +96,7 @@ PLAN = AgentProfile(
     "Plan",
     "Read-only agent for exploration and planning",
     AgentSafety.SAFE,
-    overrides={"auto_approve": True, "enabled_tools": PLAN_AGENT_TOOLS},
+    overrides=_plan_overrides(),
 )
 CHAT = AgentProfile(
     BuiltinAgentName.CHAT,

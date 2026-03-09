@@ -56,8 +56,24 @@ class ToolUIData[TArgs: BaseModel, TResult: BaseModel](ABC):
         return cls.format_call_display(cast(TArgs, event.args))
 
     @classmethod
-    @abstractmethod
-    def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay: ...
+    def format_result_display(cls, result: TResult) -> ToolResultDisplay:
+        return ToolResultDisplay(success=True, message="Success")
+
+    @classmethod
+    def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
+        if event.result is None:
+            return ToolResultDisplay(success=True, message="Success")
+
+        introspect = cast(
+            Callable[[], tuple[type, ...]] | None,
+            getattr(cls, "_get_tool_args_results", None),
+        )
+        if introspect is not None:
+            expected_type = introspect()[1]
+            if not isinstance(event.result, expected_type):
+                return ToolResultDisplay(success=True, message="Success")
+
+        return cls.format_result_display(cast(TResult, event.result))
 
     @classmethod
     @abstractmethod

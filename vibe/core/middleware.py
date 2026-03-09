@@ -129,9 +129,20 @@ class ContextWarningMiddleware:
         self.has_warned = False
 
 
-PLAN_AGENT_REMINDER = f"""<{VIBE_WARNING_TAG}>Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received (for example, to make edits). Instead, you should:
-1. Answer the user's query comprehensively
-2. When you're done researching, present your plan by giving the full plan and not doing further tool calls to return input to the user. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.</{VIBE_WARNING_TAG}>"""
+def make_plan_agent_reminder(plan_file_path: str) -> str:
+    return f"""<{VIBE_WARNING_TAG}>Plan mode is active. You MUST NOT make any edits (except to the plan file below), run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
+
+## Plan File Info
+Create or edit your plan at {plan_file_path} using the write_file and search_replace tools.
+Build your plan incrementally by writing to or editing this file.
+This is the only file you are allowed to edit. Make sure to create it early and edit as soon as you internally update your plan.
+
+## Instructions
+1. Research the user's query using read-only tools (grep, read_file, etc.)
+2. If you are unsure about requirements or approach, use the ask_user_question tool to clarify before finalizing your plan
+3. Write your plan to the plan file above
+4. When your plan is complete, call the exit_plan_mode tool to request user approval and switch to implementation mode</{VIBE_WARNING_TAG}>"""
+
 
 PLAN_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Plan mode has ended. If you have a plan ready, you can now start executing it. If not, you can now use editing tools and make changes to the system.</{VIBE_WARNING_TAG}>"""
 
@@ -149,14 +160,18 @@ class ReadOnlyAgentMiddleware:
         self,
         profile_getter: Callable[[], AgentProfile],
         agent_name: str,
-        reminder: str,
+        reminder: str | Callable[[], str],
         exit_message: str,
     ) -> None:
         self._profile_getter = profile_getter
         self._agent_name = agent_name
-        self.reminder = reminder
+        self._reminder = reminder
         self.exit_message = exit_message
         self._was_active = False
+
+    @property
+    def reminder(self) -> str:
+        return self._reminder() if callable(self._reminder) else self._reminder
 
     def _is_active(self) -> bool:
         return self._profile_getter().name == self._agent_name

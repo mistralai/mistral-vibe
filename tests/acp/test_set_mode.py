@@ -76,8 +76,8 @@ class TestACPSetMode:
         assert response is not None
         assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.PLAN
         assert (
-            acp_session.agent_loop.auto_approve is True
-        )  # Plan mode auto-approves read-only tools
+            acp_session.agent_loop.auto_approve is False
+        )  # Plan mode uses per-tool allowlists, not global auto-approve
 
     @pytest.mark.asyncio
     async def test_set_mode_to_accept_edits(

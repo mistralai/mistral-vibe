@@ -7,7 +7,7 @@ from unittest.mock import patch
 from acp.schema import TextContentBlock, ToolCallProgress, ToolCallStart
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import build_test_vibe_config, make_test_models
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
@@ -18,8 +18,9 @@ from vibe.core.agent_loop import AgentLoop
 def acp_agent_loop(backend: FakeBackend) -> VibeAcpAgentLoop:
     class PatchedAgent(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
-            # Force our config with auto_compact_threshold=1
-            kwargs["config"] = build_test_vibe_config(auto_compact_threshold=1)
+            kwargs["config"] = build_test_vibe_config(
+                models=make_test_models(auto_compact_threshold=1)
+            )
             super().__init__(*args, **kwargs, backend=backend)
 
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgent).start()

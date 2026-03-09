@@ -80,6 +80,7 @@ class TestAcpWriteFileExecution:
         assert result.content == "Hello, world!"
         assert result.bytes_written == len(b"Hello, world!")
         assert result.file_existed is False
+        assert result.file_content_before is None
         assert mock_client._write_text_file_called
         assert mock_client._session_update_called
 
@@ -113,6 +114,7 @@ class TestAcpWriteFileExecution:
         assert result.content == "New content"
         assert result.bytes_written == len(b"New content")
         assert result.file_existed is True
+        assert result.file_content_before == ""
         assert mock_client._write_text_file_called
         assert mock_client._session_update_called
 

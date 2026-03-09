@@ -5,12 +5,10 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
-    PLAN_AGENT_TOOLS,
     AgentProfile,
     AgentSafety,
     AgentType,
@@ -21,15 +19,7 @@ from vibe.core.config import VibeConfig
 from vibe.core.paths.config_paths import ConfigPath
 from vibe.core.paths.global_paths import GlobalPath
 from vibe.core.tools.base import ToolPermission
-from vibe.core.types import (
-    FunctionCall,
-    LLMChunk,
-    LLMMessage,
-    LLMUsage,
-    Role,
-    ToolCall,
-    ToolResultEvent,
-)
+from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
 
 
 class TestDeepMerge:
@@ -216,8 +206,14 @@ class TestAgentProfileOverrides:
 
     def test_plan_agent_restricts_tools(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.PLAN].overrides
-        assert "enabled_tools" in overrides
-        assert overrides["enabled_tools"] == PLAN_AGENT_TOOLS
+        assert "tools" in overrides
+        tools = overrides["tools"]
+        assert "write_file" in tools
+        assert "search_replace" in tools
+        assert tools["write_file"]["permission"] == "never"
+        assert tools["search_replace"]["permission"] == "never"
+        assert len(tools["write_file"]["allowlist"]) > 0
+        assert len(tools["search_replace"]["allowlist"]) > 0
 
     def test_accept_edits_agent_sets_tool_permissions(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.ACCEPT_EDITS].overrides
@@ -233,9 +229,7 @@ class TestAgentManagerCycling:
     @pytest.fixture
     def base_config(self) -> VibeConfig:
         return build_test_vibe_config(
-            auto_compact_threshold=0,
-            include_project_context=False,
-            include_prompt_detail=False,
+            include_project_context=False, include_prompt_detail=False
         )
 
     @pytest.fixture
@@ -302,9 +296,7 @@ class TestAgentSwitchAgent:
     @pytest.fixture
     def base_config(self) -> VibeConfig:
         return build_test_vibe_config(
-            auto_compact_threshold=0,
-            include_project_context=False,
-            include_prompt_detail=False,
+            include_project_context=False, include_prompt_detail=False
         )
 
     @pytest.fixture
@@ -317,20 +309,25 @@ class TestAgentSwitchAgent:
         ])
 
     @pytest.mark.asyncio
-    async def test_switch_to_plan_agent_restricts_tools(
+    async def test_switch_to_plan_agent_has_tools_with_restricted_permissions(
         self, base_config: VibeConfig, backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
             config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
-        initial_tool_names = set(agent.tool_manager.available_tools.keys())
-        assert len(initial_tool_names) > len(PLAN_AGENT_TOOLS)
-
         await agent.switch_agent(BuiltinAgentName.PLAN)
 
         plan_tool_names = set(agent.tool_manager.available_tools.keys())
-        assert plan_tool_names == set(PLAN_AGENT_TOOLS)
+        # Plan mode now has all tools available but with restricted permissions
+        assert "write_file" in plan_tool_names
+        assert "search_replace" in plan_tool_names
+        assert "grep" in plan_tool_names
+        assert "read_file" in plan_tool_names
         assert agent.agent_profile.name == BuiltinAgentName.PLAN
+
+        # Verify write tools have "never" base permission
+        write_config = agent.tool_manager.get_tool_config("write_file")
+        assert write_config.permission == ToolPermission.NEVER
 
     @pytest.mark.asyncio
     async def test_switch_from_plan_to_default_restores_tools(
@@ -339,11 +336,12 @@ class TestAgentSwitchAgent:
         agent = build_test_agent_loop(
             config=base_config, agent_name=BuiltinAgentName.PLAN, backend=backend
         )
-        assert len(agent.tool_manager.available_tools) == len(PLAN_AGENT_TOOLS)
 
         await agent.switch_agent(BuiltinAgentName.DEFAULT)
 
-        assert len(agent.tool_manager.available_tools) > len(PLAN_AGENT_TOOLS)
+        # Write tools should revert to default ASK permission
+        write_config = agent.tool_manager.get_tool_config("write_file")
+        assert write_config.permission == ToolPermission.ASK
         assert agent.agent_profile.name == BuiltinAgentName.DEFAULT
 
     @pytest.mark.asyncio
@@ -392,9 +390,7 @@ class TestAcceptEditsAgent:
     async def test_accept_edits_agent_auto_approves_write_file(self) -> None:
         backend = FakeBackend([])
 
-        config = build_test_vibe_config(
-            auto_compact_threshold=0, enabled_tools=["write_file"]
-        )
+        config = build_test_vibe_config(enabled_tools=["write_file"])
         agent = build_test_agent_loop(
             config=config, agent_name=BuiltinAgentName.ACCEPT_EDITS, backend=backend
         )
@@ -406,9 +402,7 @@ class TestAcceptEditsAgent:
     async def test_accept_edits_agent_requires_approval_for_other_tools(self) -> None:
         backend = FakeBackend([])
 
-        config = build_test_vibe_config(
-            auto_compact_threshold=0, enabled_tools=["bash"]
-        )
+        config = build_test_vibe_config(enabled_tools=["bash"])
         agent = build_test_agent_loop(
             config=config, agent_name=BuiltinAgentName.ACCEPT_EDITS, backend=backend
         )
@@ -419,52 +413,36 @@ class TestAcceptEditsAgent:
 
 class TestPlanAgentToolRestriction:
     @pytest.mark.asyncio
-    async def test_plan_agent_only_exposes_read_tools_to_llm(self) -> None:
+    async def test_plan_agent_has_all_tools_with_restricted_write_permissions(
+        self,
+    ) -> None:
         backend = FakeBackend([
             LLMChunk(
                 message=LLMMessage(role=Role.assistant, content="ok"),
                 usage=LLMUsage(prompt_tokens=10, completion_tokens=5),
             )
         ])
-        config = build_test_vibe_config(auto_compact_threshold=0)
+        config = build_test_vibe_config()
         agent = build_test_agent_loop(
             config=config, agent_name=BuiltinAgentName.PLAN, backend=backend
         )
 
         tool_names = set(agent.tool_manager.available_tools.keys())
 
-        assert "bash" not in tool_names
-        assert "write_file" not in tool_names
-        assert "search_replace" not in tool_names
-        for plan_tool in PLAN_AGENT_TOOLS:
-            assert plan_tool in tool_names
+        # Plan mode now has all tools available
+        assert "grep" in tool_names
+        assert "read_file" in tool_names
+        assert "write_file" in tool_names
+        assert "search_replace" in tool_names
 
-    @pytest.mark.asyncio
-    async def test_plan_agent_rejects_non_plan_tool_call(self) -> None:
-        tool_call = ToolCall(
-            id="call_1",
-            index=0,
-            function=FunctionCall(name="bash", arguments='{"command": "ls"}'),
-        )
-        backend = FakeBackend([
-            mock_llm_chunk(content="Let me run bash", tool_calls=[tool_call]),
-            mock_llm_chunk(content="Tool not available"),
-        ])
+        # But write tools have restricted permissions
+        write_config = agent.tool_manager.get_tool_config("write_file")
+        assert write_config.permission == ToolPermission.NEVER
+        assert len(write_config.allowlist) > 0
 
-        config = build_test_vibe_config(auto_compact_threshold=0)
-        agent = build_test_agent_loop(
-            config=config, agent_name=BuiltinAgentName.PLAN, backend=backend
-        )
-
-        events = [ev async for ev in agent.act("Run ls")]
-
-        tool_result = next((e for e in events if isinstance(e, ToolResultEvent)), None)
-        assert tool_result is not None
-        assert tool_result.error is not None
-        assert (
-            "not found" in tool_result.error.lower()
-            or "error" in tool_result.error.lower()
-        )
+        sr_config = agent.tool_manager.get_tool_config("search_replace")
+        assert sr_config.permission == ToolPermission.NEVER
+        assert len(sr_config.allowlist) > 0
 
 
 class TestAgentManagerFiltering:

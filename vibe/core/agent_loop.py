@@ -30,7 +30,6 @@ from vibe.core.middleware import (
     CHAT_AGENT_EXIT,
     CHAT_AGENT_REMINDER,
     PLAN_AGENT_EXIT,
-    PLAN_AGENT_REMINDER,
     AutoCompactMiddleware,
     ContextWarningMiddleware,
     ConversationContext,
@@ -41,7 +40,9 @@ from vibe.core.middleware import (
     ReadOnlyAgentMiddleware,
     ResetReason,
     TurnLimitMiddleware,
+    make_plan_agent_reminder,
 )
+from vibe.core.plan_session import PlanSession
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.session.session_migration import migrate_sessions_entrypoint
@@ -154,6 +155,7 @@ class AgentLoop:
         self._base_config = config
         self._max_turns = max_turns
         self._max_price = max_price
+        self._plan_session = PlanSession()
 
         self.agent_manager = AgentManager(
             lambda: self._base_config, initial_agent=agent_name
@@ -343,20 +345,21 @@ class AgentLoop:
         if self._max_price is not None:
             self.middleware_pipeline.add(PriceLimitMiddleware(self._max_price))
 
-        if self.config.auto_compact_threshold > 0:
+        active_model = self.config.get_active_model()
+        if active_model.auto_compact_threshold > 0:
             self.middleware_pipeline.add(
-                AutoCompactMiddleware(self.config.auto_compact_threshold)
+                AutoCompactMiddleware(active_model.auto_compact_threshold)
             )
             if self.config.context_warnings:
                 self.middleware_pipeline.add(
-                    ContextWarningMiddleware(0.5, self.config.auto_compact_threshold)
+                    ContextWarningMiddleware(0.5, active_model.auto_compact_threshold)
                 )
 
         self.middleware_pipeline.add(
             ReadOnlyAgentMiddleware(
                 lambda: self.agent_profile,
                 BuiltinAgentName.PLAN,
-                PLAN_AGENT_REMINDER,
+                lambda: make_plan_agent_reminder(self._plan_session.plan_file_path_str),
                 PLAN_AGENT_EXIT,
             )
         )
@@ -391,7 +394,7 @@ class AgentLoop:
                     "old_tokens", self.stats.context_tokens
                 )
                 threshold = result.metadata.get(
-                    "threshold", self.config.auto_compact_threshold
+                    "threshold", self.config.get_active_model().auto_compact_threshold
                 )
                 tool_call_id = str(uuid4())
 
@@ -615,6 +618,8 @@ class AgentLoop:
                     approval_callback=self.approval_callback,
                     user_input_callback=self.user_input_callback,
                     sampling_callback=self._sampling_handler,
+                    plan_file_path=self._plan_session.plan_file_path,
+                    switch_agent_callback=self.switch_agent,
                 ),
                 **tool_call.args_dict,
             ):

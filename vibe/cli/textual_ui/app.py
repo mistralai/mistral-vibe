@@ -25,12 +25,13 @@ from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.plan_offer.adapters.http_whoami_gateway import HttpWhoAmIGateway
 from vibe.cli.plan_offer.decide_plan_offer import (
-    PlanType,
+    PlanInfo,
     decide_plan_offer,
     plan_offer_cta,
+    plan_title,
     resolve_api_key_for_plan,
 )
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway
+from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway, WhoAmIPlanType
 from vibe.cli.terminal_setup import setup_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.notifications import (
@@ -89,7 +90,7 @@ from vibe.cli.update_notifier.update import do_update
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents import AgentProfile
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
-from vibe.core.config import VibeConfig
+from vibe.core.config import Backend, VibeConfig
 from vibe.core.logger import logger
 from vibe.core.paths.config_paths import HISTORY_FILE
 from vibe.core.session.session_loader import SessionLoader
@@ -270,6 +271,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._cached_chat: ChatScroll | None = None
         self._cached_loading_area: Widget | None = None
         self._switch_agent_generation = 0
+        self._plan_info: PlanInfo | None = None
 
     @property
     def config(self) -> VibeConfig:
@@ -319,7 +321,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         def update_context_progress(stats: AgentStats) -> None:
             context_progress.tokens = TokenState(
-                max_tokens=self.config.auto_compact_threshold,
+                max_tokens=self.config.get_active_model().auto_compact_threshold,
                 current_tokens=stats.context_tokens,
             )
 
@@ -332,6 +334,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         chat_input_container = self.query_one(ChatInputContainer)
         chat_input_container.focus_input()
+        await self._resolve_plan()
         await self._show_dangerous_directory_warning()
         await self._resume_history_from_messages()
         await self._check_and_show_whats_new()
@@ -728,10 +731,7 @@ class VibeApp(App):  # noqa: PLR0904
 
             message = str(e)
             if isinstance(e, RateLimitError):
-                if self.plan_type == PlanType.FREE:
-                    message = "Rate limits exceeded. Please wait a moment before trying again, or upgrade to Pro for higher rate limits and uninterrupted access."
-                else:
-                    message = "Rate limits exceeded. Please wait a moment before trying again."
+                message = self._rate_limit_message()
 
             await self._mount_and_scroll(
                 ErrorMessage(message, collapsed=self._tools_collapsed)
@@ -747,6 +747,15 @@ class VibeApp(App):  # noqa: PLR0904
                 await self.event_handler.finalize_streaming()
             await self._refresh_windowing_from_history()
             self._terminal_notifier.notify(NotificationContext.COMPLETE)
+
+    def _rate_limit_message(self) -> str:
+        upgrade_to_pro = self._plan_info and self._plan_info.plan_type in {
+            WhoAmIPlanType.API,
+            WhoAmIPlanType.UNAUTHORIZED,
+        }
+        if upgrade_to_pro:
+            return "Rate limits exceeded. Please wait a moment before trying again, or upgrade to Pro for higher rate limits and uninterrupted access."
+        return "Rate limits exceeded. Please wait a moment before trying again."
 
     async def _teleport_command(self) -> None:
         await self._handle_teleport_command(show_message=False)
@@ -1003,9 +1012,14 @@ class VibeApp(App):  # noqa: PLR0904
             base_config = VibeConfig.load()
 
             await self.agent_loop.reload_with_initial_messages(base_config=base_config)
+            await self._resolve_plan()
 
             if self._banner:
-                self._banner.set_state(base_config, self.agent_loop.skill_manager)
+                self._banner.set_state(
+                    base_config,
+                    self.agent_loop.skill_manager,
+                    plan_title(self._plan_info),
+                )
             await self._mount_and_scroll(UserCommandMessage("Configuration reloaded."))
         except Exception as e:
             await self._mount_and_scroll(
@@ -1198,6 +1212,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._chat_input_container.disabled = False
             self._chat_input_container.display = True
             self._current_bottom_app = BottomApp.Input
+            self._refresh_profile_widgets()
             self.call_after_refresh(self._chat_input_container.focus_input)
             chat = self._cached_chat or self.query_one("#chat", ChatScroll)
             if chat.is_at_bottom:
@@ -1371,7 +1386,9 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _refresh_banner(self) -> None:
         if self._banner:
-            self._banner.set_state(self.config, self.agent_loop.skill_manager)
+            self._banner.set_state(
+                self.config, self.agent_loop.skill_manager, plan_title(self._plan_info)
+            )
 
     def _update_profile_widgets(self, profile: AgentProfile) -> None:
         if self._chat_input_container:
@@ -1460,7 +1477,7 @@ class VibeApp(App):  # noqa: PLR0904
         content = load_whats_new_content()
         if content is not None:
             whats_new_message = WhatsNewMessage(content)
-            plan_offer = await self._plan_offer_cta()
+            plan_offer = plan_offer_cta(self._plan_info)
             if plan_offer is not None:
                 whats_new_message = WhatsNewMessage(f"{content}\n\n{plan_offer}")
             if self._history_widget_indices:
@@ -1474,23 +1491,21 @@ class VibeApp(App):  # noqa: PLR0904
                 chat.anchor()
         await mark_version_as_seen(self._current_version, self._update_cache_repository)
 
-    async def _plan_offer_cta(self) -> str | None:
-        self.plan_type = PlanType.UNKNOWN
-
+    async def _resolve_plan(self) -> None:
         if self._plan_offer_gateway is None:
+            self._plan_info = None
             return
 
         try:
             active_model = self.config.get_active_model()
             provider = self.config.get_provider_for_model(active_model)
 
-            api_key = resolve_api_key_for_plan(provider)
-            action, plan_type = await decide_plan_offer(
-                api_key, self._plan_offer_gateway
-            )
+            if provider.backend != Backend.MISTRAL:
+                self._plan_info = None
+                return
 
-            self.plan_type = plan_type
-            return plan_offer_cta(action)
+            api_key = resolve_api_key_for_plan(provider)
+            self._plan_info = await decide_plan_offer(api_key, self._plan_offer_gateway)
         except Exception as exc:
             logger.warning(
                 "Plan-offer check failed (%s).", type(exc).__name__, exc_info=True

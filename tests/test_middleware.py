@@ -9,12 +9,12 @@ from vibe.core.middleware import (
     CHAT_AGENT_EXIT,
     CHAT_AGENT_REMINDER,
     PLAN_AGENT_EXIT,
-    PLAN_AGENT_REMINDER,
     ConversationContext,
     MiddlewareAction,
     MiddlewarePipeline,
     ReadOnlyAgentMiddleware,
     ResetReason,
+    make_plan_agent_reminder,
 )
 from vibe.core.types import AgentStats, MessageList
 
@@ -326,15 +326,19 @@ class TestReadOnlyAgentMiddleware:
         assert result.action == MiddlewareAction.CONTINUE
 
 
+PLAN_REMINDER_SNIPPET = "Plan mode is active"
+
+
 class TestMiddlewarePipelineWithReadOnlyAgent:
     @pytest.mark.asyncio
     async def test_pipeline_includes_injection(self, ctx: ConversationContext) -> None:
+        plan_reminder = make_plan_agent_reminder("/tmp/test-plan.md")
         pipeline = MiddlewarePipeline()
         pipeline.add(
             ReadOnlyAgentMiddleware(
                 lambda: BUILTIN_AGENTS[BuiltinAgentName.PLAN],
                 BuiltinAgentName.PLAN,
-                PLAN_AGENT_REMINDER,
+                plan_reminder,
                 PLAN_AGENT_EXIT,
             )
         )
@@ -342,18 +346,19 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         result = await pipeline.run_before_turn(ctx)
 
         assert result.action == MiddlewareAction.INJECT_MESSAGE
-        assert PLAN_AGENT_REMINDER in (result.message or "")
+        assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
     @pytest.mark.asyncio
     async def test_pipeline_skips_injection_when_not_target_agent(
         self, ctx: ConversationContext
     ) -> None:
+        plan_reminder = make_plan_agent_reminder("/tmp/test-plan.md")
         pipeline = MiddlewarePipeline()
         pipeline.add(
             ReadOnlyAgentMiddleware(
                 lambda: BUILTIN_AGENTS[BuiltinAgentName.DEFAULT],
                 BuiltinAgentName.PLAN,
-                PLAN_AGENT_REMINDER,
+                plan_reminder,
                 PLAN_AGENT_EXIT,
             )
         )
@@ -366,13 +371,14 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
     async def test_direct_plan_to_chat_transition_delivers_both_messages(
         self, ctx: ConversationContext
     ) -> None:
+        plan_reminder = make_plan_agent_reminder("/tmp/test-plan.md")
         current_profile: AgentProfile = BUILTIN_AGENTS[BuiltinAgentName.PLAN]
         pipeline = MiddlewarePipeline()
         pipeline.add(
             ReadOnlyAgentMiddleware(
                 lambda: current_profile,
                 BuiltinAgentName.PLAN,
-                PLAN_AGENT_REMINDER,
+                plan_reminder,
                 PLAN_AGENT_EXIT,
             )
         )
@@ -387,7 +393,7 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
 
         result = await pipeline.run_before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
-        assert PLAN_AGENT_REMINDER in (result.message or "")
+        assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
         current_profile = CHAT
         result = await pipeline.run_before_turn(ctx)
@@ -399,7 +405,7 @@ class TestMiddlewarePipelineWithReadOnlyAgent:
         result = await pipeline.run_before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
         assert CHAT_AGENT_EXIT in (result.message or "")
-        assert PLAN_AGENT_REMINDER in (result.message or "")
+        assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
 
 def _find_plan_middleware(agent) -> ReadOnlyAgentMiddleware:
@@ -417,7 +423,6 @@ class TestReadOnlyAgentMiddlewareIntegration:
         self,
     ) -> None:
         config = build_test_vibe_config(
-            auto_compact_threshold=0,
             system_prompt_id="tests",
             include_project_context=False,
             include_prompt_detail=False,
@@ -434,7 +439,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
         )
         result = await plan_middleware.before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
-        assert result.message == PLAN_AGENT_REMINDER
+        assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
         await agent.switch_agent(BuiltinAgentName.DEFAULT)
 
@@ -451,7 +456,6 @@ class TestReadOnlyAgentMiddlewareIntegration:
     @pytest.mark.asyncio
     async def test_switch_agent_allows_reinjection_on_reentry(self) -> None:
         config = build_test_vibe_config(
-            auto_compact_threshold=0,
             system_prompt_id="tests",
             include_project_context=False,
             include_prompt_detail=False,
@@ -483,12 +487,11 @@ class TestReadOnlyAgentMiddlewareIntegration:
         )
         result = await plan_middleware.before_turn(ctx)
         assert result.action == MiddlewareAction.INJECT_MESSAGE
-        assert result.message == PLAN_AGENT_REMINDER
+        assert PLAN_REMINDER_SNIPPET in (result.message or "")
 
     @pytest.mark.asyncio
     async def test_switch_plan_to_auto_approve_fires_exit(self) -> None:
         config = build_test_vibe_config(
-            auto_compact_threshold=0,
             system_prompt_id="tests",
             include_project_context=False,
             include_prompt_detail=False,
@@ -517,7 +520,6 @@ class TestReadOnlyAgentMiddlewareIntegration:
     @pytest.mark.asyncio
     async def test_switch_between_non_plan_agents_no_injection(self) -> None:
         config = build_test_vibe_config(
-            auto_compact_threshold=0,
             system_prompt_id="tests",
             include_project_context=False,
             include_prompt_detail=False,
@@ -549,7 +551,6 @@ class TestReadOnlyAgentMiddlewareIntegration:
     async def test_full_lifecycle_plan_default_plan_default(self) -> None:
         """Integration test for a full plan -> default -> plan -> default cycle."""
         config = build_test_vibe_config(
-            auto_compact_threshold=0,
             system_prompt_id="tests",
             include_project_context=False,
             include_prompt_detail=False,
@@ -569,7 +570,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
         # 1. Enter plan: inject reminder
         r = await plan_middleware.before_turn(_ctx())
         assert r.action == MiddlewareAction.INJECT_MESSAGE
-        assert r.message == PLAN_AGENT_REMINDER
+        assert PLAN_REMINDER_SNIPPET in (r.message or "")
 
         # 2. Stay in plan: no injection
         r = await plan_middleware.before_turn(_ctx())
@@ -589,7 +590,7 @@ class TestReadOnlyAgentMiddlewareIntegration:
         await agent.switch_agent(BuiltinAgentName.PLAN)
         r = await plan_middleware.before_turn(_ctx())
         assert r.action == MiddlewareAction.INJECT_MESSAGE
-        assert r.message == PLAN_AGENT_REMINDER
+        assert PLAN_REMINDER_SNIPPET in (r.message or "")
 
         # 6. Stay in plan: no injection
         r = await plan_middleware.before_turn(_ctx())

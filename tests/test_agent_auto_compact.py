@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_config,
+    make_test_models,
+)
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.types import (
@@ -21,7 +25,7 @@ async def test_auto_compact_emits_correct_events(telemetry_events: list[dict]) -
         [mock_llm_chunk(content="<summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
-    cfg = build_test_vibe_config(auto_compact_threshold=1)
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
     agent = build_test_agent_loop(config=cfg, backend=backend)
     agent.stats.context_tokens = 2
 
@@ -65,7 +69,7 @@ async def test_auto_compact_observer_sees_user_msg_not_summary() -> None:
         [mock_llm_chunk(content="<summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
-    cfg = build_test_vibe_config(auto_compact_threshold=1)
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
     agent = build_test_agent_loop(
         config=cfg, message_observer=observer, backend=backend
     )
@@ -91,7 +95,7 @@ async def test_auto_compact_observer_does_not_see_summary_request() -> None:
         [mock_llm_chunk(content="<summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
-    cfg = build_test_vibe_config(auto_compact_threshold=1)
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
     agent = build_test_agent_loop(
         config=cfg, message_observer=observer, backend=backend
     )
@@ -111,7 +115,7 @@ async def test_compact_replaces_messages_with_summary() -> None:
         [mock_llm_chunk(content="<summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
-    cfg = build_test_vibe_config(auto_compact_threshold=1)
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
     agent = build_test_agent_loop(config=cfg, backend=backend)
     agent.stats.context_tokens = 2
 

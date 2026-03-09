@@ -34,13 +34,7 @@ class HttpWhoAmIGateway:
             raise WhoAmIGatewayError(f"Unexpected status {response.status_code}")
 
         payload = _safe_json(response) or {}
-        return WhoAmIResponse(
-            is_pro_plan=_parse_bool(payload.get("is_pro_plan")),
-            advertise_pro_plan=_parse_bool(payload.get("advertise_pro_plan")),
-            prompt_switching_to_pro_plan=_parse_bool(
-                payload.get("prompt_switching_to_pro_plan")
-            ),
-        )
+        return WhoAmIResponse.from_payload(payload)
 
 
 def _safe_json(response: httpx.Response) -> Mapping[str, object] | None:
@@ -49,19 +43,3 @@ def _safe_json(response: httpx.Response) -> Mapping[str, object] | None:
     except ValueError:
         return None
     return cast(Mapping[str, object], data) if isinstance(data, dict) else None
-
-
-def _parse_bool(value: object | None) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        match value.strip().lower():
-            case "true":
-                return True
-            case "false":
-                return False
-            case _:
-                raise WhoAmIGatewayError("Invalid boolean string in whoami response")
-    raise WhoAmIGatewayError("Invalid boolean value in whoami response")

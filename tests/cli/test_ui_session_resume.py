@@ -16,7 +16,7 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
 )
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIResponse
+from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     UserMessage,
@@ -165,8 +165,8 @@ async def test_ui_rebuilds_history_when_whats_new_is_shown(
     update_cache_repository = FakeUpdateCacheRepository(update_cache=update_cache)
     plan_offer_gateway = FakeWhoAmIGateway(
         WhoAmIResponse(
-            is_pro_plan=False,
-            advertise_pro_plan=True,
+            plan_type=WhoAmIPlanType.API,
+            plan_name="FREE",
             prompt_switching_to_pro_plan=False,
         )
     )

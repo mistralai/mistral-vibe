@@ -62,6 +62,7 @@ class SearchReplaceResult(BaseModel):
     lines_changed: int
     content: str
     warnings: list[str] = Field(default_factory=list)
+    file_content_before: str
 
 
 class SearchReplaceConfig(BaseToolConfig):
@@ -162,6 +163,7 @@ class SearchReplace(
             lines_changed=lines_changed,
             warnings=block_result.warnings,
             content=args.content,
+            file_content_before=original_content,
         )
 
     @final

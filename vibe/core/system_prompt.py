@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Generator
-import fnmatch
 import html
 import os
 from pathlib import Path
 import subprocess
 import sys
-import time
 from typing import TYPE_CHECKING
 
 from vibe.core.prompts import UtilityPrompt
@@ -19,6 +16,8 @@ if TYPE_CHECKING:
     from vibe.core.config import ProjectContextConfig, VibeConfig
     from vibe.core.skills.manager import SkillManager
     from vibe.core.tools.manager import ToolManager
+
+_git_status_cache: dict[Path, str] = {}
 
 
 def _load_project_doc(workdir: Path, max_bytes: int) -> str:
@@ -39,162 +38,16 @@ class ProjectContextProvider:
     ) -> None:
         self.root_path = Path(root_path).resolve()
         self.config = config
-        self.gitignore_patterns = self._load_gitignore_patterns()
-        self._file_count = 0
-        self._start_time = 0.0
-
-    def _load_gitignore_patterns(self) -> list[str]:
-        gitignore_path = self.root_path / ".gitignore"
-        patterns = []
-
-        if gitignore_path.exists():
-            try:
-                patterns.extend(
-                    line.strip()
-                    for line in gitignore_path.read_text(encoding="utf-8").splitlines()
-                    if line.strip() and not line.startswith("#")
-                )
-            except Exception as e:
-                print(f"Warning: Could not read .gitignore: {e}", file=sys.stderr)
-
-        default_patterns = [
-            ".git",
-            ".git/*",
-            "*.pyc",
-            "__pycache__",
-            "node_modules",
-            "node_modules/*",
-            ".env",
-            ".DS_Store",
-            "*.log",
-            ".vscode/settings.json",
-            ".idea/*",
-            "dist",
-            "build",
-            "target",
-            ".next",
-            ".nuxt",
-            "coverage",
-            ".nyc_output",
-            "*.egg-info",
-            ".pytest_cache",
-            ".tox",
-            "vendor",
-            "third_party",
-            "deps",
-            "*.min.js",
-            "*.min.css",
-            "*.bundle.js",
-            "*.chunk.js",
-            ".cache",
-            "tmp",
-            "temp",
-            "logs",
-        ]
-
-        return patterns + default_patterns
-
-    def _is_ignored(self, path: Path) -> bool:
-        try:
-            relative_path = path.relative_to(self.root_path)
-            path_str = str(relative_path)
-
-            for pattern in self.gitignore_patterns:
-                if pattern.endswith("/"):
-                    if path.is_dir() and fnmatch.fnmatch(f"{path_str}/", pattern):
-                        return True
-                elif fnmatch.fnmatch(path_str, pattern):
-                    return True
-                elif "*" in pattern or "?" in pattern:
-                    if fnmatch.fnmatch(path_str, pattern):
-                        return True
-
-            return False
-        except (ValueError, OSError):
-            return True
-
-    def _should_stop(self) -> bool:
-        return (
-            self._file_count >= self.config.max_files
-            or (time.time() - self._start_time) > self.config.timeout_seconds
-        )
-
-    def _build_tree_structure_iterative(self) -> Generator[str]:
-        self._start_time = time.time()
-        self._file_count = 0
-
-        yield from self._process_directory(self.root_path, "", 0, is_root=True)
-
-    def _process_directory(
-        self, path: Path, prefix: str, depth: int, is_root: bool = False
-    ) -> Generator[str]:
-        if depth > self.config.max_depth or self._should_stop():
-            return
-
-        try:
-            all_items = list(path.iterdir())
-            items = [item for item in all_items if not self._is_ignored(item)]
-
-            items.sort(key=lambda p: (not p.is_dir(), p.name.lower()))
-
-            show_truncation = len(items) > self.config.max_dirs_per_level
-            if show_truncation:
-                items = items[: self.config.max_dirs_per_level]
-
-            for i, item in enumerate(items):
-                if self._should_stop():
-                    break
-
-                is_last = i == len(items) - 1 and not show_truncation
-                connector = "└── " if is_last else "├── "
-                name = f"{item.name}{'/' if item.is_dir() else ''}"
-
-                yield f"{prefix}{connector}{name}"
-                self._file_count += 1
-
-                if item.is_dir() and depth < self.config.max_depth:
-                    child_prefix = prefix + ("    " if is_last else "│   ")
-                    yield from self._process_directory(item, child_prefix, depth + 1)
-
-            if show_truncation and not self._should_stop():
-                remaining = len(all_items) - len(items)
-                yield f"{prefix}└── ... ({remaining} more items)"
-
-        except (PermissionError, OSError):
-            pass
-
-    def get_directory_structure(self) -> str:
-        lines = []
-        header = f"Directory structure of {self.root_path.name} (depth≤{self.config.max_depth}, max {self.config.max_files} items):\n"
-
-        try:
-            for line in self._build_tree_structure_iterative():
-                lines.append(line)
-
-                current_text = header + "\n".join(lines)
-                if (
-                    len(current_text)
-                    > self.config.max_chars - self.config.truncation_buffer
-                ):
-                    break
-
-        except Exception as e:
-            lines.append(f"Error building structure: {e}")
-
-        structure = header + "\n".join(lines)
-
-        if self._file_count >= self.config.max_files:
-            structure += f"\n... (truncated at {self.config.max_files} files limit)"
-        elif (time.time() - self._start_time) > self.config.timeout_seconds:
-            structure += (
-                f"\n... (truncated due to {self.config.timeout_seconds}s timeout)"
-            )
-        elif len(structure) > self.config.max_chars:
-            structure += f"\n... (truncated at {self.config.max_chars} characters)"
-
-        return structure
 
     def get_git_status(self) -> str:
+        if self.root_path in _git_status_cache:
+            return _git_status_cache[self.root_path]
+
+        result = self._fetch_git_status()
+        _git_status_cache[self.root_path] = result
+        return result
+
+    def _fetch_git_status(self) -> str:
         try:
             timeout = min(self.config.timeout_seconds, 10.0)
             num_commits = self.config.default_commit_count
@@ -294,23 +147,10 @@ class ProjectContextProvider:
             return f"Error getting git status: {e}"
 
     def get_full_context(self) -> str:
-        structure = self.get_directory_structure()
         git_status = self.get_git_status()
 
-        large_repo_warning = ""
-        if len(structure) >= self.config.max_chars - self.config.truncation_buffer:
-            large_repo_warning = (
-                f" Large repository detected - showing summary view with depth limit {self.config.max_depth}. "
-                f"Use the LS tool (passing a specific path), Bash tool, and other tools to explore nested directories in detail."
-            )
-
         template = UtilityPrompt.PROJECT_CONTEXT.read()
-        return template.format(
-            large_repo_warning=large_repo_warning,
-            structure=structure,
-            abs_path=self.root_path,
-            git_status=git_status,
-        )
+        return template.format(abs_path=self.root_path, git_status=git_status)
 
 
 def _get_platform_name() -> str:

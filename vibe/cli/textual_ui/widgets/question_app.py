@@ -6,11 +6,12 @@ from typing import TYPE_CHECKING, ClassVar
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Input
 
+from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
 if TYPE_CHECKING:
@@ -108,7 +109,16 @@ class QuestionApp(Container):
         )
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="question-content"):
+        if self.args.content_preview:
+            with VerticalScroll(classes="question-content-preview"):
+                yield AnsiMarkdown(
+                    self.args.content_preview, classes="question-content-preview-text"
+                )
+
+        question_content_classes = (
+            "question-content-docked" if self.args.content_preview else ""
+        )
+        with Vertical(id="question-content", classes=question_content_classes):
             if len(self.questions) > 1:
                 self.tabs_widget = NoMarkupStatic("", classes="question-tabs")
                 yield self.tabs_widget

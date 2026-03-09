@@ -28,7 +28,12 @@ from vibe.core.types import ToolStreamEvent
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
-    from vibe.core.types import ApprovalCallback, EntrypointMetadata, UserInputCallback
+    from vibe.core.types import (
+        ApprovalCallback,
+        EntrypointMetadata,
+        SwitchAgentCallback,
+        UserInputCallback,
+    )
 
 ARGS_COUNT = 4
 
@@ -44,6 +49,8 @@ class InvokeContext:
     sampling_callback: MCPSamplingHandler | None = field(default=None)
     session_dir: Path | None = field(default=None)
     entrypoint_metadata: EntrypointMetadata | None = field(default=None)
+    plan_file_path: Path | None = field(default=None)
+    switch_agent_callback: SwitchAgentCallback | None = field(default=None)
 
 
 class ToolError(Exception):

@@ -113,9 +113,10 @@ class ChatTextArea(TextArea):
                 self.get_full_text(), self._get_full_cursor_offset()
             )
 
-    def _reset_prefix(self) -> None:
+    def _reset_prefix(self, *, clear_last_used: bool = True) -> None:
         self._history_prefix = None
-        self._last_used_prefix = None
+        if clear_last_used:
+            self._last_used_prefix = None
 
     def _mark_cursor_moved_if_needed(self) -> None:
         if (
@@ -124,7 +125,7 @@ class ChatTextArea(TextArea):
             and self.cursor_location != self._cursor_pos_after_load
         ):
             self._cursor_moved_since_load = True
-            self._reset_prefix()
+            self._reset_prefix(clear_last_used=False)
 
     def _get_prefix_up_to_cursor(self) -> str:
         cursor_row, cursor_col = self.cursor_location
@@ -137,8 +138,17 @@ class ChatTextArea(TextArea):
         return ""
 
     def _handle_history_up(self) -> bool:
-        cursor_row, cursor_col = self.cursor_location
-        if cursor_row == 0:
+        _, cursor_col = self.cursor_location
+        history_loaded_and_cursor_unmoved = (
+            self._cursor_pos_after_load is not None
+            and not self._cursor_moved_since_load
+        )
+        should_intercept = (
+            self.navigator.is_first_wrapped_line(self.cursor_location)
+            or history_loaded_and_cursor_unmoved
+        )
+
+        if should_intercept:
             if self._history_prefix is not None and cursor_col != self._last_cursor_col:
                 self._reset_prefix()
                 self._last_cursor_col = 0
@@ -151,26 +161,45 @@ class ChatTextArea(TextArea):
             return True
         return False
 
-    def _handle_history_down(self) -> bool:
-        cursor_row, cursor_col = self.cursor_location
-        total_lines = self.text.count("\n") + 1
+    def _is_on_loaded_history_entry(self) -> bool:
+        return self._cursor_pos_after_load is not None
 
-        on_first_line_unmoved = cursor_row == 0 and not self._cursor_moved_since_load
-        on_last_line = cursor_row == total_lines - 1
+    def _has_history_prefix(self) -> bool:
+        return self._history_prefix is not None
 
-        should_intercept = (
-            on_first_line_unmoved and self._history_prefix is not None
-        ) or on_last_line
+    def _has_history_navigation_context(self) -> bool:
+        return self._is_on_loaded_history_entry() or self._has_history_prefix()
 
-        if not should_intercept:
+    def _should_intercept_history_down(self) -> bool:
+        history_loaded_and_cursor_unmoved = (
+            self._is_on_loaded_history_entry() and not self._cursor_moved_since_load
+        )
+        if history_loaded_and_cursor_unmoved and self._has_history_prefix():
+            return True
+
+        if not self.navigator.is_last_wrapped_line(self.cursor_location):
             return False
 
+        return self._has_history_navigation_context()
+
+    def _handle_history_down(self) -> bool:
+        _, cursor_col = self.cursor_location
+
+        if not self._should_intercept_history_down():
+            return False
+
+        navigating_loaded_history = self._is_on_loaded_history_entry()
+
         if self._history_prefix is not None and cursor_col != self._last_cursor_col:
-            self._reset_prefix()
+            if not navigating_loaded_history:
+                self._reset_prefix()
             self._last_cursor_col = 0
 
         if self._history_prefix is None:
-            self._history_prefix = self._get_prefix_up_to_cursor()
+            if navigating_loaded_history and self._last_used_prefix is not None:
+                self._history_prefix = self._last_used_prefix
+            else:
+                self._history_prefix = self._get_prefix_up_to_cursor()
 
         self._navigating_history = True
         self.post_message(self.HistoryNext(self._history_prefix))
@@ -237,6 +266,11 @@ class ChatTextArea(TextArea):
             event.prevent_default()
             event.stop()
             return
+
+        # Work around VS Code 1.110+ sending space as CSI u (\x1b[32u),
+        # which Textual parses as Key("space", character=None, is_printable=False).
+        if event.key == "space" and event.character is None:
+            event.character = " "
 
         await super()._on_key(event)
         self._mark_cursor_moved_if_needed()

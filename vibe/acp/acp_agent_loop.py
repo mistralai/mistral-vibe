@@ -213,7 +213,9 @@ class VibeAcpAgentLoop(AcpAgent):
 
     def _load_config(self) -> VibeConfig:
         try:
-            config = VibeConfig.load(disabled_tools=["ask_user_question"])
+            config = VibeConfig.load(
+                disabled_tools=["ask_user_question", "exit_plan_mode"]
+            )
             config.tool_paths.extend(self._get_acp_tool_overrides())
             return config
         except MissingAPIKeyError as e:
@@ -512,7 +514,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
         new_config = VibeConfig.load(
             tool_paths=session.agent_loop.config.tool_paths,
-            disabled_tools=["ask_user_question"],
+            disabled_tools=["ask_user_question", "exit_plan_mode"],
         )
 
         await session.agent_loop.reload_with_initial_messages(base_config=new_config)

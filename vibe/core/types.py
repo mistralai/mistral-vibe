@@ -415,6 +415,8 @@ type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
 
 type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
 
+type SwitchAgentCallback = Callable[[str], Awaitable[None]]
+
 
 class MessageList(Sequence[LLMMessage]):
     def __init__(

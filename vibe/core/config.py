@@ -71,16 +71,6 @@ class MissingPromptFileError(RuntimeError):
         self.prompt_dir = prompt_dir
 
 
-class WrongBackendError(RuntimeError):
-    def __init__(self, backend: Backend, is_mistral_api: bool) -> None:
-        super().__init__(
-            f"Wrong backend '{backend}' for {'' if is_mistral_api else 'non-'}"
-            f"mistral API. Use '{Backend.MISTRAL}' for mistral API and '{Backend.GENERIC}' for others."
-        )
-        self.backend = backend
-        self.is_mistral_api = is_mistral_api
-
-
 class TomlFileSettingsSource(PydanticBaseSettingsSource):
     def __init__(self, settings_cls: type[BaseSettings]) -> None:
         super().__init__(settings_cls)
@@ -108,13 +98,10 @@ class TomlFileSettingsSource(PydanticBaseSettingsSource):
 
 
 class ProjectContextConfig(BaseSettings):
-    max_chars: int = 40_000
+    model_config = SettingsConfigDict(extra="ignore")
+
     default_commit_count: int = 5
     max_doc_bytes: int = 32 * 1024
-    truncation_buffer: int = 1_000
-    max_depth: int = 3
-    max_files: int = 1000
-    max_dirs_per_level: int = 20
     timeout_seconds: float = 2.0
 
 
@@ -258,6 +245,7 @@ class ModelConfig(BaseModel):
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
     thinking: Literal["off", "low", "medium", "high"] = "off"
+    auto_compact_threshold: int = 200_000
 
     @model_validator(mode="before")
     @classmethod
@@ -317,7 +305,6 @@ class VibeConfig(BaseSettings):
     autocopy_to_clipboard: bool = True
     file_watcher_for_autocomplete: bool = False
     displayed_workdir: str = ""
-    auto_compact_threshold: int = 200_000
     context_warnings: bool = False
     auto_approve: bool = False
     enable_telemetry: bool = True
@@ -493,27 +480,6 @@ class VibeConfig(BaseSettings):
             api_key_env = provider.api_key_env_var
             if api_key_env and not os.getenv(api_key_env):
                 raise MissingAPIKeyError(api_key_env, provider.name)
-        except ValueError:
-            pass
-        return self
-
-    @model_validator(mode="after")
-    def _check_api_backend_compatibility(self) -> VibeConfig:
-        try:
-            active_model = self.get_active_model()
-            provider = self.get_provider_for_model(active_model)
-            MISTRAL_API_BASES = [
-                "https://codestral.mistral.ai",
-                "https://api.mistral.ai",
-            ]
-            is_mistral_api = any(
-                provider.api_base.startswith(api_base) for api_base in MISTRAL_API_BASES
-            )
-            if (is_mistral_api and provider.backend != Backend.MISTRAL) or (
-                not is_mistral_api and provider.backend != Backend.GENERIC
-            ):
-                raise WrongBackendError(provider.backend, is_mistral_api)
-
         except ValueError:
             pass
         return self

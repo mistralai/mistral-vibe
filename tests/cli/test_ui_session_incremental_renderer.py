@@ -7,7 +7,7 @@ from textual.widgets import Button
 
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.conftest import build_test_agent_loop
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIResponse
+from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.app import ChatScroll, VibeApp
 from vibe.cli.textual_ui.widgets.load_more import (
     HistoryLoadMoreMessage,
@@ -32,8 +32,8 @@ def vibe_config() -> VibeConfig:
 def _pro_plan_gateway() -> FakeWhoAmIGateway:
     return FakeWhoAmIGateway(
         response=WhoAmIResponse(
-            is_pro_plan=True,
-            advertise_pro_plan=False,
+            plan_type=WhoAmIPlanType.CHAT,
+            plan_name="INDIVIDUAL",
             prompt_switching_to_pro_plan=False,
         )
     )
