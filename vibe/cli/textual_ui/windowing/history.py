@@ -44,7 +44,12 @@ def build_history_widgets(
         match msg.role:
             case Role.user:
                 if msg.content:
-                    widget = UserMessage(msg.content)
+                    image_filenames = (
+                        [f"image {i + 1}" for i in range(len(msg.image_parts))]
+                        if msg.image_parts
+                        else None
+                    )
+                    widget = UserMessage(msg.content, image_filenames=image_filenames)
                     widgets.append(widget)
                     history_widget_indices[widget] = history_index
 

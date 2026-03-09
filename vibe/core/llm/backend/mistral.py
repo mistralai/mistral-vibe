@@ -40,6 +40,19 @@ class MistralMapper:
             case Role.system:
                 return mistralai.SystemMessage(role="system", content=msg.content or "")
             case Role.user:
+                if msg.image_parts:
+                    chunks: list[mistralai.TextChunk | mistralai.ImageURLChunk] = []
+                    if msg.content:
+                        chunks.append(
+                            mistralai.TextChunk(type="text", text=msg.content)
+                        )
+                    for part in msg.image_parts:
+                        chunks.append(
+                            mistralai.ImageURLChunk(
+                                image_url=mistralai.ImageURL(url=part.image_url)
+                            )
+                        )
+                    return mistralai.UserMessage(role="user", content=chunks)
                 return mistralai.UserMessage(role="user", content=msg.content)
             case Role.assistant:
                 content: mistralai.AssistantMessageContent
@@ -222,6 +235,22 @@ class MistralBackend:
             self._client = self._create_mistral_client()
         return self._client
 
+    @staticmethod
+    def _strip_image_parts_if_needed(
+        model: ModelConfig, messages: Sequence[LLMMessage]
+    ) -> Sequence[LLMMessage]:
+        """Return messages with image_parts cleared for non-vision models.
+
+        Avoids sending ImageURLChunks to models that don't support vision,
+        which causes a 400 error from the Mistral API.
+        """
+        if model.supports_vision:
+            return messages
+        return [
+            msg.model_copy(update={"image_parts": None}) if msg.image_parts else msg
+            for msg in messages
+        ]
+
     async def complete(
         self,
         *,
@@ -235,6 +264,7 @@ class MistralBackend:
         metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
         try:
+            messages = self._strip_image_parts_if_needed(model, messages)
             merged_messages = merge_consecutive_user_messages(messages)
             response = await self._get_client().chat.complete_async(
                 model=model.name,
@@ -311,6 +341,7 @@ class MistralBackend:
         metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
+            messages = self._strip_image_parts_if_needed(model, messages)
             merged_messages = merge_consecutive_user_messages(messages)
             async for chunk in await self._get_client().chat.stream_async(
                 model=model.name,

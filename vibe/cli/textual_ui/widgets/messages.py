@@ -35,15 +35,26 @@ class ExpandingBorder(NonSelectableStatic):
 
 
 class UserMessage(Static):
-    def __init__(self, content: str, pending: bool = False) -> None:
+    def __init__(
+        self,
+        content: str,
+        pending: bool = False,
+        image_filenames: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.add_class("user-message")
         self._content = content
         self._pending = pending
+        self._image_filenames: list[str] = image_filenames or []
 
     def compose(self) -> ComposeResult:
-        with Horizontal(classes="user-message-container"):
+        with Vertical(classes="user-message-container"):
             yield NoMarkupStatic(self._content, classes="user-message-content")
+            if self._image_filenames:
+                names = " ".join(f"[{n}]" for n in self._image_filenames)
+                yield NoMarkupStatic(
+                    f"Uploaded Images: {names}", classes="user-message-image-label"
+                )
             if self._pending:
                 self.add_class("pending")
 

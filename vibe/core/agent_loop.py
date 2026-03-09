@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import AsyncGenerator, Callable, Generator
 from enum import StrEnum, auto
 from http import HTTPStatus
 import json
+import mimetypes
 from pathlib import Path
+import re
 from threading import Thread
 import time
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -16,7 +19,13 @@ from pydantic import BaseModel
 from vibe.cli.terminal_setup import detect_terminal
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
-from vibe.core.config import Backend, ProviderConfig, VibeConfig
+from vibe.core.config import (
+    IMAGE_EXTENSIONS,
+    Backend,
+    ModelConfig,
+    ProviderConfig,
+    VibeConfig,
+)
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.exceptions import BackendError
 from vibe.core.llm.format import (
@@ -70,6 +79,7 @@ from vibe.core.types import (
     CompactEndEvent,
     CompactStartEvent,
     EntrypointMetadata,
+    ImageContentPart,
     LLMChunk,
     LLMMessage,
     LLMUsage,
@@ -84,6 +94,7 @@ from vibe.core.types import (
     ToolStreamEvent,
     UserInputCallback,
     UserMessageEvent,
+    VisionModelCallback,
 )
 from vibe.core.utils import (
     TOOL_ERROR_TAG,
@@ -192,6 +203,8 @@ class AgentLoop:
 
         self.approval_callback: ApprovalCallback | None = None
         self.user_input_callback: UserInputCallback | None = None
+        self.vision_model_callback: VisionModelCallback | None = None
+        self._current_turn_model: ModelConfig | None = None
 
         self.entrypoint_metadata = entrypoint_metadata
         self.session_id = str(uuid4())
@@ -274,9 +287,11 @@ class AgentLoop:
             self.agent_profile,
         )
 
-    async def act(self, msg: str) -> AsyncGenerator[BaseEvent]:
+    async def act(
+        self, msg: str, image_parts: list[ImageContentPart] | None = None
+    ) -> AsyncGenerator[BaseEvent]:
         self._clean_message_history()
-        async for event in self._conversation_loop(msg):
+        async for event in self._conversation_loop(msg, image_parts=image_parts):
             yield event
 
     @property
@@ -433,8 +448,72 @@ class AgentLoop:
             })
         return headers
 
-    async def _conversation_loop(self, user_msg: str) -> AsyncGenerator[BaseEvent]:
-        user_message = LLMMessage(role=Role.user, content=user_msg)
+    @staticmethod
+    def _resolve_image_references(user_msg: str) -> tuple[str, list[ImageContentPart]]:
+        """Extract @<file> refs that point to image files and encode them as base64.
+
+        Returns the remaining text (with image refs stripped) and a list of
+        ImageContentPart objects ready to attach to an LLMMessage.
+        """
+        image_parts: list[ImageContentPart] = []
+        refs_to_remove: list[str] = []
+
+        for m in re.finditer(r"@(\S+)", user_msg):
+            path_str = m.group(1)
+            p = Path(path_str).expanduser()
+            if not p.is_absolute():
+                p = Path.cwd() / p
+            if p.suffix.lower() in IMAGE_EXTENSIONS:
+                if not p.exists():
+                    raise FileNotFoundError(f"Image file not found: {p}")
+                raw = p.read_bytes()
+                b64 = base64.standard_b64encode(raw).decode()
+                mime, _ = mimetypes.guess_type(str(p))
+                mime = mime or "image/png"
+                image_parts.append(
+                    ImageContentPart(
+                        image_url=f"data:{mime};base64,{b64}", media_type=mime
+                    )
+                )
+                refs_to_remove.append(m.group(0))
+
+        text = user_msg
+        for ref in refs_to_remove:
+            text = text.replace(ref, "")
+        text = text.strip()
+
+        return text, image_parts
+
+    async def _conversation_loop(
+        self, user_msg: str, image_parts: list[ImageContentPart] | None = None
+    ) -> AsyncGenerator[BaseEvent]:
+        # In TUI mode image_parts are pre-extracted before render_path_prompt runs.
+        # In non-TUI mode (programmatic / ACP) we resolve them here from the raw text.
+        if image_parts is None:
+            user_msg, image_parts = self._resolve_image_references(user_msg)
+            if not image_parts:
+                image_parts = None
+
+        # Vision capability guard: if images are present and the active model
+        # does not support vision, ask the user what to do via the callback.
+        if image_parts:
+            active_model = self.config.get_active_model()
+            if not active_model.supports_vision:
+                if self.vision_model_callback is not None:
+                    override_model = await self.vision_model_callback()
+                    if override_model is None:
+                        # User chose to drop this task — exit silently.
+                        return
+                    self._current_turn_model = override_model
+                else:
+                    # Non-TUI mode: no callback registered, drop images silently.
+                    image_parts = []
+
+        user_message = LLMMessage(
+            role=Role.user,
+            content=user_msg,
+            image_parts=image_parts if image_parts else None,
+        )
         self.messages.append(user_message)
         self.stats.steps += 1
         self._current_user_message_id = user_message.message_id
@@ -471,6 +550,7 @@ class AgentLoop:
                     return
 
         finally:
+            self._current_turn_model = None
             await self._save_messages()
 
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
@@ -707,7 +787,7 @@ class AgentLoop:
         )
 
     async def _chat(self, max_tokens: int | None = None) -> LLMChunk:
-        active_model = self.config.get_active_model()
+        active_model = self._current_turn_model or self.config.get_active_model()
         provider = self.config.get_provider_for_model(active_model)
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
@@ -752,7 +832,7 @@ class AgentLoop:
     async def _chat_streaming(
         self, max_tokens: int | None = None
     ) -> AsyncGenerator[LLMChunk]:
-        active_model = self.config.get_active_model()
+        active_model = self._current_turn_model or self.config.get_active_model()
         provider = self.config.get_provider_for_model(active_model)
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
@@ -938,6 +1018,9 @@ class AgentLoop:
 
     def set_user_input_callback(self, callback: UserInputCallback) -> None:
         self.user_input_callback = callback
+
+    def set_vision_model_callback(self, callback: VisionModelCallback) -> None:
+        self.vision_model_callback = callback
 
     async def clear_history(self) -> None:
         await self.session_logger.save_interaction(

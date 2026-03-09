@@ -215,6 +215,14 @@ Markdown {
     color: $mistral_orange;
 }
 
+.user-message-image-label {
+    width: 1fr;
+    height: auto;
+    padding-left: 1;
+    border-left: heavy #666666;
+    color: #666666;
+}
+
 .assistant-message {
     layout: stream;
     margin-top: 1;
