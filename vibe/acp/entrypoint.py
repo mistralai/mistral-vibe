@@ -5,10 +5,16 @@ from dataclasses import dataclass
 import os
 import sys
 
+import tomli_w
+
 from vibe import __version__
 from vibe.core.config import VibeConfig
+from vibe.core.config.harness_files import (
+    get_harness_files_manager,
+    init_harness_files_manager,
+)
 from vibe.core.logger import logger
-from vibe.core.paths.config_paths import CONFIG_FILE, HISTORY_FILE, unlock_config_paths
+from vibe.core.paths import HISTORY_FILE
 
 # Configure line buffering for subprocess communication
 sys.stdout.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
@@ -32,17 +38,22 @@ def parse_arguments() -> Arguments:
 
 
 def bootstrap_config_files() -> None:
-    if not CONFIG_FILE.path.exists():
+    mgr = get_harness_files_manager()
+    config_file = mgr.user_config_file
+    if not config_file.exists():
         try:
-            VibeConfig.save_updates(VibeConfig.create_default())
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            with config_file.open("wb") as f:
+                tomli_w.dump(VibeConfig.create_default(), f)
         except Exception as e:
             logger.error(f"Could not create default config file: {e}")
             raise
 
-    if not HISTORY_FILE.path.exists():
+    history_file = HISTORY_FILE.path
+    if not history_file.exists():
         try:
-            HISTORY_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-            HISTORY_FILE.path.write_text("Hello Vibe!\n", "utf-8")
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            history_file.write_text("Hello Vibe!\n", "utf-8")
         except Exception as e:
             logger.error(f"Could not create history file: {e}")
             raise
@@ -64,7 +75,7 @@ def handle_debug_mode() -> None:
 
 def main() -> None:
     handle_debug_mode()
-    unlock_config_paths()
+    init_harness_files_manager("user", "project")
 
     from vibe.acp.acp_agent_loop import run_acp_server
     from vibe.setup.onboarding import run_onboarding

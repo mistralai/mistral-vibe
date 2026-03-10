@@ -9,9 +9,9 @@ import re
 import sys
 from typing import TYPE_CHECKING, Any
 
+from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
-from vibe.core.paths.config_paths import discover_local_tools_dirs
-from vibe.core.paths.global_paths import DEFAULT_TOOL_DIR, GLOBAL_TOOLS_DIR
+from vibe.core.paths import DEFAULT_TOOL_DIR
 from vibe.core.tools.base import BaseTool, BaseToolConfig
 from vibe.core.tools.mcp import MCPRegistry
 from vibe.core.utils import name_matches
@@ -89,8 +89,10 @@ class ToolManager:
         paths: list[Path] = [DEFAULT_TOOL_DIR.path]
 
         paths.extend(config.tool_paths)
-        paths.extend(discover_local_tools_dirs(Path.cwd()))
-        paths.append(GLOBAL_TOOLS_DIR.path)
+
+        mgr = get_harness_files_manager()
+        paths.extend(mgr.project_tools_dirs)
+        paths.extend(mgr.user_tools_dirs)
 
         unique: list[Path] = []
         seen: set[Path] = set()

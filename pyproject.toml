@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.4.0"
+version = "2.4.1"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -151,7 +151,7 @@ ban-relative-imports = "all"
 [tool.ruff.lint.isort]
 known-first-party = ["vibe"]
 force-sort-within-sections = true
-split-on-trailing-comma = true
+split-on-trailing-comma = false
 combine-as-imports = true
 force-wrap-aliases = false
 order-by-type = true

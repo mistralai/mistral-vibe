@@ -6,7 +6,7 @@ from pathlib import Path
 import tomllib
 from typing import TYPE_CHECKING, Any
 
-from vibe.core.paths.global_paths import PLANS_DIR
+from vibe.core.paths import PLANS_DIR
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig

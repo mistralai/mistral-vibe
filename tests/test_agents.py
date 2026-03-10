@@ -16,8 +16,7 @@ from vibe.core.agents.models import (
     _deep_merge,
 )
 from vibe.core.config import VibeConfig
-from vibe.core.paths.config_paths import ConfigPath
-from vibe.core.paths.global_paths import GlobalPath
+from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.tools.base import ToolPermission
 from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
 
@@ -176,11 +175,18 @@ class TestAgentApplyToConfig:
         global_prompts.mkdir(parents=True)
         (global_prompts / "cc.md").write_text("Global custom prompt")
 
+        class _MockManager(HarnessFilesManager):
+            @property
+            def project_prompts_dirs(self) -> list[Path]:
+                return [project_prompts]
+
+            @property
+            def user_prompts_dirs(self) -> list[Path]:
+                return [global_prompts]
+
+        mock_manager = _MockManager(sources=("user",))
         monkeypatch.setattr(
-            "vibe.core.config.PROMPTS_DIR", ConfigPath(lambda: project_prompts)
-        )
-        monkeypatch.setattr(
-            "vibe.core.config.GLOBAL_PROMPTS_DIR", GlobalPath(lambda: global_prompts)
+            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
         )
 
         base = VibeConfig(include_project_context=False, include_prompt_detail=False)
@@ -555,11 +561,18 @@ class TestAgentLoopInitialization:
         custom_prompt_content = "CUSTOM_AGENT_PROMPT_MARKER"
         (global_prompts / "custom_agent.md").write_text(custom_prompt_content)
 
+        class _MockManager(HarnessFilesManager):
+            @property
+            def project_prompts_dirs(self) -> list[Path]:
+                return [project_prompts]
+
+            @property
+            def user_prompts_dirs(self) -> list[Path]:
+                return [global_prompts]
+
+        mock_manager = _MockManager(sources=("user",))
         monkeypatch.setattr(
-            "vibe.core.config.PROMPTS_DIR", ConfigPath(lambda: project_prompts)
-        )
-        monkeypatch.setattr(
-            "vibe.core.config.GLOBAL_PROMPTS_DIR", GlobalPath(lambda: global_prompts)
+            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
         )
 
         custom_agent = AgentProfile(

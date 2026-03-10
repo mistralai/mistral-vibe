@@ -7,9 +7,8 @@ from unittest.mock import patch
 import pytest
 import tomli_w
 
-from vibe.core.paths.global_paths import TRUSTED_FOLDERS_FILE
+from vibe.core.paths import AGENTS_MD_FILENAMES, TRUSTED_FOLDERS_FILE
 from vibe.core.trusted_folders import (
-    AGENTS_MD_FILENAMES,
     TrustedFoldersManager,
     has_agents_md_file,
     has_trustable_content,

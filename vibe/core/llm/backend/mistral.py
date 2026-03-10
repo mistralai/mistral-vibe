@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Sequence
 import json
 import os
-import re
 import types
 from typing import TYPE_CHECKING, NamedTuple, cast
 
@@ -24,6 +23,7 @@ from vibe.core.types import (
     StrToolChoice,
     ToolCall,
 )
+from vibe.core.utils import get_server_url_from_api_base
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
@@ -170,14 +170,13 @@ class MistralBackend:
             )
 
         # Mistral SDK takes server URL without api version as input
-        url_pattern = r"(https?://[^/]+)(/v.*)"
-        match = re.match(url_pattern, self._provider.api_base)
-        if not match:
+        server_url = get_server_url_from_api_base(self._provider.api_base)
+        if not server_url:
             raise ValueError(
                 f"Invalid API base URL: {self._provider.api_base}. "
                 "Expected format: <server_url>/v<api_version>"
             )
-        self._server_url = match.group(1)
+        self._server_url = server_url
         self._timeout = timeout
         self._retry_config = self._build_retry_config()
 

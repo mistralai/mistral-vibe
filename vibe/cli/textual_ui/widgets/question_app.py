@@ -13,6 +13,7 @@ from textual.widgets import Input
 
 from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 
 if TYPE_CHECKING:
     from vibe.core.tools.builtins.ask_user_question import (
@@ -134,7 +135,7 @@ class QuestionApp(Container):
             with Horizontal(classes="question-other-row"):
                 self.other_prefix = NoMarkupStatic("", classes="question-other-prefix")
                 yield self.other_prefix
-                self.other_input = Input(
+                self.other_input = VscodeCompatInput(
                     placeholder="Type your answer...", classes="question-other-input"
                 )
                 yield self.other_input

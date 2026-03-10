@@ -7,8 +7,8 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
+from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.prompts import UtilityPrompt
-from vibe.core.trusted_folders import AGENTS_MD_FILENAMES, trusted_folders_manager
 from vibe.core.utils import is_dangerous_directory, is_windows
 
 if TYPE_CHECKING:
@@ -18,18 +18,6 @@ if TYPE_CHECKING:
     from vibe.core.tools.manager import ToolManager
 
 _git_status_cache: dict[Path, str] = {}
-
-
-def _load_project_doc(workdir: Path, max_bytes: int) -> str:
-    if not trusted_folders_manager.is_trusted(workdir):
-        return ""
-    for name in AGENTS_MD_FILENAMES:
-        path = workdir / name
-        try:
-            return path.read_text("utf-8", errors="ignore")[:max_bytes]
-        except (FileNotFoundError, OSError):
-            continue
-    return ""
 
 
 class ProjectContextProvider:
@@ -297,8 +285,8 @@ def get_universal_system_prompt(
 
         sections.append(context)
 
-        project_doc = _load_project_doc(
-            Path.cwd(), config.project_context.max_doc_bytes
+        project_doc = get_harness_files_manager().load_project_doc(
+            config.project_context.max_doc_bytes
         )
         if project_doc.strip():
             sections.append(project_doc)

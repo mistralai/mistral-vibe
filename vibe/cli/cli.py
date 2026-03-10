@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 from rich import print as rprint
+import tomli_w
 
 from vibe import __version__
 from vibe.cli.textual_ui.app import run_textual_ui
@@ -16,8 +17,9 @@ from vibe.core.config import (
     VibeConfig,
     load_dotenv_values,
 )
+from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
-from vibe.core.paths.config_paths import CONFIG_FILE, HISTORY_FILE
+from vibe.core.paths import HISTORY_FILE
 from vibe.core.programmatic import run_programmatic
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.types import EntrypointMetadata, LLMMessage, OutputFormat, Role
@@ -61,16 +63,21 @@ def load_config_or_exit() -> VibeConfig:
 
 
 def bootstrap_config_files() -> None:
-    if not CONFIG_FILE.path.exists():
+    mgr = get_harness_files_manager()
+    config_file = mgr.user_config_file
+    if not config_file.exists():
         try:
-            VibeConfig.save_updates(VibeConfig.create_default())
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            with config_file.open("wb") as f:
+                tomli_w.dump(VibeConfig.create_default(), f)
         except Exception as e:
             rprint(f"[yellow]Could not create default config file: {e}[/]")
 
-    if not HISTORY_FILE.path.exists():
+    history_file = HISTORY_FILE.path
+    if not history_file.exists():
         try:
-            HISTORY_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-            HISTORY_FILE.path.write_text("Hello Vibe!\n", "utf-8")
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            history_file.write_text("Hello Vibe!\n", "utf-8")
         except Exception as e:
             rprint(f"[yellow]Could not create history file: {e}[/]")
 

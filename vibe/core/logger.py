@@ -5,7 +5,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 
-from vibe.core.paths.global_paths import LOG_DIR, LOG_FILE
+from vibe.core.paths import LOG_DIR, LOG_FILE
 
 LOG_DIR.path.mkdir(parents=True, exist_ok=True)
 

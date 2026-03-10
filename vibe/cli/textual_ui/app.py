@@ -92,7 +92,7 @@ from vibe.core.agents import AgentProfile
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import Backend, VibeConfig
 from vibe.core.logger import logger
-from vibe.core.paths.config_paths import HISTORY_FILE
+from vibe.core.paths import HISTORY_FILE
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.teleport.types import (
     TeleportAuthCompleteEvent,

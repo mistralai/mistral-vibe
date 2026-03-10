@@ -23,9 +23,11 @@ from vibe.core.config import (
     SessionLoggingConfig,
     VibeConfig,
 )
+from vibe.core.config.harness_files import (
+    init_harness_files_manager,
+    reset_harness_files_manager,
+)
 from vibe.core.llm.types import BackendLike
-from vibe.core.paths import global_paths
-from vibe.core.paths.config_paths import unlock_config_paths
 
 
 def get_base_config() -> dict[str, Any]:
@@ -69,13 +71,16 @@ def config_dir(
     config_file = config_dir / "config.toml"
     config_file.write_text(tomli_w.dumps(get_base_config()), encoding="utf-8")
 
-    monkeypatch.setattr(global_paths, "_DEFAULT_VIBE_HOME", config_dir)
+    monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", config_dir)
     return config_dir
 
 
 @pytest.fixture(autouse=True)
-def _unlock_config_paths():
-    unlock_config_paths()
+def _init_harness_files_manager():
+    reset_harness_files_manager()
+    init_harness_files_manager("user", "project")
+    yield
+    reset_harness_files_manager()
 
 
 @pytest.fixture(autouse=True)

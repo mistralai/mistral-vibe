@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.core.paths.global_paths import PLANS_DIR
+from vibe.core.paths import PLANS_DIR
 from vibe.core.plan_session import PlanSession
 
 

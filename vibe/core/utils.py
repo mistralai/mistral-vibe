@@ -337,5 +337,10 @@ def compact_reduction_display(old_tokens: int | None, new_tokens: int | None) ->
     )
 
 
+def get_server_url_from_api_base(api_base: str) -> str | None:
+    match = re.match(r"(https?://[^/]+)(/v.*)", api_base)
+    return match.group(1) if match else None
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)

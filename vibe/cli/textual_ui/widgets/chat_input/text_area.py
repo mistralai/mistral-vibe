@@ -12,6 +12,7 @@ from vibe.cli.textual_ui.external_editor import ExternalEditor
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
+from vibe.cli.textual_ui.widgets.vscode_compat import patch_vscode_space
 
 InputMode = Literal["!", "/", ">", "&"]
 
@@ -267,10 +268,7 @@ class ChatTextArea(TextArea):
             event.stop()
             return
 
-        # Work around VS Code 1.110+ sending space as CSI u (\x1b[32u),
-        # which Textual parses as Key("space", character=None, is_printable=False).
-        if event.key == "space" and event.character is None:
-            event.character = " "
+        patch_vscode_space(event)
 
         await super()._on_key(event)
         self._mark_cursor_moved_if_needed()

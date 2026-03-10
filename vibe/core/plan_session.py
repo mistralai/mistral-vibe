@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import time
 
-from vibe.core.paths.global_paths import PLANS_DIR
+from vibe.core.paths import PLANS_DIR
 from vibe.core.slug import create_slug
 
 

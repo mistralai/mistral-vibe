@@ -26,16 +26,12 @@ def _get_vibe_home() -> Path:
 
 
 VIBE_HOME = GlobalPath(_get_vibe_home)
-GLOBAL_CONFIG_FILE = GlobalPath(lambda: VIBE_HOME.path / "config.toml")
 GLOBAL_ENV_FILE = GlobalPath(lambda: VIBE_HOME.path / ".env")
-GLOBAL_TOOLS_DIR = GlobalPath(lambda: VIBE_HOME.path / "tools")
-GLOBAL_SKILLS_DIR = GlobalPath(lambda: VIBE_HOME.path / "skills")
-GLOBAL_AGENTS_DIR = GlobalPath(lambda: VIBE_HOME.path / "agents")
-GLOBAL_PROMPTS_DIR = GlobalPath(lambda: VIBE_HOME.path / "prompts")
 SESSION_LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs" / "session")
 TRUSTED_FOLDERS_FILE = GlobalPath(lambda: VIBE_HOME.path / "trusted_folders.toml")
 LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs")
 LOG_FILE = GlobalPath(lambda: VIBE_HOME.path / "logs" / "vibe.log")
+HISTORY_FILE = GlobalPath(lambda: VIBE_HOME.path / "vibehistory")
 PLANS_DIR = GlobalPath(lambda: VIBE_HOME.path / "plans")
 
 DEFAULT_TOOL_DIR = GlobalPath(lambda: VIBE_ROOT / "core" / "tools" / "builtins")

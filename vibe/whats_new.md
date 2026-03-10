@@ -1,4 +1,3 @@
-# What's new in v2.4.0
-- **Plan mode**: Plan can be reviewed before switching to accept mode to apply edits.
-- **Pricing plan**: Your current plan appears in the CLI banner
-- **Per-model auto-compact**: Auto-compact threshold is configurable per model
+# What's new in v2.4.1
+- **Prompt mode**: Disabled interactive questions in prompt mode for smoother non-interactive usage
+- **VS Code terminal fix**: Space key now works correctly in all input widgets (question prompts, proxy setup)
