@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.2] - 2026-03-12
+
+### Added
+
+- Session ID included in telemetry events for better tracing
+
+### Changed
+
+- Skills now extract arguments when invoked, improving parameter handling
+- Auto-compact threshold falls back to global setting when not defined at model level
+- Update notification toast no longer times out, ensuring the user sees the restart prompt
+- Removed `file_content_before` from Vibe Code, reducing payload size
+
+
 ## [2.4.1] - 2026-03-10
 
 ### Added

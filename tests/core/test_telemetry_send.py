@@ -272,3 +272,103 @@ class TestTelemetryClient:
         assert properties["entrypoint"] == "cli"
         assert properties["terminal_emulator"] == "vscode"
         assert "version" in properties
+
+    @pytest.mark.asyncio
+    async def test_session_id_added_when_getter_provided(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            TelemetryClient, "send_telemetry_event", _original_send_telemetry_event
+        )
+        config = build_test_vibe_config(enable_telemetry=True)
+        env_key = config.get_provider_for_model(
+            config.get_active_model()
+        ).api_key_env_var
+        monkeypatch.setenv(env_key, "sk-test")
+        session_id = "test-session-uuid"
+        client = TelemetryClient(
+            config_getter=lambda: config, session_id_getter=lambda: session_id
+        )
+        mock_post = AsyncMock(return_value=MagicMock(status_code=204))
+        client._client = MagicMock()
+        client._client.post = mock_post
+        client._client.aclose = AsyncMock()
+
+        client.send_telemetry_event("vibe.test_event", {"key": "value"})
+        await client.aclose()
+
+        mock_post.assert_called_once_with(
+            DATALAKE_EVENTS_URL,
+            json={
+                "event": "vibe.test_event",
+                "properties": {"session_id": session_id, "key": "value"},
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer sk-test",
+                "User-Agent": get_user_agent(Backend.MISTRAL),
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_session_id_absent_when_no_getter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            TelemetryClient, "send_telemetry_event", _original_send_telemetry_event
+        )
+        config = build_test_vibe_config(enable_telemetry=True)
+        env_key = config.get_provider_for_model(
+            config.get_active_model()
+        ).api_key_env_var
+        monkeypatch.setenv(env_key, "sk-test")
+        client = TelemetryClient(config_getter=lambda: config)
+        mock_post = AsyncMock(return_value=MagicMock(status_code=204))
+        client._client = MagicMock()
+        client._client.post = mock_post
+        client._client.aclose = AsyncMock()
+
+        client.send_telemetry_event("vibe.test_event", {"key": "value"})
+        await client.aclose()
+
+        mock_post.assert_called_once_with(
+            DATALAKE_EVENTS_URL,
+            json={"event": "vibe.test_event", "properties": {"key": "value"}},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer sk-test",
+                "User-Agent": get_user_agent(Backend.MISTRAL),
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_session_id_getter_reflects_latest_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            TelemetryClient, "send_telemetry_event", _original_send_telemetry_event
+        )
+        config = build_test_vibe_config(enable_telemetry=True)
+        env_key = config.get_provider_for_model(
+            config.get_active_model()
+        ).api_key_env_var
+        monkeypatch.setenv(env_key, "sk-test")
+        current_id = "first-session-id"
+        client = TelemetryClient(
+            config_getter=lambda: config, session_id_getter=lambda: current_id
+        )
+        mock_post = AsyncMock(return_value=MagicMock(status_code=204))
+        client._client = MagicMock()
+        client._client.post = mock_post
+        client._client.aclose = AsyncMock()
+
+        client.send_telemetry_event("vibe.test_event", {})
+        current_id = "second-session-id"
+        client.send_telemetry_event("vibe.test_event", {})
+        await client.aclose()
+
+        calls = mock_post.call_args_list
+        assert calls[0].kwargs["json"]["properties"]["session_id"] == "first-session-id"
+        assert (
+            calls[1].kwargs["json"]["properties"]["session_id"] == "second-session-id"
+        )

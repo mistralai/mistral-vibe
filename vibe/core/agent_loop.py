@@ -199,7 +199,9 @@ class AgentLoop:
         self.session_id = str(uuid4())
         self._current_user_message_id: str | None = None
 
-        self.telemetry_client = TelemetryClient(config_getter=lambda: self.config)
+        self.telemetry_client = TelemetryClient(
+            config_getter=lambda: self.config, session_id_getter=lambda: self.session_id
+        )
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
         self._teleport_service: TeleportService | None = None
 
@@ -297,6 +299,7 @@ class AgentLoop:
                 nuage_base_url=self.config.nuage_base_url,
                 nuage_workflow_id=self.config.nuage_workflow_id,
                 nuage_api_key=self.config.nuage_api_key,
+                nuage_task_queue=self.config.nuage_task_queue,
             )
         return self._teleport_service
 

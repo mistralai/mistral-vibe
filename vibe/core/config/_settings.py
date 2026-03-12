@@ -309,11 +309,13 @@ class VibeConfig(BaseSettings):
     enable_auto_update: bool = True
     enable_notifications: bool = True
     api_timeout: float = 720.0
+    auto_compact_threshold: int = 200_000
 
     # TODO(vibe-nuage): remove exclude=True once the feature is publicly available
     nuage_enabled: bool = Field(default=False, exclude=True)
     nuage_base_url: str = Field(default="https://api.globalaegis.net", exclude=True)
     nuage_workflow_id: str = Field(default="__shared-nuage-workflow", exclude=True)
+    nuage_task_queue: str | None = Field(default="shared-vibe-nuage", exclude=True)
     # TODO(vibe-nuage): change default value to MISTRAL_API_KEY once prod has shared vibe-nuage workers
     nuage_api_key_env_var: str = Field(default="STAGING_MISTRAL_API_KEY", exclude=True)
 
@@ -465,6 +467,18 @@ class VibeConfig(BaseSettings):
             TomlFileSettingsSource(settings_cls),
             file_secret_settings,
         )
+
+    @model_validator(mode="after")
+    def _apply_global_auto_compact_threshold(self) -> VibeConfig:
+        self.models = [
+            model
+            if "auto_compact_threshold" in model.model_fields_set
+            else model.model_copy(
+                update={"auto_compact_threshold": self.auto_compact_threshold}
+            )
+            for model in self.models
+        ]
+        return self
 
     @model_validator(mode="after")
     def _check_api_key(self) -> VibeConfig:

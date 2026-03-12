@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
+from vibe.core.config import ModelConfig
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
     init_harness_files_manager,
@@ -80,3 +82,40 @@ class TestResolveConfigFile:
     def test_user_only_returns_global_config(self) -> None:
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.config_file == VIBE_HOME.path / "config.toml"
+
+
+class TestAutoCompactThresholdFallback:
+    def test_model_without_explicit_threshold_inherits_global(self) -> None:
+        model = ModelConfig(name="m", provider="p", alias="m")
+        cfg = build_test_vibe_config(
+            auto_compact_threshold=42_000, models=[model], active_model="m"
+        )
+        assert cfg.get_active_model().auto_compact_threshold == 42_000
+
+    def test_model_with_explicit_threshold_keeps_own_value(self) -> None:
+        model = ModelConfig(
+            name="m", provider="p", alias="m", auto_compact_threshold=99_000
+        )
+        cfg = build_test_vibe_config(
+            auto_compact_threshold=42_000, models=[model], active_model="m"
+        )
+        assert cfg.get_active_model().auto_compact_threshold == 99_000
+
+    def test_default_global_threshold_used_when_nothing_set(self) -> None:
+        model = ModelConfig(name="m", provider="p", alias="m")
+        cfg = build_test_vibe_config(models=[model], active_model="m")
+        assert cfg.get_active_model().auto_compact_threshold == 200_000
+
+    def test_changed_global_threshold_propagates_on_reload(self) -> None:
+        model = ModelConfig(name="m", provider="p", alias="m")
+
+        cfg1 = build_test_vibe_config(
+            auto_compact_threshold=50_000, models=[model], active_model="m"
+        )
+        assert cfg1.get_active_model().auto_compact_threshold == 50_000
+
+        # Simulate config reload with a different global threshold
+        cfg2 = build_test_vibe_config(
+            auto_compact_threshold=75_000, models=[model], active_model="m"
+        )
+        assert cfg2.get_active_model().auto_compact_threshold == 75_000

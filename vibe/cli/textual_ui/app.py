@@ -537,7 +537,11 @@ class VibeApp(App):  # noqa: PLR0904
         if not self.agent_loop:
             return False
 
-        skill_name = user_input[1:].strip().lower()
+        parts = user_input[1:].strip().split(None, 1)
+        if not parts:
+            return False
+        skill_name = parts[0].lower()
+
         skill_info = self.agent_loop.skill_manager.get_skill(skill_name)
         if not skill_info:
             return False
@@ -553,6 +557,9 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
             return True
+
+        if len(parts) > 1:
+            skill_content = f"{user_input}\n\n{skill_content}"
 
         await self._handle_user_message(skill_content)
         return True
@@ -1599,7 +1606,7 @@ class VibeApp(App):  # noqa: PLR0904
                 f"{update_message_prefix}\nVibe was updated successfully. Please restart to use the new version.",
                 title="Update successful",
                 severity="information",
-                timeout=10,
+                timeout=float("inf"),
             )
             return
 
