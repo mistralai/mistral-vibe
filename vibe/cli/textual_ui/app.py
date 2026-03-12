@@ -1637,6 +1637,89 @@ class VibeApp(App):  # noqa: PLR0904
         if self._chat_input_container and self._chat_input_container.input_widget:
             self._chat_input_container.input_widget.set_app_focus(True)
 
+    async def _list_memories(self) -> None:
+        """List all available memories."""
+        try:
+            memories = self.agent_loop.memory_manager.list_memories()
+            if not memories:
+                await self._mount_and_scroll(
+                    UserCommandMessage("No memories found.")
+                )
+                return
+
+            memory_list = "### Available Memories:\n\n"
+            for i, memory in enumerate(memories, 1):
+                title = memory.metadata.title or f"Memory {i}"
+                triggers = ", ".join(str(trigger) for trigger in memory.metadata.triggers)
+                memory_list += f"{i}. **{title}** (Priority: {memory.metadata.priority})\n"
+                memory_list += f"   Triggers: {triggers}\n"
+                memory_list += f"   Preview: {memory.content[:100]}{'...' if len(memory.content) > 100 else ''}\n\n"
+
+            await self._mount_and_scroll(
+                UserCommandMessage(memory_list)
+            )
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to list memories: {e}", collapsed=self._tools_collapsed
+                )
+            )
+
+    async def _add_memory(self) -> None:
+        """Add a new memory."""
+        try:
+            # For now, add a simple memory with "always" trigger
+            # In the future, this could be enhanced with a proper UI
+            content = "This is a sample memory that will be loaded on every turn."
+            triggers = ["always"]
+
+            file_path = self.agent_loop.memory_manager.create_memory(
+                content=content,
+                triggers=triggers,
+                title="Sample Memory",
+                priority=1
+            )
+
+            await self._mount_and_scroll(
+                UserCommandMessage(f"Added memory: {file_path.name}")
+            )
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to add memory: {e}", collapsed=self._tools_collapsed
+                )
+            )
+
+    async def _remove_memory(self) -> None:
+        """Remove a memory."""
+        try:
+            memories = self.agent_loop.memory_manager.list_memories()
+            if not memories:
+                await self._mount_and_scroll(
+                    UserCommandMessage("No memories to remove.")
+                )
+                return
+
+            # Remove the first memory for simplicity
+            # In the future, this could be enhanced with selection
+            memory_files = list(self.agent_loop.memory_manager.memory_dir.glob("*.md"))
+            if memory_files:
+                success = self.agent_loop.memory_manager.delete_memory(memory_files[0])
+                if success:
+                    await self._mount_and_scroll(
+                        UserCommandMessage(f"Removed memory: {memory_files[0].name}")
+                    )
+                else:
+                    await self._mount_and_scroll(
+                        UserCommandMessage("Failed to remove memory.")
+                    )
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to remove memory: {e}", collapsed=self._tools_collapsed
+                )
+            )
+
     def action_suspend_with_message(self) -> None:
         if WINDOWS or self._driver is None or not self._driver.can_suspend:
             return
