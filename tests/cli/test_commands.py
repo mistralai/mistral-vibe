@@ -16,6 +16,18 @@ class TestCommandRegistry:
         registry = CommandRegistry()
         assert registry.get_command_name("  /help  ") == "help"
         assert registry.get_command_name("/HELP") == "help"
+        assert registry.get_command_name(
+            "  /INSTALL-SKILL https://github.com/propel-gtm/propel-code-skills  "
+        ) == "install-skill"
+
+    def test_get_command_args_returns_argument_tail(self) -> None:
+        registry = CommandRegistry()
+        assert (
+            registry.get_command_args(
+                " /install-skill https://github.com/propel-gtm/propel-code-skills carl "
+            )
+            == "https://github.com/propel-gtm/propel-code-skills carl"
+        )
 
     def test_get_command_name_returns_none_for_unknown(self) -> None:
         registry = CommandRegistry()

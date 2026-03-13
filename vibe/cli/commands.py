@@ -9,6 +9,7 @@ class Command:
     description: str
     handler: str
     exits: bool = False
+    accepts_arguments: bool = False
 
 
 class CommandRegistry:
@@ -77,6 +78,12 @@ class CommandRegistry:
                 description="Browse and resume past sessions",
                 handler="_show_session_picker",
             ),
+            "install-skill": Command(
+                aliases=frozenset(["/install-skill"]),
+                description="Install skills from a repository",
+                handler="_install_skill",
+                accepts_arguments=True,
+            ),
         }
 
         for command in excluded_commands:
@@ -92,7 +99,25 @@ class CommandRegistry:
         return self.commands.get(cmd_name) if cmd_name else None
 
     def get_command_name(self, user_input: str) -> str | None:
-        return self._alias_map.get(user_input.lower().strip())
+        command_alias, _ = self._split_input(user_input)
+        return self._alias_map.get(command_alias)
+
+    def get_command_args(self, user_input: str) -> str:
+        _, command_args = self._split_input(user_input)
+        return command_args
+
+    @staticmethod
+    def _split_input(user_input: str) -> tuple[str, str]:
+        if not (stripped := user_input.strip()):
+            return "", ""
+
+        match stripped.split(maxsplit=1):
+            case [command_alias, command_args]:
+                return command_alias.lower(), command_args
+            case [command_alias]:
+                return command_alias.lower(), ""
+            case _:
+                return "", ""
 
     def get_help_text(self) -> str:
         lines: list[str] = [
