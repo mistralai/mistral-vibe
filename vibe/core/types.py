@@ -215,6 +215,7 @@ class LLMMessage(BaseModel):
     name: str | None = None
     tool_call_id: str | None = None
     message_id: str | None = None
+    persist_to_session_log: bool = Field(default=True, exclude=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -222,6 +223,7 @@ class LLMMessage(BaseModel):
         if isinstance(v, dict):
             v.setdefault("content", "")
             v.setdefault("role", "assistant")
+            v.setdefault("persist_to_session_log", True)
             if "message_id" not in v and v.get("role") != "tool":
                 v["message_id"] = str(uuid4())
             return v
@@ -236,6 +238,7 @@ class LLMMessage(BaseModel):
             "tool_call_id": getattr(v, "tool_call_id", None),
             "message_id": getattr(v, "message_id", None)
             or (str(uuid4()) if role != "tool" else None),
+            "persist_to_session_log": getattr(v, "persist_to_session_log", True),
         }
 
     def __add__(self, other: LLMMessage) -> LLMMessage:
@@ -295,6 +298,9 @@ class LLMMessage(BaseModel):
             name=self.name,
             tool_call_id=self.tool_call_id,
             message_id=self.message_id,
+            persist_to_session_log=(
+                self.persist_to_session_log and other.persist_to_session_log
+            ),
         )
 
 

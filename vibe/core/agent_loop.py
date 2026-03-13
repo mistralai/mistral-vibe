@@ -198,6 +198,7 @@ class AgentLoop:
         self.entrypoint_metadata = entrypoint_metadata
         self.session_id = str(uuid4())
         self._current_user_message_id: str | None = None
+        self._persist_current_turn_to_session_log = True
 
         self.telemetry_client = TelemetryClient(config_getter=lambda: self.config)
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
@@ -276,9 +277,11 @@ class AgentLoop:
             self.agent_profile,
         )
 
-    async def act(self, msg: str) -> AsyncGenerator[BaseEvent]:
+    async def act(
+        self, msg: str, persist_to_session_log: bool = True
+    ) -> AsyncGenerator[BaseEvent]:
         self._clean_message_history()
-        async for event in self._conversation_loop(msg):
+        async for event in self._conversation_loop(msg, persist_to_session_log):
             yield event
 
     @property
@@ -311,7 +314,11 @@ class AgentLoop:
                 "model": self.config.active_model,
                 "stats": self.stats.model_dump(),
             },
-            messages=[msg.model_dump(exclude_none=True) for msg in self.messages[1:]],
+            messages=[
+                msg.model_dump(exclude_none=True)
+                for msg in self.messages[1:]
+                if msg.persist_to_session_log
+            ],
         )
         return self._teleport_generator(prompt, session)
 
@@ -384,8 +391,8 @@ class AgentLoop:
 
             case MiddlewareAction.INJECT_MESSAGE:
                 if result.message:
-                    injected_message = LLMMessage(
-                        role=Role.user, content=result.message
+                    injected_message = self._message_for_current_turn(
+                        LLMMessage(role=Role.user, content=result.message)
                     )
                     self.messages.append(injected_message)
 
@@ -436,18 +443,26 @@ class AgentLoop:
             })
         return headers
 
-    async def _conversation_loop(self, user_msg: str) -> AsyncGenerator[BaseEvent]:
-        user_message = LLMMessage(role=Role.user, content=user_msg)
-        self.messages.append(user_message)
-        self.stats.steps += 1
-        self._current_user_message_id = user_message.message_id
-
-        if user_message.message_id is None:
-            raise AgentLoopError("User message must have a message_id")
-
-        yield UserMessageEvent(content=user_msg, message_id=user_message.message_id)
-
+    async def _conversation_loop(
+        self, user_msg: str, persist_to_session_log: bool = True
+    ) -> AsyncGenerator[BaseEvent]:
+        previous_persist_value = self._persist_current_turn_to_session_log
+        self._persist_current_turn_to_session_log = persist_to_session_log
         try:
+            user_message = self._message_for_current_turn(
+                LLMMessage(role=Role.user, content=user_msg)
+            )
+            self.messages.append(user_message)
+            self.stats.steps += 1
+            self._current_user_message_id = user_message.message_id
+
+            if user_message.message_id is None:
+                raise AgentLoopError("User message must have a message_id")
+
+            yield UserMessageEvent(
+                content=user_msg, message_id=user_message.message_id
+            )
+
             should_break_loop = False
             while not should_break_loop:
                 result = await self.middleware_pipeline.run_before_turn(
@@ -474,7 +489,14 @@ class AgentLoop:
                     return
 
         finally:
+            self._current_user_message_id = None
+            self._persist_current_turn_to_session_log = previous_persist_value
             await self._save_messages()
+
+    def _message_for_current_turn(self, message: LLMMessage) -> LLMMessage:
+        if self._persist_current_turn_to_session_log:
+            return message
+        return message.model_copy(update={"persist_to_session_log": False})
 
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
         if self.enable_streaming:
@@ -562,8 +584,10 @@ class AgentLoop:
             )
             self.stats.tool_calls_failed += 1
             self.messages.append(
-                self.format_handler.create_failed_tool_response_message(
-                    failed, error_msg
+                self._message_for_current_turn(
+                    self.format_handler.create_failed_tool_response_message(
+                        failed, error_msg
+                    )
                 )
             )
 
@@ -698,8 +722,10 @@ class AgentLoop:
         result: dict[str, Any] | None = None,
     ) -> None:
         self.messages.append(
-            LLMMessage.model_validate(
-                self.format_handler.create_tool_response_message(tool_call, text)
+            self._message_for_current_turn(
+                LLMMessage.model_validate(
+                    self.format_handler.create_tool_response_message(tool_call, text)
+                )
             )
         )
 
@@ -743,7 +769,7 @@ class AgentLoop:
             processed_message = self.format_handler.process_api_response_message(
                 result.message
             )
-            self.messages.append(processed_message)
+            self.messages.append(self._message_for_current_turn(processed_message))
             return LLMChunk(message=processed_message, usage=result.usage)
 
         except Exception as e:
@@ -793,7 +819,7 @@ class AgentLoop:
                 )
             self._update_stats(usage=usage, time_seconds=end_time - start_time)
 
-            self.messages.append(chunk_agg.message)
+            self.messages.append(self._message_for_current_turn(chunk_agg.message))
 
         except Exception as e:
             if _should_raise_rate_limit_error(e):

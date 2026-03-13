@@ -10,6 +10,7 @@ class TestCommandRegistry:
         assert registry.get_command_name("/config") == "config"
         assert registry.get_command_name("/model") == "config"
         assert registry.get_command_name("/clear") == "clear"
+        assert registry.get_command_name("/improve") == "improve"
         assert registry.get_command_name("/exit") == "exit"
 
     def test_get_command_name_normalizes_input(self) -> None:
@@ -46,6 +47,12 @@ class TestCommandRegistry:
                 assert cmd is not None
                 assert cmd_name in registry.commands
                 assert registry.commands[cmd_name] is cmd
+
+    def test_improve_command_registration(self) -> None:
+        registry = CommandRegistry()
+        cmd = registry.find_command("/improve")
+        assert cmd is not None
+        assert cmd.handler == "_improve_from_sessions"
 
     def test_excluded_commands_not_in_registry(self) -> None:
         registry = CommandRegistry(excluded_commands=["exit"])

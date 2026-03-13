@@ -135,9 +135,19 @@ class SessionLogger:
             environment={"working_directory": str(Path.cwd())},
         )
 
+    @staticmethod
+    def _persisted_non_system_messages(
+        messages: Sequence[LLMMessage],
+    ) -> list[LLMMessage]:
+        return [
+            message
+            for message in messages
+            if message.role != Role.system and message.persist_to_session_log
+        ]
+
     def _get_title(self, messages: Sequence[LLMMessage]) -> str:
         first_user_message = None
-        for message in messages:
+        for message in self._persisted_non_system_messages(messages):
             if message.role == Role.user:
                 first_user_message = message
                 break
@@ -216,7 +226,7 @@ class SessionLogger:
         if self.session_metadata is None:
             return
 
-        if not any(msg.role != Role.system for msg in messages):
+        if not self._persisted_non_system_messages(messages):
             return
 
         # If the session directory does not exist, create it
@@ -243,7 +253,7 @@ class SessionLogger:
             ) from e
 
         try:
-            non_system_messages = [m for m in messages if m.role != Role.system]
+            non_system_messages = self._persisted_non_system_messages(messages)
             # Append new messages
             new_messages = non_system_messages[old_total_messages:]
 
