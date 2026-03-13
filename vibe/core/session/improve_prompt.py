@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from vibe.core.config import SessionLoggingConfig
+from vibe.core.logger import logger
 from vibe.core.session.session_loader import MESSAGES_FILENAME, SessionLoader
 from vibe.core.types import LLMMessage, Role
 from vibe.core.utils import CANCELLATION_TAG, TOOL_ERROR_TAG, TaggedText
@@ -384,60 +385,64 @@ def build_improve_prompt(
 ) -> str:
     """
     Build an improvement prompt by analyzing recent Vibe sessions.
-    
+
     This function analyzes recent interactive sessions to generate a comprehensive
     prompt that can be used to get suggestions for improving Vibe's functionality,
     defaults, and user experience.
-    
+
     Args:
         session_config: Configuration for session logging
         current_session_dir: Optional path to the current session directory to exclude
         limit: Maximum number of recent sessions to analyze
-        
+
     Returns:
         A formatted prompt string containing session analysis and improvement suggestions
-        
+
     Raises:
         ValueError: If no previous sessions are found or cannot be read
-        
+
     Note:
         The function uses lazy loading and early termination to efficiently handle
         large numbers of sessions. It stops processing once the requested limit
         of valid sessions is reached.
     """
     requested_limit = max(limit, 1)
-    
+
     # Use generator for lazy loading of session directories
     session_dirs = collect_recent_session_dirs(
         session_config=session_config,
         current_session_dir=current_session_dir,
     )
-    
+
     if not session_dirs:
         raise ValueError("No previous interactive sessions were found to analyze.")
 
     analyses: list[SessionAnalysis] = []
-    
+
     # Process sessions lazily - stop when we have enough valid analyses
     for session_dir in session_dirs:
         if len(analyses) >= requested_limit:
             break
-            
+
         try:
             messages, metadata = SessionLoader.load_session(session_dir)
         except ValueError:
             # Skip corrupted or invalid sessions
             continue
-            
+
         try:
             analysis = SessionAnalysis.from_session(session_dir, messages, metadata)
-        except Exception:
-            # Skip sessions that fail analysis
+        except Exception as exc:
+            logger.warning(
+                "Skipping session %s after analysis failure",
+                session_dir,
+                exc_info=exc,
+            )
             continue
-            
+
         if not analysis.has_signal():
             continue
-            
+
         analyses.append(analysis)
 
     if not analyses:
@@ -453,18 +458,18 @@ def collect_recent_session_dirs(
 ) -> list[Path]:
     """
     Collect recent session directories for analysis.
-    
+
     This function finds all session directories matching the configured prefix,
     excluding the current session if provided, and returns them sorted by
     modification time (newest first).
-    
+
     Args:
         session_config: Configuration containing session directory location and prefix
         current_session_dir: Optional path to exclude (typically the current session)
-        
+
     Returns:
         List of Path objects to session directories, sorted from newest to oldest
-        
+
     Note:
         This function uses a generator expression for memory efficiency when
         dealing with large numbers of session directories.
@@ -488,16 +493,16 @@ def collect_recent_session_dirs(
 def session_sort_key(session_dir: Path) -> tuple[float, str]:
     """
     Generate a sort key for session directories.
-    
+
     This function creates a tuple key for sorting session directories
     by modification time (primary) and name (secondary).
-    
+
     Args:
         session_dir: Path to the session directory
-        
+
     Returns:
         Tuple of (modification_time, directory_name) for sorting
-        
+
     Note:
         Uses 0.0 as fallback modification time if the messages file doesn't exist
         or cannot be accessed.
@@ -513,10 +518,10 @@ def session_sort_key(session_dir: Path) -> tuple[float, str]:
 def extract_message_text(message: LLMMessage) -> str | None:
     """
     Extract and normalize text content from an LLM message.
-    
+
     Args:
         message: The LLMMessage to extract text from
-        
+
     Returns:
         Normalized text content or None if message has no content
     """

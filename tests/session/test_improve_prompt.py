@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import logging
 from pathlib import Path
 import time
 
 import pytest
 
 from vibe.core.config import SessionLoggingConfig
+from vibe.core.logger import logger
 from vibe.core.session.improve_prompt import (
     DEFAULT_IMPROVE_SESSION_LIMIT,
+    SessionAnalysis,
     build_improve_prompt,
 )
 from vibe.core.types import FunctionCall, LLMMessage, Role, ToolCall
@@ -196,3 +199,53 @@ def test_build_improve_prompt_ignores_legacy_improve_turns(
     assert "Investigate slow test startup" in prompt
     assert "old /improve output" not in prompt
     assert "legacy-improve" not in prompt
+
+
+def test_build_improve_prompt_logs_analysis_failures(
+    session_config: SessionLoggingConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session_root = Path(session_config.save_dir)
+    create_session(
+        session_root,
+        "healthy-session",
+        user_prompt="Investigate flaky session handling",
+        assistant_text="I will inspect the session analyzer first.",
+        cwd="/repo/healthy",
+    )
+    time.sleep(0.01)
+    broken_session = create_session(
+        session_root,
+        "broken-session",
+        user_prompt="This session should log an analysis failure",
+        assistant_text="I will inspect the session analyzer first.",
+        cwd="/repo/broken",
+    )
+
+    original_from_session = SessionAnalysis.from_session
+
+    def fake_from_session(
+        cls: type[SessionAnalysis],
+        session_dir: Path,
+        messages: list[LLMMessage],
+        metadata: dict[str, object],
+    ) -> SessionAnalysis:
+        if session_dir == broken_session:
+            raise RuntimeError("boom")
+        return original_from_session(session_dir, messages, metadata)
+
+    monkeypatch.setattr(
+        SessionAnalysis, "from_session", classmethod(fake_from_session)
+    )
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        prompt = build_improve_prompt(session_config=session_config)
+
+    assert "Investigate flaky session handling" in prompt
+    assert any(
+        record.getMessage()
+        == f"Skipping session {broken_session} after analysis failure"
+        and record.exc_info is not None
+        for record in caplog.records
+    )
