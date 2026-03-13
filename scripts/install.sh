@@ -89,14 +89,14 @@ function check_vibe_installed() {
 
 function install_vibe() {
     info "Installing mistral-vibe from GitHub repository using uv..."
-    uv tool install mistral-vibe
+    uv tool install mistral-vibe --native-tls
 
     success "Mistral Vibe installed successfully! (commands: vibe, vibe-acp)"
 }
 
 function update_vibe() {
     info "Updating mistral-vibe from GitHub repository using uv..."
-    uv tool upgrade mistral-vibe
+    uv tool upgrade mistral-vibe --native-tls
 
     success "Mistral Vibe updated successfully!"
 }
