@@ -77,6 +77,11 @@ class CommandRegistry:
                 description="Browse and resume past sessions",
                 handler="_show_session_picker",
             ),
+            "install-skill": Command(
+                aliases=frozenset(["/install-skill"]),
+                description="Install a skill from a repository",
+                handler="_install_skill",
+            ),
         }
 
         for command in excluded_commands:

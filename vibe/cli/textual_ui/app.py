@@ -521,6 +521,29 @@ class VibeApp(App):  # noqa: PLR0904
             return True
         return False
 
+    async def _install_skill(self) -> None:
+        """Handle the installation of a skill from a repository."""
+        await self._mount_and_scroll(UserCommandMessage("Installing skill..."))
+        
+        # Parse the command to extract repo_url and skill_name
+        # This is a placeholder; actual parsing logic should be implemented
+        repo_url = "https://github.com/propel-gtm/propel-code-skills.git"  # Default for testing
+        skill_name = None  # Install all skills by default
+        
+        from vibe.core.skills.installer import install_skill
+        success = install_skill(repo_url, skill_name)
+        if success:
+            await self._mount_and_scroll(
+                UserCommandMessage("Skill installed successfully. Restart the application to use it.")
+            )
+        else:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Failed to install skill. Check the repository URL and skill name.",
+                    collapsed=self._tools_collapsed
+                )
+            )
+
     def _get_skill_entries(self) -> list[tuple[str, str]]:
         if not self.agent_loop:
             return []
@@ -556,6 +579,22 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._handle_user_message(skill_content)
         return True
+
+    async def _install_skill(self, repo_url: str, skill_name: str | None = None) -> None:
+        from vibe.core.skills.installer import install_skill
+        
+        success = install_skill(repo_url, skill_name)
+        if success:
+            await self._mount_and_scroll(
+                f"Skill installed successfully. Restart the application to use it."
+            )
+        else:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Failed to install skill. Check the repository URL and skill name.",
+                    collapsed=self._tools_collapsed
+                )
+            )
 
     async def _handle_bash_command(self, command: str) -> None:
         if not command:
