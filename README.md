@@ -338,6 +338,26 @@ Vibe discovers skills from multiple locations:
 skill_paths = ["/path/to/custom/skills"]
 ```
 
+#### Installing Community Skills
+
+You can browse and install community skills from [agentskill.sh](https://agentskill.sh/vibe), an open-source directory of 100,000+ agent skills compatible with the Agent Skills specification.
+
+Install the `/learn` skill to search and install skills directly from Vibe:
+
+```bash
+git clone https://github.com/agentskill-sh/learn.git ~/.vibe/skills/learn
+```
+
+Then use `/learn` to search and install skills mid-conversation:
+
+```bash
+/learn seo                    # Search for skills
+/learn @owner/skill-name      # Install a specific skill
+/learn                        # Get recommendations based on your project
+```
+
+Every skill is security-scanned before installation (scores 0-100). Skills below 70 are blocked by default.
+
 ### Managing Skills
 
 Enable or disable skills using patterns in your configuration:
