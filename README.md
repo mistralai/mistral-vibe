@@ -275,6 +275,8 @@ Vibe provides several built-in slash commands. Use slash commands by typing them
 > /help
 ```
 
+Useful built-ins include `/help`, `/compact`, `/resume`, and `/improve` to analyze recent sessions and ask Vibe how it should improve.
+
 ### Custom Slash Commands via Skills
 
 You can define your own slash commands through the skills system. Skills are reusable components that extend Vibe's functionality.

@@ -93,6 +93,10 @@ from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import Backend, VibeConfig
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
+from vibe.core.session.improve_prompt import (
+    DEFAULT_IMPROVE_SESSION_LIMIT,
+    build_improve_prompt,
+)
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.teleport.types import (
     TeleportAuthCompleteEvent,
@@ -118,6 +122,7 @@ from vibe.core.types import (
     LLMMessage,
     RateLimitError,
     Role,
+    TurnSkillInvocation,
 )
 from vibe.core.utils import (
     CancellationReason,
@@ -561,7 +566,14 @@ class VibeApp(App):  # noqa: PLR0904
         if len(parts) > 1:
             skill_content = f"{user_input}\n\n{skill_content}"
 
-        await self._handle_user_message(skill_content)
+        await self._handle_user_message(
+            skill_content,
+            skill_invocation=TurnSkillInvocation(
+                skill_name=skill_name,
+                invocation=user_input,
+                skill_path=str(skill_info.skill_path),
+            ),
+        )
         return True
 
     async def _handle_bash_command(self, command: str) -> None:
@@ -600,14 +612,23 @@ class VibeApp(App):  # noqa: PLR0904
                 ErrorMessage(f"Command failed: {e}", collapsed=self._tools_collapsed)
             )
 
-    async def _handle_user_message(self, message: str) -> None:
+    async def _handle_user_message(
+        self,
+        message: str,
+        persist_to_session_log: bool = True,
+        skill_invocation: TurnSkillInvocation | None = None,
+    ) -> None:
         user_message = UserMessage(message)
 
         await self._mount_and_scroll(user_message)
 
         if not self._agent_running:
             self._agent_task = asyncio.create_task(
-                self._handle_agent_loop_turn(message)
+                self._handle_agent_loop_turn(
+                    message,
+                    persist_to_session_log,
+                    skill_invocation=skill_invocation,
+                )
             )
 
     def _reset_ui_state(self) -> None:
@@ -703,7 +724,12 @@ class VibeApp(App):  # noqa: PLR0904
         self._pending_question = None
         return result
 
-    async def _handle_agent_loop_turn(self, prompt: str) -> None:
+    async def _handle_agent_loop_turn(
+        self,
+        prompt: str,
+        persist_to_session_log: bool = True,
+        skill_invocation: TurnSkillInvocation | None = None,
+    ) -> None:
         self._agent_running = True
 
         loading_area = self._cached_loading_area or self.query_one(
@@ -716,7 +742,11 @@ class VibeApp(App):  # noqa: PLR0904
 
         try:
             rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
-            async for event in self.agent_loop.act(rendered_prompt):
+            async for event in self.agent_loop.act(
+                rendered_prompt,
+                persist_to_session_log=persist_to_session_log,
+                skill_invocation=skill_invocation,
+            ):
                 if self.event_handler:
                     await self.event_handler.handle_event(
                         event,
@@ -901,6 +931,50 @@ class VibeApp(App):  # noqa: PLR0904
 - **Cost**: ${stats.session_cost:.4f}
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
+
+    async def _improve_from_sessions(self) -> None:
+        session_config = self.config.session_logging
+
+        if not session_config.enabled:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Session logging is disabled in configuration.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                "Preparing /improve analysis from the last "
+                f"{DEFAULT_IMPROVE_SESSION_LIMIT} interactive sessions."
+            )
+        )
+
+        try:
+            prompt = await asyncio.to_thread(
+                build_improve_prompt,
+                session_config,
+                self.agent_loop.session_logger.session_dir,
+                DEFAULT_IMPROVE_SESSION_LIMIT,
+            )
+        except ValueError as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"/improve failed: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            return
+        except Exception as e:
+            logger.exception("Failed to prepare /improve prompt")
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"/improve failed: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            return
+
+        await self._handle_user_message(prompt, persist_to_session_log=False)
 
     async def _show_config(self) -> None:
         """Switch to the configuration app in the bottom panel."""
