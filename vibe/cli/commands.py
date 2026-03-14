@@ -62,6 +62,11 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "plugins": Command(
+                aliases=frozenset(["/plugins"]),
+                description="Display plugins statuses",
+                handler="_show_plugins_status",
+            ),
             "teleport": Command(
                 aliases=frozenset(["/teleport"]),
                 description="Teleport session to Vibe Nuage",
@@ -102,12 +107,56 @@ class CommandRegistry:
             for alias in cmd.aliases:
                 self._alias_map[alias] = cmd_name
 
+        # Map to store handler callables (for plugin commands)
+        self._handler_map: dict[str, object] = {}
+
     def find_command(self, user_input: str) -> Command | None:
         cmd_name = self.get_command_name(user_input)
         return self.commands.get(cmd_name) if cmd_name else None
 
     def get_command_name(self, user_input: str) -> str | None:
         return self._alias_map.get(user_input.lower().strip())
+
+    def register_command(self, name: str, command: Command) -> None:
+        """Register a new command dynamically.
+
+        Parameters
+        ----------
+        name : str
+            The canonical command name (e.g., "my_custom_cmd").
+        command : Command
+            The Command object to register.
+        """
+        self.commands[name] = command
+        for alias in command.aliases:
+            self._alias_map[alias] = name
+
+    def register_handler(self, handler_name: str, callable_obj: object) -> None:
+        """Register a handler callable for a plugin command.
+
+        Parameters
+        ----------
+        handler_name : str
+            The handler method name (e.g., "_show_greeting").
+        callable_obj : object
+            The actual method/callable to invoke.
+        """
+        self._handler_map[handler_name] = callable_obj
+
+    def get_handler(self, handler_name: str) -> object | None:
+        """Get the registered handler callable for a given handler name.
+
+        Parameters
+        ----------
+        handler_name : str
+            The handler method name to look up.
+
+        Returns
+        -------
+        object | None
+            The callable if found, None otherwise.
+        """
+        return self._handler_map.get(handler_name)
 
     def get_help_text(self) -> str:
         lines: list[str] = [

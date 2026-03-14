@@ -44,6 +44,7 @@ from vibe.core.middleware import (
     make_plan_agent_reminder,
 )
 from vibe.core.plan_session import PlanSession
+from vibe.core.plugins import PluginContext, PluginManager, PluginMiddleware
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.session.session_migration import migrate_sessions_entrypoint
@@ -205,6 +206,27 @@ class AgentLoop:
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
         self._teleport_service: TeleportService | None = None
 
+        # Plugin system
+        from vibe.core.config.harness_files import get_harness_files_manager
+
+        workdir = get_harness_files_manager().trusted_workdir or Path.cwd()
+        self._plugin_context = PluginContext(workdir=workdir, config=config)
+        from vibe.cli.commands import CommandRegistry
+
+        command_registry = CommandRegistry()
+        self._plugin_manager = PluginManager(
+            config, self._plugin_context, command_registry
+        )
+        # Store the registry for later use in command handling
+        self._command_registry = command_registry
+        self._plugin_middleware = PluginMiddleware(
+            self._plugin_manager, self._plugin_context
+        )
+        # Insert plugin middleware into the pipeline
+        self.middleware_pipeline.add(self._plugin_middleware)
+        # Patch _execute_tool to intercept tool calls/results
+        self._plugin_middleware.patch_agent_loop(self)
+
         thread = Thread(
             target=migrate_sessions_entrypoint,
             args=(config.session_logging,),
@@ -228,6 +250,11 @@ class AgentLoop:
     @property
     def auto_approve(self) -> bool:
         return self.config.auto_approve
+
+    @property
+    def plugin_manager(self) -> PluginManager:
+        """Expose the plugin manager to the rest of the application."""
+        return self._plugin_manager
 
     def set_tool_permission(
         self, tool_name: str, permission: ToolPermission, save_permanently: bool = False
@@ -614,26 +641,36 @@ class AgentLoop:
 
             start_time = time.perf_counter()
             result_model = None
+
+            # Build the invoke context for plugin middleware
+            invoke_ctx = InvokeContext(
+                tool_call_id=tool_call.call_id,
+                agent_manager=self.agent_manager,
+                session_dir=self.session_logger.session_dir,
+                entrypoint_metadata=self.entrypoint_metadata,
+                approval_callback=self.approval_callback,
+                user_input_callback=self.user_input_callback,
+                sampling_callback=self._sampling_handler,
+                plan_file_path=self._plan_session.plan_file_path,
+                switch_agent_callback=self.switch_agent,
+            )
+
+            # Execute the tool through _execute_tool (triggers plugin hooks)
+            text_result = await self._execute_tool(
+                tool_call.tool_name, tool_call.args_dict, invoke_ctx
+            )
+
+            duration = time.perf_counter() - start_time
+
+            # Now execute again to get streaming events and result model
             async for item in tool_instance.invoke(
-                ctx=InvokeContext(
-                    tool_call_id=tool_call.call_id,
-                    agent_manager=self.agent_manager,
-                    session_dir=self.session_logger.session_dir,
-                    entrypoint_metadata=self.entrypoint_metadata,
-                    approval_callback=self.approval_callback,
-                    user_input_callback=self.user_input_callback,
-                    sampling_callback=self._sampling_handler,
-                    plan_file_path=self._plan_session.plan_file_path,
-                    switch_agent_callback=self.switch_agent,
-                ),
-                **tool_call.args_dict,
+                ctx=invoke_ctx, **tool_call.args_dict
             ):
                 if isinstance(item, ToolStreamEvent):
                     yield item
                 else:
                     result_model = item
 
-            duration = time.perf_counter() - start_time
             if result_model is None:
                 raise ToolError("Tool did not yield a result")
 
@@ -643,7 +680,7 @@ class AgentLoop:
             if extra:
                 text += "\n\n" + extra
             self._handle_tool_response(
-                tool_call, text, "success", decision, result_dict
+                tool_call, text_result, "success", decision, result_dict
             )
             yield ToolResultEvent(
                 tool_name=tool_call.tool_name,
@@ -1165,3 +1202,54 @@ class AgentLoop:
 
         if reset_middleware:
             self._setup_middleware()
+
+    async def _execute_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        ctx: InvokeContext | None = None,
+    ) -> str:
+        """Execute a tool and return the result as a string.
+
+        This method is designed to be patched by PluginMiddleware to intercept
+        tool calls and results for plugin processing.
+        """
+        # Get the tool instance
+        tool_instance = self.tool_manager.get(tool_name)
+
+        # Build invoke arguments with context if provided
+        invoke_args = {}
+        if ctx is not None:
+            invoke_args["ctx"] = ctx
+        invoke_args.update(arguments)
+
+        # Invoke the tool
+        result_model = None
+        async for item in tool_instance.invoke(**invoke_args):
+            if isinstance(item, str):
+                # For simple string results
+                return item
+            else:
+                # For more complex results, convert to string
+                result_model = item
+                break
+
+        if result_model is None:
+            raise ToolError(f"Tool '{tool_name}' did not return a result")
+
+        # Convert the result to string format
+        if hasattr(result_model, "model_dump"):
+            result_dict = result_model.model_dump()
+            return "\n".join(f"{k}: {v}" for k, v in result_dict.items())
+        else:
+            return str(result_model)
+
+    async def start(self) -> None:
+        """Start the agent loop and initialize plugins."""
+        # Discover and set up plugins
+        await self._plugin_manager.discover_and_setup()
+
+    async def stop(self) -> None:
+        """Stop the agent loop and tear down plugins."""
+        # Tear down plugins first
+        await self._plugin_manager.teardown_all()

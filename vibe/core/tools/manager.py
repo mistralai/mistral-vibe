@@ -251,3 +251,10 @@ class ToolManager:
 
     def invalidate_tool(self, tool_name: str) -> None:
         self._instances.pop(tool_name, None)
+
+    def register_dynamic_tool(self, tool_class: type[BaseTool]) -> None:
+        """Register a tool dynamically at runtime.
+
+        Used by plugins to inject tools that aren't discovered from files.
+        """
+        self._available[tool_class.get_name()] = tool_class

@@ -57,35 +57,46 @@ dependencies = [
     "watchfiles>=1.1.1",
     "websockets>=13.0",
     "zstandard>=0.25.0",
+    # ── LSP plugin ────────────────────────────────────────────────────────────
+    # pygls provides the async LSP client (BaseLanguageClient) used by
+    # vibe/core/plugins/builtin/lsp/lsp_client.py to communicate with language
+    # servers (pylsp, typescript-language-server, jdtls, …).
+    # Requires >=1.3 for BaseLanguageClient and *_async request helpers.
+    # mcp>=1.14.0 is already listed above and covers the MCP server transport.
+    "pygls>=1.3.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/mistralai/mistral-vibe"
-Repository = "https://github.com/mistralai/mistral-vibe"
-Issues = "https://github.com/mistralai/mistral-vibe/issues"
+Homepage      = "https://github.com/mistralai/mistral-vibe"
+Repository    = "https://github.com/mistralai/mistral-vibe"
+Issues        = "https://github.com/mistralai/mistral-vibe/issues"
 Documentation = "https://github.com/mistralai/mistral-vibe#readme"
 
+# ── Build system ──────────────────────────────────────────────────────────────
 [build-system]
-requires = ["hatchling", "hatch-vcs", "editables"]
+requires      = ["hatchling", "hatch-vcs", "editables"]
 build-backend = "hatchling.build"
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
+[tool.hatch.version]
+source = "vcs"
+
 [tool.hatch.build.targets.wheel]
 include = ["vibe/"]
 
-
 [project.scripts]
-vibe = "vibe.cli.entrypoint:main"
+vibe     = "vibe.cli.entrypoint:main"
 vibe-acp = "vibe.acp.entrypoint:main"
 
-
+# ── uv ────────────────────────────────────────────────────────────────────────
 [tool.uv]
 package = true
 required-version = ">=0.8.0"
 
-
+# Development dependency groups
+# Install with: uv sync --group dev
 [dependency-groups]
 dev = [
     "debugpy>=1.8.19",
@@ -103,7 +114,21 @@ dev = [
     "vulture>=2.14",
 ]
 
-build = ["pyinstaller>=6.17.0"]
+# Test dependencies
+# Install with: uv sync --group test
+# pytest-asyncio is required by tests/plugins/test_plugin_system.py which
+# uses @pytest.mark.asyncio on all async test functions.
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-xdist>=3.8.0",
+    "pytest-timeout>=2.3.0",
+]
+
+# Build / binary distribution
+build = [
+    "pyinstaller>=6.17.0",
+]
 
 [tool.pyright]
 pythonVersion = "3.12"
@@ -113,6 +138,7 @@ include = ["vibe/**/*.py", "tests/**/*.py"]
 venvPath = "."
 venv = ".venv"
 
+# ── ruff ──────────────────────────────────────────────────────────────────────
 [tool.ruff]
 include = ["vibe/**/*.py", "tests/**/*.py"]
 line-length = 88
@@ -171,8 +197,9 @@ max-nested-blocks = 4
 ignore_decorators = ["@*"]
 
 [tool.pytest.ini_options]
-addopts = "-vvvv -q -n auto --durations=10 --import-mode=importlib --maxschedchunk=1"
-timeout = 10
+asyncio_mode = "auto"
+timeout      = 30
+addopts = "-x --tb=short -vvvv -q -n auto --durations=10 --import-mode=importlib --maxschedchunk=1"
 filterwarnings = [
     # (e2e) streaming mock server is started in a thread; and the cli is spawn in a fork
     "ignore:This process \\(pid=.*\\) is multi-threaded, use of forkpty\\(\\) may lead to deadlocks in the child\\.:DeprecationWarning",

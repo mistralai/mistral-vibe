@@ -456,6 +456,30 @@ class VibeConfig(BaseSettings):
         ),
     )
 
+    # Plugin system
+    plugin_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Additional directories to search for plugins. "
+            "Paths may be absolute or relative to the current working directory."
+        ),
+    )
+    enabled_plugins: list[str] | None = Field(
+        default=None,
+        description=(
+            "An explicit list of plugin names/patterns to enable. If set, only these"
+            " plugins will be active. Supports glob patterns (e.g., 'lsp') and"
+            " regex with 're:' prefix (e.g., 're:^lsp$')."
+        ),
+    )
+    disabled_plugins: list[str] = Field(
+        default_factory=list,
+        description=(
+            "A list of plugin names/patterns to disable. Ignored if 'enabled_plugins'"
+            " is set. Supports glob patterns and regex with 're:' prefix."
+        ),
+    )
+
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"
     )

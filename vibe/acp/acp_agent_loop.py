@@ -269,6 +269,10 @@ class VibeAcpAgentLoop(AcpAgent):
             enable_streaming=True,
             entrypoint_metadata=self._build_entrypoint_metadata(),
         )
+
+        # Start the agent loop to initialize plugins
+        await agent_loop.start()
+
         agent_loop.agent_manager.register_agent(CHAT_AGENT)
         # NOTE: For now, we pin session.id to agent_loop.session_id right after init time.
         # We should just use agent_loop.session_id everywhere, but it can still change during

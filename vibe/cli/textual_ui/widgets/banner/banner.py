@@ -21,6 +21,7 @@ class BannerState:
     models_count: int = 0
     mcp_servers_count: int = 0
     skills_count: int = 0
+    plugins_count: int = 0
     plan_description: str | None = None
 
 
@@ -37,6 +38,7 @@ class Banner(Static):
             models_count=len(config.models),
             mcp_servers_count=len(config.mcp_servers),
             skills_count=len(skill_manager.available_skills),
+            plugins_count=0,  # Will be updated later
             plan_description=None,
         )
         self._animated = not config.disable_welcome_banner_animation
@@ -77,6 +79,7 @@ class Banner(Static):
         self,
         config: VibeConfig,
         skill_manager: SkillManager,
+        plugin_manager: Any,
         plan_description: str | None = None,
     ) -> None:
         self.state = BannerState(
@@ -84,15 +87,26 @@ class Banner(Static):
             models_count=len(config.models),
             mcp_servers_count=len(config.mcp_servers),
             skills_count=len(skill_manager.available_skills),
+            plugins_count=len(plugin_manager.all_plugins) if plugin_manager else 0,
             plan_description=plan_description,
         )
 
     def _format_meta_counts(self) -> str:
-        return (
+        counts = (
             f"{self.state.models_count} model{'s' if self.state.models_count != 1 else ''}"
             f" · {self.state.mcp_servers_count} MCP server{'s' if self.state.mcp_servers_count != 1 else ''}"
             f" · {self.state.skills_count} skill{'s' if self.state.skills_count != 1 else ''}"
         )
+
+        plugin_text = (
+            f" · {self.state.plugins_count} plugin{'s' if self.state.plugins_count != 1 else ''}"
+        )
+
+        # Add warning if no plugins are registered
+        if self.state.plugins_count == 0:
+            return counts + " ⚠️ No plugins registered"
+
+        return counts + plugin_text
 
     def _format_plan(self) -> str:
         return (

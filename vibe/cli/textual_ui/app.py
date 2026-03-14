@@ -23,7 +23,6 @@ from textual.widgets import Static
 
 from vibe import __version__ as CORE_VERSION
 from vibe.cli.clipboard import copy_selection_to_clipboard
-from vibe.cli.commands import CommandRegistry
 from vibe.cli.plan_offer.adapters.http_whoami_gateway import HttpWhoAmIGateway
 from vibe.cli.plan_offer.decide_plan_offer import (
     PlanInfo,
@@ -256,10 +255,15 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.event_handler: EventHandler | None = None
 
+        # Use the command registry from agent_loop so plugin commands are available
+        self.commands = self.agent_loop._command_registry
+
+        # Remove excluded commands if needed
         excluded_commands = []
         if not self.config.nuage_enabled:
             excluded_commands.append("teleport")
-        self.commands = CommandRegistry(excluded_commands=excluded_commands)
+        for command in excluded_commands:
+            self.commands.commands.pop(command, None)
 
         self._chat_input_container: ChatInputContainer | None = None
         self._current_bottom_app: BottomApp = BottomApp.Input
@@ -346,10 +350,13 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.agent_loop.set_approval_callback(self._approval_callback)
         self.agent_loop.set_user_input_callback(self._user_input_callback)
+
+        # Start the agent loop to initialize plugins (deferred to avoid blocking UI)
+        self.call_after_refresh(self._start_agent_loop)
+
         self._refresh_profile_widgets()
 
-        chat_input_container = self.query_one(ChatInputContainer)
-        chat_input_container.focus_input()
+        self.query_one(ChatInputContainer)
         await self._resolve_plan()
         await self._show_dangerous_directory_warning()
         await self._resume_history_from_messages()
@@ -357,13 +364,23 @@ class VibeApp(App):  # noqa: PLR0904
         self._schedule_update_notification()
         self.agent_loop.emit_new_session_telemetry()
 
-        self.call_after_refresh(self._refresh_banner)
-
         if self._initial_prompt or self._teleport_on_start:
             self.call_after_refresh(self._process_initial_prompt)
 
         gc.collect()
         gc.freeze()
+
+    async def _start_agent_loop(self) -> None:
+        """Start the agent loop and initialize plugins after UI is rendered."""
+        try:
+            await self.agent_loop.start()
+            # Refresh banner after plugins are loaded
+            self.call_after_refresh(self._refresh_banner)
+            # Focus input after everything is ready
+            chat_input_container = self.query_one(ChatInputContainer)
+            chat_input_container.focus_input()
+        except Exception as exc:
+            logger.error("Failed to start agent loop: %s", exc, exc_info=True)
 
     def _process_initial_prompt(self) -> None:
         if self._teleport_on_start:
@@ -521,11 +538,24 @@ class VibeApp(App):  # noqa: PLR0904
                     cmd_name, "builtin"
                 )
             await self._mount_and_scroll(UserMessage(user_input))
-            handler = getattr(self, command.handler)
+
+            # Try to get handler from registry (for plugin commands)
+            handler = self.commands.get_handler(command.handler)
+            if handler is None:
+                # Fallback to App methods for built-in commands
+                handler = getattr(self, command.handler)
+
+            # Execute the handler and capture its return value
+            result = None
             if asyncio.iscoroutinefunction(handler):
-                await handler()
+                result = await handler()
             else:
-                handler()
+                result = handler()
+
+            # If the handler returned a string, display it in the chat
+            if result is not None and isinstance(result, str):
+                await self._mount_and_scroll(UserCommandMessage(result))
+
             return True
         return False
 
@@ -926,6 +956,12 @@ class VibeApp(App):  # noqa: PLR0904
 - **Cost**: ${stats.session_cost:.4f}
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
+
+    async def _show_plugins_status(self) -> None:
+        """Display the status of all active plugins."""
+        summary = self.agent_loop.plugin_manager.summary()
+        plugins_text = f"## Plugins Status\n\n{summary}"
+        await self._mount_and_scroll(UserCommandMessage(plugins_text))
 
     async def _show_config(self) -> None:
         """Switch to the configuration app in the bottom panel."""
@@ -1472,7 +1508,10 @@ class VibeApp(App):  # noqa: PLR0904
     def _refresh_banner(self) -> None:
         if self._banner:
             self._banner.set_state(
-                self.config, self.agent_loop.skill_manager, plan_title(self._plan_info)
+                self.config,
+                self.agent_loop.skill_manager,
+                self.agent_loop.plugin_manager,
+                plan_title(self._plan_info),
             )
 
     def _update_profile_widgets(self, profile: AgentProfile) -> None:
