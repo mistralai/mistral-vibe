@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.2] - 2026-03-12
+
+### Added
+
+- Session ID included in telemetry events for better tracing
+
+### Changed
+
+- Skills now extract arguments when invoked, improving parameter handling
+- Auto-compact threshold falls back to global setting when not defined at model level
+- Update notification toast no longer times out, ensuring the user sees the restart prompt
+- Removed `file_content_before` from Vibe Code, reducing payload size
+
+
+## [2.4.1] - 2026-03-10
+
+### Added
+
+- `HarnessFilesManager` for selective loading of harness files, enabling SDK usage without accessing the file system.
+
+### Changed
+
+- Web search tool infers server URL from provider config instead of hardcoded production API
+- `ask_user_questions` tool disabled in prompt mode
+
+### Fixed
+
+- Space key fix extended to all `Input` widgets (question prompts, proxy setup) in VS Code terminal
+- Ruff isort/formatter config conflict resolved (`split-on-trailing-comma` set to `false`)
+
+
+## [2.4.0] - 2026-03-09
+
+### Added
+
+- User plan displayed in the CLI banner
+- Reasoning effort configuration and thinking blocks adapter
+
+### Changed
+
+- Auto-compact threshold is now per-model
+- Removed expensive file scan from system prompt; cached git operations for faster agent switching
+- Improved plan mode
+- Updated `whoami` response handling with new plan type and name fields
+
+### Fixed
+
+- Space key works again in VSCode 1.110+
+- Arrow-key history navigation at wrapped-line boundaries in chat input
+- UTF-8 encoding enforced when reading metadata files
+- Update notifier no longer crashes on unexpected response fields
+
+
 ## [2.3.0] - 2026-02-27
 
 ### Added

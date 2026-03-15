@@ -48,6 +48,7 @@ class TeleportService:
         nuage_api_key: str,
         workdir: Path | None = None,
         *,
+        nuage_task_queue: str | None = None,
         client: httpx.AsyncClient | None = None,
         timeout: float = 60.0,
     ) -> None:
@@ -55,6 +56,7 @@ class TeleportService:
         self._nuage_base_url = nuage_base_url
         self._nuage_workflow_id = nuage_workflow_id
         self._nuage_api_key = nuage_api_key
+        self._nuage_task_queue = nuage_task_queue
         self._git = GitRepository(workdir)
         self._client = client
         self._owns_client = client is None
@@ -70,6 +72,7 @@ class TeleportService:
             self._nuage_base_url,
             self._nuage_api_key,
             self._nuage_workflow_id,
+            task_queue=self._nuage_task_queue,
             client=self._client,
         )
         await self._git.__aenter__()
@@ -106,6 +109,7 @@ class TeleportService:
                 self._nuage_base_url,
                 self._nuage_api_key,
                 self._nuage_workflow_id,
+                task_queue=self._nuage_task_queue,
                 client=self._http_client,
             )
         return self._nuage

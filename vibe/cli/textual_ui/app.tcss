@@ -840,6 +840,10 @@ StatusMessage {
     height: auto;
 }
 
+#question-content.question-content-docked {
+    dock: bottom;
+}
+
 .question-tabs {
     height: auto;
     color: ansi_blue;
@@ -900,6 +904,28 @@ StatusMessage {
     margin-top: 1;
 }
 
+.question-content-preview {
+    width: 100%;
+    height: auto;
+    max-height: 50vh;
+    border: none;
+    border-left: wide ansi_bright_black;
+    padding: 0 0 0 1;
+    margin-bottom: 1;
+}
+
+.question-content-preview-text {
+    width: 100%;
+    height: auto;
+    color: ansi_default;
+    padding: 0;
+    margin: 0;
+
+    & > *:last-child {
+        margin-bottom: 0;
+    }
+}
+
 ExpandingBorder {
     width: auto;
     height: 100%;
@@ -956,6 +982,10 @@ ContextProgress {
 
 #banner-model {
     color: ansi_cyan;
+    width: auto;
+}
+
+#banner-user-plan {
     width: auto;
 }
 

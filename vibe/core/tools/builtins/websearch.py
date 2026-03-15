@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar, final
 import mistralai
 from pydantic import BaseModel, Field
 
+from vibe.core.config import Backend
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -17,6 +18,7 @@ from vibe.core.tools.base import (
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils import get_server_url_from_api_base
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -66,7 +68,9 @@ class WebSearch(
             raise ToolError("MISTRAL_API_KEY environment variable not set.")
 
         client = mistralai.Mistral(
-            api_key=api_key, timeout_ms=self.config.timeout * 1000
+            api_key=api_key,
+            server_url=self._resolve_server_url(ctx),
+            timeout_ms=self.config.timeout * 1000,
         )
 
         try:
@@ -83,6 +87,14 @@ class WebSearch(
 
         except mistralai.SDKError as exc:
             raise ToolError(f"Mistral API error: {exc}") from exc
+
+    def _resolve_server_url(self, ctx: InvokeContext | None) -> str | None:
+        if not ctx or not ctx.agent_manager:
+            return None
+        for provider in ctx.agent_manager.config.providers:
+            if provider.backend == Backend.MISTRAL:
+                return get_server_url_from_api_base(provider.api_base)
+        return None
 
     def _parse_response(
         self, response: mistralai.ConversationResponse

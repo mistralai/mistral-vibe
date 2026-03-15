@@ -1,6 +1,4 @@
-# What's new
+# What's new in v2.4.2
 
-- **Interactive resume**: Added a /resume command to choose which session to resume
-- **Web Search & Web Fetch**: New tools to search the web and fetch content from URLs directly from your session.
-- **MCP Sampling**: MCP servers can now request LLM completions through the sampling protocol.
-- **Notification Indicator**: Terminal bell and window title update when Vibe needs your attention or completes a task.
+- **Skill arguments**: Skills now extract arguments when invoked, allowing you to pass arguments
+- **Auto-compact fallback**: Auto-compact threshold falls back to the global setting when not defined at model level

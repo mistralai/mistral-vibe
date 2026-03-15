@@ -10,6 +10,7 @@ from textual.message import Message
 from textual.widgets import Input, Static
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 from vibe.core.proxy_setup import (
     SUPPORTED_PROXY_VARS,
     get_current_proxy_settings,
@@ -48,7 +49,7 @@ class ProxySetupApp(Container):
                 yield Static(f"[bold ansi_blue]{key}[/]", classes="proxy-label-line")
 
                 initial_value = self.initial_values.get(key) or ""
-                input_widget = Input(
+                input_widget = VscodeCompatInput(
                     value=initial_value,
                     placeholder=description,
                     id=f"proxy-input-{key}",

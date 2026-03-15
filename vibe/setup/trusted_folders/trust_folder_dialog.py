@@ -11,7 +11,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.paths.global_paths import TRUSTED_FOLDERS_FILE
+from vibe.core.paths import TRUSTED_FOLDERS_FILE
 
 
 class TrustDialogQuitException(Exception):

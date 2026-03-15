@@ -13,14 +13,21 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
 )
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIResponse
+from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.app import CORE_VERSION, VibeApp
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.config import (
+    DEFAULT_MODELS,
+    ModelConfig,
+    SessionLoggingConfig,
+    VibeConfig,
+)
+from vibe.core.config.harness_files import (
+    init_harness_files_manager,
+    reset_harness_files_manager,
+)
 from vibe.core.llm.types import BackendLike
-from vibe.core.paths import global_paths
-from vibe.core.paths.config_paths import unlock_config_paths
 
 
 def get_base_config() -> dict[str, Any]:
@@ -64,13 +71,16 @@ def config_dir(
     config_file = config_dir / "config.toml"
     config_file.write_text(tomli_w.dumps(get_base_config()), encoding="utf-8")
 
-    monkeypatch.setattr(global_paths, "_DEFAULT_VIBE_HOME", config_dir)
+    monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", config_dir)
     return config_dir
 
 
 @pytest.fixture(autouse=True)
-def _unlock_config_paths():
-    unlock_config_paths()
+def _init_harness_files_manager():
+    reset_harness_files_manager()
+    init_harness_files_manager("user", "project")
+    yield
+    reset_harness_files_manager()
 
 
 @pytest.fixture(autouse=True)
@@ -125,6 +135,13 @@ def vibe_config() -> VibeConfig:
     return build_test_vibe_config()
 
 
+def make_test_models(auto_compact_threshold: int) -> list[ModelConfig]:
+    return [
+        m.model_copy(update={"auto_compact_threshold": auto_compact_threshold})
+        for m in DEFAULT_MODELS
+    ]
+
+
 def build_test_vibe_config(**kwargs) -> VibeConfig:
     session_logging = kwargs.pop("session_logging", None)
     resolved_session_logging = (
@@ -136,6 +153,8 @@ def build_test_vibe_config(**kwargs) -> VibeConfig:
     resolved_enable_update_checks = (
         False if enable_update_checks is None else enable_update_checks
     )
+    if kwargs.get("models"):
+        kwargs.setdefault("active_model", kwargs["models"][0].alias)
     return VibeConfig(
         session_logging=resolved_session_logging,
         enable_update_checks=resolved_enable_update_checks,
@@ -184,8 +203,8 @@ def build_test_vibe_app(
     resolved_plan_offer_gateway = (
         FakeWhoAmIGateway(
             WhoAmIResponse(
-                is_pro_plan=True,
-                advertise_pro_plan=False,
+                plan_type=WhoAmIPlanType.CHAT,
+                plan_name="INDIVIDUAL",
                 prompt_switching_to_pro_plan=False,
             )
         )

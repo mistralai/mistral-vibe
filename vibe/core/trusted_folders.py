@@ -5,10 +5,11 @@ import tomllib
 
 import tomli_w
 
-from vibe.core.paths.global_paths import TRUSTED_FOLDERS_FILE
-from vibe.core.paths.local_config_walk import walk_local_config_dirs_all
-
-AGENTS_MD_FILENAMES = ["AGENTS.md", "VIBE.md", ".vibe.md"]
+from vibe.core.paths import (
+    AGENTS_MD_FILENAMES,
+    TRUSTED_FOLDERS_FILE,
+    walk_local_config_dirs_all,
+)
 
 
 def has_agents_md_file(path: Path) -> bool:

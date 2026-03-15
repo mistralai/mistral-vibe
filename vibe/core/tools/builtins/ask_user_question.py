@@ -50,6 +50,10 @@ class AskUserQuestionArgs(BaseModel):
         min_length=1,
         max_length=4,
     )
+    content_preview: str | None = Field(
+        default=None,
+        description="Optional text content to display in a scrollable area above the questions.",
+    )
 
 
 class Answer(BaseModel):

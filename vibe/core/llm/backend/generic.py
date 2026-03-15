@@ -10,6 +10,7 @@ import httpx
 
 from vibe.core.llm.backend.anthropic import AnthropicAdapter
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
+from vibe.core.llm.backend.reasoning_adapter import ReasoningAdapter
 from vibe.core.llm.backend.vertex import VertexAnthropicAdapter
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.llm.message_utils import merge_consecutive_user_messages
@@ -159,6 +160,7 @@ ADAPTERS: dict[str, APIAdapter] = {
     "openai": OpenAIAdapter(),
     "anthropic": AnthropicAdapter(),
     "vertex-anthropic": VertexAnthropicAdapter(),
+    "reasoning": ReasoningAdapter(),
 }
 
 

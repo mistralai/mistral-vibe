@@ -20,12 +20,8 @@ from pydantic_settings import (
 )
 import tomli_w
 
-from vibe.core.paths.config_paths import CONFIG_DIR, CONFIG_FILE, PROMPTS_DIR
-from vibe.core.paths.global_paths import (
-    GLOBAL_ENV_FILE,
-    GLOBAL_PROMPTS_DIR,
-    SESSION_LOG_DIR,
-)
+from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
 from vibe.core.prompts import SystemPrompt
 from vibe.core.tools.base import BaseToolConfig
 
@@ -55,30 +51,14 @@ class MissingAPIKeyError(RuntimeError):
 
 
 class MissingPromptFileError(RuntimeError):
-    def __init__(
-        self, system_prompt_id: str, prompt_dir: str, global_prompt_dir: str
-    ) -> None:
-        extra_global_prompt_dir = (
-            f" or {global_prompt_dir}" if global_prompt_dir != prompt_dir else ""
-        )
-
+    def __init__(self, system_prompt_id: str, *prompt_dirs: str) -> None:
+        dirs_str = " or ".join(prompt_dirs) if prompt_dirs else "<no prompt dirs>"
         super().__init__(
             f"Invalid system_prompt_id value: '{system_prompt_id}'. "
             f"Must be one of the available prompts ({', '.join(f'{p.name.lower()}' for p in SystemPrompt)}), "
-            f"or correspond to a .md file in {prompt_dir}{extra_global_prompt_dir}"
+            f"or correspond to a .md file in {dirs_str}"
         )
         self.system_prompt_id = system_prompt_id
-        self.prompt_dir = prompt_dir
-
-
-class WrongBackendError(RuntimeError):
-    def __init__(self, backend: Backend, is_mistral_api: bool) -> None:
-        super().__init__(
-            f"Wrong backend '{backend}' for {'' if is_mistral_api else 'non-'}"
-            f"mistral API. Use '{Backend.MISTRAL}' for mistral API and '{Backend.GENERIC}' for others."
-        )
-        self.backend = backend
-        self.is_mistral_api = is_mistral_api
 
 
 class TomlFileSettingsSource(PydanticBaseSettingsSource):
@@ -87,7 +67,9 @@ class TomlFileSettingsSource(PydanticBaseSettingsSource):
         self.toml_data = self._load_toml()
 
     def _load_toml(self) -> dict[str, Any]:
-        file = CONFIG_FILE.path
+        file = get_harness_files_manager().config_file
+        if file is None:
+            return {}
         try:
             with file.open("rb") as f:
                 return tomllib.load(f)
@@ -108,13 +90,10 @@ class TomlFileSettingsSource(PydanticBaseSettingsSource):
 
 
 class ProjectContextConfig(BaseSettings):
-    max_chars: int = 40_000
+    model_config = SettingsConfigDict(extra="ignore")
+
     default_commit_count: int = 5
     max_doc_bytes: int = 32 * 1024
-    truncation_buffer: int = 1_000
-    max_depth: int = 3
-    max_files: int = 1000
-    max_dirs_per_level: int = 20
     timeout_seconds: float = 2.0
 
 
@@ -258,6 +237,7 @@ class ModelConfig(BaseModel):
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
     thinking: Literal["off", "low", "medium", "high"] = "off"
+    auto_compact_threshold: int = 200_000
 
     @model_validator(mode="before")
     @classmethod
@@ -317,7 +297,6 @@ class VibeConfig(BaseSettings):
     autocopy_to_clipboard: bool = True
     file_watcher_for_autocomplete: bool = False
     displayed_workdir: str = ""
-    auto_compact_threshold: int = 200_000
     context_warnings: bool = False
     auto_approve: bool = False
     enable_telemetry: bool = True
@@ -330,11 +309,13 @@ class VibeConfig(BaseSettings):
     enable_auto_update: bool = True
     enable_notifications: bool = True
     api_timeout: float = 720.0
+    auto_compact_threshold: int = 200_000
 
     # TODO(vibe-nuage): remove exclude=True once the feature is publicly available
     nuage_enabled: bool = Field(default=False, exclude=True)
     nuage_base_url: str = Field(default="https://api.globalaegis.net", exclude=True)
     nuage_workflow_id: str = Field(default="__shared-nuage-workflow", exclude=True)
+    nuage_task_queue: str | None = Field(default="shared-vibe-nuage", exclude=True)
     # TODO(vibe-nuage): change default value to MISTRAL_API_KEY once prod has shared vibe-nuage workers
     nuage_api_key_env_var: str = Field(default="STAGING_MISTRAL_API_KEY", exclude=True)
 
@@ -435,7 +416,9 @@ class VibeConfig(BaseSettings):
         except KeyError:
             pass
 
-        for current_prompt_dir in [PROMPTS_DIR.path, GLOBAL_PROMPTS_DIR.path]:
+        mgr = get_harness_files_manager()
+        prompt_dirs = mgr.project_prompts_dirs + mgr.user_prompts_dirs
+        for current_prompt_dir in prompt_dirs:
             custom_sp_path = (current_prompt_dir / self.system_prompt_id).with_suffix(
                 ".md"
             )
@@ -443,7 +426,7 @@ class VibeConfig(BaseSettings):
                 return custom_sp_path.read_text()
 
         raise MissingPromptFileError(
-            self.system_prompt_id, str(PROMPTS_DIR.path), str(GLOBAL_PROMPTS_DIR.path)
+            self.system_prompt_id, *(str(d) for d in prompt_dirs)
         )
 
     def get_active_model(self) -> ModelConfig:
@@ -486,6 +469,18 @@ class VibeConfig(BaseSettings):
         )
 
     @model_validator(mode="after")
+    def _apply_global_auto_compact_threshold(self) -> VibeConfig:
+        self.models = [
+            model
+            if "auto_compact_threshold" in model.model_fields_set
+            else model.model_copy(
+                update={"auto_compact_threshold": self.auto_compact_threshold}
+            )
+            for model in self.models
+        ]
+        return self
+
+    @model_validator(mode="after")
     def _check_api_key(self) -> VibeConfig:
         try:
             active_model = self.get_active_model()
@@ -493,27 +488,6 @@ class VibeConfig(BaseSettings):
             api_key_env = provider.api_key_env_var
             if api_key_env and not os.getenv(api_key_env):
                 raise MissingAPIKeyError(api_key_env, provider.name)
-        except ValueError:
-            pass
-        return self
-
-    @model_validator(mode="after")
-    def _check_api_backend_compatibility(self) -> VibeConfig:
-        try:
-            active_model = self.get_active_model()
-            provider = self.get_provider_for_model(active_model)
-            MISTRAL_API_BASES = [
-                "https://codestral.mistral.ai",
-                "https://api.mistral.ai",
-            ]
-            is_mistral_api = any(
-                provider.api_base.startswith(api_base) for api_base in MISTRAL_API_BASES
-            )
-            if (is_mistral_api and provider.backend != Backend.MISTRAL) or (
-                not is_mistral_api and provider.backend != Backend.GENERIC
-            ):
-                raise WrongBackendError(provider.backend, is_mistral_api)
-
         except ValueError:
             pass
         return self
@@ -567,7 +541,8 @@ class VibeConfig(BaseSettings):
 
     @classmethod
     def save_updates(cls, updates: dict[str, Any]) -> None:
-        CONFIG_DIR.path.mkdir(parents=True, exist_ok=True)
+        if not get_harness_files_manager().persist_allowed:
+            return
         current_config = TomlFileSettingsSource(cls).toml_data
 
         def deep_merge(target: dict, source: dict) -> None:
@@ -597,7 +572,12 @@ class VibeConfig(BaseSettings):
 
     @classmethod
     def dump_config(cls, config: dict[str, Any]) -> None:
-        with CONFIG_FILE.path.open("wb") as f:
+        mgr = get_harness_files_manager()
+        if not mgr.persist_allowed:
+            return
+        target = mgr.config_file or mgr.user_config_file
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as f:
             tomli_w.dump(config, f)
 
     @classmethod
@@ -611,11 +591,7 @@ class VibeConfig(BaseSettings):
 
     @classmethod
     def create_default(cls) -> dict[str, Any]:
-        try:
-            config = cls()
-        except MissingAPIKeyError:
-            config = cls.model_construct()
-
+        config = cls.model_construct()
         config_dict = config.model_dump(mode="json", exclude_none=True)
 
         from vibe.core.tools.manager import ToolManager

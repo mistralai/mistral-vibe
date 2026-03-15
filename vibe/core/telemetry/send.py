@@ -19,8 +19,13 @@ DATALAKE_EVENTS_URL = "https://codestral.mistral.ai/v1/datalake/events"
 
 
 class TelemetryClient:
-    def __init__(self, config_getter: Callable[[], VibeConfig]) -> None:
+    def __init__(
+        self,
+        config_getter: Callable[[], VibeConfig],
+        session_id_getter: Callable[[], str | None] | None = None,
+    ) -> None:
         self._config_getter = config_getter
+        self._session_id_getter = session_id_getter
         self._client: httpx.AsyncClient | None = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
 
@@ -71,6 +76,11 @@ class TelemetryClient:
         if mistral_api_key is None or not self._is_enabled():
             return
         user_agent = self._get_telemetry_user_agent()
+        if (
+            self._session_id_getter is not None
+            and (session_id := self._session_id_getter()) is not None
+        ):
+            properties = {**properties, "session_id": session_id}
 
         async def _send() -> None:
             try:

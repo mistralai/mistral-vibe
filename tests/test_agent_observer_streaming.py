@@ -58,7 +58,6 @@ def make_config(
     tools: dict[str, BaseToolConfig] | None = None,
 ) -> VibeConfig:
     return build_test_vibe_config(
-        auto_compact_threshold=0,
         system_prompt_id="tests",
         include_project_context=False,
         include_prompt_detail=False,

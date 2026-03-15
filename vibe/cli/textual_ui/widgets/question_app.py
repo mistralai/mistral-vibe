@@ -6,12 +6,14 @@ from typing import TYPE_CHECKING, ClassVar
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Input
 
+from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 
 if TYPE_CHECKING:
     from vibe.core.tools.builtins.ask_user_question import (
@@ -108,7 +110,16 @@ class QuestionApp(Container):
         )
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="question-content"):
+        if self.args.content_preview:
+            with VerticalScroll(classes="question-content-preview"):
+                yield AnsiMarkdown(
+                    self.args.content_preview, classes="question-content-preview-text"
+                )
+
+        question_content_classes = (
+            "question-content-docked" if self.args.content_preview else ""
+        )
+        with Vertical(id="question-content", classes=question_content_classes):
             if len(self.questions) > 1:
                 self.tabs_widget = NoMarkupStatic("", classes="question-tabs")
                 yield self.tabs_widget
@@ -124,7 +135,7 @@ class QuestionApp(Container):
             with Horizontal(classes="question-other-row"):
                 self.other_prefix = NoMarkupStatic("", classes="question-other-prefix")
                 yield self.other_prefix
-                self.other_input = Input(
+                self.other_input = VscodeCompatInput(
                     placeholder="Type your answer...", classes="question-other-input"
                 )
                 yield self.other_input

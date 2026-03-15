@@ -8,8 +8,7 @@ import pytest
 
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from vibe.cli.plan_offer.decide_plan_offer import (
-    PlanOfferAction,
-    PlanType,
+    WhoAmIPlanType,
     decide_plan_offer,
     resolve_api_key_for_plan,
 )
@@ -31,105 +30,96 @@ def mistral_api_key_env() -> Generator[str, None, None]:
 
 
 @pytest.mark.asyncio
-async def test_proposes_upgrade_without_call_when_api_key_is_empty() -> None:
+async def test_returns_unknown_plan_when_api_key_is_empty() -> None:
     gateway = FakeWhoAmIGateway(
         WhoAmIResponse(
-            is_pro_plan=False,
-            advertise_pro_plan=False,
+            plan_type=WhoAmIPlanType.API,
+            plan_name="Free plan",
             prompt_switching_to_pro_plan=False,
         )
     )
-    action, plan_type = await decide_plan_offer("", gateway)
+    plan_info = await decide_plan_offer("", gateway)
 
-    assert action is PlanOfferAction.UPGRADE
-    assert plan_type is PlanType.FREE
+    assert plan_info.plan_type is WhoAmIPlanType.UNKNOWN
+    assert plan_info.plan_name == ""
+    assert plan_info.prompt_switching_to_pro_plan is False
     assert gateway.calls == []
 
 
 @pytest.mark.parametrize(
-    ("response", "expected_action", "expected_plan_type"),
+    ("response", "expected_plan_type", "expected_plan_name", "expected_switch_flag"),
     [
         (
             WhoAmIResponse(
-                is_pro_plan=True,
-                advertise_pro_plan=False,
+                plan_type=WhoAmIPlanType.API,
+                plan_name="Free Plan",
                 prompt_switching_to_pro_plan=False,
             ),
-            PlanOfferAction.NONE,
-            PlanType.PRO,
+            WhoAmIPlanType.API,
+            "Free Plan",
+            False,
         ),
         (
             WhoAmIResponse(
-                is_pro_plan=False,
-                advertise_pro_plan=True,
+                plan_type=WhoAmIPlanType.CHAT,
+                plan_name="Pro Plan",
                 prompt_switching_to_pro_plan=False,
             ),
-            PlanOfferAction.UPGRADE,
-            PlanType.FREE,
+            WhoAmIPlanType.CHAT,
+            "Pro Plan",
+            False,
         ),
         (
             WhoAmIResponse(
-                is_pro_plan=False,
-                advertise_pro_plan=False,
+                plan_type=WhoAmIPlanType.CHAT,
+                plan_name="Pro Plan",
                 prompt_switching_to_pro_plan=True,
             ),
-            PlanOfferAction.SWITCH_TO_PRO_KEY,
-            PlanType.PRO,
+            WhoAmIPlanType.CHAT,
+            "Pro Plan",
+            True,
         ),
     ],
-    ids=["with-a-pro-plan", "without-a-pro-plan", "with-a-non-pro-key"],
+    ids=["api-plan", "chat-plan", "chat-plan-with-prompt"],
 )
 @pytest.mark.asyncio
-async def test_proposes_an_action_based_on_current_plan_status(
+async def test_returns_plan_info_and_proposes_an_action_based_on_current_plan_status(
     response: WhoAmIResponse,
-    expected_action: PlanOfferAction,
-    expected_plan_type: PlanType,
+    expected_plan_type: WhoAmIPlanType,
+    expected_plan_name: str,
+    expected_switch_flag: bool,
 ) -> None:
     gateway = FakeWhoAmIGateway(response)
-    action, plan_type = await decide_plan_offer("api-key", gateway)
+    plan_info = await decide_plan_offer("api-key", gateway)
 
-    assert action is expected_action
-    assert plan_type is expected_plan_type
+    assert plan_info.plan_type is expected_plan_type
+    assert plan_info.plan_name == expected_plan_name
+    assert plan_info.prompt_switching_to_pro_plan is expected_switch_flag
     assert gateway.calls == ["api-key"]
 
 
 @pytest.mark.asyncio
-async def test_proposes_nothing_when_nothing_is_suggested() -> None:
-    gateway = FakeWhoAmIGateway(
-        WhoAmIResponse(
-            is_pro_plan=False,
-            advertise_pro_plan=False,
-            prompt_switching_to_pro_plan=False,
-        )
-    )
-
-    action, plan_type = await decide_plan_offer("api-key", gateway)
-
-    assert action is PlanOfferAction.NONE
-    assert plan_type is PlanType.UNKNOWN
-    assert gateway.calls == ["api-key"]
-
-
-@pytest.mark.asyncio
-async def test_proposes_upgrade_when_api_key_is_unauthorized() -> None:
+async def test_returns_unauthorized_plan_when_api_key_is_unauthorized() -> None:
     gateway = FakeWhoAmIGateway(unauthorized=True)
-    action, plan_type = await decide_plan_offer("bad-key", gateway)
+    plan_info = await decide_plan_offer("bad-key", gateway)
 
-    assert action is PlanOfferAction.UPGRADE
-    assert plan_type is PlanType.FREE
+    assert plan_info.plan_type is WhoAmIPlanType.UNAUTHORIZED
+    assert plan_info.plan_name == ""
+    assert plan_info.prompt_switching_to_pro_plan is False
     assert gateway.calls == ["bad-key"]
 
 
 @pytest.mark.asyncio
-async def test_proposes_none_and_logs_warning_when_gateway_error_occurs(
+async def test_returns_unknown_plan_and_logs_warning_when_gateway_error_occurs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     gateway = FakeWhoAmIGateway(error=True)
     with caplog.at_level(logging.WARNING):
-        action, plan_type = await decide_plan_offer("api-key", gateway)
+        plan_info = await decide_plan_offer("api-key", gateway)
 
-    assert action is PlanOfferAction.NONE
-    assert plan_type is PlanType.UNKNOWN
+    assert plan_info.plan_type is WhoAmIPlanType.UNKNOWN
+    assert plan_info.plan_name == ""
+    assert plan_info.prompt_switching_to_pro_plan is False
     assert gateway.calls == ["api-key"]
     assert "Failed to fetch plan status." in caplog.text
 

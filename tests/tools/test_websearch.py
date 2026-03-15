@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import mistralai
 import pytest
 
 from tests.mock.utils import collect_result
-from vibe.core.tools.base import BaseToolState, ToolError
+from vibe.core.config import Backend, ProviderConfig
+from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.websearch import WebSearch, WebSearchArgs, WebSearchConfig
 
 
@@ -149,6 +150,61 @@ async def test_run_sdk_error_wrapped(websearch):
             with patch.object(mistralai.Mistral, "__aexit__", return_value=None):
                 with pytest.raises(ToolError, match="Mistral API error"):
                     await collect_result(websearch.run(WebSearchArgs(query="test")))
+
+
+def test_resolve_server_url_no_ctx(websearch):
+    assert websearch._resolve_server_url(None) is None
+
+
+def test_resolve_server_url_no_agent_manager(websearch):
+    ctx = InvokeContext(tool_call_id="t1", agent_manager=None)
+    assert websearch._resolve_server_url(ctx) is None
+
+
+def test_resolve_server_url_with_mistral_provider(websearch):
+    config = MagicMock()
+    config.providers = [
+        ProviderConfig(
+            name="mistral",
+            api_base="https://on-prem.example.com/v1",
+            api_key_env_var="MISTRAL_API_KEY",
+            backend=Backend.MISTRAL,
+        )
+    ]
+    agent_manager = MagicMock()
+    agent_manager.config = config
+
+    ctx = InvokeContext(tool_call_id="t1", agent_manager=agent_manager)
+    assert websearch._resolve_server_url(ctx) == "https://on-prem.example.com"
+
+
+def test_resolve_server_url_with_default_provider(websearch):
+    config = MagicMock()
+    config.providers = [
+        ProviderConfig(
+            name="mistral",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="MISTRAL_API_KEY",
+            backend=Backend.MISTRAL,
+        )
+    ]
+    agent_manager = MagicMock()
+    agent_manager.config = config
+
+    ctx = InvokeContext(tool_call_id="t1", agent_manager=agent_manager)
+    assert websearch._resolve_server_url(ctx) == "https://api.mistral.ai"
+
+
+def test_resolve_server_url_no_mistral_provider(websearch):
+    config = MagicMock()
+    config.providers = [
+        ProviderConfig(name="llamacpp", api_base="http://127.0.0.1:8080/v1")
+    ]
+    agent_manager = MagicMock()
+    agent_manager.config = config
+
+    ctx = InvokeContext(tool_call_id="t1", agent_manager=agent_manager)
+    assert websearch._resolve_server_url(ctx) is None
 
 
 def test_is_available_with_key(monkeypatch):

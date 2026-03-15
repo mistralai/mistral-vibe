@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
+from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.proxy_setup import (
     SUPPORTED_PROXY_VARS,
     ProxySetupError,

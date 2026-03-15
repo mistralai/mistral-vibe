@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dotenv import dotenv_values, set_key, unset_key
 
-from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
+from vibe.core.paths import GLOBAL_ENV_FILE
 
 SUPPORTED_PROXY_VARS: dict[str, str] = {
     "HTTP_PROXY": "Proxy URL for HTTP requests",
