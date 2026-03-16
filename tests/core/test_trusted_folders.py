@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 import tomli_w
 
-from vibe.core.paths import AGENTS_MD_FILENAMES, TRUSTED_FOLDERS_FILE
+from vibe.core.paths import AGENTS_MD_FILENAME, TRUSTED_FOLDERS_FILE
 from vibe.core.trusted_folders import (
     TrustedFoldersManager,
     has_agents_md_file,
@@ -209,6 +209,99 @@ class TestTrustedFoldersManager:
         assert manager.is_trusted(tmp_path) is True
 
 
+class TestIsTrustedInheritance:
+    """Tests for the walk-up trust inheritance behaviour."""
+
+    def test_child_of_trusted_folder_returns_true(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        manager.add_trusted(tmp_path)
+        child = tmp_path / "sub" / "deep"
+        child.mkdir(parents=True)
+        assert manager.is_trusted(child) is True
+
+    def test_child_of_untrusted_folder_returns_false(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        manager.add_untrusted(tmp_path)
+        child = tmp_path / "sub"
+        child.mkdir()
+        assert manager.is_trusted(child) is False
+
+    def test_most_specific_ancestor_wins(self, tmp_path: Path) -> None:
+        parent = tmp_path / "parent"
+        child = parent / "child"
+        child.mkdir(parents=True)
+
+        manager = TrustedFoldersManager()
+        manager.add_trusted(parent)
+        manager.add_untrusted(child)
+
+        assert manager.is_trusted(parent) is True
+        assert manager.is_trusted(child) is False
+        assert manager.is_trusted(child / "grandchild") is False
+
+    def test_untrusted_parent_trusted_child(self, tmp_path: Path) -> None:
+        parent = tmp_path / "parent"
+        child = parent / "child"
+        child.mkdir(parents=True)
+
+        manager = TrustedFoldersManager()
+        manager.add_untrusted(parent)
+        manager.add_trusted(child)
+
+        assert manager.is_trusted(parent) is False
+        assert manager.is_trusted(child) is True
+        assert manager.is_trusted(child / "grandchild") is True
+
+    def test_deep_nesting_inherits_trust(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        manager.add_trusted(tmp_path)
+        deep = tmp_path / "a" / "b" / "c" / "d"
+        deep.mkdir(parents=True)
+        assert manager.is_trusted(deep) is True
+
+    def test_no_match_returns_none(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        assert manager.is_trusted(tmp_path / "unknown") is None
+
+
+class TestFindTrustRoot:
+    def test_returns_path_when_path_is_trusted(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        manager.add_trusted(tmp_path)
+        assert manager.find_trust_root(tmp_path) == tmp_path.resolve()
+
+    def test_returns_ancestor_when_child(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        manager.add_trusted(tmp_path)
+        child = tmp_path / "sub" / "deep"
+        child.mkdir(parents=True)
+        assert manager.find_trust_root(child) == tmp_path.resolve()
+
+    def test_returns_none_when_no_trusted_ancestor(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        assert manager.find_trust_root(tmp_path) is None
+
+    def test_returns_closest_trusted_ancestor(self, tmp_path: Path) -> None:
+        parent = tmp_path / "parent"
+        child = parent / "child"
+        child.mkdir(parents=True)
+        manager = TrustedFoldersManager()
+        manager.add_trusted(tmp_path)
+        manager.add_trusted(parent)
+        # child should find parent (closest), not tmp_path
+        assert manager.find_trust_root(child) == parent.resolve()
+
+    def test_ignores_untrusted_ancestors(self, tmp_path: Path) -> None:
+        parent = tmp_path / "parent"
+        child = parent / "child"
+        child.mkdir(parents=True)
+        manager = TrustedFoldersManager()
+        manager.add_untrusted(parent)
+        manager.add_trusted(tmp_path)
+        # find_trust_root skips untrusted, finds tmp_path
+        assert manager.find_trust_root(child) == tmp_path.resolve()
+
+
 class TestHasAgentsMdFile:
     def test_returns_false_for_empty_directory(self, tmp_path: Path) -> None:
         assert has_agents_md_file(tmp_path) is False
@@ -217,21 +310,13 @@ class TestHasAgentsMdFile:
         (tmp_path / "AGENTS.md").write_text("# Agents", encoding="utf-8")
         assert has_agents_md_file(tmp_path) is True
 
-    def test_returns_true_when_vibe_md_exists(self, tmp_path: Path) -> None:
-        (tmp_path / "VIBE.md").write_text("# Vibe", encoding="utf-8")
-        assert has_agents_md_file(tmp_path) is True
-
-    def test_returns_true_when_dot_vibe_md_exists(self, tmp_path: Path) -> None:
-        (tmp_path / ".vibe.md").write_text("# Vibe", encoding="utf-8")
-        assert has_agents_md_file(tmp_path) is True
-
     def test_returns_false_when_only_other_files_exist(self, tmp_path: Path) -> None:
         (tmp_path / "README.md").write_text("", encoding="utf-8")
         (tmp_path / ".vibe").mkdir()
         assert has_agents_md_file(tmp_path) is False
 
-    def test_agents_md_filenames_constant(self) -> None:
-        assert AGENTS_MD_FILENAMES == ["AGENTS.md", "VIBE.md", ".vibe.md"]
+    def test_agents_md_filename_constant(self) -> None:
+        assert AGENTS_MD_FILENAME == "AGENTS.md"
 
 
 class TestHasTrustableContent:
@@ -244,10 +329,9 @@ class TestHasTrustableContent:
         assert has_trustable_content(tmp_path) is True
 
     def test_returns_true_when_agents_md_filename_exists(self, tmp_path: Path) -> None:
-        for name in AGENTS_MD_FILENAMES:
-            (tmp_path / name).write_text("", encoding="utf-8")
-            assert has_trustable_content(tmp_path) is True
-            (tmp_path / name).unlink()
+        (tmp_path / AGENTS_MD_FILENAME).write_text("", encoding="utf-8")
+        assert has_trustable_content(tmp_path) is True
+        (tmp_path / AGENTS_MD_FILENAME).unlink()
 
     def test_returns_false_when_no_trustable_content(self, tmp_path: Path) -> None:
         (tmp_path / "other.txt").write_text("", encoding="utf-8")

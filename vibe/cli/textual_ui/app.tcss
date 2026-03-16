@@ -86,6 +86,7 @@ TextArea > .text-area--cursor {
 #completion-popup {
     width: 100%;
     padding: 1;
+    padding-left: 3;
     color: ansi_default;
 }
 
@@ -112,6 +113,11 @@ TextArea > .text-area--cursor {
         border: solid ansi_red;
         border-title-color: ansi_red;
     }
+
+    &.border-recording {
+        border: solid $mistral_orange;
+        border-title-color: $mistral_orange;
+    }
 }
 
 #input-body {
@@ -119,7 +125,8 @@ TextArea > .text-area--cursor {
 }
 
 #prompt,
-#prompt-spinner {
+#prompt-spinner,
+#recording-indicator {
     width: auto;
     background: transparent;
     color: $mistral_orange;
@@ -137,6 +144,10 @@ TextArea > .text-area--cursor {
     border: none;
     padding: 0;
     scrollbar-visibility: hidden;
+
+    &.recording {
+        color: ansi_bright_black;
+    }
 }
 
 ToastRack {

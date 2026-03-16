@@ -9,6 +9,7 @@ from tests.conftest import (
 )
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
+from vibe.core.config import ModelConfig
 from vibe.core.types import (
     AssistantEvent,
     CompactEndEvent,
@@ -125,3 +126,56 @@ async def test_compact_replaces_messages_with_summary() -> None:
     assert agent.messages[0].role == Role.system
     assert agent.messages[-1].role == Role.assistant
     assert agent.messages[-1].content == "<final>"
+
+
+class _ModelTrackingBackend(FakeBackend):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.requested_models: list[ModelConfig] = []
+
+    async def complete(self, *, model, **kwargs):
+        self.requested_models.append(model)
+        return await super().complete(model=model, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_compact_uses_compaction_model() -> None:
+    """When compaction_model is set, compact() uses it instead of active_model."""
+    compaction = ModelConfig(
+        name="compaction-model",
+        provider="mistral",
+        alias="compaction",
+        auto_compact_threshold=1,
+    )
+    backend = _ModelTrackingBackend([
+        [mock_llm_chunk(content="<summary>")],
+        [mock_llm_chunk(content="<final>")],
+    ])
+    cfg = build_test_vibe_config(
+        models=make_test_models(auto_compact_threshold=1), compaction_model=compaction
+    )
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.stats.context_tokens = 2
+
+    [_ async for _ in agent.act("Hello")]
+
+    assert backend.requested_models[0].name == "compaction-model"
+    assert backend.requested_models[1].name != "compaction-model"
+
+
+@pytest.mark.asyncio
+async def test_compact_uses_active_model_when_no_compaction_model() -> None:
+    """Without compaction_model, compact() falls back to the active model."""
+    backend = _ModelTrackingBackend([
+        [mock_llm_chunk(content="<summary>")],
+        [mock_llm_chunk(content="<final>")],
+    ])
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.stats.context_tokens = 2
+
+    [_ async for _ in agent.act("Hello")]
+
+    active = cfg.get_active_model()
+    assert backend.requested_models[0].name == active.name
+    assert backend.requested_models[1].name == active.name

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tomllib
 
 import pytest
+import tomli_w
 
 from tests.conftest import build_test_vibe_config
-from vibe.core.config import ModelConfig
+from vibe.core.config import ModelConfig, VibeConfig
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
     init_harness_files_manager,
@@ -84,6 +86,60 @@ class TestResolveConfigFile:
         assert mgr.config_file == VIBE_HOME.path / "config.toml"
 
 
+class TestMigrateRemovesFindFromBashAllowlist:
+    def test_removes_find_from_config_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {"tools": {"bash": {"allowlist": ["echo", "find", "ls"]}}}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert "find" not in result["tools"]["bash"]["allowlist"]
+        assert result["tools"]["bash"]["allowlist"] == ["echo", "ls"]
+
+    def test_noop_when_find_not_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {"tools": {"bash": {"allowlist": ["echo", "ls"]}}}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["tools"]["bash"]["allowlist"] == ["echo", "ls"]
+
+    def test_noop_when_no_bash_tools_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {"active_model": "test"}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert "tools" not in result
+
+
 class TestAutoCompactThresholdFallback:
     def test_model_without_explicit_threshold_inherits_global(self) -> None:
         model = ModelConfig(name="m", provider="p", alias="m")
@@ -119,3 +175,52 @@ class TestAutoCompactThresholdFallback:
             auto_compact_threshold=75_000, models=[model], active_model="m"
         )
         assert cfg2.get_active_model().auto_compact_threshold == 75_000
+
+
+class TestCompactionModel:
+    def test_get_compaction_model_returns_active_when_unset(self) -> None:
+        cfg = build_test_vibe_config()
+        assert cfg.get_compaction_model() == cfg.get_active_model()
+
+    def test_get_compaction_model_returns_configured_model(self) -> None:
+        compaction = ModelConfig(
+            name="compact-model", provider="mistral", alias="compact"
+        )
+        cfg = build_test_vibe_config(compaction_model=compaction)
+        assert cfg.get_compaction_model().name == "compact-model"
+
+    def test_compaction_model_provider_must_match_active(self) -> None:
+        from vibe.core.config import ProviderConfig
+
+        compaction = ModelConfig(
+            name="compact-model", provider="other", alias="compact"
+        )
+        providers = [
+            ProviderConfig(
+                name="mistral",
+                api_base="https://api.mistral.ai/v1",
+                api_key_env_var="MISTRAL_API_KEY",
+            ),
+            ProviderConfig(
+                name="other",
+                api_base="https://other.ai/v1",
+                api_key_env_var="MISTRAL_API_KEY",
+            ),
+        ]
+        with pytest.raises(ValueError, match="must share the same provider"):
+            build_test_vibe_config(compaction_model=compaction, providers=providers)
+
+    def test_compaction_model_provider_must_exist(self) -> None:
+        compaction = ModelConfig(
+            name="compact-model", provider="missing-provider", alias="compact"
+        )
+        with pytest.raises(
+            ValueError,
+            match="Provider 'missing-provider' for model 'compact-model' not found in configuration",
+        ):
+            build_test_vibe_config(compaction_model=compaction)
+
+    def test_compaction_model_excluded_from_model_dump_when_none(self) -> None:
+        cfg = build_test_vibe_config()
+        dumped = cfg.model_dump()
+        assert "compaction_model" not in dumped

@@ -7,8 +7,28 @@ import types
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 import httpx
-import mistralai
-from mistralai.utils.retries import BackoffStrategy, RetryConfig
+from mistralai.client import Mistral
+from mistralai.client.errors import SDKError
+from mistralai.client.models import (
+    AssistantMessage,
+    AssistantMessageContent,
+    ChatCompletionRequestMessage,
+    ChatCompletionStreamRequestToolChoice,
+    FileChunk,
+    Function,
+    FunctionCall as MistralFunctionCall,
+    FunctionName,
+    SystemMessage,
+    TextChunk,
+    ThinkChunk,
+    Tool,
+    ToolCall as MistralToolCall,
+    ToolChoice,
+    ToolChoiceEnum,
+    ToolMessage,
+    UserMessage,
+)
+from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.llm.message_utils import merge_consecutive_user_messages
@@ -35,35 +55,33 @@ class ParsedContent(NamedTuple):
 
 
 class MistralMapper:
-    def prepare_message(self, msg: LLMMessage) -> mistralai.Messages:
+    def prepare_message(self, msg: LLMMessage) -> ChatCompletionRequestMessage:
         match msg.role:
             case Role.system:
-                return mistralai.SystemMessage(role="system", content=msg.content or "")
+                return SystemMessage(role="system", content=msg.content or "")
             case Role.user:
-                return mistralai.UserMessage(role="user", content=msg.content)
+                return UserMessage(role="user", content=msg.content)
             case Role.assistant:
-                content: mistralai.AssistantMessageContent
+                content: AssistantMessageContent
                 if msg.reasoning_content:
                     content = [
-                        mistralai.ThinkChunk(
+                        ThinkChunk(
                             type="thinking",
                             thinking=[
-                                mistralai.TextChunk(
-                                    type="text", text=msg.reasoning_content
-                                )
+                                TextChunk(type="text", text=msg.reasoning_content)
                             ],
                         ),
-                        mistralai.TextChunk(type="text", text=msg.content or ""),
+                        TextChunk(type="text", text=msg.content or ""),
                     ]
                 else:
                     content = msg.content or ""
 
-                return mistralai.AssistantMessage(
+                return AssistantMessage(
                     role="assistant",
                     content=content,
                     tool_calls=[
-                        mistralai.ToolCall(
-                            function=mistralai.FunctionCall(
+                        MistralToolCall(
+                            function=MistralFunctionCall(
                                 name=tc.function.name or "",
                                 arguments=tc.function.arguments or "",
                             ),
@@ -75,17 +93,17 @@ class MistralMapper:
                     ],
                 )
             case Role.tool:
-                return mistralai.ToolMessage(
+                return ToolMessage(
                     role="tool",
                     content=msg.content,
                     tool_call_id=msg.tool_call_id,
                     name=msg.name,
                 )
 
-    def prepare_tool(self, tool: AvailableTool) -> mistralai.Tool:
-        return mistralai.Tool(
+    def prepare_tool(self, tool: AvailableTool) -> Tool:
+        return Tool(
             type="function",
-            function=mistralai.Function(
+            function=Function(
                 name=tool.function.name,
                 description=tool.function.description,
                 parameters=tool.function.parameters,
@@ -94,16 +112,15 @@ class MistralMapper:
 
     def prepare_tool_choice(
         self, tool_choice: StrToolChoice | AvailableTool
-    ) -> mistralai.ChatCompletionStreamRequestToolChoice:
+    ) -> ChatCompletionStreamRequestToolChoice:
         if isinstance(tool_choice, str):
-            return cast(mistralai.ToolChoiceEnum, tool_choice)
+            return cast(ToolChoiceEnum, tool_choice)
 
-        return mistralai.ToolChoice(
-            type="function",
-            function=mistralai.FunctionName(name=tool_choice.function.name),
+        return ToolChoice(
+            type="function", function=FunctionName(name=tool_choice.function.name)
         )
 
-    def _extract_thinking_text(self, chunk: mistralai.ThinkChunk) -> str:
+    def _extract_thinking_text(self, chunk: ThinkChunk) -> str:
         thinking_content = getattr(chunk, "thinking", None)
         if not thinking_content:
             return ""
@@ -115,27 +132,25 @@ class MistralMapper:
                 parts.append(inner)
         return "".join(parts)
 
-    def parse_content(
-        self, content: mistralai.AssistantMessageContent
-    ) -> ParsedContent:
+    def parse_content(self, content: AssistantMessageContent) -> ParsedContent:
         if isinstance(content, str):
             return ParsedContent(content=content, reasoning_content=None)
 
         concat_content = ""
         concat_reasoning = ""
         for chunk in content:
-            if isinstance(chunk, mistralai.FileChunk):
+            if isinstance(chunk, FileChunk):
                 continue
-            if isinstance(chunk, mistralai.TextChunk):
+            if isinstance(chunk, TextChunk):
                 concat_content += chunk.text
-            elif isinstance(chunk, mistralai.ThinkChunk):
+            elif isinstance(chunk, ThinkChunk):
                 concat_reasoning += self._extract_thinking_text(chunk)
         return ParsedContent(
             content=concat_content,
             reasoning_content=concat_reasoning if concat_reasoning else None,
         )
 
-    def parse_tool_calls(self, tool_calls: list[mistralai.ToolCall]) -> list[ToolCall]:
+    def parse_tool_calls(self, tool_calls: list[MistralToolCall]) -> list[ToolCall]:
         return [
             ToolCall(
                 id=tool_call.id,
@@ -153,7 +168,7 @@ class MistralMapper:
 
 class MistralBackend:
     def __init__(self, provider: ProviderConfig, timeout: float = 720.0) -> None:
-        self._client: mistralai.Mistral | None = None
+        self._client: Mistral | None = None
         self._provider = provider
         self._mapper = MistralMapper()
         self._api_key = (
@@ -208,15 +223,15 @@ class MistralBackend:
                 exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb
             )
 
-    def _create_mistral_client(self) -> mistralai.Mistral:
-        return mistralai.Mistral(
+    def _create_mistral_client(self) -> Mistral:
+        return Mistral(
             api_key=self._api_key,
             server_url=self._server_url,
             timeout_ms=int(self._timeout * 1000),
             retry_config=self._retry_config,
         )
 
-    def _get_client(self) -> mistralai.Mistral:
+    def _get_client(self) -> Mistral:
         if self._client is None:
             self._client = self._create_mistral_client()
         return self._client
@@ -273,7 +288,7 @@ class MistralBackend:
                 ),
             )
 
-        except mistralai.SDKError as e:
+        except SDKError as e:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
@@ -351,7 +366,7 @@ class MistralBackend:
                     ),
                 )
 
-        except mistralai.SDKError as e:
+        except SDKError as e:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,

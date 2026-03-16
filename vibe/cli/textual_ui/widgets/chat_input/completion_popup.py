@@ -27,7 +27,7 @@ class CompletionPopup(Static):
             label_style = "bold reverse" if idx == selected else "bold"
             description_style = "italic" if idx == selected else "dim"
 
-            text.append(label, style=label_style)
+            text.append(self._display_label(label), style=label_style)
             if description:
                 text.append("  ")
                 text.append(description, style=description_style)
@@ -41,3 +41,8 @@ class CompletionPopup(Static):
 
     def show(self) -> None:
         self.styles.display = "block"
+
+    def _display_label(self, label: str) -> str:
+        if label.startswith("@"):
+            return label[1:]
+        return label

@@ -15,7 +15,6 @@ from acp import (
     LoadSessionResponse,
     NewSessionResponse,
     PromptResponse,
-    RequestError,
     SetSessionModelResponse,
     SetSessionModeResponse,
     run_agent,
@@ -55,6 +54,17 @@ from pydantic import BaseModel, ConfigDict
 
 from vibe import VIBE_ROOT, __version__
 from vibe.acp.acp_logger import acp_message_observer
+from vibe.acp.exceptions import (
+    ConfigurationError,
+    ConversationLimitError,
+    InternalError,
+    InvalidRequestError,
+    NotImplementedMethodError,
+    RateLimitError,
+    SessionLoadError,
+    SessionNotFoundError,
+    UnauthenticatedError,
+)
 from vibe.acp.tools.base import BaseAcpTool
 from vibe.acp.tools.session_update import (
     tool_call_session_update,
@@ -93,13 +103,14 @@ from vibe.core.proxy_setup import (
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
+    ApprovalCallback,
     ApprovalResponse,
     AssistantEvent,
-    AsyncApprovalCallback,
     CompactEndEvent,
     CompactStartEvent,
     EntrypointMetadata,
     LLMMessage,
+    RateLimitError as CoreRateLimitError,
     ReasoningEvent,
     Role,
     ToolCallEvent,
@@ -107,7 +118,11 @@ from vibe.core.types import (
     ToolStreamEvent,
     UserMessageEvent,
 )
-from vibe.core.utils import CancellationReason, get_user_cancellation_message
+from vibe.core.utils import (
+    CancellationReason,
+    ConversationLimitException,
+    get_user_cancellation_message,
+)
 
 
 class AcpSessionLoop(BaseModel):
@@ -201,7 +216,7 @@ class VibeAcpAgentLoop(AcpAgent):
     async def authenticate(
         self, method_id: str, **kwargs: Any
     ) -> AuthenticateResponse | None:
-        raise NotImplementedError("Not implemented yet")
+        raise NotImplementedMethodError("authenticate")
 
     def _build_entrypoint_metadata(self) -> EntrypointMetadata:
         return EntrypointMetadata(
@@ -219,9 +234,9 @@ class VibeAcpAgentLoop(AcpAgent):
             config.tool_paths.extend(self._get_acp_tool_overrides())
             return config
         except MissingAPIKeyError as e:
-            raise RequestError.auth_required({
-                "message": "You must be authenticated before creating a session"
-            }) from e
+            raise UnauthenticatedError.from_missing_api_key(e) from e
+        except Exception as e:
+            raise ConfigurationError(str(e)) from e
 
     async def _create_acp_session(
         self, session_id: str, agent_loop: AgentLoop
@@ -295,7 +310,7 @@ class VibeAcpAgentLoop(AcpAgent):
             for override in overrides
         ]
 
-    def _create_approval_callback(self, session_id: str) -> AsyncApprovalCallback:
+    def _create_approval_callback(self, session_id: str) -> ApprovalCallback:
         session = self._get_session(session_id)
 
         def _handle_permission_selection(
@@ -347,7 +362,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
     def _get_session(self, session_id: str) -> AcpSessionLoop:
         if session_id not in self.sessions:
-            raise RequestError.invalid_params({"session": "Not found"})
+            raise SessionNotFoundError(session_id)
         return self.sessions[session_id]
 
     async def _replay_tool_calls(self, session_id: str, msg: LLMMessage) -> None:
@@ -395,7 +410,17 @@ class VibeAcpAgentLoop(AcpAgent):
                         hint="KEY value to set, KEY to unset, or empty for help"
                     )
                 ),
-            )
+            ),
+            AvailableCommand(
+                name="leanstall",
+                description="Install the Lean 4 agent (leanstral)",
+                input=AvailableCommandInput(root=UnstructuredCommandInput(hint="")),
+            ),
+            AvailableCommand(
+                name="unleanstall",
+                description="Uninstall the Lean 4 agent",
+                input=AvailableCommandInput(root=UnstructuredCommandInput(hint="")),
+            ),
         ]
 
         update = update_available_commands(commands)
@@ -429,6 +454,60 @@ class VibeAcpAgentLoop(AcpAgent):
         )
         return PromptResponse(stop_reason="end_turn")
 
+    async def _handle_leanstall_command(self, session_id: str) -> PromptResponse:
+        session = self._get_session(session_id)
+        current = list(session.agent_loop.base_config.installed_agents)
+        if "lean" in current:
+            message = "Lean agent is already installed."
+        else:
+            VibeConfig.save_updates({"installed_agents": [*current, "lean"]})
+            new_config = VibeConfig.load(
+                tool_paths=session.agent_loop.config.tool_paths,
+                disabled_tools=["ask_user_question", "exit_plan_mode"],
+            )
+            await session.agent_loop.reload_with_initial_messages(
+                base_config=new_config
+            )
+            message = (
+                "Lean agent installed. Start a new session to switch to Lean mode."
+            )
+
+        await self.client.session_update(
+            session_id=session_id,
+            update=AgentMessageChunk(
+                session_update="agent_message_chunk",
+                content=TextContentBlock(type="text", text=message),
+            ),
+        )
+        return PromptResponse(stop_reason="end_turn")
+
+    async def _handle_unleanstall_command(self, session_id: str) -> PromptResponse:
+        session = self._get_session(session_id)
+        current = list(session.agent_loop.base_config.installed_agents)
+        if "lean" not in current:
+            message = "Lean agent is not installed."
+        else:
+            VibeConfig.save_updates({
+                "installed_agents": [a for a in current if a != "lean"]
+            })
+            new_config = VibeConfig.load(
+                tool_paths=session.agent_loop.config.tool_paths,
+                disabled_tools=["ask_user_question", "exit_plan_mode"],
+            )
+            await session.agent_loop.reload_with_initial_messages(
+                base_config=new_config
+            )
+            message = "Lean agent uninstalled."
+
+        await self.client.session_update(
+            session_id=session_id,
+            update=AgentMessageChunk(
+                session_update="agent_message_chunk",
+                content=TextContentBlock(type="text", text=message),
+            ),
+        )
+        return PromptResponse(stop_reason="end_turn")
+
     @override
     async def load_session(
         self,
@@ -446,16 +525,12 @@ class VibeAcpAgentLoop(AcpAgent):
             session_id, config.session_logging
         )
         if session_dir is None:
-            raise RequestError.invalid_params({
-                "session_id": f"Session not found: {session_id}"
-            })
+            raise SessionNotFoundError(session_id)
 
         try:
             loaded_messages, _ = SessionLoader.load_session(session_dir)
-        except ValueError as e:
-            raise RequestError.invalid_params({
-                "session_id": f"Failed to load session: {e}"
-            }) from e
+        except Exception as e:
+            raise SessionLoadError(session_id, str(e)) from e
 
         agent_loop = AgentLoop(
             config=config,
@@ -605,7 +680,7 @@ class VibeAcpAgentLoop(AcpAgent):
         session = self._get_session(session_id)
 
         if session.task is not None:
-            raise RuntimeError(
+            raise InvalidRequestError(
                 "Concurrent prompts are not supported yet, wait for agent loop to finish"
             )
 
@@ -613,6 +688,12 @@ class VibeAcpAgentLoop(AcpAgent):
 
         if text_prompt.strip().lower().startswith("/proxy-setup"):
             return await self._handle_proxy_setup_command(session_id, text_prompt)
+
+        if text_prompt.strip().lower().startswith("/unleanstall"):
+            return await self._handle_unleanstall_command(session_id)
+
+        if text_prompt.strip().lower().startswith("/leanstall"):
+            return await self._handle_leanstall_command(session_id)
 
         temp_user_message_id: str | None = kwargs.get("messageId")
 
@@ -629,16 +710,14 @@ class VibeAcpAgentLoop(AcpAgent):
         except asyncio.CancelledError:
             return PromptResponse(stop_reason="cancelled")
 
-        except Exception as e:
-            await self.client.session_update(
-                session_id=session_id,
-                update=AgentMessageChunk(
-                    session_update="agent_message_chunk",
-                    content=TextContentBlock(type="text", text=f"Error: {e!s}"),
-                ),
-            )
+        except CoreRateLimitError as e:
+            raise RateLimitError.from_core(e) from e
 
-            return PromptResponse(stop_reason="refusal")
+        except ConversationLimitException as e:
+            raise ConversationLimitError(str(e)) from e
+
+        except Exception as e:
+            raise InternalError(str(e)) from e
 
         finally:
             session.task = None
@@ -687,7 +766,9 @@ class VibeAcpAgentLoop(AcpAgent):
                     block_prompt = "\n".join(parts)
                     text_prompt = f"{text_prompt}{separator}{block_prompt}"
                 case _:
-                    raise ValueError(f"Unsupported content block type: {block.type}")
+                    raise InvalidRequestError(
+                        f"We currently don't support {block.type} content blocks"
+                    )
         return text_prompt
 
     async def _run_agent_loop(
@@ -775,7 +856,7 @@ class VibeAcpAgentLoop(AcpAgent):
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> ForkSessionResponse:
-        raise NotImplementedError()
+        raise NotImplementedMethodError("fork_session")
 
     @override
     async def resume_session(
@@ -785,15 +866,15 @@ class VibeAcpAgentLoop(AcpAgent):
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> ResumeSessionResponse:
-        raise NotImplementedError()
+        raise NotImplementedMethodError("resume_session")
 
     @override
     async def ext_method(self, method: str, params: dict) -> dict:
-        raise NotImplementedError()
+        raise NotImplementedMethodError("ext_method")
 
     @override
     async def ext_notification(self, method: str, params: dict) -> None:
-        raise NotImplementedError()
+        raise NotImplementedMethodError("ext_notification")
 
     @override
     def on_connect(self, conn: Client) -> None:

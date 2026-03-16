@@ -155,6 +155,7 @@ class TestAgentProfile:
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
             BuiltinAgentName.AUTO_APPROVE,
+            BuiltinAgentName.LEAN,
         }
 
 
@@ -535,6 +536,26 @@ class TestAgentManagerFiltering:
         assert "plan" in agents
         assert "auto-approve" in agents
         assert "explore" in agents
+
+    def test_install_required_agents_hidden_by_default(self) -> None:
+        config = build_test_vibe_config(
+            include_project_context=False, include_prompt_detail=False
+        )
+        manager = AgentManager(lambda: config)
+
+        agents = manager.available_agents
+        assert "lean" not in agents
+
+    def test_install_required_agents_visible_when_installed(self) -> None:
+        config = build_test_vibe_config(
+            include_project_context=False,
+            include_prompt_detail=False,
+            installed_agents=["lean"],
+        )
+        manager = AgentManager(lambda: config)
+
+        agents = manager.available_agents
+        assert "lean" in agents
 
     def test_get_subagents_respects_filtering(self) -> None:
         config = build_test_vibe_config(

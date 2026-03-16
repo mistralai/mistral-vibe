@@ -10,7 +10,7 @@ from vibe.core.config.harness_files._paths import (
     GLOBAL_SKILLS_DIR,
     GLOBAL_TOOLS_DIR,
 )
-from vibe.core.paths import AGENTS_MD_FILENAMES, VIBE_HOME, walk_local_config_dirs_all
+from vibe.core.paths import AGENTS_MD_FILENAME, VIBE_HOME, walk_local_config_dirs_all
 from vibe.core.trusted_folders import trusted_folders_manager
 
 FileSource = Literal["user", "project"]
@@ -110,17 +110,85 @@ class HarnessFilesManager:
         d = GLOBAL_PROMPTS_DIR.path
         return [d] if d.is_dir() else []
 
-    def load_project_doc(self, max_bytes: int) -> str:
+    def load_user_doc(self) -> str:
+        if "user" not in self.sources:
+            return ""
+        path = VIBE_HOME.path / AGENTS_MD_FILENAME
+        try:
+            content = path.read_text("utf-8", errors="ignore")
+            stripped = content.strip()
+            return stripped if stripped else ""
+        except (FileNotFoundError, OSError):
+            return ""
+
+    def _collect_agents_md(
+        self, start: Path, stop: Path, *, stop_inclusive: bool
+    ) -> list[tuple[Path, str]]:
+        """Walk up from start toward stop, collecting non-empty AGENTS.md files.
+
+        Returns ``(directory, content)`` pairs ordered outermost-first.
+        When ``stop_inclusive`` is True the stop directory is included in the
+        walk; when False the walk stops before reaching it.
+        """
+        if not start.is_relative_to(stop):
+            return []
+
+        docs: list[tuple[Path, str]] = []
+        current = start
+        while True:
+            if current == stop and not stop_inclusive:
+                break
+            path = current / AGENTS_MD_FILENAME
+            try:
+                content = path.read_text("utf-8", errors="ignore")
+                stripped = content.strip()
+                if stripped:
+                    docs.append((current, stripped))
+            except (FileNotFoundError, OSError):
+                pass
+            if current == stop:
+                break
+            parent = current.parent
+            if parent == current:  # fs-root safety
+                break
+            current = parent
+        docs.reverse()  # outermost first
+        return docs
+
+    def find_subdirectory_agents_md(self, file_path: Path) -> list[tuple[Path, str]]:
+        """Find AGENTS.md files between file_path's parent and cwd (exclusive of cwd).
+
+        For lazy injection when reading files in subdirectories below cwd.
+        Returns (directory, content) pairs, outermost first.
+        Does not overlap with load_project_docs() which covers cwd and above.
+        """
         workdir = self.trusted_workdir
         if workdir is None:
-            return ""
-        for name in AGENTS_MD_FILENAMES:
-            path = workdir / name
-            try:
-                return path.read_text("utf-8", errors="ignore")[:max_bytes]
-            except (FileNotFoundError, OSError):
-                continue
-        return ""
+            return []
+        cwd = workdir.resolve()
+        try:
+            resolved = file_path.resolve()
+        except (ValueError, OSError):
+            return []
+        if not resolved.is_relative_to(cwd):
+            return []
+        start = resolved if resolved.is_dir() else resolved.parent
+        return self._collect_agents_md(start, cwd, stop_inclusive=False)
+
+    def load_project_docs(self) -> list[tuple[Path, str]]:
+        """Walk up from cwd to the trust root, collecting AGENTS.md files.
+
+        Returns ``(directory, content)`` pairs ordered outermost-first
+        (trust root first, cwd last).  Later entries take priority.
+        """
+        workdir = self.trusted_workdir
+        if workdir is None:
+            return []
+        cwd = workdir.resolve()
+        trust_root = trusted_folders_manager.find_trust_root(cwd)
+        if trust_root is None:
+            return []
+        return self._collect_agents_md(cwd, trust_root, stop_inclusive=True)
 
 
 _manager: HarnessFilesManager | None = None

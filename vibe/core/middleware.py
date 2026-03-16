@@ -79,16 +79,14 @@ class PriceLimitMiddleware:
 
 
 class AutoCompactMiddleware:
-    def __init__(self, threshold: int) -> None:
-        self.threshold = threshold
-
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
-        if context.stats.context_tokens >= self.threshold:
+        threshold = context.config.get_active_model().auto_compact_threshold
+        if threshold > 0 and context.stats.context_tokens >= threshold:
             return MiddlewareResult(
                 action=MiddlewareAction.COMPACT,
                 metadata={
                     "old_tokens": context.stats.context_tokens,
-                    "threshold": self.threshold,
+                    "threshold": threshold,
                 },
             )
         return MiddlewareResult()
@@ -98,19 +96,16 @@ class AutoCompactMiddleware:
 
 
 class ContextWarningMiddleware:
-    def __init__(
-        self, threshold_percent: float = 0.5, max_context: int | None = None
-    ) -> None:
+    def __init__(self, threshold_percent: float = 0.5) -> None:
         self.threshold_percent = threshold_percent
-        self.max_context = max_context
         self.has_warned = False
 
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
         if self.has_warned:
             return MiddlewareResult()
 
-        max_context = self.max_context
-        if max_context is None:
+        max_context = context.config.get_active_model().auto_compact_threshold
+        if max_context <= 0:
             return MiddlewareResult()
 
         if context.stats.context_tokens >= max_context * self.threshold_percent:

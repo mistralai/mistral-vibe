@@ -45,7 +45,7 @@ class TestInvokeContext:
         assert ctx.approval_callback is None
 
     def test_approval_callback_can_be_set(self) -> None:
-        def dummy_callback(
+        async def dummy_callback(
             _tool_name: str, _args: BaseModel, _tool_call_id: str
         ) -> tuple[ApprovalResponse, str | None]:
             return ApprovalResponse.YES, None
@@ -75,7 +75,7 @@ class TestToolInvokeWithContext:
 
     @pytest.mark.asyncio
     async def test_invoke_with_approval_callback(self, simple_tool: SimpleTool) -> None:
-        def dummy_callback(
+        async def dummy_callback(
             _tool_name: str, _args: BaseModel, _tool_call_id: str
         ) -> tuple[ApprovalResponse, str | None]:
             return ApprovalResponse.YES, None

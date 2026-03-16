@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.4.2"
+version = "2.5.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -38,7 +38,7 @@ dependencies = [
     "keyring>=25.6.0",
     "markdownify>=1.2.2",
     "mcp>=1.14.0",
-    "mistralai==1.12.4",
+    "mistralai==2.0.0",
     "packaging>=24.1",
     "pexpect>=4.9.0",
     "pydantic>=2.12.4",
@@ -48,12 +48,14 @@ dependencies = [
     "pyyaml>=6.0.0",
     "requests>=2.20.0",
     "rich>=14.0.0",
-    "textual>=7.4.0",
+    "sounddevice>=0.5.1",
+    "textual>=8.1.1",
     "textual-speedups>=0.2.1",
     "tomli-w>=1.2.0",
     "tree-sitter>=0.25.2",
     "tree-sitter-bash>=0.25.1",
     "watchfiles>=1.1.1",
+    "websockets>=13.0",
     "zstandard>=0.25.0",
 ]
 

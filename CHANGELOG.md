@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-03-16
+
+### Added
+
+- Dedicated theorem proving agent powered by leanstral, setup with /leanstall
+- More advanced AGENTS.md support:
+  - AGENTS.md in ~/.vibe/ folder for user-level agent instructions
+  - AGENTS.md for subfolders and in parent folders
+- Mistral Code API key info displayed in CLI banner
+- Voice mode with real-time transcription support
+- Parallel tool execution for improved performance
+- Structured ACP error classes for better error handling
+
+### Changed
+
+- Bash allowlist/denylist now active on Windows
+- Auto-completion relevance improved with better filename and path matching
+- History navigation no longer filters by prefix
+- Updated to Mistral SDK v2 import structure
+- Removed `find` from bash default allowlist to prevent -exec abuse
+
+### Fixed
+
+- Improved scrolling performance
+- Web search tool now infers server URL from provider config
+
+
 ## [2.4.2] - 2026-03-12
 
 ### Added

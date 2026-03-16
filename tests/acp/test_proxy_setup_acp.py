@@ -51,9 +51,11 @@ class TestAvailableCommandsUpdate:
 
         assert len(available_commands_updates) == 1
         update = available_commands_updates[0].update
-        assert len(update.available_commands) == 1
-        assert update.available_commands[0].name == "proxy-setup"
-        assert "proxy" in update.available_commands[0].description.lower()
+        proxy_cmd = next(
+            (c for c in update.available_commands if c.name == "proxy-setup"), None
+        )
+        assert proxy_cmd is not None
+        assert "proxy" in proxy_cmd.description.lower()
 
 
 class TestProxySetupCommand:

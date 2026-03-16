@@ -13,10 +13,10 @@ from vibe.core.paths._vibe_home import (
     VIBE_HOME,
     GlobalPath,
 )
-from vibe.core.paths.conventions import AGENTS_MD_FILENAMES
+from vibe.core.paths.conventions import AGENTS_MD_FILENAME
 
 __all__ = [
-    "AGENTS_MD_FILENAMES",
+    "AGENTS_MD_FILENAME",
     "DEFAULT_TOOL_DIR",
     "GLOBAL_ENV_FILE",
     "HISTORY_FILE",

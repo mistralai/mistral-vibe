@@ -82,6 +82,7 @@ class EventHandler:
                 skip_reason=TaggedText.from_string(event.skip_reason).message
                 if event.skip_reason
                 else None,
+                cancelled=event.cancelled,
                 duration=event.duration,
                 tool_call_id=event.tool_call_id,
             )

@@ -11,9 +11,16 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from vibe.cli.history_manager import HistoryManager
+from vibe.cli.textual_ui.recording.recording_indicator import RecordingIndicator
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea, InputMode
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
+from vibe.cli.voice_manager.voice_manager_port import (
+    TranscribeState,
+    VoiceManagerListener,
+    VoiceManagerPort,
+)
+from vibe.core.logger import logger
 
 
 class _PromptSpinner(SpinnerMixin, Static):
@@ -29,7 +36,7 @@ class _PromptSpinner(SpinnerMixin, Static):
         self.start_spinner_timer()
 
 
-class ChatInputBody(Widget):
+class ChatInputBody(VoiceManagerListener, Widget):
     class Submitted(Message):
         def __init__(self, value: str) -> None:
             self.value = value
@@ -39,6 +46,7 @@ class ChatInputBody(Widget):
         self,
         history_file: Path | None = None,
         nuage_enabled: bool = False,
+        voice_manager: VoiceManagerPort | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -46,6 +54,8 @@ class ChatInputBody(Widget):
         self.prompt_widget: NoMarkupStatic | None = None
         self._nuage_enabled = nuage_enabled
         self._switching_mode = False
+        self._voice_manager = voice_manager
+        self._recording_indicator: RecordingIndicator | None = None
 
         if history_file:
             self.history = HistoryManager(history_file)
@@ -60,13 +70,21 @@ class ChatInputBody(Widget):
             yield self.prompt_widget
 
             self.input_widget = ChatTextArea(
-                id="input", nuage_enabled=self._nuage_enabled
+                id="input",
+                nuage_enabled=self._nuage_enabled,
+                voice_manager=self._voice_manager,
             )
             yield self.input_widget
 
     def on_mount(self) -> None:
         if self.input_widget:
             self.input_widget.focus()
+        if self._voice_manager:
+            self._voice_manager.add_listener(self)
+
+    def on_unmount(self) -> None:
+        if self._voice_manager:
+            self._voice_manager.remove_listener(self)
 
     def _parse_mode_and_text(self, text: str) -> tuple[InputMode, str]:
         if text.startswith("!"):
@@ -103,7 +121,6 @@ class ChatInputBody(Widget):
         cursor_pos = (0, col)
 
         self.input_widget.move_cursor(cursor_pos)
-        self.input_widget._last_cursor_col = col
         self.input_widget._cursor_pos_after_load = cursor_pos
         self.input_widget._cursor_moved_since_load = False
 
@@ -111,7 +128,7 @@ class ChatInputBody(Widget):
         self._notify_completion_reset()
 
     def on_chat_text_area_history_previous(
-        self, event: ChatTextArea.HistoryPrevious
+        self, _event: ChatTextArea.HistoryPrevious
     ) -> None:
         if not self.history or not self.input_widget:
             return
@@ -119,52 +136,25 @@ class ChatInputBody(Widget):
         if self.history._current_index == -1:
             self.input_widget._original_text = self.input_widget.text
 
-        if (
-            self.history._current_index != -1
-            and self.input_widget._last_used_prefix is not None
-            and self.input_widget._last_used_prefix != event.prefix
-        ):
-            self.history.reset_navigation()
-
-        self.input_widget._last_used_prefix = event.prefix
-        previous = self.history.get_previous(
-            self.input_widget._original_text, prefix=event.prefix
-        )
+        previous = self.history.get_previous(self.input_widget._original_text)
 
         if previous is not None:
             self._load_history_entry(previous)
 
-    def on_chat_text_area_history_next(self, event: ChatTextArea.HistoryNext) -> None:
+    def on_chat_text_area_history_next(self, _event: ChatTextArea.HistoryNext) -> None:
         if not self.history or not self.input_widget:
             return
 
         if self.history._current_index == -1:
             return
 
-        if (
-            self.input_widget._last_used_prefix is not None
-            and self.input_widget._last_used_prefix != event.prefix
-        ):
-            self.history.reset_navigation()
+        next_entry = self.history.get_next()
+        if next_entry is not None:
+            self._load_history_entry(next_entry)
 
-        self.input_widget._last_used_prefix = event.prefix
-
-        has_next = any(
-            self.history._entries[i].startswith(event.prefix)
-            for i in range(self.history._current_index + 1, len(self.history._entries))
-        )
-
-        original_matches = self.input_widget._original_text.startswith(event.prefix)
-
-        if has_next or original_matches:
-            next_entry = self.history.get_next(prefix=event.prefix)
-            if next_entry is not None:
-                cursor_col = (
-                    len(event.prefix) if self.history._current_index == -1 else None
-                )
-                self._load_history_entry(next_entry, cursor_col=cursor_col)
-
-    def on_chat_text_area_history_reset(self, event: ChatTextArea.HistoryReset) -> None:
+    def on_chat_text_area_history_reset(
+        self, _event: ChatTextArea.HistoryReset
+    ) -> None:
         if self.history:
             self.history.reset_navigation()
         if self.input_widget:
@@ -250,3 +240,68 @@ class ChatInputBody(Widget):
 
         if cursor_offset is not None:
             self.input_widget.set_cursor_offset(max(0, min(cursor_offset, len(text))))
+
+    def on_transcribe_state_change(self, state: TranscribeState) -> None:
+        if state == TranscribeState.RECORDING:
+            self._start_recording_ui()
+        elif state == TranscribeState.IDLE:
+            self._stop_recording_ui()
+
+    def on_transcribe_text(self, text: str) -> None:
+        if not self.input_widget:
+            return
+        self.input_widget.insert(text)
+
+    def _start_recording_ui(self) -> None:
+        if not self._voice_manager:
+            return
+
+        try:
+            self.screen.get_widget_by_id("input-box").add_class("border-recording")
+
+            if self.input_widget:
+                self.input_widget.cursor_blink = False
+                self.input_widget.add_class("recording")
+            if self.prompt_widget:
+                self.prompt_widget.display = False
+            self._recording_indicator = RecordingIndicator(self._voice_manager)
+            self.query_one(Horizontal).mount(self._recording_indicator, before=0)
+        except Exception as e:
+            logger.error("Failed to start recording UI", exc_info=e)
+            self._reset_recording_ui()
+
+    def _stop_recording_ui(self) -> None:
+        try:
+            self.screen.get_widget_by_id("input-box").remove_class("border-recording")
+
+            if self.input_widget:
+                self.input_widget.cursor_blink = True
+                self.input_widget.remove_class("recording")
+            if self.prompt_widget:
+                self.prompt_widget.display = True
+                self._update_prompt()
+            if self._recording_indicator:
+                self._recording_indicator.remove()
+                self._recording_indicator = None
+        except Exception as e:
+            logger.error("Failed to stop recording UI", exc_info=e)
+            self._reset_recording_ui()
+
+    def _reset_recording_ui(self) -> None:
+        try:
+            self.screen.get_widget_by_id("input-box").remove_class("border-recording")
+        except Exception:
+            pass
+
+        if self.input_widget:
+            self.input_widget.cursor_blink = True
+            self.input_widget.remove_class("recording")
+        if self.prompt_widget:
+            self.prompt_widget.display = True
+            self._update_prompt()
+        if self._recording_indicator:
+            try:
+                self._recording_indicator.remove()
+            except Exception:
+                pass
+            self._recording_indicator = None

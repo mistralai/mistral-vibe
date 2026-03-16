@@ -93,7 +93,6 @@ class ProjectContextConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     default_commit_count: int = 5
-    max_doc_bytes: int = 32 * 1024
     timeout_seconds: float = 2.0
 
 
@@ -129,6 +128,17 @@ class ProviderConfig(BaseModel):
     reasoning_field_name: str = "reasoning_content"
     project_id: str = ""
     region: str = ""
+
+
+class TranscribeClient(StrEnum):
+    MISTRAL = auto()
+
+
+class TranscribeProviderConfig(BaseModel):
+    name: str
+    api_base: str = "wss://api.mistral.ai"
+    api_key_env_var: str = ""
+    client: TranscribeClient = TranscribeClient.MISTRAL
 
 
 class _MCPBase(BaseModel):
@@ -229,6 +239,13 @@ MCPServer = Annotated[
 ]
 
 
+def _default_alias_to_name(data: Any) -> Any:
+    if isinstance(data, dict):
+        if "alias" not in data or data["alias"] is None:
+            data["alias"] = data.get("name")
+    return data
+
+
 class ModelConfig(BaseModel):
     name: str
     provider: str
@@ -239,13 +256,19 @@ class ModelConfig(BaseModel):
     thinking: Literal["off", "low", "medium", "high"] = "off"
     auto_compact_threshold: int = 200_000
 
-    @model_validator(mode="before")
-    @classmethod
-    def _default_alias_to_name(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            if "alias" not in data or data["alias"] is None:
-                data["alias"] = data.get("name")
-        return data
+    _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
+
+
+class TranscribeModelConfig(BaseModel):
+    name: str
+    provider: str
+    alias: str
+    sample_rate: int = 16000
+    encoding: Literal["pcm_s16le"] = "pcm_s16le"
+    language: str = "en"
+    target_streaming_delay_ms: int = 500
+
+    _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
 
 
 DEFAULT_MISTRAL_API_ENV_KEY = "MISTRAL_API_KEY"
@@ -289,6 +312,22 @@ DEFAULT_MODELS = [
     ),
 ]
 
+DEFAULT_TRANSCRIBE_PROVIDERS = [
+    TranscribeProviderConfig(
+        name="mistral",
+        api_base="wss://api.mistral.ai",
+        api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
+    )
+]
+
+DEFAULT_TRANSCRIBE_MODELS = [
+    TranscribeModelConfig(
+        name="voxtral-mini-transcribe-realtime-2602",
+        provider="mistral",
+        alias="voxtral-realtime",
+    )
+]
+
 
 class VibeConfig(BaseSettings):
     active_model: str = "devstral-2"
@@ -298,6 +337,8 @@ class VibeConfig(BaseSettings):
     file_watcher_for_autocomplete: bool = False
     displayed_workdir: str = ""
     context_warnings: bool = False
+    voice_mode_enabled: bool = False
+    active_transcribe_model: str = "voxtral-realtime"
     auto_approve: bool = False
     enable_telemetry: bool = True
     system_prompt_id: str = "cli"
@@ -323,6 +364,14 @@ class VibeConfig(BaseSettings):
         default_factory=lambda: list(DEFAULT_PROVIDERS)
     )
     models: list[ModelConfig] = Field(default_factory=lambda: list(DEFAULT_MODELS))
+    compaction_model: ModelConfig | None = None
+
+    transcribe_providers: list[TranscribeProviderConfig] = Field(
+        default_factory=lambda: list(DEFAULT_TRANSCRIBE_PROVIDERS)
+    )
+    transcribe_models: list[TranscribeModelConfig] = Field(
+        default_factory=lambda: list(DEFAULT_TRANSCRIBE_MODELS)
+    )
 
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
@@ -378,6 +427,12 @@ class VibeConfig(BaseSettings):
             " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
+    installed_agents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "A list of opt-in builtin agent names that have been explicitly installed."
+        ),
+    )
     skill_paths: list[Path] = Field(
         default_factory=list,
         description=(
@@ -404,6 +459,10 @@ class VibeConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"
     )
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump(**kwargs)
 
     @property
     def nuage_api_key(self) -> str:
@@ -437,12 +496,35 @@ class VibeConfig(BaseSettings):
             f"Active model '{self.active_model}' not found in configuration."
         )
 
+    def get_compaction_model(self) -> ModelConfig:
+        if self.compaction_model is not None:
+            return self.compaction_model
+        return self.get_active_model()
+
     def get_provider_for_model(self, model: ModelConfig) -> ProviderConfig:
         for provider in self.providers:
             if provider.name == model.provider:
                 return provider
         raise ValueError(
             f"Provider '{model.provider}' for model '{model.name}' not found in configuration."
+        )
+
+    def get_active_transcribe_model(self) -> TranscribeModelConfig:
+        for model in self.transcribe_models:
+            if model.alias == self.active_transcribe_model:
+                return model
+        raise ValueError(
+            f"Active transcribe model '{self.active_transcribe_model}' not found in configuration."
+        )
+
+    def get_transcribe_provider_for_model(
+        self, model: TranscribeModelConfig
+    ) -> TranscribeProviderConfig:
+        for provider in self.transcribe_providers:
+            if provider.name == model.provider:
+                return provider
+        raise ValueError(
+            f"Transcribe provider '{model.provider}' for transcribe model '{model.name}' not found in configuration."
         )
 
     @classmethod
@@ -478,6 +560,24 @@ class VibeConfig(BaseSettings):
             )
             for model in self.models
         ]
+        return self
+
+    @model_validator(mode="after")
+    def _check_compaction_model_provider(self) -> VibeConfig:
+        if self.compaction_model is None:
+            return self
+
+        compaction_provider = self.get_provider_for_model(self.compaction_model)
+        try:
+            active_provider = self.get_provider_for_model(self.get_active_model())
+        except ValueError:
+            return self
+        if active_provider.name != compaction_provider.name:
+            raise ValueError(
+                f"Compaction model '{self.compaction_model.alias}' uses provider "
+                f"'{compaction_provider.name}' but active model uses provider "
+                f"'{active_provider.name}'. They must share the same provider."
+            )
         return self
 
     @model_validator(mode="after")
@@ -535,6 +635,17 @@ class VibeConfig(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_transcribe_model_uniqueness(self) -> VibeConfig:
+        seen_aliases: set[str] = set()
+        for model in self.transcribe_models:
+            if model.alias in seen_aliases:
+                raise ValueError(
+                    f"Duplicate transcribe model alias found: '{model.alias}'. Aliases must be unique."
+                )
+            seen_aliases.add(model.alias)
+        return self
+
+    @model_validator(mode="after")
     def _check_system_prompt(self) -> VibeConfig:
         _ = self.system_prompt
         return self
@@ -558,7 +669,13 @@ class VibeConfig(BaseSettings):
                     and isinstance(target.get(key), list)
                     and isinstance(value, list)
                 ):
-                    if key in {"providers", "models"}:
+                    if key in {
+                        "providers",
+                        "models",
+                        "transcribe_providers",
+                        "transcribe_models",
+                        "installed_agents",
+                    }:
                         target[key] = value
                     else:
                         target[key] = list(set(value + target[key]))
@@ -566,9 +683,7 @@ class VibeConfig(BaseSettings):
                     target[key] = value
 
         deep_merge(current_config, updates)
-        cls.dump_config(
-            to_jsonable_python(current_config, exclude_none=True, fallback=str)
-        )
+        cls.dump_config(current_config)
 
     @classmethod
     def dump_config(cls, config: dict[str, Any]) -> None:
@@ -578,11 +693,29 @@ class VibeConfig(BaseSettings):
         target = mgr.config_file or mgr.user_config_file
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("wb") as f:
-            tomli_w.dump(config, f)
+            tomli_w.dump(to_jsonable_python(config, exclude_none=True, fallback=str), f)
 
     @classmethod
     def _migrate(cls) -> None:
-        pass
+        mgr = get_harness_files_manager()
+        if not mgr.persist_allowed:
+            return
+        file = mgr.config_file
+        if file is None:
+            return
+        try:
+            with file.open("rb") as f:
+                data = tomllib.load(f)
+        except (FileNotFoundError, tomllib.TOMLDecodeError, OSError):
+            return
+
+        bash_tools = data.get("tools", {}).get("bash", {})
+        allowlist = bash_tools.get("allowlist")
+        if allowlist is None or "find" not in allowlist:
+            return
+
+        allowlist.remove("find")
+        cls.dump_config(data)
 
     @classmethod
     def load(cls, **overrides: Any) -> VibeConfig:
@@ -592,7 +725,7 @@ class VibeConfig(BaseSettings):
     @classmethod
     def create_default(cls) -> dict[str, Any]:
         config = cls.model_construct()
-        config_dict = config.model_dump(mode="json", exclude_none=True)
+        config_dict = config.model_dump(mode="json")
 
         from vibe.core.tools.manager import ToolManager
 

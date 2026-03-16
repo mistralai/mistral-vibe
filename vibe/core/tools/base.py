@@ -348,3 +348,12 @@ class BaseTool[
         Override in subclasses for domain-specific rules (e.g. workdir checks).
         """
         return None
+
+    def get_result_extra(self, result: ToolResult) -> str | None:
+        """Optional extra context appended to the result text sent to the LLM.
+
+        Override in subclasses to inject contextual information alongside
+        tool results (e.g. directory-level instructions discovered during
+        file reads).  The default returns ``None`` (no annotation).
+        """
+        return None

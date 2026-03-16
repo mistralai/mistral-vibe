@@ -16,7 +16,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import httpx
-from mistralai.utils.retries import BackoffStrategy, RetryConfig
+from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 import pytest
 import respx
 
@@ -426,7 +426,7 @@ class TestMistralRetry:
     async def test_client_creation_includes_timeout_and_retry_config(self):
         backend = self._create_test_backend()
 
-        with patch("mistralai.Mistral") as mock_mistral_class:
+        with patch("vibe.core.llm.backend.mistral.Mistral") as mock_mistral_class:
             mock_mistral_class.return_value = MagicMock()
             backend._get_client()
             mock_mistral_class.assert_called_once_with(

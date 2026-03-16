@@ -17,6 +17,7 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
 )
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
+from vibe.cli.voice_manager.voice_manager_port import VoiceManagerPort
 from vibe.core.agents import AgentSafety
 from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
 
@@ -44,6 +45,7 @@ class ChatInputContainer(Vertical):
         skill_entries_getter: Callable[[], list[tuple[str, str]]] | None = None,
         file_watcher_for_autocomplete_getter: Callable[[], bool] | None = None,
         nuage_enabled: bool = False,
+        voice_manager: VoiceManagerPort | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -56,6 +58,7 @@ class ChatInputContainer(Vertical):
             file_watcher_for_autocomplete_getter
         )
         self._nuage_enabled = nuage_enabled
+        self._voice_manager = voice_manager
 
         self._completion_manager = MultiCompletionManager([
             SlashCommandController(CommandCompleter(self._get_slash_entries), self),
@@ -90,6 +93,7 @@ class ChatInputContainer(Vertical):
                 history_file=self._history_file,
                 id="input-body",
                 nuage_enabled=self._nuage_enabled,
+                voice_manager=self._voice_manager,
             )
 
             yield self._body

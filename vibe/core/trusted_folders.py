@@ -6,14 +6,14 @@ import tomllib
 import tomli_w
 
 from vibe.core.paths import (
-    AGENTS_MD_FILENAMES,
+    AGENTS_MD_FILENAME,
     TRUSTED_FOLDERS_FILE,
     walk_local_config_dirs_all,
 )
 
 
 def has_agents_md_file(path: Path) -> bool:
-    return any((path / name).exists() for name in AGENTS_MD_FILENAMES)
+    return (path / AGENTS_MD_FILENAME).exists()
 
 
 def has_trustable_content(path: Path) -> bool:
@@ -60,11 +60,35 @@ class TrustedFoldersManager:
             pass
 
     def is_trusted(self, path: Path) -> bool | None:
-        normalized = self._normalize_path(path)
-        if normalized in self._trusted:
-            return True
-        if normalized in self._untrusted:
-            return False
+        """Check trust walking up from *path* to filesystem root.
+
+        The first ancestor (or *path* itself) found in either the trusted
+        or untrusted list wins.  Returns ``None`` when no decision exists.
+        """
+        current = Path(self._normalize_path(path))
+        while True:
+            s = str(current)
+            if s in self._trusted:
+                return True
+            if s in self._untrusted:
+                return False
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        return None
+
+    def find_trust_root(self, path: Path) -> Path | None:
+        """Return the closest ancestor (or *path* itself) explicitly in the trusted list."""
+        current = Path(self._normalize_path(path))
+        while True:
+            s = str(current)
+            if s in self._trusted:
+                return current
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
         return None
 
     def add_trusted(self, path: Path) -> None:

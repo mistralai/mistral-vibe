@@ -11,6 +11,7 @@ from pydantic import TypeAdapter, ValidationError
 class WhoAmIPlanType(StrEnum):
     API = "API"
     CHAT = "CHAT"
+    MISTRAL_CODE = "MISTRAL_CODE"
     UNKNOWN = "UNKNOWN"
     UNAUTHORIZED = "UNAUTHORIZED"
 

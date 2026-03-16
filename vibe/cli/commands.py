@@ -77,6 +77,21 @@ class CommandRegistry:
                 description="Browse and resume past sessions",
                 handler="_show_session_picker",
             ),
+            "voice": Command(
+                aliases=frozenset(["/voice"]),
+                description="Toggle voice mode on/off",
+                handler="_toggle_voice_mode",
+            ),
+            "leanstall": Command(
+                aliases=frozenset(["/leanstall"]),
+                description="Install the Lean 4 agent (leanstral)",
+                handler="_install_lean",
+            ),
+            "unleanstall": Command(
+                aliases=frozenset(["/unleanstall"]),
+                description="Uninstall the Lean 4 agent",
+                handler="_uninstall_lean",
+            ),
         }
 
         for command in excluded_commands:

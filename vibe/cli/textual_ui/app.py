@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from enum import StrEnum, auto
+import gc
 import os
 from pathlib import Path
 import signal
@@ -87,8 +88,11 @@ from vibe.cli.update_notifier import (
     should_show_whats_new,
 )
 from vibe.cli.update_notifier.update import do_update
+from vibe.cli.voice_manager import VoiceManager, VoiceManagerPort
+from vibe.cli.voice_manager.voice_manager_port import TranscribeState
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents import AgentProfile
+from vibe.core.audio_recorder import AudioRecorder
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import Backend, VibeConfig
 from vibe.core.logger import logger
@@ -112,6 +116,7 @@ from vibe.core.tools.builtins.ask_user_question import (
     Choice,
     Question,
 )
+from vibe.core.transcribe import make_transcribe_client
 from vibe.core.types import (
     AgentStats,
     ApprovalResponse,
@@ -147,7 +152,11 @@ class ChatScroll(VerticalScroll):
 
     @property
     def is_at_bottom(self) -> bool:
-        return self.scroll_offset.y >= (self.max_scroll_y - 3)
+        return self.scroll_target_y >= (self.max_scroll_y - 3)
+
+    def _check_anchor(self) -> None:
+        if self._anchored and self._anchor_released and self.is_at_bottom:
+            self._anchor_released = False
 
     def update_node_styles(self, animate: bool = True) -> None:
         pass
@@ -196,6 +205,7 @@ async def prune_oldest_children(
 class VibeApp(App):  # noqa: PLR0904
     ENABLE_COMMAND_PALETTE = False
     CSS_PATH = "app.tcss"
+    PAUSE_GC_ON_SCROLL: ClassVar[bool] = True
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+c", "clear_quit", "Quit", show=False),
@@ -222,10 +232,14 @@ class VibeApp(App):  # noqa: PLR0904
         current_version: str = CORE_VERSION,
         plan_offer_gateway: WhoAmIGateway | None = None,
         terminal_notifier: NotificationPort | None = None,
+        voice_manager: VoiceManagerPort | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.agent_loop = agent_loop
+        self._voice_manager: VoiceManagerPort = (
+            voice_manager or self._make_default_voice_manager()
+        )
         self._terminal_notifier = terminal_notifier or TextualNotificationAdapter(
             self,
             get_enabled=lambda: self.config.enable_notifications,
@@ -238,6 +252,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._loading_widget: LoadingWidget | None = None
         self._pending_approval: asyncio.Future | None = None
         self._pending_question: asyncio.Future | None = None
+        self._user_interaction_lock = asyncio.Lock()
 
         self.event_handler: EventHandler | None = None
 
@@ -296,6 +311,7 @@ class VibeApp(App):  # noqa: PLR0904
                 skill_entries_getter=self._get_skill_entries,
                 file_watcher_for_autocomplete_getter=self._is_file_watcher_enabled,
                 nuage_enabled=self.config.nuage_enabled,
+                voice_manager=self._voice_manager,
             )
 
         with Horizontal(id="bottom-bar"):
@@ -345,6 +361,9 @@ class VibeApp(App):  # noqa: PLR0904
 
         if self._initial_prompt or self._teleport_on_start:
             self.call_after_refresh(self._process_initial_prompt)
+
+        gc.collect()
+        gc.freeze()
 
     def _process_initial_prompt(self) -> None:
         if self._teleport_on_start:
@@ -402,8 +421,6 @@ class VibeApp(App):  # noqa: PLR0904
         if self._pending_approval and not self._pending_approval.done():
             self._pending_approval.set_result((ApprovalResponse.YES, None))
 
-        await self._switch_to_input_app()
-
     async def on_approval_app_approval_granted_always_tool(
         self, message: ApprovalApp.ApprovalGrantedAlwaysTool
     ) -> None:
@@ -414,8 +431,6 @@ class VibeApp(App):  # noqa: PLR0904
         if self._pending_approval and not self._pending_approval.done():
             self._pending_approval.set_result((ApprovalResponse.YES, None))
 
-        await self._switch_to_input_app()
-
     async def on_approval_app_approval_rejected(
         self, message: ApprovalApp.ApprovalRejected
     ) -> None:
@@ -425,8 +440,6 @@ class VibeApp(App):  # noqa: PLR0904
             )
             self._pending_approval.set_result((ApprovalResponse.NO, feedback))
 
-        await self._switch_to_input_app()
-
         if self._loading_widget and self._loading_widget.parent:
             await self._remove_loading_widget()
 
@@ -435,15 +448,10 @@ class VibeApp(App):  # noqa: PLR0904
             result = AskUserQuestionResult(answers=message.answers, cancelled=False)
             self._pending_question.set_result(result)
 
-        await self._switch_to_input_app()
-
     async def on_question_app_cancelled(self, message: QuestionApp.Cancelled) -> None:
         if self._pending_question and not self._pending_question.done():
             result = AskUserQuestionResult(answers=[], cancelled=True)
             self._pending_question.set_result(result)
-
-        await self._switch_to_input_app()
-        await self._interrupt_agent_loop()
 
     async def _remove_loading_widget(self) -> None:
         if self._loading_widget and self._loading_widget.parent:
@@ -682,26 +690,32 @@ class VibeApp(App):  # noqa: PLR0904
             if self._is_tool_enabled_in_main_agent(tool):
                 return (ApprovalResponse.YES, None)
 
-        self._pending_approval = asyncio.Future()
-        self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
-        with paused_timer(self._loading_widget):
-            await self._switch_to_approval_app(tool, args)
-            result = await self._pending_approval
-
-        self._pending_approval = None
-        return result
+        async with self._user_interaction_lock:
+            self._pending_approval = asyncio.Future()
+            self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
+            try:
+                with paused_timer(self._loading_widget):
+                    await self._switch_to_approval_app(tool, args)
+                    result = await self._pending_approval
+                return result
+            finally:
+                self._pending_approval = None
+                await self._switch_to_input_app()
 
     async def _user_input_callback(self, args: BaseModel) -> BaseModel:
         question_args = cast(AskUserQuestionArgs, args)
 
-        self._pending_question = asyncio.Future()
-        self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
-        with paused_timer(self._loading_widget):
-            await self._switch_to_question_app(question_args)
-            result = await self._pending_question
-
-        self._pending_question = None
-        return result
+        async with self._user_interaction_lock:
+            self._pending_question = asyncio.Future()
+            self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
+            try:
+                with paused_timer(self._loading_widget):
+                    await self._switch_to_question_app(question_args)
+                    result = await self._pending_question
+                return result
+            finally:
+                self._pending_question = None
+                await self._switch_to_input_app()
 
     async def _handle_agent_loop_turn(self, prompt: str) -> None:
         self._agent_running = True
@@ -756,10 +770,11 @@ class VibeApp(App):  # noqa: PLR0904
             self._terminal_notifier.notify(NotificationContext.COMPLETE)
 
     def _rate_limit_message(self) -> str:
-        upgrade_to_pro = self._plan_info and self._plan_info.plan_type in {
-            WhoAmIPlanType.API,
-            WhoAmIPlanType.UNAUTHORIZED,
-        }
+        upgrade_to_pro = self._plan_info and (
+            self._plan_info.plan_type
+            in {WhoAmIPlanType.API, WhoAmIPlanType.UNAUTHORIZED}
+            or self._plan_info.is_free_mistral_code_plan()
+        )
         if upgrade_to_pro:
             return "Rate limits exceeded. Please wait a moment before trying again, or upgrade to Pro for higher rate limits and uninterrupted access."
         return "Rate limits exceeded. Please wait a moment before trying again."
@@ -861,6 +876,16 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         self._interrupt_requested = True
+
+        if self._pending_approval and not self._pending_approval.done():
+            feedback = str(
+                get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
+            )
+            self._pending_approval.set_result((ApprovalResponse.NO, feedback))
+        if self._pending_question and not self._pending_question.done():
+            self._pending_question.set_result(
+                AskUserQuestionResult(answers=[], cancelled=True)
+            )
 
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
@@ -1035,6 +1060,28 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
 
+    async def _install_lean(self) -> None:
+        current = list(self.agent_loop.base_config.installed_agents)
+        if "lean" in current:
+            await self._mount_and_scroll(
+                UserCommandMessage("Lean agent is already installed.")
+            )
+            return
+        VibeConfig.save_updates({"installed_agents": sorted([*current, "lean"])})
+        await self._reload_config()
+
+    async def _uninstall_lean(self) -> None:
+        current = list(self.agent_loop.base_config.installed_agents)
+        if "lean" not in current:
+            await self._mount_and_scroll(
+                UserCommandMessage("Lean agent is not installed.")
+            )
+            return
+        VibeConfig.save_updates({
+            "installed_agents": [a for a in current if a != "lean"]
+        })
+        await self._reload_config()
+
     async def _clear_history(self) -> None:
         try:
             self._reset_ui_state()
@@ -1166,6 +1213,33 @@ class VibeApp(App):  # noqa: PLR0904
                 ErrorMessage(result.message, collapsed=self._tools_collapsed)
             )
 
+    def _make_default_voice_manager(self) -> VoiceManager:
+        try:
+            model = self.config.get_active_transcribe_model()
+            provider = self.config.get_transcribe_provider_for_model(model)
+            transcribe_client = make_transcribe_client(provider, model)
+        except (ValueError, KeyError) as exc:
+            logger.error(
+                "Failed to initialize transcription, check transcribe model configuration",
+                exc_info=exc,
+            )
+            transcribe_client = None
+
+        return VoiceManager(
+            lambda: self.config,
+            audio_recorder=AudioRecorder(),
+            transcribe_client=transcribe_client,
+        )
+
+    async def _toggle_voice_mode(self) -> None:
+        result = self._voice_manager.toggle_voice_mode()
+        self.agent_loop.refresh_config()
+        if result.enabled:
+            msg = "Voice mode enabled. Press ctrl+r to start recording."
+        else:
+            msg = "Voice mode disabled."
+        await self._mount_and_scroll(UserCommandMessage(msg))
+
     async def _switch_from_input(self, widget: Widget, scroll: bool = False) -> None:
         bottom_container = self.query_one("#bottom-app-container")
         chat = self._cached_chat or self.query_one("#chat", ChatScroll)
@@ -1291,7 +1365,11 @@ class VibeApp(App):  # noqa: PLR0904
         self.agent_loop.telemetry_client.send_user_cancelled_action("interrupt_agent")
         self.run_worker(self._interrupt_agent_loop(), exclusive=False)
 
-    def action_interrupt(self) -> None:
+    def action_interrupt(self) -> None:  # noqa: PLR0911
+        if self._voice_manager.transcribe_state != TranscribeState.IDLE:
+            self._voice_manager.cancel_recording()
+            return
+
         current_time = time.monotonic()
 
         if self._current_bottom_app == BottomApp.Config:
@@ -1424,6 +1502,7 @@ class VibeApp(App):  # noqa: PLR0904
                         self._chat_input_container
                         and self._switch_agent_generation == my_gen
                     ):
+                        self.call_from_thread(self._refresh_banner)
                         self.call_from_thread(
                             setattr, self._chat_input_container, "switching_mode", False
                         )

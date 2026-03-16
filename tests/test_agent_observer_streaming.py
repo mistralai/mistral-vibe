@@ -7,6 +7,7 @@ from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import httpx
+from pydantic import BaseModel
 import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
@@ -395,12 +396,16 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     )
     middleware = CountingMiddleware()
     agent.middleware_pipeline.add(middleware)
-    agent.set_approval_callback(
-        lambda _name, _args, _id: (
+
+    async def _reject_callback(
+        _name: str, _args: BaseModel, _id: str
+    ) -> tuple[ApprovalResponse, str | None]:
+        return (
             ApprovalResponse.NO,
             str(get_user_cancellation_message(CancellationReason.OPERATION_CANCELLED)),
         )
-    )
+
+    agent.set_approval_callback(_reject_callback)
     agent.session_logger.save_interaction = AsyncMock(return_value=None)
 
     events = [event async for event in agent.act("Cancel mid stream?")]
@@ -418,6 +423,7 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     assert events[-1].skipped is True
     assert events[-1].skip_reason is not None
     assert "<user_cancellation>" in events[-1].skip_reason
+    assert events[-1].cancelled is True
     assert agent.session_logger.save_interaction.await_count >= 1
 
 

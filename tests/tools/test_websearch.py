@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import mistralai
+from mistralai.client import Mistral
+from mistralai.client.errors import SDKError
+from mistralai.client.models import (
+    ConversationResponse,
+    ConversationUsageInfo,
+    MessageOutputEntry,
+    TextChunk,
+    ToolReferenceChunk,
+)
 import pytest
 
 from tests.mock.utils import collect_result
@@ -13,13 +21,13 @@ from vibe.core.tools.builtins.websearch import WebSearch, WebSearchArgs, WebSear
 
 def _make_response(
     content: list | None = None, outputs: list | None = None
-) -> mistralai.ConversationResponse:
+) -> ConversationResponse:
     if outputs is None:
-        outputs = [mistralai.MessageOutputEntry(content=content or [])]
-    return mistralai.ConversationResponse(
+        outputs = [MessageOutputEntry(content=content or [])]
+    return ConversationResponse(
         conversation_id="test",
         outputs=outputs,
-        usage=mistralai.ConversationUsageInfo(
+        usage=ConversationUsageInfo(
             prompt_tokens=10, completion_tokens=20, total_tokens=30
         ),
     )
@@ -34,7 +42,7 @@ def websearch(monkeypatch):
 
 def test_parse_text_chunks(websearch):
     response = _make_response(
-        content=[mistralai.TextChunk(text="Hello "), mistralai.TextChunk(text="world")]
+        content=[TextChunk(text="Hello "), TextChunk(text="world")]
     )
     result = websearch._parse_response(response)
     assert result.answer == "Hello world"
@@ -44,16 +52,12 @@ def test_parse_text_chunks(websearch):
 def test_parse_sources_deduped(websearch):
     response = _make_response(
         content=[
-            mistralai.TextChunk(text="Answer"),
-            mistralai.ToolReferenceChunk(
-                tool="web_search", title="Site A", url="https://a.com"
-            ),
-            mistralai.ToolReferenceChunk(
+            TextChunk(text="Answer"),
+            ToolReferenceChunk(tool="web_search", title="Site A", url="https://a.com"),
+            ToolReferenceChunk(
                 tool="web_search", title="Site A duplicate", url="https://a.com"
             ),
-            mistralai.ToolReferenceChunk(
-                tool="web_search", title="Site B", url="https://b.com"
-            ),
+            ToolReferenceChunk(tool="web_search", title="Site B", url="https://b.com"),
         ]
     )
     result = websearch._parse_response(response)
@@ -67,8 +71,8 @@ def test_parse_sources_deduped(websearch):
 def test_parse_skips_source_without_url(websearch):
     response = _make_response(
         content=[
-            mistralai.TextChunk(text="Answer"),
-            mistralai.ToolReferenceChunk(tool="web_search", title="No URL"),
+            TextChunk(text="Answer"),
+            ToolReferenceChunk(tool="web_search", title="No URL"),
         ]
     )
     result = websearch._parse_response(response)
@@ -82,16 +86,14 @@ def test_parse_empty_text_raises(websearch):
 
 
 def test_parse_whitespace_only_raises(websearch):
-    response = _make_response(content=[mistralai.TextChunk(text="   ")])
+    response = _make_response(content=[TextChunk(text="   ")])
     with pytest.raises(ToolError, match="No text in agent response"):
         websearch._parse_response(response)
 
 
 def test_parse_skips_non_message_entries(websearch):
     response = _make_response(
-        outputs=[
-            mistralai.MessageOutputEntry(content=[mistralai.TextChunk(text="Answer")])
-        ]
+        outputs=[MessageOutputEntry(content=[TextChunk(text="Answer")])]
     )
     result = websearch._parse_response(response)
     assert result.answer == "Answer"
@@ -110,18 +112,18 @@ async def test_run_missing_api_key(monkeypatch):
 async def test_run_returns_parsed_result(websearch):
     response = _make_response(
         content=[
-            mistralai.TextChunk(text="The answer"),
-            mistralai.ToolReferenceChunk(
+            TextChunk(text="The answer"),
+            ToolReferenceChunk(
                 tool="web_search", title="Source", url="https://example.com"
             ),
         ]
     )
 
     mock_start = AsyncMock(return_value=response)
-    with patch.object(mistralai.Mistral, "beta", create=True) as mock_beta:
+    with patch.object(Mistral, "beta", create=True) as mock_beta:
         mock_beta.conversations.start_async = mock_start
-        with patch.object(mistralai.Mistral, "__aenter__", return_value=None):
-            with patch.object(mistralai.Mistral, "__aexit__", return_value=None):
+        with patch.object(Mistral, "__aenter__", return_value=None):
+            with patch.object(Mistral, "__aexit__", return_value=None):
                 result = await collect_result(
                     websearch.run(WebSearchArgs(query="test query"))
                 )
@@ -142,12 +144,12 @@ async def test_run_sdk_error_wrapped(websearch):
     mock_response.text = "error"
     mock_response.headers = httpx.Headers({"content-type": "application/json"})
 
-    with patch.object(mistralai.Mistral, "beta", create=True) as mock_beta:
+    with patch.object(Mistral, "beta", create=True) as mock_beta:
         mock_beta.conversations.start_async = AsyncMock(
-            side_effect=mistralai.SDKError("API failed", mock_response)
+            side_effect=SDKError("API failed", mock_response)
         )
-        with patch.object(mistralai.Mistral, "__aenter__", return_value=None):
-            with patch.object(mistralai.Mistral, "__aexit__", return_value=None):
+        with patch.object(Mistral, "__aenter__", return_value=None):
+            with patch.object(Mistral, "__aexit__", return_value=None):
                 with pytest.raises(ToolError, match="Mistral API error"):
                     await collect_result(websearch.run(WebSearchArgs(query="test")))
 

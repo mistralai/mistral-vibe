@@ -50,19 +50,25 @@ class AgentManager:
 
     @property
     def available_agents(self) -> dict[str, AgentProfile]:
+        installed = self._config.installed_agents
+        base = {
+            name: profile
+            for name, profile in self._available.items()
+            if not profile.install_required or name in installed
+        }
         if self._config.enabled_agents:
             return {
                 name: profile
-                for name, profile in self._available.items()
+                for name, profile in base.items()
                 if name_matches(name, self._config.enabled_agents)
             }
         if self._config.disabled_agents:
             return {
                 name: profile
-                for name, profile in self._available.items()
+                for name, profile in base.items()
                 if not name_matches(name, self._config.disabled_agents)
             }
-        return dict(self._available)
+        return base
 
     @property
     def config(self) -> VibeConfig:

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Generator
+import contextlib
 from enum import StrEnum, auto
 from http import HTTPStatus
 import json
 from pathlib import Path
 from threading import Thread
 import time
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -16,7 +17,7 @@ from pydantic import BaseModel
 from vibe.cli.terminal_setup import detect_terminal
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
-from vibe.core.config import Backend, ProviderConfig, VibeConfig
+from vibe.core.config import Backend, ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.exceptions import BackendError
 from vibe.core.llm.format import (
@@ -66,7 +67,6 @@ from vibe.core.types import (
     ApprovalCallback,
     ApprovalResponse,
     AssistantEvent,
-    AsyncApprovalCallback,
     BaseEvent,
     CompactEndEvent,
     CompactStartEvent,
@@ -78,7 +78,6 @@ from vibe.core.types import (
     RateLimitError,
     ReasoningEvent,
     Role,
-    SyncApprovalCallback,
     ToolCall,
     ToolCallEvent,
     ToolResultEvent,
@@ -87,6 +86,7 @@ from vibe.core.types import (
     UserMessageEvent,
 )
 from vibe.core.utils import (
+    CANCELLATION_TAG,
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
     CancellationReason,
@@ -218,6 +218,10 @@ class AgentLoop:
         return self.agent_manager.active_profile
 
     @property
+    def base_config(self) -> VibeConfig:
+        return self._base_config
+
+    @property
     def config(self) -> VibeConfig:
         return self.agent_manager.config
 
@@ -238,6 +242,10 @@ class AgentLoop:
 
         self.config.tools[tool_name].permission = permission
         self.tool_manager.invalidate_tool(tool_name)
+
+    def refresh_config(self) -> None:
+        self._base_config = VibeConfig.load()
+        self.agent_manager.invalidate_config()
 
     def emit_new_session_telemetry(self) -> None:
         entrypoint = (
@@ -348,15 +356,9 @@ class AgentLoop:
         if self._max_price is not None:
             self.middleware_pipeline.add(PriceLimitMiddleware(self._max_price))
 
-        active_model = self.config.get_active_model()
-        if active_model.auto_compact_threshold > 0:
-            self.middleware_pipeline.add(
-                AutoCompactMiddleware(active_model.auto_compact_threshold)
-            )
-            if self.config.context_warnings:
-                self.middleware_pipeline.add(
-                    ContextWarningMiddleware(0.5, active_model.auto_compact_threshold)
-                )
+        self.middleware_pipeline.add(AutoCompactMiddleware())
+        if self.config.context_warnings:
+            self.middleware_pipeline.add(ContextWarningMiddleware(0.5))
 
         self.middleware_pipeline.add(
             ReadOnlyAgentMiddleware(
@@ -424,6 +426,10 @@ class AgentLoop:
         return ConversationContext(
             messages=self.messages, stats=self.stats, config=self.config
         )
+
+    def _build_metadata(self) -> dict[str, str]:
+        base = self.entrypoint_metadata.model_dump() if self.entrypoint_metadata else {}
+        return base | {"session_id": self.session_id}
 
     def _get_extra_headers(self, provider: ProviderConfig) -> dict[str, str]:
         headers: dict[str, str] = {
@@ -577,39 +583,35 @@ class AgentLoop:
             tool_instance = self.tool_manager.get(tool_call.tool_name)
         except Exception as exc:
             error_msg = f"Error getting tool '{tool_call.tool_name}': {exc}"
-            yield ToolResultEvent(
-                tool_name=tool_call.tool_name,
-                tool_class=tool_call.tool_class,
-                error=error_msg,
-                tool_call_id=tool_call.call_id,
-            )
-            self._handle_tool_response(tool_call, error_msg, "failure")
+            yield self._tool_failure_event(tool_call, error_msg)
             return
 
-        decision = await self._should_execute_tool(
-            tool_instance, tool_call.validated_args, tool_call.call_id
-        )
-
-        if decision.verdict == ToolExecutionResponse.SKIP:
-            self.stats.tool_calls_rejected += 1
-            skip_reason = decision.feedback or str(
-                get_user_cancellation_message(
-                    CancellationReason.TOOL_SKIPPED, tool_call.tool_name
-                )
-            )
-            yield ToolResultEvent(
-                tool_name=tool_call.tool_name,
-                tool_class=tool_call.tool_class,
-                skipped=True,
-                skip_reason=skip_reason,
-                tool_call_id=tool_call.call_id,
-            )
-            self._handle_tool_response(tool_call, skip_reason, "skipped", decision)
-            return
-
-        self.stats.tool_calls_agreed += 1
-
+        decision: ToolDecision | None = None
         try:
+            decision = await self._should_execute_tool(
+                tool_instance, tool_call.validated_args, tool_call.call_id
+            )
+
+            if decision.verdict == ToolExecutionResponse.SKIP:
+                self.stats.tool_calls_rejected += 1
+                skip_reason = decision.feedback or str(
+                    get_user_cancellation_message(
+                        CancellationReason.TOOL_SKIPPED, tool_call.tool_name
+                    )
+                )
+                yield ToolResultEvent(
+                    tool_name=tool_call.tool_name,
+                    tool_class=tool_call.tool_class,
+                    skipped=True,
+                    skip_reason=skip_reason,
+                    cancelled=f"<{CANCELLATION_TAG}>" in skip_reason,
+                    tool_call_id=tool_call.call_id,
+                )
+                self._handle_tool_response(tool_call, skip_reason, "skipped", decision)
+                return
+
+            self.stats.tool_calls_agreed += 1
+
             start_time = time.perf_counter()
             result_model = None
             async for item in tool_instance.invoke(
@@ -637,6 +639,9 @@ class AgentLoop:
 
             result_dict = result_model.model_dump()
             text = "\n".join(f"{k}: {v}" for k, v in result_dict.items())
+            extra = tool_instance.get_result_extra(result_model)
+            if extra:
+                text += "\n\n" + extra
             self._handle_tool_response(
                 tool_call, text, "success", decision, result_dict
             )
@@ -644,6 +649,7 @@ class AgentLoop:
                 tool_name=tool_call.tool_name,
                 tool_class=tool_call.tool_class,
                 result=result_model,
+                cancelled=getattr(result_model, "cancelled", False),
                 duration=duration,
                 tool_call_id=tool_call.call_id,
             )
@@ -653,35 +659,27 @@ class AgentLoop:
             cancel = str(
                 get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
             )
-            yield ToolResultEvent(
-                tool_name=tool_call.tool_name,
-                tool_class=tool_call.tool_class,
-                error=cancel,
-                tool_call_id=tool_call.call_id,
-            )
-            self._handle_tool_response(tool_call, cancel, "failure", decision)
+            self.stats.tool_calls_failed += 1
+            yield self._tool_failure_event(tool_call, cancel, decision, cancelled=True)
             raise
 
-        except (ToolError, ToolPermissionError) as exc:
+        except Exception as exc:
             error_msg = f"<{TOOL_ERROR_TAG}>{tool_instance.get_name()} failed: {exc}</{TOOL_ERROR_TAG}>"
-            yield ToolResultEvent(
-                tool_name=tool_call.tool_name,
-                tool_class=tool_call.tool_class,
-                error=error_msg,
-                tool_call_id=tool_call.call_id,
-            )
             if isinstance(exc, ToolPermissionError):
                 self.stats.tool_calls_agreed -= 1
                 self.stats.tool_calls_rejected += 1
             else:
                 self.stats.tool_calls_failed += 1
-            self._handle_tool_response(tool_call, error_msg, "failure", decision)
+            yield self._tool_failure_event(tool_call, error_msg, decision)
 
     async def _handle_tool_calls(
         self, resolved: ResolvedMessage
     ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent]:
         async for event in self._emit_failed_tool_events(resolved.failed_calls):
             yield event
+        if not resolved.tool_calls:
+            return
+
         for tool_call in resolved.tool_calls:
             yield ToolCallEvent(
                 tool_name=tool_call.tool_name,
@@ -689,8 +687,62 @@ class AgentLoop:
                 args=tool_call.validated_args,
                 tool_call_id=tool_call.call_id,
             )
-            async for event in self._process_one_tool_call(tool_call):
+
+        async for event in self._run_tools_concurrently(resolved.tool_calls):
+            yield event
+
+    async def _execute_tool_to_queue(
+        self,
+        tc: ResolvedToolCall,
+        queue: asyncio.Queue[ToolCallEvent | ToolResultEvent | ToolStreamEvent | None],
+    ) -> None:
+        """Run a single tool call, sending events to the queue."""
+        async for event in self._process_one_tool_call(tc):
+            await queue.put(event)
+
+    async def _run_tools_concurrently(
+        self, tool_calls: list[ResolvedToolCall]
+    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent]:
+        """Execute multiple tool calls concurrently, yielding events as they arrive."""
+        queue: asyncio.Queue[
+            ToolCallEvent | ToolResultEvent | ToolStreamEvent | None
+        ] = asyncio.Queue()
+
+        tasks = [
+            asyncio.create_task(self._execute_tool_to_queue(tc, queue))
+            for tc in tool_calls
+        ]
+
+        async def _signal_when_all_done() -> None:
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                await queue.put(None)
+
+        monitor = asyncio.create_task(_signal_when_all_done())
+
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
                 yield event
+        except GeneratorExit:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            raise
+        except asyncio.CancelledError:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            if not monitor.done():
+                monitor.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await monitor
 
     def _handle_tool_response(
         self,
@@ -714,8 +766,27 @@ class AgentLoop:
             result=result,
         )
 
-    async def _chat(self, max_tokens: int | None = None) -> LLMChunk:
-        active_model = self.config.get_active_model()
+    def _tool_failure_event(
+        self,
+        tool_call: ResolvedToolCall,
+        error_msg: str,
+        decision: ToolDecision | None = None,
+        cancelled: bool = False,
+    ) -> ToolResultEvent:
+        """Create a ToolResultEvent for a failed tool and record the failure."""
+        self._handle_tool_response(tool_call, error_msg, "failure", decision)
+        return ToolResultEvent(
+            tool_name=tool_call.tool_name,
+            tool_class=tool_call.tool_class,
+            error=error_msg,
+            cancelled=cancelled,
+            tool_call_id=tool_call.call_id,
+        )
+
+    async def _chat(
+        self, max_tokens: int | None = None, model_override: ModelConfig | None = None
+    ) -> LLMChunk:
+        active_model = model_override or self.config.get_active_model()
         provider = self.config.get_provider_for_model(active_model)
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
@@ -731,9 +802,7 @@ class AgentLoop:
                 tool_choice=tool_choice,
                 extra_headers=self._get_extra_headers(provider),
                 max_tokens=max_tokens,
-                metadata=self.entrypoint_metadata.model_dump()
-                if self.entrypoint_metadata
-                else None,
+                metadata=self._build_metadata(),
             )
             end_time = time.perf_counter()
 
@@ -777,9 +846,7 @@ class AgentLoop:
                 tool_choice=tool_choice,
                 extra_headers=self._get_extra_headers(provider),
                 max_tokens=max_tokens,
-                metadata=self.entrypoint_metadata.model_dump()
-                if self.entrypoint_metadata
-                else None,
+                metadata=self._build_metadata(),
             ):
                 processed_message = self.format_handler.process_api_response_message(
                     chunk.message
@@ -855,26 +922,17 @@ class AgentLoop:
                 approval_type=ToolPermission.ASK,
                 feedback="Tool execution not permitted.",
             )
-        if asyncio.iscoroutinefunction(self.approval_callback):
-            async_callback = cast(AsyncApprovalCallback, self.approval_callback)
-            response, feedback = await async_callback(tool_name, args, tool_call_id)
-        else:
-            sync_callback = cast(SyncApprovalCallback, self.approval_callback)
-            response, feedback = sync_callback(tool_name, args, tool_call_id)
+        response, feedback = await self.approval_callback(tool_name, args, tool_call_id)
 
         match response:
             case ApprovalResponse.YES:
-                return ToolDecision(
-                    verdict=ToolExecutionResponse.EXECUTE,
-                    approval_type=ToolPermission.ASK,
-                    feedback=feedback,
-                )
-            case ApprovalResponse.NO:
-                return ToolDecision(
-                    verdict=ToolExecutionResponse.SKIP,
-                    approval_type=ToolPermission.ASK,
-                    feedback=feedback,
-                )
+                verdict = ToolExecutionResponse.EXECUTE
+            case _:
+                verdict = ToolExecutionResponse.SKIP
+
+        return ToolDecision(
+            verdict=verdict, approval_type=ToolPermission.ASK, feedback=feedback
+        )
 
     def _clean_message_history(self) -> None:
         ACCEPTABLE_HISTORY_SIZE = 2
@@ -892,17 +950,19 @@ class AgentLoop:
                 expected_responses = len(msg.tool_calls)
 
                 if expected_responses > 0:
-                    actual_responses = 0
+                    responded_ids: set[str] = set()
                     j = i + 1
                     while j < len(self.messages) and self.messages[j].role == "tool":
-                        actual_responses += 1
+                        if self.messages[j].tool_call_id:
+                            responded_ids.add(self.messages[j].tool_call_id)
                         j += 1
 
-                    if actual_responses < expected_responses:
-                        insertion_point = i + 1 + actual_responses
+                    if len(responded_ids) < expected_responses:
+                        insertion_point = j
 
-                        for call_idx in range(actual_responses, expected_responses):
-                            tool_call_data = msg.tool_calls[call_idx]
+                        for tool_call_data in msg.tool_calls:
+                            if (tool_call_data.id or "") in responded_ids:
+                                continue
 
                             empty_response = LLMMessage(
                                 role=Role.tool,
@@ -990,7 +1050,9 @@ class AgentLoop:
                 self.messages.append(
                     LLMMessage(role=Role.user, content=summary_request)
                 )
-                summary_result = await self._chat()
+                summary_result = await self._chat(
+                    model_override=self.config.get_compaction_model()
+                )
 
             if summary_result.usage is None:
                 raise AgentLoopLLMResponseError(
@@ -1010,9 +1072,7 @@ class AgentLoop:
                 messages=self.messages,
                 tools=self.format_handler.get_available_tools(self.tool_manager),
                 extra_headers={"user-agent": get_user_agent(provider.backend)},
-                metadata=self.entrypoint_metadata.model_dump()
-                if self.entrypoint_metadata
-                else None,
+                metadata=self._build_metadata(),
             )
 
             self.stats.context_tokens = actual_context_tokens

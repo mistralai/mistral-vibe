@@ -366,6 +366,7 @@ class ToolResultEvent(BaseEvent):
     error: str | None = None
     skipped: bool = False
     skip_reason: str | None = None
+    cancelled: bool = False
     duration: float | None = None
     tool_call_id: str
 
@@ -403,15 +404,9 @@ class OutputFormat(StrEnum):
     STREAMING = auto()
 
 
-type AsyncApprovalCallback = Callable[
+type ApprovalCallback = Callable[
     [str, BaseModel, str], Awaitable[tuple[ApprovalResponse, str | None]]
 ]
-
-type SyncApprovalCallback = Callable[
-    [str, BaseModel, str], tuple[ApprovalResponse, str | None]
-]
-
-type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
 
 type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
 

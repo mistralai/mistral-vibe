@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 import logging
 from os import getenv
 
@@ -17,6 +18,11 @@ logger = logging.getLogger(__name__)
 CONSOLE_CLI_URL = "https://console.mistral.ai/codestral/cli"
 UPGRADE_URL = CONSOLE_CLI_URL
 SWITCH_TO_PRO_KEY_URL = CONSOLE_CLI_URL
+
+
+class MistralCodePlanName(StrEnum):
+    FREE = "F"
+    ENTERPRISE = "E"
 
 
 class PlanInfo:
@@ -51,6 +57,18 @@ class PlanInfo:
     def is_chat_pro_plan(self) -> bool:
         return self.plan_type == WhoAmIPlanType.CHAT
 
+    def is_free_mistral_code_plan(self) -> bool:
+        return (
+            self.plan_type == WhoAmIPlanType.MISTRAL_CODE
+            and self.plan_name.upper() == MistralCodePlanName.FREE
+        )
+
+    def is_mistral_code_enterprise_plan(self) -> bool:
+        return (
+            self.plan_type == WhoAmIPlanType.MISTRAL_CODE
+            and self.plan_name.upper() == MistralCodePlanName.ENTERPRISE
+        )
+
 
 async def decide_plan_offer(api_key: str | None, gateway: WhoAmIGateway) -> PlanInfo:
     if not api_key:
@@ -79,11 +97,14 @@ def plan_offer_cta(payload: PlanInfo | None) -> str | None:
         return
     if payload.prompt_switching_to_pro_plan:
         return f"### Switch to your [Le Chat Pro API key]({SWITCH_TO_PRO_KEY_URL})"
-    if payload.plan_type in {WhoAmIPlanType.API, WhoAmIPlanType.UNAUTHORIZED}:
+    if (
+        payload.plan_type in {WhoAmIPlanType.API, WhoAmIPlanType.UNAUTHORIZED}
+        or payload.is_free_mistral_code_plan()
+    ):
         return f"### Unlock more with Vibe - [Upgrade to Le Chat Pro]({UPGRADE_URL})"
 
 
-def plan_title(payload: PlanInfo | None) -> str | None:
+def plan_title(payload: PlanInfo | None) -> str | None:  # noqa: PLR0911
     if not payload:
         return None
     if payload.is_chat_pro_plan():
@@ -92,4 +113,8 @@ def plan_title(payload: PlanInfo | None) -> str | None:
         return "[API] Experiment plan"
     if payload.is_paid_api_plan():
         return "[API] Scale plan"
+    if payload.is_free_mistral_code_plan():
+        return "Mistral Code Free"
+    if payload.is_mistral_code_enterprise_plan():
+        return "Mistral Code Enterprise"
     return None

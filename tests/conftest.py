@@ -9,6 +9,7 @@ import tomli_w
 
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.stubs.fake_backend import FakeBackend
+from tests.stubs.fake_voice_manager import FakeVoiceManager
 from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
 )
@@ -73,6 +74,22 @@ def config_dir(
 
     monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", config_dir)
     return config_dir
+
+
+@pytest.fixture(autouse=True)
+def _reset_trusted_folders_manager(config_dir: Path) -> None:
+    """Prevent the singleton from writing to the real ~/.vibe/trusted_folders.toml.
+
+    The module-level ``trusted_folders_manager`` captures its file path at import
+    time (before any monkeypatch), so it would otherwise target the real home
+    directory.  Redirect it to the temp config dir used by the ``config_dir``
+    fixture.
+    """
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    trusted_folders_manager._file_path = config_dir / "trusted_folders.toml"
+    trusted_folders_manager._trusted = []
+    trusted_folders_manager._untrusted = []
 
 
 @pytest.fixture(autouse=True)
@@ -215,6 +232,7 @@ def build_test_vibe_app(
     resolved_current_version = (
         CORE_VERSION if current_version is None else current_version
     )
+    voice_manager = kwargs.pop("voice_manager", FakeVoiceManager())
 
     return VibeApp(
         agent_loop=resolved_agent_loop,
@@ -223,5 +241,6 @@ def build_test_vibe_app(
         update_cache_repository=resolved_update_cache_repository,
         plan_offer_gateway=resolved_plan_offer_gateway,
         initial_prompt=kwargs.pop("initial_prompt", None),
+        voice_manager=voice_manager,
         **kwargs,
     )

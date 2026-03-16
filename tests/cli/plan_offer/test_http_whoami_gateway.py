@@ -145,3 +145,28 @@ async def test_raises_on_invalid_boolean_string(respx_mock: respx.MockRouter) ->
 
     with pytest.raises(WhoAmIGatewayError):
         await gateway.whoami("api-key")
+
+
+@pytest.mark.asyncio
+async def test_return_unknown_plan_on_unsupported_plan_type(
+    respx_mock: respx.MockRouter,
+) -> None:
+    respx_mock.get("http://test/api/vibe/whoami").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "plan_type": "SOMETHING",
+                "plan_name": "INDIVIDUAL",
+                "prompt_switching_to_pro_plan": "false",
+            },
+        )
+    )
+
+    gateway = HttpWhoAmIGateway(base_url="http://test")
+
+    response = await gateway.whoami("api-key")
+    assert response == WhoAmIResponse(
+        plan_type=WhoAmIPlanType.UNKNOWN,
+        plan_name="INDIVIDUAL",
+        prompt_switching_to_pro_plan=False,
+    )

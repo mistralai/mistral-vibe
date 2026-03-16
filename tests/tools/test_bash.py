@@ -76,6 +76,13 @@ async def test_decodes_non_utf8_bytes(bash):
     assert result.stderr == ""
 
 
+def test_find_not_in_default_allowlist():
+    bash_tool = Bash(config=BashToolConfig(), state=BaseToolState())
+    # find -exec runs arbitrary commands; must not be allowlisted by default
+    permission = bash_tool.resolve_permission(BashArgs(command="find . -exec id \\;"))
+    assert permission is not ToolPermission.ALWAYS
+
+
 def test_resolve_permission():
     config = BashToolConfig(allowlist=["echo", "pwd"], denylist=["rm"])
     bash_tool = Bash(config=config, state=BaseToolState())
@@ -89,3 +96,92 @@ def test_resolve_permission():
     assert denylisted is ToolPermission.NEVER
     assert mixed is None
     assert empty is None
+
+
+class TestResolvePermissionWindowsSyntax:
+    """Verify allowlist/denylist works with Windows-style commands."""
+
+    def _make_bash(self, **kwargs) -> Bash:
+        config = BashToolConfig(**kwargs)
+        return Bash(config=config, state=BaseToolState())
+
+    def test_dir_with_windows_flags_allowlisted(self):
+        bash_tool = self._make_bash(allowlist=["dir"])
+        result = bash_tool.resolve_permission(BashArgs(command="dir /s /b"))
+        assert result is ToolPermission.ALWAYS
+
+    def test_type_command_allowlisted(self):
+        bash_tool = self._make_bash(allowlist=["type"])
+        result = bash_tool.resolve_permission(BashArgs(command="type file.txt"))
+        assert result is ToolPermission.ALWAYS
+
+    def test_findstr_allowlisted(self):
+        bash_tool = self._make_bash(allowlist=["findstr"])
+        result = bash_tool.resolve_permission(
+            BashArgs(command="findstr /s pattern *.txt")
+        )
+        assert result is ToolPermission.ALWAYS
+
+    def test_ver_allowlisted(self):
+        bash_tool = self._make_bash(allowlist=["ver"])
+        result = bash_tool.resolve_permission(BashArgs(command="ver"))
+        assert result is ToolPermission.ALWAYS
+
+    def test_where_allowlisted(self):
+        bash_tool = self._make_bash(allowlist=["where"])
+        result = bash_tool.resolve_permission(BashArgs(command="where python"))
+        assert result is ToolPermission.ALWAYS
+
+    def test_cmd_k_denylisted(self):
+        bash_tool = self._make_bash(denylist=["cmd /k"])
+        result = bash_tool.resolve_permission(BashArgs(command="cmd /k something"))
+        assert result is ToolPermission.NEVER
+
+    def test_powershell_noexit_denylisted(self):
+        bash_tool = self._make_bash(denylist=["powershell -NoExit"])
+        result = bash_tool.resolve_permission(BashArgs(command="powershell -NoExit"))
+        assert result is ToolPermission.NEVER
+
+    def test_notepad_denylisted(self):
+        bash_tool = self._make_bash(denylist=["notepad"])
+        result = bash_tool.resolve_permission(BashArgs(command="notepad file.txt"))
+        assert result is ToolPermission.NEVER
+
+    def test_cmd_standalone_denylisted(self):
+        bash_tool = self._make_bash(denylist_standalone=["cmd"])
+        result = bash_tool.resolve_permission(BashArgs(command="cmd"))
+        assert result is ToolPermission.NEVER
+
+    def test_powershell_standalone_denylisted(self):
+        bash_tool = self._make_bash(denylist_standalone=["powershell"])
+        result = bash_tool.resolve_permission(BashArgs(command="powershell"))
+        assert result is ToolPermission.NEVER
+
+    def test_powershell_cmdlet_asks(self):
+        bash_tool = self._make_bash(allowlist=["dir", "echo"])
+        result = bash_tool.resolve_permission(BashArgs(command="Get-ChildItem -Path ."))
+        assert result is None
+
+    def test_mixed_allowed_and_unknown_asks(self):
+        bash_tool = self._make_bash(allowlist=["git status"])
+        result = bash_tool.resolve_permission(
+            BashArgs(command="git status && npm install")
+        )
+        assert result is None
+
+    def test_chained_windows_commands_all_allowed(self):
+        bash_tool = self._make_bash(allowlist=["dir", "echo"])
+        result = bash_tool.resolve_permission(BashArgs(command="dir /s && echo done"))
+        assert result is ToolPermission.ALWAYS
+
+    def test_chained_commands_one_denied(self):
+        bash_tool = self._make_bash(allowlist=["dir"], denylist=["rm"])
+        result = bash_tool.resolve_permission(BashArgs(command="dir /s && rm -rf /"))
+        assert result is ToolPermission.NEVER
+
+    def test_piped_windows_commands(self):
+        bash_tool = self._make_bash(allowlist=["findstr", "type"])
+        result = bash_tool.resolve_permission(
+            BashArgs(command="type file.txt | findstr pattern")
+        )
+        assert result is ToolPermission.ALWAYS

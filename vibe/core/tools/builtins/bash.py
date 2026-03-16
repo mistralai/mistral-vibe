@@ -116,7 +116,7 @@ async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
 
 
 def _get_default_allowlist() -> list[str]:
-    common = ["echo", "find", "git diff", "git log", "git status", "tree", "whoami"]
+    common = ["echo", "git diff", "git log", "git status", "tree", "whoami"]
 
     if is_windows():
         return common + ["dir", "findstr", "more", "type", "ver", "where"]
@@ -225,9 +225,6 @@ class Bash(
         return "Running command"
 
     def resolve_permission(self, args: BashArgs) -> ToolPermission | None:
-        if is_windows():
-            return None
-
         command_parts = _extract_commands(args.command)
         if not command_parts:
             return None

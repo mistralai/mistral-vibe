@@ -156,7 +156,7 @@ async def test_path_completion_popup_lists_files_and_directories(
         await pilot.press(*"@s")
 
         popup_content = str(popup.render())
-        assert "@src/" in popup_content
+        assert "src/" in popup_content
         assert popup.styles.display == "block"
 
 
@@ -177,16 +177,16 @@ async def test_path_completion_popup_shows_up_to_ten_results(
         await pilot.press(*"@src/core/extra/")
 
         popup_content = str(popup.render())
-        assert "@src/core/extra/extra_file_1.py" in popup_content
-        assert "@src/core/extra/extra_file_10.py" in popup_content
-        assert "@src/core/extra/extra_file_11.py" in popup_content
-        assert "@src/core/extra/extra_file_12.py" in popup_content
-        assert "@src/core/extra/extra_file_2.py" in popup_content
-        assert "@src/core/extra/extra_file_3.py" in popup_content
-        assert "@src/core/extra/extra_file_4.py" in popup_content
-        assert "@src/core/extra/extra_file_5.py" in popup_content
-        assert "@src/core/extra/extra_file_6.py" in popup_content
-        assert "@src/core/extra/extra_file_7.py" in popup_content
+        assert "src/core/extra/extra_file_1.py" in popup_content
+        assert "src/core/extra/extra_file_10.py" in popup_content
+        assert "src/core/extra/extra_file_11.py" in popup_content
+        assert "src/core/extra/extra_file_12.py" in popup_content
+        assert "src/core/extra/extra_file_2.py" in popup_content
+        assert "src/core/extra/extra_file_3.py" in popup_content
+        assert "src/core/extra/extra_file_4.py" in popup_content
+        assert "src/core/extra/extra_file_5.py" in popup_content
+        assert "src/core/extra/extra_file_6.py" in popup_content
+        assert "src/core/extra/extra_file_7.py" in popup_content
         assert popup.styles.display == "block"
 
 
@@ -230,7 +230,7 @@ async def test_fuzzy_matches_subsequence_characters(
         await pilot.press(*"@src/utils/handling")
 
         popup_content = str(popup.render())
-        assert "@src/utils/error_handling.py" in popup_content
+        assert "src/utils/error_handling.py" in popup_content
         assert popup.styles.display == "block"
 
 
@@ -244,7 +244,7 @@ async def test_fuzzy_matches_word_boundaries(
         await pilot.press(*"@src/utils/eh")
 
         popup_content = str(popup.render())
-        assert "@src/utils/error_handling.py" in popup_content
+        assert "src/utils/error_handling.py" in popup_content
         assert popup.styles.display == "block"
 
 
@@ -258,7 +258,7 @@ async def test_finds_files_recursively_by_filename(
         await pilot.press(*"@entryp")
 
         popup_content = str(popup.render())
-        assert "@vibe/acp/entrypoint.py" in popup_content
+        assert "vibe/acp/entrypoint.py" in popup_content
         assert popup.styles.display == "block"
 
 
@@ -272,7 +272,7 @@ async def test_finds_files_recursively_with_partial_path(
         await pilot.press(*"@acp/entry")
 
         popup_content = str(popup.render())
-        assert "@vibe/acp/entrypoint.py" in popup_content
+        assert "vibe/acp/entrypoint.py" in popup_content
         assert popup.styles.display == "block"
 
 

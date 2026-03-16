@@ -54,6 +54,23 @@ async def test_ui_navigation_through_input_history(
 
 
 @pytest.mark.asyncio
+async def test_ui_navigation_restores_partially_typed_draft_after_round_trip(
+    vibe_app: VibeApp, history_file: Path
+) -> None:
+    async with vibe_app.run_test() as pilot:
+        inject_history_file(vibe_app, history_file)
+        chat_input = vibe_app.query_one(ChatInputContainer)
+
+        await pilot.press(*"he")
+        assert chat_input.value == "he"
+
+        await pilot.press("up")
+        assert chat_input.value == "how are you?"
+        await pilot.press("down")
+        assert chat_input.value == "he"
+
+
+@pytest.mark.asyncio
 async def test_ui_does_nothing_if_command_completion_is_active(
     vibe_app: VibeApp, history_file: Path
 ) -> None:

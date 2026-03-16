@@ -88,12 +88,9 @@ def get_user_cancellation_message(
 
 
 def is_user_cancellation_event(event: BaseEvent) -> bool:
-    return (
-        isinstance(event, ToolResultEvent)
-        and event.skipped
-        and event.skip_reason is not None
-        and f"<{CANCELLATION_TAG}>" in event.skip_reason
-    )
+    if not isinstance(event, ToolResultEvent):
+        return False
+    return event.cancelled
 
 
 def is_dangerous_directory(path: Path | str = ".") -> tuple[bool, str]:

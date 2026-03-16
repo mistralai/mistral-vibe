@@ -8,6 +8,8 @@ from pathlib import Path
 from vibe.core.autocompletion.file_indexer.ignore_rules import IgnoreRules
 from vibe.core.autocompletion.file_indexer.watcher import Change
 
+ASCII_CODEPOINT_LIMIT = 128
+
 
 @dataclass(slots=True)
 class FileIndexStats:
@@ -22,6 +24,17 @@ class IndexEntry:
     name: str
     path: Path
     is_dir: bool
+    ascii_mask: int
+
+
+def build_ascii_mask(value: str) -> int:
+    mask = 0
+    for char in value:
+        codepoint = ord(char)
+        if codepoint >= ASCII_CODEPOINT_LIMIT:
+            continue
+        mask |= 1 << codepoint
+    return mask
 
 
 class FileIndexStore:
@@ -118,8 +131,14 @@ class FileIndexStore:
     ) -> IndexEntry | None:
         if self._ignore_rules.should_ignore(rel_str, name, is_dir):
             return None
+        rel_lower = rel_str.lower()
         return IndexEntry(
-            rel=rel_str, rel_lower=rel_str.lower(), name=name, path=path, is_dir=is_dir
+            rel=rel_str,
+            rel_lower=rel_lower,
+            name=name,
+            path=path,
+            is_dir=is_dir,
+            ascii_mask=build_ascii_mask(rel_lower),
         )
 
     def _walk_directory(

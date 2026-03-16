@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import NamedTuple
 
 from vibe.core.autocompletion.file_indexer import FileIndexer, IndexEntry
+from vibe.core.autocompletion.file_indexer.store import (
+    ASCII_CODEPOINT_LIMIT,
+    build_ascii_mask,
+)
 from vibe.core.autocompletion.fuzzy import fuzzy_match
 
 DEFAULT_MAX_ENTRIES_TO_PROCESS = 32000
@@ -67,6 +71,18 @@ class CommandCompleter(Completer):
 
 
 class PathCompleter(Completer):
+    class MatchRank(NamedTuple):
+        exact_directory: int
+        immediate_child_of_exact_path: int
+        exact_filename: int
+        preferred_stem_match: int
+        exact_stem: int
+        stem_prefix: int
+        name_prefix: int
+        extension_match: int
+        fuzzy_score: float
+        shallow_path: int
+
     def __init__(
         self,
         max_entries_to_process: int = DEFAULT_MAX_ENTRIES_TO_PROCESS,
@@ -82,6 +98,7 @@ class PathCompleter(Completer):
         search_pattern: str
         path_prefix: str
         immediate_only: bool
+        search_pattern_ascii_mask: int | None
 
     def _extract_partial(self, before_cursor: str) -> str | None:
         if "@" not in before_cursor:
@@ -97,11 +114,16 @@ class PathCompleter(Completer):
 
     def _build_search_context(self, partial_path: str) -> _SearchContext:
         suffix = partial_path.split("/")[-1]
+        search_pattern_ascii_mask = self._build_query_ascii_mask(partial_path)
 
         if not partial_path:
             # "@" => show top-level dir and files
             return self._SearchContext(
-                search_pattern="", path_prefix="", suffix=suffix, immediate_only=True
+                search_pattern="",
+                path_prefix="",
+                suffix=suffix,
+                immediate_only=True,
+                search_pattern_ascii_mask=search_pattern_ascii_mask,
             )
 
         if partial_path.endswith("/"):
@@ -111,6 +133,7 @@ class PathCompleter(Completer):
                 path_prefix=partial_path,
                 suffix=suffix,
                 immediate_only=True,
+                search_pattern_ascii_mask=search_pattern_ascii_mask,
             )
 
         return self._SearchContext(
@@ -119,29 +142,40 @@ class PathCompleter(Completer):
             path_prefix="",
             suffix=suffix,
             immediate_only=False,
+            search_pattern_ascii_mask=search_pattern_ascii_mask,
         )
+
+    def _build_query_ascii_mask(self, pattern: str) -> int | None:
+        if any(ord(char) >= ASCII_CODEPOINT_LIMIT for char in pattern):
+            return None
+        return build_ascii_mask(pattern.lower())
+
+    def _is_immediate_child_of_prefix(self, path_str: str, prefix: str) -> bool:
+        prefix_without_slash = prefix.rstrip("/")
+        prefix_with_slash = f"{prefix_without_slash}/"
+
+        if path_str.startswith(prefix_with_slash):
+            after_prefix = path_str[len(prefix_with_slash) :]
+        else:
+            idx = path_str.find(prefix_with_slash)
+            if idx == -1 or (idx > 0 and path_str[idx - 1] != "/"):
+                return False
+            after_prefix = path_str[idx + len(prefix_with_slash) :]
+
+        return bool(after_prefix) and "/" not in after_prefix
 
     def _matches_prefix(self, entry: IndexEntry, context: _SearchContext) -> bool:
         path_str = entry.rel
 
         if context.path_prefix:
             prefix_without_slash = context.path_prefix.rstrip("/")
-            prefix_with_slash = f"{prefix_without_slash}/"
 
             if path_str == prefix_without_slash and entry.is_dir:
                 # do not suggest the dir itself (e.g. "@src/" => don't suggest "@src/")
                 return False
 
-            if path_str.startswith(prefix_with_slash):
-                after_prefix = path_str[len(prefix_with_slash) :]
-            else:
-                idx = path_str.find(prefix_with_slash)
-                if idx == -1 or (idx > 0 and path_str[idx - 1] != "/"):
-                    return False
-                after_prefix = path_str[idx + len(prefix_with_slash) :]
-
             # only suggest files/dirs that are immediate children of the prefix
-            return bool(after_prefix) and "/" not in after_prefix
+            return self._is_immediate_child_of_prefix(path_str, context.path_prefix)
 
         if context.immediate_only and "/" in path_str:
             # when user just typed "@", only show top-level entries
@@ -153,15 +187,72 @@ class PathCompleter(Completer):
     def _is_visible(self, entry: IndexEntry, context: _SearchContext) -> bool:
         return not (entry.name.startswith(".") and not context.suffix.startswith("."))
 
+    def _can_possibly_fuzzy_match(
+        self, entry: IndexEntry, context: _SearchContext
+    ) -> bool:
+        if context.search_pattern_ascii_mask is None:
+            return True
+        return (
+            entry.ascii_mask & context.search_pattern_ascii_mask
+        ) == context.search_pattern_ascii_mask
+
     def _format_label(self, entry: IndexEntry) -> str:
         suffix = "/" if entry.is_dir else ""
         return f"@{entry.rel}{suffix}"
 
+    def _build_match_rank(
+        self, entry: IndexEntry, context: _SearchContext, fuzzy_score: float
+    ) -> MatchRank:
+        query = context.suffix.lower()
+        if not query:
+            return self.MatchRank(
+                exact_directory=0,
+                immediate_child_of_exact_path=0,
+                exact_filename=0,
+                preferred_stem_match=0,
+                exact_stem=0,
+                stem_prefix=0,
+                name_prefix=0,
+                extension_match=0,
+                fuzzy_score=fuzzy_score,
+                shallow_path=-entry.rel.count("/"),
+            )
+
+        name = entry.name.lower()
+        rel = entry.rel.lower()
+        stem = Path(entry.name).stem.lower()
+        extension = Path(entry.name).suffix.lower()
+        query_extension = Path(query).suffix.lower()
+        query_stem = Path(query).stem.lower()
+        query_looks_like_filename = "." in query
+        query_looks_like_path = "/" in context.search_pattern
+        exact_directory = int(entry.is_dir and rel == context.search_pattern.lower())
+        immediate_child_of_exact_path = int(
+            query_looks_like_path
+            and self._is_immediate_child_of_prefix(rel, context.search_pattern.lower())
+        )
+
+        return self.MatchRank(
+            exact_directory=exact_directory,
+            immediate_child_of_exact_path=immediate_child_of_exact_path,
+            exact_filename=int(query_looks_like_filename and name == query),
+            preferred_stem_match=int(stem == query and extension != ".lock"),
+            exact_stem=int(
+                stem == query or (query_looks_like_filename and stem == query_stem)
+            ),
+            stem_prefix=int(
+                stem.startswith(query_stem if query_looks_like_filename else query)
+            ),
+            name_prefix=int(name.startswith(query)),
+            extension_match=int(bool(query_extension) and extension == query_extension),
+            fuzzy_score=fuzzy_score,
+            shallow_path=-entry.rel.count("/"),
+        )
+
     def _score_matches(
         self, entries: list[IndexEntry], context: _SearchContext
-    ) -> list[tuple[str, float]]:
-        scored_matches: list[tuple[str, float]] = []
-        MAX_MATCHES = 50
+    ) -> list[tuple[str, PathCompleter.MatchRank]]:
+        scored_matches: list[tuple[str, PathCompleter.MatchRank]] = []
 
         for i, entry in enumerate(entries):
             if i >= self._max_entries_to_process:
@@ -176,24 +267,27 @@ class PathCompleter(Completer):
             label = self._format_label(entry)
 
             if not context.search_pattern:
-                scored_matches.append((label, 0.0))
+                rank = self._build_match_rank(entry, context, 0.0)
+                scored_matches.append((label, rank))
                 if len(scored_matches) >= self._target_matches:
                     break
+                continue
+
+            if not self._can_possibly_fuzzy_match(entry, context):
                 continue
 
             match_result = fuzzy_match(
                 context.search_pattern, entry.rel, entry.rel_lower
             )
             if match_result.matched:
-                scored_matches.append((label, match_result.score))
-                if (
-                    len(scored_matches) >= self._target_matches
-                    and match_result.score > MAX_MATCHES
-                ):
-                    break
+                rank = self._build_match_rank(entry, context, match_result.score)
+                scored_matches.append((label, rank))
 
-        scored_matches.sort(key=lambda x: (-x[1], x[0]))
-        return scored_matches
+        # Sort alphabetically first, then by descending rank; Python's stable sort
+        # keeps the label order for entries with equal ranks.
+        scored_matches.sort(key=lambda x: x[0])
+        scored_matches.sort(key=lambda x: x[1], reverse=True)
+        return scored_matches[: self._target_matches]
 
     def _collect_matches(self, text: str, cursor_pos: int) -> list[str]:
         before_cursor = text[:cursor_pos]

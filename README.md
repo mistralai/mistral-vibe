@@ -35,6 +35,7 @@ curl -LsSf https://mistral.ai/vibe/install.sh | bash
 **Windows**
 
 First, install uv
+
 ```bash
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
@@ -65,6 +66,7 @@ pip install mistral-vibe
   - [Interactive Mode](#interactive-mode)
   - [Trust Folder System](#trust-folder-system)
   - [Programmatic Mode](#programmatic-mode)
+- [Voice Mode](#voice-mode)
 - [Slash Commands](#slash-commands)
   - [Built-in Slash Commands](#built-in-slash-commands)
   - [Custom Slash Commands via Skills](#custom-slash-commands-via-skills)
@@ -184,7 +186,6 @@ Most modern terminals should work, but older or minimal terminal emulators may h
    ```
 
 3. If this is your first time running Vibe, it will:
-
    - Create a default configuration file at `~/.vibe/config.toml`
    - Prompt you to enter your API key if it's not already configured
    - Save your API key to `~/.vibe/.env` for future use
@@ -262,6 +263,30 @@ Example:
 ```bash
 vibe --prompt "Analyze the codebase" --max-turns 5 --max-price 1.0 --output json
 ```
+
+## Voice Mode
+
+> [!WARNING]
+> Voice mode is experimental and may change in future releases.
+
+Voice mode allows you to dictate input using your microphone instead of typing.
+
+### Activating Voice Mode
+
+Toggle voice mode on or off with the `/voice` slash command:
+
+```
+> /voice
+```
+
+### Recording Shortcuts
+
+| Shortcut | Action           |
+| -------- | ---------------- |
+| `Ctrl+R` | Start recording  |
+| Any key  | Stop recording   |
+| `Escape` | Cancel recording |
+| `Ctrl+C` | Cancel recording |
 
 ## Slash Commands
 

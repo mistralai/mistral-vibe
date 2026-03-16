@@ -112,6 +112,17 @@ async def test_updates_tokens_stats_based_on_backend_response_streaming(
 
 
 @pytest.mark.asyncio
+async def test_passes_session_id_to_backend(vibe_config: VibeConfig):
+    backend = FakeBackend([mock_llm_chunk(content="Response")])
+    agent = build_test_agent_loop(config=vibe_config, backend=backend)
+
+    [_ async for _ in agent.act("Hello")]
+
+    assert len(backend.requests_metadata) > 0
+    assert backend.requests_metadata[0] == {"session_id": agent.session_id}
+
+
+@pytest.mark.asyncio
 async def test_passes_entrypoint_metadata_to_backend(vibe_config: VibeConfig):
     metadata = EntrypointMetadata(
         agent_entrypoint="acp",
@@ -135,6 +146,7 @@ async def test_passes_entrypoint_metadata_to_backend(vibe_config: VibeConfig):
         "agent_version": "2.0.0",
         "client_name": "vibe_ide",
         "client_version": "0.5.0",
+        "session_id": agent.session_id,
     }
 
 

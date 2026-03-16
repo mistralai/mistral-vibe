@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar, NamedTuple, final
 import anyio
 from pydantic import BaseModel, Field
 
+from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -18,6 +19,7 @@ from vibe.core.tools.base import (
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils import VIBE_WARNING_TAG
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -57,8 +59,12 @@ class ReadFileToolConfig(BaseToolConfig):
     )
 
 
+class ReadFileState(BaseToolState):
+    injected_agents_md: set[str] = Field(default_factory=set)
+
+
 class ReadFile(
-    BaseTool[ReadFileArgs, ReadFileResult, ReadFileToolConfig, BaseToolState],
+    BaseTool[ReadFileArgs, ReadFileResult, ReadFileToolConfig, ReadFileState],
     ToolUIData[ReadFileArgs, ReadFileResult],
 ):
     description: ClassVar[str] = (
@@ -88,6 +94,27 @@ class ReadFile(
             denylist=self.config.denylist,
             config_permission=self.config.permission,
         )
+
+    def get_result_extra(self, result: ReadFileResult) -> str | None:
+        try:
+            mgr = get_harness_files_manager()
+        except RuntimeError:
+            return None
+        docs = mgr.find_subdirectory_agents_md(Path(result.path))
+        new_docs = [
+            (d, c)
+            for d, c in docs
+            if str(d.resolve()) not in self.state.injected_agents_md
+        ]
+        if not new_docs:
+            return None
+        for d, _ in new_docs:
+            self.state.injected_agents_md.add(str(d.resolve()))
+        sections = [
+            f"Contents of {d}/AGENTS.md (project instructions for this directory):\n\n{c.strip()}"
+            for d, c in new_docs
+        ]
+        return f"<{VIBE_WARNING_TAG}>\n{'\n\n'.join(sections)}\n</{VIBE_WARNING_TAG}>"
 
     def _prepare_and_validate_path(self, args: ReadFileArgs) -> Path:
         self._validate_inputs(args)

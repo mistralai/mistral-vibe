@@ -3,11 +3,13 @@ from __future__ import annotations
 import html
 import os
 from pathlib import Path
+from string import Template
 import subprocess
 import sys
 from typing import TYPE_CHECKING
 
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.paths import VIBE_HOME
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.utils import is_dangerous_directory, is_windows
 
@@ -138,7 +140,9 @@ class ProjectContextProvider:
         git_status = self.get_git_status()
 
         template = UtilityPrompt.PROJECT_CONTEXT.read()
-        return template.format(abs_path=self.root_path, git_status=git_status)
+        return Template(template).safe_substitute(
+            abs_path=str(self.root_path), git_status=git_status
+        )
 
 
 def _get_platform_name() -> str:
@@ -275,7 +279,7 @@ def get_universal_system_prompt(
         is_dangerous, reason = is_dangerous_directory()
         if is_dangerous:
             template = UtilityPrompt.DANGEROUS_DIRECTORY.read()
-            context = template.format(
+            context = Template(template).safe_substitute(
                 reason=reason.lower(), abs_path=Path(".").resolve()
             )
         else:
@@ -285,10 +289,25 @@ def get_universal_system_prompt(
 
         sections.append(context)
 
-        project_doc = get_harness_files_manager().load_project_doc(
-            config.project_context.max_doc_bytes
-        )
-        if project_doc.strip():
-            sections.append(project_doc)
+        mgr = get_harness_files_manager()
+        user_doc = mgr.load_user_doc()
+        project_docs = mgr.load_project_docs()
+
+        doc_sections: list[str] = []
+        if user_doc.strip():
+            doc_sections.append(
+                f"## User instructions\n\nContents of {VIBE_HOME.path}/AGENTS.md (user-level instructions):\n\n{user_doc.strip()}"
+            )
+        if project_docs:
+            doc_sections.append("## Project instructions (checked into the codebase)")
+        for doc_dir, doc_content in project_docs:
+            doc_sections.append(
+                f"Contents of {doc_dir}/AGENTS.md:\n\n{doc_content.strip()}"
+            )
+        if doc_sections:
+            template = UtilityPrompt.AGENTS_DOC.read()
+            sections.append(
+                Template(template).safe_substitute(sections="\n\n".join(doc_sections))
+            )
 
     return "\n\n".join(sections)

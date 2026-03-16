@@ -13,6 +13,11 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
 from vibe.cli.textual_ui.widgets.vscode_compat import patch_vscode_space
+from vibe.cli.voice_manager.voice_manager_port import (
+    RecordingStartError,
+    TranscribeState,
+    VoiceManagerPort,
+)
 
 InputMode = Literal["!", "/", ">", "&"]
 
@@ -37,14 +42,10 @@ class ChatTextArea(TextArea):
             super().__init__()
 
     class HistoryPrevious(Message):
-        def __init__(self, prefix: str) -> None:
-            self.prefix = prefix
-            super().__init__()
+        pass
 
     class HistoryNext(Message):
-        def __init__(self, prefix: str) -> None:
-            self.prefix = prefix
-            super().__init__()
+        pass
 
     class HistoryReset(Message):
         """Message sent when history navigation should be reset."""
@@ -56,20 +57,23 @@ class ChatTextArea(TextArea):
             self.mode = mode
             super().__init__()
 
-    def __init__(self, nuage_enabled: bool = False, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        nuage_enabled: bool = False,
+        voice_manager: VoiceManagerPort | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         self._nuage_enabled = nuage_enabled
         self._input_mode: InputMode = self.DEFAULT_MODE
-        self._history_prefix: str | None = None
         self._last_text = ""
         self._navigating_history = False
-        self._last_cursor_col: int = 0
-        self._last_used_prefix: str | None = None
         self._original_text: str = ""
         self._cursor_pos_after_load: tuple[int, int] | None = None
         self._cursor_moved_since_load: bool = False
         self._completion_manager: MultiCompletionManager | None = None
         self._app_has_focus: bool = True
+        self._voice_manager = voice_manager
 
     def on_blur(self, event: events.Blur) -> None:
         if self._app_has_focus:
@@ -100,7 +104,6 @@ class ChatTextArea(TextArea):
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if not self._navigating_history and self.text != self._last_text:
-            self._reset_prefix()
             self._original_text = ""
             self._cursor_pos_after_load = None
             self._cursor_moved_since_load = False
@@ -114,11 +117,6 @@ class ChatTextArea(TextArea):
                 self.get_full_text(), self._get_full_cursor_offset()
             )
 
-    def _reset_prefix(self, *, clear_last_used: bool = True) -> None:
-        self._history_prefix = None
-        if clear_last_used:
-            self._last_used_prefix = None
-
     def _mark_cursor_moved_if_needed(self) -> None:
         if (
             self._cursor_pos_after_load is not None
@@ -126,20 +124,8 @@ class ChatTextArea(TextArea):
             and self.cursor_location != self._cursor_pos_after_load
         ):
             self._cursor_moved_since_load = True
-            self._reset_prefix(clear_last_used=False)
-
-    def _get_prefix_up_to_cursor(self) -> str:
-        cursor_row, cursor_col = self.cursor_location
-        lines = self.text.split("\n")
-        if cursor_row < len(lines):
-            visible_prefix = lines[cursor_row][:cursor_col]
-            if cursor_row == 0 and self._input_mode != self.DEFAULT_MODE:
-                return self._input_mode + visible_prefix
-            return visible_prefix
-        return ""
 
     def _handle_history_up(self) -> bool:
-        _, cursor_col = self.cursor_location
         history_loaded_and_cursor_unmoved = (
             self._cursor_pos_after_load is not None
             and not self._cursor_moved_since_load
@@ -150,63 +136,61 @@ class ChatTextArea(TextArea):
         )
 
         if should_intercept:
-            if self._history_prefix is not None and cursor_col != self._last_cursor_col:
-                self._reset_prefix()
-                self._last_cursor_col = 0
-
-            if self._history_prefix is None:
-                self._history_prefix = self._get_prefix_up_to_cursor()
-
             self._navigating_history = True
-            self.post_message(self.HistoryPrevious(self._history_prefix))
+            self.post_message(self.HistoryPrevious())
             return True
         return False
 
     def _is_on_loaded_history_entry(self) -> bool:
         return self._cursor_pos_after_load is not None
 
-    def _has_history_prefix(self) -> bool:
-        return self._history_prefix is not None
-
-    def _has_history_navigation_context(self) -> bool:
-        return self._is_on_loaded_history_entry() or self._has_history_prefix()
-
     def _should_intercept_history_down(self) -> bool:
-        history_loaded_and_cursor_unmoved = (
-            self._is_on_loaded_history_entry() and not self._cursor_moved_since_load
-        )
-        if history_loaded_and_cursor_unmoved and self._has_history_prefix():
+        if self._is_on_loaded_history_entry() and not self._cursor_moved_since_load:
             return True
 
         if not self.navigator.is_last_wrapped_line(self.cursor_location):
             return False
 
-        return self._has_history_navigation_context()
+        return self._is_on_loaded_history_entry()
 
     def _handle_history_down(self) -> bool:
-        _, cursor_col = self.cursor_location
-
         if not self._should_intercept_history_down():
             return False
 
-        navigating_loaded_history = self._is_on_loaded_history_entry()
-
-        if self._history_prefix is not None and cursor_col != self._last_cursor_col:
-            if not navigating_loaded_history:
-                self._reset_prefix()
-            self._last_cursor_col = 0
-
-        if self._history_prefix is None:
-            if navigating_loaded_history and self._last_used_prefix is not None:
-                self._history_prefix = self._last_used_prefix
-            else:
-                self._history_prefix = self._get_prefix_up_to_cursor()
-
         self._navigating_history = True
-        self.post_message(self.HistoryNext(self._history_prefix))
+        self.post_message(self.HistoryNext())
         return True
 
+    async def _handle_voice_key(self, event: events.Key) -> bool:
+        if not self._voice_manager:
+            return False
+
+        # Handle key pressed during audio recording
+        if self._voice_manager.transcribe_state != TranscribeState.IDLE:
+            event.prevent_default()
+            event.stop()
+            if event.key == "ctrl+c":  # Escape is handled in app.py
+                self._voice_manager.cancel_recording()
+            elif self._voice_manager.transcribe_state == TranscribeState.RECORDING:
+                await self._voice_manager.stop_recording()
+            return True
+
+        # Handle audio record keybind
+        if self._voice_manager.is_enabled and event.key == "ctrl+r":
+            event.prevent_default()
+            event.stop()
+            try:
+                self._voice_manager.start_recording()
+            except RecordingStartError as e:
+                self.notify(str(e), severity="warning")
+            return True
+
+        return False
+
     async def _on_key(self, event: events.Key) -> None:  # noqa: PLR0911
+        if await self._handle_voice_key(event):
+            return
+
         self._mark_cursor_moved_if_needed()
 
         manager = self._completion_manager
@@ -223,7 +207,6 @@ class ChatTextArea(TextArea):
                     event.stop()
                     value = self.get_full_text().strip()
                     if value:
-                        self._reset_prefix()
                         self.post_message(self.Submitted(value))
                     return
 
@@ -232,7 +215,6 @@ class ChatTextArea(TextArea):
             event.stop()
             value = self.get_full_text().strip()
             if value:
-                self._reset_prefix()
                 self.post_message(self.Submitted(value))
             return
 
@@ -323,7 +305,6 @@ class ChatTextArea(TextArea):
         self.move_cursor((last_row, len(lines[last_row])))
 
     def reset_history_state(self) -> None:
-        self._reset_prefix()
         self._original_text = ""
         self._cursor_pos_after_load = None
         self._cursor_moved_since_load = False

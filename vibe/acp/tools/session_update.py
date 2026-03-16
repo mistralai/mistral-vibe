@@ -57,11 +57,14 @@ def tool_call_session_update(event: ToolCallEvent) -> SessionUpdate | None:
 def tool_result_session_update(event: ToolResultEvent) -> SessionUpdate | None:
     if is_user_cancellation_event(event):
         tool_status = "failed"
-        raw_output = (
-            TaggedText.from_string(event.skip_reason).message
-            if event.skip_reason
-            else None
-        )
+        if event.skip_reason:
+            raw_output = TaggedText.from_string(event.skip_reason).message
+        elif event.error:
+            raw_output = TaggedText.from_string(event.error).message
+        elif event.result:
+            raw_output = event.result.model_dump_json()
+        else:
+            raw_output = None
     elif event.result:
         tool_status = "completed"
         raw_output = event.result.model_dump_json()

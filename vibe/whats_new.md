@@ -1,4 +1,4 @@
-# What's new in v2.4.2
-
-- **Skill arguments**: Skills now extract arguments when invoked, allowing you to pass arguments
-- **Auto-compact fallback**: Auto-compact threshold falls back to the global setting when not defined at model level
+# What's new in v2.5.0
+- **Lean mode**: Setup a dedicated theorem proving agent powered by leanstral with /leanstall
+- **Parallel tool execution**: Parallel tool calls are sped up by being ran at the same time
+- **Voice mode**: Real-time transcription support with /voice
