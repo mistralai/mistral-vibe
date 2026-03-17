@@ -46,6 +46,11 @@ class CommandRegistry:
                 description="Compact conversation history by summarizing",
                 handler="_compact_history",
             ),
+            "improve": Command(
+                aliases=frozenset(["/improve"]),
+                description="Analyze recent sessions and suggest product improvements",
+                handler="_improve_from_sessions",
+            ),
             "exit": Command(
                 aliases=frozenset(["/exit"]),
                 description="Exit the application",

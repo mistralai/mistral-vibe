@@ -237,6 +237,60 @@ class TestSessionLoggerSaveInteraction:
             assert "system_prompt" in metadata
 
     @pytest.mark.asyncio
+    async def test_save_interaction_persists_skill_invocations(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        session_id = "test-session-123"
+        logger = SessionLogger(session_config, session_id)
+
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(
+                role=Role.user,
+                content="Long skill instructions that should not become the title.",
+            ),
+            LLMMessage(role=Role.assistant, content="Hi there!"),
+        ]
+        user_message_id = messages[1].message_id
+        assert user_message_id is not None
+
+        logger.record_skill_invocation(
+            message_id=user_message_id,
+            skill_name="carl",
+            invocation="/carl --base main",
+            skill_path=Path("/Users/tony/.codex/skills/carl/SKILL.md"),
+        )
+
+        await logger.save_interaction(
+            messages=messages,
+            stats=AgentStats(
+                steps=1, session_prompt_tokens=10, session_completion_tokens=20
+            ),
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_dir is not None
+        metadata_file = logger.session_dir / "meta.json"
+        with metadata_file.open() as f:
+            metadata = json.load(f)
+
+        assert metadata["title"] == "/carl --base main"
+        assert metadata["skill_invocations"] == [
+            {
+                "message_id": user_message_id,
+                "skill_name": "carl",
+                "invocation": "/carl --base main",
+                "skill_path": "/Users/tony/.codex/skills/carl/SKILL.md",
+            }
+        ]
+
+    @pytest.mark.asyncio
     async def test_save_interaction_system_prompt_in_metadata(
         self,
         session_config: SessionLoggingConfig,
@@ -501,6 +555,61 @@ class TestSessionLoggerSaveInteraction:
         assert messages_file.exists()
         with open(messages_file) as f:
             assert len(f.readlines()) == 2
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_skips_transient_messages(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        session_id = "test-session-123"
+        logger = SessionLogger(session_config, session_id)
+
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(
+                role=Role.user,
+                content="Internal improve prompt",
+                persist_to_session_log=False,
+            ),
+            LLMMessage(
+                role=Role.assistant,
+                content="Internal improve output",
+                persist_to_session_log=False,
+            ),
+            LLMMessage(role=Role.user, content="Real user prompt"),
+            LLMMessage(role=Role.assistant, content="Real assistant output"),
+        ]
+
+        stats = AgentStats(
+            steps=2, session_prompt_tokens=10, session_completion_tokens=20
+        )
+
+        await logger.save_interaction(
+            messages=messages,
+            stats=stats,
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_dir is not None
+        metadata_file = logger.session_dir / "meta.json"
+        messages_file = logger.session_dir / "messages.jsonl"
+
+        with open(metadata_file) as f:
+            metadata = json.load(f)
+            assert metadata["title"] == "Real user prompt"
+            assert metadata["total_messages"] == 2
+
+        with open(messages_file) as f:
+            messages_data = [json.loads(line) for line in f.readlines()]
+            assert [message["content"] for message in messages_data] == [
+                "Real user prompt",
+                "Real assistant output",
+            ]
 
     @pytest.mark.asyncio
     async def test_save_interaction_throttles_tmp_cleanup(

@@ -972,6 +972,45 @@ class TestSessionLoaderUTF8Encoding:
         assert metadata.start_time == "2023-01-01T12:00:00Z"
         assert metadata.username is not None
 
+    def test_load_metadata_with_skill_invocations(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = create_test_session(
+            session_dir,
+            "skill-meta-test",
+            metadata={
+                "session_id": "skill-meta-test",
+                "start_time": "2023-01-01T12:00:00Z",
+                "end_time": "2023-01-01T12:05:00Z",
+                "total_messages": 2,
+                "stats": {
+                    "steps": 1,
+                    "session_prompt_tokens": 10,
+                    "session_completion_tokens": 20,
+                },
+                "system_prompt": {"content": "System prompt", "role": "system"},
+                "username": "testuser",
+                "environment": {"working_directory": "/test"},
+                "git_commit": None,
+                "git_branch": None,
+                "skill_invocations": [
+                    {
+                        "message_id": "message-123",
+                        "skill_name": "carl",
+                        "invocation": "/carl --base main",
+                        "skill_path": "/Users/tony/.codex/skills/carl/SKILL.md",
+                    }
+                ],
+            },
+        )
+
+        metadata = SessionLoader.load_metadata(session_folder)
+
+        assert len(metadata.skill_invocations) == 1
+        assert metadata.skill_invocations[0].skill_name == "carl"
+        assert metadata.skill_invocations[0].invocation == "/carl --base main"
+
     def test_load_metadata_with_unicode_characters(
         self, session_config: SessionLoggingConfig
     ) -> None:
