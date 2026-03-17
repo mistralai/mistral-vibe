@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 import pytest
 
 from tests.mock.utils import collect_result
 from vibe.core.tools.base import BaseToolState, ToolError, ToolPermission
-from vibe.core.tools.builtins.bash import Bash, BashArgs, BashToolConfig
+from vibe.core.tools.builtins.bash import Bash, BashArgs, BashToolConfig, _get_base_env
 
 
 @pytest.fixture
@@ -12,6 +13,35 @@ def bash(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = BashToolConfig()
     return Bash(config=config, state=BaseToolState())
+
+
+def test_get_base_env_removes_library_path_vars(monkeypatch):
+    """Test that LD_LIBRARY_PATH and LD_PRELOAD are removed from base env.
+    
+    This prevents symbol lookup errors like:
+    /bin/bash: symbol lookup error: /bin/bash: undefined symbol: rl_trim_arg_from_keyseq
+    when running in IDE environments (e.g., JetBrains WebStorm) that modify library paths.
+    See: https://github.com/mistralai/mistral-vibe/issues/494
+    """
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/some/path")
+    monkeypatch.setenv("LD_PRELOAD", "/some/lib.so")
+    
+    base_env = _get_base_env()
+    
+    assert "LD_LIBRARY_PATH" not in base_env
+    assert "LD_PRELOAD" not in base_env
+
+
+def test_get_base_env_preserves_other_vars(monkeypatch):
+    """Test that other environment variables are preserved."""
+    monkeypatch.setenv("CUSTOM_VAR", "custom_value")
+    
+    base_env = _get_base_env()
+    
+    assert base_env["CUSTOM_VAR"] == "custom_value"
+    assert base_env["CI"] == "true"
+    assert base_env["NONINTERACTIVE"] == "1"
+    assert base_env["NO_TTY"] == "1"
 
 
 @pytest.mark.asyncio
