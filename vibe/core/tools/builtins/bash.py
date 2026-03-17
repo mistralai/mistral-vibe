@@ -74,6 +74,12 @@ def _get_shell_executable() -> str | None:
 def _get_base_env() -> dict[str, str]:
     base_env = {**os.environ, "CI": "true", "NONINTERACTIVE": "1", "NO_TTY": "1"}
 
+    # Remove library path variables that can cause symbol lookup errors
+    # when the parent environment (e.g., JetBrains IDE) has incompatible
+    # library versions. See: https://github.com/mistralai/mistral-vibe/issues/494
+    base_env.pop("LD_LIBRARY_PATH", None)
+    base_env.pop("LD_PRELOAD", None)
+
     if is_windows():
         base_env["GIT_PAGER"] = "more"
         base_env["PAGER"] = "more"
