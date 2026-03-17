@@ -168,11 +168,23 @@ class FunctionCall(BaseModel):
     arguments: str | None = None
 
 
+def _tool_call_type_validator(v: Any) -> str:
+    """Convert None to 'function' for tool call type field.
+
+    Some backends (e.g., vLLM with certain models) may omit the type field
+    or set it to null, causing validation errors. This validator ensures
+    compatibility by defaulting to 'function'.
+    """
+    if v is None:
+        return "function"
+    return v
+
+
 class ToolCall(BaseModel):
     id: str | None = None
     index: int | None = None
     function: FunctionCall = Field(default_factory=FunctionCall)
-    type: Literal["function"] = "function"
+    type: Annotated[Literal["function"], BeforeValidator(_tool_call_type_validator)] = "function"
 
 
 def _content_before(v: Any) -> str:
