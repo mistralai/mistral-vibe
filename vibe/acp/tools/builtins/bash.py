@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from acp.schema import (
+    EnvVariable,
     TerminalToolCallContent,
     ToolCallProgress,
     ToolCallStart,
@@ -21,6 +22,29 @@ from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 
 class AcpBashState(BaseToolState, AcpToolState):
     pass
+
+
+def _get_terminal_env() -> list[EnvVariable]:
+    """Build clean environment variables for terminal execution.
+
+    Returns a list of EnvVariable objects with settings that ensure
+    consistent shell behavior and prevent library path conflicts.
+    The LD_LIBRARY_PATH is explicitly cleared to avoid symbol lookup
+    errors when bash is invoked from environments with incompatible
+    library paths (e.g., IDEs that modify LD_LIBRARY_PATH).
+    """
+    return [
+        EnvVariable(name="CI", value="true"),
+        EnvVariable(name="NONINTERACTIVE", value="1"),
+        EnvVariable(name="NO_TTY", value="1"),
+        EnvVariable(name="TERM", value="dumb"),
+        EnvVariable(name="DEBIAN_FRONTEND", value="noninteractive"),
+        EnvVariable(name="GIT_PAGER", value="cat"),
+        EnvVariable(name="PAGER", value="cat"),
+        EnvVariable(name="LESS", value="-FX"),
+        EnvVariable(name="LC_ALL", value="en_US.UTF-8"),
+        EnvVariable(name="LD_LIBRARY_PATH", value=""),
+    ]
 
 
 class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
@@ -45,6 +69,7 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
                 command=args.command,
                 cwd=str(Path.cwd()),
                 output_byte_limit=max_bytes,
+                env=_get_terminal_env(),
             )
         except Exception as e:
             raise ToolError(f"Failed to create terminal: {e!r}") from e
