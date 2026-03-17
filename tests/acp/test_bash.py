@@ -7,7 +7,7 @@ from acp.schema import EnvVariable, TerminalOutputResponse, WaitForTerminalExitR
 import pytest
 
 from tests.mock.utils import collect_result
-from vibe.acp.tools.builtins.bash import AcpBashState, Bash
+from vibe.acp.tools.builtins.bash import AcpBashState, Bash, _get_sanitized_env
 from vibe.core.tools.base import ToolError
 from vibe.core.tools.builtins.bash import BashArgs, BashResult, BashToolConfig
 
@@ -493,3 +493,106 @@ class TestAcpBashCleanup:
 
         assert result is not None
         assert result.stdout == "test output"
+
+
+class TestAcpBashEnvSanitization:
+    def test_get_sanitized_env_removes_problematic_vars(self) -> None:
+        """Test that _get_sanitized_env removes library path variables."""
+        import os
+
+        # Set problematic environment variables
+        original_ld_path = os.environ.get("LD_LIBRARY_PATH")
+        original_ld_preload = os.environ.get("LD_PRELOAD")
+        os.environ["LD_LIBRARY_PATH"] = "/opt/jetbrains/lib:/usr/local/lib"
+        os.environ["LD_PRELOAD"] = "/opt/jetbrains/lib/libsome.so"
+
+        try:
+            env_vars = _get_sanitized_env()
+            env_dict = {e.name: e.value for e in env_vars}
+
+            # Problematic variables should be removed
+            assert "LD_LIBRARY_PATH" not in env_dict
+            assert "LD_PRELOAD" not in env_dict
+
+            # Other variables should still be present
+            assert "PATH" in env_dict
+        finally:
+            # Restore original environment
+            if original_ld_path is not None:
+                os.environ["LD_LIBRARY_PATH"] = original_ld_path
+            elif "LD_LIBRARY_PATH" in os.environ:
+                del os.environ["LD_LIBRARY_PATH"]
+
+            if original_ld_preload is not None:
+                os.environ["LD_PRELOAD"] = original_ld_preload
+            elif "LD_PRELOAD" in os.environ:
+                del os.environ["LD_PRELOAD"]
+
+    @pytest.mark.asyncio
+    async def test_run_sanitizes_ld_library_path(self, mock_client: MockClient) -> None:
+        """Test that LD_LIBRARY_PATH and other problematic vars are stripped."""
+        import os
+
+        # Set problematic environment variables
+        original_ld_path = os.environ.get("LD_LIBRARY_PATH")
+        original_ld_preload = os.environ.get("LD_PRELOAD")
+        os.environ["LD_LIBRARY_PATH"] = "/opt/jetbrains/lib:/usr/local/lib"
+        os.environ["LD_PRELOAD"] = "/opt/jetbrains/lib/libsome.so"
+
+        try:
+            tool = Bash(
+                config=BashToolConfig(),
+                state=AcpBashState.model_construct(
+                    client=mock_client,
+                    session_id="test_session",
+                    tool_call_id="test_call",
+                ),
+            )
+
+            args = BashArgs(command="echo hello")
+            await collect_result(tool.run(args))
+
+            # Verify create_terminal was called with sanitized env
+            params = mock_client._last_create_params
+            env_vars = params.get("env", [])
+            env_dict = {e.name: e.value for e in env_vars}
+
+            # Problematic variables should be removed
+            assert "LD_LIBRARY_PATH" not in env_dict
+            assert "LD_PRELOAD" not in env_dict
+
+            # Other variables should still be present
+            assert "PATH" in env_dict
+        finally:
+            # Restore original environment
+            if original_ld_path is not None:
+                os.environ["LD_LIBRARY_PATH"] = original_ld_path
+            elif "LD_LIBRARY_PATH" in os.environ:
+                del os.environ["LD_LIBRARY_PATH"]
+
+            if original_ld_preload is not None:
+                os.environ["LD_PRELOAD"] = original_ld_preload
+            elif "LD_PRELOAD" in os.environ:
+                del os.environ["LD_PRELOAD"]
+
+    @pytest.mark.asyncio
+    async def test_run_preserves_safe_env_vars(self, mock_client: MockClient) -> None:
+        """Test that safe environment variables are preserved."""
+        tool = Bash(
+            config=BashToolConfig(),
+            state=AcpBashState.model_construct(
+                client=mock_client, session_id="test_session", tool_call_id="test_call"
+            ),
+        )
+
+        args = BashArgs(command="echo hello")
+        await collect_result(tool.run(args))
+
+        params = mock_client._last_create_params
+        env_vars = params.get("env", [])
+        env_dict = {e.name: e.value for e in env_vars}
+
+        # Safe variables should be preserved
+        assert "PATH" in env_dict
+        assert "HOME" in env_dict
+        assert "USER" in env_dict or "LOGNAME" in env_dict
