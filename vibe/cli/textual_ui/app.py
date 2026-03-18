@@ -8,7 +8,7 @@ from pathlib import Path
 import signal
 import subprocess
 import time
-from typing import Any, ClassVar, assert_never, cast
+from typing import TYPE_CHECKING, Any, ClassVar, assert_never, cast
 from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel
@@ -98,6 +98,11 @@ from vibe.core.config import Backend, VibeConfig
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.session.session_loader import SessionLoader
+
+if TYPE_CHECKING:
+    from vibe.cli.textual_ui.widgets.plugin_picker import PluginPickerApp
+    from vibe.core.plugins.commands import PluginCommand
+
 from vibe.core.teleport.types import (
     TeleportAuthCompleteEvent,
     TeleportAuthRequiredEvent,
@@ -142,6 +147,7 @@ class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
     Input = auto()
+    PluginPicker = auto()
     ProxySetup = auto()
     Question = auto()
     SessionPicker = auto()
@@ -287,6 +293,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._cached_loading_area: Widget | None = None
         self._switch_agent_generation = 0
         self._plan_info: PlanInfo | None = None
+        self._plugin_commands_cache: dict[str, PluginCommand] | None = None
 
     @property
     def config(self) -> VibeConfig:
@@ -413,6 +420,9 @@ class VibeApp(App):  # noqa: PLR0904
         if await self._handle_skill(value):
             return
 
+        if await self._handle_plugin_command(value):
+            return
+
         await self._handle_user_message(value)
 
     async def on_approval_app_approval_granted(
@@ -532,11 +542,29 @@ class VibeApp(App):  # noqa: PLR0904
     def _get_skill_entries(self) -> list[tuple[str, str]]:
         if not self.agent_loop:
             return []
-        return [
+        entries = [
             (f"/{name}", info.description)
             for name, info in self.agent_loop.skill_manager.available_skills.items()
             if info.user_invocable
         ]
+        for slash_name, cmd in self._get_plugin_commands().items():
+            entries.append((f"/{slash_name}", cmd.description))
+        return entries
+
+    def _get_plugin_commands(self) -> dict[str, PluginCommand]:
+        if self._plugin_commands_cache is None:
+            from vibe.core.config.harness_files._harness_manager import (
+                _get_plugin_registry_manager,
+            )
+            from vibe.core.plugins.commands import discover_all_plugin_commands
+
+            try:
+                registry = _get_plugin_registry_manager()
+                self._plugin_commands_cache = discover_all_plugin_commands(registry)
+            except (FileNotFoundError, ValueError, KeyError, OSError):
+                logger.warning("Failed to load plugin commands", exc_info=True)
+                self._plugin_commands_cache = {}
+        return self._plugin_commands_cache
 
     async def _handle_skill(self, user_input: str) -> bool:
         if not user_input.startswith("/"):
@@ -570,6 +598,45 @@ class VibeApp(App):  # noqa: PLR0904
             skill_content = f"{user_input}\n\n{skill_content}"
 
         await self._handle_user_message(skill_content)
+        return True
+
+    async def _handle_plugin_command(self, user_input: str) -> bool:
+        if not user_input.startswith("/") or ":" not in user_input:
+            return False
+
+        parts = user_input[1:].strip().split(None, 1)
+        if not parts:
+            return False
+        cmd_key = parts[0].lower()
+
+        commands = self._get_plugin_commands()
+        cmd = commands.get(cmd_key)
+        if not cmd:
+            return False
+
+        if self.agent_loop:
+            self.agent_loop.telemetry_client.send_slash_command_used(
+                cmd_key, "plugin_command"
+            )
+
+        try:
+            content = cmd.file_path.read_text(encoding="utf-8")
+        except OSError as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to read command file: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            return True
+
+        from vibe.core.plugins.commands import strip_frontmatter
+
+        content = strip_frontmatter(content).strip()
+
+        if len(parts) > 1:
+            content = f"{user_input}\n\n{content}"
+
+        await self._handle_user_message(content)
         return True
 
     async def _handle_bash_command(self, command: str) -> None:
@@ -1037,9 +1104,58 @@ class VibeApp(App):  # noqa: PLR0904
 
         await self._mount_and_scroll(UserCommandMessage("Resume cancelled."))
 
+    async def _show_plugin_picker(self) -> None:
+        if self._current_bottom_app == BottomApp.PluginPicker:
+            return
+
+        from vibe.cli.textual_ui.widgets.plugin_picker import PluginPickerApp
+        from vibe.core.config.harness_files._harness_manager import (
+            _get_plugin_registry_manager,
+        )
+
+        registry = _get_plugin_registry_manager()
+        plugins = registry.get_all_plugins_with_scope()
+
+        if not plugins:
+            await self._mount_and_scroll(UserCommandMessage("No plugins installed."))
+            return
+
+        await self._mount_and_scroll(UserCommandMessage("Plugins..."))
+        picker = PluginPickerApp(plugins=plugins)
+        await self._switch_from_input(picker)
+
+    async def on_plugin_picker_app_plugin_toggled(
+        self, event: PluginPickerApp.PluginToggled
+    ) -> None:
+        from vibe.core.config.harness_files._harness_manager import (
+            _get_plugin_registry_manager,
+        )
+
+        try:
+            registry = _get_plugin_registry_manager()
+            registry.set_enabled(event.plugin_name, enabled=event.enabled)
+            self._plugin_commands_cache = None
+            status = "enabled" if event.enabled else "disabled"
+            await self._mount_and_scroll(
+                UserCommandMessage(f"Plugin '{event.plugin_name}' {status}.")
+            )
+        except KeyError:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Plugin '{event.plugin_name}' not found.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+
+    async def on_plugin_picker_app_cancelled(
+        self, event: PluginPickerApp.Cancelled
+    ) -> None:
+        await self._switch_to_input_app()
+
     async def _reload_config(self) -> None:
         try:
             self._reset_ui_state()
+            self._plugin_commands_cache = None
             await self._load_more.hide()
             base_config = VibeConfig.load()
 
@@ -1059,6 +1175,16 @@ class VibeApp(App):  # noqa: PLR0904
                     f"Failed to reload config: {e}", collapsed=self._tools_collapsed
                 )
             )
+
+    async def _reload_plugins(self) -> None:
+        """Reload all plugin components by invalidating caches and reloading config."""
+        from vibe.core.config.harness_files._harness_manager import (
+            _get_plugin_registry_manager,
+        )
+
+        _get_plugin_registry_manager().invalidate()
+        self._plugin_commands_cache = None
+        await self._reload_config()
 
     async def _install_lean(self) -> None:
         current = list(self.agent_loop.base_config.installed_agents)
@@ -1314,6 +1440,12 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(QuestionApp).focus()
                 case BottomApp.SessionPicker:
                     self.query_one(SessionPickerApp).focus()
+                case BottomApp.PluginPicker:
+                    from vibe.cli.textual_ui.widgets.plugin_picker import (
+                        PluginPickerApp,
+                    )
+
+                    self.query_one(PluginPickerApp).focus()
                 case app:
                     assert_never(app)
         except Exception:
@@ -1349,6 +1481,16 @@ class VibeApp(App):  # noqa: PLR0904
         try:
             session_picker = self.query_one(SessionPickerApp)
             session_picker.post_message(SessionPickerApp.Cancelled())
+        except Exception:
+            pass
+        self._last_escape_time = None
+
+    def _handle_plugin_picker_app_escape(self) -> None:
+        from vibe.cli.textual_ui.widgets.plugin_picker import PluginPickerApp
+
+        try:
+            plugin_picker = self.query_one(PluginPickerApp)
+            plugin_picker.post_message(PluginPickerApp.Cancelled())
         except Exception:
             pass
         self._last_escape_time = None
@@ -1395,6 +1537,10 @@ class VibeApp(App):  # noqa: PLR0904
 
         if self._current_bottom_app == BottomApp.SessionPicker:
             self._handle_session_picker_app_escape()
+            return
+
+        if self._current_bottom_app == BottomApp.PluginPicker:
+            self._handle_plugin_picker_app_escape()
             return
 
         if (

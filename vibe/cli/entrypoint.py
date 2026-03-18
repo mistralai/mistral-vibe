@@ -83,6 +83,13 @@ def parse_arguments() -> argparse.Namespace:
         metavar="DIR",
         help="Change to this directory before running",
     )
+    parser.add_argument(
+        "--plugin-dir",
+        action="append",
+        type=Path,
+        metavar="DIR",
+        help="Load plugin from local directory (can be specified multiple times)",
+    )
 
     # Feature flag for teleport, not exposed to the user yet
     parser.add_argument("--teleport", action="store_true", help=argparse.SUPPRESS)
@@ -138,6 +145,10 @@ def check_and_resolve_trusted_folder() -> None:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "plugin":
+        _run_plugin_command()
+        return
+
     args = parse_arguments()
 
     if args.workdir:
@@ -154,9 +165,42 @@ def main() -> None:
         check_and_resolve_trusted_folder()
     init_harness_files_manager("user", "project")
 
+    if args.plugin_dir:
+        from vibe.core.config.harness_files._harness_manager import (
+            _get_plugin_registry_manager,
+        )
+
+        registry = _get_plugin_registry_manager()
+        for plugin_path in args.plugin_dir:
+            registry.add_dev_plugin(plugin_path.expanduser().resolve())
+
     from vibe.cli.cli import run_cli
 
     run_cli(args)
+
+
+def _run_plugin_command() -> None:
+    # Process --workdir if present before the "plugin" subcommand
+    workdir_idx = None
+    for i, arg in enumerate(sys.argv):
+        if arg == "--workdir" and i + 1 < len(sys.argv):
+            workdir_idx = i
+            break
+    if workdir_idx is not None:
+        workdir = Path(sys.argv[workdir_idx + 1]).expanduser().resolve()
+        if workdir.is_dir():
+            os.chdir(workdir)
+
+    check_and_resolve_trusted_folder()
+    init_harness_files_manager("user", "project")
+    from vibe.core.plugins.cli import build_plugin_parser, handle_plugin_command
+
+    parser = build_plugin_parser()
+    args = parser.parse_args(sys.argv[2:])
+    if not args.plugin_command:
+        parser.print_help()
+        return
+    handle_plugin_command(args)
 
 
 if __name__ == "__main__":

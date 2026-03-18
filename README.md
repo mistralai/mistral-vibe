@@ -69,11 +69,13 @@ pip install mistral-vibe
 - [Voice Mode](#voice-mode)
 - [Slash Commands](#slash-commands)
   - [Built-in Slash Commands](#built-in-slash-commands)
+  - [Plugin Management in Chat](#plugin-management-in-chat)
   - [Custom Slash Commands via Skills](#custom-slash-commands-via-skills)
 - [Skills System](#skills-system)
   - [Creating Skills](#creating-skills)
   - [Skill Discovery](#skill-discovery)
   - [Managing Skills](#managing-skills)
+- [Plugins](#plugins)
 - [Configuration](#configuration)
   - [Configuration File Location](#configuration-file-location)
   - [API Key Configuration](#api-key-configuration)
@@ -100,6 +102,8 @@ pip install mistral-vibe
   - Ask interactive questions to gather user input (`ask_user_question`).
   - Delegate tasks to subagents for parallel work (`task`).
 - **Project-Aware Context**: Vibe automatically scans your project's file structure and Git status to provide relevant context to the agent, improving its understanding of your codebase.
+- **Plugin System**: Install reusable bundles of skills, agents, tools, slash commands, and optional MCP server definitions.
+  - Plugin manifests can be defined in either `plugin.toml` or `plugin.json`.
 - **Advanced CLI Experience**: Built with modern libraries for a smooth and efficient workflow.
   - Autocompletion for slash commands (`/`) and file paths (`@`).
   - Persistent command history.
@@ -300,6 +304,22 @@ Vibe provides several built-in slash commands. Use slash commands by typing them
 > /help
 ```
 
+### Plugin Management in Chat
+
+Plugins add their own interactive workflow inside the chat UI:
+
+- `/plugin` and `/plugins` open the installed-plugin picker so you can change a plugin's enabled state without leaving the session.
+- `/reload-plugins` reloads plugin-discovered components after you install, edit, or toggle a plugin.
+- Enabled plugin commands appear in slash-command completion using the form `/plugin-name:command-name`.
+
+When you toggle a plugin in the picker, use `/reload-plugins` to refresh plugin-provided skills, tools, agents, and MCP servers for the current session.
+
+Example:
+
+```
+> /my-plugin:review
+```
+
 ### Custom Slash Commands via Skills
 
 You can define your own slash commands through the skills system. Skills are reusable components that extend Vibe's functionality.
@@ -320,11 +340,11 @@ user-invocable: true
 ---
 ```
 
-Custom slash commands appear in the autocompletion menu alongside built-in commands.
+Custom slash commands appear in the autocompletion menu alongside built-in commands and enabled plugin commands.
 
 ## Skills System
 
-Vibe's skills system allows you to extend functionality through reusable components. Skills can add new tools, slash commands, and specialized behaviors.
+Vibe's skills system allows you to extend functionality through reusable components. Skills can add new tools, slash commands, and specialized behaviors. Skills can be installed directly from the standard skill locations or packaged inside plugins for distribution.
 
 Vibe follows the [Agent Skills specification](https://agentskills.io/specification) for skill format and structure.
 
@@ -377,6 +397,26 @@ disabled_skills = ["experimental-*"]
 
 Skills support the same pattern matching as tools (exact names, glob patterns, and regex).
 
+## Plugins
+
+Plugins extend Vibe with installable bundles of skills, agents, tools, markdown-backed commands, and optional MCP server definitions.
+
+```bash
+# Add a marketplace (one-time setup)
+vibe plugin marketplace add anthropics/claude-code
+
+# Search for plugins
+vibe plugin search security
+
+# Install a plugin by name
+vibe plugin install security-guidance
+
+# List installed plugins
+vibe plugin list
+```
+
+For complete documentation on plugin management, marketplace setup, plugin development, and cross-platform compatibility, see the [Plugin & Marketplace Guide](docs/plugin-marketplace.md).
+
 ## Configuration
 
 ### Configuration File Location
@@ -425,6 +465,8 @@ This will load the prompt from `~/.vibe/prompts/my_custom_prompt.md`.
 ### Custom Agent Configurations
 
 You can create custom agent configurations for specific use cases (e.g., red-teaming, specialized tasks) by adding agent-specific TOML files in the `~/.vibe/agents/` directory.
+
+You can also install agent configurations through plugins, which lets you distribute agents alongside related skills, tools, and commands.
 
 To use a custom agent, run Vibe with the `--agent` flag:
 
@@ -482,6 +524,8 @@ Notes:
 ### MCP Server Configuration
 
 You can configure MCP (Model Context Protocol) servers to extend Vibe's capabilities. Add MCP server configurations under the `mcp_servers` section:
+
+Plugins can also contribute MCP servers through manifest `mcp_servers` entries or an optional `.mcp.json` file at the plugin root. Plugin-defined MCP servers are merged with the servers from your configuration.
 
 ```toml
 # Example MCP server configurations
@@ -618,6 +662,7 @@ This affects where Vibe looks for:
 
 - `config.toml` - Main configuration
 - `.env` - API keys
+- `plugins/` - User-scope installed plugins and `registry.toml`
 - `agents/` - Custom agent configurations
 - `prompts/` - Custom system prompts
 - `tools/` - Custom tools

@@ -92,6 +92,16 @@ class CommandRegistry:
                 description="Uninstall the Lean 4 agent",
                 handler="_uninstall_lean",
             ),
+            "reload-plugins": Command(
+                aliases=frozenset(["/reload-plugins"]),
+                description="Reload all plugin components",
+                handler="_reload_plugins",
+            ),
+            "plugin": Command(
+                aliases=frozenset(["/plugin"]),
+                description="Browse and manage installed plugins",
+                handler="_show_plugin_picker",
+            ),
         }
 
         for command in excluded_commands:

@@ -93,6 +93,7 @@ class ToolManager:
         mgr = get_harness_files_manager()
         paths.extend(mgr.project_tools_dirs)
         paths.extend(mgr.user_tools_dirs)
+        paths.extend(mgr.plugin_tool_dirs)
 
         unique: list[Path] = []
         seen: set[Path] = set()
@@ -195,11 +196,19 @@ class ToolManager:
         return runtime_available
 
     def _integrate_mcp(self) -> None:
-        if not self._config.mcp_servers:
+        from pydantic import TypeAdapter
+
+        from vibe.core.config._settings import MCPServer
+
+        mgr = get_harness_files_manager()
+        adapter = TypeAdapter(MCPServer)
+        plugin_mcp = [adapter.validate_python(s) for s in mgr.plugin_mcp_servers]
+        all_mcp = list(self._config.mcp_servers) + plugin_mcp
+        if not all_mcp:
             return
 
         try:
-            mcp_tools = self._mcp_registry.get_tools(self._config.mcp_servers)
+            mcp_tools = self._mcp_registry.get_tools(all_mcp)
         except Exception as exc:
             logger.warning("MCP integration failed: %s", exc)
             return

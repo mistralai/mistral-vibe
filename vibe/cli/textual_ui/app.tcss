@@ -1083,3 +1083,36 @@ ContextProgress {
     color: ansi_bright_black;
     margin-top: 1;
 }
+
+#pluginpicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
+#pluginpicker-content {
+    width: 100%;
+    height: auto;
+}
+
+#pluginpicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
+}
+
+#pluginpicker-options:focus {
+    border: none;
+}
+
+.pluginpicker-help {
+    width: 100%;
+    height: auto;
+    color: ansi_bright_black;
+    margin-top: 1;
+}

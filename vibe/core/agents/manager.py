@@ -96,6 +96,7 @@ class AgentManager:
         mgr = get_harness_files_manager()
         paths.extend(mgr.project_agents_dirs)
         paths.extend(mgr.user_agents_dirs)
+        paths.extend(mgr.plugin_agent_dirs)
         unique: list[Path] = []
         for p in paths:
             rp = p.resolve()
@@ -109,8 +110,10 @@ class AgentManager:
         for base in self._search_paths:
             if not base.is_dir():
                 continue
-            for agent_file in base.glob("*.toml"):
+            for agent_file in sorted(base.iterdir()):
                 if not agent_file.is_file():
+                    continue
+                if agent_file.suffix not in {".toml", ".md"}:
                     continue
                 if (agent := self._try_load_agent(agent_file)) is not None:
                     if agent.name in BUILTIN_AGENTS:
@@ -130,7 +133,13 @@ class AgentManager:
 
     def _try_load_agent(self, agent_file: Path) -> AgentProfile | None:
         try:
-            agent = AgentProfile.from_toml(agent_file)
+            match agent_file.suffix:
+                case ".toml":
+                    agent = AgentProfile.from_toml(agent_file)
+                case ".md":
+                    agent = AgentProfile.from_md(agent_file)
+                case _:
+                    return None
             agent.apply_to_config(self._config)
             return agent
         except Exception as e:

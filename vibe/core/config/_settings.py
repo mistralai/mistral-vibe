@@ -22,6 +22,7 @@ import tomli_w
 
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
+from vibe.core.plugins.models import MarketplaceConfig
 from vibe.core.prompts import SystemPrompt
 from vibe.core.tools.base import BaseToolConfig
 
@@ -342,6 +343,7 @@ class VibeConfig(BaseSettings):
     auto_approve: bool = False
     enable_telemetry: bool = True
     system_prompt_id: str = "cli"
+    custom_system_prompt: str | None = Field(default=None, exclude=True)
     include_commit_signature: bool = True
     include_model_info: bool = True
     include_project_context: bool = True
@@ -455,6 +457,9 @@ class VibeConfig(BaseSettings):
             " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
+    plugin_marketplaces: list[MarketplaceConfig] = Field(
+        default_factory=list, description="List of plugin marketplace repositories."
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"
@@ -470,6 +475,8 @@ class VibeConfig(BaseSettings):
 
     @property
     def system_prompt(self) -> str:
+        if self.custom_system_prompt is not None:
+            return self.custom_system_prompt
         try:
             return SystemPrompt[self.system_prompt_id.upper()].read()
         except KeyError:
@@ -675,6 +682,7 @@ class VibeConfig(BaseSettings):
                         "transcribe_providers",
                         "transcribe_models",
                         "installed_agents",
+                        "plugin_marketplaces",
                     }:
                         target[key] = value
                     else:

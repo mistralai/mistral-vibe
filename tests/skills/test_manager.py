@@ -98,6 +98,23 @@ class TestSkillManagerDiscovery:
         assert len(skills) == 1
         assert "valid-skill" in skills
 
+    def test_discovers_skill_when_skill_md_is_directly_in_search_dir(
+        self, skills_dir: Path
+    ) -> None:
+        """When a skill path points directly to a skill dir (contains SKILL.md)."""
+        create_skill(skills_dir, "my-skill", "Direct skill")
+        skill_dir = skills_dir / "my-skill"
+
+        config = build_test_vibe_config(
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skill_dir],  # points directly to the skill dir
+        )
+        manager = SkillManager(lambda: config)
+
+        assert "my-skill" in manager.available_skills
+        assert manager.available_skills["my-skill"].description == "Direct skill"
+
 
 class TestSkillManagerParsing:
     def test_parses_all_skill_fields(self, skills_dir: Path) -> None:

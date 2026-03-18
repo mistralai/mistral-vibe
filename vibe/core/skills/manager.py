@@ -58,6 +58,7 @@ class SkillManager:
         mgr = get_harness_files_manager()
         paths.extend(mgr.project_skills_dirs)
         paths.extend(mgr.user_skills_dirs)
+        paths.extend(mgr.plugin_skill_dirs)
 
         unique: list[Path] = []
         for p in paths:
@@ -86,6 +87,13 @@ class SkillManager:
 
     def _discover_skills_in_dir(self, base: Path) -> dict[str, SkillInfo]:
         skills: dict[str, SkillInfo] = {}
+        # If the directory itself contains SKILL.md, treat it as a single skill
+        # (supports manifests that point directly to a skill directory).
+        direct = base / "SKILL.md"
+        if direct.is_file():
+            if (skill_info := self._try_load_skill(direct)) is not None:
+                skills[skill_info.name] = skill_info
+            return skills
         for skill_dir in base.iterdir():
             if not skill_dir.is_dir():
                 continue
