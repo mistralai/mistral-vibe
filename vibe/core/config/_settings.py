@@ -482,7 +482,7 @@ class VibeConfig(BaseSettings):
                 ".md"
             )
             if custom_sp_path.is_file():
-                return custom_sp_path.read_text()
+                return custom_sp_path.read_text(encoding="utf-8")
 
         raise MissingPromptFileError(
             self.system_prompt_id, *(str(d) for d in prompt_dirs)
