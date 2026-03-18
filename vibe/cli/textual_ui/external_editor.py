@@ -24,7 +24,7 @@ class ExternalEditor:
             parts = shlex.split(editor)
             subprocess.run([*parts, filepath], check=True)
 
-            content = Path(filepath).read_text().rstrip()
+            content = Path(filepath).read_text(encoding="utf-8").rstrip()
             return content if content != initial_content else None
         except (OSError, subprocess.CalledProcessError):
             return

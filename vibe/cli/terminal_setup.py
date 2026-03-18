@@ -189,7 +189,7 @@ def _setup_vscode_like_terminal(terminal: Terminal) -> SetupResult:
 
 def _read_existing_keybindings(keybindings_path: Path) -> list[dict[str, Any]]:
     if keybindings_path.exists():
-        content = keybindings_path.read_text()
+        content = keybindings_path.read_text(encoding="utf-8")
         return _parse_keybindings(content)
     keybindings_path.parent.mkdir(parents=True, exist_ok=True)
     return []
