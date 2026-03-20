@@ -33,7 +33,6 @@ class LoadingWidget(SpinnerMixin, Static):
 
     EASTER_EGGS: ClassVar[list[str]] = [
         "Eating a chocolatine",
-        "Eating a pain au chocolat",
         "Réflexion",
         "Analyse",
         "Contemplation",
