@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import tomllib
 
@@ -84,6 +85,63 @@ class TestResolveConfigFile:
     def test_user_only_returns_global_config(self) -> None:
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.config_file == VIBE_HOME.path / "config.toml"
+
+
+class TestConfigMerging:
+    def test_project_config_overlays_global_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path / "home"))
+        home = Path(os.environ["VIBE_HOME"])
+        home.mkdir(parents=True)
+        with (home / "config.toml").open("wb") as f:
+            tomli_w.dump(
+                {
+                    "active_model": "devstral-2",
+                    "providers": [
+                        {
+                            "name": "mistral",
+                            "api_base": "https://api.mistral.ai/v1",
+                            "api_key_env_var": "MISTRAL_VIBE_KEY",
+                            "api_style": "openai",
+                            "backend": "mistral",
+                            "reasoning_field_name": "reasoning_content",
+                        }
+                    ],
+                },
+                f,
+            )
+
+        monkeypatch.chdir(tmp_path)
+        local_config_dir = tmp_path / ".vibe"
+        local_config_dir.mkdir()
+        with (local_config_dir / "config.toml").open("wb") as f:
+            tomli_w.dump(
+                {
+                    "skill_paths": [".vibe/skills"],
+                    "mcp_servers": [
+                        {
+                            "name": "memory",
+                            "transport": "stdio",
+                            "command": "vibe-rag",
+                            "args": ["serve"],
+                        }
+                    ],
+                },
+                f,
+            )
+
+        monkeypatch.setenv("MISTRAL_VIBE_KEY", "test-vibe-key")
+        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user", "project")
+        cfg = VibeConfig.load()
+
+        provider = cfg.get_provider_for_model(cfg.get_active_model())
+        assert provider.api_key_env_var == "MISTRAL_VIBE_KEY"
+        assert cfg.skill_paths == [Path(".vibe/skills").expanduser().resolve()]
+        assert cfg.mcp_servers[0].name == "memory"
 
 
 class TestMigrateRemovesFindFromBashAllowlist:

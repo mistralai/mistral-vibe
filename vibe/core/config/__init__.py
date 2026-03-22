@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from vibe.core.config._settings import (
+    BackgroundMCPHookConfig,
     DEFAULT_MISTRAL_API_ENV_KEY,
     DEFAULT_MODELS,
     DEFAULT_PROVIDERS,
@@ -17,6 +18,7 @@ from vibe.core.config._settings import (
     ProjectContextConfig,
     ProviderConfig,
     SessionLoggingConfig,
+    SessionMemoryHookConfig,
     TomlFileSettingsSource,
     TranscribeClient,
     TranscribeModelConfig,
@@ -27,6 +29,7 @@ from vibe.core.config._settings import (
 
 __all__ = [
     "DEFAULT_MISTRAL_API_ENV_KEY",
+    "BackgroundMCPHookConfig",
     "DEFAULT_MODELS",
     "DEFAULT_PROVIDERS",
     "DEFAULT_TRANSCRIBE_MODELS",
@@ -42,6 +45,7 @@ __all__ = [
     "ProjectContextConfig",
     "ProviderConfig",
     "SessionLoggingConfig",
+    "SessionMemoryHookConfig",
     "TomlFileSettingsSource",
     "TranscribeClient",
     "TranscribeModelConfig",
