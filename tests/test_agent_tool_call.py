@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 import json
 
 from pydantic import BaseModel
@@ -13,7 +14,13 @@ from tests.stubs.fake_tool import FakeTool
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import VibeConfig
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
+from vibe.core.tools.base import (
+    BaseTool,
+    BaseToolConfig,
+    BaseToolState,
+    InvokeContext,
+    ToolPermission,
+)
 from vibe.core.tools.builtins.todo import TodoItem
 from vibe.core.types import (
     ApprovalCallback,
@@ -32,6 +39,40 @@ from vibe.core.types import (
 
 async def act_and_collect_events(agent_loop: AgentLoop, prompt: str) -> list[BaseEvent]:
     return [ev async for ev in agent_loop.act(prompt)]
+
+
+class BackgroundHookArgs(BaseModel):
+    task: str
+
+
+class BackgroundHookResult(BaseModel):
+    ok: bool = True
+    context: dict[str, object]
+
+
+class BackgroundHookState(BaseToolState):
+    pass
+
+
+class BackgroundHookTool(
+    BaseTool[
+        BackgroundHookArgs, BackgroundHookResult, BaseToolConfig, BackgroundHookState
+    ]
+):
+    @classmethod
+    def get_name(cls) -> str:
+        return "memory_load_session_context"
+
+    async def run(
+        self, args: BackgroundHookArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[BackgroundHookResult, None]:
+        yield BackgroundHookResult(
+            context={
+                "task": args.task,
+                "memories": [{"summary": "Use pgvector memory for durable decisions."}],
+                "code": [{"file_path": "src/example.py"}],
+            }
+        )
 
 
 def make_config(todo_permission: ToolPermission = ToolPermission.ALWAYS) -> VibeConfig:
@@ -118,6 +159,82 @@ async def test_single_tool_call_executes_under_auto_approve(
     assert tool_finished[0]["properties"]["tool_name"] == "todo"
     assert tool_finished[0]["properties"]["status"] == "success"
     assert tool_finished[0]["properties"]["approval_type"] == "always"
+
+
+@pytest.mark.asyncio
+async def test_background_mcp_hook_injects_context_before_first_turn() -> None:
+    backend = FakeBackend([[mock_llm_chunk(content="I can continue from there.")]])
+    config = build_test_vibe_config(
+        background_mcp_hook={
+            "enabled": True,
+            "tool_name": "memory_load_session_context",
+        },
+        include_project_context=False,
+        include_prompt_detail=False,
+    )
+    agent_loop = build_test_agent_loop(config=config, backend=backend)
+    agent_loop.tool_manager._available["memory_load_session_context"] = (
+        BackgroundHookTool
+    )
+
+    events = await act_and_collect_events(agent_loop, "Continue the refactor")
+
+    assert [type(event) for event in events] == [UserMessageEvent, AssistantEvent]
+    first_request = backend.requests_messages[0]
+    user_messages = [message for message in first_request if message.role == Role.user]
+    assert user_messages[0].content == "Continue the refactor"
+    assert any(
+        message.content
+        and "Background session context for the current task." in message.content
+        for message in user_messages
+    )
+    assert any(
+        message.content
+        and '"summary": "Use pgvector memory for durable decisions."' in message.content
+        for message in user_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_background_mcp_hook_runs_only_once_per_session() -> None:
+    backend = FakeBackend([
+        [mock_llm_chunk(content="First response.")],
+        [mock_llm_chunk(content="Second response.")],
+    ])
+    config = build_test_vibe_config(
+        background_mcp_hook={
+            "enabled": True,
+            "tool_name": "memory_load_session_context",
+        },
+        include_project_context=False,
+        include_prompt_detail=False,
+    )
+    agent_loop = build_test_agent_loop(config=config, backend=backend)
+    agent_loop.tool_manager._available["memory_load_session_context"] = (
+        BackgroundHookTool
+    )
+
+    await act_and_collect_events(agent_loop, "First task")
+    await act_and_collect_events(agent_loop, "Second task")
+
+    first_request = backend.requests_messages[0]
+    second_request = backend.requests_messages[1]
+    first_background_messages = [
+        message
+        for message in first_request
+        if message.content
+        and "Background session context for the current task." in message.content
+    ]
+    second_background_messages = [
+        message
+        for message in second_request
+        if message.content
+        and "Background session context for the current task." in message.content
+    ]
+    assert len(first_background_messages) == 1
+    assert len(second_background_messages) == 1
+    assert '"task": "First task"' in second_background_messages[0].content
+    assert '"task": "Second task"' not in second_background_messages[0].content
 
 
 @pytest.mark.asyncio

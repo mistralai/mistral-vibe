@@ -543,6 +543,27 @@ MCP server configurations support additional features:
 - **Environment variables**: Set environment variables for MCP servers
 - **Custom timeouts**: Configure startup and tool execution timeouts
 
+Vibe can also auto-bootstrap context from an MCP tool before the first model turn in
+each session. This is useful for memory systems that return structured prior context,
+such as `vibe-rag`:
+
+```toml
+[[mcp_servers]]
+name = "memory"
+transport = "stdio"
+command = "vibe-rag"
+args = ["serve"]
+env = { "MISTRAL_API_KEY" = "your_mistral_api_key", "DATABASE_URL" = "postgresql://user@localhost/vibe_memory" }
+
+[background_mcp_hook]
+enabled = true
+tool_name = "memory_load_session_context"
+task_arg = "task"
+```
+
+When enabled, Vibe calls the configured tool with the first user task and injects
+the structured response as hidden background context for the session.
+
 Example with environment variables and timeouts:
 
 ```toml

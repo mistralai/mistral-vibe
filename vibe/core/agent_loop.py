@@ -27,6 +27,7 @@ from vibe.core.llm.format import (
     ResolvedToolCall,
 )
 from vibe.core.llm.types import BackendLike
+from vibe.core.logger import logger
 from vibe.core.middleware import (
     CHAT_AGENT_EXIT,
     CHAT_AGENT_REMINDER,
@@ -198,6 +199,7 @@ class AgentLoop:
         self.entrypoint_metadata = entrypoint_metadata
         self.session_id = str(uuid4())
         self._current_user_message_id: str | None = None
+        self._background_hook_consumed = False
 
         self.telemetry_client = TelemetryClient(
             config_getter=lambda: self.config, session_id_getter=lambda: self.session_id
@@ -456,6 +458,8 @@ class AgentLoop:
 
         yield UserMessageEvent(content=user_msg, message_id=user_message.message_id)
 
+        await self._inject_background_mcp_context(user_msg)
+
         try:
             should_break_loop = False
             while not should_break_loop:
@@ -484,6 +488,71 @@ class AgentLoop:
 
         finally:
             await self._save_messages()
+
+    async def _inject_background_mcp_context(self, task: str) -> None:
+        hook = self.config.background_mcp_hook
+        if self._background_hook_consumed or not hook.enabled or not hook.tool_name:
+            return
+
+        try:
+            payload = await self._invoke_background_tool(
+                hook.tool_name, {hook.task_arg: task, **hook.extra_args}
+            )
+        except Exception as exc:
+            logger.warning("Background MCP hook '%s' failed: %s", hook.tool_name, exc)
+            self._background_hook_consumed = True
+            return
+
+        context_json = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, indent=2
+        ).strip()
+        if not context_json:
+            self._background_hook_consumed = True
+            return
+        if len(context_json) > hook.max_chars:
+            context_json = context_json[: hook.max_chars - 1] + "…"
+
+        with self.messages.silent():
+            self.messages.append(
+                LLMMessage(
+                    role=Role.user,
+                    content=hook.inject_prompt.format(context_json=context_json),
+                )
+            )
+        self._background_hook_consumed = True
+
+    async def _invoke_background_tool(
+        self, tool_name: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        tool_instance = self.tool_manager.get(tool_name)
+        result_model = None
+        async for item in tool_instance.invoke(
+            ctx=InvokeContext(
+                tool_call_id=f"background-hook-{uuid4()}",
+                agent_manager=self.agent_manager,
+                session_dir=self.session_logger.session_dir,
+                entrypoint_metadata=self.entrypoint_metadata,
+                approval_callback=None,
+                user_input_callback=self.user_input_callback,
+                sampling_callback=self._sampling_handler,
+                plan_file_path=self._plan_session.plan_file_path,
+                switch_agent_callback=self.switch_agent,
+            ),
+            **payload,
+        ):
+            if isinstance(item, ToolStreamEvent):
+                continue
+            result_model = item
+
+        if result_model is None:
+            raise ToolError(f"Background MCP hook '{tool_name}' did not yield a result")
+
+        result_dict = result_model.model_dump(exclude_none=True)
+        if "structured" in result_dict and isinstance(result_dict["structured"], dict):
+            return result_dict["structured"]
+        if "text" in result_dict and isinstance(result_dict["text"], str):
+            return {"text": result_dict["text"]}
+        return result_dict
 
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
         if self.enable_streaming:
