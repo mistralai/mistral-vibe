@@ -75,6 +75,82 @@ class BackgroundHookTool(
         )
 
 
+class SessionMemoryHookArgs(BaseModel):
+    task: str
+    response: str
+    source_session_id: str
+    source_message_id: str
+    user_message_id: str | None = None
+
+
+class SessionMemoryHookResult(BaseModel):
+    ok: bool = True
+    stored: bool = True
+
+
+class SessionMemoryHookState(BaseToolState):
+    pass
+
+
+class SessionMemoryHookTool(
+    BaseTool[
+        SessionMemoryHookArgs,
+        SessionMemoryHookResult,
+        BaseToolConfig,
+        SessionMemoryHookState,
+    ]
+):
+    invocations: list[dict[str, str | None]] = []
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "memory_save_session_memory"
+
+    async def run(
+        self, args: SessionMemoryHookArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[SessionMemoryHookResult, None]:
+        type(self).invocations.append(args.model_dump())
+        yield SessionMemoryHookResult()
+
+
+class SessionSummaryHookArgs(BaseModel):
+    task: str
+    turns: list[dict[str, str]]
+    source_session_id: str
+    source_message_id: str
+    user_message_id: str | None = None
+
+
+class SessionSummaryHookResult(BaseModel):
+    ok: bool = True
+    stored: bool = True
+
+
+class SessionSummaryHookState(BaseToolState):
+    pass
+
+
+class SessionSummaryHookTool(
+    BaseTool[
+        SessionSummaryHookArgs,
+        SessionSummaryHookResult,
+        BaseToolConfig,
+        SessionSummaryHookState,
+    ]
+):
+    invocations: list[dict[str, object]] = []
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "memory_save_session_summary"
+
+    async def run(
+        self, args: SessionSummaryHookArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[SessionSummaryHookResult, None]:
+        type(self).invocations.append(args.model_dump())
+        yield SessionSummaryHookResult()
+
+
 def make_config(todo_permission: ToolPermission = ToolPermission.ALWAYS) -> VibeConfig:
     return build_test_vibe_config(
         enabled_tools=["todo"],
@@ -235,6 +311,51 @@ async def test_background_mcp_hook_runs_only_once_per_session() -> None:
     assert len(second_background_messages) == 1
     assert '"task": "First task"' in second_background_messages[0].content
     assert '"task": "Second task"' not in second_background_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_session_memory_hook_stores_completed_assistant_turn() -> None:
+    SessionMemoryHookTool.invocations.clear()
+    SessionSummaryHookTool.invocations.clear()
+    backend = FakeBackend([[mock_llm_chunk(content="The gateway owns auth validation.")]])
+    config = build_test_vibe_config(
+        session_memory_hook={
+            "enabled": True,
+            "tool_name": "memory_save_session_memory",
+            "summary_tool_name": "memory_save_session_summary",
+        },
+        include_project_context=False,
+        include_prompt_detail=False,
+    )
+    agent_loop = build_test_agent_loop(config=config, backend=backend)
+    agent_loop.tool_manager._available["memory_save_session_memory"] = (
+        SessionMemoryHookTool
+    )
+    agent_loop.tool_manager._available["memory_save_session_summary"] = (
+        SessionSummaryHookTool
+    )
+
+    events = await act_and_collect_events(agent_loop, "Figure out auth ownership")
+
+    assert [type(event) for event in events] == [UserMessageEvent, AssistantEvent]
+    assert len(SessionMemoryHookTool.invocations) == 1
+    invocation = SessionMemoryHookTool.invocations[0]
+    assert invocation["task"] == "Figure out auth ownership"
+    assert invocation["response"] == "The gateway owns auth validation."
+    assert invocation["source_session_id"] == agent_loop.session_id
+    assert invocation["source_message_id"] is not None
+    assert invocation["user_message_id"] == events[0].message_id
+    assert len(SessionSummaryHookTool.invocations) == 1
+    summary_invocation = SessionSummaryHookTool.invocations[0]
+    assert summary_invocation["task"] == "Figure out auth ownership"
+    assert summary_invocation["source_session_id"] == agent_loop.session_id
+    assert summary_invocation["source_message_id"] == invocation["source_message_id"]
+    assert summary_invocation["turns"] == [
+        {
+            "user": "Figure out auth ownership",
+            "assistant": "The gateway owns auth validation.",
+        }
+    ]
 
 
 @pytest.mark.asyncio

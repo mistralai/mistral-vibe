@@ -66,19 +66,46 @@ class TomlFileSettingsSource(PydanticBaseSettingsSource):
         super().__init__(settings_cls)
         self.toml_data = self._load_toml()
 
-    def _load_toml(self) -> dict[str, Any]:
-        file = get_harness_files_manager().config_file
-        if file is None:
-            return {}
+    @staticmethod
+    def _read_toml(path: Path) -> dict[str, Any]:
         try:
-            with file.open("rb") as f:
+            with path.open("rb") as f:
                 return tomllib.load(f)
         except FileNotFoundError:
             return {}
         except tomllib.TOMLDecodeError as e:
-            raise RuntimeError(f"Invalid TOML in {file}: {e}") from e
+            raise RuntimeError(f"Invalid TOML in {path}: {e}") from e
         except OSError as e:
-            raise RuntimeError(f"Cannot read {file}: {e}") from e
+            raise RuntimeError(f"Cannot read {path}: {e}") from e
+
+    @staticmethod
+    def _merge_toml_dicts(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        for key, value in overlay.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = TomlFileSettingsSource._merge_toml_dicts(
+                    merged[key], value
+                )
+            else:
+                merged[key] = value
+        return merged
+
+    def _load_toml(self) -> dict[str, Any]:
+        mgr = get_harness_files_manager()
+        user_data = (
+            self._read_toml(mgr.user_config_file) if "user" in mgr.sources else {}
+        )
+
+        workdir = mgr.trusted_workdir
+        if workdir is None:
+            return user_data
+
+        project_data = self._read_toml(workdir / ".vibe" / "config.toml")
+        if not project_data:
+            return user_data
+        if not user_data:
+            return project_data
+        return self._merge_toml_dicts(user_data, project_data)
 
     def get_field_value(
         self, field: FieldInfo, field_name: str
@@ -135,6 +162,39 @@ class BackgroundMCPHookConfig(BaseSettings):
     @field_validator("tool_name", mode="before")
     @classmethod
     def _normalize_tool_name(cls, v: Any) -> str:
+        return v.strip() if isinstance(v, str) else ""
+
+
+class SessionMemoryHookConfig(BaseSettings):
+    enabled: bool = False
+    tool_name: str = ""
+    summary_tool_name: str = ""
+    task_arg: str = "task"
+    response_arg: str = "response"
+    source_session_id_arg: str = "source_session_id"
+    source_message_id_arg: str = "source_message_id"
+    user_message_id_arg: str = "user_message_id"
+    turns_arg: str = "turns"
+    extra_args: dict[str, Any] = Field(default_factory=dict)
+    max_response_chars: int = Field(
+        default=8_000,
+        gt=0,
+        description="Maximum assistant response size sent to the session memory tool.",
+    )
+    max_summary_turns: int = Field(
+        default=8,
+        gt=0,
+        description="Maximum number of recent user/assistant turns included in session summaries.",
+    )
+
+    @field_validator("tool_name", mode="before")
+    @classmethod
+    def _normalize_tool_name(cls, v: Any) -> str:
+        return v.strip() if isinstance(v, str) else ""
+
+    @field_validator("summary_tool_name", mode="before")
+    @classmethod
+    def _normalize_summary_tool_name(cls, v: Any) -> str:
         return v.strip() if isinstance(v, str) else ""
 
 
@@ -401,6 +461,9 @@ class VibeConfig(BaseSettings):
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
     background_mcp_hook: BackgroundMCPHookConfig = Field(
         default_factory=BackgroundMCPHookConfig
+    )
+    session_memory_hook: SessionMemoryHookConfig = Field(
+        default_factory=SessionMemoryHookConfig
     )
     tools: dict[str, BaseToolConfig] = Field(default_factory=dict)
     tool_paths: list[Path] = Field(

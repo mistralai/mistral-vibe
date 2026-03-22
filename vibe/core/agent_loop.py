@@ -200,6 +200,7 @@ class AgentLoop:
         self.session_id = str(uuid4())
         self._current_user_message_id: str | None = None
         self._background_hook_consumed = False
+        self._stored_session_memory_message_ids: set[str] = set()
 
         self.telemetry_client = TelemetryClient(
             config_getter=lambda: self.config, session_id_getter=lambda: self.session_id
@@ -486,6 +487,9 @@ class AgentLoop:
                 if user_cancelled:
                     return
 
+                if should_break_loop and last_message.role == Role.assistant:
+                    await self._store_session_memory(user_msg, last_message)
+
         finally:
             await self._save_messages()
 
@@ -553,6 +557,88 @@ class AgentLoop:
         if "text" in result_dict and isinstance(result_dict["text"], str):
             return {"text": result_dict["text"]}
         return result_dict
+
+    def _recent_session_turns(self, limit: int) -> list[dict[str, str]]:
+        background_prefix = self.config.background_mcp_hook.inject_prompt.split(
+            "{context_json}", 1
+        )[0].strip()
+        turns: list[dict[str, str]] = []
+        current_user: str | None = None
+        for message in self.messages:
+            if message.role == Role.user:
+                content = (message.content or "").strip()
+                if not content:
+                    continue
+                if background_prefix and content.startswith(background_prefix):
+                    continue
+                current_user = content
+                continue
+            if message.role == Role.assistant and current_user is not None:
+                assistant = (message.content or "").strip()
+                if assistant:
+                    turns.append({"user": current_user, "assistant": assistant})
+                current_user = None
+
+        if limit <= 0:
+            return turns
+        return turns[-limit:]
+
+    async def _store_session_memory(
+        self, task: str, assistant_message: LLMMessage
+    ) -> None:
+        hook = self.config.session_memory_hook
+        response = (assistant_message.content or "").strip()
+        message_id = assistant_message.message_id
+        if (
+            not hook.enabled
+            or not hook.tool_name
+            or not response
+            or not message_id
+            or message_id in self._stored_session_memory_message_ids
+        ):
+            return
+
+        if len(response) > hook.max_response_chars:
+            response = response[: hook.max_response_chars - 1] + "…"
+
+        payload = {
+            hook.task_arg: task,
+            hook.response_arg: response,
+            hook.source_session_id_arg: self.session_id,
+            hook.source_message_id_arg: message_id,
+            **hook.extra_args,
+        }
+        if self._current_user_message_id:
+            payload[hook.user_message_id_arg] = self._current_user_message_id
+
+        try:
+            await self._invoke_background_tool(hook.tool_name, payload)
+        except Exception as exc:
+            logger.warning("Session memory hook '%s' failed: %s", hook.tool_name, exc)
+        if hook.summary_tool_name:
+            summary_payload = {
+                hook.task_arg: task,
+                hook.turns_arg: self._recent_session_turns(hook.max_summary_turns),
+                hook.source_session_id_arg: self.session_id,
+                hook.source_message_id_arg: message_id,
+                **hook.extra_args,
+            }
+            if self._current_user_message_id:
+                summary_payload[hook.user_message_id_arg] = (
+                    self._current_user_message_id
+                )
+            try:
+                await self._invoke_background_tool(
+                    hook.summary_tool_name, summary_payload
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Session summary hook '%s' failed: %s",
+                    hook.summary_tool_name,
+                    exc,
+                )
+
+        self._stored_session_memory_message_ids.add(message_id)
 
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
         if self.enable_streaming:
