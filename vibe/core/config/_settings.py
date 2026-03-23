@@ -286,6 +286,11 @@ DEFAULT_PROVIDERS = [
         api_base="http://127.0.0.1:8080/v1",
         api_key_env_var="",  # NOTE: if you wish to use --api-key in llama-server, change this value
     ),
+    ProviderConfig(
+        name="minimax",
+        api_base="https://api.minimax.io/v1",
+        api_key_env_var="MINIMAX_API_KEY",
+    ),
 ]
 
 DEFAULT_MODELS = [
@@ -309,6 +314,20 @@ DEFAULT_MODELS = [
         alias="local",
         input_price=0.0,
         output_price=0.0,
+    ),
+    ModelConfig(
+        name="MiniMax-M2.7",
+        provider="minimax",
+        alias="minimax-m2.7",
+        input_price=0.15,
+        output_price=0.45,
+    ),
+    ModelConfig(
+        name="MiniMax-M2.7-highspeed",
+        provider="minimax",
+        alias="minimax-m2.7-highspeed",
+        input_price=0.05,
+        output_price=0.15,
     ),
 ]
 

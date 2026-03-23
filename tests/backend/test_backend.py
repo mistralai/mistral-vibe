@@ -27,6 +27,12 @@ from tests.backend.data.fireworks import (
     STREAMED_TOOL_CONVERSATION_PARAMS as FIREWORKS_STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS as FIREWORKS_TOOL_CONVERSATION_PARAMS,
 )
+from tests.backend.data.minimax import (
+    SIMPLE_CONVERSATION_PARAMS as MINIMAX_SIMPLE_CONVERSATION_PARAMS,
+    STREAMED_SIMPLE_CONVERSATION_PARAMS as MINIMAX_STREAMED_SIMPLE_CONVERSATION_PARAMS,
+    STREAMED_TOOL_CONVERSATION_PARAMS as MINIMAX_STREAMED_TOOL_CONVERSATION_PARAMS,
+    TOOL_CONVERSATION_PARAMS as MINIMAX_TOOL_CONVERSATION_PARAMS,
+)
 from tests.backend.data.mistral import (
     SIMPLE_CONVERSATION_PARAMS as MISTRAL_SIMPLE_CONVERSATION_PARAMS,
     STREAMED_SIMPLE_CONVERSATION_PARAMS as MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS,
@@ -60,6 +66,8 @@ class TestBackend:
         [
             *FIREWORKS_SIMPLE_CONVERSATION_PARAMS,
             *FIREWORKS_TOOL_CONVERSATION_PARAMS,
+            *MINIMAX_SIMPLE_CONVERSATION_PARAMS,
+            *MINIMAX_TOOL_CONVERSATION_PARAMS,
             *MISTRAL_SIMPLE_CONVERSATION_PARAMS,
             *MISTRAL_TOOL_CONVERSATION_PARAMS,
         ],
@@ -128,6 +136,8 @@ class TestBackend:
         [
             *FIREWORKS_STREAMED_SIMPLE_CONVERSATION_PARAMS,
             *FIREWORKS_STREAMED_TOOL_CONVERSATION_PARAMS,
+            *MINIMAX_STREAMED_SIMPLE_CONVERSATION_PARAMS,
+            *MINIMAX_STREAMED_TOOL_CONVERSATION_PARAMS,
             *MISTRAL_STREAMED_SIMPLE_CONVERSATION_PARAMS,
             *MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
         ],
@@ -217,6 +227,16 @@ class TestBackend:
                 httpx.Response(status_code=429, text="Rate Limit Exceeded"),
             ),
             (
+                "https://api.minimax.io",
+                GenericBackend,
+                httpx.Response(status_code=500, text="Internal Server Error"),
+            ),
+            (
+                "https://api.minimax.io",
+                GenericBackend,
+                httpx.Response(status_code=429, text="Rate Limit Exceeded"),
+            ),
+            (
                 "https://api.mistral.ai",
                 MistralBackend,
                 httpx.Response(status_code=500, text="Internal Server Error"),
@@ -268,6 +288,7 @@ class TestBackend:
         "base_url,provider_name,expected_stream_options",
         [
             ("https://api.fireworks.ai", "fireworks", {"include_usage": True}),
+            ("https://api.minimax.io", "minimax", {"include_usage": True}),
             (
                 "https://api.mistral.ai",
                 "mistral",
