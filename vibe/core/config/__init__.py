@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from vibe.core.config._settings import (
-    BackgroundMCPHookConfig,
-    CommandHookConfig,
     DEFAULT_MISTRAL_API_ENV_KEY,
     DEFAULT_MODELS,
     DEFAULT_PROVIDERS,
     DEFAULT_TRANSCRIBE_MODELS,
     DEFAULT_TRANSCRIBE_PROVIDERS,
     Backend,
+    BackgroundMCPHookConfig,
+    CommandHookConfig,
     MCPHttp,
     MCPServer,
     MCPStdio,
@@ -29,13 +29,13 @@ from vibe.core.config._settings import (
 
 __all__ = [
     "DEFAULT_MISTRAL_API_ENV_KEY",
-    "BackgroundMCPHookConfig",
-    "CommandHookConfig",
     "DEFAULT_MODELS",
     "DEFAULT_PROVIDERS",
     "DEFAULT_TRANSCRIBE_MODELS",
     "DEFAULT_TRANSCRIBE_PROVIDERS",
     "Backend",
+    "BackgroundMCPHookConfig",
+    "CommandHookConfig",
     "MCPHttp",
     "MCPServer",
     "MCPStdio",

@@ -220,22 +220,22 @@ async def test_background_mcp_hook_runs_only_once_per_session() -> None:
 
     first_request = backend.requests_messages[0]
     second_request = backend.requests_messages[1]
-    first_background_messages = [
-        message
+    first_background_contents = [
+        message.content
         for message in first_request
-        if message.content
+        if isinstance(message.content, str)
         and "Background session context for the current task." in message.content
     ]
-    second_background_messages = [
-        message
+    second_background_contents = [
+        message.content
         for message in second_request
-        if message.content
+        if isinstance(message.content, str)
         and "Background session context for the current task." in message.content
     ]
-    assert len(first_background_messages) == 1
-    assert len(second_background_messages) == 1
-    assert '"task": "First task"' in second_background_messages[0].content
-    assert '"task": "Second task"' not in second_background_messages[0].content
+    assert len(first_background_contents) == 1
+    assert len(second_background_contents) == 1
+    assert '"task": "First task"' in second_background_contents[0]
+    assert '"task": "Second task"' not in second_background_contents[0]
 
 
 @pytest.mark.asyncio
