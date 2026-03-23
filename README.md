@@ -555,14 +555,12 @@ command = "vibe-rag"
 args = ["serve"]
 env = { "MISTRAL_API_KEY" = "your_mistral_api_key", "DATABASE_URL" = "postgresql://user@localhost/vibe_memory" }
 
-[background_mcp_hook]
-enabled = true
-tool_name = "memory_load_session_context"
-task_arg = "task"
+[[hooks.SessionStart]]
+command = "vibe-rag hook-session-start --format vibe"
 ```
 
-When enabled, Vibe calls the configured tool with the first user task and injects
-the structured response as hidden background context for the session.
+When enabled, Vibe runs the configured SessionStart hook with the first user task and
+injects the returned context as hidden background context for the session.
 
 Example with environment variables and timeouts:
 

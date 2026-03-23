@@ -114,6 +114,22 @@ class SessionLoggingConfig(BaseSettings):
         return str(Path(v).expanduser().resolve())
 
 
+class CommandHookConfig(BaseModel):
+    command: str = ""
+    timeout_sec: float = Field(
+        default=30.0, gt=0, description="Timeout in seconds for hook execution."
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables to set for the hook process.",
+    )
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _normalize_command(cls, v: Any) -> str:
+        return v.strip() if isinstance(v, str) else ""
+
+
 class BackgroundMCPHookConfig(BaseSettings):
     enabled: bool = False
     tool_name: str = ""
@@ -399,6 +415,7 @@ class VibeConfig(BaseSettings):
 
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
+    hooks: dict[str, list[CommandHookConfig]] = Field(default_factory=dict)
     background_mcp_hook: BackgroundMCPHookConfig = Field(
         default_factory=BackgroundMCPHookConfig
     )

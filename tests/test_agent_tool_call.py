@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 import json
+from pathlib import Path
 
 from pydantic import BaseModel
 import pytest
@@ -182,7 +183,7 @@ async def test_background_mcp_hook_injects_context_before_first_turn() -> None:
     assert [type(event) for event in events] == [UserMessageEvent, AssistantEvent]
     first_request = backend.requests_messages[0]
     user_messages = [message for message in first_request if message.role == Role.user]
-    assert user_messages[0].content == "Continue the refactor"
+    assert user_messages[-1].content == "Continue the refactor"
     assert any(
         message.content
         and "Background session context for the current task." in message.content
@@ -235,6 +236,69 @@ async def test_background_mcp_hook_runs_only_once_per_session() -> None:
     assert len(second_background_messages) == 1
     assert '"task": "First task"' in second_background_messages[0].content
     assert '"task": "Second task"' not in second_background_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_session_start_hook_injects_first_class_context_with_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeBackend([[mock_llm_chunk(content="I can continue from there.")]])
+    config = build_test_vibe_config(
+        hooks={
+            "SessionStart": [
+                {"command": "vibe-rag hook-session-start --format vibe", "timeout_sec": 5}
+            ]
+        },
+        include_project_context=False,
+        include_prompt_detail=False,
+    )
+    agent_loop = build_test_agent_loop(config=config, backend=backend)
+    seen: dict[str, object] = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self, payload: bytes):
+            seen["payload"] = json.loads(payload.decode("utf-8"))
+            response = {
+                "systemMessage": "vibe-rag session bootstrap ready",
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": "vibe-rag | demo | main | clean",
+                },
+            }
+            return json.dumps(response).encode("utf-8"), b""
+
+    async def fake_create_subprocess_shell(*args, **kwargs):
+        seen["command"] = args[0]
+        seen["env"] = kwargs.get("env")
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", fake_create_subprocess_shell)
+
+    events = await act_and_collect_events(agent_loop, "Continue the refactor")
+
+    assert [type(event) for event in events] == [UserMessageEvent, AssistantEvent]
+    first_request = backend.requests_messages[0]
+    user_messages = [message for message in first_request if message.role == Role.user]
+    assert user_messages[-1].content == "Continue the refactor"
+    assert any(
+        message.content and "vibe-rag | demo | main | clean" in message.content
+        for message in user_messages
+    )
+    assert any(
+        message.content and "vibe-rag session bootstrap ready" in message.content
+        for message in user_messages
+    )
+    assert seen["command"] == "vibe-rag hook-session-start --format vibe"
+    assert isinstance(seen["env"], dict)
+    assert seen["payload"] == {
+        "hookEventName": "SessionStart",
+        "source": "startup",
+        "task": "Continue the refactor",
+        "session_id": agent_loop.session_id,
+        "cwd": str(Path.cwd()),
+    }
 
 
 @pytest.mark.asyncio
