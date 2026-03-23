@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from pydantic import ValidationError
@@ -17,8 +19,10 @@ from vibe.core.tools.mcp import (
     _mcp_stderr_capture,
     _parse_call_result,
     _stderr_logger_thread,
+    call_tool_stdio,
     create_mcp_http_proxy_tool_class,
     create_mcp_stdio_proxy_tool_class,
+    list_tools_stdio,
 )
 
 
@@ -186,6 +190,101 @@ class TestMCPStderrCapture:
                 stream.write("\n\n")
             time.sleep(0.05)
             debug_mock.assert_not_called()
+
+
+class _FakeListToolsSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def initialize(self):
+        return None
+
+    async def list_tools(self):
+        return SimpleNamespace(tools=[RemoteTool(name="search")])
+
+
+class _FakeCallToolSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def initialize(self):
+        return None
+
+    async def call_tool(self, tool_name, arguments, read_timeout_seconds=None):
+        return SimpleNamespace(
+            structuredContent={"tool_name": tool_name, "arguments": arguments},
+            content=None,
+        )
+
+
+class TestMCPStdioEnv:
+    @pytest.mark.asyncio
+    async def test_list_tools_stdio_inherits_parent_environment(self):
+        captured: dict[str, str] = {}
+
+        @contextlib.asynccontextmanager
+        async def fake_stdio_client(params, errlog=None):
+            captured.update(params.env)
+            yield (object(), object())
+
+        with (
+            patch.dict(os.environ, {"VIBE_TEST_PARENT": "present"}, clear=True),
+            patch(
+                "vibe.core.tools.mcp.tools.StdioServerParameters",
+                side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+            ),
+            patch("vibe.core.tools.mcp.tools.stdio_client", fake_stdio_client),
+            patch(
+                "vibe.core.tools.mcp.tools.ClientSession",
+                side_effect=lambda *args, **kwargs: _FakeListToolsSession(),
+            ),
+        ):
+            tools = await list_tools_stdio(["python", "-m", "server"])
+
+        assert tools[0].name == "search"
+        assert captured["VIBE_TEST_PARENT"] == "present"
+
+    @pytest.mark.asyncio
+    async def test_call_tool_stdio_overlays_configured_environment(self):
+        captured: dict[str, str] = {}
+
+        @contextlib.asynccontextmanager
+        async def fake_stdio_client(params, errlog=None):
+            captured.update(params.env)
+            yield (object(), object())
+
+        with (
+            patch.dict(os.environ, {"VIBE_TEST_PARENT": "base", "OVERRIDE_ME": "shell"}),
+            patch(
+                "vibe.core.tools.mcp.tools.StdioServerParameters",
+                side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+            ),
+            patch("vibe.core.tools.mcp.tools.stdio_client", fake_stdio_client),
+            patch(
+                "vibe.core.tools.mcp.tools.ClientSession",
+                side_effect=lambda *args, **kwargs: _FakeCallToolSession(),
+            ),
+        ):
+            result = await call_tool_stdio(
+                ["python", "-m", "server"],
+                "search",
+                {"query": "invoice"},
+                env={"OVERRIDE_ME": "config", "CONFIG_ONLY": "1"},
+            )
+
+        assert result.structured == {
+            "tool_name": "search",
+            "arguments": {"query": "invoice"},
+        }
+        assert captured["VIBE_TEST_PARENT"] == "base"
+        assert captured["OVERRIDE_ME"] == "config"
+        assert captured["CONFIG_ONLY"] == "1"
 
 
 class TestCreateMCPHttpProxyToolClass:

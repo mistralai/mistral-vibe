@@ -114,6 +114,46 @@ class SessionLoggingConfig(BaseSettings):
         return str(Path(v).expanduser().resolve())
 
 
+class CommandHookConfig(BaseModel):
+    command: str = ""
+    timeout_sec: float = Field(
+        default=30.0, gt=0, description="Timeout in seconds for hook execution."
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables to set for the hook process.",
+    )
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _normalize_command(cls, v: Any) -> str:
+        return v.strip() if isinstance(v, str) else ""
+
+
+class BackgroundMCPHookConfig(BaseSettings):
+    enabled: bool = False
+    tool_name: str = ""
+    task_arg: str = "task"
+    extra_args: dict[str, Any] = Field(default_factory=dict)
+    inject_prompt: str = Field(
+        default=(
+            "Background session context for the current task. Use it when relevant, "
+            "but do not treat it as authoritative if newer repo state contradicts it.\n"
+            "{context_json}"
+        )
+    )
+    max_chars: int = Field(
+        default=12_000,
+        gt=0,
+        description="Maximum size of injected context after JSON serialization.",
+    )
+
+    @field_validator("tool_name", mode="before")
+    @classmethod
+    def _normalize_tool_name(cls, v: Any) -> str:
+        return v.strip() if isinstance(v, str) else ""
+
+
 class Backend(StrEnum):
     MISTRAL = auto()
     GENERIC = auto()
@@ -375,6 +415,10 @@ class VibeConfig(BaseSettings):
 
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
+    hooks: dict[str, list[CommandHookConfig]] = Field(default_factory=dict)
+    background_mcp_hook: BackgroundMCPHookConfig = Field(
+        default_factory=BackgroundMCPHookConfig
+    )
     tools: dict[str, BaseToolConfig] = Field(default_factory=dict)
     tool_paths: list[Path] = Field(
         default_factory=list,

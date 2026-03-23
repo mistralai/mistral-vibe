@@ -146,6 +146,13 @@ def _parse_call_result(server: str, tool: str, result_obj: Any) -> MCPToolResult
     return MCPToolResult(server=server, tool=tool, text=text, structured=None)
 
 
+def _stdio_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    merged = dict(os.environ)
+    if env:
+        merged.update(env)
+    return merged
+
+
 async def list_tools_http(
     url: str,
     *,
@@ -279,7 +286,9 @@ async def list_tools_stdio(
     env: dict[str, str] | None = None,
     startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
-    params = StdioServerParameters(command=command[0], args=command[1:], env=env)
+    params = StdioServerParameters(
+        command=command[0], args=command[1:], env=_stdio_env(env)
+    )
     timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     async with (
         _mcp_stderr_capture() as errlog,
@@ -301,7 +310,9 @@ async def call_tool_stdio(
     tool_timeout_sec: float | None = None,
     sampling_callback: MCPSamplingHandler | None = None,
 ) -> MCPToolResult:
-    params = StdioServerParameters(command=command[0], args=command[1:], env=env)
+    params = StdioServerParameters(
+        command=command[0], args=command[1:], env=_stdio_env(env)
+    )
     init_timeout = (
         timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     )
