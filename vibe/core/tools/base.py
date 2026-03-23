@@ -24,10 +24,13 @@ from typing import (
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
+    from vibe.core.skills.manager import SkillManager
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
+    from vibe.core.tools.permissions import PermissionContext
     from vibe.core.types import (
         ApprovalCallback,
         EntrypointMetadata,
@@ -51,6 +54,7 @@ class InvokeContext:
     entrypoint_metadata: EntrypointMetadata | None = field(default=None)
     plan_file_path: Path | None = field(default=None)
     switch_agent_callback: SwitchAgentCallback | None = field(default=None)
+    skill_manager: SkillManager | None = field(default=None)
 
 
 class ToolError(Exception):
@@ -97,6 +101,7 @@ class BaseToolConfig(BaseModel):
         permission: The permission level required to use the tool.
         allowlist: Patterns that automatically allow tool execution.
         denylist: Patterns that automatically deny tool execution.
+        sensitive_patterns: Patterns that trigger ASK even when permission is ALWAYS.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -104,6 +109,7 @@ class BaseToolConfig(BaseModel):
     permission: ToolPermission = ToolPermission.ASK
     allowlist: list[str] = Field(default_factory=list)
     denylist: list[str] = Field(default_factory=list)
+    sensitive_patterns: list[str] = Field(default_factory=list)
 
 
 class BaseToolState(BaseModel):
@@ -153,7 +159,7 @@ class BaseTool[
             prompt_dir = class_path.parent / "prompts"
             prompt_path = cls.prompt_path or prompt_dir / f"{class_path.stem}.md"
 
-            return prompt_path.read_text("utf-8")
+            return read_safe(prompt_path)
         except (FileNotFoundError, TypeError, OSError):
             pass
 
@@ -338,12 +344,12 @@ class BaseTool[
         config_class = cls._get_tool_config_class()
         return config_class(permission=permission)
 
-    def resolve_permission(self, args: ToolArgs) -> ToolPermission | None:
+    def resolve_permission(self, args: ToolArgs) -> PermissionContext | None:
         """Per-invocation permission override, checked before config-level permission.
 
         Returns:
-            ALWAYS if auto-approved, NEVER if blocked, ASK to force approval,
-            or None to fall through to config permission.
+            PermissionContext with granular required_permissions and a permission
+            level (ALWAYS/NEVER/ASK), or None to fall through to config permission.
 
         Override in subclasses for domain-specific rules (e.g. workdir checks).
         """

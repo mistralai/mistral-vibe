@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 import io
 import os
@@ -52,17 +52,21 @@ type SpawnedVibeContext = Iterator[tuple[pexpect.spawn, io.StringIO]]
 type SpawnedVibeContextManager = AbstractContextManager[
     tuple[pexpect.spawn, io.StringIO]
 ]
-type SpawnedVibeFactory = Callable[[Path], SpawnedVibeContextManager]
+type SpawnedVibeFactory = Callable[
+    [Path, Sequence[str] | None], SpawnedVibeContextManager
+]
 
 
 @pytest.fixture
 def spawned_vibe_process() -> SpawnedVibeFactory:
     @contextmanager
-    def spawn(workdir: Path) -> SpawnedVibeContext:
+    def spawn(
+        workdir: Path, extra_args: Sequence[str] | None = None
+    ) -> SpawnedVibeContext:
         captured = io.StringIO()
         child = pexpect.spawn(
             "uv",
-            ["run", "vibe", "--workdir", str(workdir)],
+            ["run", "vibe", "--workdir", str(workdir), *(extra_args or [])],
             cwd=str(TESTS_ROOT.parent),
             env=os.environ,
             encoding="utf-8",

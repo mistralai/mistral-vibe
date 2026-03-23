@@ -16,6 +16,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import httpx
+from mistralai.client.models import AssistantMessage
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 import pytest
 import respx
@@ -33,13 +34,13 @@ from tests.backend.data.mistral import (
     STREAMED_TOOL_CONVERSATION_PARAMS as MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS as MISTRAL_TOOL_CONVERSATION_PARAMS,
 )
-from vibe.core.config import Backend, ModelConfig, ProviderConfig
+from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.backend.generic import GenericBackend
-from vibe.core.llm.backend.mistral import MistralBackend
+from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper
 from vibe.core.llm.exceptions import BackendError
 from vibe.core.llm.types import BackendLike
-from vibe.core.types import LLMChunk, LLMMessage, Role, ToolCall
+from vibe.core.types import Backend, FunctionCall, LLMChunk, LLMMessage, Role, ToolCall
 from vibe.core.utils import get_user_agent
 
 
@@ -435,3 +436,93 @@ class TestMistralRetry:
                 timeout_ms=720000,
                 retry_config=backend._retry_config,
             )
+
+
+class TestMistralMapperPrepareMessage:
+    """Tests for MistralMapper.prepare_message thinking-block handling.
+
+    The Mistral API returns assistant messages with reasoning as a single
+    ThinkChunk (no trailing TextChunk when there is no text content).  When
+    the mapper rebuilds the message for the next request it must NOT append
+    an empty TextChunk, otherwise the proxy's history-consistency check
+    sees a content mismatch on every turn and creates spurious conversation
+    segments.
+    """
+
+    @pytest.fixture
+    def mapper(self) -> MistralMapper:
+        return MistralMapper()
+
+    def test_reasoning_only_no_empty_text_chunk(self, mapper: MistralMapper) -> None:
+        """Assistant with reasoning_content but no text content should produce
+        only a ThinkChunk — no trailing empty TextChunk.
+        """
+        msg = LLMMessage(
+            role=Role.assistant,
+            content=None,
+            reasoning_content="Let me think step by step.",
+        )
+        result = mapper.prepare_message(msg)
+        content = result.content
+        assert isinstance(content, list)
+        assert len(content) == 1
+        assert content[0].type == "thinking"
+
+    def test_reasoning_with_empty_string_content(self, mapper: MistralMapper) -> None:
+        """content='' (empty string) should also not produce a trailing TextChunk."""
+        msg = LLMMessage(
+            role=Role.assistant, content="", reasoning_content="Thinking..."
+        )
+        result = mapper.prepare_message(msg)
+        content = result.content
+        assert isinstance(content, list)
+        assert len(content) == 1
+        assert content[0].type == "thinking"
+
+    def test_reasoning_with_text_content(self, mapper: MistralMapper) -> None:
+        """When there is actual text content, both ThinkChunk and TextChunk
+        should be present.
+        """
+        msg = LLMMessage(
+            role=Role.assistant,
+            content="Here is the answer.",
+            reasoning_content="Let me reason.",
+        )
+        result = mapper.prepare_message(msg)
+        content = result.content
+        assert isinstance(content, list)
+        assert len(content) == 2
+        assert content[0].type == "thinking"
+        assert content[1].type == "text"
+        assert content[1].text == "Here is the answer."
+
+    def test_reasoning_with_tool_calls_no_text(self, mapper: MistralMapper) -> None:
+        """Reasoning + tool_calls but no text content — only ThinkChunk."""
+        msg = LLMMessage(
+            role=Role.assistant,
+            content=None,
+            reasoning_content="I should run a command.",
+            tool_calls=[
+                ToolCall(
+                    id="tc_1",
+                    index=0,
+                    function=FunctionCall(name="bash", arguments='{"cmd": "ls"}'),
+                )
+            ],
+        )
+        result = mapper.prepare_message(msg)
+        assert isinstance(result, AssistantMessage)
+        content = result.content
+        assert isinstance(content, list)
+        assert len(content) == 1
+        assert content[0].type == "thinking"
+        # Tool calls should still be present
+        assert isinstance(result.tool_calls, list)
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "bash"
+
+    def test_no_reasoning_plain_string(self, mapper: MistralMapper) -> None:
+        """Without reasoning_content, content is a plain string."""
+        msg = LLMMessage(role=Role.assistant, content="Hello!")
+        result = mapper.prepare_message(msg)
+        assert result.content == "Hello!"

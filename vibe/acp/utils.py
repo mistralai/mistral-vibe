@@ -9,7 +9,6 @@ from acp.schema import (
     ContentToolCallContent,
     ModelInfo,
     PermissionOption,
-    SessionConfigOption,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
     SessionMode,
@@ -23,6 +22,7 @@ from acp.schema import (
 
 from vibe.core.agents.models import AgentProfile, AgentType
 from vibe.core.proxy_setup import SUPPORTED_PROXY_VARS, get_current_proxy_settings
+from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.types import CompactEndEvent, CompactStartEvent, LLMMessage
 from vibe.core.utils import compact_reduction_display
 
@@ -45,7 +45,7 @@ TOOL_OPTIONS = [
     ),
     PermissionOption(
         option_id=ToolOption.ALLOW_ALWAYS,
-        name="Allow always",
+        name="Allow for this session",
         kind=cast(Literal["allow_always"], ToolOption.ALLOW_ALWAYS),
     ),
     PermissionOption(
@@ -56,6 +56,44 @@ TOOL_OPTIONS = [
 ]
 
 
+def build_permission_options(
+    required_permissions: list[RequiredPermission] | None,
+) -> list[PermissionOption]:
+    """Build ACP permission options, including granular labels when available."""
+    if not required_permissions:
+        return TOOL_OPTIONS
+
+    labels = ", ".join(rp.label for rp in required_permissions)
+    permissions_meta = [
+        {
+            "scope": rp.scope,
+            "invocation_pattern": rp.invocation_pattern,
+            "session_pattern": rp.session_pattern,
+            "label": rp.label,
+        }
+        for rp in required_permissions
+    ]
+
+    return [
+        PermissionOption(
+            option_id=ToolOption.ALLOW_ONCE,
+            name="Allow once",
+            kind=cast(Literal["allow_once"], ToolOption.ALLOW_ONCE),
+        ),
+        PermissionOption(
+            option_id=ToolOption.ALLOW_ALWAYS,
+            name=f"Allow for this session: {labels}",
+            kind=cast(Literal["allow_always"], ToolOption.ALLOW_ALWAYS),
+            field_meta={"required_permissions": permissions_meta},
+        ),
+        PermissionOption(
+            option_id=ToolOption.REJECT_ONCE,
+            name="Reject once",
+            kind=cast(Literal["reject_once"], ToolOption.REJECT_ONCE),
+        ),
+    ]
+
+
 def is_valid_acp_mode(profiles: list[AgentProfile], mode_name: str) -> bool:
     return any(
         p.name == mode_name and p.agent_type == AgentType.AGENT for p in profiles
@@ -64,7 +102,7 @@ def is_valid_acp_mode(profiles: list[AgentProfile], mode_name: str) -> bool:
 
 def make_mode_response(
     profiles: list[AgentProfile], current_mode_id: str
-) -> tuple[SessionModeState, SessionConfigOption]:
+) -> tuple[SessionModeState, SessionConfigOptionSelect]:
     session_modes: list[SessionMode] = []
     config_options: list[SessionConfigSelectOption] = []
 
@@ -89,22 +127,20 @@ def make_mode_response(
     state = SessionModeState(
         current_mode_id=current_mode_id, available_modes=session_modes
     )
-    config = SessionConfigOption(
-        root=SessionConfigOptionSelect(
-            id="mode",
-            name="Session Mode",
-            current_value=current_mode_id,
-            category="mode",
-            type="select",
-            options=config_options,
-        )
+    config = SessionConfigOptionSelect(
+        id="mode",
+        name="Session Mode",
+        current_value=current_mode_id,
+        category="mode",
+        type="select",
+        options=config_options,
     )
     return state, config
 
 
 def make_model_response(
     models: list[ModelConfig], current_model_id: str
-) -> tuple[SessionModelState, SessionConfigOption]:
+) -> tuple[SessionModelState, SessionConfigOptionSelect]:
     model_infos: list[ModelInfo] = []
     config_options: list[SessionConfigSelectOption] = []
 
@@ -119,15 +155,13 @@ def make_model_response(
     state = SessionModelState(
         current_model_id=current_model_id, available_models=model_infos
     )
-    config_option = SessionConfigOption(
-        root=SessionConfigOptionSelect(
-            id="model",
-            name="Model",
-            current_value=current_model_id,
-            category="model",
-            type="select",
-            options=config_options,
-        )
+    config_option = SessionConfigOptionSelect(
+        id="model",
+        name="Model",
+        current_value=current_model_id,
+        category="model",
+        type="select",
+        options=config_options,
     )
     return state, config_option
 

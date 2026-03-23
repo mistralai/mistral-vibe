@@ -12,6 +12,7 @@ from vibe.core.config.harness_files._paths import (
 )
 from vibe.core.paths import AGENTS_MD_FILENAME, VIBE_HOME, walk_local_config_dirs_all
 from vibe.core.trusted_folders import trusted_folders_manager
+from vibe.core.utils.io import read_safe
 
 FileSource = Literal["user", "project"]
 
@@ -115,8 +116,7 @@ class HarnessFilesManager:
             return ""
         path = VIBE_HOME.path / AGENTS_MD_FILENAME
         try:
-            content = path.read_text("utf-8", errors="ignore")
-            stripped = content.strip()
+            stripped = read_safe(path).strip()
             return stripped if stripped else ""
         except (FileNotFoundError, OSError):
             return ""
@@ -140,8 +140,7 @@ class HarnessFilesManager:
                 break
             path = current / AGENTS_MD_FILENAME
             try:
-                content = path.read_text("utf-8", errors="ignore")
-                stripped = content.strip()
+                stripped = read_safe(path).strip()
                 if stripped:
                     docs.append((current, stripped))
             except (FileNotFoundError, OSError):

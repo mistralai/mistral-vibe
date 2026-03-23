@@ -21,6 +21,7 @@ from vibe.core.tools.builtins.ask_user_question import (
     Question,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.utils.io import read_safe
 
 
 class ExitPlanModeArgs(BaseModel):
@@ -74,7 +75,7 @@ class ExitPlanMode(
         plan_content: str | None = None
         if ctx.plan_file_path and ctx.plan_file_path.is_file():
             try:
-                plan_content = ctx.plan_file_path.read_text()
+                plan_content = read_safe(ctx.plan_file_path)
             except OSError as e:
                 raise ToolError(
                     f"Failed to read plan file at {ctx.plan_file_path}: {e}"

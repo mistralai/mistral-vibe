@@ -1008,12 +1008,13 @@ class TestSessionLoaderUTF8Encoding:
         session_folder = session_dir / "test_20230101_120000_latin100"
         session_folder.mkdir()
 
+        # \x81 invalid UTF-8 and undefined in CP1252 → U+FFFD on all platforms
         metadata_content = {
             "session_id": "latin1-test",
             "start_time": "2023-01-01T12:00:00Z",
             "end_time": "2023-01-01T12:05:00Z",
             "username": "testuser",
-            "environment": {"working_directory": "/home/user/café_project"},
+            "environment": {"working_directory": "/home/user/caf\x81_project"},
             "git_commit": None,
             "git_branch": None,
         }
@@ -1027,7 +1028,7 @@ class TestSessionLoaderUTF8Encoding:
 
         metadata = SessionLoader.load_metadata(session_folder)
         assert metadata.session_id == "latin1-test"
-        assert metadata.environment["working_directory"] == "/home/user/caf_project"
+        assert metadata.environment["working_directory"] == "/home/user/caf�_project"
 
     def test_load_session_with_utf8_metadata_and_messages(
         self, session_config: SessionLoggingConfig

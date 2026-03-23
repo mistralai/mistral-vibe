@@ -16,11 +16,12 @@ from vibe.core.tools.base import (
     BaseToolState,
     InvokeContext,
     ToolError,
-    ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
+from vibe.core.utils.io import read_safe_async
 
 SEARCH_REPLACE_BLOCK_RE = re.compile(
     r"<{5,} SEARCH\r?\n(.*?)\r?\n?={5,}\r?\n(.*?)\r?\n?>{5,} REPLACE", flags=re.DOTALL
@@ -65,6 +66,10 @@ class SearchReplaceResult(BaseModel):
 
 
 class SearchReplaceConfig(BaseToolConfig):
+    sensitive_patterns: list[str] = Field(
+        default=["**/.env", "**/.env.*"],
+        description="File patterns that trigger ASK even when permission is ALWAYS.",
+    )
     max_content_size: int = 100_000
     create_backup: bool = False
     fuzzy_threshold: float = 0.9
@@ -105,12 +110,14 @@ class SearchReplace(
     def get_status_text(cls) -> str:
         return "Editing files"
 
-    def resolve_permission(self, args: SearchReplaceArgs) -> ToolPermission | None:
+    def resolve_permission(self, args: SearchReplaceArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.file_path,
+            tool_name=self.get_name(),
             allowlist=self.config.allowlist,
             denylist=self.config.denylist,
             config_permission=self.config.permission,
+            sensitive_patterns=self.config.sensitive_patterns,
         )
 
     @final
@@ -211,12 +218,11 @@ class SearchReplace(
 
     async def _read_file(self, file_path: Path) -> str:
         try:
-            async with await anyio.Path(file_path).open(encoding="utf-8") as f:
-                return await f.read()
-        except UnicodeDecodeError as e:
-            raise ToolError(f"Unicode decode error reading {file_path}: {e}") from e
+            return await read_safe_async(file_path, raise_on_error=True)
         except PermissionError:
             raise ToolError(f"Permission denied reading file: {file_path}")
+        except OSError as e:
+            raise ToolError(f"OS error reading {file_path}: {e}") from e
         except Exception as e:
             raise ToolError(f"Unexpected error reading {file_path}: {e}") from e
 

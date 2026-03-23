@@ -39,10 +39,17 @@ async def _empty_audio_stream() -> AsyncIterator[bytes]:
     yield
 
 
-def _make_sdk_session_created() -> MagicMock:
-    from mistralai.client.models import RealtimeTranscriptionSessionCreated
+def _make_sdk_session_created(request_id: str = "test-request-id") -> MagicMock:
+    from mistralai.client.models import (
+        RealtimeTranscriptionSession,
+        RealtimeTranscriptionSessionCreated,
+    )
 
-    return MagicMock(spec=RealtimeTranscriptionSessionCreated)
+    session = MagicMock(spec=RealtimeTranscriptionSession)
+    session.request_id = request_id
+    mock = MagicMock(spec=RealtimeTranscriptionSessionCreated)
+    mock.session = session
+    return mock
 
 
 def _make_sdk_text_delta(text: str) -> MagicMock:
@@ -104,6 +111,7 @@ class TestEventMapping:
 
         assert len(events) == 1
         assert isinstance(events[0], TranscribeSessionCreated)
+        assert events[0].request_id == "test-request-id"
 
     @pytest.mark.asyncio
     async def test_text_delta(self) -> None:

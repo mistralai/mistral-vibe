@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-03-23
+
+### Added
+
+- OTEL tracing support for observability
+- Skill tool for managing task lists and workflows
+- Text-to-speech (TTS) functionality
+- Standalone --resume command for session picker
+- BFS for vibe folders to improve startup performance
+- List-based model picker for /model command
+- is_user_prompt flag to Mistral metadata header
+- Correlation ID in user feedback calls
+- Current date added to system prompt in vibe-work
+- TypeScript type inference for large tool outputs in vibe-work-harness
+
+### Changed
+
+- Updated agent-client-protocol to 0.9.0a1
+- Changed inline code color from yellow to green
+- Removed "You have no internet access" from CLI prompt
+- Fine-grained permission system improvements
+- Inject system certs into vibe-acp frozen binary via truststore
+
+### Fixed
+
+- Streaming for currently streamed message when switching agents
+- Proper UI updates when tools switch current agents
+- Space key functionality when holding shift
+- Empty TextChunk not appended when reasoning has no text content
+- Messages removed from user feedback event
+- Bash allowlist/denylist activation on Windows
+- Improved scrolling performance
+- ACP error handling in webview
+- Context usage updates sent via ACP
+- Include `exit_plan_mode` tool only in plan mode
+
+
 ## [2.5.0] - 2026-03-16
 
 ### Added

@@ -1,4 +1,4 @@
-# What's new in v2.5.0
-- **Lean mode**: Setup a dedicated theorem proving agent powered by leanstral with /leanstall
-- **Parallel tool execution**: Parallel tool calls are sped up by being ran at the same time
-- **Voice mode**: Real-time transcription support with /voice
+# What's new in v2.6.0
+- **Text-to-speech**: Added TTS functionality
+- **Standalone resume**: New --resume command for session picker
+- **Fine-grained permissions**: Improved permissions granularity and persistence

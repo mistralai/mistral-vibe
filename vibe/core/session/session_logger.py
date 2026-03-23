@@ -19,6 +19,7 @@ from vibe.core.session.session_loader import (
 )
 from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
 from vibe.core.utils import is_windows, utc_now
+from vibe.core.utils.io import read_safe_async
 
 if TYPE_CHECKING:
     from vibe.core.agents.models import AgentProfile
@@ -230,11 +231,9 @@ class SessionLogger:
         # Read old metadata and get total_messages
         try:
             if self.metadata_filepath.exists():
-                async with await AsyncPath(self.metadata_filepath).open(
-                    encoding="utf-8", errors="ignore"
-                ) as f:
-                    old_metadata = json.loads(await f.read())
-                    old_total_messages = old_metadata["total_messages"]
+                raw = await read_safe_async(self.metadata_filepath)
+                old_metadata = json.loads(raw)
+                old_total_messages = old_metadata["total_messages"]
             else:
                 old_total_messages = 0
         except Exception as e:

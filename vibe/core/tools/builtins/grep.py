@@ -17,8 +17,11 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -31,6 +34,10 @@ class GrepBackend(StrEnum):
 
 class GrepToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
+    sensitive_patterns: list[str] = Field(
+        default=["**/.env", "**/.env.*"],
+        description="File patterns that trigger ASK even when permission is ALWAYS.",
+    )
 
     max_output_bytes: int = Field(
         default=64_000, description="Hard cap for the total size of matched lines."
@@ -103,6 +110,16 @@ class Grep(
         "Respects .gitignore and .codeignore files by default when using ripgrep."
     )
 
+    def resolve_permission(self, args: GrepArgs) -> PermissionContext | None:
+        return resolve_file_tool_permission(
+            args.path,
+            tool_name=self.get_name(),
+            allowlist=self.config.allowlist,
+            denylist=self.config.denylist,
+            config_permission=self.config.permission,
+            sensitive_patterns=self.config.sensitive_patterns,
+        )
+
     def _detect_backend(self) -> GrepBackend:
         if shutil.which("rg"):
             return GrepBackend.RIPGREP
@@ -150,7 +167,7 @@ class Grep(
     def _load_codeignore_patterns(self, codeignore_path: Path) -> list[str]:
         patterns = []
         try:
-            content = codeignore_path.read_text("utf-8")
+            content = read_safe(codeignore_path)
             for line in content.splitlines():
                 line = line.strip()
                 if line and not line.startswith("#"):

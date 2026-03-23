@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from textual.pilot import Pilot
 
+from tests.conftest import build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
 from tests.snapshots.snap_compare import SnapCompare
@@ -17,7 +18,14 @@ class VoiceEnableApp(BaseSnapshotTestApp):
 
 class VoiceDisableApp(BaseSnapshotTestApp):
     def __init__(self) -> None:
-        super().__init__(voice_manager=FakeVoiceManager(is_voice_ready=True))
+        config = build_test_vibe_config(
+            disable_welcome_banner_animation=True,
+            displayed_workdir="/test/workdir",
+            voice_mode_enabled=True,
+        )
+        super().__init__(
+            config=config, voice_manager=FakeVoiceManager(is_voice_ready=True)
+        )
 
 
 class RecordingActiveApp(BaseSnapshotTestApp):
@@ -49,6 +57,10 @@ def test_snapshot_voice_enable(snap_compare: SnapCompare) -> None:
         await pilot.press(*"/voice")
         await pilot.press("enter")
         await pilot.pause(0.4)
+        await pilot.press("space")
+        await pilot.pause(0.2)
+        await pilot.press("escape")
+        await pilot.pause(0.4)
 
     assert snap_compare(
         "test_ui_snapshot_voice_mode.py:VoiceEnableApp",
@@ -61,6 +73,10 @@ def test_snapshot_voice_disable(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
         await pilot.press(*"/voice")
         await pilot.press("enter")
+        await pilot.pause(0.4)
+        await pilot.press("space")
+        await pilot.pause(0.2)
+        await pilot.press("escape")
         await pilot.pause(0.4)
 
     assert snap_compare(

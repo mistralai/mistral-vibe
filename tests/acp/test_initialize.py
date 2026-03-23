@@ -28,7 +28,7 @@ class TestACPInitialize:
             session_capabilities=SessionCapabilities(list=SessionListCapabilities()),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.5.0"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.6.0"
         )
 
         assert response.auth_methods == []
@@ -52,7 +52,7 @@ class TestACPInitialize:
             session_capabilities=SessionCapabilities(list=SessionListCapabilities()),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.5.0"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.6.0"
         )
 
         assert response.auth_methods is not None

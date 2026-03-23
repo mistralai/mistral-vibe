@@ -64,10 +64,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
+      - name: Install Python
+        run: uv python install 3.12
 
       - name: Sync dependencies
         run: uv sync --no-dev --group build
@@ -86,19 +84,20 @@ jobs:
         shell: pwsh
         run: python -c "import subprocess; version = subprocess.check_output(['uv', 'version']).decode().split()[1]; print(f'version={version}')" >> $env:GITHUB_OUTPUT
 
-      - name: Upload binary as artifact (Unix)
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - name: Smoke test bundled binary (Unix)
         if: ${{ matrix.os != 'windows' }}
-        with:
-          name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version_unix.outputs.version }}
-          path: dist/vibe-acp
+        run: ./dist/vibe-acp-dir/vibe-acp --version
 
-      - name: Upload binary as artifact (Windows)
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - name: Smoke test bundled binary (Windows)
         if: ${{ matrix.os == 'windows' }}
+        shell: pwsh
+        run: .\dist\vibe-acp-dir\vibe-acp.exe --version
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version_windows.outputs.version }}
-          path: dist/vibe-acp.exe
+          name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.os == 'windows' && steps.get_version_windows.outputs.version || steps.get_version_unix.outputs.version }}
+          path: dist/vibe-acp-dir/
 
   attach-to-release:
     needs: build-and-upload
@@ -117,11 +116,9 @@ jobs:
           mkdir release-assets
           for dir in artifacts/*; do
             name=$(basename "$dir")
-            if [ -f "$dir/vibe-acp" ]; then
-              chmod +x "$dir/vibe-acp"
-              zip -j "release-assets/${name}.zip" "$dir/vibe-acp"
-            elif [ -f "$dir/vibe-acp.exe" ]; then
-              zip -j "release-assets/${name}.zip" "$dir/vibe-acp.exe"
+            if [ -f "$dir/vibe-acp" ] || [ -f "$dir/vibe-acp.exe" ]; then
+              chmod -f +x "$dir/vibe-acp" 2>/dev/null || true
+              (cd "$dir" && zip -r "../../release-assets/${name}.zip" .)
             fi
           done
 

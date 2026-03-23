@@ -212,7 +212,7 @@ def _get_available_skills_section(skill_manager: SkillManager) -> str:
         "# Available Skills",
         "",
         "You have access to the following skills. When a task matches a skill's description,",
-        "read the full SKILL.md file to load detailed instructions.",
+        "use the `skill` tool if available to load the full skill instructions, if it is not available, read the files manually.",
         "",
         "<available_skills>",
     ]

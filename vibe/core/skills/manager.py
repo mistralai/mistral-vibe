@@ -9,6 +9,7 @@ from vibe.core.logger import logger
 from vibe.core.skills.models import SkillInfo, SkillMetadata
 from vibe.core.skills.parser import SkillParseError, parse_frontmatter
 from vibe.core.utils import name_matches
+from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
@@ -106,7 +107,7 @@ class SkillManager:
 
     def _parse_skill_file(self, skill_path: Path) -> SkillInfo:
         try:
-            content = skill_path.read_text(encoding="utf-8")
+            content = read_safe(skill_path)
         except OSError as e:
             raise SkillParseError(f"Cannot read file: {e}") from e
 

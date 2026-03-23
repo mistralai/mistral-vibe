@@ -22,9 +22,14 @@ class CommandRegistry:
                 handler="_show_help",
             ),
             "config": Command(
-                aliases=frozenset(["/config", "/model"]),
+                aliases=frozenset(["/config"]),
                 description="Edit config settings",
                 handler="_show_config",
+            ),
+            "model": Command(
+                aliases=frozenset(["/model"]),
+                description="Select active model",
+                handler="_show_model",
             ),
             "reload": Command(
                 aliases=frozenset(["/reload"]),
@@ -79,8 +84,8 @@ class CommandRegistry:
             ),
             "voice": Command(
                 aliases=frozenset(["/voice"]),
-                description="Toggle voice mode on/off",
-                handler="_toggle_voice_mode",
+                description="Configure voice settings",
+                handler="_show_voice_settings",
             ),
             "leanstall": Command(
                 aliases=frozenset(["/leanstall"]),

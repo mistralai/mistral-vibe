@@ -9,6 +9,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import (
+    AgentProfileChangedEvent,
     AssistantEvent,
     BaseEvent,
     CompactEndEvent,
@@ -27,10 +28,14 @@ if TYPE_CHECKING:
 
 class EventHandler:
     def __init__(
-        self, mount_callback: Callable, get_tools_collapsed: Callable[[], bool]
+        self,
+        mount_callback: Callable,
+        get_tools_collapsed: Callable[[], bool],
+        on_profile_changed: Callable[[], None] | None = None,
     ) -> None:
         self.mount_callback = mount_callback
         self.get_tools_collapsed = get_tools_collapsed
+        self.on_profile_changed = on_profile_changed
         self.tool_calls: dict[str, ToolCallMessage] = {}
         self.current_compact: CompactMessage | None = None
         self.current_streaming_message: AssistantMessage | None = None
@@ -62,6 +67,9 @@ class EventHandler:
             case CompactEndEvent():
                 await self.finalize_streaming()
                 await self._handle_compact_end(event)
+            case AgentProfileChangedEvent():
+                if self.on_profile_changed:
+                    self.on_profile_changed()
             case UserMessageEvent():
                 await self.finalize_streaming()
             case _:

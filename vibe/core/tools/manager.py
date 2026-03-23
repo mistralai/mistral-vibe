@@ -221,10 +221,9 @@ class ToolManager:
 
         user_overrides = self._config.tools.get(tool_name)
         if user_overrides is None:
-            merged_dict = default_config.model_dump()
-        else:
-            merged_dict = {**default_config.model_dump(), **user_overrides.model_dump()}
+            return config_class()
 
+        merged_dict = {**default_config.model_dump(), **user_overrides}
         return config_class.model_validate(merged_dict)
 
     def get(self, tool_name: str) -> BaseTool:

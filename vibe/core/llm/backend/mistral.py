@@ -14,6 +14,7 @@ from mistralai.client.models import (
     AssistantMessageContent,
     ChatCompletionRequestMessage,
     ChatCompletionStreamRequestToolChoice,
+    ContentChunk,
     FileChunk,
     Function,
     FunctionCall as MistralFunctionCall,
@@ -64,15 +65,17 @@ class MistralMapper:
             case Role.assistant:
                 content: AssistantMessageContent
                 if msg.reasoning_content:
-                    content = [
+                    chunks: list[ContentChunk] = [
                         ThinkChunk(
                             type="thinking",
                             thinking=[
                                 TextChunk(type="text", text=msg.reasoning_content)
                             ],
-                        ),
-                        TextChunk(type="text", text=msg.content or ""),
+                        )
                     ]
+                    if msg.content:
+                        chunks.append(TextChunk(type="text", text=msg.content))
+                    content = chunks
                 else:
                     content = msg.content or ""
 
@@ -326,7 +329,7 @@ class MistralBackend:
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
             merged_messages = merge_consecutive_user_messages(messages)
-            async for chunk in await self._get_client().chat.stream_async(
+            stream = await self._get_client().chat.stream_async(
                 model=model.name,
                 messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
                 temperature=temperature,
@@ -339,7 +342,9 @@ class MistralBackend:
                 else None,
                 http_headers=extra_headers,
                 metadata=metadata,
-            ):
+            )
+            correlation_id = stream.response.headers.get("mistral-correlation-id")
+            async for chunk in stream:
                 parsed = (
                     self._mapper.parse_content(chunk.data.choices[0].delta.content)
                     if chunk.data.choices[0].delta.content
@@ -364,6 +369,7 @@ class MistralBackend:
                         if chunk.data.usage
                         else 0,
                     ),
+                    correlation_id=correlation_id,
                 )
 
         except SDKError as e:

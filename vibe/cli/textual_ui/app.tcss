@@ -160,7 +160,7 @@ Markdown {
     color: ansi_default;
 
     .code_inline {
-        color: ansi_yellow;
+        color: ansi_green;
         background: transparent;
         text-style: bold;
     }
@@ -625,7 +625,8 @@ StatusMessage {
 .loading-hint {
     width: auto;
     height: auto;
-    color: $foreground;
+    color: ansi_bright_black;
+
 }
 
 .history-load-more-message {
@@ -655,7 +656,7 @@ StatusMessage {
 
 }
 
-#config-app {
+#config-app, #voice-app {
     width: 100%;
     height: auto;
     background: transparent;
@@ -664,7 +665,7 @@ StatusMessage {
     margin: 0;
 }
 
-#config-content {
+#config-content, #voice-content {
     width: 100%;
     height: auto;
 }
@@ -675,41 +676,14 @@ StatusMessage {
     color: ansi_blue;
 }
 
-.settings-option {
-    height: auto;
-    color: ansi_default;
+#config-options {
+    width: 100%;
+    max-height: 50vh;
+    border: none;
 }
 
-.settings-cursor-selected {
-    color: ansi_blue;
-    text-style: bold;
-}
-
-.settings-label-selected {
-    color: ansi_default;
-    text-style: bold;
-}
-
-.settings-value-toggle-on-selected {
-    color: ansi_green;
-    text-style: bold;
-}
-
-.settings-value-toggle-on-unselected {
-    color: ansi_green;
-}
-
-.settings-value-toggle-off {
-    color: ansi_bright_black;
-}
-
-.settings-value-cycle-selected {
-    color: ansi_blue;
-    text-style: bold;
-}
-
-.settings-value-cycle-unselected {
-    color: ansi_blue;
+#config-options:focus {
+    border: none;
 }
 
 .settings-help {
@@ -953,6 +927,14 @@ ContextProgress {
     color: ansi_bright_black;
 }
 
+NarratorStatus {
+    width: auto;
+    height: auto;
+    background: transparent;
+    padding: 0;
+    margin: 0 0 0 1;
+}
+
 #banner-container {
     align: left middle;
     padding: 0 1 0 0;
@@ -1082,4 +1064,55 @@ ContextProgress {
     height: auto;
     color: ansi_bright_black;
     margin-top: 1;
+}
+
+#modelpicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
+#modelpicker-content {
+    width: 100%;
+    height: auto;
+}
+
+.modelpicker-title {
+    height: auto;
+    text-style: bold;
+    color: ansi_blue;
+}
+
+#modelpicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
+}
+
+#modelpicker-options:focus {
+    border: none;
+}
+
+.modelpicker-help {
+    width: 100%;
+    height: auto;
+    color: ansi_bright_black;
+    margin-top: 1;
+}
+
+FeedbackBar {
+    width: auto;
+    height: auto;
+    margin-left: 1;
+}
+
+#feedback-text {
+    width: auto;
+    height: auto;
+    color: ansi_default;
 }

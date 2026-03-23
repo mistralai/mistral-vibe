@@ -16,6 +16,11 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import (
+    PermissionContext,
+    PermissionScope,
+    RequiredPermission,
+)
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolStreamEvent
 
@@ -71,14 +76,43 @@ class WebFetch(
         "Fetch content from a URL. Converts HTML to markdown for readability."
     )
 
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        """Normalise a URL to always have an http(s) scheme.
+
+        Handles protocol-relative URLs (//example.com) and bare URLs (example.com).
+        """
+        raw = url.lstrip("/") if url.startswith("//") else url
+        return raw if raw.startswith(("http://", "https://")) else "https://" + raw
+
+    def resolve_permission(self, args: WebFetchArgs) -> PermissionContext | None:
+        if self.config.permission in {ToolPermission.ALWAYS, ToolPermission.NEVER}:
+            return PermissionContext(permission=self.config.permission)
+
+        parsed = urlparse(self._normalize_url(args.url))
+        domain = parsed.netloc or parsed.path.split("/")[0]
+        if not domain:
+            return None
+
+        return PermissionContext(
+            permission=ToolPermission.ASK,
+            required_permissions=[
+                RequiredPermission(
+                    scope=PermissionScope.URL_PATTERN,
+                    invocation_pattern=domain,
+                    session_pattern=domain,
+                    label=f"fetching from {domain}",
+                )
+            ],
+        )
+
     @final
     async def run(
         self, args: WebFetchArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | WebFetchResult, None]:
         self._validate_args(args)
 
-        raw = args.url.lstrip("/") if args.url.startswith("//") else args.url
-        url = raw if raw.startswith(("http://", "https://")) else "https://" + raw
+        url = self._normalize_url(args.url)
         timeout = self._resolve_timeout(args.timeout)
 
         content, content_type = await self._fetch_url(url, timeout)

@@ -160,6 +160,32 @@ class TestAgentProfile:
 
 
 class TestAgentApplyToConfig:
+    def test_profile_disabled_tools_are_merged_with_base_config(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=["ask_user_question"],
+        )
+
+        result = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].apply_to_config(base)
+
+        assert set(result.disabled_tools) == {"ask_user_question", "exit_plan_mode"}
+
+    def test_profile_disabled_tools_preserve_user_disabled_tools(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=["ask_user_question", "custom_tool"],
+        )
+
+        result = BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].apply_to_config(base)
+
+        assert set(result.disabled_tools) == {
+            "ask_user_question",
+            "custom_tool",
+            "exit_plan_mode",
+        }
+
     def test_custom_prompt_found_in_global_when_missing_from_project(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -204,8 +230,9 @@ class TestAgentApplyToConfig:
 
 
 class TestAgentProfileOverrides:
-    def test_default_agent_has_no_overrides(self) -> None:
-        assert BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].overrides == {}
+    def test_default_agent_disables_exit_plan_mode(self) -> None:
+        overrides = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].overrides
+        assert "exit_plan_mode" in overrides.get("base_disabled", [])
 
     def test_auto_approve_agent_sets_auto_approve(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].overrides

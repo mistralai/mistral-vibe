@@ -16,6 +16,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
@@ -53,6 +54,10 @@ class ReadFileResult(BaseModel):
 
 class ReadFileToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
+    sensitive_patterns: list[str] = Field(
+        default=["**/.env", "**/.env.*"],
+        description="File patterns that trigger ASK even when permission is ALWAYS.",
+    )
 
     max_read_bytes: int = Field(
         default=64_000, description="Maximum total bytes to read from a file in one go."
@@ -87,12 +92,14 @@ class ReadFile(
             was_truncated=read_result.was_truncated,
         )
 
-    def resolve_permission(self, args: ReadFileArgs) -> ToolPermission | None:
+    def resolve_permission(self, args: ReadFileArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.path,
+            tool_name=self.get_name(),
             allowlist=self.config.allowlist,
             denylist=self.config.denylist,
             config_permission=self.config.permission,
+            sensitive_patterns=self.config.sensitive_patterns,
         )
 
     def get_result_extra(self, result: ReadFileResult) -> str | None:
@@ -128,12 +135,25 @@ class ReadFile(
 
     async def _read_file(self, args: ReadFileArgs, file_path: Path) -> _ReadResult:
         try:
+            return await self._do_read_file(args, file_path, encoding="utf-8")
+        except (UnicodeDecodeError, ValueError):
+            return await self._do_read_file(args, file_path, errors="replace")
+
+    async def _do_read_file(
+        self,
+        args: ReadFileArgs,
+        file_path: Path,
+        *,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> _ReadResult:
+        try:
             lines_to_return: list[str] = []
             bytes_read = 0
             was_truncated = False
 
             async with await anyio.Path(file_path).open(
-                encoding="utf-8", errors="ignore"
+                encoding=encoding, errors=errors
             ) as f:
                 line_index = 0
                 async for line in f:

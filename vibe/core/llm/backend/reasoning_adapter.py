@@ -48,9 +48,10 @@ class ReasoningAdapter(APIAdapter):
                 {
                     "type": "thinking",
                     "thinking": [{"type": "text", "text": msg.reasoning_content}],
-                },
-                {"type": "text", "text": msg.content or ""},
+                }
             ]
+            if msg.content:
+                content.append({"type": "text", "text": msg.content})
             result["content"] = content
         else:
             result["content"] = msg.content or ""

@@ -83,8 +83,8 @@ class TestACPSetConfigOptionMode:
 
         # Verify config_options reflect the new state
         mode_config = response.config_options[0]
-        assert mode_config.root.id == "mode"
-        assert mode_config.root.current_value == BuiltinAgentName.AUTO_APPROVE
+        assert mode_config.id == "mode"
+        assert mode_config.current_value == BuiltinAgentName.AUTO_APPROVE
 
     @pytest.mark.asyncio
     async def test_set_config_option_mode_to_plan(
@@ -133,8 +133,8 @@ class TestACPSetConfigOptionMode:
         )  # Chat mode auto-approves read-only tools
 
         mode_config = response.config_options[0]
-        assert mode_config.root.id == "mode"
-        assert mode_config.root.current_value == BuiltinAgentName.CHAT
+        assert mode_config.id == "mode"
+        assert mode_config.current_value == BuiltinAgentName.CHAT
 
     @pytest.mark.asyncio
     async def test_set_config_option_mode_invalid_returns_none(
@@ -205,8 +205,8 @@ class TestACPSetConfigOptionModel:
 
         # Verify config_options reflect the new state
         model_config = response.config_options[1]
-        assert model_config.root.id == "model"
-        assert model_config.root.current_value == "devstral-small"
+        assert model_config.id == "model"
+        assert model_config.current_value == "devstral-small"
 
     @pytest.mark.asyncio
     async def test_set_config_option_model_invalid_returns_none(

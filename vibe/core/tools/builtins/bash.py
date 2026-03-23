@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from functools import lru_cache
 import os
+from pathlib import Path
 import signal
 import sys
 from typing import ClassVar, Literal, final
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 from tree_sitter import Language, Node, Parser
 import tree_sitter_bash as tsbash
 
+from vibe.core.tools.arity import build_session_pattern
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -20,7 +22,13 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import (
+    PermissionContext,
+    PermissionScope,
+    RequiredPermission,
+)
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.utils import is_path_within_workdir
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
 
@@ -116,7 +124,7 @@ async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
 
 
 def _get_default_allowlist() -> list[str]:
-    common = ["echo", "git diff", "git log", "git status", "tree", "whoami"]
+    common = ["cd", "echo", "git diff", "git log", "git status", "tree", "whoami"]
 
     if is_windows():
         return common + ["dir", "findstr", "more", "type", "ver", "where"]
@@ -165,6 +173,68 @@ def _get_default_denylist_standalone() -> list[str]:
         return common + ["bash", "sh", "nohup", "vi", "vim", "emacs", "nano", "su"]
 
 
+_PATH_COMMANDS = {
+    "cat",
+    "cd",
+    "chmod",
+    "chown",
+    "cp",
+    "head",
+    "ls",
+    "mkdir",
+    "mv",
+    "rm",
+    "stat",
+    "tail",
+    "touch",
+    "wc",
+}
+
+
+def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
+    """Collect parent directories referenced outside the workdir.
+
+    Iterates file-manipulating commands (see _PATH_COMMANDS) and inspects
+    their arguments as candidate paths. Skips flags (-r, --recursive) and
+    chmod mode strings (+x). For any argument that resolves outside the current
+    working directory, adds the parent directory (or the path itself when it is
+    a directory) to the result set — suitable for building an OUTSIDE_DIRECTORY
+    RequiredPermission.
+    """
+    dirs: set[str] = set()
+    for part in command_parts:
+        tokens = part.split()
+        command = tokens[0] if tokens else None
+        if not command or command not in _PATH_COMMANDS:
+            continue
+        for token in tokens[1:]:
+            # Skip CLI flags like -r, --recursive
+            if token.startswith("-"):
+                continue
+            # Skip chmod mode strings like +x, +rwx — they are not file paths
+            if command == "chmod" and token.startswith("+"):
+                continue
+            # Only consider tokens that look like paths
+            if not (
+                token.startswith(os.sep)
+                or token.startswith("~")
+                or token.startswith(".")
+                or os.sep in token
+            ):
+                continue
+            if is_path_within_workdir(token):
+                continue
+            # Resolve relative / home-relative paths, then collect parent dir
+            resolved = Path(token).expanduser()
+            if not resolved.is_absolute():
+                resolved = Path.cwd() / resolved
+            resolved = resolved.resolve()
+            # For a directory target use the dir itself; for a file use its parent
+            parent = str(resolved) if resolved.is_dir() else str(resolved.parent)
+            dirs.add(parent)
+    return dirs
+
+
 class BashToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
     max_output_bytes: int = Field(
@@ -184,6 +254,10 @@ class BashToolConfig(BaseToolConfig):
     denylist_standalone: list[str] = Field(
         default_factory=_get_default_denylist_standalone,
         description="Commands that are denied only when run without arguments",
+    )
+    sensitive_patterns: list[str] = Field(
+        default=["sudo"],
+        description="Command prefixes that always ASK regardless of arity approval.",
     )
 
 
@@ -224,7 +298,10 @@ class Bash(
     def get_status_text(cls) -> str:
         return "Running command"
 
-    def resolve_permission(self, args: BashArgs) -> ToolPermission | None:
+    def resolve_permission(self, args: BashArgs) -> PermissionContext | None:  # noqa: PLR0911, PLR0912
+        if is_windows():
+            return None
+
         command_parts = _extract_commands(args.command)
         if not command_parts:
             return None
@@ -236,32 +313,92 @@ class Bash(
             parts = command.split()
             if not parts:
                 return False
-
             base_command = parts[0]
-            has_args = len(parts) > 1
-
-            if not has_args:
+            if len(parts) == 1:
                 command_name = os.path.basename(base_command)
                 if command_name in self.config.denylist_standalone:
                     return True
                 if base_command in self.config.denylist_standalone:
                     return True
-
             return False
 
         def is_allowlisted(command: str) -> bool:
             return any(command.startswith(pattern) for pattern in self.config.allowlist)
 
+        def is_sensitive(command: str) -> bool:
+            tokens = command.split()
+            if not tokens:
+                return False
+            return tokens[0] in self.config.sensitive_patterns
+
         for part in command_parts:
-            if is_denylisted(part):
-                return ToolPermission.NEVER
-            if is_standalone_denylisted(part):
-                return ToolPermission.NEVER
+            if is_denylisted(part) or is_standalone_denylisted(part):
+                return PermissionContext(permission=ToolPermission.NEVER)
 
-        if all(is_allowlisted(part) for part in command_parts):
-            return ToolPermission.ALWAYS
+        if self.config.permission == ToolPermission.ALWAYS:
+            return PermissionContext(permission=ToolPermission.ALWAYS)
 
-        return None
+        has_sensitive = any(is_sensitive(part) for part in command_parts)
+        all_allowlisted = not has_sensitive and all(
+            is_allowlisted(part) for part in command_parts
+        )
+        outside_dirs = _collect_outside_dirs(command_parts)
+
+        if all_allowlisted and not outside_dirs:
+            return PermissionContext(permission=ToolPermission.ALWAYS)
+
+        required: list[RequiredPermission] = []
+        seen_session: set[str] = set()
+
+        for part in command_parts:
+            if not part:
+                continue
+            tokens = part.split()
+            if not tokens:
+                continue
+            if not is_sensitive(part) and is_allowlisted(part):
+                continue
+
+            if is_sensitive(part):
+                required.append(
+                    RequiredPermission(
+                        scope=PermissionScope.COMMAND_PATTERN,
+                        invocation_pattern=part,
+                        session_pattern=part,
+                        label=part,
+                    )
+                )
+            else:
+                session_pat = build_session_pattern(tokens)
+                if session_pat not in seen_session:
+                    seen_session.add(session_pat)
+                    required.append(
+                        RequiredPermission(
+                            scope=PermissionScope.COMMAND_PATTERN,
+                            invocation_pattern=part,
+                            session_pattern=session_pat,
+                            label=session_pat,
+                        )
+                    )
+
+        if outside_dirs:
+            globs = sorted(str(Path(d) / "*") for d in outside_dirs)
+            for glob in globs:
+                required.append(
+                    RequiredPermission(
+                        scope=PermissionScope.OUTSIDE_DIRECTORY,
+                        invocation_pattern=glob,
+                        session_pattern=glob,
+                        label=f"outside workdir ({glob})",
+                    )
+                )
+
+        if not required:
+            return None
+
+        return PermissionContext(
+            permission=ToolPermission.ASK, required_permissions=required
+        )
 
     @final
     def _build_timeout_error(self, command: str, timeout: int) -> ToolError:

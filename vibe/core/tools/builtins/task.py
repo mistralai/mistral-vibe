@@ -17,6 +17,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import (
     ToolCallDisplay,
     ToolResultDisplay,
@@ -89,16 +90,16 @@ class Task(
     def get_status_text(cls) -> str:
         return "Running subagent"
 
-    def resolve_permission(self, args: TaskArgs) -> ToolPermission | None:
+    def resolve_permission(self, args: TaskArgs) -> PermissionContext | None:
         agent_name = args.agent
 
         for pattern in self.config.denylist:
             if fnmatch.fnmatch(agent_name, pattern):
-                return ToolPermission.NEVER
+                return PermissionContext(permission=ToolPermission.NEVER)
 
         for pattern in self.config.allowlist:
             if fnmatch.fnmatch(agent_name, pattern):
-                return ToolPermission.ALWAYS
+                return PermissionContext(permission=ToolPermission.ALWAYS)
 
         return None
 

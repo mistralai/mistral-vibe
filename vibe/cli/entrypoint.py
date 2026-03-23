@@ -97,8 +97,11 @@ def parse_arguments() -> argparse.Namespace:
     )
     continuation_group.add_argument(
         "--resume",
+        nargs="?",
+        const=True,
+        default=None,
         metavar="SESSION_ID",
-        help="Resume a specific session by its ID (supports partial matching)",
+        help="Resume a session. Without SESSION_ID, shows an interactive picker.",
     )
     return parser.parse_args()
 

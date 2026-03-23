@@ -9,7 +9,7 @@ from vibe.core.config import TranscribeModelConfig, TranscribeProviderConfig
 
 @dataclass(frozen=True, slots=True)
 class TranscribeSessionCreated:
-    pass
+    request_id: str
 
 
 @dataclass(frozen=True, slots=True)

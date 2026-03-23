@@ -11,6 +11,7 @@ from uuid import uuid4
 
 if TYPE_CHECKING:
     from vibe.core.tools.base import BaseTool
+    from vibe.core.tools.permissions import RequiredPermission
 else:
     BaseTool = Any
 
@@ -23,6 +24,11 @@ from pydantic import (
     computed_field,
     model_validator,
 )
+
+
+class Backend(StrEnum):
+    MISTRAL = auto()
+    GENERIC = auto()
 
 
 class AgentStats(BaseModel):
@@ -314,13 +320,18 @@ class LLMChunk(BaseModel):
     model_config = ConfigDict(frozen=True)
     message: LLMMessage
     usage: LLMUsage | None = None
+    correlation_id: str | None = None
 
     def __add__(self, other: LLMChunk) -> LLMChunk:
         if self.usage is None and other.usage is None:
             new_usage = None
         else:
             new_usage = (self.usage or LLMUsage()) + (other.usage or LLMUsage())
-        return LLMChunk(message=self.message + other.message, usage=new_usage)
+        return LLMChunk(
+            message=self.message + other.message,
+            usage=new_usage,
+            correlation_id=other.correlation_id or self.correlation_id,
+        )
 
 
 class BaseEvent(BaseModel, ABC):
@@ -398,6 +409,12 @@ class CompactEndEvent(BaseEvent):
     tool_call_id: str
 
 
+class AgentProfileChangedEvent(BaseEvent):
+    """Emitted when the active agent profile changes during a turn."""
+
+    agent_name: str
+
+
 class OutputFormat(StrEnum):
     TEXT = auto()
     JSON = auto()
@@ -405,8 +422,10 @@ class OutputFormat(StrEnum):
 
 
 type ApprovalCallback = Callable[
-    [str, BaseModel, str], Awaitable[tuple[ApprovalResponse, str | None]]
+    [str, BaseModel, str, list[RequiredPermission] | None],
+    Awaitable[tuple[ApprovalResponse, str | None]],
 ]
+
 
 type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
 

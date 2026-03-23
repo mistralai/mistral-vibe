@@ -9,10 +9,10 @@ import pytest
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_tool import FakeTool, FakeToolArgs
 from vibe.core.agent_loop import ToolDecision, ToolExecutionResponse
-from vibe.core.config import Backend
 from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.telemetry.send import DATALAKE_EVENTS_URL, TelemetryClient
 from vibe.core.tools.base import BaseTool, ToolPermission
+from vibe.core.types import Backend
 from vibe.core.utils import get_user_agent
 
 _original_send_telemetry_event = TelemetryClient.send_telemetry_event
@@ -258,6 +258,8 @@ class TestTelemetryClient:
             nb_mcp_servers=1,
             nb_models=3,
             entrypoint="cli",
+            client_name="vscode",
+            client_version="1.96.0",
             terminal_emulator="vscode",
         )
 
@@ -270,6 +272,8 @@ class TestTelemetryClient:
         assert properties["nb_mcp_servers"] == 1
         assert properties["nb_models"] == 3
         assert properties["entrypoint"] == "cli"
+        assert properties["client_name"] == "vscode"
+        assert properties["client_version"] == "1.96.0"
         assert properties["terminal_emulator"] == "vscode"
         assert "version" in properties
 
@@ -372,3 +376,41 @@ class TestTelemetryClient:
         assert (
             calls[1].kwargs["json"]["properties"]["session_id"] == "second-session-id"
         )
+
+    def test_send_user_rating_feedback_payload(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_user_rating_feedback(rating=2, model="mistral-large")
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.user_rating_feedback"
+        properties = telemetry_events[0]["properties"]
+        assert properties["rating"] == 2
+        assert properties["model"] == "mistral-large"
+        assert "version" in properties
+
+    def test_send_user_rating_feedback_includes_correlation_id(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        client.last_correlation_id = "corr-abc-123"
+
+        client.send_user_rating_feedback(rating=1, model="mistral-large")
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["correlation_id"] == "corr-abc-123"
+
+    def test_send_user_rating_feedback_omits_correlation_id_when_none(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_user_rating_feedback(rating=1, model="mistral-large")
+
+        assert len(telemetry_events) == 1
+        assert "correlation_id" not in telemetry_events[0]

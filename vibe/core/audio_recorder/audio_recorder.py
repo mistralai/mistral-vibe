@@ -19,6 +19,7 @@ from vibe.core.audio_recorder.audio_recorder_port import (
 )
 from vibe.core.logger import logger
 
+# sounddevice raises OSError on import when no audio driver is available.
 try:
     import sounddevice as sd
 

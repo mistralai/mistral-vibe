@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING, Any, Literal
 import httpx
 
 from vibe import __version__
-from vibe.core.config import Backend, VibeConfig
+from vibe.core.config import VibeConfig
 from vibe.core.llm.format import ResolvedToolCall
+from vibe.core.types import Backend
 from vibe.core.utils import get_user_agent
 
 if TYPE_CHECKING:
@@ -28,6 +29,7 @@ class TelemetryClient:
         self._session_id_getter = session_id_getter
         self._client: httpx.AsyncClient | None = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
+        self.last_correlation_id: str | None = None
 
     def _get_telemetry_user_agent(self) -> str:
         try:
@@ -62,6 +64,9 @@ class TelemetryClient:
         except ValueError:
             return False
 
+    def is_active(self) -> bool:
+        return self._is_enabled() and self._get_mistral_api_key() is not None
+
     @property
     def client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -71,7 +76,13 @@ class TelemetryClient:
             )
         return self._client
 
-    def send_telemetry_event(self, event_name: str, properties: dict[str, Any]) -> None:
+    def send_telemetry_event(
+        self,
+        event_name: str,
+        properties: dict[str, Any],
+        *,
+        correlation_id: str | None = None,
+    ) -> None:
         mistral_api_key = self._get_mistral_api_key()
         if mistral_api_key is None or not self._is_enabled():
             return
@@ -82,11 +93,15 @@ class TelemetryClient:
         ):
             properties = {**properties, "session_id": session_id}
 
+        payload: dict[str, Any] = {"event": event_name, "properties": properties}
+        if correlation_id:
+            payload["correlation_id"] = correlation_id
+
         async def _send() -> None:
             try:
                 await self.client.post(
                     DATALAKE_EVENTS_URL,
-                    json={"event": event_name, "properties": properties},
+                    json=payload,
                     headers={
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {mistral_api_key}",
@@ -178,6 +193,8 @@ class TelemetryClient:
         nb_mcp_servers: int,
         nb_models: int,
         entrypoint: Literal["cli", "acp", "programmatic", "unknown"],
+        client_name: str | None,
+        client_version: str | None,
         terminal_emulator: str | None = None,
     ) -> None:
         payload = {
@@ -187,6 +204,8 @@ class TelemetryClient:
             "nb_models": nb_models,
             "entrypoint": entrypoint,
             "version": __version__,
+            "client_name": client_name,
+            "client_version": client_version,
             "terminal_emulator": terminal_emulator,
         }
         self.send_telemetry_event("vibe.new_session", payload)
@@ -194,4 +213,11 @@ class TelemetryClient:
     def send_onboarding_api_key_added(self) -> None:
         self.send_telemetry_event(
             "vibe.onboarding_api_key_added", {"version": __version__}
+        )
+
+    def send_user_rating_feedback(self, rating: int, model: str) -> None:
+        self.send_telemetry_event(
+            "vibe.user_rating_feedback",
+            {"rating": rating, "version": __version__, "model": model},
+            correlation_id=self.last_correlation_id,
         )

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import fnmatch
 from pathlib import Path
 
+from vibe.core.utils.io import read_safe
+
 DEFAULT_IGNORE_PATTERNS: list[tuple[str, bool]] = [
     (".git/", True),
     ("__pycache__/", True),
@@ -111,7 +113,7 @@ class IgnoreRules:
         gitignore_path = root / ".gitignore"
         if gitignore_path.exists():
             try:
-                text = gitignore_path.read_text(encoding="utf-8")
+                text = read_safe(gitignore_path)
             except Exception:
                 return patterns
 

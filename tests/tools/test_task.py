@@ -10,6 +10,7 @@ from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import BUILTIN_AGENTS, AgentType
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError, ToolPermission
 from vibe.core.tools.builtins.task import Task, TaskArgs, TaskResult, TaskToolConfig
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.types import AssistantEvent, LLMMessage, Role
 
 
@@ -80,7 +81,8 @@ class TestTaskToolResolvePermission:
     def test_explore_allowed_by_default(self, task_tool: Task) -> None:
         args = TaskArgs(task="do something", agent="explore")
         result = task_tool.resolve_permission(args)
-        assert result == ToolPermission.ALWAYS
+        assert isinstance(result, PermissionContext)
+        assert result.permission is ToolPermission.ALWAYS
 
     def test_unknown_agent_returns_none(self, task_tool: Task) -> None:
         args = TaskArgs(task="do something", agent="custom_agent")
@@ -92,21 +94,24 @@ class TestTaskToolResolvePermission:
         tool = Task(config=config, state=BaseToolState())
         args = TaskArgs(task="do something", agent="explore")
         result = tool.resolve_permission(args)
-        assert result == ToolPermission.NEVER
+        assert isinstance(result, PermissionContext)
+        assert result.permission is ToolPermission.NEVER
 
     def test_glob_pattern_in_allowlist(self) -> None:
         config = TaskToolConfig(allowlist=["exp*"])
         tool = Task(config=config, state=BaseToolState())
         args = TaskArgs(task="do something", agent="explore")
         result = tool.resolve_permission(args)
-        assert result == ToolPermission.ALWAYS
+        assert isinstance(result, PermissionContext)
+        assert result.permission is ToolPermission.ALWAYS
 
     def test_glob_pattern_in_denylist(self) -> None:
         config = TaskToolConfig(denylist=["danger*"])
         tool = Task(config=config, state=BaseToolState())
         args = TaskArgs(task="do something", agent="dangerous_agent")
         result = tool.resolve_permission(args)
-        assert result == ToolPermission.NEVER
+        assert isinstance(result, PermissionContext)
+        assert result.permission is ToolPermission.NEVER
 
     def test_empty_lists_returns_none(self) -> None:
         config = TaskToolConfig(allowlist=[], denylist=[])

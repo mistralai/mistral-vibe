@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from vibe.core.types import LLMMessage, SessionMetadata
+from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.config import SessionLoggingConfig
@@ -181,7 +182,7 @@ class SessionLoader:
             raise ValueError(f"Session metadata not found at {session_dir}")
 
         try:
-            metadata_content = metadata_path.read_text("utf-8", errors="ignore")
+            metadata_content = read_safe(metadata_path)
             return SessionMetadata.model_validate_json(metadata_content)
         except ValueError:
             raise
@@ -196,8 +197,9 @@ class SessionLoader:
         messages_filepath = filepath / MESSAGES_FILENAME
 
         try:
-            with messages_filepath.open("r", encoding="utf-8", errors="ignore") as f:
-                content = f.readlines()
+            content = read_safe(messages_filepath).split("\n")
+            if content and content[-1] == "":
+                content.pop()
         except Exception as e:
             raise ValueError(
                 f"Error reading session messages at {filepath}: {e}"

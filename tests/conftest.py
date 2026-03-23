@@ -15,7 +15,7 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
 )
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
-from vibe.cli.textual_ui.app import CORE_VERSION, VibeApp
+from vibe.cli.textual_ui.app import CORE_VERSION, StartupOptions, VibeApp
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
@@ -122,13 +122,27 @@ def _mock_update_commands(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _disable_feedback_bar(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "vibe.cli.textual_ui.widgets.feedback_bar.FEEDBACK_PROBABILITY", 0
+    )
+
+
+@pytest.fixture(autouse=True)
 def telemetry_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
 
     def record_telemetry(
-        self: Any, event_name: str, properties: dict[str, Any]
+        self: Any,
+        event_name: str,
+        properties: dict[str, Any],
+        *,
+        correlation_id: str | None = None,
     ) -> None:
-        events.append({"event_name": event_name, "properties": properties})
+        event: dict[str, Any] = {"event_name": event_name, "properties": properties}
+        if correlation_id is not None:
+            event["correlation_id"] = correlation_id
+        events.append(event)
 
     monkeypatch.setattr(
         "vibe.core.telemetry.send.TelemetryClient.send_telemetry_event",
@@ -236,11 +250,11 @@ def build_test_vibe_app(
 
     return VibeApp(
         agent_loop=resolved_agent_loop,
+        startup=StartupOptions(initial_prompt=kwargs.pop("initial_prompt", None)),
         current_version=resolved_current_version,
         update_notifier=resolved_update_notifier,
         update_cache_repository=resolved_update_cache_repository,
         plan_offer_gateway=resolved_plan_offer_gateway,
-        initial_prompt=kwargs.pop("initial_prompt", None),
         voice_manager=voice_manager,
         **kwargs,
     )
