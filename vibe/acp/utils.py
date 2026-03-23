@@ -9,6 +9,7 @@ from acp.schema import (
     ContentToolCallContent,
     ModelInfo,
     PermissionOption,
+    SessionConfigOption,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
     SessionMode,
@@ -102,7 +103,7 @@ def is_valid_acp_mode(profiles: list[AgentProfile], mode_name: str) -> bool:
 
 def make_mode_response(
     profiles: list[AgentProfile], current_mode_id: str
-) -> tuple[SessionModeState, SessionConfigOptionSelect]:
+) -> tuple[SessionModeState, SessionConfigOption]:
     session_modes: list[SessionMode] = []
     config_options: list[SessionConfigSelectOption] = []
 
@@ -127,20 +128,22 @@ def make_mode_response(
     state = SessionModeState(
         current_mode_id=current_mode_id, available_modes=session_modes
     )
-    config = SessionConfigOptionSelect(
-        id="mode",
-        name="Session Mode",
-        current_value=current_mode_id,
-        category="mode",
-        type="select",
-        options=config_options,
+    config = SessionConfigOption(
+        root=SessionConfigOptionSelect(
+            id="mode",
+            name="Session Mode",
+            current_value=current_mode_id,
+            category="mode",
+            type="select",
+            options=config_options,
+        )
     )
     return state, config
 
 
 def make_model_response(
     models: list[ModelConfig], current_model_id: str
-) -> tuple[SessionModelState, SessionConfigOptionSelect]:
+) -> tuple[SessionModelState, SessionConfigOption]:
     model_infos: list[ModelInfo] = []
     config_options: list[SessionConfigSelectOption] = []
 
@@ -155,13 +158,15 @@ def make_model_response(
     state = SessionModelState(
         current_model_id=current_model_id, available_models=model_infos
     )
-    config_option = SessionConfigOptionSelect(
-        id="model",
-        name="Model",
-        current_value=current_model_id,
-        category="model",
-        type="select",
-        options=config_options,
+    config_option = SessionConfigOption(
+        root=SessionConfigOptionSelect(
+            id="model",
+            name="Model",
+            current_value=current_model_id,
+            category="model",
+            type="select",
+            options=config_options,
+        )
     )
     return state, config_option
 

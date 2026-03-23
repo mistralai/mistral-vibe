@@ -26,14 +26,11 @@ from acp.schema import (
     AgentThoughtChunk,
     AllowedOutcome,
     AuthenticateResponse,
-    AuthMethodAgent,
+    AuthMethod,
     AvailableCommand,
     AvailableCommandInput,
     ClientCapabilities,
-    CloseSessionResponse,
     ContentToolCallContent,
-    Cost,
-    EnvVarAuthMethod,
     ForkSessionResponse,
     HttpMcpServer,
     Implementation,
@@ -46,14 +43,11 @@ from acp.schema import (
     SessionListCapabilities,
     SetSessionConfigOptionResponse,
     SseMcpServer,
-    TerminalAuthMethod,
     TextContentBlock,
     TextResourceContents,
     ToolCallProgress,
     ToolCallUpdate,
     UnstructuredCommandInput,
-    Usage,
-    UsageUpdate,
     UserMessageChunk,
 )
 from pydantic import BaseModel, ConfigDict
@@ -180,10 +174,9 @@ class VibeAcpAgentLoop(AcpAgent):
             and self.client_capabilities.field_meta.get("terminal-auth") is True
         )
 
-        auth_methods: list[EnvVarAuthMethod | TerminalAuthMethod | AuthMethodAgent] = (
+        auth_methods = (
             [
-                TerminalAuthMethod(
-                    type="terminal",
+                AuthMethod(
                     id="vibe-setup",
                     name="Register your API Key",
                     description="Register your API Key inside Mistral Vibe",
@@ -387,39 +380,6 @@ class VibeAcpAgentLoop(AcpAgent):
             raise SessionNotFoundError(session_id)
         return self.sessions[session_id]
 
-    def _build_usage(self, session: AcpSessionLoop) -> Usage:
-        stats = session.agent_loop.stats
-        return Usage(
-            input_tokens=stats.session_prompt_tokens,
-            output_tokens=stats.session_completion_tokens,
-            total_tokens=stats.session_total_llm_tokens,
-        )
-
-    def _build_usage_update(self, session: AcpSessionLoop) -> UsageUpdate:
-        stats = session.agent_loop.stats
-        active_model = session.agent_loop.config.get_active_model()
-        cost = (
-            Cost(amount=stats.session_cost, currency="USD")
-            if stats.input_price_per_million > 0 or stats.output_price_per_million > 0
-            else None
-        )
-        return UsageUpdate(
-            session_update="usage_update",
-            used=stats.context_tokens,
-            size=active_model.auto_compact_threshold,
-            cost=cost,
-        )
-
-    def _send_usage_update(self, session: AcpSessionLoop) -> None:
-        async def _send() -> None:
-            try:
-                update = self._build_usage_update(session)
-                await self.client.session_update(session_id=session.id, update=update)
-            except Exception:
-                pass
-
-        asyncio.create_task(_send())
-
     async def _replay_tool_calls(self, session_id: str, msg: LLMMessage) -> None:
         if not msg.tool_calls:
             return
@@ -604,7 +564,6 @@ class VibeAcpAgentLoop(AcpAgent):
         session = await self._create_acp_session(session_id, agent_loop)
 
         await self._replay_conversation_history(session_id, non_system_messages)
-        self._send_usage_update(session)
 
         modes_state, modes_config = make_mode_response(
             list(agent_loop.agent_manager.available_agents.values()),
@@ -731,11 +690,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
     @override
     async def prompt(
-        self,
-        prompt: list[ContentBlock],
-        session_id: str,
-        message_id: str | None = None,
-        **kwargs: Any,
+        self, prompt: list[ContentBlock], session_id: str, **kwargs: Any
     ) -> PromptResponse:
         session = self._get_session(session_id)
 
@@ -768,10 +723,7 @@ class VibeAcpAgentLoop(AcpAgent):
             await session.task
 
         except asyncio.CancelledError:
-            self._send_usage_update(session)
-            return PromptResponse(
-                stop_reason="cancelled", usage=self._build_usage(session)
-            )
+            return PromptResponse(stop_reason="cancelled")
 
         except CoreRateLimitError as e:
             raise RateLimitError.from_core(e) from e
@@ -785,8 +737,7 @@ class VibeAcpAgentLoop(AcpAgent):
         finally:
             session.task = None
 
-        self._send_usage_update(session)
-        return PromptResponse(stop_reason="end_turn", usage=self._build_usage(session))
+        return PromptResponse(stop_reason="end_turn")
 
     def _build_text_prompt(self, acp_prompt: list[ContentBlock]) -> str:
         text_prompt = ""
@@ -907,12 +858,6 @@ class VibeAcpAgentLoop(AcpAgent):
 
             elif isinstance(event, AgentProfileChangedEvent):
                 pass
-
-    @override
-    async def close_session(
-        self, session_id: str, **kwargs: Any
-    ) -> CloseSessionResponse | None:
-        raise NotImplementedMethodError("close_session")
 
     @override
     async def cancel(self, session_id: str, **kwargs: Any) -> None:

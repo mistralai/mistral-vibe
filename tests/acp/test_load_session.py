@@ -100,11 +100,13 @@ class TestLoadSession:
 
         assert response.config_options is not None
         assert len(response.config_options) == 2
-        assert response.config_options[0].id == "mode"
-        assert response.config_options[0].category == "mode"
-        assert response.config_options[0].current_value == BuiltinAgentName.DEFAULT
-        assert len(response.config_options[0].options) == 5
-        mode_option_values = {opt.value for opt in response.config_options[0].options}
+        assert response.config_options[0].root.id == "mode"
+        assert response.config_options[0].root.category == "mode"
+        assert response.config_options[0].root.current_value == BuiltinAgentName.DEFAULT
+        assert len(response.config_options[0].root.options) == 5
+        mode_option_values = {
+            opt.value for opt in response.config_options[0].root.options
+        }
         assert mode_option_values == {
             BuiltinAgentName.DEFAULT,
             BuiltinAgentName.CHAT,
@@ -112,11 +114,13 @@ class TestLoadSession:
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
         }
-        assert response.config_options[1].id == "model"
-        assert response.config_options[1].category == "model"
-        assert response.config_options[1].current_value == "devstral-latest"
-        assert len(response.config_options[1].options) == 2
-        model_option_values = {opt.value for opt in response.config_options[1].options}
+        assert response.config_options[1].root.id == "model"
+        assert response.config_options[1].root.category == "model"
+        assert response.config_options[1].root.current_value == "devstral-latest"
+        assert len(response.config_options[1].root.options) == 2
+        model_option_values = {
+            opt.value for opt in response.config_options[1].root.options
+        }
         assert model_option_values == {"devstral-latest", "devstral-small"}
 
     @pytest.mark.asyncio

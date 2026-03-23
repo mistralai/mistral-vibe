@@ -103,11 +103,11 @@ class TestACPNewSession:
 
         # Mode config option
         mode_config = session_response.config_options[0]
-        assert mode_config.id == "mode"
-        assert mode_config.category == "mode"
-        assert mode_config.current_value == BuiltinAgentName.DEFAULT
-        assert len(mode_config.options) == 5
-        mode_option_values = {opt.value for opt in mode_config.options}
+        assert mode_config.root.id == "mode"
+        assert mode_config.root.category == "mode"
+        assert mode_config.root.current_value == BuiltinAgentName.DEFAULT
+        assert len(mode_config.root.options) == 5
+        mode_option_values = {opt.value for opt in mode_config.root.options}
         assert mode_option_values == {
             BuiltinAgentName.DEFAULT,
             BuiltinAgentName.CHAT,
@@ -118,11 +118,11 @@ class TestACPNewSession:
 
         # Model config option
         model_config = session_response.config_options[1]
-        assert model_config.id == "model"
-        assert model_config.category == "model"
-        assert model_config.current_value == "devstral-latest"
-        assert len(model_config.options) == 2
-        model_option_values = {opt.value for opt in model_config.options}
+        assert model_config.root.id == "model"
+        assert model_config.root.category == "model"
+        assert model_config.root.current_value == "devstral-latest"
+        assert len(model_config.root.options) == 2
+        model_option_values = {opt.value for opt in model_config.root.options}
         assert model_option_values == {"devstral-latest", "devstral-small"}
 
     @pytest.mark.skip(reason="TODO: Fix this test")
