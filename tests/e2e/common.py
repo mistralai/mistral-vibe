@@ -22,25 +22,31 @@ def ansi_tolerant_pattern(text: str) -> re.Pattern[str]:
     return re.compile(ansi.join(re.escape(char) for char in text))
 
 
-def write_e2e_config(vibe_home: Path, api_base: str) -> None:
+def write_e2e_config(
+    vibe_home: Path, api_base: str, extra_toml: str = ""
+) -> None:
     vibe_home.mkdir(parents=True, exist_ok=True)
+    lines = [
+        'active_model = "mock-model"',
+        "enable_update_checks = false",
+        "enable_auto_update = false",
+        "",
+        "[[providers]]",
+        'name = "mock-provider"',
+        f'api_base = "{api_base}"',
+        'api_key_env_var = "MISTRAL_API_KEY"',
+        'backend = "generic"',
+        "",
+        "[[models]]",
+        'name = "mock-model"',
+        'provider = "mock-provider"',
+        'alias = "mock-model"',
+    ]
+    if extra_toml:
+        lines.append("")
+        lines.append(extra_toml)
     (vibe_home / "config.toml").write_text(
-        "\n".join([
-            'active_model = "mock-model"',
-            "enable_update_checks = false",
-            "enable_auto_update = false",
-            "",
-            "[[providers]]",
-            'name = "mock-provider"',
-            f'api_base = "{api_base}"',
-            'api_key_env_var = "MISTRAL_API_KEY"',
-            'backend = "generic"',
-            "",
-            "[[models]]",
-            'name = "mock-model"',
-            'provider = "mock-provider"',
-            'alias = "mock-model"',
-        ]),
+        "\n".join(lines),
         encoding="utf-8",
     )
 

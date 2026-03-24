@@ -118,6 +118,18 @@ class SessionLoggingConfig(BaseSettings):
         return str(Path(v).expanduser().resolve())
 
 
+class HookEntry(BaseModel):
+    command: str
+
+
+class HooksConfig(BaseModel):
+    session_start: list[HookEntry] = Field(default_factory=list)
+    user_prompt_submit: list[HookEntry] = Field(default_factory=list)
+    pre_tool_use: list[HookEntry] = Field(default_factory=list)
+    post_tool_use: list[HookEntry] = Field(default_factory=list)
+    turn_end: list[HookEntry] = Field(default_factory=list)
+
+
 class ProviderConfig(BaseModel):
     name: str
     api_base: str
@@ -430,6 +442,7 @@ class VibeConfig(BaseSettings):
 
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
     tools: dict[str, dict[str, Any]] = Field(default_factory=dict)
     tool_paths: list[Path] = Field(
         default_factory=list,
