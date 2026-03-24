@@ -16,12 +16,6 @@ from vibe.core.hooks import HookManager
 # ── Config model tests ──
 
 
-class TestHookEntry:
-    def test_command_field(self) -> None:
-        entry = HookEntry(command="echo hi")
-        assert entry.command == "echo hi"
-
-
 class TestHooksConfig:
     def test_defaults_to_empty_lists(self) -> None:
         config = HooksConfig()
@@ -30,11 +24,6 @@ class TestHooksConfig:
         assert config.pre_tool_use == []
         assert config.post_tool_use == []
         assert config.turn_end == []
-
-    def test_single_hook_per_event(self) -> None:
-        config = HooksConfig(session_start=[HookEntry(command="echo start")])
-        assert len(config.session_start) == 1
-        assert config.session_start[0].command == "echo start"
 
     def test_multiple_hooks_per_event(self) -> None:
         config = HooksConfig(
@@ -160,19 +149,6 @@ class TestHookManagerPayloads:
         assert payload["tool_response"] is None
         assert payload["tool_error"] == "boom"
 
-    @pytest.mark.asyncio
-    async def test_turn_end_payload(self) -> None:
-        mgr = _make_manager("turn_end", ["cat"])
-        proc = _mock_proc()
-        with patch("asyncio.create_subprocess_shell", return_value=proc):
-            mgr.emit_turn_end()
-            await mgr.drain()
-        payload = json.loads(proc.communicate.call_args[1]["input"])
-        assert payload["hook_event_name"] == "turn_end"
-        assert "session_id" in payload
-        assert "cwd" in payload
-
-
 class TestHookManagerBehavior:
     @pytest.mark.asyncio
     async def test_no_hooks_configured_no_subprocess(self) -> None:
@@ -229,7 +205,7 @@ class TestHookManagerBehavior:
     async def test_timeout_kills_process(self) -> None:
         mgr = _make_manager("session_start", ["sleep 999"])
         proc = AsyncMock()
-        proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+        proc.communicate = AsyncMock(side_effect=TimeoutError)
         proc.kill = MagicMock()
         proc.wait = AsyncMock()
         with patch("asyncio.create_subprocess_shell", return_value=proc):

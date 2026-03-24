@@ -201,6 +201,20 @@ class TestTurnEndHook:
         turn_ends = [p for p in payloads if p["hook_event_name"] == "turn_end"]
         assert len(turn_ends) == 1
 
+    @pytest.mark.asyncio
+    async def test_fires_once_per_turn(self) -> None:
+        hooks = HooksConfig(turn_end=[HookEntry(command="cat")])
+        agent = _make_agent(hooks)
+        proc = _mock_proc()
+        with patch(
+            "vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc
+        ):
+            await _act_and_collect(agent, "hello")
+            await _act_and_collect(agent, "world")
+        payloads = _extract_payloads(proc)
+        turn_ends = [p for p in payloads if p["hook_event_name"] == "turn_end"]
+        assert len(turn_ends) == 2
+
 
 class TestFullLifecycleOrdering:
     @pytest.mark.asyncio
