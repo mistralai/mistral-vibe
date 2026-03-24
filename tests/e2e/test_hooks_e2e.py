@@ -4,19 +4,13 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from pathlib import Path
 
 import pexpect
 import pytest
 
 from tests import TESTS_ROOT
-from tests.e2e.common import (
-    SpawnedVibeProcessFixture,
-    wait_for_main_screen,
-    wait_for_request_count,
-    write_e2e_config,
-)
+from tests.e2e.common import write_e2e_config
 from tests.e2e.mock_server import StreamingMockServer
 
 
@@ -33,8 +27,8 @@ def _create_hook_helper(tmp_path: Path) -> Path:
     return helper
 
 
-def _hooks_toml(helper: Path, output_file: Path) -> str:
-    """Generate TOML config for hooks that write payloads to output_file."""
+def _hooks_toml(helper: Path) -> str:
+    """Generate TOML config for hooks that use the helper script."""
     cmd = f'python3 {helper}'
     lines = []
     for event in ["session_start", "user_prompt_submit", "pre_tool_use", "post_tool_use", "turn_end"]:
@@ -71,7 +65,7 @@ def test_programmatic_mode_lifecycle_hooks(
     write_e2e_config(
         vibe_home,
         streaming_mock_server.api_base,
-        extra_toml=_hooks_toml(helper, output_file),
+        extra_toml=_hooks_toml(helper),
     )
 
     env = dict(os.environ)

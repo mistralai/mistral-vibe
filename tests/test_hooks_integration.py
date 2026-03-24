@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -46,6 +45,16 @@ def _mock_proc() -> AsyncMock:
     return proc
 
 
+def _extract_payloads(proc: AsyncMock) -> list[dict]:
+    """Extract all JSON payloads sent to a mock subprocess via stdin."""
+    payloads = []
+    for comm_call in proc.communicate.await_args_list:
+        raw = comm_call[1].get("input")
+        if raw:
+            payloads.append(json.loads(raw))
+    return payloads
+
+
 def _make_agent(
     hooks: HooksConfig,
     backend: FakeBackend | None = None,
@@ -79,21 +88,6 @@ async def _act_and_collect(agent: AgentLoop, prompt: str) -> list[BaseEvent]:
     return [ev async for ev in agent.act(prompt)]
 
 
-def _extract_payloads(mock_shell: AsyncMock) -> list[dict]:
-    """Extract JSON payloads from all create_subprocess_shell calls."""
-    payloads = []
-    for call in mock_shell.call_args_list:
-        # The proc.communicate is called with input=payload_bytes
-        proc = mock_shell.return_value
-        for comm_call in proc.communicate.call_args_list:
-            raw = comm_call[1].get("input") or comm_call[0][0] if comm_call[0] else None
-            if raw is None:
-                raw = comm_call[1].get("input")
-            if raw:
-                payloads.append(json.loads(raw))
-    return payloads
-
-
 # ── Tests ──
 
 
@@ -103,18 +97,12 @@ class TestSessionStartHook:
         hooks = HooksConfig(session_start=[HookEntry(command="cat")])
         agent = _make_agent(hooks)
         proc = _mock_proc()
-        with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc) as mock_shell:
+        with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
             await _act_and_collect(agent, "hello")
             await _act_and_collect(agent, "world")
-        # session_start should fire exactly once
-        payloads = []
-        for comm_call in proc.communicate.await_args_list:
-            raw = comm_call[1].get("input")
-            if raw:
-                p = json.loads(raw)
-                if p["hook_event_name"] == "session_start":
-                    payloads.append(p)
-        assert len(payloads) == 1
+        payloads = _extract_payloads(proc)
+        starts = [p for p in payloads if p["hook_event_name"] == "session_start"]
+        assert len(starts) == 1
 
 
 class TestUserPromptSubmitHook:
@@ -126,16 +114,11 @@ class TestUserPromptSubmitHook:
         with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
             await _act_and_collect(agent, "hello")
             await _act_and_collect(agent, "world")
-        payloads = []
-        for comm_call in proc.communicate.await_args_list:
-            raw = comm_call[1].get("input")
-            if raw:
-                p = json.loads(raw)
-                if p["hook_event_name"] == "user_prompt_submit":
-                    payloads.append(p)
-        assert len(payloads) == 2
-        assert payloads[0]["prompt"] == "hello"
-        assert payloads[1]["prompt"] == "world"
+        payloads = _extract_payloads(proc)
+        prompts = [p for p in payloads if p["hook_event_name"] == "user_prompt_submit"]
+        assert len(prompts) == 2
+        assert prompts[0]["prompt"] == "hello"
+        assert prompts[1]["prompt"] == "world"
 
 
 class TestToolHooks:
@@ -154,11 +137,7 @@ class TestToolHooks:
         proc = _mock_proc()
         with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
             await _act_and_collect(agent, "show todos")
-        payloads = []
-        for comm_call in proc.communicate.await_args_list:
-            raw = comm_call[1].get("input")
-            if raw:
-                payloads.append(json.loads(raw))
+        payloads = _extract_payloads(proc)
         pre = [p for p in payloads if p["hook_event_name"] == "pre_tool_use"]
         post = [p for p in payloads if p["hook_event_name"] == "post_tool_use"]
         assert len(pre) == 1
@@ -178,7 +157,6 @@ class TestToolHooks:
             [mock_llm_chunk(content="Checking.", tool_calls=[tool_call])],
             [mock_llm_chunk(content="Ok.")],
         ])
-        # Use ASK permission so the approval callback is consulted
         config = build_test_vibe_config(
             hooks=hooks,
             enabled_tools=["todo"],
@@ -201,14 +179,10 @@ class TestToolHooks:
         proc = _mock_proc()
         with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
             await _act_and_collect(agent, "show todos")
-        payloads = []
-        for comm_call in proc.communicate.await_args_list:
-            raw = comm_call[1].get("input")
-            if raw:
-                payloads.append(json.loads(raw))
+        payloads = _extract_payloads(proc)
         pre = [p for p in payloads if p["hook_event_name"] == "pre_tool_use"]
         post = [p for p in payloads if p["hook_event_name"] == "post_tool_use"]
-        assert len(pre) == 0  # no pre_tool_use for skipped
+        assert len(pre) == 0
         assert len(post) == 1
         assert post[0]["tool_outcome"] == "skipped"
 
@@ -221,11 +195,7 @@ class TestTurnEndHook:
         proc = _mock_proc()
         with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
             await _act_and_collect(agent, "hello")
-        payloads = []
-        for comm_call in proc.communicate.await_args_list:
-            raw = comm_call[1].get("input")
-            if raw:
-                payloads.append(json.loads(raw))
+        payloads = _extract_payloads(proc)
         turn_ends = [p for p in payloads if p["hook_event_name"] == "turn_end"]
         assert len(turn_ends) == 1
 
@@ -243,13 +213,8 @@ class TestFullLifecycleOrdering:
         proc = _mock_proc()
         with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
             await _act_and_collect(agent, "show todos")
-        payloads = []
-        for comm_call in proc.communicate.await_args_list:
-            raw = comm_call[1].get("input")
-            if raw:
-                payloads.append(json.loads(raw))
+        payloads = _extract_payloads(proc)
         event_names = [p["hook_event_name"] for p in payloads]
-        # Verify ordering
         assert event_names.index("session_start") < event_names.index("user_prompt_submit")
         assert event_names.index("user_prompt_submit") < event_names.index("pre_tool_use")
         assert event_names.index("pre_tool_use") < event_names.index("post_tool_use")
@@ -259,7 +224,7 @@ class TestFullLifecycleOrdering:
 class TestNoHooksByDefault:
     @pytest.mark.asyncio
     async def test_no_subprocess_spawned(self) -> None:
-        agent = build_test_agent_loop()  # default config, no hooks
+        agent = build_test_agent_loop()
         with patch("vibe.core.hooks.asyncio.create_subprocess_shell") as mock_shell:
             await _act_and_collect(agent, "hello")
         mock_shell.assert_not_called()
