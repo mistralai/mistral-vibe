@@ -71,8 +71,7 @@ class HookManager:
             )
             try:
                 _, stderr = await asyncio.wait_for(
-                    proc.communicate(input=payload),
-                    timeout=HOOK_TIMEOUT_SECONDS,
+                    proc.communicate(input=payload), timeout=HOOK_TIMEOUT_SECONDS
                 )
                 if stderr:
                     logger.debug(
@@ -82,13 +81,11 @@ class HookManager:
                     logger.warning(
                         "Hook %r exited with code %d", command, proc.returncode
                     )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 logger.warning(
-                    "Hook %r timed out after %ds, killed",
-                    command,
-                    HOOK_TIMEOUT_SECONDS,
+                    "Hook %r timed out after %ds, killed", command, HOOK_TIMEOUT_SECONDS
                 )
         except Exception:
             logger.exception("Failed to run hook %r", command)

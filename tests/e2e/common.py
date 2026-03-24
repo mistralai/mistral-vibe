@@ -22,9 +22,7 @@ def ansi_tolerant_pattern(text: str) -> re.Pattern[str]:
     return re.compile(ansi.join(re.escape(char) for char in text))
 
 
-def write_e2e_config(
-    vibe_home: Path, api_base: str, extra_toml: str = ""
-) -> None:
+def write_e2e_config(vibe_home: Path, api_base: str, extra_toml: str = "") -> None:
     vibe_home.mkdir(parents=True, exist_ok=True)
     lines = [
         'active_model = "mock-model"',
@@ -45,10 +43,7 @@ def write_e2e_config(
     if extra_toml:
         lines.append("")
         lines.append(extra_toml)
-    (vibe_home / "config.toml").write_text(
-        "\n".join(lines),
-        encoding="utf-8",
-    )
+    (vibe_home / "config.toml").write_text("\n".join(lines), encoding="utf-8")
 
 
 def strip_ansi(text: str) -> str:

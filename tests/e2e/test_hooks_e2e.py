@@ -18,7 +18,7 @@ def _create_hook_helper(tmp_path: Path) -> Path:
     """Create a helper script that appends hook stdin JSON to an output file."""
     helper = tmp_path / "hook_helper.py"
     helper.write_text(
-        'import sys, os\n'
+        "import sys, os\n"
         'out = os.environ.get("HOOK_OUTPUT_FILE", "/dev/null")\n'
         'with open(out, "a") as f:\n'
         '    f.write(sys.stdin.read() + "\\n")\n',
@@ -29,9 +29,15 @@ def _create_hook_helper(tmp_path: Path) -> Path:
 
 def _hooks_toml(helper: Path) -> str:
     """Generate TOML config for hooks that use the helper script."""
-    cmd = f'python3 {helper}'
+    cmd = f"python3 {helper}"
     lines = []
-    for event in ["session_start", "user_prompt_submit", "pre_tool_use", "post_tool_use", "turn_end"]:
+    for event in [
+        "session_start",
+        "user_prompt_submit",
+        "pre_tool_use",
+        "post_tool_use",
+        "turn_end",
+    ]:
         lines.append(f"[[hooks.{event}]]")
         lines.append(f'command = "{cmd}"')
         lines.append("")
@@ -54,6 +60,7 @@ def _read_payloads(output_file: Path) -> list[dict]:
 def test_programmatic_mode_lifecycle_hooks(
     streaming_mock_server: StreamingMockServer,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Spawn vibe -p with hooks and verify the full lifecycle fires."""
     vibe_home = tmp_path / "vibe-home"
@@ -63,22 +70,19 @@ def test_programmatic_mode_lifecycle_hooks(
     helper = _create_hook_helper(tmp_path)
 
     write_e2e_config(
-        vibe_home,
-        streaming_mock_server.api_base,
-        extra_toml=_hooks_toml(helper),
+        vibe_home, streaming_mock_server.api_base, extra_toml=_hooks_toml(helper)
     )
 
-    env = dict(os.environ)
-    env["MISTRAL_API_KEY"] = "fake-key"
-    env["VIBE_HOME"] = str(vibe_home)
-    env["HOOK_OUTPUT_FILE"] = str(output_file)
-    env["TERM"] = "xterm-256color"
+    monkeypatch.setenv("MISTRAL_API_KEY", "fake-key")
+    monkeypatch.setenv("VIBE_HOME", str(vibe_home))
+    monkeypatch.setenv("HOOK_OUTPUT_FILE", str(output_file))
+    monkeypatch.setenv("TERM", "xterm-256color")
 
     child = pexpect.spawn(
         "uv",
         ["run", "vibe", "-p", "Say hello", "--workdir", str(workdir)],
         cwd=str(TESTS_ROOT.parent),
-        env=env,
+        env=os.environ,
         encoding="utf-8",
         timeout=15,
     )
@@ -104,7 +108,9 @@ def test_programmatic_mode_lifecycle_hooks(
         assert "session_id" in p
 
     # Verify user_prompt_submit has the prompt
-    prompt_payloads = [p for p in payloads if p["hook_event_name"] == "user_prompt_submit"]
+    prompt_payloads = [
+        p for p in payloads if p["hook_event_name"] == "user_prompt_submit"
+    ]
     assert len(prompt_payloads) == 1
     assert prompt_payloads[0]["prompt"] == "Say hello"
 

@@ -13,7 +13,6 @@ import pytest
 from vibe.core.config._settings import HookEntry, HooksConfig, VibeConfig
 from vibe.core.hooks import HookManager
 
-
 # ── Config model tests ──
 
 
@@ -33,18 +32,13 @@ class TestHooksConfig:
         assert config.turn_end == []
 
     def test_single_hook_per_event(self) -> None:
-        config = HooksConfig(
-            session_start=[HookEntry(command="echo start")],
-        )
+        config = HooksConfig(session_start=[HookEntry(command="echo start")])
         assert len(config.session_start) == 1
         assert config.session_start[0].command == "echo start"
 
     def test_multiple_hooks_per_event(self) -> None:
         config = HooksConfig(
-            turn_end=[
-                HookEntry(command="cmd1"),
-                HookEntry(command="cmd2"),
-            ],
+            turn_end=[HookEntry(command="cmd1"), HookEntry(command="cmd2")]
         )
         assert len(config.turn_end) == 2
 
@@ -140,7 +134,9 @@ class TestHookManagerPayloads:
         proc = _mock_proc()
         with patch("asyncio.create_subprocess_shell", return_value=proc):
             mgr.emit_post_tool_use(
-                "write_file", {"path": "/foo.py"}, "success",
+                "write_file",
+                {"path": "/foo.py"},
+                "success",
                 tool_response={"result": "ok"},
             )
             await mgr.drain()
@@ -156,8 +152,7 @@ class TestHookManagerPayloads:
         proc = _mock_proc()
         with patch("asyncio.create_subprocess_shell", return_value=proc):
             mgr.emit_post_tool_use(
-                "bash", {"command": "bad"}, "failed",
-                tool_error="boom",
+                "bash", {"command": "bad"}, "failed", tool_error="boom"
             )
             await mgr.drain()
         payload = json.loads(proc.communicate.call_args[1]["input"])
@@ -262,6 +257,7 @@ class TestHookManagerBehavior:
         class Unserializable:
             def __str__(self) -> str:
                 raise RuntimeError("cannot serialize")
+
             def __repr__(self) -> str:
                 raise RuntimeError("cannot serialize")
 

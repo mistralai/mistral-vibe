@@ -215,9 +215,7 @@ class AgentLoop:
         )
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
         self._hook_manager = HookManager(
-            config=config.hooks,
-            session_id=self.session_id,
-            cwd=str(Path.cwd()),
+            config=config.hooks, session_id=self.session_id, cwd=str(Path.cwd())
         )
         self._session_started = False
         self._teleport_service: TeleportService | None = None
@@ -703,8 +701,10 @@ class AgentLoop:
                     tool_call, skip_reason, "skipped", decision, span=span
                 )
                 self._hook_manager.emit_post_tool_use(
-                    tool_call.tool_name, tool_call.args_dict,
-                    "skipped", tool_error=skip_reason,
+                    tool_call.tool_name,
+                    tool_call.args_dict,
+                    "skipped",
+                    tool_error=skip_reason,
                 )
                 return
 
@@ -748,8 +748,10 @@ class AgentLoop:
                 tool_call, text, "success", decision, result_dict, span=span
             )
             self._hook_manager.emit_post_tool_use(
-                tool_call.tool_name, tool_call.args_dict,
-                "success", tool_response=result_dict,
+                tool_call.tool_name,
+                tool_call.args_dict,
+                "success",
+                tool_response=result_dict,
             )
             yield ToolResultEvent(
                 tool_name=tool_call.tool_name,
@@ -770,8 +772,7 @@ class AgentLoop:
                 tool_call, cancel, decision, cancelled=True, span=span
             )
             self._hook_manager.emit_post_tool_use(
-                tool_call.tool_name, tool_call.args_dict,
-                "cancelled", tool_error=cancel,
+                tool_call.tool_name, tool_call.args_dict, "cancelled", tool_error=cancel
             )
             raise
 
@@ -784,8 +785,7 @@ class AgentLoop:
                 self.stats.tool_calls_failed += 1
             yield self._tool_failure_event(tool_call, error_msg, decision, span=span)
             self._hook_manager.emit_post_tool_use(
-                tool_call.tool_name, tool_call.args_dict,
-                "failed", tool_error=error_msg,
+                tool_call.tool_name, tool_call.args_dict, "failed", tool_error=error_msg
             )
 
     async def _handle_tool_calls(

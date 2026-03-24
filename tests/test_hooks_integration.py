@@ -13,13 +13,7 @@ from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config._settings import HookEntry, HooksConfig
-from vibe.core.types import (
-    ApprovalResponse,
-    BaseEvent,
-    FunctionCall,
-    ToolCall,
-)
-
+from vibe.core.types import ApprovalResponse, BaseEvent, FunctionCall, ToolCall
 
 # ── Helpers ──
 
@@ -56,9 +50,7 @@ def _extract_payloads(proc: AsyncMock) -> list[dict]:
 
 
 def _make_agent(
-    hooks: HooksConfig,
-    backend: FakeBackend | None = None,
-    auto_approve: bool = True,
+    hooks: HooksConfig, backend: FakeBackend | None = None, auto_approve: bool = True
 ) -> AgentLoop:
     config = build_test_vibe_config(
         hooks=hooks,
@@ -68,11 +60,11 @@ def _make_agent(
         include_project_context=False,
         include_prompt_detail=False,
     )
-    agent_name = BuiltinAgentName.AUTO_APPROVE if auto_approve else BuiltinAgentName.DEFAULT
+    agent_name = (
+        BuiltinAgentName.AUTO_APPROVE if auto_approve else BuiltinAgentName.DEFAULT
+    )
     return build_test_agent_loop(
-        config=config,
-        agent_name=agent_name,
-        backend=backend or FakeBackend(),
+        config=config, agent_name=agent_name, backend=backend or FakeBackend()
     )
 
 
@@ -97,7 +89,9 @@ class TestSessionStartHook:
         hooks = HooksConfig(session_start=[HookEntry(command="cat")])
         agent = _make_agent(hooks)
         proc = _mock_proc()
-        with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
+        with patch(
+            "vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc
+        ):
             await _act_and_collect(agent, "hello")
             await _act_and_collect(agent, "world")
         payloads = _extract_payloads(proc)
@@ -111,7 +105,9 @@ class TestUserPromptSubmitHook:
         hooks = HooksConfig(user_prompt_submit=[HookEntry(command="cat")])
         agent = _make_agent(hooks)
         proc = _mock_proc()
-        with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
+        with patch(
+            "vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc
+        ):
             await _act_and_collect(agent, "hello")
             await _act_and_collect(agent, "world")
         payloads = _extract_payloads(proc)
@@ -135,7 +131,9 @@ class TestToolHooks:
         ])
         agent = _make_agent(hooks, backend=backend)
         proc = _mock_proc()
-        with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
+        with patch(
+            "vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc
+        ):
             await _act_and_collect(agent, "show todos")
         payloads = _extract_payloads(proc)
         pre = [p for p in payloads if p["hook_event_name"] == "pre_tool_use"]
@@ -166,18 +164,20 @@ class TestToolHooks:
             include_prompt_detail=False,
         )
         agent = build_test_agent_loop(
-            config=config,
-            agent_name=BuiltinAgentName.DEFAULT,
-            backend=backend,
+            config=config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
 
-        async def reject_tool(name, args, call_id, perms) -> tuple[ApprovalResponse, str | None]:
+        async def reject_tool(
+            name, args, call_id, perms
+        ) -> tuple[ApprovalResponse, str | None]:
             return ApprovalResponse.NO, "not allowed"
 
         agent.approval_callback = reject_tool
 
         proc = _mock_proc()
-        with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
+        with patch(
+            "vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc
+        ):
             await _act_and_collect(agent, "show todos")
         payloads = _extract_payloads(proc)
         pre = [p for p in payloads if p["hook_event_name"] == "pre_tool_use"]
@@ -193,7 +193,9 @@ class TestTurnEndHook:
         hooks = HooksConfig(turn_end=[HookEntry(command="cat")])
         agent = _make_agent(hooks)
         proc = _mock_proc()
-        with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
+        with patch(
+            "vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc
+        ):
             await _act_and_collect(agent, "hello")
         payloads = _extract_payloads(proc)
         turn_ends = [p for p in payloads if p["hook_event_name"] == "turn_end"]
@@ -211,12 +213,18 @@ class TestFullLifecycleOrdering:
         ])
         agent = _make_agent(hooks, backend=backend)
         proc = _mock_proc()
-        with patch("vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc):
+        with patch(
+            "vibe.core.hooks.asyncio.create_subprocess_shell", return_value=proc
+        ):
             await _act_and_collect(agent, "show todos")
         payloads = _extract_payloads(proc)
         event_names = [p["hook_event_name"] for p in payloads]
-        assert event_names.index("session_start") < event_names.index("user_prompt_submit")
-        assert event_names.index("user_prompt_submit") < event_names.index("pre_tool_use")
+        assert event_names.index("session_start") < event_names.index(
+            "user_prompt_submit"
+        )
+        assert event_names.index("user_prompt_submit") < event_names.index(
+            "pre_tool_use"
+        )
         assert event_names.index("pre_tool_use") < event_names.index("post_tool_use")
         assert event_names.index("post_tool_use") < event_names.index("turn_end")
 
