@@ -490,6 +490,11 @@ type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
 
 type SwitchAgentCallback = Callable[[str], Awaitable[None]]
 
+type BeforeToolCallback = Callable[
+    [str, dict[str, Any]],
+    Awaitable[dict[str, Any] | None],
+]
+
 
 class MessageList(Sequence[LLMMessage]):
     def __init__(
