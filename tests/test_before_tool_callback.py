@@ -33,6 +33,7 @@ from vibe.core.types import FunctionCall, ToolCall, ToolResultEvent, ToolStreamE
 
 class CommandArgs(BaseModel):
     command: str
+    timeout: int = 30  # second field — used to test partial-return merging
 
 
 class CommandResult(BaseModel):
@@ -46,10 +47,11 @@ class CommandToolState(BaseToolState):
 class FakeCommandTool(
     BaseTool[CommandArgs, CommandResult, BaseToolConfig, CommandToolState]
 ):
-    """Records the exact ``command`` it was invoked with for test assertions."""
+    """Records the exact args it was invoked with for test assertions."""
 
-    # Class-level storage so tests can read it after the agent loop finishes.
+    # Class-level storage so tests can read after the agent loop finishes.
     _last_command: str = ""
+    _last_timeout: int = 0
 
     @classmethod
     def get_name(cls) -> str:
@@ -59,6 +61,7 @@ class FakeCommandTool(
         self, args: CommandArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | CommandResult, None]:
         FakeCommandTool._last_command = args.command
+        FakeCommandTool._last_timeout = args.timeout
         yield CommandResult(executed_command=args.command)
 
 
@@ -67,12 +70,13 @@ class FakeCommandTool(
 # ---------------------------------------------------------------------------
 
 
-def _tool_call(call_id: str, command: str) -> ToolCall:
+def _tool_call(call_id: str, command: str, timeout: int = 30) -> ToolCall:
     return ToolCall(
         id=call_id,
         index=0,
         function=FunctionCall(
-            name="fake_command", arguments=f'{{"command": "{command}"}}'
+            name="fake_command",
+            arguments=f'{{"command": "{command}", "timeout": {timeout}}}',
         ),
     )
 
@@ -90,7 +94,7 @@ def _make_agent_loop(backend: FakeBackend) -> AgentLoop:
         backend=backend,
     )
     # Register the stub tool without touching the filesystem.
-    loop.tool_manager._available["fake_command"] = FakeCommandTool
+    loop.tool_manager._all_tools["fake_command"] = FakeCommandTool
     return loop
 
 
@@ -205,3 +209,60 @@ async def test_rewritten_args_produce_successful_tool_result() -> None:
     assert results[0].error is None
     assert results[0].skipped is False
     assert FakeCommandTool._last_command == "rtk git status"
+
+
+@pytest.mark.asyncio
+async def test_partial_return_merges_with_original_args() -> None:
+    """Callback returning only the changed key preserves unchanged original keys.
+
+    This validates fix #1: args are merged ({**original, **callback_return})
+    rather than replaced wholesale by the callback's return value.
+    """
+    async def change_only_command(
+        tool_name: str, args: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        # Return ONLY the key we want to change — timeout must survive.
+        return {"command": "rtk git status"}
+
+    backend = FakeBackend([
+        [mock_llm_chunk(
+            content="Running.",
+            tool_calls=[_tool_call("c6", "git status", timeout=99)],
+        )],
+        [mock_llm_chunk(content="Done.")],
+    ])
+    loop = _make_agent_loop(backend)
+    loop.set_before_tool_callback(change_only_command)
+
+    async for _ in loop.act("run git status"):
+        pass
+
+    # Command was rewritten …
+    assert FakeCommandTool._last_command == "rtk git status"
+    # … but timeout (which the callback never touched) is still intact.
+    assert FakeCommandTool._last_timeout == 99
+
+
+@pytest.mark.asyncio
+async def test_callback_exception_falls_back_to_original_args() -> None:
+    """When the callback raises, the tool still executes with the original args."""
+    async def broken_callback(
+        tool_name: str, args: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        raise RuntimeError("callback exploded")
+
+    backend = FakeBackend([
+        [mock_llm_chunk(content="Running.", tool_calls=[_tool_call("c7", "git status")])],
+        [mock_llm_chunk(content="Done.")],
+    ])
+    loop = _make_agent_loop(backend)
+    loop.set_before_tool_callback(broken_callback)
+
+    events = [ev async for ev in loop.act("run git status")]
+
+    # Tool should still execute — no crash propagated to the agent loop.
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert results[0].error is None
+    # Original args were used as fallback.
+    assert FakeCommandTool._last_command == "git status"
