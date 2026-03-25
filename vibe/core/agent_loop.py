@@ -18,6 +18,7 @@ from vibe.cli.terminal_setup import detect_terminal
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.hooks import HookManager
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.exceptions import BackendError
 from vibe.core.llm.format import (
@@ -213,6 +214,10 @@ class AgentLoop:
             config_getter=lambda: self.config, session_id_getter=lambda: self.session_id
         )
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
+        self._hook_manager = HookManager(
+            config=config.hooks, session_id=self.session_id, cwd=str(Path.cwd())
+        )
+        self._session_started = False
         self._teleport_service: TeleportService | None = None
 
         thread = Thread(
@@ -339,6 +344,9 @@ class AgentLoop:
         )
 
     async def act(self, msg: str) -> AsyncGenerator[BaseEvent]:
+        if not self._session_started:
+            self._hook_manager.emit_session_start()
+            self._session_started = True
         self._clean_message_history()
         try:
             model_name = self.config.get_active_model().name
@@ -514,6 +522,7 @@ class AgentLoop:
             raise AgentLoopError("User message must have a message_id")
 
         yield UserMessageEvent(content=user_msg, message_id=user_message.message_id)
+        self._hook_manager.emit_user_prompt_submit(user_msg)
 
         try:
             should_break_loop = False
@@ -549,6 +558,8 @@ class AgentLoop:
 
         finally:
             await self._save_messages()
+            self._hook_manager.emit_turn_end()
+            await self._hook_manager.drain()
 
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
         if self.enable_streaming:
@@ -689,9 +700,18 @@ class AgentLoop:
                 self._handle_tool_response(
                     tool_call, skip_reason, "skipped", decision, span=span
                 )
+                self._hook_manager.emit_post_tool_use(
+                    tool_call.tool_name,
+                    tool_call.args_dict,
+                    "skipped",
+                    tool_error=skip_reason,
+                )
                 return
 
             self.stats.tool_calls_agreed += 1
+            self._hook_manager.emit_pre_tool_use(
+                tool_call.tool_name, tool_call.args_dict
+            )
 
             start_time = time.perf_counter()
             result_model = None
@@ -727,6 +747,12 @@ class AgentLoop:
             self._handle_tool_response(
                 tool_call, text, "success", decision, result_dict, span=span
             )
+            self._hook_manager.emit_post_tool_use(
+                tool_call.tool_name,
+                tool_call.args_dict,
+                "success",
+                tool_response=result_dict,
+            )
             yield ToolResultEvent(
                 tool_name=tool_call.tool_name,
                 tool_class=tool_call.tool_class,
@@ -745,6 +771,9 @@ class AgentLoop:
             yield self._tool_failure_event(
                 tool_call, cancel, decision, cancelled=True, span=span
             )
+            self._hook_manager.emit_post_tool_use(
+                tool_call.tool_name, tool_call.args_dict, "cancelled", tool_error=cancel
+            )
             raise
 
         except Exception as exc:
@@ -755,6 +784,9 @@ class AgentLoop:
             else:
                 self.stats.tool_calls_failed += 1
             yield self._tool_failure_event(tool_call, error_msg, decision, span=span)
+            self._hook_manager.emit_post_tool_use(
+                tool_call.tool_name, tool_call.args_dict, "failed", tool_error=error_msg
+            )
 
     async def _handle_tool_calls(
         self, resolved: ResolvedMessage
