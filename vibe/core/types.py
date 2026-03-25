@@ -215,6 +215,7 @@ class LLMMessage(BaseModel):
 
     role: Role
     content: Content | None = None
+    injected: bool = False
     reasoning_content: Content | None = None
     reasoning_signature: str | None = None
     tool_calls: list[ToolCall] | None = None
@@ -440,6 +441,7 @@ class MessageList(Sequence[LLMMessage]):
     ) -> None:
         self._data: list[LLMMessage] = list(initial) if initial else []
         self._observer = observer
+        self._reset_hooks: list[Callable[[], None]] = []
         self._silent = False
         if self._observer:
             for msg in self._data:
@@ -460,9 +462,19 @@ class MessageList(Sequence[LLMMessage]):
         for msg in msgs:
             self.append(msg)
 
+    def on_reset(self, hook: Callable[[], None]) -> None:
+        """Register a callback that fires whenever the list is reset."""
+        self._reset_hooks.append(hook)
+
     def reset(self, new: list[LLMMessage]) -> None:
         """Replace contents silently (never notifies)."""
         self._data = list(new)
+        for hook in self._reset_hooks:
+            hook()
+
+    def update_system_prompt(self, new: str) -> None:
+        """Update the system prompt in place."""
+        self._data[0] = LLMMessage(role=Role.system, content=new)
 
     @contextmanager
     def silent(self) -> Iterator[None]:

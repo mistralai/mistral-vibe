@@ -258,8 +258,7 @@ class GenericBackend:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=url,
-                response=e.response,
-                headers=e.response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -327,8 +326,7 @@ class GenericBackend:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=url,
-                response=e.response,
-                headers=e.response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,

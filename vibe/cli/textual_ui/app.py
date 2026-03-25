@@ -69,6 +69,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
 from vibe.cli.textual_ui.widgets.proxy_setup_app import ProxySetupApp
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+from vibe.cli.textual_ui.widgets.rewind_app import RewindApp
 from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.cli.textual_ui.widgets.tools import ToolResultMessage
@@ -114,6 +115,7 @@ from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
+from vibe.core.rewind import RewindError
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.teleport.types import (
     TeleportAuthCompleteEvent,
@@ -166,6 +168,7 @@ class BottomApp(StrEnum):
     ModelPicker = auto()
     ProxySetup = auto()
     Question = auto()
+    Rewind = auto()
     SessionPicker = auto()
     Voice = auto()
 
@@ -272,6 +275,10 @@ class VibeApp(App):  # noqa: PLR0904
         Binding(
             "shift+down", "scroll_chat_down", "Scroll Down", show=False, priority=True
         ),
+        Binding("alt+up", "rewind_prev", "Rewind Previous", show=False, priority=True),
+        Binding("ctrl+p", "rewind_prev", "Rewind Previous", show=False, priority=True),
+        Binding("alt+down", "rewind_next", "Rewind Next", show=False, priority=True),
+        Binding("ctrl+n", "rewind_next", "Rewind Next", show=False, priority=True),
     ]
 
     def __init__(
@@ -346,6 +353,9 @@ class VibeApp(App):  # noqa: PLR0904
         self._audio_player = AudioPlayer()
         self._speak_task: asyncio.Task[None] | None = None
         self._cancel_summary: Callable[[], bool] | None = None
+
+        self._rewind_mode = False
+        self._rewind_highlighted_widget: UserMessage | None = None
 
     @property
     def config(self) -> VibeConfig:
@@ -750,7 +760,10 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
     async def _handle_user_message(self, message: str) -> None:
-        user_message = UserMessage(message)
+        # message_index is where the user message will land in agent_loop.messages
+        # (checkpoint is created in agent_loop.act())
+        message_index = len(self.agent_loop.messages)
+        user_message = UserMessage(message, message_index=message_index)
 
         await self._mount_and_scroll(user_message)
         if self.agent_loop.telemetry_client.is_active():
@@ -1471,6 +1484,12 @@ class VibeApp(App):  # noqa: PLR0904
         await self._switch_from_input(QuestionApp(args=args), scroll=True)
 
     async def _switch_to_input_app(self) -> None:
+        if self._chat_input_container:
+            self._chat_input_container.disabled = False
+            self._chat_input_container.display = True
+            self._current_bottom_app = BottomApp.Input
+            self._refresh_profile_widgets()
+
         for app in BottomApp:
             if app != BottomApp.Input:
                 try:
@@ -1479,10 +1498,6 @@ class VibeApp(App):  # noqa: PLR0904
                     pass
 
         if self._chat_input_container:
-            self._chat_input_container.disabled = False
-            self._chat_input_container.display = True
-            self._current_bottom_app = BottomApp.Input
-            self._refresh_profile_widgets()
             self.call_after_refresh(self._chat_input_container.focus_input)
             chat = self._cached_chat or self.query_one("#chat", ChatScroll)
             if chat.is_at_bottom:
@@ -1505,6 +1520,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(QuestionApp).focus()
                 case BottomApp.SessionPicker:
                     self.query_one(SessionPickerApp).focus()
+                case BottomApp.Rewind:
+                    self.query_one(RewindApp).focus()
                 case BottomApp.Voice:
                     self.query_one(VoiceApp).focus()
                 case app:
@@ -1562,6 +1579,196 @@ class VibeApp(App):  # noqa: PLR0904
             pass
         self._last_escape_time = None
 
+    # --- Rewind mode ---
+
+    def _get_user_message_widgets(self) -> list[UserMessage]:
+        """Return all UserMessage widgets currently visible in #messages."""
+        messages_area = self._cached_messages_area or self.query_one("#messages")
+        return [
+            child for child in messages_area.children if isinstance(child, UserMessage)
+        ]
+
+    def _start_rewind_mode(self) -> None:
+        self.action_rewind_prev()
+
+    def action_rewind_prev(self) -> None:
+        if self._agent_running:
+            return
+
+        user_widgets = self._get_user_message_widgets()
+        if not user_widgets:
+            return
+
+        if not self._rewind_mode:
+            self._rewind_mode = True
+            target = user_widgets[-1]
+        elif self._rewind_highlighted_widget is not None:
+            try:
+                idx = user_widgets.index(self._rewind_highlighted_widget)
+            except ValueError:
+                idx = len(user_widgets)
+            if idx <= 0:
+                self.run_worker(self._rewind_prev_at_top(), exclusive=False)
+                return
+            target = user_widgets[idx - 1]
+        else:
+            target = user_widgets[-1]
+
+        self.run_worker(self._select_rewind_widget(target), exclusive=False)
+
+    async def _rewind_prev_at_top(self) -> None:
+        """Handle alt+up when already at the topmost visible user message."""
+        if self._load_more.widget is not None and self._windowing.has_backfill:
+            await self.on_history_load_more_requested(HistoryLoadMoreRequested())
+            user_widgets = self._get_user_message_widgets()
+            if user_widgets and self._rewind_highlighted_widget is not None:
+                # Find the current highlighted widget in the refreshed list
+                # and select the one above it
+                try:
+                    idx = user_widgets.index(self._rewind_highlighted_widget)
+                except ValueError:
+                    idx = 0
+                if idx > 0:
+                    await self._select_rewind_widget(user_widgets[idx - 1])
+                    return
+        # No load more or already first message: scroll to top
+        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
+        self.call_after_refresh(chat.scroll_home, animate=False)
+
+    def action_rewind_next(self) -> None:
+        if not self._rewind_mode:
+            return
+
+        if self._rewind_highlighted_widget is None:
+            return
+
+        user_widgets = self._get_user_message_widgets()
+        try:
+            idx = user_widgets.index(self._rewind_highlighted_widget)
+        except ValueError:
+            return
+        if idx >= len(user_widgets) - 1:
+            return
+
+        self.run_worker(
+            self._select_rewind_widget(user_widgets[idx + 1]), exclusive=False
+        )
+
+    async def _select_rewind_widget(self, widget: UserMessage) -> None:
+        """Highlight the given user message widget and show the rewind panel."""
+        if self._rewind_highlighted_widget is not None:
+            self._rewind_highlighted_widget.remove_class("rewind-selected")
+
+        widget.add_class("rewind-selected")
+        self._rewind_highlighted_widget = widget
+
+        msg_index = widget.message_index
+        has_file_changes = (
+            msg_index is not None
+            and self.agent_loop.rewind_manager.has_file_changes_at(msg_index)
+        )
+
+        await self._switch_to_rewind_app(
+            widget.get_content(), has_file_changes=has_file_changes
+        )
+
+        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
+        self.call_after_refresh(chat.scroll_to_widget, widget, animate=False, top=True)
+
+    async def _switch_to_rewind_app(
+        self, message_preview: str, *, has_file_changes: bool
+    ) -> None:
+        """Show the rewind action panel at the bottom."""
+        if self._current_bottom_app == BottomApp.Rewind:
+            # Reuse existing widget if the option set hasn't changed
+            try:
+                existing = self.query_one(RewindApp)
+                if existing.has_file_changes == has_file_changes:
+                    existing.update_preview(message_preview)
+                    return
+                await existing.remove()
+            except Exception:
+                pass
+
+            rewind_app = RewindApp(
+                message_preview=message_preview, has_file_changes=has_file_changes
+            )
+            bottom_container = self.query_one("#bottom-app-container")
+            self._current_bottom_app = BottomApp.Rewind
+            await bottom_container.mount(rewind_app)
+            self.call_after_refresh(rewind_app.focus)
+        else:
+            rewind_app = RewindApp(
+                message_preview=message_preview, has_file_changes=has_file_changes
+            )
+            await self._switch_from_input(rewind_app)
+
+    def _clear_rewind_state(self) -> None:
+        if self._rewind_highlighted_widget is not None:
+            self._rewind_highlighted_widget.remove_class("rewind-selected")
+            self._rewind_highlighted_widget = None
+        self._rewind_mode = False
+
+    async def _exit_rewind_mode(self) -> None:
+        """Exit rewind mode and restore the input panel."""
+        self._clear_rewind_state()
+        await self._switch_to_input_app()
+
+    async def on_rewind_app_rewind_with_restore(
+        self, message: RewindApp.RewindWithRestore
+    ) -> None:
+        await self._execute_rewind(restore_files=True)
+
+    async def on_rewind_app_rewind_without_restore(
+        self, message: RewindApp.RewindWithoutRestore
+    ) -> None:
+        await self._execute_rewind(restore_files=False)
+
+    async def _execute_rewind(self, *, restore_files: bool) -> None:
+        """Fork the session at the selected user message."""
+        if not self._rewind_mode or self._rewind_highlighted_widget is None:
+            return
+
+        target_widget = self._rewind_highlighted_widget
+        msg_index = target_widget.message_index
+
+        if msg_index is None:
+            return
+
+        try:
+            (
+                message_content,
+                restore_errors,
+            ) = await self.agent_loop.rewind_manager.rewind_to_message(
+                msg_index, restore_files=restore_files
+            )
+        except RewindError as exc:
+            self.notify(str(exc), severity="error")
+            return
+
+        for error in restore_errors:
+            self.notify(error, severity="warning")
+
+        # Remove UI widgets from the selected message onward
+        messages_area = self._cached_messages_area or self.query_one("#messages")
+        children = list(messages_area.children)
+        try:
+            target_idx = children.index(target_widget)
+        except ValueError:
+            target_idx = len(children)
+        to_remove = children[target_idx:]
+        if to_remove:
+            await messages_area.remove_children(to_remove)
+
+        self._clear_rewind_state()
+
+        # Switch back to input and pre-fill with the original message
+        await self._switch_to_input_app()
+        if self._chat_input_container:
+            self._chat_input_container.value = message_content
+
+    # --- End rewind mode ---
+
     def _handle_input_app_escape(self) -> None:
         try:
             input_widget = self.query_one(ChatInputContainer)
@@ -1612,6 +1819,11 @@ class VibeApp(App):  # noqa: PLR0904
 
         if self._current_bottom_app == BottomApp.SessionPicker:
             self._handle_session_picker_app_escape()
+            return
+
+        if self._current_bottom_app == BottomApp.Rewind:
+            self.run_worker(self._exit_rewind_mode(), exclusive=False)
+            self._last_escape_time = None
             return
 
         if (

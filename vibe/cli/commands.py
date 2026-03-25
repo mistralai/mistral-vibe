@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
+
+ALT_KEY = "⌥" if sys.platform == "darwin" else "Alt"
 
 
 @dataclass
@@ -97,6 +100,11 @@ class CommandRegistry:
                 description="Uninstall the Lean 4 agent",
                 handler="_uninstall_lean",
             ),
+            "rewind": Command(
+                aliases=frozenset(["/rewind"]),
+                description="Rewind to a previous message",
+                handler="_start_rewind_mode",
+            ),
         }
 
         for command in excluded_commands:
@@ -125,6 +133,7 @@ class CommandRegistry:
             "- `Ctrl+G` Edit input in external editor",
             "- `Ctrl+O` Toggle tool output view",
             "- `Shift+Tab` Toggle auto-approve mode",
+            f"- `{ALT_KEY}+↑↓` / `Ctrl+P/N` Rewind to previous/next message",
             "",
             "### Special Features",
             "",

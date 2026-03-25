@@ -10,6 +10,7 @@ from typing import ClassVar, NamedTuple, final
 import anyio
 from pydantic import BaseModel, Field
 
+from vibe.core.rewind.manager import FileSnapshot
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -109,6 +110,9 @@ class SearchReplace(
     @classmethod
     def get_status_text(cls) -> str:
         return "Editing files"
+
+    def get_file_snapshot(self, args: SearchReplaceArgs) -> FileSnapshot | None:
+        return self.get_file_snapshot_for_path(args.file_path)
 
     def resolve_permission(self, args: SearchReplaceArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(

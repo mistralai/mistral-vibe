@@ -529,6 +529,24 @@ StatusMessage {
     height: auto;
 }
 
+.tool-result-widget Markdown,
+.tool-approval-widget Markdown {
+    padding: 0;
+    margin: 0;
+}
+
+.tool-result-widget Markdown > *,
+.tool-approval-widget Markdown > * {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.tool-result-widget Markdown MarkdownFence,
+.tool-approval-widget Markdown MarkdownFence {
+    margin: 0;
+    padding: 0;
+}
+
 .tool-call-detail,
 .tool-result-detail {
     height: auto;
@@ -1109,6 +1127,51 @@ FeedbackBar {
     width: auto;
     height: auto;
     margin-left: 1;
+}
+
+.user-message.rewind-selected {
+    .user-message-content {
+        text-style: bold reverse;
+    }
+}
+
+#rewind-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
+#rewind-content {
+    width: 100%;
+    height: auto;
+}
+
+.rewind-title {
+    height: auto;
+    text-style: bold;
+    color: ansi_blue;
+}
+
+.rewind-option {
+    height: auto;
+    color: ansi_default;
+}
+
+.rewind-cursor-selected {
+    color: ansi_blue;
+    text-style: bold;
+}
+
+.rewind-option-unselected {
+    color: ansi_default;
+}
+
+.rewind-help {
+    height: auto;
+    color: ansi_bright_black;
 }
 
 #feedback-text {

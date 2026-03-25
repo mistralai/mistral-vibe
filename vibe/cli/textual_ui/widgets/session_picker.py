@@ -98,8 +98,7 @@ class SessionPickerApp(Container):
         with Vertical(id="sessionpicker-content"):
             yield OptionList(*options, id="sessionpicker-options")
             yield NoMarkupStatic(
-                "Up/Down Navigate  Enter Select  Esc Cancel",
-                classes="sessionpicker-help",
+                "↑↓ Navigate  Enter Select  Esc Cancel", classes="sessionpicker-help"
             )
 
     def on_mount(self) -> None:

@@ -45,6 +45,7 @@ from vibe.core.middleware import (
 )
 from vibe.core.plan_session import PlanSession
 from vibe.core.prompts import UtilityPrompt
+from vibe.core.rewind import RewindManager
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.session.session_migration import migrate_sessions_entrypoint
 from vibe.core.skills.manager import SkillManager
@@ -213,6 +214,11 @@ class AgentLoop:
             config_getter=lambda: self.config, session_id_getter=lambda: self.session_id
         )
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
+        self.rewind_manager = RewindManager(
+            messages=self.messages,
+            save_messages=self._save_messages,
+            reset_session=self._reset_session,
+        )
         self._teleport_service: TeleportService | None = None
 
         thread = Thread(
@@ -340,6 +346,7 @@ class AgentLoop:
 
     async def act(self, msg: str) -> AsyncGenerator[BaseEvent]:
         self._clean_message_history()
+        self.rewind_manager.create_checkpoint()
         try:
             model_name = self.config.get_active_model().name
         except ValueError:
@@ -447,7 +454,7 @@ class AgentLoop:
             case MiddlewareAction.INJECT_MESSAGE:
                 if result.message:
                     injected_message = LLMMessage(
-                        role=Role.user, content=result.message
+                        role=Role.user, content=result.message, injected=True
                     )
                     self.messages.append(injected_message)
 
@@ -693,6 +700,10 @@ class AgentLoop:
 
             self.stats.tool_calls_agreed += 1
 
+            snapshot = tool_instance.get_file_snapshot(tool_call.validated_args)
+            if snapshot is not None:
+                self.rewind_manager.add_snapshot(snapshot)
+
             start_time = time.perf_counter()
             result_model = None
             async for item in tool_instance.invoke(
@@ -928,7 +939,7 @@ class AgentLoop:
         try:
             start_time = time.perf_counter()
             usage = LLMUsage()
-            chunk_agg = LLMChunk(message=LLMMessage(role=Role.assistant))
+            chunk_agg: LLMChunk | None = None
             async for chunk in self.backend.complete_streaming(
                 model=active_model,
                 messages=self.messages,
@@ -945,12 +956,16 @@ class AgentLoop:
                     chunk.message
                 )
                 processed_chunk = LLMChunk(message=processed_message, usage=chunk.usage)
-                chunk_agg += processed_chunk
+                chunk_agg = (
+                    processed_chunk
+                    if chunk_agg is None
+                    else chunk_agg + processed_chunk
+                )
                 usage += chunk.usage or LLMUsage()
                 yield processed_chunk
             end_time = time.perf_counter()
 
-            if chunk_agg.usage is None:
+            if chunk_agg is None or chunk_agg.usage is None:
                 raise AgentLoopLLMResponseError(
                     "Usage data missing in final chunk of streamed completion"
                 )
@@ -1259,10 +1274,7 @@ class AgentLoop:
             self.tool_manager, self.config, self.skill_manager, self.agent_manager
         )
 
-        self.messages.reset([
-            LLMMessage(role=Role.system, content=new_system_prompt),
-            *[msg for msg in self.messages if msg.role != Role.system],
-        ])
+        self.messages.update_system_prompt(new_system_prompt)
 
         if len(self.messages) == 1:
             self.stats.reset_context_state()

@@ -442,12 +442,16 @@ async def test_act_flushes_and_logs_when_streaming_errors(observer_capture) -> N
 @pytest.mark.asyncio
 async def test_rate_limit(observer_capture) -> None:
     observed, observer = observer_capture
-    response = httpx.Response(HTTPStatus.TOO_MANY_REQUESTS)
+    response = httpx.Response(
+        HTTPStatus.TOO_MANY_REQUESTS, request=httpx.Request("POST", "http://test")
+    )
+    error = httpx.HTTPStatusError(
+        "rate limited", request=response.request, response=response
+    )
     backend_error = BackendErrorBuilder.build_http_error(
         provider="mistral",
         endpoint="test",
-        response=response,
-        headers=None,
+        error=error,
         model="test-model",
         messages=[],
         temperature=0.0,
@@ -640,3 +644,27 @@ async def test_empty_content_chunks_do_not_trigger_false_yields() -> None:
         ("ReasoningEvent", " more reasoning"),
         ("AssistantEvent", "Actual content"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_assistant_event_message_id_matches_stored_message() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(content="Hello"),
+        mock_llm_chunk(content=" world"),
+    ])
+    agent = build_test_agent_loop(
+        config=make_config(), backend=backend, enable_streaming=True
+    )
+
+    events = [event async for event in agent.act("Test")]
+
+    assistant_events = [e for e in events if isinstance(e, AssistantEvent)]
+    assert len(assistant_events) == 2
+
+    # All chunks of the same assistant turn share one message_id
+    message_ids = {e.message_id for e in assistant_events}
+    assert len(message_ids) == 1
+
+    # The stored LLMMessage must carry that same message_id
+    stored_msg = next(m for m in agent.messages if m.role == Role.assistant)
+    assert stored_msg.message_id == assistant_events[0].message_id

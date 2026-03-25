@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator, Sequence
 import json
 import os
 import types
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 import httpx
 from mistralai.client import Mistral
@@ -32,7 +32,10 @@ from mistralai.client.models import (
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 
 from vibe.core.llm.exceptions import BackendErrorBuilder
-from vibe.core.llm.message_utils import merge_consecutive_user_messages
+from vibe.core.llm.message_utils import (
+    merge_consecutive_user_messages,
+    strip_reasoning as strip_reasoning_message,
+)
 from vibe.core.types import (
     AvailableTool,
     Content,
@@ -168,6 +171,18 @@ class MistralMapper:
             for tool_call in tool_calls
         ]
 
+    def strip_reasoning(self, msg: LLMMessage) -> LLMMessage:
+        return strip_reasoning_message(msg)
+
+
+ReasoningEffortValue = Literal["none", "high"]
+
+_THINKING_TO_REASONING_EFFORT: dict[str, ReasoningEffortValue] = {
+    "low": "none",
+    "medium": "high",
+    "high": "high",
+}
+
 
 class MistralBackend:
     def __init__(self, provider: ProviderConfig, timeout: float = 720.0) -> None:
@@ -253,6 +268,14 @@ class MistralBackend:
     ) -> LLMChunk:
         try:
             merged_messages = merge_consecutive_user_messages(messages)
+            reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+            if reasoning_effort is not None:
+                temperature = 1.0
+            else:
+                merged_messages = [
+                    strip_reasoning_message(msg) for msg in merged_messages
+                ]
+
             response = await self._get_client().chat.complete_async(
                 model=model.name,
                 messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
@@ -267,6 +290,7 @@ class MistralBackend:
                 http_headers=extra_headers,
                 metadata=metadata,
                 stream=False,
+                reasoning_effort=reasoning_effort,
             )
 
             parsed = (
@@ -295,8 +319,7 @@ class MistralBackend:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
-                response=e.raw_response,
-                headers=e.raw_response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -329,6 +352,14 @@ class MistralBackend:
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
             merged_messages = merge_consecutive_user_messages(messages)
+            reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+            if reasoning_effort is not None:
+                temperature = 1.0
+            else:
+                merged_messages = [
+                    strip_reasoning_message(msg) for msg in merged_messages
+                ]
+
             stream = await self._get_client().chat.stream_async(
                 model=model.name,
                 messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
@@ -342,6 +373,7 @@ class MistralBackend:
                 else None,
                 http_headers=extra_headers,
                 metadata=metadata,
+                reasoning_effort=reasoning_effort,
             )
             correlation_id = stream.response.headers.get("mistral-correlation-id")
             async for chunk in stream:
@@ -376,8 +408,7 @@ class MistralBackend:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
-                response=e.raw_response,
-                headers=e.raw_response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,

@@ -39,12 +39,17 @@ def build_history_widgets(
 ) -> list[Widget]:
     widgets: list[Widget] = []
 
-    for offset, msg in enumerate(batch):
-        history_index = start_index + offset
+    for history_index, msg in zip(
+        range(start_index, start_index + len(batch)), batch, strict=True
+    ):
+        if msg.injected:
+            continue
         match msg.role:
             case Role.user:
                 if msg.content:
-                    widget = UserMessage(msg.content)
+                    # history_index is 0-based in non-system messages;
+                    # agent_loop.messages index = history_index + 1 (system msg at 0)
+                    widget = UserMessage(msg.content, message_index=history_index + 1)
                     widgets.append(widget)
                     history_widget_indices[widget] = history_index
 

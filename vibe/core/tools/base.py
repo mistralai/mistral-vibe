@@ -23,6 +23,8 @@ from typing import (
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from vibe.core.logger import logger
+from vibe.core.rewind.manager import FileSnapshot
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils.io import read_safe
 
@@ -354,6 +356,30 @@ class BaseTool[
         Override in subclasses for domain-specific rules (e.g. workdir checks).
         """
         return None
+
+    def get_file_snapshot(self, args: ToolArgs) -> FileSnapshot | None:
+        """Return a snapshot of the file this tool is about to modify.
+
+        Called before ``run()`` so the checkpoint system can capture
+        the file's state *before* the tool writes to it.
+        Override in tools that modify files on disk.
+        """
+        return None
+
+    @staticmethod
+    def get_file_snapshot_for_path(path: str) -> FileSnapshot:
+        file_path = Path(path).expanduser()
+        if not file_path.is_absolute():
+            file_path = Path.cwd() / file_path
+        file_path = file_path.resolve()
+        try:
+            content: bytes | None = file_path.read_bytes()
+        except FileNotFoundError:
+            content = None
+        except Exception:
+            logger.warning("Failed to read file for tool snapshot: %s", file_path)
+            content = None
+        return FileSnapshot(path=str(file_path), content=content)
 
     def get_result_extra(self, result: ToolResult) -> str | None:
         """Optional extra context appended to the result text sent to the LLM.
