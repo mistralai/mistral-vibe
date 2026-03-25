@@ -148,6 +148,7 @@ class TestHookManagerPayloads:
         assert payload["tool_response"] is None
         assert payload["tool_error"] == "boom"
 
+
 class TestHookManagerBehavior:
     @pytest.mark.asyncio
     async def test_no_hooks_configured_no_subprocess(self) -> None:
