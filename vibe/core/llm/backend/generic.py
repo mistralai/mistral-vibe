@@ -97,7 +97,10 @@ class OpenAIAdapter(APIAdapter):
         field_name = provider.reasoning_field_name
         converted_messages = [
             self._reasoning_to_api(
-                msg.model_dump(exclude_none=True, exclude={"message_id"}), field_name
+                msg.model_dump(
+                    exclude_none=True, exclude={"message_id", "injected", "reasoning_signature"}
+                ),
+                field_name,
             )
             for msg in merged_messages
         ]
