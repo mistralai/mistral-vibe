@@ -35,7 +35,7 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
     def _get_tool_state_class(cls) -> type[AcpSearchReplaceState]:
         return AcpSearchReplaceState
 
-    async def _read_file(self, file_path: Path) -> str:
+    async def _read_file(self, file_path: Path) -> tuple[str, str]:
         client, session_id, _ = self._load_state()
 
         await self._send_in_progress_session_update()
@@ -48,7 +48,8 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
             raise ToolError(f"Unexpected error reading {file_path}: {e}") from e
 
         self.state.file_backup_content = response.content
-        return response.content
+        # ACP client handles encoding on the server side, default to utf-8
+        return response.content, "utf-8"
 
     async def _backup_file(self, file_path: Path) -> None:
         if self.state.file_backup_content is None:
@@ -59,7 +60,9 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
             self.state.file_backup_content,
         )
 
-    async def _write_file(self, file_path: Path, content: str) -> None:
+    async def _write_file(
+        self, file_path: Path, content: str, encoding: str = "utf-8"
+    ) -> None:
         client, session_id, _ = self._load_state()
 
         try:
