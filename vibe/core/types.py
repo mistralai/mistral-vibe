@@ -178,7 +178,7 @@ class ToolCall(BaseModel):
     id: str | None = None
     index: int | None = None
     function: FunctionCall = Field(default_factory=FunctionCall)
-    type: Literal["function"] = "function"
+    type: Literal["function"] | None = "function"
 
 
 def _content_before(v: Any) -> str:
