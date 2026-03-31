@@ -9,7 +9,6 @@ from acp.schema import (
     ContentToolCallContent,
     ModelInfo,
     PermissionOption,
-    SessionConfigOption,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
     SessionMode,
@@ -103,7 +102,7 @@ def is_valid_acp_mode(profiles: list[AgentProfile], mode_name: str) -> bool:
 
 def make_mode_response(
     profiles: list[AgentProfile], current_mode_id: str
-) -> tuple[SessionModeState, SessionConfigOption]:
+) -> tuple[SessionModeState, SessionConfigOptionSelect]:
     session_modes: list[SessionMode] = []
     config_options: list[SessionConfigSelectOption] = []
 
@@ -128,22 +127,20 @@ def make_mode_response(
     state = SessionModeState(
         current_mode_id=current_mode_id, available_modes=session_modes
     )
-    config = SessionConfigOption(
-        root=SessionConfigOptionSelect(
-            id="mode",
-            name="Session Mode",
-            current_value=current_mode_id,
-            category="mode",
-            type="select",
-            options=config_options,
-        )
+    config = SessionConfigOptionSelect(
+        id="mode",
+        name="Session Mode",
+        current_value=current_mode_id,
+        category="mode",
+        type="select",
+        options=config_options,
     )
     return state, config
 
 
 def make_model_response(
     models: list[ModelConfig], current_model_id: str
-) -> tuple[SessionModelState, SessionConfigOption]:
+) -> tuple[SessionModelState, SessionConfigOptionSelect]:
     model_infos: list[ModelInfo] = []
     config_options: list[SessionConfigSelectOption] = []
 
@@ -158,15 +155,13 @@ def make_model_response(
     state = SessionModelState(
         current_model_id=current_model_id, available_models=model_infos
     )
-    config_option = SessionConfigOption(
-        root=SessionConfigOptionSelect(
-            id="model",
-            name="Model",
-            current_value=current_model_id,
-            category="model",
-            type="select",
-            options=config_options,
-        )
+    config_option = SessionConfigOptionSelect(
+        id="model",
+        name="Model",
+        current_value=current_model_id,
+        category="model",
+        type="select",
+        options=config_options,
     )
     return state, config_option
 
@@ -257,7 +252,7 @@ def create_user_message_replay(msg: LLMMessage) -> UserMessageChunk:
     return UserMessageChunk(
         session_update="user_message_chunk",
         content=TextContentBlock(type="text", text=content),
-        field_meta={"messageId": msg.message_id} if msg.message_id else {},
+        message_id=msg.message_id,
     )
 
 
@@ -269,7 +264,7 @@ def create_assistant_message_replay(msg: LLMMessage) -> AgentMessageChunk | None
     return AgentMessageChunk(
         session_update="agent_message_chunk",
         content=TextContentBlock(type="text", text=content),
-        field_meta={"messageId": msg.message_id} if msg.message_id else {},
+        message_id=msg.message_id,
     )
 
 
@@ -280,7 +275,7 @@ def create_reasoning_replay(msg: LLMMessage) -> AgentThoughtChunk | None:
     return AgentThoughtChunk(
         session_update="agent_thought_chunk",
         content=TextContentBlock(type="text", text=msg.reasoning_content),
-        field_meta={"messageId": msg.message_id} if msg.message_id else {},
+        message_id=msg.reasoning_message_id,
     )
 
 

@@ -61,9 +61,13 @@ class BackendError(RuntimeError):
             return "Rate limit exceeded. Please wait a moment before trying again."
 
         rid = self.headers.get("x-request-id") or self.headers.get("request-id")
-        status_label = (
-            f"{self.status} {HTTPStatus(self.status).phrase}" if self.status else "N/A"
-        )
+        if self.status:
+            try:
+                status_label = f"{self.status} {HTTPStatus(self.status).phrase}"
+            except ValueError:
+                status_label = str(self.status)
+        else:
+            status_label = "N/A"
         parts = [
             f"LLM backend error [{self.provider}]",
             f"  status: {status_label}",

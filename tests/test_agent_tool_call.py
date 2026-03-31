@@ -517,26 +517,6 @@ async def test_fill_missing_tool_responses_inserts_placeholders() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_assistant_after_tool_appends_understood() -> None:
-    agent_loop = build_test_agent_loop(
-        config=make_config(),
-        agent_name=BuiltinAgentName.AUTO_APPROVE,
-        backend=FakeBackend(mock_llm_chunk(content="ok")),
-    )
-    tool_msg = LLMMessage(
-        role=Role.tool, tool_call_id="tc_z", name="todo", content="Done"
-    )
-    agent_loop.messages.reset([agent_loop.messages[0], tool_msg])
-
-    await act_and_collect_events(agent_loop, "Next")
-
-    # find the seeded tool message and ensure the next message is "Understood."
-    idx = next(i for i, m in enumerate(agent_loop.messages) if m.role == Role.tool)
-    assert agent_loop.messages[idx + 1].role == Role.assistant
-    assert agent_loop.messages[idx + 1].content == "Understood."
-
-
-@pytest.mark.asyncio
 async def test_parallel_tool_calls_produce_correct_events(
     telemetry_events: list[dict],
 ) -> None:

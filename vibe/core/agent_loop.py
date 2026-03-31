@@ -344,7 +344,9 @@ class AgentLoop:
             self.agent_profile,
         )
 
-    async def act(self, msg: str) -> AsyncGenerator[BaseEvent]:
+    async def act(
+        self, msg: str, client_message_id: str | None = None
+    ) -> AsyncGenerator[BaseEvent]:
         self._clean_message_history()
         self.rewind_manager.create_checkpoint()
         try:
@@ -352,7 +354,9 @@ class AgentLoop:
         except ValueError:
             model_name = None
         async with agent_span(model=model_name, session_id=self.session_id):
-            async for event in self._conversation_loop(msg):
+            async for event in self._conversation_loop(
+                msg, client_message_id=client_message_id
+            ):
                 yield event
 
     @property
@@ -511,8 +515,12 @@ class AgentLoop:
         }
         return headers
 
-    async def _conversation_loop(self, user_msg: str) -> AsyncGenerator[BaseEvent]:
-        user_message = LLMMessage(role=Role.user, content=user_msg)
+    async def _conversation_loop(
+        self, user_msg: str, client_message_id: str | None = None
+    ) -> AsyncGenerator[BaseEvent]:
+        user_message = LLMMessage(
+            role=Role.user, content=user_msg, message_id=client_message_id
+        )
         self.messages.append(user_message)
         self.stats.steps += 1
         self._current_user_message_id = user_message.message_id
@@ -604,11 +612,14 @@ class AgentLoop:
         self,
     ) -> AsyncGenerator[AssistantEvent | ReasoningEvent | ToolCallEvent]:
         message_id: str | None = None
+        reasoning_message_id: str | None = None
         emitted_tool_call_ids = set[str]()
 
         async for chunk in self._chat_streaming():
             if message_id is None:
                 message_id = chunk.message.message_id
+            if reasoning_message_id is None:
+                reasoning_message_id = chunk.message.reasoning_message_id
 
             for event in self._build_tool_call_events(
                 chunk.message.tool_calls, emitted_tool_call_ids
@@ -618,7 +629,8 @@ class AgentLoop:
 
             if chunk.message.reasoning_content:
                 yield ReasoningEvent(
-                    content=chunk.message.reasoning_content, message_id=message_id
+                    content=chunk.message.reasoning_content,
+                    message_id=reasoning_message_id,
                 )
 
             if chunk.message.content:
@@ -1066,7 +1078,6 @@ class AgentLoop:
         if len(self.messages) < ACCEPTABLE_HISTORY_SIZE:
             return
         self._fill_missing_tool_responses()
-        self._ensure_assistant_after_tools()
 
     def _fill_missing_tool_responses(self) -> None:
         i = 1
@@ -1113,16 +1124,6 @@ class AgentLoop:
                     continue
 
             i += 1
-
-    def _ensure_assistant_after_tools(self) -> None:
-        MIN_MESSAGE_SIZE = 2
-        if len(self.messages) < MIN_MESSAGE_SIZE:
-            return
-
-        last_msg = self.messages[-1]
-        if last_msg.role is Role.tool:
-            empty_assistant_msg = LLMMessage(role=Role.assistant, content="Understood.")
-            self.messages.append(empty_assistant_msg)
 
     def _reset_session(self) -> None:
         self.session_id = str(uuid4())

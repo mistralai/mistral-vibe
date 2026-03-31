@@ -9,7 +9,7 @@ import httpx
 
 def _is_retryable_http_error(e: Exception) -> bool:
     if isinstance(e, httpx.HTTPStatusError):
-        return e.response.status_code in {408, 409, 425, 429, 500, 502, 503, 504}
+        return e.response.status_code in {408, 409, 425, 429, 500, 502, 503, 504, 529}
     return False
 
 

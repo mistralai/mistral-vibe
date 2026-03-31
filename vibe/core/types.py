@@ -218,6 +218,7 @@ class LLMMessage(BaseModel):
     injected: bool = False
     reasoning_content: Content | None = None
     reasoning_signature: str | None = None
+    reasoning_message_id: str | None = None
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
@@ -229,15 +230,20 @@ class LLMMessage(BaseModel):
         if isinstance(v, dict):
             v.setdefault("content", "")
             v.setdefault("role", "assistant")
-            if "message_id" not in v and v.get("role") != "tool":
+            if v.get("message_id") is None and v.get("role") != "tool":
                 v["message_id"] = str(uuid4())
+            if v.get("reasoning_message_id") is None and v.get("reasoning_content"):
+                v["reasoning_message_id"] = str(uuid4())
             return v
         role = str(getattr(v, "role", "assistant"))
+        reasoning_content = getattr(v, "reasoning_content", None)
         return {
             "role": role,
             "content": getattr(v, "content", ""),
-            "reasoning_content": getattr(v, "reasoning_content", None),
+            "reasoning_content": reasoning_content,
             "reasoning_signature": getattr(v, "reasoning_signature", None),
+            "reasoning_message_id": getattr(v, "reasoning_message_id", None)
+            or (str(uuid4()) if reasoning_content else None),
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
@@ -298,6 +304,8 @@ class LLMMessage(BaseModel):
             content=content,
             reasoning_content=reasoning_content,
             reasoning_signature=reasoning_signature,
+            reasoning_message_id=self.reasoning_message_id
+            or other.reasoning_message_id,
             tool_calls=list(tool_calls_map.values()) or None,
             name=self.name,
             tool_call_id=self.tool_call_id,

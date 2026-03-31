@@ -148,6 +148,98 @@ class TestProxySetupCommand:
         assert "HTTP_PROXY" in env_content
         assert "http://localhost:8080" in env_content
 
+
+class TestProxySetupMessageId:
+    @pytest.mark.asyncio
+    async def test_proxy_setup_response_has_user_message_id(
+        self,
+        acp_agent_loop: VibeAcpAgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env_file = tmp_path / ".env"
+
+        class FakeGlobalEnvFile:
+            path = env_file
+
+        monkeypatch.setattr(
+            "vibe.core.proxy_setup.GLOBAL_ENV_FILE", FakeGlobalEnvFile()
+        )
+
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+
+        response = await acp_agent_loop.prompt(
+            prompt=[TextContentBlock(type="text", text="/proxy-setup")],
+            session_id=session_response.session_id,
+        )
+
+        assert response.user_message_id is not None
+
+    @pytest.mark.asyncio
+    async def test_proxy_setup_echoes_client_message_id(
+        self,
+        acp_agent_loop: VibeAcpAgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env_file = tmp_path / ".env"
+
+        class FakeGlobalEnvFile:
+            path = env_file
+
+        monkeypatch.setattr(
+            "vibe.core.proxy_setup.GLOBAL_ENV_FILE", FakeGlobalEnvFile()
+        )
+
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        client_message_id = "550e8400-e29b-41d4-a716-446655440000"
+
+        response = await acp_agent_loop.prompt(
+            prompt=[TextContentBlock(type="text", text="/proxy-setup")],
+            session_id=session_response.session_id,
+            message_id=client_message_id,
+        )
+
+        assert response.user_message_id == client_message_id
+
+    @pytest.mark.asyncio
+    async def test_proxy_setup_agent_message_has_message_id(
+        self,
+        acp_agent_loop: VibeAcpAgentLoop,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env_file = tmp_path / ".env"
+
+        class FakeGlobalEnvFile:
+            path = env_file
+
+        monkeypatch.setattr(
+            "vibe.core.proxy_setup.GLOBAL_ENV_FILE", FakeGlobalEnvFile()
+        )
+
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        _get_fake_client(acp_agent_loop)._session_updates.clear()
+
+        await acp_agent_loop.prompt(
+            prompt=[TextContentBlock(type="text", text="/proxy-setup")],
+            session_id=session_response.session_id,
+        )
+
+        message_updates = [
+            u
+            for u in _get_fake_client(acp_agent_loop)._session_updates
+            if isinstance(u.update, AgentMessageChunk)
+        ]
+        assert len(message_updates) == 1
+        assert message_updates[0].update.message_id is not None
+
     @pytest.mark.asyncio
     async def test_proxy_setup_unsets_value(
         self,

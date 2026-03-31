@@ -128,12 +128,10 @@ def _get_selected_texts(app: App) -> list[str]:
     selected_texts = []
 
     for widget in app.query("*"):
-        if not hasattr(widget, "text_selection") or not widget.text_selection:
-            continue
-
-        selection = widget.text_selection
-
         try:
+            if not hasattr(widget, "text_selection") or not widget.text_selection:
+                continue
+            selection = widget.text_selection
             result = widget.get_selection(selection)
         except Exception:
             continue

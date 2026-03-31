@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 from typing import Any, cast, override
+from uuid import uuid4
 
 from acp import (
     PROTOCOL_VERSION,
@@ -26,11 +27,14 @@ from acp.schema import (
     AgentThoughtChunk,
     AllowedOutcome,
     AuthenticateResponse,
-    AuthMethod,
+    AuthMethodAgent,
     AvailableCommand,
     AvailableCommandInput,
     ClientCapabilities,
+    CloseSessionResponse,
     ContentToolCallContent,
+    Cost,
+    EnvVarAuthMethod,
     ForkSessionResponse,
     HttpMcpServer,
     Implementation,
@@ -43,12 +47,14 @@ from acp.schema import (
     SessionListCapabilities,
     SetSessionConfigOptionResponse,
     SseMcpServer,
+    TerminalAuthMethod,
     TextContentBlock,
     TextResourceContents,
     ToolCallProgress,
     ToolCallUpdate,
     UnstructuredCommandInput,
-    UserMessageChunk,
+    Usage,
+    UsageUpdate,
 )
 from pydantic import BaseModel, ConfigDict
 
@@ -117,13 +123,18 @@ from vibe.core.types import (
     ToolCallEvent,
     ToolResultEvent,
     ToolStreamEvent,
-    UserMessageEvent,
 )
 from vibe.core.utils import (
     CancellationReason,
     ConversationLimitException,
     get_user_cancellation_message,
 )
+
+
+def _resolved_user_message_id(client_message_id: str | None) -> str:
+    if client_message_id is not None:
+        return client_message_id
+    return str(uuid4())
 
 
 class AcpSessionLoop(BaseModel):
@@ -174,9 +185,10 @@ class VibeAcpAgentLoop(AcpAgent):
             and self.client_capabilities.field_meta.get("terminal-auth") is True
         )
 
-        auth_methods = (
+        auth_methods: list[EnvVarAuthMethod | TerminalAuthMethod | AuthMethodAgent] = (
             [
-                AuthMethod(
+                TerminalAuthMethod(
+                    type="terminal",
                     id="vibe-setup",
                     name="Register your API Key",
                     description="Register your API Key inside Mistral Vibe",
@@ -380,6 +392,39 @@ class VibeAcpAgentLoop(AcpAgent):
             raise SessionNotFoundError(session_id)
         return self.sessions[session_id]
 
+    def _build_usage(self, session: AcpSessionLoop) -> Usage:
+        stats = session.agent_loop.stats
+        return Usage(
+            input_tokens=stats.session_prompt_tokens,
+            output_tokens=stats.session_completion_tokens,
+            total_tokens=stats.session_total_llm_tokens,
+        )
+
+    def _build_usage_update(self, session: AcpSessionLoop) -> UsageUpdate:
+        stats = session.agent_loop.stats
+        active_model = session.agent_loop.config.get_active_model()
+        cost = (
+            Cost(amount=stats.session_cost, currency="USD")
+            if stats.input_price_per_million > 0 or stats.output_price_per_million > 0
+            else None
+        )
+        return UsageUpdate(
+            session_update="usage_update",
+            used=stats.context_tokens,
+            size=active_model.auto_compact_threshold,
+            cost=cost,
+        )
+
+    def _send_usage_update(self, session: AcpSessionLoop) -> None:
+        async def _send() -> None:
+            try:
+                update = self._build_usage_update(session)
+                await self.client.session_update(session_id=session.id, update=update)
+            except Exception:
+                pass
+
+        asyncio.create_task(_send())
+
     async def _replay_tool_calls(self, session_id: str, msg: LLMMessage) -> None:
         if not msg.tool_calls:
             return
@@ -442,7 +487,7 @@ class VibeAcpAgentLoop(AcpAgent):
         await self.client.session_update(session_id=session_id, update=update)
 
     async def _handle_proxy_setup_command(
-        self, session_id: str, text_prompt: str
+        self, session_id: str, text_prompt: str, message_id: str
     ) -> PromptResponse:
         args = text_prompt.strip()[len("/proxy-setup") :].strip()
 
@@ -465,11 +510,14 @@ class VibeAcpAgentLoop(AcpAgent):
             update=AgentMessageChunk(
                 session_update="agent_message_chunk",
                 content=TextContentBlock(type="text", text=message),
+                message_id=str(uuid4()),
             ),
         )
-        return PromptResponse(stop_reason="end_turn")
+        return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
 
-    async def _handle_leanstall_command(self, session_id: str) -> PromptResponse:
+    async def _handle_leanstall_command(
+        self, session_id: str, message_id: str
+    ) -> PromptResponse:
         session = self._get_session(session_id)
         current = list(session.agent_loop.base_config.installed_agents)
         if "lean" in current:
@@ -492,11 +540,14 @@ class VibeAcpAgentLoop(AcpAgent):
             update=AgentMessageChunk(
                 session_update="agent_message_chunk",
                 content=TextContentBlock(type="text", text=message),
+                message_id=str(uuid4()),
             ),
         )
-        return PromptResponse(stop_reason="end_turn")
+        return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
 
-    async def _handle_unleanstall_command(self, session_id: str) -> PromptResponse:
+    async def _handle_unleanstall_command(
+        self, session_id: str, message_id: str
+    ) -> PromptResponse:
         session = self._get_session(session_id)
         current = list(session.agent_loop.base_config.installed_agents)
         if "lean" not in current:
@@ -519,9 +570,10 @@ class VibeAcpAgentLoop(AcpAgent):
             update=AgentMessageChunk(
                 session_update="agent_message_chunk",
                 content=TextContentBlock(type="text", text=message),
+                message_id=str(uuid4()),
             ),
         )
-        return PromptResponse(stop_reason="end_turn")
+        return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
 
     @override
     async def load_session(
@@ -564,6 +616,7 @@ class VibeAcpAgentLoop(AcpAgent):
         session = await self._create_acp_session(session_id, agent_loop)
 
         await self._replay_conversation_history(session_id, non_system_messages)
+        self._send_usage_update(session)
 
         modes_state, modes_config = make_mode_response(
             list(agent_loop.agent_manager.available_agents.values()),
@@ -635,14 +688,14 @@ class VibeAcpAgentLoop(AcpAgent):
 
     @override
     async def set_config_option(
-        self, config_id: str, session_id: str, value: str, **kwargs: Any
+        self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
     ) -> SetSessionConfigOptionResponse | None:
         session = self._get_session(session_id)
 
         match config_id:
-            case "mode":
+            case "mode" if isinstance(value, str):
                 success = await self._apply_mode_change(session, value)
-            case "model":
+            case "model" if isinstance(value, str):
                 success = await self._apply_model_change(session, value)
             case _:
                 success = False
@@ -690,7 +743,11 @@ class VibeAcpAgentLoop(AcpAgent):
 
     @override
     async def prompt(
-        self, prompt: list[ContentBlock], session_id: str, **kwargs: Any
+        self,
+        prompt: list[ContentBlock],
+        session_id: str,
+        message_id: str | None = None,
+        **kwargs: Any,
     ) -> PromptResponse:
         session = self._get_session(session_id)
 
@@ -700,21 +757,24 @@ class VibeAcpAgentLoop(AcpAgent):
             )
 
         text_prompt = self._build_text_prompt(prompt)
+        resolved_message_id = _resolved_user_message_id(message_id)
 
         if text_prompt.strip().lower().startswith("/proxy-setup"):
-            return await self._handle_proxy_setup_command(session_id, text_prompt)
+            return await self._handle_proxy_setup_command(
+                session_id, text_prompt, resolved_message_id
+            )
 
         if text_prompt.strip().lower().startswith("/unleanstall"):
-            return await self._handle_unleanstall_command(session_id)
+            return await self._handle_unleanstall_command(
+                session_id, resolved_message_id
+            )
 
         if text_prompt.strip().lower().startswith("/leanstall"):
-            return await self._handle_leanstall_command(session_id)
-
-        temp_user_message_id: str | None = kwargs.get("messageId")
+            return await self._handle_leanstall_command(session_id, resolved_message_id)
 
         async def agent_loop_task() -> None:
             async for update in self._run_agent_loop(
-                session, text_prompt, temp_user_message_id
+                session, text_prompt, resolved_message_id
             ):
                 await self.client.session_update(session_id=session.id, update=update)
 
@@ -723,7 +783,12 @@ class VibeAcpAgentLoop(AcpAgent):
             await session.task
 
         except asyncio.CancelledError:
-            return PromptResponse(stop_reason="cancelled")
+            self._send_usage_update(session)
+            return PromptResponse(
+                stop_reason="cancelled",
+                usage=self._build_usage(session),
+                user_message_id=resolved_message_id,
+            )
 
         except CoreRateLimitError as e:
             raise RateLimitError.from_core(e) from e
@@ -737,7 +802,12 @@ class VibeAcpAgentLoop(AcpAgent):
         finally:
             session.task = None
 
-        return PromptResponse(stop_reason="end_turn")
+        self._send_usage_update(session)
+        return PromptResponse(
+            stop_reason="end_turn",
+            usage=self._build_usage(session),
+            user_message_id=resolved_message_id,
+        )
 
     def _build_text_prompt(self, acp_prompt: list[ContentBlock]) -> str:
         text_prompt = ""
@@ -787,37 +857,25 @@ class VibeAcpAgentLoop(AcpAgent):
         return text_prompt
 
     async def _run_agent_loop(
-        self, session: AcpSessionLoop, prompt: str, user_message_id: str | None = None
+        self, session: AcpSessionLoop, prompt: str, client_message_id: str | None = None
     ) -> AsyncGenerator[SessionUpdate]:
         rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
 
-        async for event in session.agent_loop.act(rendered_prompt):
-            if isinstance(event, UserMessageEvent):
-                yield UserMessageChunk(
-                    session_update="user_message_chunk",
-                    content=TextContentBlock(type="text", text=""),
-                    field_meta={
-                        "messageId": event.message_id,
-                        **(
-                            {"previousMessageId": user_message_id}
-                            if user_message_id
-                            else {}
-                        ),
-                    },
-                )
-
-            elif isinstance(event, AssistantEvent):
+        async for event in session.agent_loop.act(
+            rendered_prompt, client_message_id=client_message_id
+        ):
+            if isinstance(event, AssistantEvent):
                 yield AgentMessageChunk(
                     session_update="agent_message_chunk",
                     content=TextContentBlock(type="text", text=event.content),
-                    field_meta={"messageId": event.message_id},
+                    message_id=event.message_id,
                 )
 
             elif isinstance(event, ReasoningEvent):
                 yield AgentThoughtChunk(
                     session_update="agent_thought_chunk",
                     content=TextContentBlock(type="text", text=event.content),
-                    field_meta={"messageId": event.message_id},
+                    message_id=event.message_id,
                 )
 
             elif isinstance(event, ToolCallEvent):
@@ -858,6 +916,12 @@ class VibeAcpAgentLoop(AcpAgent):
 
             elif isinstance(event, AgentProfileChangedEvent):
                 pass
+
+    @override
+    async def close_session(
+        self, session_id: str, **kwargs: Any
+    ) -> CloseSessionResponse | None:
+        raise NotImplementedMethodError("close_session")
 
     @override
     async def cancel(self, session_id: str, **kwargs: Any) -> None:

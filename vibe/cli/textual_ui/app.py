@@ -294,6 +294,7 @@ class VibeApp(App):  # noqa: PLR0904
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        self.scroll_sensitivity_y = 1.0
         self.agent_loop = agent_loop
         self._voice_manager: VoiceManagerPort = (
             voice_manager or self._make_default_voice_manager()

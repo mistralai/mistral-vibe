@@ -463,14 +463,6 @@ class TestSessionUpdates:
                 == "available_commands_update"
             )
 
-            user_response_text = await read_response(process)
-            assert user_response_text is not None
-            user_response = UpdateJsonRpcNotification.model_validate(
-                json.loads(user_response_text)
-            )
-            assert user_response.params is not None
-            assert user_response.params.update.session_update == "user_message_chunk"
-
             text_response = await read_response(process)
             assert text_response is not None
             response = UpdateJsonRpcNotification.model_validate(

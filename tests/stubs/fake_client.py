@@ -6,7 +6,7 @@ from acp import (
     Agent as AcpAgent,
     Client,
     CreateTerminalResponse,
-    KillTerminalCommandResponse,
+    KillTerminalResponse,
     ReadTextFileResponse,
     ReleaseTerminalResponse,
     RequestPermissionResponse,
@@ -112,7 +112,7 @@ class FakeClient(Client):
 
     async def kill_terminal(
         self, session_id: str, terminal_id: str, **kwargs: Any
-    ) -> KillTerminalCommandResponse | None:
+    ) -> KillTerminalResponse | None:
         raise NotImplementedError()
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:

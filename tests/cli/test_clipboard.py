@@ -38,6 +38,12 @@ class MockWidget:
         return self._get_selection_result
 
 
+class MockWidgetNoScreen:
+    @property
+    def text_selection(self) -> object:
+        raise RuntimeError("node has no screen")
+
+
 @pytest.fixture
 def mock_app() -> App:
     app = MagicMock(spec=App)
@@ -73,6 +79,7 @@ def mock_app() -> App:
             ],
             "empty text",
         ),
+        ([MockWidgetNoScreen()], "widget with no screen (text_selection raises)"),
     ],
 )
 def test_copy_selection_to_clipboard_no_notification(
@@ -85,6 +92,22 @@ def test_copy_selection_to_clipboard_no_notification(
     result = copy_selection_to_clipboard(mock_app)
     assert result is None
     mock_app.notify.assert_not_called()
+
+
+@patch("vibe.cli.clipboard._copy_to_clipboard")
+def test_copy_selection_skips_detached_widget_and_collects_valid(
+    mock_copy_to_clipboard: MagicMock, mock_app: MagicMock
+) -> None:
+    detached = MockWidgetNoScreen()
+    valid = MockWidget(
+        text_selection=SimpleNamespace(), get_selection_result=("valid text", None)
+    )
+    mock_app.query.return_value = [detached, valid]
+
+    result = copy_selection_to_clipboard(mock_app)
+
+    assert result == "valid text"
+    mock_copy_to_clipboard.assert_called_once_with("valid text")
 
 
 @patch("vibe.cli.clipboard._copy_to_clipboard")
