@@ -24,6 +24,14 @@ class TurnSummaryPort(ABC):
     @abstractmethod
     def generation(self) -> int: ...
 
+    @property
+    @abstractmethod
+    def on_summary(self) -> Callable[[TurnSummaryResult], None] | None: ...
+
+    @on_summary.setter
+    @abstractmethod
+    def on_summary(self, value: Callable[[TurnSummaryResult], None] | None) -> None: ...
+
     @abstractmethod
     def start_turn(self, user_message: str) -> None: ...
 

@@ -162,6 +162,10 @@ class MCPRegistry:
                 )
         return tools
 
+    def count_loaded(self, servers: list[MCPServer]) -> int:
+        """Return how many of *servers* were successfully discovered (cached)."""
+        return sum(self._server_key(srv) in self._cache for srv in servers)
+
     def clear(self) -> None:
         """Drop all cached entries, forcing re-discovery on next use."""
         self._cache.clear()

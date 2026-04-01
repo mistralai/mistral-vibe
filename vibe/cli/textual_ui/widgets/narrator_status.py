@@ -1,30 +1,39 @@
 from __future__ import annotations
 
-from enum import StrEnum, auto
 from typing import Any
 
 from textual.reactive import reactive
 from textual.timer import Timer
 from textual.widgets import Static
 
+from vibe.cli.narrator_manager.narrator_manager_port import (
+    NarratorManagerListener,
+    NarratorManagerPort,
+    NarratorState,
+)
+
 SHRINK_FRAMES = "█▇▆▅▄▃▂▁"
 BAR_FRAMES = ["▂▅▇", "▃▆▅", "▅▃▇", "▇▂▅", "▅▇▃", "▃▅▆"]
 ANIMATION_INTERVAL = 0.15
 
 
-class NarratorState(StrEnum):
-    IDLE = auto()
-    SUMMARIZING = auto()
-    SPEAKING = auto()
-
-
-class NarratorStatus(Static):
+class NarratorStatus(NarratorManagerListener, Static):
     state = reactive(NarratorState.IDLE)
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, narrator_manager: NarratorManagerPort, **kwargs: Any) -> None:
         super().__init__("", **kwargs)
+        self._narrator_manager = narrator_manager
         self._timer: Timer | None = None
         self._frame: int = 0
+
+    def on_mount(self) -> None:
+        self._narrator_manager.add_listener(self)
+
+    def on_unmount(self) -> None:
+        self._narrator_manager.remove_listener(self)
+
+    def on_narrator_state_change(self, state: NarratorState) -> None:
+        self.state = state
 
     def watch_state(self, new_state: NarratorState) -> None:
         self._stop_timer()

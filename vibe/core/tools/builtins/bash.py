@@ -306,8 +306,13 @@ class Bash(
         if not command_parts:
             return None
 
-        def is_denylisted(command: str) -> bool:
-            return any(command.startswith(pattern) for pattern in self.config.denylist)
+        def _matches_pattern(command: str, pattern: str) -> bool:
+            return command == pattern or command.startswith(pattern + " ")
+
+        def find_denylist_match(command: str) -> str | None:
+            return next(
+                (p for p in self.config.denylist if _matches_pattern(command, p)), None
+            )
 
         def is_standalone_denylisted(command: str) -> bool:
             parts = command.split()
@@ -323,7 +328,9 @@ class Bash(
             return False
 
         def is_allowlisted(command: str) -> bool:
-            return any(command.startswith(pattern) for pattern in self.config.allowlist)
+            return any(
+                _matches_pattern(command, pattern) for pattern in self.config.allowlist
+            )
 
         def is_sensitive(command: str) -> bool:
             tokens = command.split()
@@ -332,8 +339,16 @@ class Bash(
             return tokens[0] in self.config.sensitive_patterns
 
         for part in command_parts:
-            if is_denylisted(part) or is_standalone_denylisted(part):
-                return PermissionContext(permission=ToolPermission.NEVER)
+            if matched := find_denylist_match(part):
+                return PermissionContext(
+                    permission=ToolPermission.NEVER,
+                    reason=f"Command denied: '{part}' matches denylist pattern '{matched}'. Do not attempt to run this command.",
+                )
+            if is_standalone_denylisted(part):
+                return PermissionContext(
+                    permission=ToolPermission.NEVER,
+                    reason=f"Command denied: '{part}' is not allowed as a standalone command. Do not attempt to run this command.",
+                )
 
         if self.config.permission == ToolPermission.ALWAYS:
             return PermissionContext(permission=ToolPermission.ALWAYS)

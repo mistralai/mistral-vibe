@@ -21,7 +21,7 @@ class TurnSummaryTracker(TurnSummaryPort):
         self,
         backend: BackendLike,
         model: ModelConfig,
-        on_summary: Callable[[TurnSummaryResult], None],
+        on_summary: Callable[[TurnSummaryResult], None] | None = None,
         max_tokens: int = 512,
     ) -> None:
         self._backend = backend
@@ -35,6 +35,14 @@ class TurnSummaryTracker(TurnSummaryPort):
     @property
     def generation(self) -> int:
         return self._generation
+
+    @property
+    def on_summary(self) -> Callable[[TurnSummaryResult], None] | None:
+        return self._on_summary
+
+    @on_summary.setter
+    def on_summary(self, value: Callable[[TurnSummaryResult], None] | None) -> None:
+        self._on_summary = value
 
     def start_turn(self, user_message: str) -> None:
         self._generation += 1
@@ -103,7 +111,9 @@ class TurnSummaryTracker(TurnSummaryPort):
             )
 
             summary = result.message.content or ""
-            self._on_summary(TurnSummaryResult(generation=gen, summary=summary))
+            if self._on_summary is not None:
+                self._on_summary(TurnSummaryResult(generation=gen, summary=summary))
         except Exception:
             logger.warning("Turn summary generation failed", exc_info=True)
-            self._on_summary(TurnSummaryResult(generation=gen, summary=None))
+            if self._on_summary is not None:
+                self._on_summary(TurnSummaryResult(generation=gen, summary=None))

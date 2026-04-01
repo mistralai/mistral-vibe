@@ -168,9 +168,9 @@ class AgentLoop:
         self.agent_manager = AgentManager(
             lambda: self._base_config, initial_agent=agent_name
         )
-        self._mcp_registry = MCPRegistry()
+        self.mcp_registry = MCPRegistry()
         self.tool_manager = ToolManager(
-            lambda: self.config, mcp_registry=self._mcp_registry
+            lambda: self.config, mcp_registry=self.mcp_registry
         )
         self.skill_manager = SkillManager(lambda: self.config)
         self.format_handler = APIToolFormatHandler()
@@ -1029,7 +1029,8 @@ class AgentLoop:
                 return ToolDecision(
                     verdict=ToolExecutionResponse.SKIP,
                     approval_type=ToolPermission.NEVER,
-                    feedback=f"Tool '{tool_name}' is permanently disabled",
+                    feedback=ctx.reason
+                    or f"Tool '{tool_name}' is permanently disabled",
                 )
             case _:
                 uncovered = [
@@ -1267,7 +1268,7 @@ class AgentLoop:
             self._max_price = max_price
 
         self.tool_manager = ToolManager(
-            lambda: self.config, mcp_registry=self._mcp_registry
+            lambda: self.config, mcp_registry=self.mcp_registry
         )
         self.skill_manager = SkillManager(lambda: self.config)
 

@@ -50,7 +50,7 @@ async def test_rewind_highlights_last_user_message() -> None:
         await pilot.pause(0.1)
 
         assert app._rewind_highlighted_widget is not None
-        assert app._rewind_highlighted_widget._content == "world"
+        assert app._rewind_highlighted_widget.get_content() == "world"
 
 
 @pytest.mark.asyncio
@@ -67,7 +67,7 @@ async def test_rewind_navigates_to_previous_message() -> None:
         await pilot.pause(0.1)
 
         assert app._rewind_highlighted_widget is not None
-        assert app._rewind_highlighted_widget._content == "hello"
+        assert app._rewind_highlighted_widget.get_content() == "hello"
 
 
 @pytest.mark.asyncio
@@ -88,7 +88,7 @@ async def test_rewind_navigates_down() -> None:
         await pilot.pause(0.1)
 
         assert app._rewind_highlighted_widget is not None
-        assert app._rewind_highlighted_widget._content == "world"
+        assert app._rewind_highlighted_widget.get_content() == "world"
 
 
 @pytest.mark.asyncio
@@ -123,7 +123,7 @@ async def test_rewind_ctrl_p_n_alternate_bindings() -> None:
 
         assert app._rewind_mode is True
         assert app._rewind_highlighted_widget is not None
-        assert app._rewind_highlighted_widget._content == "world"
+        assert app._rewind_highlighted_widget.get_content() == "world"
 
         # ctrl+p again goes to previous
         await pilot.press("ctrl+p")
@@ -131,7 +131,7 @@ async def test_rewind_ctrl_p_n_alternate_bindings() -> None:
         await pilot.pause(0.1)
 
         assert app._rewind_highlighted_widget is not None
-        assert app._rewind_highlighted_widget._content == "hello"
+        assert app._rewind_highlighted_widget.get_content() == "hello"
 
         # ctrl+n goes back
         await pilot.press("ctrl+n")
@@ -139,7 +139,7 @@ async def test_rewind_ctrl_p_n_alternate_bindings() -> None:
         await pilot.pause(0.1)
 
         assert app._rewind_highlighted_widget is not None
-        assert app._rewind_highlighted_widget._content == "world"
+        assert app._rewind_highlighted_widget.get_content() == "world"
 
 
 @pytest.mark.asyncio
@@ -180,7 +180,7 @@ async def test_rewind_removes_messages_after_selected() -> None:
         await pilot.pause(0.1)
 
         assert app._rewind_highlighted_widget is not None
-        assert app._rewind_highlighted_widget._content == "second"
+        assert app._rewind_highlighted_widget.get_content() == "second"
 
         # Confirm
         await pilot.press("enter")
@@ -193,7 +193,37 @@ async def test_rewind_removes_messages_after_selected() -> None:
             child for child in messages_area.children if isinstance(child, UserMessage)
         ]
         assert len(user_widgets) == 1
-        assert user_widgets[0]._content == "first"
+        assert user_widgets[0].get_content() == "first"
+
+
+@pytest.mark.asyncio
+async def test_rewind_skips_command_messages() -> None:
+    """Slash-command echo messages (message_index=None) are not rewind-selectable."""
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await _send_messages(pilot, ["hello"])
+
+        # Simulate a slash command inserting a UserMessage without message_index
+        await app._mount_and_scroll(UserMessage("/model"))
+        await pilot.pause(0.1)
+
+        await _send_messages(pilot, ["world"])
+
+        # First alt+up should land on "world", not the command message
+        await pilot.press("alt+up")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause(0.1)
+
+        assert app._rewind_highlighted_widget is not None
+        assert app._rewind_highlighted_widget.get_content() == "world"
+
+        # Second alt+up should land on "hello", skipping the command message
+        await pilot.press("alt+up")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause(0.1)
+
+        assert app._rewind_highlighted_widget is not None
+        assert app._rewind_highlighted_widget.get_content() == "hello"
 
 
 @pytest.mark.asyncio

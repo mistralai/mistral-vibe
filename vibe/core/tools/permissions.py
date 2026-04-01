@@ -24,6 +24,7 @@ class RequiredPermission(BaseModel):
 class PermissionContext(BaseModel):
     permission: ToolPermission
     required_permissions: list[RequiredPermission] = Field(default_factory=list)
+    reason: str | None = None
 
 
 class ApprovedRule(BaseModel):

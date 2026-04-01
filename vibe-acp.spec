@@ -45,6 +45,7 @@ exe = EXE(
     pyz,
     a.scripts,
     [],
+    exclude_binaries=True,
     name='vibe-acp',
     debug=False,
     bootloader_ignore_signals=False,
@@ -62,6 +63,7 @@ exe = EXE(
 coll = COLLECT(
     exe,
     a.binaries,
+    a.zipfiles,
     a.datas,
     strip=False,
     upx=True,

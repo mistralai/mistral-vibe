@@ -13,6 +13,7 @@ from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import VibeConfig
 from vibe.core.skills.manager import SkillManager
+from vibe.core.tools.mcp.registry import MCPRegistry
 
 
 @dataclass
@@ -28,14 +29,18 @@ class Banner(Static):
     state = reactive(BannerState(), init=False)
 
     def __init__(
-        self, config: VibeConfig, skill_manager: SkillManager, **kwargs: Any
+        self,
+        config: VibeConfig,
+        skill_manager: SkillManager,
+        mcp_registry: MCPRegistry,
+        **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.can_focus = False
         self._initial_state = BannerState(
             active_model=config.active_model,
             models_count=len(config.models),
-            mcp_servers_count=len(config.mcp_servers),
+            mcp_servers_count=mcp_registry.count_loaded(config.mcp_servers),
             skills_count=len(skill_manager.available_skills),
             plan_description=None,
         )
@@ -77,12 +82,13 @@ class Banner(Static):
         self,
         config: VibeConfig,
         skill_manager: SkillManager,
+        mcp_registry: MCPRegistry,
         plan_description: str | None = None,
     ) -> None:
         self.state = BannerState(
             active_model=config.active_model,
             models_count=len(config.models),
-            mcp_servers_count=len(config.mcp_servers),
+            mcp_servers_count=mcp_registry.count_loaded(config.mcp_servers),
             skills_count=len(skill_manager.available_skills),
             plan_description=plan_description,
         )

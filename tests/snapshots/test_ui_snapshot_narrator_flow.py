@@ -12,8 +12,9 @@ from tests.snapshots.snap_compare import SnapCompare
 from tests.stubs.fake_audio_player import FakeAudioPlayer
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_tts_client import FakeTTSClient
+from vibe.cli.narrator_manager import NarratorManager, NarratorState
 import vibe.cli.textual_ui.widgets.narrator_status as narrator_status_mod
-from vibe.cli.textual_ui.widgets.narrator_status import NarratorState, NarratorStatus
+from vibe.cli.textual_ui.widgets.narrator_status import NarratorStatus
 from vibe.cli.turn_summary import TurnSummaryTracker
 
 narrator_status_mod.SHRINK_FRAMES = "█"
@@ -65,6 +66,16 @@ class NarratorFlowApp(BaseSnapshotTestApp):
             mock_llm_chunk(content="Summary of the conversation")
         )
         self.tts_gate = GatedTTSClient()
+        self.fake_audio_player = FakeAudioPlayer()
+        narrator_manager = NarratorManager(
+            config_getter=_narrator_config, audio_player=self.fake_audio_player
+        )
+        # Override turn_summary and tts_client with gated test doubles.
+        narrator_manager._turn_summary = TurnSummaryTracker(
+            backend=self.summary_gate, model=_TEST_MODEL
+        )
+        narrator_manager._turn_summary.on_summary = narrator_manager._on_turn_summary
+        narrator_manager._tts_client = self.tts_gate
         super().__init__(
             config=_narrator_config(),
             backend=FakeBackend(
@@ -74,13 +85,7 @@ class NarratorFlowApp(BaseSnapshotTestApp):
                     completion_tokens=2_500,
                 )
             ),
-        )
-        self._tts_client = self.tts_gate
-        self._audio_player = FakeAudioPlayer()
-        self._turn_summary = TurnSummaryTracker(
-            backend=self.summary_gate,
-            model=_TEST_MODEL,
-            on_summary=self._on_turn_summary,
+            narrator_manager=narrator_manager,
         )
 
 
@@ -91,7 +96,7 @@ def test_snapshot_narrator_summarizing(snap_compare: SnapCompare) -> None:
         await pilot.press(*"Hello")
         await pilot.press("enter")
         await pilot.pause(0.5)
-        # end_turn has fired, SUMMARIZING is set, summary backend is gated
+        # on_turn_end has fired, SUMMARIZING is set, summary backend is gated
         assert app.summary_gate._gate.is_set() is False
         # Freeze animation at frame 0 for deterministic snapshot
         app.query_one(NarratorStatus)._stop_timer()
@@ -137,8 +142,9 @@ def test_snapshot_narrator_idle_after_speaking(snap_compare: SnapCompare) -> Non
         app.tts_gate.release()
         await pilot.pause(0.2)
         # Simulate playback finishing (same thread, so call directly)
-        app._audio_player.stop()
-        app._set_narrator_state(NarratorState.IDLE)
+        app.fake_audio_player.stop()
+        narrator = cast(NarratorManager, app._narrator_manager)
+        narrator._set_state(NarratorState.IDLE)
         await pilot.pause(0.2)
 
     assert snap_compare(

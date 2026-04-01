@@ -31,6 +31,8 @@ class ChatTextArea(TextArea):
             show=False,
             priority=True,
         ),
+        Binding("alt+left", "cursor_word_left", "Cursor word left", show=False),
+        Binding("alt+right", "cursor_word_right", "Cursor word right", show=False),
         Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
     ]
 

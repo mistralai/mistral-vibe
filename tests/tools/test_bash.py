@@ -208,3 +208,66 @@ class TestResolvePermissionWindowsSyntax:
         )
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ALWAYS
+
+
+class TestDenylistWordBoundary:
+    """Verify denylist matches whole command names, not prefixes."""
+
+    def _make_bash(self, **kwargs) -> Bash:
+        config = BashToolConfig(**kwargs)
+        return Bash(config=config, state=BaseToolState())
+
+    def test_vi_blocks_vi_exact(self):
+        bash_tool = self._make_bash(denylist=["vi"])
+        result = bash_tool.resolve_permission(BashArgs(command="vi"))
+        assert isinstance(result, PermissionContext)
+        assert result.permission is ToolPermission.NEVER
+
+    def test_vi_blocks_vi_with_args(self):
+        bash_tool = self._make_bash(denylist=["vi"])
+        result = bash_tool.resolve_permission(BashArgs(command="vi file.txt"))
+        assert isinstance(result, PermissionContext)
+        assert result.permission is ToolPermission.NEVER
+
+    def test_vi_does_not_block_vibe(self):
+        bash_tool = self._make_bash(denylist=["vi"])
+        result = bash_tool.resolve_permission(BashArgs(command="vibe -p hello"))
+        assert result is None or result.permission is not ToolPermission.NEVER
+
+    def test_multiword_pattern_still_works(self):
+        bash_tool = self._make_bash(denylist=["bash -i"])
+        result = bash_tool.resolve_permission(BashArgs(command="bash -i"))
+        assert isinstance(result, PermissionContext)
+        assert result.permission is ToolPermission.NEVER
+
+    def test_multiword_pattern_with_trailing_args(self):
+        bash_tool = self._make_bash(denylist=["bash -i"])
+        result = bash_tool.resolve_permission(BashArgs(command="bash -i extra"))
+        assert isinstance(result, PermissionContext)
+        assert result.permission is ToolPermission.NEVER
+
+    def test_multiword_pattern_does_not_match_partial(self):
+        bash_tool = self._make_bash(denylist=["bash -i"])
+        result = bash_tool.resolve_permission(BashArgs(command="bash -init"))
+        assert result is None or result.permission is not ToolPermission.NEVER
+
+    def test_deny_reason_is_set(self):
+        bash_tool = self._make_bash(denylist=["vim"])
+        result = bash_tool.resolve_permission(BashArgs(command="vim file.txt"))
+        assert isinstance(result, PermissionContext)
+        assert result.reason is not None
+        assert "vim" in result.reason
+
+    def test_standalone_deny_reason_is_set(self):
+        bash_tool = self._make_bash(denylist_standalone=["python"])
+        result = bash_tool.resolve_permission(BashArgs(command="python"))
+        assert isinstance(result, PermissionContext)
+        assert result.reason is not None
+        assert result.permission is ToolPermission.NEVER
+        assert "python" in result.reason
+        assert "standalone" in result.reason
+
+    def test_allowlist_does_not_match_prefix(self):
+        bash_tool = self._make_bash(allowlist=["cat"])
+        result = bash_tool.resolve_permission(BashArgs(command="catalog"))
+        assert result is not None and result.permission is not ToolPermission.ALWAYS

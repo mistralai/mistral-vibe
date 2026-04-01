@@ -430,6 +430,21 @@ class TestMCPRegistry:
 
         assert len(registry._cache) == 0
 
+    def test_count_loaded_excludes_failed_servers(self):
+        registry = MCPRegistry()
+        ok_srv = self._make_http_server("ok", url="http://ok:1")
+        fail_srv = self._make_http_server("fail", url="http://fail:2")
+
+        proxy = create_mcp_http_proxy_tool_class(
+            url="http://ok:1", remote=RemoteTool(name="t"), alias="ok"
+        )
+        registry._cache[registry._server_key(ok_srv)] = {proxy.get_name(): proxy}
+
+        assert registry.count_loaded([ok_srv, fail_srv]) == 1
+        assert registry.count_loaded([ok_srv]) == 1
+        assert registry.count_loaded([fail_srv]) == 0
+        assert registry.count_loaded([]) == 0
+
     def test_cache_survives_multiple_get_tools_calls(self):
         registry = MCPRegistry()
         srv = self._make_http_server("stable")

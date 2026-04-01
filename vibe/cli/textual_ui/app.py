@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum, auto
 import gc
@@ -26,6 +25,11 @@ from textual.widgets import Static
 from vibe import __version__ as CORE_VERSION
 from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.commands import CommandRegistry
+from vibe.cli.narrator_manager import (
+    NarratorManager,
+    NarratorManagerPort,
+    NarratorState,
+)
 from vibe.cli.plan_offer.adapters.http_whoami_gateway import HttpWhoAmIGateway
 from vibe.cli.plan_offer.decide_plan_offer import (
     PlanInfo,
@@ -64,7 +68,7 @@ from vibe.cli.textual_ui.widgets.messages import (
     WhatsNewMessage,
 )
 from vibe.cli.textual_ui.widgets.model_picker import ModelPickerApp
-from vibe.cli.textual_ui.widgets.narrator_status import NarratorState, NarratorStatus
+from vibe.cli.textual_ui.widgets.narrator_status import NarratorStatus
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
 from vibe.cli.textual_ui.widgets.proxy_setup_app import ProxySetupApp
@@ -85,13 +89,6 @@ from vibe.cli.textual_ui.windowing import (
     should_resume_history,
     sync_backfill_state,
 )
-from vibe.cli.turn_summary import (
-    NoopTurnSummary,
-    TurnSummaryPort,
-    TurnSummaryResult,
-    TurnSummaryTracker,
-    create_narrator_backend,
-)
 from vibe.cli.update_notifier import (
     FileSystemUpdateCacheRepository,
     PyPIUpdateGateway,
@@ -109,7 +106,6 @@ from vibe.cli.voice_manager.voice_manager_port import TranscribeState
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents import AgentProfile
 from vibe.core.audio_player.audio_player import AudioPlayer
-from vibe.core.audio_player.audio_player_port import AudioFormat
 from vibe.core.audio_recorder import AudioRecorder
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
@@ -136,8 +132,6 @@ from vibe.core.tools.builtins.ask_user_question import (
 )
 from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.transcribe import make_transcribe_client
-from vibe.core.tts.factory import make_tts_client
-from vibe.core.tts.tts_client_port import TTSClientPort
 from vibe.core.types import (
     AgentStats,
     ApprovalResponse,
@@ -291,6 +285,7 @@ class VibeApp(App):  # noqa: PLR0904
         plan_offer_gateway: WhoAmIGateway | None = None,
         terminal_notifier: NotificationPort | None = None,
         voice_manager: VoiceManagerPort | None = None,
+        narrator_manager: NarratorManagerPort | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -348,12 +343,9 @@ class VibeApp(App):  # noqa: PLR0904
         self._cached_loading_area: Widget | None = None
         self._switch_agent_generation = 0
         self._plan_info: PlanInfo | None = None
-        self._turn_summary: TurnSummaryPort = self._make_turn_summary()
-        self._turn_summary_close_tasks: set[asyncio.Task[Any]] = set()
-        self._tts_client: TTSClientPort | None = self._make_tts_client()
-        self._audio_player = AudioPlayer()
-        self._speak_task: asyncio.Task[None] | None = None
-        self._cancel_summary: Callable[[], bool] | None = None
+        self._narrator_manager: NarratorManagerPort = (
+            narrator_manager or self._make_default_narrator_manager()
+        )
 
         self._rewind_mode = False
         self._rewind_highlighted_widget: UserMessage | None = None
@@ -364,12 +356,14 @@ class VibeApp(App):  # noqa: PLR0904
 
     def compose(self) -> ComposeResult:
         with ChatScroll(id="chat"):
-            self._banner = Banner(self.config, self.agent_loop.skill_manager)
+            self._banner = Banner(
+                self.config, self.agent_loop.skill_manager, self.agent_loop.mcp_registry
+            )
             yield self._banner
             yield VerticalGroup(id="messages")
 
         with Horizontal(id="loading-area"):
-            yield NarratorStatus()
+            yield NarratorStatus(self._narrator_manager)
             yield Static(id="loading-area-content")
             yield FeedbackBar()
 
@@ -616,7 +610,7 @@ class VibeApp(App):  # noqa: PLR0904
         if non_voice_changes:
             VibeConfig.save_updates(non_voice_changes)
             self.agent_loop.refresh_config()
-            self._sync_turn_summary()
+            self._narrator_manager.sync()
 
     async def on_model_picker_app_model_selected(
         self, message: ModelPickerApp.ModelSelected
@@ -897,10 +891,10 @@ class VibeApp(App):  # noqa: PLR0904
 
         try:
             rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
-            self._cancel_speak()
-            self._turn_summary.start_turn(rendered_prompt)
+            self._narrator_manager.cancel()
+            self._narrator_manager.on_turn_start(rendered_prompt)
             async for event in self.agent_loop.act(rendered_prompt):
-                self._turn_summary.track(event)
+                self._narrator_manager.on_turn_event(event)
                 if self.event_handler:
                     await self.event_handler.handle_event(
                         event,
@@ -910,7 +904,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         except asyncio.CancelledError:
             await self._handle_turn_error()
-            self._turn_summary.cancel_turn()
+            self._narrator_manager.on_turn_cancel()
             raise
         except Exception as e:
             await self._handle_turn_error()
@@ -918,20 +912,13 @@ class VibeApp(App):  # noqa: PLR0904
             message = str(e)
             if isinstance(e, RateLimitError):
                 message = self._rate_limit_message()
-            self._turn_summary.set_error(message)
+            self._narrator_manager.on_turn_error(message)
 
             await self._mount_and_scroll(
                 ErrorMessage(message, collapsed=self._tools_collapsed)
             )
         finally:
-            cancel_summary = self._turn_summary.end_turn()
-            if (
-                cancel_summary is not None
-                and self.config.narrator_enabled
-                and self._tts_client is not None
-            ):
-                self._cancel_summary = cancel_summary
-                self.query_one(NarratorStatus).state = NarratorState.SUMMARIZING
+            self._narrator_manager.on_turn_end()
             self._agent_running = False
             self._interrupt_requested = False
             self._agent_task = None
@@ -1225,12 +1212,13 @@ class VibeApp(App):  # noqa: PLR0904
 
             await self.agent_loop.reload_with_initial_messages(base_config=base_config)
             await self._resolve_plan()
-            self._sync_turn_summary()
+            self._narrator_manager.sync()
 
             if self._banner:
                 self._banner.set_state(
                     base_config,
                     self.agent_loop.skill_manager,
+                    self.agent_loop.mcp_registry,
                     plan_title(self._plan_info),
                 )
             await self._mount_and_scroll(UserCommandMessage("Configuration reloaded."))
@@ -1373,6 +1361,7 @@ class VibeApp(App):  # noqa: PLR0904
         return self.agent_loop.session_logger.session_id[:8]
 
     async def _exit_app(self) -> None:
+        await self._narrator_manager.close()
         self.exit(result=self._get_session_resume_info())
 
     async def _setup_terminal(self) -> None:
@@ -1583,10 +1572,16 @@ class VibeApp(App):  # noqa: PLR0904
     # --- Rewind mode ---
 
     def _get_user_message_widgets(self) -> list[UserMessage]:
-        """Return all UserMessage widgets currently visible in #messages."""
+        """Return all UserMessage widgets currently visible in #messages.
+
+        Only includes messages with a valid message_index (i.e. real user
+        messages, not slash-command echo messages).
+        """
         messages_area = self._cached_messages_area or self.query_one("#messages")
         return [
-            child for child in messages_area.children if isinstance(child, UserMessage)
+            child
+            for child in messages_area.children
+            if isinstance(child, UserMessage) and child.message_index is not None
         ]
 
     def _start_rewind_mode(self) -> None:
@@ -1835,9 +1830,11 @@ class VibeApp(App):  # noqa: PLR0904
             self._handle_input_app_escape()
             return
 
-        narrator_status = self.query_one(NarratorStatus)
-        if self._audio_player.is_playing or narrator_status.state != NarratorState.IDLE:
-            self._cancel_speak()
+        if (
+            self._narrator_manager.is_playing
+            or self._narrator_manager.state != NarratorState.IDLE
+        ):
+            self._narrator_manager.cancel()
             return
 
         if self._agent_running:
@@ -1911,7 +1908,10 @@ class VibeApp(App):  # noqa: PLR0904
     def _refresh_banner(self) -> None:
         if self._banner:
             self._banner.set_state(
-                self.config, self.agent_loop.skill_manager, plan_title(self._plan_info)
+                self.config,
+                self.agent_loop.skill_manager,
+                self.agent_loop.mcp_registry,
+                plan_title(self._plan_info),
             )
 
     def _update_profile_widgets(self, profile: AgentProfile) -> None:
@@ -1966,6 +1966,7 @@ class VibeApp(App):  # noqa: PLR0904
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
 
+        self._narrator_manager.cancel()
         self.exit(result=self._get_session_resume_info())
 
     def action_scroll_chat_up(self) -> None:
@@ -2169,85 +2170,10 @@ class VibeApp(App):  # noqa: PLR0904
         # force a full layout refresh so the UI isn't garbled.
         self.refresh(layout=True)
 
-    def _make_turn_summary(self) -> TurnSummaryPort:
-        if not self.config.narrator_enabled:
-            return NoopTurnSummary()
-        result = create_narrator_backend(self.config)
-        if result is None:
-            return NoopTurnSummary()
-        backend, model = result
-        return TurnSummaryTracker(
-            backend=backend, model=model, on_summary=self._on_turn_summary
+    def _make_default_narrator_manager(self) -> NarratorManager:
+        return NarratorManager(
+            config_getter=lambda: self.config, audio_player=AudioPlayer()
         )
-
-    def _on_turn_summary(self, result: TurnSummaryResult) -> None:
-        self._cancel_summary = None
-        if result.generation != self._turn_summary.generation:
-            self._set_narrator_state(NarratorState.IDLE)
-            return
-        if result.summary is None:
-            self._set_narrator_state(NarratorState.IDLE)
-            return
-        if self._tts_client is not None:
-            self._speak_task = asyncio.create_task(self._speak_summary(result.summary))
-        else:
-            self._set_narrator_state(NarratorState.IDLE)
-
-    async def _speak_summary(self, text: str) -> None:
-        if self._tts_client is None:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-            tts_result = await self._tts_client.speak(text)
-            self._set_narrator_state(NarratorState.SPEAKING)
-            self._audio_player.play(
-                tts_result.audio_data,
-                AudioFormat.WAV,
-                on_finished=lambda: loop.call_soon_threadsafe(
-                    self._set_narrator_state, NarratorState.IDLE
-                ),
-            )
-        except Exception:
-            logger.warning("TTS speak failed", exc_info=True)
-            self._set_narrator_state(NarratorState.IDLE)
-
-    def _cancel_speak(self) -> None:
-        if self._cancel_summary is not None:
-            self._cancel_summary()
-            self._cancel_summary = None
-        if self._speak_task is not None and not self._speak_task.done():
-            self._speak_task.cancel()
-            self._speak_task = None
-        self._audio_player.stop()
-        self._set_narrator_state(NarratorState.IDLE)
-
-    def _set_narrator_state(self, state: NarratorState) -> None:
-        self.query_one(NarratorStatus).state = state
-
-    def _make_tts_client(self) -> TTSClientPort | None:
-        if not self.config.narrator_enabled:
-            return None
-        try:
-            model = self.config.get_active_tts_model()
-            provider = self.config.get_tts_provider_for_model(model)
-            return make_tts_client(provider, model)
-        except (ValueError, KeyError) as exc:
-            logger.error("Failed to initialize TTS client", exc_info=exc)
-            return None
-
-    def _sync_turn_summary(self) -> None:
-        self._cancel_speak()
-        task = asyncio.create_task(self._turn_summary.close())
-        self._turn_summary_close_tasks.add(task)
-        task.add_done_callback(self._turn_summary_close_tasks.discard)
-        self._turn_summary = self._make_turn_summary()
-
-        old_tts = self._tts_client
-        self._tts_client = self._make_tts_client()
-        if old_tts is not None:
-            close_task = asyncio.create_task(old_tts.close())
-            self._turn_summary_close_tasks.add(close_task)
-            close_task.add_done_callback(self._turn_summary_close_tasks.discard)
 
 
 def run_textual_ui(
