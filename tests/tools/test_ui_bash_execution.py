@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 import time
 
 import pytest
@@ -9,20 +8,6 @@ from textual.widgets import Static
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
 from vibe.cli.textual_ui.widgets.messages import BashOutputMessage, ErrorMessage
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import SessionLoggingConfig, VibeConfig
-
-
-@pytest.fixture
-def vibe_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> VibeConfig:
-    monkeypatch.chdir(tmp_path)
-    return VibeConfig(session_logging=SessionLoggingConfig(enabled=False))
-
-
-@pytest.fixture
-def vibe_app(vibe_config: VibeConfig) -> VibeApp:
-    agent_loop = AgentLoop(vibe_config)
-    return VibeApp(agent_loop=agent_loop)
 
 
 async def _wait_for_bash_output_message(
@@ -76,9 +61,8 @@ async def test_ui_shows_success_in_case_of_zero_code(vibe_app: VibeApp) -> None:
 
         await pilot.press("enter")
         message = await _wait_for_bash_output_message(vibe_app, pilot)
-        icon = message.query_one(".bash-exit-success", Static)
-        assert str(icon.render()) == "✓"
-        assert not list(message.query(".bash-exit-failure"))
+        assert message.has_class("bash-success")
+        assert not message.has_class("bash-error")
 
 
 @pytest.mark.asyncio
@@ -89,11 +73,8 @@ async def test_ui_shows_failure_in_case_of_non_zero_code(vibe_app: VibeApp) -> N
 
         await pilot.press("enter")
         message = await _wait_for_bash_output_message(vibe_app, pilot)
-        icon = message.query_one(".bash-exit-failure", Static)
-        assert str(icon.render()) == "✗"
-        code = message.query_one(".bash-exit-code", Static)
-        assert "7" in str(code.render())
-        assert not list(message.query(".bash-exit-success"))
+        assert message.has_class("bash-error")
+        assert not message.has_class("bash-success")
 
 
 @pytest.mark.asyncio
@@ -122,7 +103,7 @@ async def test_ui_handles_utf8_output(vibe_app: VibeApp) -> None:
         await pilot.press("enter")
         message = await _wait_for_bash_output_message(vibe_app, pilot)
         output_widget = message.query_one(".bash-output", Static)
-        assert str(output_widget.render()) == "hello\n"
+        assert str(output_widget.render()) == "hello"
         assert_no_command_error(vibe_app)
 
 

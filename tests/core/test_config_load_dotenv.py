@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import threading
 
 from vibe.core.config import load_dotenv_values
 
@@ -59,3 +61,21 @@ def test_ignores_empty_values(tmp_path: Path) -> None:
     assert "EMPTY" not in environ
     assert "MISTRAL_API_KEY" not in environ
     assert "NO_VALUE" not in environ
+
+
+def test_reads_from_fifo(tmp_path: Path) -> None:
+    fifo_path = tmp_path / ".env.fifo"
+    os.mkfifo(fifo_path)
+    environ: dict[str, str] = {}
+
+    def write_to_fifo() -> None:
+        with open(fifo_path, "w") as f:
+            f.write("FIFO_KEY=fifo-value\n")
+
+    writer = threading.Thread(target=write_to_fifo)
+    writer.start()
+
+    load_dotenv_values(env_path=fifo_path, environ=environ)
+
+    writer.join()
+    assert environ["FIFO_KEY"] == "fifo-value"

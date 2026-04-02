@@ -50,7 +50,7 @@ class WelcomeScreen(OnboardingScreen):
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
-    NEXT_SCREEN = "theme_selection"
+    NEXT_SCREEN = "api_key"
 
     def __init__(self) -> None:
         super().__init__()

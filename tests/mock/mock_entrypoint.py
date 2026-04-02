@@ -14,10 +14,10 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from vibe.core.paths.config_paths import unlock_config_paths
+from vibe.core.config.harness_files import init_harness_files_manager
 
 if __name__ == "__main__":
-    unlock_config_paths()
+    init_harness_files_manager("user", "project")
 
     from tests import TESTS_ROOT
     from tests.mock.utils import MOCK_DATA_ENV_VAR

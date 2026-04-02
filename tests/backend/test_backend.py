@@ -13,8 +13,13 @@ the tests will be. Always prefer real API data over manually constructed example
 from __future__ import annotations
 
 import json
+from typing import ClassVar, Literal
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from mistralai.client.errors import SDKError
+from mistralai.client.models import AssistantMessage
+from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 import pytest
 import respx
 
@@ -31,17 +36,27 @@ from tests.backend.data.mistral import (
     STREAMED_TOOL_CONVERSATION_PARAMS as MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS as MISTRAL_TOOL_CONVERSATION_PARAMS,
 )
-from vibe.core.config import Backend, ModelConfig, ProviderConfig
+from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.backend.generic import GenericBackend
-from vibe.core.llm.backend.mistral import MistralBackend
-from vibe.core.llm.exceptions import BackendError
+from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper
+from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
 from vibe.core.llm.types import BackendLike
-from vibe.core.types import LLMChunk, LLMMessage, Role, ToolCall
+from vibe.core.types import Backend, FunctionCall, LLMChunk, LLMMessage, Role, ToolCall
 from vibe.core.utils import get_user_agent
 
 
 class TestBackend:
+    @staticmethod
+    def _build_fast_retry_config() -> RetryConfig:
+        return RetryConfig(
+            strategy="backoff",
+            backoff=BackoffStrategy(
+                initial_interval=1, max_interval=1, exponent=1, max_elapsed_time=1
+            ),
+            retry_connection_errors=False,
+        )
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "base_url,json_response,result_data",
@@ -230,6 +245,8 @@ class TestBackend:
                 api_key_env_var="API_KEY",
             )
             backend = backend_class(provider=provider)
+            if isinstance(backend, MistralBackend):
+                backend._retry_config = self._build_fast_retry_config()
             model = ModelConfig(
                 name="model_name", provider="provider_name", alias="model_alias"
             )
@@ -396,3 +413,352 @@ class TestBackend:
                 pass
 
             assert mock_api.calls.last.request.headers["user-agent"] == user_agent
+
+
+class TestMistralRetry:
+    @staticmethod
+    def _create_test_backend() -> MistralBackend:
+        provider = ProviderConfig(
+            name="test_provider",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="API_KEY",
+        )
+        return MistralBackend(provider=provider)
+
+    @pytest.mark.asyncio
+    async def test_client_creation_includes_timeout_and_retry_config(self):
+        backend = self._create_test_backend()
+
+        with patch("vibe.core.llm.backend.mistral.Mistral") as mock_mistral_class:
+            mock_mistral_class.return_value = MagicMock()
+            backend._get_client()
+            mock_mistral_class.assert_called_once_with(
+                api_key=backend._api_key,
+                server_url=backend._server_url,
+                timeout_ms=720000,
+                retry_config=backend._retry_config,
+            )
+
+
+class TestMistralMapperPrepareMessage:
+    """Tests for MistralMapper.prepare_message thinking-block handling.
+
+    The Mistral API returns assistant messages with reasoning as a single
+    ThinkChunk (no trailing TextChunk when there is no text content).  When
+    the mapper rebuilds the message for the next request it must NOT append
+    an empty TextChunk, otherwise the proxy's history-consistency check
+    sees a content mismatch on every turn and creates spurious conversation
+    segments.
+    """
+
+    @pytest.fixture
+    def mapper(self) -> MistralMapper:
+        return MistralMapper()
+
+    def test_reasoning_only_no_empty_text_chunk(self, mapper: MistralMapper) -> None:
+        """Assistant with reasoning_content but no text content should produce
+        only a ThinkChunk — no trailing empty TextChunk.
+        """
+        msg = LLMMessage(
+            role=Role.assistant,
+            content=None,
+            reasoning_content="Let me think step by step.",
+        )
+        result = mapper.prepare_message(msg)
+        content = result.content
+        assert isinstance(content, list)
+        assert len(content) == 1
+        assert content[0].type == "thinking"
+
+    def test_reasoning_with_empty_string_content(self, mapper: MistralMapper) -> None:
+        """content='' (empty string) should also not produce a trailing TextChunk."""
+        msg = LLMMessage(
+            role=Role.assistant, content="", reasoning_content="Thinking..."
+        )
+        result = mapper.prepare_message(msg)
+        content = result.content
+        assert isinstance(content, list)
+        assert len(content) == 1
+        assert content[0].type == "thinking"
+
+    def test_reasoning_with_text_content(self, mapper: MistralMapper) -> None:
+        """When there is actual text content, both ThinkChunk and TextChunk
+        should be present.
+        """
+        msg = LLMMessage(
+            role=Role.assistant,
+            content="Here is the answer.",
+            reasoning_content="Let me reason.",
+        )
+        result = mapper.prepare_message(msg)
+        content = result.content
+        assert isinstance(content, list)
+        assert len(content) == 2
+        assert content[0].type == "thinking"
+        assert content[1].type == "text"
+        assert content[1].text == "Here is the answer."
+
+    def test_reasoning_with_tool_calls_no_text(self, mapper: MistralMapper) -> None:
+        """Reasoning + tool_calls but no text content — only ThinkChunk."""
+        msg = LLMMessage(
+            role=Role.assistant,
+            content=None,
+            reasoning_content="I should run a command.",
+            tool_calls=[
+                ToolCall(
+                    id="tc_1",
+                    index=0,
+                    function=FunctionCall(name="bash", arguments='{"cmd": "ls"}'),
+                )
+            ],
+        )
+        result = mapper.prepare_message(msg)
+        assert isinstance(result, AssistantMessage)
+        content = result.content
+        assert isinstance(content, list)
+        assert len(content) == 1
+        assert content[0].type == "thinking"
+        # Tool calls should still be present
+        assert isinstance(result.tool_calls, list)
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "bash"
+
+    def test_no_reasoning_plain_string(self, mapper: MistralMapper) -> None:
+        """Without reasoning_content, content is a plain string."""
+        msg = LLMMessage(role=Role.assistant, content="Hello!")
+        result = mapper.prepare_message(msg)
+        assert result.content == "Hello!"
+
+    def test_strip_reasoning_removes_reasoning_from_assistant(
+        self, mapper: MistralMapper
+    ) -> None:
+        msg = LLMMessage(
+            role=Role.assistant,
+            content="Answer",
+            reasoning_content="thinking...",
+            reasoning_signature="sig",
+        )
+        stripped = mapper.strip_reasoning(msg)
+        assert stripped.content == "Answer"
+        assert stripped.reasoning_content is None
+        assert stripped.reasoning_signature is None
+
+    def test_strip_reasoning_leaves_non_assistant_unchanged(
+        self, mapper: MistralMapper
+    ) -> None:
+        msg = LLMMessage(role=Role.user, content="hello")
+        assert mapper.strip_reasoning(msg) is msg
+
+
+class TestMistralBackendReasoningEffort:
+    """Tests that MistralBackend correctly passes reasoning_effort to the SDK."""
+
+    @pytest.fixture
+    def backend(self) -> MistralBackend:
+        provider = ProviderConfig(
+            name="mistral",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="API_KEY",
+        )
+        return MistralBackend(provider=provider)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("thinking", "expected_effort", "expected_temperature"),
+        [
+            ("off", None, 0.2),
+            ("low", "none", 1.0),
+            ("medium", "high", 1.0),
+            ("high", "high", 1.0),
+        ],
+    )
+    async def test_complete_passes_reasoning_effort(
+        self,
+        backend: MistralBackend,
+        thinking: Literal["off", "low", "medium", "high"],
+        expected_effort: str | None,
+        expected_temperature: float,
+    ) -> None:
+        model = ModelConfig(
+            name="mistral-small-latest",
+            provider="mistral",
+            alias="mistral-small",
+            thinking=thinking,
+        )
+        messages = [LLMMessage(role=Role.user, content="hi")]
+
+        with patch.object(backend, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "hello"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage.prompt_tokens = 10
+            mock_response.usage.completion_tokens = 5
+            mock_client.chat.complete_async = AsyncMock(return_value=mock_response)
+            mock_get_client.return_value = mock_client
+
+            await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+            call_kwargs = mock_client.chat.complete_async.call_args.kwargs
+            assert call_kwargs["reasoning_effort"] == expected_effort
+            assert call_kwargs["temperature"] == expected_temperature
+
+    @pytest.mark.asyncio
+    async def test_complete_strips_reasoning_when_thinking_off(
+        self, backend: MistralBackend
+    ) -> None:
+        model = ModelConfig(
+            name="mistral-small-latest",
+            provider="mistral",
+            alias="mistral-small",
+            thinking="off",
+        )
+        messages = [
+            LLMMessage(role=Role.user, content="hi"),
+            LLMMessage(
+                role=Role.assistant, content="answer", reasoning_content="thinking..."
+            ),
+            LLMMessage(role=Role.user, content="follow up"),
+        ]
+
+        with patch.object(backend, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "response"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage.prompt_tokens = 10
+            mock_response.usage.completion_tokens = 5
+            mock_client.chat.complete_async = AsyncMock(return_value=mock_response)
+            mock_get_client.return_value = mock_client
+
+            await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+            call_kwargs = mock_client.chat.complete_async.call_args.kwargs
+            assert call_kwargs["reasoning_effort"] is None
+            # The assistant message should have reasoning stripped
+            converted_msgs = call_kwargs["messages"]
+            assistant_msg = converted_msgs[1]
+            assert isinstance(assistant_msg, AssistantMessage)
+            assert assistant_msg.content == "answer"
+
+
+class TestBuildHttpErrorBodyReading:
+    _MESSAGES: ClassVar[list[LLMMessage]] = [LLMMessage(role=Role.user, content="hi")]
+    _COMMON_KWARGS: ClassVar[dict] = dict(
+        provider="test",
+        endpoint="https://api.test.com",
+        model="test-model",
+        messages=_MESSAGES,
+        temperature=0.2,
+        has_tools=False,
+        tool_choice=None,
+    )
+
+    def _make_sdk_error(self, response: httpx.Response) -> SDKError:
+        return SDKError("sdk error", response)
+
+    def _make_http_status_error(
+        self, response: httpx.Response
+    ) -> httpx.HTTPStatusError:
+        return httpx.HTTPStatusError(
+            "http error", request=response.request, response=response
+        )
+
+    def test_sdk_error_readable_body(self) -> None:
+        response = httpx.Response(
+            400,
+            json={"message": "invalid temperature"},
+            request=httpx.Request("POST", "https://api.test.com"),
+        )
+        err = BackendErrorBuilder.build_http_error(
+            error=self._make_sdk_error(response), **self._COMMON_KWARGS
+        )
+        assert err.status == 400
+        assert err.parsed_error == "invalid temperature"
+        assert "invalid temperature" in err.body_text
+
+    def test_http_status_error_readable_body(self) -> None:
+        response = httpx.Response(
+            400,
+            json={"message": "invalid temperature"},
+            request=httpx.Request("POST", "https://api.test.com"),
+        )
+        err = BackendErrorBuilder.build_http_error(
+            error=self._make_http_status_error(response), **self._COMMON_KWARGS
+        )
+        assert err.status == 400
+        assert err.parsed_error == "invalid temperature"
+        assert "invalid temperature" in err.body_text
+
+    def test_sdk_error_stream_response_falls_back_to_read(self) -> None:
+        response = httpx.Response(
+            400,
+            stream=httpx.ByteStream(b'{"message": "context too long"}'),
+            request=httpx.Request("POST", "https://api.test.com"),
+        )
+        sdk_err = SDKError(
+            "sdk error", response, body='{"message": "context too long"}'
+        )
+        err = BackendErrorBuilder.build_http_error(error=sdk_err, **self._COMMON_KWARGS)
+        assert err.parsed_error == "context too long"
+        assert "context too long" in err.body_text
+
+    def test_http_status_error_stream_response_falls_back_to_read(self) -> None:
+        response = httpx.Response(
+            400,
+            stream=httpx.ByteStream(b'{"message": "context too long"}'),
+            request=httpx.Request("POST", "https://api.test.com"),
+        )
+        err = BackendErrorBuilder.build_http_error(
+            error=self._make_http_status_error(response), **self._COMMON_KWARGS
+        )
+        assert err.parsed_error == "context too long"
+        assert "context too long" in err.body_text
+
+    def test_sdk_error_unreadable_response_falls_back_to_str(self) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.status_code = 400
+        response.reason_phrase = "Bad Request"
+        response.headers = {}
+        type(response).text = property(lambda self: (_ for _ in ()).throw(Exception))
+        response.read.side_effect = Exception("closed")
+
+        sdk_err = SDKError("sdk msg", response, body='{"message": "context too long"}')
+        err = BackendErrorBuilder.build_http_error(error=sdk_err, **self._COMMON_KWARGS)
+        assert err.body_text == '{"message": "context too long"}'
+        assert err.parsed_error == "context too long"
+
+    def test_http_status_error_unreadable_response_falls_back_to_str(self) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.status_code = 400
+        response.reason_phrase = "Bad Request"
+        response.headers = {}
+        type(response).text = property(lambda self: (_ for _ in ()).throw(Exception))
+        response.read.side_effect = Exception("closed")
+        response.request = httpx.Request("POST", "https://api.test.com")
+
+        http_err = httpx.HTTPStatusError(
+            "http error with details", request=response.request, response=response
+        )
+        err = BackendErrorBuilder.build_http_error(
+            error=http_err, **self._COMMON_KWARGS
+        )
+        assert "http error with details" in err.body_text

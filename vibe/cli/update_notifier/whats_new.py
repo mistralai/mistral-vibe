@@ -7,6 +7,7 @@ from vibe.cli.update_notifier.ports.update_cache_repository import (
     UpdateCache,
     UpdateCacheRepository,
 )
+from vibe.core.utils.io import read_safe
 
 
 async def should_show_whats_new(
@@ -23,7 +24,7 @@ def load_whats_new_content() -> str | None:
     if not whats_new_file.exists():
         return None
     try:
-        content = whats_new_file.read_text(encoding="utf-8").strip()
+        content = read_safe(whats_new_file).strip()
         return content if content else None
     except OSError:
         return None

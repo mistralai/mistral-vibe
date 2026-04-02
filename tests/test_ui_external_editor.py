@@ -9,19 +9,6 @@ import pytest
 
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import SessionLoggingConfig, VibeConfig
-
-
-@pytest.fixture
-def vibe_config() -> VibeConfig:
-    return VibeConfig(session_logging=SessionLoggingConfig(enabled=False))
-
-
-@pytest.fixture
-def vibe_app(vibe_config: VibeConfig) -> VibeApp:
-    agent_loop = AgentLoop(vibe_config)
-    return VibeApp(agent_loop=agent_loop)
 
 
 @contextmanager

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from abc import ABC
 from collections.abc import Callable
-from enum import Enum
+from enum import Enum, auto
+import random
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from textual.timer import Timer
+
+from vibe.cli.textual_ui.widgets.braille_renderer import render_braille
 
 if TYPE_CHECKING:
     from textual.widgets import Static
@@ -51,47 +54,84 @@ class BrailleSpinner(Spinner):
     )
 
 
-class LineSpinner(Spinner):
-    FRAMES: ClassVar[tuple[str, ...]] = ("|", "/", "-", "\\")
-
-
-class CircleSpinner(Spinner):
-    FRAMES: ClassVar[tuple[str, ...]] = ("◴", "◷", "◶", "◵")
-
-
-class BowtieSpinner(Spinner):
+class PulseSpinner(Spinner):
     FRAMES: ClassVar[tuple[str, ...]] = (
-        "⠋",
-        "⠙",
-        "⠚",
-        "⠞",
-        "⠖",
-        "⠦",
-        "⠴",
-        "⠲",
-        "⠳",
-        "⠓",
+        "■",
+        "■",
+        "■",
+        "■",
+        "■",
+        "■",
+        "□",
+        "□",
+        "□",
+        "□",
     )
 
 
-class DotWaveSpinner(Spinner):
-    FRAMES: ClassVar[tuple[str, ...]] = ("⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷")
-
-
 class SpinnerType(Enum):
-    BRAILLE = "braille"
-    LINE = "line"
-    CIRCLE = "circle"
-    BOWTIE = "bowtie"
-    DOT_WAVE = "dot_wave"
+    BRAILLE = auto()
+    PULSE = auto()
+    SNAKE = auto()
+
+
+class SnakeSpinner(Spinner):
+    MAP_WIDTH: ClassVar[int] = 4
+    MAP_HEIGHT: ClassVar[int] = 4
+    SNAKE_LENGTH: ClassVar[int] = 3
+
+    def __init__(self) -> None:
+        self._positions: list[complex] = [1, 0, 1j]
+        super().__init__()
+
+    @property
+    def current_direction(self) -> complex:
+        return self._positions[0] - self._positions[1]
+
+    def _is_in_bounds(self, position: complex) -> bool:
+        return (
+            0 <= position.real < self.MAP_WIDTH and 0 <= position.imag < self.MAP_HEIGHT
+        )
+
+    def _get_direction(self) -> complex:
+        if (
+            len(set(z.real for z in self._positions)) > 1
+            and len(set(z.imag for z in self._positions)) > 1
+            and self._is_in_bounds(self._positions[0] + self.current_direction)
+        ):
+            return self.current_direction
+        valid_directions = []
+        for rotation in [1, 1j, -1j]:
+            offset = rotation * self.current_direction
+            new_position = self._positions[0] + offset
+            if self._is_in_bounds(new_position) and new_position not in self._positions:
+                valid_directions.append(offset)
+        return random.choice(valid_directions)
+
+    def _next_positions(self) -> list[complex]:
+        if len(self._positions) > self.SNAKE_LENGTH:
+            return self._positions[: self.SNAKE_LENGTH]
+        head_position = self._positions[0]
+        direction = self._get_direction()
+        if self.current_direction != direction:
+            return [head_position + direction] + self._positions
+        return [head_position + direction] + self._positions[:-1]
+
+    def current_frame(self) -> str:
+        return render_braille(self._positions, self.MAP_WIDTH, self.MAP_HEIGHT)
+
+    def next_frame(self) -> str:
+        self._positions = self._next_positions()
+        return self.current_frame()
+
+    def reset(self) -> None:
+        self._positions = [1, 0, 1j]
 
 
 _SPINNER_CLASSES: dict[SpinnerType, type[Spinner]] = {
     SpinnerType.BRAILLE: BrailleSpinner,
-    SpinnerType.LINE: LineSpinner,
-    SpinnerType.CIRCLE: CircleSpinner,
-    SpinnerType.BOWTIE: BowtieSpinner,
-    SpinnerType.DOT_WAVE: DotWaveSpinner,
+    SpinnerType.PULSE: PulseSpinner,
+    SpinnerType.SNAKE: SnakeSpinner,
 }
 
 
@@ -101,7 +141,7 @@ def create_spinner(spinner_type: SpinnerType = SpinnerType.BRAILLE) -> Spinner:
 
 
 class SpinnerMixin:
-    SPINNER_TYPE: ClassVar[SpinnerType] = SpinnerType.LINE
+    SPINNER_TYPE: ClassVar[SpinnerType] = SpinnerType.BRAILLE
     SPINNING_TEXT: ClassVar[str] = ""
     COMPLETED_TEXT: ClassVar[str] = ""
 

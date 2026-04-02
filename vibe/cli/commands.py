@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
+
+ALT_KEY = "⌥" if sys.platform == "darwin" else "Alt"
 
 
 @dataclass
@@ -22,9 +25,14 @@ class CommandRegistry:
                 handler="_show_help",
             ),
             "config": Command(
-                aliases=frozenset(["/config", "/theme", "/model"]),
+                aliases=frozenset(["/config"]),
                 description="Edit config settings",
                 handler="_show_config",
+            ),
+            "model": Command(
+                aliases=frozenset(["/model"]),
+                description="Select active model",
+                handler="_show_model",
             ),
             "reload": Command(
                 aliases=frozenset(["/reload"]),
@@ -62,6 +70,41 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "teleport": Command(
+                aliases=frozenset(["/teleport"]),
+                description="Teleport session to Vibe Nuage",
+                handler="_teleport_command",
+            ),
+            "proxy-setup": Command(
+                aliases=frozenset(["/proxy-setup"]),
+                description="Configure proxy and SSL certificate settings",
+                handler="_show_proxy_setup",
+            ),
+            "resume": Command(
+                aliases=frozenset(["/resume", "/continue"]),
+                description="Browse and resume past sessions",
+                handler="_show_session_picker",
+            ),
+            "voice": Command(
+                aliases=frozenset(["/voice"]),
+                description="Configure voice settings",
+                handler="_show_voice_settings",
+            ),
+            "leanstall": Command(
+                aliases=frozenset(["/leanstall"]),
+                description="Install the Lean 4 agent (leanstral)",
+                handler="_install_lean",
+            ),
+            "unleanstall": Command(
+                aliases=frozenset(["/unleanstall"]),
+                description="Uninstall the Lean 4 agent",
+                handler="_uninstall_lean",
+            ),
+            "rewind": Command(
+                aliases=frozenset(["/rewind"]),
+                description="Rewind to a previous message",
+                handler="_start_rewind_mode",
+            ),
         }
 
         for command in excluded_commands:
@@ -73,8 +116,11 @@ class CommandRegistry:
                 self._alias_map[alias] = cmd_name
 
     def find_command(self, user_input: str) -> Command | None:
-        cmd_name = self._alias_map.get(user_input.lower().strip())
+        cmd_name = self.get_command_name(user_input)
         return self.commands.get(cmd_name) if cmd_name else None
+
+    def get_command_name(self, user_input: str) -> str | None:
+        return self._alias_map.get(user_input.lower().strip())
 
     def get_help_text(self) -> str:
         lines: list[str] = [
@@ -86,8 +132,8 @@ class CommandRegistry:
             "- `Ctrl+C` Quit (or clear input if text present)",
             "- `Ctrl+G` Edit input in external editor",
             "- `Ctrl+O` Toggle tool output view",
-            "- `Ctrl+T` Toggle todo view",
             "- `Shift+Tab` Toggle auto-approve mode",
+            f"- `{ALT_KEY}+↑↓` / `Ctrl+P/N` Rewind to previous/next message",
             "",
             "### Special Features",
             "",

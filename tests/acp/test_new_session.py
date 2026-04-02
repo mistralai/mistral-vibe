@@ -6,15 +6,16 @@ from unittest.mock import patch
 import pytest
 
 from tests.acp.conftest import _create_acp_agent
+from tests.conftest import build_test_vibe_config
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import ModelConfig, VibeConfig
+from vibe.core.config import ModelConfig
 
 
 @pytest.fixture
 def acp_agent_loop(backend) -> VibeAcpAgentLoop:
-    config = VibeConfig(
+    config = build_test_vibe_config(
         active_model="devstral-latest",
         models=[
             ModelConfig(
@@ -40,11 +41,17 @@ def acp_agent_loop(backend) -> VibeAcpAgentLoop:
 class TestACPNewSession:
     @pytest.mark.asyncio
     async def test_new_session_response_structure(
-        self, acp_agent_loop: VibeAcpAgentLoop
+        self, acp_agent_loop: VibeAcpAgentLoop, telemetry_events: list[dict]
     ) -> None:
         session_response = await acp_agent_loop.new_session(
             cwd=str(Path.cwd()), mcp_servers=[]
         )
+
+        new_session_events = [
+            e for e in telemetry_events if e.get("event_name") == "vibe.new_session"
+        ]
+        assert len(new_session_events) == 1
+        assert new_session_events[0]["properties"]["entrypoint"] == "acp"
 
         assert session_response.session_id is not None
         acp_session = next(
@@ -77,17 +84,46 @@ class TestACPNewSession:
         assert session_response.modes is not None
         assert session_response.modes.current_mode_id is not None
         assert session_response.modes.available_modes is not None
-        assert len(session_response.modes.available_modes) == 4
+        assert len(session_response.modes.available_modes) == 5
 
         assert session_response.modes.current_mode_id == BuiltinAgentName.DEFAULT
         # Check that all primary agents are available (order may vary)
         mode_ids = {m.id for m in session_response.modes.available_modes}
         assert mode_ids == {
             BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.CHAT,
             BuiltinAgentName.AUTO_APPROVE,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
         }
+
+        # Check config_options
+        assert session_response.config_options is not None
+        assert len(session_response.config_options) == 2
+
+        # Mode config option
+        mode_config = session_response.config_options[0]
+        assert mode_config.id == "mode"
+        assert mode_config.category == "mode"
+        assert mode_config.current_value == BuiltinAgentName.DEFAULT
+        assert len(mode_config.options) == 5
+        mode_option_values = {opt.value for opt in mode_config.options}
+        assert mode_option_values == {
+            BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.CHAT,
+            BuiltinAgentName.AUTO_APPROVE,
+            BuiltinAgentName.PLAN,
+            BuiltinAgentName.ACCEPT_EDITS,
+        }
+
+        # Model config option
+        model_config = session_response.config_options[1]
+        assert model_config.id == "model"
+        assert model_config.category == "model"
+        assert model_config.current_value == "devstral-latest"
+        assert len(model_config.options) == 2
+        model_option_values = {opt.value for opt in model_config.options}
+        assert model_option_values == {"devstral-latest", "devstral-small"}
 
     @pytest.mark.skip(reason="TODO: Fix this test")
     @pytest.mark.asyncio

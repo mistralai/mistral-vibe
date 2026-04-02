@@ -14,7 +14,7 @@ from vibe.core.tools.base import (
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.types import ToolResultEvent
 
 
 class Choice(BaseModel):
@@ -39,6 +39,9 @@ class Question(BaseModel):
     multi_select: bool = Field(
         default=False, description="If true, user can select multiple options"
     )
+    hide_other: bool = Field(
+        default=False, description="If true, hide the 'Other' free text option"
+    )
 
 
 class AskUserQuestionArgs(BaseModel):
@@ -46,6 +49,10 @@ class AskUserQuestionArgs(BaseModel):
         description="Questions to ask (1-4). Displayed as tabs if multiple.",
         min_length=1,
         max_length=4,
+    )
+    content_preview: str | None = Field(
+        default=None,
+        description="Optional text content to display in a scrollable area above the questions.",
     )
 
 
@@ -81,16 +88,10 @@ class AskUserQuestion(
     )
 
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-        if not isinstance(event.args, AskUserQuestionArgs):
-            return ToolCallDisplay(summary="Asking user")
-
-        args = event.args
+    def format_call_display(cls, args: AskUserQuestionArgs) -> ToolCallDisplay:
         count = len(args.questions)
-
         if count == 1:
             return ToolCallDisplay(summary=f"Asking: {args.questions[0].question}")
-
         return ToolCallDisplay(summary=f"Asking {count} questions")
 
     @classmethod

@@ -11,13 +11,32 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.constants import MistralColors
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
+def _format_elapsed(seconds: int) -> str:
+    if seconds < 60:  # noqa: PLR2004
+        return f"{seconds}s"
+
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:  # noqa: PLR2004
+        return f"{minutes}m{secs}s"
+
+    hours, mins = divmod(minutes, 60)
+    return f"{hours}h{mins}m{secs}s"
+
+
 class LoadingWidget(SpinnerMixin, Static):
-    TARGET_COLORS = ("#FFD800", "#FFAF00", "#FF8205", "#FA500F", "#E10500")
-    SPINNER_TYPE = SpinnerType.BRAILLE
+    TARGET_COLORS = (
+        MistralColors.YELLOW,
+        MistralColors.ORANGE_LIGHT,
+        MistralColors.ORANGE,
+        MistralColors.ORANGE_DARK,
+        MistralColors.RED,
+    )
+    SPINNER_TYPE = SpinnerType.SNAKE
 
     EASTER_EGGS: ClassVar[list[str]] = [
         "Eating a chocolatine",
@@ -57,6 +76,7 @@ class LoadingWidget(SpinnerMixin, Static):
         self.init_spinner()
         self.status = status or self._get_default_status()
         self.current_color_index = 0
+        self._color_direction = 1
         self.transition_progress = 0
         self._status_widget: Static | None = None
         self.hint_widget: Static | None = None
@@ -129,11 +149,12 @@ class LoadingWidget(SpinnerMixin, Static):
             return
         self._update_animation()
 
+    def _next_color_index(self) -> int:
+        return self.current_color_index + self._color_direction
+
     def _get_color_for_position(self, position: int) -> str:
         current_color = self.TARGET_COLORS[self.current_color_index]
-        next_color = self.TARGET_COLORS[
-            (self.current_color_index + 1) % len(self.TARGET_COLORS)
-        ]
+        next_color = self.TARGET_COLORS[self._next_color_index()]
         if position < self.transition_progress:
             return next_color
         return current_color
@@ -161,9 +182,9 @@ class LoadingWidget(SpinnerMixin, Static):
 
         self.transition_progress += 1
         if self.transition_progress > total_elements:
-            self.current_color_index = (self.current_color_index + 1) % len(
-                self.TARGET_COLORS
-            )
+            self.current_color_index = self._next_color_index()
+            if not 0 < self.current_color_index < len(self.TARGET_COLORS) - 1:
+                self._color_direction *= -1
             self.transition_progress = 0
 
         if self.hint_widget and self.start_time is not None:
@@ -173,7 +194,9 @@ class LoadingWidget(SpinnerMixin, Static):
             elapsed = int(time() - self.start_time - paused)
             if elapsed != self._last_elapsed:
                 self._last_elapsed = elapsed
-                self.hint_widget.update(f"({elapsed}s esc to interrupt)")
+                self.hint_widget.update(
+                    f"({_format_elapsed(elapsed)} esc to interrupt)"
+                )
 
 
 @contextmanager

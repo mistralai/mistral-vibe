@@ -17,11 +17,14 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
-    from vibe.core.types import ToolCallEvent, ToolResultEvent
+    from vibe.core.types import ToolResultEvent
 
 
 class GrepBackend(StrEnum):
@@ -31,6 +34,10 @@ class GrepBackend(StrEnum):
 
 class GrepToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
+    sensitive_patterns: list[str] = Field(
+        default=["**/.env", "**/.env.*"],
+        description="File patterns that trigger ASK even when permission is ALWAYS.",
+    )
 
     max_output_bytes: int = Field(
         default=64_000, description="Hard cap for the total size of matched lines."
@@ -75,10 +82,6 @@ class GrepToolConfig(BaseToolConfig):
     )
 
 
-class GrepState(BaseToolState):
-    search_history: list[str] = Field(default_factory=list)
-
-
 class GrepArgs(BaseModel):
     pattern: str
     path: str = "."
@@ -99,13 +102,23 @@ class GrepResult(BaseModel):
 
 
 class Grep(
-    BaseTool[GrepArgs, GrepResult, GrepToolConfig, GrepState],
+    BaseTool[GrepArgs, GrepResult, GrepToolConfig, BaseToolState],
     ToolUIData[GrepArgs, GrepResult],
 ):
     description: ClassVar[str] = (
         "Recursively search files for a regex pattern using ripgrep (rg) or grep. "
         "Respects .gitignore and .codeignore files by default when using ripgrep."
     )
+
+    def resolve_permission(self, args: GrepArgs) -> PermissionContext | None:
+        return resolve_file_tool_permission(
+            args.path,
+            tool_name=self.get_name(),
+            allowlist=self.config.allowlist,
+            denylist=self.config.denylist,
+            config_permission=self.config.permission,
+            sensitive_patterns=self.config.sensitive_patterns,
+        )
 
     def _detect_backend(self) -> GrepBackend:
         if shutil.which("rg"):
@@ -122,7 +135,6 @@ class Grep(
     ) -> AsyncGenerator[ToolStreamEvent | GrepResult, None]:
         backend = self._detect_backend()
         self._validate_args(args)
-        self.state.search_history.append(args.pattern)
 
         exclude_patterns = self._collect_exclude_patterns()
         cmd = self._build_command(args, exclude_patterns, backend)
@@ -155,7 +167,7 @@ class Grep(
     def _load_codeignore_patterns(self, codeignore_path: Path) -> list[str]:
         patterns = []
         try:
-            content = codeignore_path.read_text("utf-8")
+            content = read_safe(codeignore_path)
             for line in content.splitlines():
                 line = line.strip()
                 if line and not line.startswith("#"):
@@ -274,18 +286,14 @@ class Grep(
         )
 
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-        if not isinstance(event.args, GrepArgs):
-            return ToolCallDisplay(summary="grep")
-
-        summary = f"Grepping '{event.args.pattern}'"
-        if event.args.path != ".":
-            summary += f" in {event.args.path}"
-        if event.args.max_matches:
-            summary += f" (max {event.args.max_matches} matches)"
-        if not event.args.use_default_ignore:
+    def format_call_display(cls, args: GrepArgs) -> ToolCallDisplay:
+        summary = f"Grepping '{args.pattern}'"
+        if args.path != ".":
+            summary += f" in {args.path}"
+        if args.max_matches:
+            summary += f" (max {args.max_matches} matches)"
+        if not args.use_default_ignore:
             summary += " [no-ignore]"
-
         return ToolCallDisplay(summary=summary)
 
     @classmethod

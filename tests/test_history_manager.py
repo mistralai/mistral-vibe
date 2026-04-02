@@ -19,7 +19,7 @@ def test_history_manager_normalizes_loaded_entries_like_numbers_to_strings(
     )
     manager = HistoryManager(history_file)
 
-    result = manager.get_previous(current_input="", prefix="1")
+    result = manager.get_previous(current_input="")
 
     assert result == "123"
 
@@ -35,11 +35,11 @@ def test_history_manager_retains_a_fixed_number_of_entries(tmp_path: Path) -> No
 
     reloaded = HistoryManager(history_file)
 
-    assert reloaded.get_previous(current_input="", prefix="") == "fourth"
-    assert reloaded.get_previous(current_input="", prefix="") == "third"
-    assert reloaded.get_previous(current_input="", prefix="") == "second"
+    assert reloaded.get_previous(current_input="") == "fourth"
+    assert reloaded.get_previous(current_input="") == "third"
+    assert reloaded.get_previous(current_input="") == "second"
     # "first" is not proposed as we defined number of entries to 3
-    assert reloaded.get_previous(current_input="", prefix="") is None
+    assert reloaded.get_previous(current_input="") is None
 
 
 def test_history_manager_filters_invalid_and_duplicated_entries(tmp_path: Path) -> None:
@@ -54,11 +54,11 @@ def test_history_manager_filters_invalid_and_duplicated_entries(tmp_path: Path) 
 
     reloaded = HistoryManager(history_file)
 
-    assert reloaded.get_previous(current_input="", prefix="") == "third"
-    assert reloaded.get_previous(current_input="", prefix="") == "second"
-    assert reloaded.get_previous(current_input="", prefix="") == "first"
-    assert reloaded.get_previous(current_input="", prefix="") is None
-    assert reloaded.get_previous(current_input="", prefix="") is None
+    assert reloaded.get_previous(current_input="") == "third"
+    assert reloaded.get_previous(current_input="") == "second"
+    assert reloaded.get_previous(current_input="") == "first"
+    assert reloaded.get_previous(current_input="") is None
+    assert reloaded.get_previous(current_input="") is None
 
 
 def test_history_manager_filters_commands(tmp_path: Path) -> None:
@@ -69,9 +69,8 @@ def test_history_manager_filters_commands(tmp_path: Path) -> None:
 
     reloaded = HistoryManager(history_file)
 
-    assert reloaded.get_previous(current_input="", prefix="/") == None
-    assert reloaded.get_previous(current_input="", prefix="") == "first"
-    assert reloaded.get_previous(current_input="", prefix="") is None
+    assert reloaded.get_previous(current_input="") == "first"
+    assert reloaded.get_previous(current_input="") is None
 
 
 def test_history_manager_allows_navigation_round_trip(tmp_path: Path) -> None:
@@ -88,7 +87,9 @@ def test_history_manager_allows_navigation_round_trip(tmp_path: Path) -> None:
     assert manager.get_next() is None
 
 
-def test_history_manager_prefix_filtering(tmp_path: Path) -> None:
+def test_history_manager_preserves_original_draft_during_navigation(
+    tmp_path: Path,
+) -> None:
     history_file = tmp_path / "history.jsonl"
     manager = HistoryManager(history_file)
 
@@ -96,6 +97,7 @@ def test_history_manager_prefix_filtering(tmp_path: Path) -> None:
     manager.add("bar")
     manager.add("fizz")
 
-    assert manager.get_previous(current_input="", prefix="f") == "fizz"
-    assert manager.get_previous(current_input="", prefix="f") == "foo"
-    assert manager.get_previous(current_input="", prefix="f") is None
+    assert manager.get_previous(current_input="draft") == "fizz"
+    assert manager.get_previous(current_input="overwritten draft") == "bar"
+    assert manager.get_next() == "fizz"
+    assert manager.get_next() == "draft"

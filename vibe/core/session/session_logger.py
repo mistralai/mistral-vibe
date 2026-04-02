@@ -1,17 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 import getpass
 import json
 import os
 from pathlib import Path
 import subprocess
+from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from anyio import NamedTemporaryFile, Path as AsyncPath
 
+from vibe.core.session.session_loader import (
+    MESSAGES_FILENAME,
+    METADATA_FILENAME,
+    SessionLoader,
+)
 from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
-from vibe.core.utils import is_windows
+from vibe.core.utils import is_windows, utc_now
+from vibe.core.utils.io import read_safe_async
 
 if TYPE_CHECKING:
     from vibe.core.agents.models import AgentProfile
@@ -19,14 +27,15 @@ if TYPE_CHECKING:
     from vibe.core.tools.manager import ToolManager
 
 
-METADATA_FILENAME = "meta.json"
-MESSAGES_FILENAME = "messages.jsonl"
+TMP_CLEANUP_INTERVAL = timedelta(seconds=5)
 
 
 class SessionLogger:
     def __init__(self, session_config: SessionLoggingConfig, session_id: str) -> None:
         self.session_config = session_config
         self.enabled = session_config.enabled
+        self._last_tmp_cleanup_at: datetime | None = None
+        self._tmp_cleanup_lock = Lock()
 
         if not self.enabled:
             self.save_dir: Path | None = None
@@ -40,7 +49,7 @@ class SessionLogger:
         self.save_dir = Path(session_config.save_dir)
         self.session_prefix = session_config.session_prefix
         self.session_id = session_id
-        self.session_start_time = datetime.now().isoformat()
+        self.session_start_time = utc_now().isoformat()
 
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.session_dir = self.save_folder
@@ -53,7 +62,7 @@ class SessionLogger:
                 "Cannot get session save folder when logging is disabled"
             )
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
         folder_name = f"{self.session_prefix}_{timestamp}_{self.session_id[:8]}"
         return self.save_dir / folder_name
 
@@ -127,7 +136,7 @@ class SessionLogger:
             environment={"working_directory": str(Path.cwd())},
         )
 
-    def _get_title(self, messages: list[LLMMessage]) -> str:
+    def _get_title(self, messages: Sequence[LLMMessage]) -> str:
         first_user_message = None
         for message in messages:
             if message.role == Role.user:
@@ -196,7 +205,7 @@ class SessionLogger:
 
     async def save_interaction(
         self,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         stats: AgentStats,
         base_config: VibeConfig,
         tool_manager: ToolManager,
@@ -206,6 +215,9 @@ class SessionLogger:
             return
 
         if self.session_metadata is None:
+            return
+
+        if not any(msg.role != Role.system for msg in messages):
             return
 
         # If the session directory does not exist, create it
@@ -219,11 +231,9 @@ class SessionLogger:
         # Read old metadata and get total_messages
         try:
             if self.metadata_filepath.exists():
-                async with await AsyncPath(self.metadata_filepath).open(
-                    encoding="utf-8", errors="ignore"
-                ) as f:
-                    old_metadata = json.loads(await f.read())
-                    old_total_messages = old_metadata["total_messages"]
+                raw = await read_safe_async(self.metadata_filepath)
+                old_metadata = json.loads(raw)
+                old_total_messages = old_metadata["total_messages"]
             else:
                 old_total_messages = 0
         except Exception as e:
@@ -265,7 +275,7 @@ class SessionLogger:
 
             metadata_dump = {
                 **self.session_metadata.model_dump(),
-                "end_time": datetime.now().isoformat(),
+                "end_time": utc_now().isoformat(),
                 "stats": stats.model_dump(),
                 "title": title,
                 "total_messages": total_messages,
@@ -284,7 +294,7 @@ class SessionLogger:
                 f"Failed to save session to {self.session_dir}: {e}"
             ) from e
         finally:
-            self.cleanup_tmp_files()
+            self.maybe_cleanup_tmp_files()
 
     def reset_session(self, session_id: str) -> None:
         """Clear existing session info and setup a new session"""
@@ -292,16 +302,27 @@ class SessionLogger:
             return
 
         self.session_id = session_id
-        self.session_start_time = datetime.now().isoformat()
+        self.session_start_time = utc_now().isoformat()
         self.session_dir = self.save_folder
         self.session_metadata = self._initialize_session_metadata()
+
+    def resume_existing_session(self, session_id: str, session_dir: Path) -> None:
+        if not self.enabled:
+            return
+
+        self.session_id = session_id
+        self.session_dir = session_dir
+        self.session_metadata = SessionLoader.load_metadata(session_dir)
+
+        if self.session_metadata.start_time:
+            self.session_start_time = self.session_metadata.start_time
 
     def cleanup_tmp_files(self) -> None:
         """Delete temporary files created more than 5 minutes ago"""
         if not self.enabled or not self.save_dir:
             return
 
-        now = datetime.now()
+        now = utc_now()
         ago = now - timedelta(minutes=5)
 
         tmp_files = self.save_dir.glob("**/*.json.tmp")  # Recursive search
@@ -309,8 +330,29 @@ class SessionLogger:
         for file_path in tmp_files:
             if file_path.is_file():
                 try:
-                    file_mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+                    file_mtime = datetime.fromtimestamp(
+                        file_path.stat().st_mtime, tz=UTC
+                    )
                     if file_mtime < ago:
                         file_path.unlink()
                 except Exception:
                     continue
+
+    def maybe_cleanup_tmp_files(self) -> None:
+        if not self.enabled or not self.save_dir:
+            return
+
+        if not self._tmp_cleanup_lock.acquire(blocking=False):
+            return
+        try:
+            now = utc_now()
+            if (
+                self._last_tmp_cleanup_at is not None
+                and now - self._last_tmp_cleanup_at < TMP_CLEANUP_INTERVAL
+            ):
+                return
+
+            self.cleanup_tmp_files()
+            self._last_tmp_cleanup_at = now
+        finally:
+            self._tmp_cleanup_lock.release()

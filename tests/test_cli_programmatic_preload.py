@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from tests.mock.mock_backend_factory import mock_backend_factory
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core import run_programmatic
-from vibe.core.config import Backend, SessionLoggingConfig, VibeConfig
-from vibe.core.types import LLMMessage, OutputFormat, Role
+from vibe.core.types import Backend, LLMMessage, OutputFormat, Role
 
 
 class SpyStreamingFormatter:
@@ -25,7 +25,7 @@ class SpyStreamingFormatter:
 
 
 def test_run_programmatic_preload_streaming_is_batched(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, telemetry_events: list[dict]
 ) -> None:
     spy = SpyStreamingFormatter()
     monkeypatch.setattr(
@@ -40,8 +40,7 @@ def test_run_programmatic_preload_streaming_is_batched(
             )
         ),
     ):
-        cfg = VibeConfig(
-            session_logging=SessionLoggingConfig(enabled=False),
+        cfg = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
             include_prompt_detail=False,
@@ -77,6 +76,14 @@ def test_run_programmatic_preload_streaming_is_batched(
             Role.user,
             Role.assistant,
         ]
+
+        new_session = [
+            e for e in telemetry_events if e.get("event_name") == "vibe.new_session"
+        ]
+        assert len(new_session) == 1
+        assert new_session[0]["properties"]["entrypoint"] == "programmatic"
+        assert "version" in new_session[0]["properties"]
+
         assert (
             spy.emitted[0][1] == "You are Vibe, a super useful programming assistant."
         )
@@ -101,8 +108,7 @@ def test_run_programmatic_ignores_system_messages_in_previous(
         Backend.MISTRAL,
         lambda provider, **kwargs: FakeBackend([mock_llm_chunk(content="Understood.")]),
     ):
-        cfg = VibeConfig(
-            session_logging=SessionLoggingConfig(enabled=False),
+        cfg = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
             include_prompt_detail=False,

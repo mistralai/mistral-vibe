@@ -78,11 +78,27 @@ function install_uv() {
     fi
 }
 
+function check_vibe_installed() {
+    if command -v vibe &> /dev/null; then
+        info "vibe is already installed"
+        VIBE_INSTALLED=true
+    else
+        VIBE_INSTALLED=false
+    fi
+}
+
 function install_vibe() {
     info "Installing mistral-vibe from GitHub repository using uv..."
     uv tool install mistral-vibe
 
     success "Mistral Vibe installed successfully! (commands: vibe, vibe-acp)"
+}
+
+function update_vibe() {
+    info "Updating mistral-vibe from GitHub repository using uv..."
+    uv tool upgrade mistral-vibe
+
+    success "Mistral Vibe updated successfully!"
 }
 
 function main() {
@@ -108,7 +124,13 @@ function main() {
         install_uv
     fi
 
-    install_vibe
+    check_vibe_installed
+
+    if [[ "$VIBE_INSTALLED" == "false" ]]; then
+        install_vibe
+    else
+        update_vibe
+    fi
 
     if command -v vibe &> /dev/null; then
         success "Installation completed successfully!"

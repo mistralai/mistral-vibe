@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from logging import getLogger
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from vibe.core.paths.config_paths import resolve_local_skills_dir
-from vibe.core.paths.global_paths import GLOBAL_SKILLS_DIR
+from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.logger import logger
 from vibe.core.skills.models import SkillInfo, SkillMetadata
 from vibe.core.skills.parser import SkillParseError, parse_frontmatter
 from vibe.core.utils import name_matches
+from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
-
-logger = getLogger("vibe")
 
 
 class SkillManager:
@@ -58,11 +56,9 @@ class SkillManager:
             if path.is_dir():
                 paths.append(path)
 
-        if (skills_dir := resolve_local_skills_dir(Path.cwd())) is not None:
-            paths.append(skills_dir)
-
-        if GLOBAL_SKILLS_DIR.path.is_dir():
-            paths.append(GLOBAL_SKILLS_DIR.path)
+        mgr = get_harness_files_manager()
+        paths.extend(mgr.project_skills_dirs)
+        paths.extend(mgr.user_skills_dirs)
 
         unique: list[Path] = []
         for p in paths:
@@ -111,7 +107,7 @@ class SkillManager:
 
     def _parse_skill_file(self, skill_path: Path) -> SkillInfo:
         try:
-            content = skill_path.read_text(encoding="utf-8")
+            content = read_safe(skill_path)
         except OSError as e:
             raise SkillParseError(f"Cannot read file: {e}") from e
 

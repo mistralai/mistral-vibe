@@ -10,19 +10,6 @@ from textual.widgets import Markdown
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import SessionLoggingConfig, VibeConfig
-
-
-@pytest.fixture
-def vibe_config() -> VibeConfig:
-    return VibeConfig(session_logging=SessionLoggingConfig(enabled=False))
-
-
-@pytest.fixture
-def vibe_app(vibe_config: VibeConfig) -> VibeApp:
-    agent_loop = AgentLoop(vibe_config)
-    return VibeApp(agent_loop=agent_loop)
 
 
 @pytest.mark.asyncio
@@ -113,7 +100,7 @@ async def test_arrow_navigation_cycles_through_suggestions(vibe_app: VibeApp) ->
 
 @pytest.mark.asyncio
 async def test_pressing_enter_submits_selected_command_and_hides_popup(
-    vibe_app: VibeApp,
+    vibe_app: VibeApp, telemetry_events: list[dict]
 ) -> None:
     async with vibe_app.run_test() as pilot:
         chat_input = vibe_app.query_one(ChatInputContainer)
@@ -127,6 +114,17 @@ async def test_pressing_enter_submits_selected_command_and_hides_popup(
         message = vibe_app.query_one(".user-command-message")
         message_content = message.query_one(Markdown)
         assert "Show help message" in message_content.source
+
+        slash_used = [
+            e
+            for e in telemetry_events
+            if e.get("event_name") == "vibe.slash_command_used"
+        ]
+        assert any(
+            e.get("properties", {}).get("command") == "help"
+            and e.get("properties", {}).get("command_type") == "builtin"
+            for e in slash_used
+        )
 
 
 @pytest.fixture()
@@ -158,7 +156,7 @@ async def test_path_completion_popup_lists_files_and_directories(
         await pilot.press(*"@s")
 
         popup_content = str(popup.render())
-        assert "@src/" in popup_content
+        assert "src/" in popup_content
         assert popup.styles.display == "block"
 
 
@@ -179,16 +177,16 @@ async def test_path_completion_popup_shows_up_to_ten_results(
         await pilot.press(*"@src/core/extra/")
 
         popup_content = str(popup.render())
-        assert "@src/core/extra/extra_file_1.py" in popup_content
-        assert "@src/core/extra/extra_file_10.py" in popup_content
-        assert "@src/core/extra/extra_file_11.py" in popup_content
-        assert "@src/core/extra/extra_file_12.py" in popup_content
-        assert "@src/core/extra/extra_file_2.py" in popup_content
-        assert "@src/core/extra/extra_file_3.py" in popup_content
-        assert "@src/core/extra/extra_file_4.py" in popup_content
-        assert "@src/core/extra/extra_file_5.py" in popup_content
-        assert "@src/core/extra/extra_file_6.py" in popup_content
-        assert "@src/core/extra/extra_file_7.py" in popup_content
+        assert "src/core/extra/extra_file_1.py" in popup_content
+        assert "src/core/extra/extra_file_10.py" in popup_content
+        assert "src/core/extra/extra_file_11.py" in popup_content
+        assert "src/core/extra/extra_file_12.py" in popup_content
+        assert "src/core/extra/extra_file_2.py" in popup_content
+        assert "src/core/extra/extra_file_3.py" in popup_content
+        assert "src/core/extra/extra_file_4.py" in popup_content
+        assert "src/core/extra/extra_file_5.py" in popup_content
+        assert "src/core/extra/extra_file_6.py" in popup_content
+        assert "src/core/extra/extra_file_7.py" in popup_content
         assert popup.styles.display == "block"
 
 
@@ -232,7 +230,7 @@ async def test_fuzzy_matches_subsequence_characters(
         await pilot.press(*"@src/utils/handling")
 
         popup_content = str(popup.render())
-        assert "@src/utils/error_handling.py" in popup_content
+        assert "src/utils/error_handling.py" in popup_content
         assert popup.styles.display == "block"
 
 
@@ -246,7 +244,7 @@ async def test_fuzzy_matches_word_boundaries(
         await pilot.press(*"@src/utils/eh")
 
         popup_content = str(popup.render())
-        assert "@src/utils/error_handling.py" in popup_content
+        assert "src/utils/error_handling.py" in popup_content
         assert popup.styles.display == "block"
 
 
@@ -260,7 +258,7 @@ async def test_finds_files_recursively_by_filename(
         await pilot.press(*"@entryp")
 
         popup_content = str(popup.render())
-        assert "@vibe/acp/entrypoint.py" in popup_content
+        assert "vibe/acp/entrypoint.py" in popup_content
         assert popup.styles.display == "block"
 
 
@@ -274,7 +272,7 @@ async def test_finds_files_recursively_with_partial_path(
         await pilot.press(*"@acp/entry")
 
         popup_content = str(popup.render())
-        assert "@vibe/acp/entrypoint.py" in popup_content
+        assert "vibe/acp/entrypoint.py" in popup_content
         assert popup.styles.display == "block"
 
 

@@ -1,16 +1,41 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 import json
 import os
-import re
 import types
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 import httpx
-import mistralai
+from mistralai.client import Mistral
+from mistralai.client.errors import SDKError
+from mistralai.client.models import (
+    AssistantMessage,
+    AssistantMessageContent,
+    ChatCompletionRequestMessage,
+    ChatCompletionStreamRequestToolChoice,
+    ContentChunk,
+    FileChunk,
+    Function,
+    FunctionCall as MistralFunctionCall,
+    FunctionName,
+    SystemMessage,
+    TextChunk,
+    ThinkChunk,
+    Tool,
+    ToolCall as MistralToolCall,
+    ToolChoice,
+    ToolChoiceEnum,
+    ToolMessage,
+    UserMessage,
+)
+from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 
 from vibe.core.llm.exceptions import BackendErrorBuilder
+from vibe.core.llm.message_utils import (
+    merge_consecutive_user_messages,
+    strip_reasoning as strip_reasoning_message,
+)
 from vibe.core.types import (
     AvailableTool,
     Content,
@@ -22,6 +47,7 @@ from vibe.core.types import (
     StrToolChoice,
     ToolCall,
 )
+from vibe.core.utils import get_server_url_from_api_base
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
@@ -33,35 +59,35 @@ class ParsedContent(NamedTuple):
 
 
 class MistralMapper:
-    def prepare_message(self, msg: LLMMessage) -> mistralai.Messages:
+    def prepare_message(self, msg: LLMMessage) -> ChatCompletionRequestMessage:
         match msg.role:
             case Role.system:
-                return mistralai.SystemMessage(role="system", content=msg.content or "")
+                return SystemMessage(role="system", content=msg.content or "")
             case Role.user:
-                return mistralai.UserMessage(role="user", content=msg.content)
+                return UserMessage(role="user", content=msg.content)
             case Role.assistant:
-                content: mistralai.AssistantMessageContent
+                content: AssistantMessageContent
                 if msg.reasoning_content:
-                    content = [
-                        mistralai.ThinkChunk(
+                    chunks: list[ContentChunk] = [
+                        ThinkChunk(
                             type="thinking",
                             thinking=[
-                                mistralai.TextChunk(
-                                    type="text", text=msg.reasoning_content
-                                )
+                                TextChunk(type="text", text=msg.reasoning_content)
                             ],
-                        ),
-                        mistralai.TextChunk(type="text", text=msg.content or ""),
+                        )
                     ]
+                    if msg.content:
+                        chunks.append(TextChunk(type="text", text=msg.content))
+                    content = chunks
                 else:
                     content = msg.content or ""
 
-                return mistralai.AssistantMessage(
+                return AssistantMessage(
                     role="assistant",
                     content=content,
                     tool_calls=[
-                        mistralai.ToolCall(
-                            function=mistralai.FunctionCall(
+                        MistralToolCall(
+                            function=MistralFunctionCall(
                                 name=tc.function.name or "",
                                 arguments=tc.function.arguments or "",
                             ),
@@ -73,17 +99,17 @@ class MistralMapper:
                     ],
                 )
             case Role.tool:
-                return mistralai.ToolMessage(
+                return ToolMessage(
                     role="tool",
                     content=msg.content,
                     tool_call_id=msg.tool_call_id,
                     name=msg.name,
                 )
 
-    def prepare_tool(self, tool: AvailableTool) -> mistralai.Tool:
-        return mistralai.Tool(
+    def prepare_tool(self, tool: AvailableTool) -> Tool:
+        return Tool(
             type="function",
-            function=mistralai.Function(
+            function=Function(
                 name=tool.function.name,
                 description=tool.function.description,
                 parameters=tool.function.parameters,
@@ -92,16 +118,15 @@ class MistralMapper:
 
     def prepare_tool_choice(
         self, tool_choice: StrToolChoice | AvailableTool
-    ) -> mistralai.ChatCompletionStreamRequestToolChoice:
+    ) -> ChatCompletionStreamRequestToolChoice:
         if isinstance(tool_choice, str):
-            return cast(mistralai.ToolChoiceEnum, tool_choice)
+            return cast(ToolChoiceEnum, tool_choice)
 
-        return mistralai.ToolChoice(
-            type="function",
-            function=mistralai.FunctionName(name=tool_choice.function.name),
+        return ToolChoice(
+            type="function", function=FunctionName(name=tool_choice.function.name)
         )
 
-    def _extract_thinking_text(self, chunk: mistralai.ThinkChunk) -> str:
+    def _extract_thinking_text(self, chunk: ThinkChunk) -> str:
         thinking_content = getattr(chunk, "thinking", None)
         if not thinking_content:
             return ""
@@ -113,27 +138,25 @@ class MistralMapper:
                 parts.append(inner)
         return "".join(parts)
 
-    def parse_content(
-        self, content: mistralai.AssistantMessageContent
-    ) -> ParsedContent:
+    def parse_content(self, content: AssistantMessageContent) -> ParsedContent:
         if isinstance(content, str):
             return ParsedContent(content=content, reasoning_content=None)
 
         concat_content = ""
         concat_reasoning = ""
         for chunk in content:
-            if isinstance(chunk, mistralai.FileChunk):
+            if isinstance(chunk, FileChunk):
                 continue
-            if isinstance(chunk, mistralai.TextChunk):
+            if isinstance(chunk, TextChunk):
                 concat_content += chunk.text
-            elif isinstance(chunk, mistralai.ThinkChunk):
+            elif isinstance(chunk, ThinkChunk):
                 concat_reasoning += self._extract_thinking_text(chunk)
         return ParsedContent(
             content=concat_content,
             reasoning_content=concat_reasoning if concat_reasoning else None,
         )
 
-    def parse_tool_calls(self, tool_calls: list[mistralai.ToolCall]) -> list[ToolCall]:
+    def parse_tool_calls(self, tool_calls: list[MistralToolCall]) -> list[ToolCall]:
         return [
             ToolCall(
                 id=tool_call.id,
@@ -148,10 +171,22 @@ class MistralMapper:
             for tool_call in tool_calls
         ]
 
+    def strip_reasoning(self, msg: LLMMessage) -> LLMMessage:
+        return strip_reasoning_message(msg)
+
+
+ReasoningEffortValue = Literal["none", "high"]
+
+_THINKING_TO_REASONING_EFFORT: dict[str, ReasoningEffortValue] = {
+    "low": "none",
+    "medium": "high",
+    "high": "high",
+}
+
 
 class MistralBackend:
     def __init__(self, provider: ProviderConfig, timeout: float = 720.0) -> None:
-        self._client: mistralai.Mistral | None = None
+        self._client: Mistral | None = None
         self._provider = provider
         self._mapper = MistralMapper()
         self._api_key = (
@@ -168,22 +203,30 @@ class MistralBackend:
             )
 
         # Mistral SDK takes server URL without api version as input
-        url_pattern = r"(https?://[^/]+)(/v.*)"
-        match = re.match(url_pattern, self._provider.api_base)
-        if not match:
+        server_url = get_server_url_from_api_base(self._provider.api_base)
+        if not server_url:
             raise ValueError(
                 f"Invalid API base URL: {self._provider.api_base}. "
                 "Expected format: <server_url>/v<api_version>"
             )
-        self._server_url = match.group(1)
+        self._server_url = server_url
         self._timeout = timeout
+        self._retry_config = self._build_retry_config()
+
+    def _build_retry_config(self) -> RetryConfig:
+        return RetryConfig(
+            strategy="backoff",
+            backoff=BackoffStrategy(
+                initial_interval=500,
+                max_interval=30000,
+                exponent=1.5,
+                max_elapsed_time=300000,
+            ),
+            retry_connection_errors=True,
+        )
 
     async def __aenter__(self) -> MistralBackend:
-        self._client = mistralai.Mistral(
-            api_key=self._api_key,
-            server_url=self._server_url,
-            timeout_ms=int(self._timeout * 1000),
-        )
+        self._client = self._create_mistral_client()
         await self._client.__aenter__()
         return self
 
@@ -198,28 +241,44 @@ class MistralBackend:
                 exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb
             )
 
-    def _get_client(self) -> mistralai.Mistral:
+    def _create_mistral_client(self) -> Mistral:
+        return Mistral(
+            api_key=self._api_key,
+            server_url=self._server_url,
+            timeout_ms=int(self._timeout * 1000),
+            retry_config=self._retry_config,
+        )
+
+    def _get_client(self) -> Mistral:
         if self._client is None:
-            self._client = mistralai.Mistral(
-                api_key=self._api_key, server_url=self._server_url
-            )
+            self._client = self._create_mistral_client()
         return self._client
 
     async def complete(
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         tools: list[AvailableTool] | None,
         max_tokens: int | None,
         tool_choice: StrToolChoice | AvailableTool | None,
         extra_headers: dict[str, str] | None,
+        metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
         try:
+            merged_messages = merge_consecutive_user_messages(messages)
+            reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+            if reasoning_effort is not None:
+                temperature = 1.0
+            else:
+                merged_messages = [
+                    strip_reasoning_message(msg) for msg in merged_messages
+                ]
+
             response = await self._get_client().chat.complete_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+                messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools
@@ -229,7 +288,9 @@ class MistralBackend:
                 if tool_choice
                 else None,
                 http_headers=extra_headers,
+                metadata=metadata,
                 stream=False,
+                reasoning_effort=reasoning_effort,
             )
 
             parsed = (
@@ -254,12 +315,11 @@ class MistralBackend:
                 ),
             )
 
-        except mistralai.SDKError as e:
+        except SDKError as e:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
-                response=e.raw_response,
-                headers=e.raw_response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -282,17 +342,27 @@ class MistralBackend:
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         tools: list[AvailableTool] | None,
         max_tokens: int | None,
         tool_choice: StrToolChoice | AvailableTool | None,
         extra_headers: dict[str, str] | None,
+        metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
-            async for chunk in await self._get_client().chat.stream_async(
+            merged_messages = merge_consecutive_user_messages(messages)
+            reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+            if reasoning_effort is not None:
+                temperature = 1.0
+            else:
+                merged_messages = [
+                    strip_reasoning_message(msg) for msg in merged_messages
+                ]
+
+            stream = await self._get_client().chat.stream_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+                messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools
@@ -302,7 +372,11 @@ class MistralBackend:
                 if tool_choice
                 else None,
                 http_headers=extra_headers,
-            ):
+                metadata=metadata,
+                reasoning_effort=reasoning_effort,
+            )
+            correlation_id = stream.response.headers.get("mistral-correlation-id")
+            async for chunk in stream:
                 parsed = (
                     self._mapper.parse_content(chunk.data.choices[0].delta.content)
                     if chunk.data.choices[0].delta.content
@@ -327,14 +401,14 @@ class MistralBackend:
                         if chunk.data.usage
                         else 0,
                     ),
+                    correlation_id=correlation_id,
                 )
 
-        except mistralai.SDKError as e:
+        except SDKError as e:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
-                response=e.raw_response,
-                headers=e.raw_response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -357,11 +431,12 @@ class MistralBackend:
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float = 0.0,
         tools: list[AvailableTool] | None = None,
         tool_choice: StrToolChoice | AvailableTool | None = None,
         extra_headers: dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> int:
         result = await self.complete(
             model=model,
@@ -371,6 +446,7 @@ class MistralBackend:
             max_tokens=1,
             tool_choice=tool_choice,
             extra_headers=extra_headers,
+            metadata=metadata,
         )
         if result.usage is None:
             raise ValueError("Missing usage in non streaming completion")

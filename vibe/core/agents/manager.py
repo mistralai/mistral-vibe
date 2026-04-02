@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from logging import getLogger
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,14 +10,12 @@ from vibe.core.agents.models import (
     AgentType,
     BuiltinAgentName,
 )
-from vibe.core.paths.config_paths import resolve_local_agents_dir
-from vibe.core.paths.global_paths import GLOBAL_AGENTS_DIR
+from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.logger import logger
 from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
-
-logger = getLogger("vibe")
 
 
 class AgentManager:
@@ -53,19 +50,25 @@ class AgentManager:
 
     @property
     def available_agents(self) -> dict[str, AgentProfile]:
+        installed = self._config.installed_agents
+        base = {
+            name: profile
+            for name, profile in self._available.items()
+            if not profile.install_required or name in installed
+        }
         if self._config.enabled_agents:
             return {
                 name: profile
-                for name, profile in self._available.items()
+                for name, profile in base.items()
                 if name_matches(name, self._config.enabled_agents)
             }
         if self._config.disabled_agents:
             return {
                 name: profile
-                for name, profile in self._available.items()
+                for name, profile in base.items()
                 if not name_matches(name, self._config.disabled_agents)
             }
-        return dict(self._available)
+        return base
 
     @property
     def config(self) -> VibeConfig:
@@ -77,6 +80,10 @@ class AgentManager:
         self.active_profile = self.get_agent(name)
         self._cached_config = None
 
+    def register_agent(self, profile: AgentProfile) -> None:
+        self._available[profile.name] = profile
+        self._cached_config = None
+
     def invalidate_config(self) -> None:
         self._cached_config = None
 
@@ -86,10 +93,9 @@ class AgentManager:
         for path in config.agent_paths:
             if path.is_dir():
                 paths.append(path)
-        if (agents_dir := resolve_local_agents_dir(Path.cwd())) is not None:
-            paths.append(agents_dir)
-        if GLOBAL_AGENTS_DIR.path.is_dir():
-            paths.append(GLOBAL_AGENTS_DIR.path)
+        mgr = get_harness_files_manager()
+        paths.extend(mgr.project_agents_dirs)
+        paths.extend(mgr.user_agents_dirs)
         unique: list[Path] = []
         for p in paths:
             rp = p.resolve()

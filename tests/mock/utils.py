@@ -51,7 +51,6 @@ def get_mocking_env(mock_chunks: list[LLMChunk] | None = None) -> dict[str, str]
 
 
 async def collect_result[T](gen: AsyncGenerator[ToolStreamEvent | T, None]) -> T:
-    """Collect the final result from an AsyncGenerator, filtering out stream events."""
     result = None
     async for item in gen:
         if not isinstance(item, ToolStreamEvent):

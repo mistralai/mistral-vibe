@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.acp.conftest import _create_acp_agent
+from tests.conftest import build_test_vibe_config
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.config import ModelConfig, VibeConfig
@@ -14,7 +15,7 @@ from vibe.core.types import LLMMessage, Role
 
 @pytest.fixture
 def acp_agent_loop(backend) -> VibeAcpAgentLoop:
-    config = VibeConfig(
+    config = build_test_vibe_config(
         active_model="devstral-latest",
         models=[
             ModelConfig(

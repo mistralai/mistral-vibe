@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Sequence
 import json
 import os
 import types
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import httpx
 
+from vibe.core.llm.backend.anthropic import AnthropicAdapter
+from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
+from vibe.core.llm.backend.reasoning_adapter import ReasoningAdapter
+from vibe.core.llm.backend.vertex import VertexAnthropicAdapter
 from vibe.core.llm.exceptions import BackendErrorBuilder
+from vibe.core.llm.message_utils import merge_consecutive_user_messages
 from vibe.core.types import (
     AvailableTool,
     LLMChunk,
@@ -23,51 +28,6 @@ if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
 
 
-class PreparedRequest(NamedTuple):
-    endpoint: str
-    headers: dict[str, str]
-    body: bytes
-
-
-class APIAdapter(Protocol):
-    endpoint: ClassVar[str]
-
-    def prepare_request(
-        self,
-        *,
-        model_name: str,
-        messages: list[LLMMessage],
-        temperature: float,
-        tools: list[AvailableTool] | None,
-        max_tokens: int | None,
-        tool_choice: StrToolChoice | AvailableTool | None,
-        enable_streaming: bool,
-        provider: ProviderConfig,
-        api_key: str | None = None,
-    ) -> PreparedRequest: ...
-
-    def parse_response(
-        self, data: dict[str, Any], provider: ProviderConfig
-    ) -> LLMChunk: ...
-
-
-BACKEND_ADAPTERS: dict[str, APIAdapter] = {}
-
-T = TypeVar("T", bound=APIAdapter)
-
-
-def register_adapter(
-    adapters: dict[str, APIAdapter], name: str
-) -> Callable[[type[T]], type[T]]:
-
-    def decorator(cls: type[T]) -> type[T]:
-        adapters[name] = cls()
-        return cls
-
-    return decorator
-
-
-@register_adapter(BACKEND_ADAPTERS, "openai")
 class OpenAIAdapter(APIAdapter):
     endpoint: ClassVar[str] = "/chat/completions"
 
@@ -119,11 +79,11 @@ class OpenAIAdapter(APIAdapter):
             msg_dict["reasoning_content"] = msg_dict.pop(field_name)
         return msg_dict
 
-    def prepare_request(
+    def prepare_request(  # noqa: PLR0913
         self,
         *,
         model_name: str,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float,
         tools: list[AvailableTool] | None,
         max_tokens: int | None,
@@ -131,13 +91,19 @@ class OpenAIAdapter(APIAdapter):
         enable_streaming: bool,
         provider: ProviderConfig,
         api_key: str | None = None,
+        thinking: str = "off",
     ) -> PreparedRequest:
+        merged_messages = merge_consecutive_user_messages(messages)
         field_name = provider.reasoning_field_name
         converted_messages = [
             self._reasoning_to_api(
-                msg.model_dump(exclude_none=True, exclude={"message_id"}), field_name
+                msg.model_dump(
+                    exclude_none=True,
+                    exclude={"message_id", "reasoning_message_id", "injected"},
+                ),
+                field_name,
             )
-            for msg in messages
+            for msg in merged_messages
         ]
 
         payload = self.build_payload(
@@ -194,6 +160,14 @@ class OpenAIAdapter(APIAdapter):
         return LLMChunk(message=message, usage=usage)
 
 
+ADAPTERS: dict[str, APIAdapter] = {
+    "openai": OpenAIAdapter(),
+    "anthropic": AnthropicAdapter(),
+    "vertex-anthropic": VertexAnthropicAdapter(),
+    "reasoning": ReasoningAdapter(),
+}
+
+
 class GenericBackend:
     def __init__(
         self,
@@ -243,12 +217,13 @@ class GenericBackend:
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float = 0.2,
         tools: list[AvailableTool] | None = None,
         max_tokens: int | None = None,
         tool_choice: StrToolChoice | AvailableTool | None = None,
         extra_headers: dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
         api_key = (
             os.getenv(self._provider.api_key_env_var)
@@ -257,9 +232,9 @@ class GenericBackend:
         )
 
         api_style = getattr(self._provider, "api_style", "openai")
-        adapter = BACKEND_ADAPTERS[api_style]
+        adapter = ADAPTERS[api_style]
 
-        endpoint, headers, body = adapter.prepare_request(
+        req = adapter.prepare_request(
             model_name=model.name,
             messages=messages,
             temperature=temperature,
@@ -269,23 +244,25 @@ class GenericBackend:
             enable_streaming=False,
             provider=self._provider,
             api_key=api_key,
+            thinking=model.thinking,
         )
 
+        headers = req.headers
         if extra_headers:
             headers.update(extra_headers)
 
-        url = f"{self._provider.api_base}{endpoint}"
+        base = req.base_url or self._provider.api_base
+        url = f"{base}{req.endpoint}"
 
         try:
-            res_data, _ = await self._make_request(url, body, headers)
+            res_data, _ = await self._make_request(url, req.body, headers)
             return adapter.parse_response(res_data, self._provider)
 
         except httpx.HTTPStatusError as e:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=url,
-                response=e.response,
-                headers=e.response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -308,12 +285,13 @@ class GenericBackend:
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float = 0.2,
         tools: list[AvailableTool] | None = None,
         max_tokens: int | None = None,
         tool_choice: StrToolChoice | AvailableTool | None = None,
         extra_headers: dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
         api_key = (
             os.getenv(self._provider.api_key_env_var)
@@ -322,9 +300,9 @@ class GenericBackend:
         )
 
         api_style = getattr(self._provider, "api_style", "openai")
-        adapter = BACKEND_ADAPTERS[api_style]
+        adapter = ADAPTERS[api_style]
 
-        endpoint, headers, body = adapter.prepare_request(
+        req = adapter.prepare_request(
             model_name=model.name,
             messages=messages,
             temperature=temperature,
@@ -334,23 +312,25 @@ class GenericBackend:
             enable_streaming=True,
             provider=self._provider,
             api_key=api_key,
+            thinking=model.thinking,
         )
 
+        headers = req.headers
         if extra_headers:
             headers.update(extra_headers)
 
-        url = f"{self._provider.api_base}{endpoint}"
+        base = req.base_url or self._provider.api_base
+        url = f"{base}{req.endpoint}"
 
         try:
-            async for res_data in self._make_streaming_request(url, body, headers):
+            async for res_data in self._make_streaming_request(url, req.body, headers):
                 yield adapter.parse_response(res_data, self._provider)
 
         except httpx.HTTPStatusError as e:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=url,
-                response=e.response,
-                headers=e.response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -393,6 +373,8 @@ class GenericBackend:
         async with client.stream(
             method="POST", url=url, content=data, headers=headers
         ) as response:
+            if not response.is_success:
+                await response.aread()
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if line.strip() == "":
@@ -419,11 +401,12 @@ class GenericBackend:
         self,
         *,
         model: ModelConfig,
-        messages: list[LLMMessage],
+        messages: Sequence[LLMMessage],
         temperature: float = 0.0,
         tools: list[AvailableTool] | None = None,
         tool_choice: StrToolChoice | AvailableTool | None = None,
         extra_headers: dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> int:
         probe_messages = list(messages)
         if not probe_messages or probe_messages[-1].role != Role.user:

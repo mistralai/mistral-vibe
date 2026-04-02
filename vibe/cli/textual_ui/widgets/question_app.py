@@ -6,12 +6,14 @@ from typing import TYPE_CHECKING, ClassVar
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Input
 
+from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 
 if TYPE_CHECKING:
     from vibe.core.tools.builtins.ask_user_question import (
@@ -70,25 +72,35 @@ class QuestionApp(Container):
         return self.questions[self.current_question_idx]
 
     @property
+    def _has_other(self) -> bool:
+        return not self._current_question.hide_other
+
+    @property
     def _total_options(self) -> int:
-        base = len(self._current_question.options) + 1
+        base = len(self._current_question.options)
+        if self._has_other:
+            base += 1
         if self._current_question.multi_select:
-            return base + 1
+            base += 1
         return base
 
     @property
     def _other_option_idx(self) -> int:
+        if not self._has_other:
+            return -1
         return len(self._current_question.options)
 
     @property
     def _submit_option_idx(self) -> int:
         if not self._current_question.multi_select:
             return -1
-        return self._other_option_idx + 1
+        if self._has_other:
+            return self._other_option_idx + 1
+        return len(self._current_question.options)
 
     @property
     def _is_other_selected(self) -> bool:
-        return self.selected_option == self._other_option_idx
+        return self._has_other and self.selected_option == self._other_option_idx
 
     @property
     def _is_submit_selected(self) -> bool:
@@ -98,7 +110,16 @@ class QuestionApp(Container):
         )
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="question-content"):
+        if self.args.content_preview:
+            with VerticalScroll(classes="question-content-preview"):
+                yield AnsiMarkdown(
+                    self.args.content_preview, classes="question-content-preview-text"
+                )
+
+        question_content_classes = (
+            "question-content-docked" if self.args.content_preview else ""
+        )
+        with Vertical(id="question-content", classes=question_content_classes):
             if len(self.questions) > 1:
                 self.tabs_widget = NoMarkupStatic("", classes="question-tabs")
                 yield self.tabs_widget
@@ -114,7 +135,7 @@ class QuestionApp(Container):
             with Horizontal(classes="question-other-row"):
                 self.other_prefix = NoMarkupStatic("", classes="question-other-prefix")
                 yield self.other_prefix
-                self.other_input = Input(
+                self.other_input = VscodeCompatInput(
                     placeholder="Type your answer...", classes="question-other-input"
                 )
                 yield self.other_input
@@ -217,6 +238,12 @@ class QuestionApp(Container):
         if not self.other_prefix or not self.other_input or not self.other_static:
             return
 
+        if not self._has_other:
+            self.other_prefix.display = False
+            self.other_input.display = False
+            self.other_static.display = False
+            return
+
         q = self._current_question
         is_multi = q.multi_select
         multi_selected = self.multi_selections.get(self.current_question_idx, set())
@@ -235,6 +262,7 @@ class QuestionApp(Container):
 
         show_input = is_focused or bool(stored_text)
 
+        self.other_prefix.display = True
         self.other_input.display = show_input
         self.other_static.display = not show_input
 

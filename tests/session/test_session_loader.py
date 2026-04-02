@@ -37,6 +37,7 @@ def create_test_session():
         session_id: str,
         messages: list[LLMMessage] | None = None,
         metadata: dict | None = None,
+        encoding: str = "utf-8",
     ) -> Path:
         """Create a test session directory with messages and metadata files."""
         # Create session directory
@@ -53,7 +54,7 @@ def create_test_session():
                 LLMMessage(role=Role.assistant, content="Hi there!"),
             ]
 
-        with messages_file.open("w", encoding="utf-8") as f:
+        with messages_file.open("w", encoding=encoding) as f:
             for message in messages:
                 f.write(
                     json.dumps(
@@ -67,8 +68,8 @@ def create_test_session():
         if metadata is None:
             metadata = {
                 "session_id": session_id,
-                "start_time": "2023-01-01T12:00:00",
-                "end_time": "2023-01-01T12:05:00",
+                "start_time": "2023-01-01T12:00:00Z",
+                "end_time": "2023-01-01T12:05:00Z",
                 "total_messages": 2,
                 "stats": {
                     "steps": 1,
@@ -76,9 +77,13 @@ def create_test_session():
                     "session_completion_tokens": 20,
                 },
                 "system_prompt": {"content": "System prompt", "role": "system"},
+                "username": "testuser",
+                "environment": {"working_directory": "/test"},
+                "git_commit": None,
+                "git_branch": None,
             }
 
-        with metadata_file.open("w", encoding="utf-8") as f:
+        with metadata_file.open("w", encoding=encoding) as f:
             json.dump(metadata, f, indent=2)
 
         return session_folder
@@ -635,3 +640,427 @@ class TestSessionLoaderEdgeCases:
         assert messages[0].content == "Hello"
         assert messages[1].role == Role.assistant
         assert messages[1].content == "Hi there!"
+
+
+@pytest.fixture
+def create_test_session_with_cwd():
+    def _create_session(
+        session_dir: Path,
+        session_id: str,
+        cwd: str,
+        title: str | None = None,
+        end_time: str | None = None,
+    ) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_folder = session_dir / f"test_{timestamp}_{session_id[:8]}"
+        session_folder.mkdir(exist_ok=True)
+
+        messages_file = session_folder / "messages.jsonl"
+        messages_file.write_text('{"role": "user", "content": "Hello"}\n')
+
+        metadata = {
+            "session_id": session_id,
+            "start_time": "2024-01-01T12:00:00Z",
+            "end_time": end_time or "2024-01-01T12:05:00Z",
+            "environment": {"working_directory": cwd},
+            "title": title,
+        }
+
+        metadata_file = session_folder / "meta.json"
+        with metadata_file.open("w", encoding="utf-8") as f:
+            json.dump(metadata, f)
+
+        return session_folder
+
+    return _create_session
+
+
+class TestSessionLoaderListSessions:
+    def test_list_sessions_empty(self, session_config: SessionLoggingConfig) -> None:
+        result = SessionLoader.list_sessions(session_config)
+        assert result == []
+
+    def test_list_sessions_returns_all_sessions(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir,
+            "aaaaaaaa-1111",
+            "/home/user/project1",
+            title="First session",
+            end_time="2024-01-01T12:00:00Z",
+        )
+        create_test_session_with_cwd(
+            session_dir,
+            "bbbbbbbb-2222",
+            "/home/user/project2",
+            title="Second session",
+            end_time="2024-01-01T13:00:00Z",
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert len(result) == 2
+        session_ids = {s["session_id"] for s in result}
+        assert "aaaaaaaa-1111" in session_ids
+        assert "bbbbbbbb-2222" in session_ids
+
+    def test_list_sessions_filters_by_cwd(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir,
+            "aaaaaaaa-proj1",
+            "/home/user/project1",
+            title="Project 1 session",
+        )
+        create_test_session_with_cwd(
+            session_dir,
+            "bbbbbbbb-proj2",
+            "/home/user/project2",
+            title="Project 2 session",
+        )
+        create_test_session_with_cwd(
+            session_dir,
+            "cccccccc-proj1",
+            "/home/user/project1",
+            title="Another Project 1 session",
+        )
+
+        result = SessionLoader.list_sessions(session_config, cwd="/home/user/project1")
+
+        assert len(result) == 2
+        for session in result:
+            assert session["cwd"] == "/home/user/project1"
+
+    def test_list_sessions_includes_all_fields(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir,
+            "test-session-123",
+            "/home/user/project",
+            title="Test Session Title",
+            end_time="2024-01-15T10:30:00Z",
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert len(result) == 1
+        session = result[0]
+        assert session["session_id"] == "test-session-123"
+        assert session["cwd"] == "/home/user/project"
+        assert session["title"] == "Test Session Title"
+
+    def test_list_sessions_skips_invalid_sessions(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir, "valid-se", "/home/user/project", title="Valid Session"
+        )
+
+        invalid_session = session_dir / "test_20240101_120000_invalid1"
+        invalid_session.mkdir()
+        (invalid_session / "meta.json").write_text('{"session_id": "invalid"}')
+
+        no_id_session = session_dir / "test_20240101_120001_noid0000"
+        no_id_session.mkdir()
+        (no_id_session / "messages.jsonl").write_text(
+            '{"role": "user", "content": "Hello"}\n'
+        )
+        (no_id_session / "meta.json").write_text(
+            '{"environment": {"working_directory": "/test"}}'
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert len(result) == 1
+        assert result[0]["session_id"] == "valid-se"
+
+    def test_list_sessions_nonexistent_save_dir(self) -> None:
+        bad_config = SessionLoggingConfig(
+            save_dir="/nonexistent/path", session_prefix="test", enabled=True
+        )
+
+        result = SessionLoader.list_sessions(bad_config)
+        assert result == []
+
+    def test_list_sessions_handles_missing_environment(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        session_folder = session_dir / "test_20240101_120000_noenv000"
+        session_folder.mkdir()
+        (session_folder / "messages.jsonl").write_text(
+            '{"role": "user", "content": "Hello"}\n'
+        )
+        (session_folder / "meta.json").write_text(
+            '{"session_id": "noenv000", "end_time": "2024-01-01T12:00:00Z"}'
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert len(result) == 1
+        assert result[0]["session_id"] == "noenv000"
+        assert result[0]["cwd"] == ""  # Empty string when no working_directory
+
+    def test_list_sessions_handles_none_title(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session_with_cwd(
+            session_dir, "notitle0", "/home/user/project", title=None
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert len(result) == 1
+        assert result[0]["session_id"] == "notitle0"
+        assert result[0]["title"] is None
+
+
+class TestSessionLoaderGetFirstUserMessage:
+    """Tests for SessionLoader.get_first_user_message method."""
+
+    def test_returns_first_user_message(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test that get_first_user_message returns the first user message."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="First user message"),
+            LLMMessage(role=Role.assistant, content="First response"),
+            LLMMessage(role=Role.user, content="Second user message"),
+            LLMMessage(role=Role.assistant, content="Second response"),
+        ]
+        create_test_session(session_dir, "test-sess", messages=messages)
+
+        result = SessionLoader.get_first_user_message("test-sess", session_config)
+
+        assert result == "First user message"
+
+    def test_returns_fallback_for_missing_session(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        """Test that get_first_user_message returns fallback when session not found."""
+        result = SessionLoader.get_first_user_message("nonexistent", session_config)
+
+        assert result == "(session not found)"
+
+    def test_returns_no_user_messages_fallback(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test fallback when session has no user messages."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.assistant, content="Assistant only"),
+        ]
+        create_test_session(session_dir, "no-user0", messages=messages)
+
+        result = SessionLoader.get_first_user_message("no-user0", session_config)
+
+        assert result == "(no user messages)"
+
+    def test_replaces_newlines_with_spaces(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test that newlines in messages are replaced with spaces."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="Line one\nLine two\nLine three"),
+        ]
+        create_test_session(session_dir, "newline0", messages=messages)
+
+        result = SessionLoader.get_first_user_message("newline0", session_config)
+
+        assert "\n" not in result
+        assert "Line one Line two Line three" == result
+
+    def test_handles_empty_user_message(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test handling of empty user message content."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content=""),
+        ]
+        create_test_session(session_dir, "empty-ms", messages=messages)
+
+        result = SessionLoader.get_first_user_message("empty-ms", session_config)
+
+        assert result == "(no user messages)"
+
+    def test_handles_whitespace_only_message(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test handling of whitespace-only user message."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="   \n\t  "),
+        ]
+        create_test_session(session_dir, "whitespc", messages=messages)
+
+        result = SessionLoader.get_first_user_message("whitespc", session_config)
+
+        assert result == "(empty message)"
+
+    def test_handles_invalid_session_as_not_found(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        """Test that invalid sessions (bad JSON) are treated as not found.
+
+        Note: Sessions with invalid JSON are filtered out by _is_valid_session
+        during find_session_by_id, so they return 'not found' rather than
+        'corrupted'. This is the expected behavior.
+        """
+        session_dir = Path(session_config.save_dir)
+
+        # Create a session with invalid JSON - will fail validation
+        session_folder = session_dir / "test_20230101_120000_corrupt0"
+        session_folder.mkdir()
+        (session_folder / "messages.jsonl").write_text("{invalid json}")
+        (session_folder / "meta.json").write_text('{"session_id": "corrupt0"}')
+
+        result = SessionLoader.get_first_user_message("corrupt0", session_config)
+
+        # Invalid sessions are filtered by _is_valid_session, so not found
+        assert result == "(session not found)"
+
+    def test_skips_non_user_messages(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        """Test that only user messages are considered, not assistant/system."""
+        session_dir = Path(session_config.save_dir)
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="User question"),
+            LLMMessage(role=Role.assistant, content="Assistant response"),
+        ]
+        create_test_session(session_dir, "skip-non", messages=messages)
+
+        result = SessionLoader.get_first_user_message("skip-non", session_config)
+
+        # Should return "User question", not "Assistant response"
+        assert result == "User question"
+
+
+class TestSessionLoaderUTF8Encoding:
+    def test_load_metadata_with_utf8_encoding(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = create_test_session(session_dir, "utf8-test")
+
+        metadata = SessionLoader.load_metadata(session_folder)
+
+        assert metadata.session_id == "utf8-test"
+        assert metadata.start_time == "2023-01-01T12:00:00Z"
+        assert metadata.username is not None
+
+    def test_load_metadata_with_unicode_characters(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = session_dir / "test_20230101_120000_unicode0"
+        session_folder.mkdir()
+
+        metadata_content = {
+            "session_id": "unicode-test-123",
+            "start_time": "2023-01-01T12:00:00Z",
+            "end_time": "2023-01-01T12:05:00Z",
+            "environment": {"working_directory": "/home/user/café_project"},
+            "username": "testuser",
+            "git_commit": None,
+            "git_branch": None,
+        }
+
+        metadata_file = session_folder / "meta.json"
+        with metadata_file.open("w", encoding="utf-8") as f:
+            json.dump(metadata_content, f, indent=2, ensure_ascii=False)
+
+        messages_file = session_folder / "messages.jsonl"
+        messages_file.write_text('{"role": "user", "content": "Hello"}\n')
+
+        metadata = SessionLoader.load_metadata(session_folder)
+
+        assert metadata.session_id == "unicode-test-123"
+        assert metadata.environment["working_directory"] == "/home/user/café_project"
+
+    def test_load_metadata_with_different_encoding_handled(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = session_dir / "test_20230101_120000_latin100"
+        session_folder.mkdir()
+
+        # \x81 invalid UTF-8 and undefined in CP1252 → U+FFFD on all platforms
+        metadata_content = {
+            "session_id": "latin1-test",
+            "start_time": "2023-01-01T12:00:00Z",
+            "end_time": "2023-01-01T12:05:00Z",
+            "username": "testuser",
+            "environment": {"working_directory": "/home/user/caf\x81_project"},
+            "git_commit": None,
+            "git_branch": None,
+        }
+
+        metadata_file = session_folder / "meta.json"
+        with metadata_file.open("w", encoding="latin-1") as f:
+            json.dump(metadata_content, f, indent=2, ensure_ascii=False)
+
+        messages_file = session_folder / "messages.jsonl"
+        messages_file.write_text('{"role": "user", "content": "Hello"}\n')
+
+        metadata = SessionLoader.load_metadata(session_folder)
+        assert metadata.session_id == "latin1-test"
+        assert metadata.environment["working_directory"] == "/home/user/caf�_project"
+
+    def test_load_session_with_utf8_metadata_and_messages(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = session_dir / "test_20230101_120000_utf8all0"
+        session_folder.mkdir()
+
+        metadata_content = {
+            "session_id": "utf8-all-test",
+            "start_time": "2023-01-01T12:00:00Z",
+            "end_time": "2023-01-01T12:05:00Z",
+            "username": "testuser",
+            "environment": {},
+            "git_commit": None,
+            "git_branch": None,
+        }
+
+        metadata_file = session_folder / "meta.json"
+        with metadata_file.open("w", encoding="utf-8") as f:
+            json.dump(metadata_content, f, indent=2, ensure_ascii=False)
+
+        messages_file = session_folder / "messages.jsonl"
+        messages_file.write_text(
+            '{"role": "user", "content": "Hello café"}\n'
+            + '{"role": "assistant", "content": "Hi there naïve"}\n',
+            encoding="utf-8",
+        )
+
+        messages, metadata = SessionLoader.load_session(session_folder)
+
+        assert metadata["session_id"] == "utf8-all-test"
+        assert len(messages) == 2
+        assert messages[0].content == "Hello café"
+        assert messages[1].content == "Hi there naïve"
