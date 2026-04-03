@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -8,16 +9,18 @@ import types
 import httpx
 import zstandard
 
-from vibe.core.auth.github import GitHubAuthProvider
+from vibe.core.config import VibeConfig
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.git import GitRepoInfo, GitRepository
 from vibe.core.teleport.nuage import (
-    GitRepoConfig,
+    ChatAssistantParams,
+    GitHubParams,
     NuageClient,
     TeleportSession,
-    VibeNewSandbox,
-    VibeSandboxConfig,
+    VibeAgent,
+    WorkflowConfig,
+    WorkflowIntegrations,
     WorkflowParams,
 )
 from vibe.core.teleport.types import (
@@ -25,18 +28,17 @@ from vibe.core.teleport.types import (
     TeleportAuthRequiredEvent,
     TeleportCheckingGitEvent,
     TeleportCompleteEvent,
+    TeleportFetchingUrlEvent,
     TeleportPushingEvent,
     TeleportPushRequiredEvent,
     TeleportPushResponseEvent,
     TeleportSendEvent,
-    TeleportSendingGithubTokenEvent,
     TeleportStartingWorkflowEvent,
+    TeleportWaitingForGitHubEvent,
     TeleportYieldEvent,
 )
 
-# TODO(vibe-nuage): update URL once prod has shared vibe-nuage workers
-_NUAGE_EXECUTION_URL_TEMPLATE = "https://console.globalaegis.net/build/workflows/{workflow_id}?tab=executions&executionId={execution_id}"
-_DEFAULT_TELEPORT_PROMPT = "please continue where you left off"
+_DEFAULT_TELEPORT_PROMPT = "Your session has been teleported on a remote workspace. Changes of workspace has been automatically teleported. External workspace changes has NOT been teleported. Environment variables has NOT been teleported. Please continue where you left off."
 
 
 class TeleportService:
@@ -49,6 +51,7 @@ class TeleportService:
         workdir: Path | None = None,
         *,
         nuage_task_queue: str | None = None,
+        vibe_config: VibeConfig | None = None,
         client: httpx.AsyncClient | None = None,
         timeout: float = 60.0,
     ) -> None:
@@ -57,17 +60,19 @@ class TeleportService:
         self._nuage_workflow_id = nuage_workflow_id
         self._nuage_api_key = nuage_api_key
         self._nuage_task_queue = nuage_task_queue
+        self._nuage_project_name = (
+            vibe_config.nuage_project_name if vibe_config else "Vibe"
+        )
+        self._vibe_config = vibe_config
         self._git = GitRepository(workdir)
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
-        self._github_auth: GitHubAuthProvider | None = None
         self._nuage: NuageClient | None = None
 
     async def __aenter__(self) -> TeleportService:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=httpx.Timeout(self._timeout))
-        self._github_auth = GitHubAuthProvider(client=self._client)
         self._nuage = NuageClient(
             self._nuage_base_url,
             self._nuage_api_key,
@@ -97,12 +102,6 @@ class TeleportService:
         return self._client
 
     @property
-    def _github_auth_provider(self) -> GitHubAuthProvider:
-        if self._github_auth is None:
-            self._github_auth = GitHubAuthProvider(client=self._http_client)
-        return self._github_auth
-
-    @property
     def _nuage_client(self) -> NuageClient:
         if self._nuage is None:
             self._nuage = NuageClient(
@@ -123,56 +122,76 @@ class TeleportService:
     async def execute(
         self, prompt: str | None, session: TeleportSession
     ) -> AsyncGenerator[TeleportYieldEvent, TeleportSendEvent]:
-        prompt = prompt or _DEFAULT_TELEPORT_PROMPT
+        if prompt:
+            lechat_user_message = prompt
+        else:
+            last_user_message = self._get_last_user_message(session)
+            if not last_user_message:
+                raise ServiceTeleportError(
+                    "No prompt provided and no user message found in session."
+                )
+            lechat_user_message = f"{last_user_message} (continue)"
+            prompt = _DEFAULT_TELEPORT_PROMPT
         self._validate_config()
 
         git_info = await self._git.get_info()
 
         yield TeleportCheckingGitEvent()
-        if not await self._git.is_commit_pushed(git_info.commit):
+        await self._git.fetch()
+        commit_pushed, branch_pushed = await asyncio.gather(
+            self._git.is_commit_pushed(git_info.commit, fetch=False),
+            self._git.is_branch_pushed(fetch=False),
+        )
+        if not commit_pushed or not branch_pushed:
             unpushed_count = await self._git.get_unpushed_commit_count()
             response = yield TeleportPushRequiredEvent(
-                unpushed_count=max(1, unpushed_count)
+                unpushed_count=max(1, unpushed_count),
+                branch_not_pushed=not branch_pushed,
             )
             if (
                 not isinstance(response, TeleportPushResponseEvent)
                 or not response.approved
             ):
-                raise ServiceTeleportError("Teleport cancelled: commit not pushed.")
+                raise ServiceTeleportError("Teleport cancelled: changes not pushed.")
 
             yield TeleportPushingEvent()
             await self._push_or_fail()
-
-        github_token = await self._github_auth_provider.get_valid_token()
-
-        if not github_token:
-            handle = await self._github_auth_provider.start_device_flow(
-                open_browser=True
-            )
-            yield TeleportAuthRequiredEvent(
-                user_code=handle.info.user_code,
-                verification_uri=handle.info.verification_uri,
-            )
-            github_token = await self._github_auth_provider.wait_for_token(handle)
-            yield TeleportAuthCompleteEvent()
 
         yield TeleportStartingWorkflowEvent()
 
         execution_id = await self._nuage_client.start_workflow(
             WorkflowParams(
-                prompt=prompt, sandbox=self._build_sandbox(git_info), session=session
+                prompt=prompt,
+                config=WorkflowConfig(
+                    agent=VibeAgent(
+                        vibe_config=self._vibe_config.model_dump()
+                        if self._vibe_config
+                        else None,
+                        session=session,
+                    )
+                ),
+                integrations=WorkflowIntegrations(
+                    github=self._build_github_params(git_info),
+                    chat_assistant=ChatAssistantParams(
+                        create_thread=True,
+                        user_message=lechat_user_message,
+                        project_name=self._nuage_project_name,
+                    ),
+                ),
             )
         )
 
-        yield TeleportSendingGithubTokenEvent()
-        await self._nuage_client.send_github_token(execution_id, github_token)
+        yield TeleportWaitingForGitHubEvent()
+        github_data = await self._nuage_client.get_github_integration(execution_id)
 
-        chat_url = _NUAGE_EXECUTION_URL_TEMPLATE.format(
-            workflow_id=self._nuage_workflow_id, execution_id=execution_id
-        )
-        # chat_url = await nuage.create_le_chat_thread(
-        #     execution_id=execution_id, user_message=prompt
-        # )
+        if not github_data.connected:
+            if github_data.oauth_url:
+                yield TeleportAuthRequiredEvent(oauth_url=github_data.oauth_url)
+            await self._nuage_client.wait_for_github_connection(execution_id)
+            yield TeleportAuthCompleteEvent()
+
+        yield TeleportFetchingUrlEvent()
+        chat_url = await self._nuage_client.get_chat_assistant_url(execution_id)
 
         yield TeleportCompleteEvent(url=chat_url)
 
@@ -181,22 +200,19 @@ class TeleportService:
             raise ServiceTeleportError("Failed to push current branch to remote.")
 
     def _validate_config(self) -> None:
-        # TODO(vibe-nuage): update error message once prod has shared vibe-nuage workers
         if not self._nuage_api_key:
-            raise ServiceTeleportError(
-                "STAGING_MISTRAL_API_KEY not set. "
-                "Set it from https://console.globalaegis.net/ to use teleport."
+            env_var = (
+                self._vibe_config.nuage_api_key_env_var
+                if self._vibe_config
+                else "MISTRAL_API_KEY"
             )
+            raise ServiceTeleportError(f"{env_var} not set.")
 
-    def _build_sandbox(self, git_info: GitRepoInfo) -> VibeNewSandbox:
-        return VibeNewSandbox(
-            config=VibeSandboxConfig(
-                git_repo=GitRepoConfig(
-                    url=git_info.remote_url,
-                    branch=git_info.branch,
-                    commit=git_info.commit,
-                )
-            ),
+    def _build_github_params(self, git_info: GitRepoInfo) -> GitHubParams:
+        return GitHubParams(
+            repo=f"{git_info.owner}/{git_info.repo}",
+            branch=git_info.branch,
+            commit=git_info.commit,
             teleported_diffs=self._compress_diff(git_info.diff or ""),
         )
 
@@ -210,3 +226,11 @@ class TeleportService:
                 "Diff too large to teleport. Please commit and push your changes first."
             )
         return encoded
+
+    def _get_last_user_message(self, session: TeleportSession) -> str | None:
+        for msg in reversed(session.messages):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str) and content:
+                    return content
+        return None

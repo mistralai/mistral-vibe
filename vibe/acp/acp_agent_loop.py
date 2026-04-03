@@ -100,6 +100,7 @@ from vibe.core.config import (
     VibeConfig,
     load_dotenv_values,
 )
+from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.proxy_setup import (
     ProxySetupError,
     parse_proxy_command,
@@ -477,6 +478,11 @@ class VibeAcpAgentLoop(AcpAgent):
                 input=AvailableCommandInput(root=UnstructuredCommandInput(hint="")),
             ),
             AvailableCommand(
+                name="data-retention",
+                description="Show data retention information",
+                input=AvailableCommandInput(root=UnstructuredCommandInput(hint="")),
+            ),
+            AvailableCommand(
                 name="unleanstall",
                 description="Uninstall the Lean 4 agent",
                 input=AvailableCommandInput(root=UnstructuredCommandInput(hint="")),
@@ -540,6 +546,19 @@ class VibeAcpAgentLoop(AcpAgent):
             update=AgentMessageChunk(
                 session_update="agent_message_chunk",
                 content=TextContentBlock(type="text", text=message),
+                message_id=str(uuid4()),
+            ),
+        )
+        return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
+
+    async def _handle_data_retention_command(
+        self, session_id: str, message_id: str
+    ) -> PromptResponse:
+        await self.client.session_update(
+            session_id=session_id,
+            update=AgentMessageChunk(
+                session_update="agent_message_chunk",
+                content=TextContentBlock(type="text", text=DATA_RETENTION_MESSAGE),
                 message_id=str(uuid4()),
             ),
         )
@@ -771,6 +790,11 @@ class VibeAcpAgentLoop(AcpAgent):
 
         if text_prompt.strip().lower().startswith("/leanstall"):
             return await self._handle_leanstall_command(session_id, resolved_message_id)
+
+        if text_prompt.strip().lower().startswith("/data-retention"):
+            return await self._handle_data_retention_command(
+                session_id, resolved_message_id
+            )
 
         async def agent_loop_task() -> None:
             async for update in self._run_agent_loop(

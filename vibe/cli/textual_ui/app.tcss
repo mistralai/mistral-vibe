@@ -118,6 +118,11 @@ TextArea > .text-area--cursor {
         border: solid $mistral_orange;
         border-title-color: $mistral_orange;
     }
+
+    &.border-remote {
+        border: solid $mistral_orange;
+        border-title-color: $mistral_orange;
+    }
 }
 
 #input-body {

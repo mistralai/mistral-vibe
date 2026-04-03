@@ -397,6 +397,12 @@ class ToolStreamEvent(BaseEvent):
     tool_call_id: str
 
 
+class WaitingForInputEvent(BaseEvent):
+    task_id: str
+    label: str | None = None
+    predefined_answers: list[str] | None = None
+
+
 class CompactStartEvent(BaseEvent):
     current_context_tokens: int
     threshold: int

@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 
 from vibe import __version__
-from vibe.core.agent_loop import AgentLoop
+from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import VibeConfig
 from vibe.core.logger import logger
 from vibe.core.output_formatters import create_formatter
+from vibe.core.teleport.types import (
+    TeleportPushRequiredEvent,
+    TeleportPushResponseEvent,
+)
 from vibe.core.types import (
     AssistantEvent,
     ClientMetadata,
@@ -17,6 +21,8 @@ from vibe.core.types import (
     Role,
 )
 from vibe.core.utils import ConversationLimitException
+
+__all__ = ["TeleportError", "run_programmatic"]
 
 _DEFAULT_CLIENT_METADATA = ClientMetadata(name="vibe_programmatic", version=__version__)
 
@@ -30,6 +36,7 @@ def run_programmatic(
     previous_messages: list[LLMMessage] | None = None,
     agent_name: str = BuiltinAgentName.AUTO_APPROVE,
     client_metadata: ClientMetadata = _DEFAULT_CLIENT_METADATA,
+    teleport: bool = False,
 ) -> str | None:
     formatter = create_formatter(output_format)
 
@@ -62,10 +69,23 @@ def run_programmatic(
 
             agent_loop.emit_new_session_telemetry()
 
-            async for event in agent_loop.act(prompt):
-                formatter.on_event(event)
-                if isinstance(event, AssistantEvent) and event.stopped_by_middleware:
-                    raise ConversationLimitException(event.content)
+            if teleport and config.nuage_enabled:
+                gen = agent_loop.teleport_to_vibe_nuage(prompt or None)
+                async for event in gen:
+                    formatter.on_event(event)
+                    if isinstance(event, TeleportPushRequiredEvent):
+                        next_event = await gen.asend(
+                            TeleportPushResponseEvent(approved=True)
+                        )
+                        formatter.on_event(next_event)
+            else:
+                async for event in agent_loop.act(prompt):
+                    formatter.on_event(event)
+                    if (
+                        isinstance(event, AssistantEvent)
+                        and event.stopped_by_middleware
+                    ):
+                        raise ConversationLimitException(event.content)
 
             return formatter.finalize()
         finally:

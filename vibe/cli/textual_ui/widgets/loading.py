@@ -78,6 +78,7 @@ class LoadingWidget(SpinnerMixin, Static):
         self.current_color_index = 0
         self._color_direction = 1
         self.transition_progress = 0
+        self._indicator_widget: Static | None = None
         self._status_widget: Static | None = None
         self.hint_widget: Static | None = None
         self.start_time: float | None = None

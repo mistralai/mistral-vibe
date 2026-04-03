@@ -5,73 +5,73 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from vibe.core.auth import EncryptedPayload
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.nuage import (
-    CreateLeChatThreadInput,
-    GitRepoConfig,
+    ChatAssistantParams,
+    GitHubParams,
     NuageClient,
-    VibeNewSandbox,
-    VibeSandboxConfig,
+    WorkflowIntegrations,
     WorkflowParams,
 )
 
 
 class TestNuageModels:
-    def test_git_repo_config_defaults(self) -> None:
-        config = GitRepoConfig(url="https://github.com/owner/repo.git")
-        assert config.url == "https://github.com/owner/repo.git"
-        assert config.branch is None
-        assert config.commit is None
+    def test_github_params_defaults(self) -> None:
+        params = GitHubParams(repo="owner/repo")
+        assert params.repo == "owner/repo"
+        assert params.branch is None
+        assert params.commit is None
+        assert params.pr_number is None
+        assert params.teleported_diffs is None
 
-    def test_git_repo_config_with_values(self) -> None:
-        config = GitRepoConfig(
-            url="https://github.com/owner/repo.git", branch="main", commit="abc123"
+    def test_github_params_with_values(self) -> None:
+        params = GitHubParams(
+            repo="owner/repo",
+            branch="main",
+            commit="abc123",
+            pr_number=42,
+            teleported_diffs=b"base64data",
         )
-        assert config.branch == "main"
-        assert config.commit == "abc123"
+        assert params.repo == "owner/repo"
+        assert params.branch == "main"
+        assert params.commit == "abc123"
+        assert params.pr_number == 42
+        assert params.teleported_diffs == b"base64data"
 
-    def test_vibe_sandbox_config_defaults(self) -> None:
-        config = VibeSandboxConfig()
-        assert config.git_repo is None
+    def test_chat_assistant_params(self) -> None:
+        params = ChatAssistantParams(
+            user_message="test message", project_name="test-project"
+        )
+        assert params.user_message == "test message"
+        assert params.project_name == "test-project"
 
-    def test_vibe_new_sandbox_defaults(self) -> None:
-        sandbox = VibeNewSandbox()
-        assert sandbox.type == "new"
-        assert sandbox.config.git_repo is None
-        assert sandbox.teleported_diffs is None
+    def test_workflow_integrations(self) -> None:
+        integrations = WorkflowIntegrations(
+            github=GitHubParams(repo="owner/repo"),
+            chat_assistant=ChatAssistantParams(user_message="test"),
+        )
+        assert integrations.github is not None
+        assert integrations.chat_assistant is not None
 
     def test_workflow_params_serialization(self) -> None:
         params = WorkflowParams(
             prompt="test prompt",
-            sandbox=VibeNewSandbox(
-                config=VibeSandboxConfig(
-                    git_repo=GitRepoConfig(
-                        url="https://github.com/owner/repo.git",
-                        branch="main",
-                        commit="abc123",
-                    )
+            integrations=WorkflowIntegrations(
+                github=GitHubParams(
+                    repo="owner/repo",
+                    branch="main",
+                    commit="abc123",
+                    pr_number=42,
+                    teleported_diffs=b"base64data",
                 ),
-                teleported_diffs=b"base64data",
+                chat_assistant=ChatAssistantParams(user_message="test"),
             ),
         )
         data = params.model_dump()
         assert data["prompt"] == "test prompt"
-        assert data["sandbox"]["type"] == "new"
-        assert data["sandbox"]["config"]["git_repo"]["url"] == (
-            "https://github.com/owner/repo.git"
-        )
-        assert data["sandbox"]["teleported_diffs"] == b"base64data"
-
-    def test_create_le_chat_thread_input(self) -> None:
-        input_data = CreateLeChatThreadInput(
-            encrypted_api_key={"key": "value"},
-            user_message="test message",
-            project_name="test-project",
-        )
-        assert input_data.encrypted_api_key == {"key": "value"}
-        assert input_data.user_message == "test message"
-        assert input_data.project_name == "test-project"
+        assert data["integrations"]["github"]["repo"] == "owner/repo"
+        assert data["integrations"]["github"]["pr_number"] == 42
+        assert data["integrations"]["github"]["teleported_diffs"] == b"base64data"
 
 
 class TestNuageClientContextManager:
@@ -116,7 +116,7 @@ class TestNuageClientStartWorkflow:
         mock_response.json.return_value = {"execution_id": "exec-123"}
         mock_client.post = AsyncMock(return_value=mock_response)
 
-        params = WorkflowParams(prompt="test", sandbox=VibeNewSandbox())
+        params = WorkflowParams(prompt="test", integrations=WorkflowIntegrations())
         execution_id = await nuage.start_workflow(params)
 
         assert execution_id == "exec-123"
@@ -133,25 +133,12 @@ class TestNuageClientStartWorkflow:
         mock_response.text = "Internal Server Error"
         mock_client.post = AsyncMock(return_value=mock_response)
 
-        params = WorkflowParams(prompt="test", sandbox=VibeNewSandbox())
+        params = WorkflowParams(prompt="test", integrations=WorkflowIntegrations())
         with pytest.raises(ServiceTeleportError, match="Nuage workflow trigger failed"):
             await nuage.start_workflow(params)
 
-    @pytest.mark.asyncio
-    async def test_start_workflow_unauthorized_hint(
-        self, nuage: NuageClient, mock_client: MagicMock
-    ) -> None:
-        mock_response = MagicMock()
-        mock_response.is_success = False
-        mock_response.text = "Unauthorized"
-        mock_client.post = AsyncMock(return_value=mock_response)
 
-        params = WorkflowParams(prompt="test", sandbox=VibeNewSandbox())
-        with pytest.raises(ServiceTeleportError, match="STAGING_MISTRAL_API_KEY"):
-            await nuage.start_workflow(params)
-
-
-class TestNuageClientSendGithubToken:
+class TestNuageClientGetGitHubIntegration:
     @pytest.fixture
     def mock_client(self) -> MagicMock:
         return MagicMock(spec=httpx.AsyncClient)
@@ -163,48 +150,43 @@ class TestNuageClientSendGithubToken:
         )
 
     @pytest.mark.asyncio
-    async def test_send_github_token_success(
-        self,
-        nuage: NuageClient,
-        mock_client: MagicMock,
-        monkeypatch: pytest.MonkeyPatch,
+    async def test_get_github_integration_connected(
+        self, nuage: NuageClient, mock_client: MagicMock
     ) -> None:
-        query_response = MagicMock()
-        query_response.is_success = True
-        query_response.json.return_value = {
-            "result": {
-                "public_key": (
-                    "-----BEGIN PUBLIC KEY-----\n"
-                    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn/"
-                    "ygWyf8TFXQNZ0XsLOqXB1Mi2+bKPFv1WfhECTxJ3c6SXl0p1sGyWTFxRV8u/"
-                    "bKqYZ0E6VZ6YRTRPFiGq0kkONjVBFxOQ8Y0jeT0d9e0Y3E3MWDL8tQ0Nz9v8"
-                    "5Y7gC8F1m/dEbBwPjCJQV0Dg0z3gZDO8RCG0GrBoLO0b+NNqL8FXPPDXQ1l4"
-                    "FGnYM0gZ1rCU7Y/zTN1wI4sCQ0GJQPDA1hWB8KRJl5x0ZDXE3rRwT1E8c+Fn"
-                    "ZFV1nN0C6zxF7GpVY3FVWXS4PA0FH+8C1+TnYgBL7xS0o+LF6PgjGT5F3CXD"
-                    "BZmYSxKL+EsVVGT5EuYbJE9TxVwIDAQAB\n"
-                    "-----END PUBLIC KEY-----"
-                )
-            }
+        mock_response = MagicMock()
+        mock_response.is_success = True
+        mock_response.json.return_value = {
+            "result": {"status": "connected", "oauth_url": None, "error": None}
         }
+        mock_client.post = AsyncMock(return_value=mock_response)
 
-        signal_response = MagicMock()
-        signal_response.is_success = True
+        result = await nuage.get_github_integration("exec-123")
 
-        mock_client.post = AsyncMock(side_effect=[query_response, signal_response])
-
-        encrypted = EncryptedPayload(
-            encrypted_key="enc_key", nonce="nonce", ciphertext="cipher"
-        )
-        monkeypatch.setattr(
-            "vibe.core.teleport.nuage.encrypt", lambda _token, _key: encrypted
-        )
-
-        await nuage.send_github_token("exec-123", "ghp_token")
-
-        assert mock_client.post.call_count == 2
+        assert result.connected is True
+        assert result.oauth_url is None
 
     @pytest.mark.asyncio
-    async def test_query_public_key_failure(
+    async def test_get_github_integration_waiting_for_oauth(
+        self, nuage: NuageClient, mock_client: MagicMock
+    ) -> None:
+        mock_response = MagicMock()
+        mock_response.is_success = True
+        mock_response.json.return_value = {
+            "result": {
+                "status": "waiting_for_oauth",
+                "oauth_url": "https://github.com/login/oauth",
+                "error": None,
+            }
+        }
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        result = await nuage.get_github_integration("exec-123")
+
+        assert result.connected is False
+        assert result.oauth_url == "https://github.com/login/oauth"
+
+    @pytest.mark.asyncio
+    async def test_get_github_integration_failure(
         self, nuage: NuageClient, mock_client: MagicMock
     ) -> None:
         mock_response = MagicMock()
@@ -212,26 +194,13 @@ class TestNuageClientSendGithubToken:
         mock_response.text = "Not found"
         mock_client.post = AsyncMock(return_value=mock_response)
 
-        with pytest.raises(ServiceTeleportError, match="Failed to get public key"):
-            await nuage._query_public_key("exec-123")
-
-    @pytest.mark.asyncio
-    async def test_signal_encrypted_token_failure(
-        self, nuage: NuageClient, mock_client: MagicMock
-    ) -> None:
-        mock_response = MagicMock()
-        mock_response.is_success = False
-        mock_response.text = "Signal failed"
-        mock_client.post = AsyncMock(return_value=mock_response)
-
-        encrypted = EncryptedPayload(
-            encrypted_key="enc_key", nonce="nonce", ciphertext="cipher"
-        )
-        with pytest.raises(ServiceTeleportError, match="Failed to send GitHub token"):
-            await nuage._signal_encrypted_token("exec-123", encrypted)
+        with pytest.raises(
+            ServiceTeleportError, match="Failed to get GitHub integration"
+        ):
+            await nuage.get_github_integration("exec-123")
 
 
-class TestNuageClientCreateLeChatThread:
+class TestNuageClientGetChatAssistantUrl:
     @pytest.fixture
     def mock_client(self) -> MagicMock:
         return MagicMock(spec=httpx.AsyncClient)
@@ -243,90 +212,32 @@ class TestNuageClientCreateLeChatThread:
         )
 
     @pytest.mark.asyncio
-    async def test_create_le_chat_thread_success(
-        self,
-        nuage: NuageClient,
-        mock_client: MagicMock,
-        monkeypatch: pytest.MonkeyPatch,
+    async def test_get_chat_assistant_url_success(
+        self, nuage: NuageClient, mock_client: MagicMock
     ) -> None:
-        query_response = MagicMock()
-        query_response.is_success = True
-        query_response.json.return_value = {
-            "result": {
-                "public_key": (
-                    "-----BEGIN PUBLIC KEY-----\n"
-                    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn/"
-                    "ygWyf8TFXQNZ0XsLOqXB1Mi2+bKPFv1WfhECTxJ3c6SXl0p1sGyWTFxRV8u/"
-                    "bKqYZ0E6VZ6YRTRPFiGq0kkONjVBFxOQ8Y0jeT0d9e0Y3E3MWDL8tQ0Nz9v8"
-                    "5Y7gC8F1m/dEbBwPjCJQV0Dg0z3gZDO8RCG0GrBoLO0b+NNqL8FXPPDXQ1l4"
-                    "FGnYM0gZ1rCU7Y/zTN1wI4sCQ0GJQPDA1hWB8KRJl5x0ZDXE3rRwT1E8c+Fn"
-                    "ZFV1nN0C6zxF7GpVY3FVWXS4PA0FH+8C1+TnYgBL7xS0o+LF6PgjGT5F3CXD"
-                    "BZmYSxKL+EsVVGT5EuYbJE9TxVwIDAQAB\n"
-                    "-----END PUBLIC KEY-----"
-                )
-            }
-        }
-
-        update_response = MagicMock()
-        update_response.is_success = True
-        update_response.json.return_value = {
+        mock_response = MagicMock()
+        mock_response.is_success = True
+        mock_response.json.return_value = {
             "result": {"chat_url": "https://chat.example.com/thread/123"}
         }
+        mock_client.post = AsyncMock(return_value=mock_response)
 
-        mock_client.post = AsyncMock(side_effect=[query_response, update_response])
-
-        encrypted = EncryptedPayload(
-            encrypted_key="enc_key", nonce="nonce", ciphertext="cipher"
-        )
-        monkeypatch.setattr(
-            "vibe.core.teleport.nuage.encrypt", lambda _token, _key: encrypted
-        )
-
-        url = await nuage.create_le_chat_thread("exec-123", "test message")
+        url = await nuage.get_chat_assistant_url("exec-123")
         assert url == "https://chat.example.com/thread/123"
 
     @pytest.mark.asyncio
-    async def test_create_le_chat_thread_failure(
-        self,
-        nuage: NuageClient,
-        mock_client: MagicMock,
-        monkeypatch: pytest.MonkeyPatch,
+    async def test_get_chat_assistant_url_failure(
+        self, nuage: NuageClient, mock_client: MagicMock
     ) -> None:
-        query_response = MagicMock()
-        query_response.is_success = True
-        query_response.json.return_value = {
-            "result": {
-                "public_key": (
-                    "-----BEGIN PUBLIC KEY-----\n"
-                    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn/"
-                    "ygWyf8TFXQNZ0XsLOqXB1Mi2+bKPFv1WfhECTxJ3c6SXl0p1sGyWTFxRV8u/"
-                    "bKqYZ0E6VZ6YRTRPFiGq0kkONjVBFxOQ8Y0jeT0d9e0Y3E3MWDL8tQ0Nz9v8"
-                    "5Y7gC8F1m/dEbBwPjCJQV0Dg0z3gZDO8RCG0GrBoLO0b+NNqL8FXPPDXQ1l4"
-                    "FGnYM0gZ1rCU7Y/zTN1wI4sCQ0GJQPDA1hWB8KRJl5x0ZDXE3rRwT1E8c+Fn"
-                    "ZFV1nN0C6zxF7GpVY3FVWXS4PA0FH+8C1+TnYgBL7xS0o+LF6PgjGT5F3CXD"
-                    "BZmYSxKL+EsVVGT5EuYbJE9TxVwIDAQAB\n"
-                    "-----END PUBLIC KEY-----"
-                )
-            }
-        }
-
-        update_response = MagicMock()
-        update_response.is_success = False
-        update_response.text = "Failed to create thread"
-
-        mock_client.post = AsyncMock(side_effect=[query_response, update_response])
-
-        encrypted = EncryptedPayload(
-            encrypted_key="enc_key", nonce="nonce", ciphertext="cipher"
-        )
-        monkeypatch.setattr(
-            "vibe.core.teleport.nuage.encrypt", lambda _token, _key: encrypted
-        )
+        mock_response = MagicMock()
+        mock_response.is_success = False
+        mock_response.text = "Failed"
+        mock_client.post = AsyncMock(return_value=mock_response)
 
         with pytest.raises(
-            ServiceTeleportError, match="Failed to create Le Chat thread"
+            ServiceTeleportError, match="Failed to get chat assistant integration"
         ):
-            await nuage.create_le_chat_thread("exec-123", "test message")
+            await nuage.get_chat_assistant_url("exec-123")
 
 
 class TestNuageClientHeaders:

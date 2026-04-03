@@ -161,18 +161,19 @@ class AgentLoop:
         entrypoint_metadata: EntrypointMetadata | None = None,
     ) -> None:
         self._base_config = config
-        self._max_turns = max_turns
-        self._max_price = max_price
-        self._plan_session = PlanSession()
-
+        self.mcp_registry = MCPRegistry()
         self.agent_manager = AgentManager(
             lambda: self._base_config, initial_agent=agent_name
         )
-        self.mcp_registry = MCPRegistry()
         self.tool_manager = ToolManager(
             lambda: self.config, mcp_registry=self.mcp_registry
         )
         self.skill_manager = SkillManager(lambda: self.config)
+        self.message_observer = message_observer
+        self._max_turns = max_turns
+        self._max_price = max_price
+        self._plan_session = PlanSession()
+
         self.format_handler = APIToolFormatHandler()
 
         self.backend_factory = lambda: backend or self._select_backend()
@@ -181,7 +182,6 @@ class AgentLoop:
             backend_getter=lambda: self.backend, config_getter=lambda: self.config
         )
 
-        self.message_observer = message_observer
         self.enable_streaming = enable_streaming
         self.middleware_pipeline = MiddlewarePipeline()
         self._setup_middleware()
@@ -193,6 +193,11 @@ class AgentLoop:
         self.messages = MessageList(initial=[system_message], observer=message_observer)
 
         self.stats = AgentStats()
+        self.approval_callback: ApprovalCallback | None = None
+        self.user_input_callback: UserInputCallback | None = None
+        self.entrypoint_metadata = entrypoint_metadata
+        self.session_id = str(uuid4())
+
         try:
             active_model = config.get_active_model()
             self.stats.input_price_per_million = active_model.input_price
@@ -200,11 +205,6 @@ class AgentLoop:
         except ValueError:
             pass
 
-        self.approval_callback: ApprovalCallback | None = None
-        self.user_input_callback: UserInputCallback | None = None
-
-        self.entrypoint_metadata = entrypoint_metadata
-        self.session_id = str(uuid4())
         self._current_user_message_id: str | None = None
         self._is_user_prompt_call: bool = False
 
@@ -244,6 +244,16 @@ class AgentLoop:
     @property
     def auto_approve(self) -> bool:
         return self.config.auto_approve
+
+    def refresh_config(self) -> None:
+        self._base_config = VibeConfig.load()
+        self.agent_manager.invalidate_config()
+
+    def set_approval_callback(self, callback: ApprovalCallback) -> None:
+        self.approval_callback = callback
+
+    def set_user_input_callback(self, callback: UserInputCallback) -> None:
+        self.user_input_callback = callback
 
     def set_tool_permission(
         self, tool_name: str, permission: ToolPermission, save_permanently: bool = False
@@ -290,10 +300,6 @@ class AgentLoop:
             self.set_tool_permission(
                 tool_name, ToolPermission.ALWAYS, save_permanently=save_permanently
             )
-
-    def refresh_config(self) -> None:
-        self._base_config = VibeConfig.load()
-        self.agent_manager.invalidate_config()
 
     def emit_new_session_telemetry(self) -> None:
         entrypoint = (
@@ -346,7 +352,7 @@ class AgentLoop:
 
     async def act(
         self, msg: str, client_message_id: str | None = None
-    ) -> AsyncGenerator[BaseEvent]:
+    ) -> AsyncGenerator[BaseEvent, None]:
         self._clean_message_history()
         self.rewind_manager.create_checkpoint()
         try:
@@ -376,6 +382,7 @@ class AgentLoop:
                 nuage_workflow_id=self.config.nuage_workflow_id,
                 nuage_api_key=self.config.nuage_api_key,
                 nuage_task_queue=self.config.nuage_task_queue,
+                vibe_config=self._base_config,
             )
         return self._teleport_service
 
@@ -1129,12 +1136,6 @@ class AgentLoop:
     def _reset_session(self) -> None:
         self.session_id = str(uuid4())
         self.session_logger.reset_session(self.session_id)
-
-    def set_approval_callback(self, callback: ApprovalCallback) -> None:
-        self.approval_callback = callback
-
-    def set_user_input_callback(self, callback: UserInputCallback) -> None:
-        self.user_input_callback = callback
 
     async def clear_history(self) -> None:
         await self.session_logger.save_interaction(

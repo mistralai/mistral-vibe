@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,8 +39,6 @@ class TestAvailableCommandsUpdate:
     async def test_available_commands_sent_on_new_session(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
-        import asyncio
-
         await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
 
         await asyncio.sleep(0)
@@ -56,6 +55,27 @@ class TestAvailableCommandsUpdate:
         )
         assert proxy_cmd is not None
         assert "proxy" in proxy_cmd.description.lower()
+
+    @pytest.mark.asyncio
+    async def test_data_retention_command_sent_on_new_session(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+
+        await asyncio.sleep(0)
+
+        updates = _get_fake_client(acp_agent_loop)._session_updates
+        available_commands_updates = [
+            u for u in updates if isinstance(u.update, AvailableCommandsUpdate)
+        ]
+
+        assert len(available_commands_updates) == 1
+        update = available_commands_updates[0].update
+        data_retention_cmd = next(
+            (c for c in update.available_commands if c.name == "data-retention"), None
+        )
+        assert data_retention_cmd is not None
+        assert "data retention" in data_retention_cmd.description.lower()
 
 
 class TestProxySetupCommand:
@@ -363,3 +383,36 @@ class TestProxySetupMessageId:
         assert env_file.exists()
         env_content = env_file.read_text()
         assert "HTTP_PROXY" in env_content
+
+
+class TestDataRetentionCommand:
+    @pytest.mark.asyncio
+    async def test_data_retention_returns_notice(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+
+        _get_fake_client(acp_agent_loop)._session_updates.clear()
+
+        response = await acp_agent_loop.prompt(
+            prompt=[TextContentBlock(type="text", text="/data-retention")],
+            session_id=session_id,
+        )
+
+        assert response.stop_reason == "end_turn"
+        assert response.user_message_id is not None
+
+        updates = _get_fake_client(acp_agent_loop)._session_updates
+        message_updates = [
+            u for u in updates if isinstance(u.update, AgentMessageChunk)
+        ]
+
+        assert len(message_updates) == 1
+        chunk = message_updates[0].update
+        assert chunk.message_id is not None
+        content = chunk.content.text
+        assert "Your Data Helps Improve Mistral AI" in content
+        assert "https://admin.mistral.ai/plateforme/privacy" in content

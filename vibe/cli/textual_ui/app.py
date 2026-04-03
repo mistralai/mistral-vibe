@@ -11,6 +11,7 @@ import subprocess
 import time
 from typing import Any, ClassVar, assert_never, cast
 from weakref import WeakKeyDictionary
+import webbrowser
 
 from pydantic import BaseModel
 from rich import print as rprint
@@ -46,6 +47,7 @@ from vibe.cli.textual_ui.notifications import (
     NotificationPort,
     TextualNotificationAdapter,
 )
+from vibe.cli.textual_ui.remote import RemoteSessionManager, is_progress_event
 from vibe.cli.textual_ui.session_exit import print_session_resume_message
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
@@ -109,20 +111,28 @@ from vibe.core.audio_player.audio_player import AudioPlayer
 from vibe.core.audio_recorder import AudioRecorder
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
+from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.rewind import RewindError
+from vibe.core.session.resume_sessions import (
+    ResumeSessionInfo,
+    list_local_resume_sessions,
+    list_remote_resume_sessions,
+    short_session_id,
+)
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.teleport.types import (
     TeleportAuthCompleteEvent,
     TeleportAuthRequiredEvent,
     TeleportCheckingGitEvent,
     TeleportCompleteEvent,
+    TeleportFetchingUrlEvent,
     TeleportPushingEvent,
     TeleportPushRequiredEvent,
     TeleportPushResponseEvent,
-    TeleportSendingGithubTokenEvent,
     TeleportStartingWorkflowEvent,
+    TeleportWaitingForGitHubEvent,
 )
 from vibe.core.tools.builtins.ask_user_question import (
     AskUserQuestionArgs,
@@ -136,9 +146,11 @@ from vibe.core.types import (
     AgentStats,
     ApprovalResponse,
     Backend,
+    BaseEvent,
     LLMMessage,
     RateLimitError,
     Role,
+    WaitingForInputEvent,
 )
 from vibe.core.utils import (
     CancellationReason,
@@ -302,6 +314,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._agent_running = False
         self._interrupt_requested = False
         self._agent_task: asyncio.Task | None = None
+        self._remote_manager = RemoteSessionManager()
 
         self._loading_widget: LoadingWidget | None = None
         self._pending_approval: asyncio.Future | None = None
@@ -398,6 +411,7 @@ class VibeApp(App):  # noqa: PLR0904
             mount_callback=self._mount_and_scroll,
             get_tools_collapsed=lambda: self._tools_collapsed,
             on_profile_changed=self._on_profile_changed,
+            is_remote=self._remote_manager.is_active,
         )
 
         self._chat_input_container = self.query_one(ChatInputContainer)
@@ -512,11 +526,21 @@ class VibeApp(App):  # noqa: PLR0904
             await self._remove_loading_widget()
 
     async def on_question_app_answered(self, message: QuestionApp.Answered) -> None:
+        if self._remote_manager.has_pending_input and self._remote_manager.is_active:
+            result = AskUserQuestionResult(answers=message.answers, cancelled=False)
+            await self._handle_remote_answer(result)
+            return
+
         if self._pending_question and not self._pending_question.done():
             result = AskUserQuestionResult(answers=message.answers, cancelled=False)
             self._pending_question.set_result(result)
 
     async def on_question_app_cancelled(self, message: QuestionApp.Cancelled) -> None:
+        if self._remote_manager.has_pending_input:
+            self._remote_manager.cancel_pending_input()
+            await self._switch_to_input_app()
+            return
+
         if self._pending_question and not self._pending_question.done():
             result = AskUserQuestionResult(answers=[], cancelled=True)
             self._pending_question.set_result(result)
@@ -553,6 +577,21 @@ class VibeApp(App):  # noqa: PLR0904
             await self._reload_config()
         await self._switch_to_input_app()
         await self._switch_to_model_picker_app()
+
+    async def _ensure_loading_widget(self, status: str = "Generating") -> None:
+        if self._loading_widget and self._loading_widget.parent:
+            self._loading_widget.set_status(status)
+            return
+
+        loading_area = self._cached_loading_area
+        if loading_area is None:
+            try:
+                loading_area = self.query_one("#loading-area-content")
+            except Exception:
+                return
+        loading = LoadingWidget(status=status)
+        self._loading_widget = loading
+        await loading_area.mount(loading)
 
     async def on_config_app_config_closed(
         self, message: ConfigApp.ConfigClosed
@@ -755,6 +794,10 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
     async def _handle_user_message(self, message: str) -> None:
+        if self._remote_manager.is_active:
+            await self._handle_remote_user_message(message)
+            return
+
         # message_index is where the user message will land in agent_loop.messages
         # (checkpoint is created in agent_loop.act())
         message_index = len(self.agent_loop.messages)
@@ -765,9 +808,45 @@ class VibeApp(App):  # noqa: PLR0904
             self._feedback_bar.maybe_show()
 
         if not self._agent_running:
+            await self._remote_manager.stop_stream()
+            await self._remove_loading_widget()
             self._agent_task = asyncio.create_task(
                 self._handle_agent_loop_turn(message)
             )
+
+    async def _handle_remote_user_message(self, message: str) -> None:
+        warning = self._remote_manager.validate_input()
+        if warning:
+            await self._mount_and_scroll(WarningMessage(warning))
+            return
+        try:
+            await self._remote_manager.send_prompt(message)
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to send message: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            return
+        await self._ensure_loading_widget()
+
+    async def _handle_remote_waiting_input(self, event: WaitingForInputEvent) -> None:
+        self._remote_manager.set_pending_input(event)
+        if question_args := self._remote_manager.build_question_args(event):
+            await self._switch_to_question_app(question_args)
+            return
+        await self._switch_to_input_app()
+
+    async def _handle_remote_answer(self, result: AskUserQuestionResult) -> None:
+        if result.cancelled or not result.answers:
+            self._remote_manager.cancel_pending_input()
+            await self._switch_to_input_app()
+            return
+        await self._remote_manager.send_prompt(
+            result.answers[0].answer, require_source=False
+        )
+        await self._switch_to_input_app()
+        await self._ensure_loading_widget()
 
     def _reset_ui_state(self) -> None:
         self._windowing.reset()
@@ -881,13 +960,8 @@ class VibeApp(App):  # noqa: PLR0904
     async def _handle_agent_loop_turn(self, prompt: str) -> None:
         self._agent_running = True
 
-        loading_area = self._cached_loading_area or self.query_one(
-            "#loading-area-content"
-        )
-
-        loading = LoadingWidget()
-        self._loading_widget = loading
-        await loading_area.mount(loading)
+        await self._remove_loading_widget()
+        await self._ensure_loading_widget()
 
         try:
             rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
@@ -895,6 +969,12 @@ class VibeApp(App):  # noqa: PLR0904
             self._narrator_manager.on_turn_start(rendered_prompt)
             async for event in self.agent_loop.act(rendered_prompt):
                 self._narrator_manager.on_turn_event(event)
+                if isinstance(event, WaitingForInputEvent):
+                    await self._remove_loading_widget()
+                    if self._remote_manager.is_active:
+                        await self._handle_remote_waiting_input(event)
+                elif self._loading_widget is None and is_progress_event(event):
+                    await self._ensure_loading_widget()
                 if self.event_handler:
                     await self.event_handler.handle_event(
                         event,
@@ -972,32 +1052,47 @@ class VibeApp(App):  # noqa: PLR0904
         teleport_msg = TeleportMessage()
         await self._mount_and_scroll(teleport_msg)
 
+        if self._remote_manager.is_active:
+            await loading.remove()
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Teleport is not available for remote sessions.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
         try:
             gen = self.agent_loop.teleport_to_vibe_nuage(prompt)
             async for event in gen:
                 match event:
                     case TeleportCheckingGitEvent():
-                        teleport_msg.set_status("Checking git status...")
-                    case TeleportPushRequiredEvent(unpushed_count=count):
+                        teleport_msg.set_status("Preparing workspace...")
+                    case TeleportPushRequiredEvent(
+                        unpushed_count=count, branch_not_pushed=branch_not_pushed
+                    ):
                         await loading.remove()
-                        response = await self._ask_push_approval(count)
+                        response = await self._ask_push_approval(
+                            count, branch_not_pushed
+                        )
                         await loading_area.mount(loading)
                         teleport_msg.set_status("Teleporting...")
-                        await gen.asend(response)
+                        next_event = await gen.asend(response)
+                        if isinstance(next_event, TeleportPushingEvent):
+                            teleport_msg.set_status("Syncing with remote...")
                     case TeleportPushingEvent():
-                        teleport_msg.set_status("Pushing to remote...")
-                    case TeleportAuthRequiredEvent(
-                        user_code=code, verification_uri=uri
-                    ):
-                        teleport_msg.set_status(
-                            f"GitHub auth required. Code: {code} (copied)\nOpen: {uri}"
-                        )
-                    case TeleportAuthCompleteEvent():
-                        teleport_msg.set_status("GitHub authenticated.")
+                        teleport_msg.set_status("Syncing with remote...")
                     case TeleportStartingWorkflowEvent():
-                        teleport_msg.set_status("Starting Nuage workflow...")
-                    case TeleportSendingGithubTokenEvent():
-                        teleport_msg.set_status("Sending encrypted GitHub token...")
+                        teleport_msg.set_status("Teleporting...")
+                    case TeleportWaitingForGitHubEvent():
+                        teleport_msg.set_status("Connecting to GitHub...")
+                    case TeleportAuthRequiredEvent(oauth_url=url):
+                        webbrowser.open(url)
+                        teleport_msg.set_status("Authorizing GitHub...")
+                    case TeleportAuthCompleteEvent():
+                        teleport_msg.set_status("GitHub authorized")
+                    case TeleportFetchingUrlEvent():
+                        teleport_msg.set_status("Finalizing...")
                     case TeleportCompleteEvent(url=url):
                         teleport_msg.set_complete(url)
         except TeleportError as e:
@@ -1009,14 +1104,20 @@ class VibeApp(App):  # noqa: PLR0904
             if loading.parent:
                 await loading.remove()
 
-    async def _ask_push_approval(self, count: int) -> TeleportPushResponseEvent:
-        word = f"commit{'s' if count != 1 else ''}"
+    async def _ask_push_approval(
+        self, count: int, branch_not_pushed: bool
+    ) -> TeleportPushResponseEvent:
+        if branch_not_pushed:
+            question = "Your branch doesn't exist on remote. Push to continue?"
+        else:
+            word = f"commit{'s' if count != 1 else ''}"
+            question = f"You have {count} unpushed {word}. Push to continue?"
         push_label = "Push and continue"
         result = await self._user_input_callback(
             AskUserQuestionArgs(
                 questions=[
                     Question(
-                        question=f"You have {count} unpushed {word}. Push to continue?",
+                        question=question,
                         header="Push",
                         options=[Choice(label=push_label), Choice(label="Cancel")],
                         hide_other=True,
@@ -1105,20 +1206,41 @@ class VibeApp(App):  # noqa: PLR0904
             return
         await self._switch_to_proxy_setup_app()
 
+    async def _show_data_retention(self) -> None:
+        await self._mount_and_scroll(UserCommandMessage(DATA_RETENTION_MESSAGE))
+
     async def _show_session_picker(self) -> None:
-        session_config = self.config.session_logging
-
-        if not session_config.enabled:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    "Session logging is disabled in configuration.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
         cwd = str(Path.cwd())
-        raw_sessions = SessionLoader.list_sessions(session_config, cwd=cwd)
+        local_sessions = (
+            list_local_resume_sessions(self.config, cwd)
+            if self.config.session_logging.enabled
+            else []
+        )
+        remote_list_timeout = max(float(self.config.api_timeout), 10.0)
+        remote_error: str | None = None
+        await self._ensure_loading_widget("Loading sessions")
+        try:
+            remote_sessions = await asyncio.wait_for(
+                list_remote_resume_sessions(self.config), timeout=remote_list_timeout
+            )
+        except TimeoutError:
+            remote_sessions = []
+            remote_error = (
+                "Timed out while listing remote sessions "
+                f"after {remote_list_timeout:.0f}s."
+            )
+        except Exception as e:
+            remote_sessions = []
+            remote_error = f"Failed to list remote sessions: {e}"
+        finally:
+            await self._remove_loading_widget()
+
+        if remote_error is not None:
+            await self._mount_and_scroll(
+                ErrorMessage(remote_error, collapsed=self._tools_collapsed)
+            )
+
+        raw_sessions = [*local_sessions, *remote_sessions]
 
         if not raw_sessions:
             await self._mount_and_scroll(
@@ -1126,16 +1248,20 @@ class VibeApp(App):  # noqa: PLR0904
             )
             return
 
-        sessions = sorted(
-            raw_sessions, key=lambda s: s.get("end_time") or "", reverse=True
-        )
+        sessions = sorted(raw_sessions, key=lambda s: s.end_time or "", reverse=True)
 
         latest_messages = {
-            s["session_id"]: SessionLoader.get_first_user_message(
-                s["session_id"], session_config
+            s.option_id: SessionLoader.get_first_user_message(
+                s.session_id, self.config.session_logging
             )
             for s in sessions
+            if s.source == "local"
         }
+        for session in sessions:
+            if session.source == "remote":
+                latest_messages[session.option_id] = (
+                    f"{session.title or 'Remote workflow'} ({(session.status or 'RUNNING').lower()})"
+                )
 
         picker = SessionPickerApp(sessions=sessions, latest_messages=latest_messages)
         await self._switch_from_input(picker)
@@ -1144,53 +1270,21 @@ class VibeApp(App):  # noqa: PLR0904
         self, event: SessionPickerApp.SessionSelected
     ) -> None:
         await self._switch_to_input_app()
-
-        session_config = self.config.session_logging
-        session_path = SessionLoader.find_session_by_id(
-            event.session_id, session_config
+        session = ResumeSessionInfo(
+            session_id=event.session_id,
+            source=event.source,
+            cwd="",
+            title=None,
+            end_time=None,
         )
-
-        if not session_path:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    f"Session `{event.session_id[:8]}` not found.",
-                    collapsed=self._tools_collapsed,
-                )
-            )
-            return
-
         try:
-            loaded_messages, _ = SessionLoader.load_session(session_path)
-
-            current_system_messages = [
-                msg for msg in self.agent_loop.messages if msg.role == Role.system
-            ]
-            non_system_messages = [
-                msg for msg in loaded_messages if msg.role != Role.system
-            ]
-
-            self.agent_loop.session_id = event.session_id
-            self.agent_loop.session_logger.resume_existing_session(
-                event.session_id, session_path
-            )
-
-            self.agent_loop.messages.reset(
-                current_system_messages + non_system_messages
-            )
-
-            self._reset_ui_state()
-            await self._load_more.hide()
-
-            messages_area = self._cached_messages_area or self.query_one("#messages")
-            await messages_area.remove_children()
-
-            await self._resume_history_from_messages()
-
-            await self._mount_and_scroll(
-                UserCommandMessage(f"Resumed session `{event.session_id[:8]}`")
-            )
-
-        except ValueError as e:
+            if event.source == "local":
+                await self._resume_local_session(session)
+            elif event.source == "remote":
+                await self._resume_remote_session(session)
+            else:
+                raise ValueError(f"Unknown session source: {event.source}")
+        except Exception as e:
             await self._mount_and_scroll(
                 ErrorMessage(
                     f"Failed to load session: {e}", collapsed=self._tools_collapsed
@@ -1203,6 +1297,113 @@ class VibeApp(App):  # noqa: PLR0904
         await self._switch_to_input_app()
 
         await self._mount_and_scroll(UserCommandMessage("Resume cancelled."))
+
+    async def _resume_local_session(self, session: ResumeSessionInfo) -> None:
+        await self._remote_manager.detach()
+        session_config = self.config.session_logging
+        session_path = SessionLoader.find_session_by_id(
+            session.session_id, session_config
+        )
+
+        if not session_path:
+            raise ValueError(
+                f"Session `{short_session_id(session.session_id)}` not found."
+            )
+
+        loaded_messages, _ = SessionLoader.load_session(session_path)
+        if self._chat_input_container:
+            self._chat_input_container.set_custom_border(None)
+
+        current_system_messages = [
+            msg for msg in self.agent_loop.messages if msg.role == Role.system
+        ]
+        non_system_messages = [
+            msg for msg in loaded_messages if msg.role != Role.system
+        ]
+
+        self.agent_loop.session_id = session.session_id
+        self.agent_loop.session_logger.resume_existing_session(
+            session.session_id, session_path
+        )
+        self.agent_loop.messages.reset(current_system_messages + non_system_messages)
+        self._refresh_profile_widgets()
+
+        self._reset_ui_state()
+        await self._load_more.hide()
+
+        messages_area = self._cached_messages_area or self.query_one("#messages")
+        await messages_area.remove_children()
+
+        if self.event_handler:
+            self.event_handler.is_remote = False
+        await self._resume_history_from_messages()
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                f"Resumed session `{short_session_id(session.session_id)}`"
+            )
+        )
+
+    async def _resume_remote_session(self, session: ResumeSessionInfo) -> None:
+        await self._remote_manager.attach(
+            session_id=session.session_id, config=self.config
+        )
+        self._refresh_profile_widgets()
+        if self._chat_input_container:
+            self._chat_input_container.set_custom_border(None)
+
+        self._reset_ui_state()
+        await self._load_more.hide()
+
+        messages_area = self._cached_messages_area or self.query_one("#messages")
+        await messages_area.remove_children()
+
+        if self.event_handler:
+            self.event_handler.is_remote = True
+        self._remote_manager.start_stream(self)
+
+    async def on_remote_event(
+        self, event: BaseEvent, loading_active: bool, loading_widget: Any
+    ) -> None:
+        if self.event_handler:
+            await self.event_handler.handle_event(
+                event, loading_active=loading_active, loading_widget=loading_widget
+            )
+
+    async def on_remote_waiting_input(self, event: WaitingForInputEvent) -> None:
+        await self._handle_remote_waiting_input(event)
+
+    async def on_remote_user_message_cleared_input(self) -> None:
+        await self._switch_to_input_app()
+
+    async def on_remote_stream_error(self, error: str) -> None:
+        await self._mount_and_scroll(
+            ErrorMessage(error, collapsed=self._tools_collapsed)
+        )
+
+    async def on_remote_stream_ended(self, msg_type: str, text: str) -> None:
+        if msg_type == "error":
+            widget = ErrorMessage(text, collapsed=self._tools_collapsed)
+        elif msg_type == "warning":
+            widget = WarningMessage(text)
+        else:
+            widget = UserCommandMessage(text)
+        await self._mount_and_scroll(widget)
+        if self._chat_input_container:
+            self._chat_input_container.set_custom_border("Remote session ended")
+
+    async def on_remote_finalize_streaming(self) -> None:
+        if self.event_handler:
+            await self.event_handler.finalize_streaming()
+
+    async def remove_loading(self) -> None:
+        await self._remove_loading_widget()
+
+    async def ensure_loading(self, status: str = "Generating") -> None:
+        await self._ensure_loading_widget(status)
+
+    @property
+    def loading_widget(self) -> LoadingWidget | None:
+        return self._loading_widget
 
     async def _reload_config(self) -> None:
         try:
@@ -1254,6 +1455,13 @@ class VibeApp(App):  # noqa: PLR0904
     async def _clear_history(self) -> None:
         try:
             self._reset_ui_state()
+            if self._remote_manager.is_active:
+                await self._remote_manager.detach()
+                self._refresh_profile_widgets()
+                if self.event_handler:
+                    self.event_handler.is_remote = False
+            if self._chat_input_container:
+                self._chat_input_container.set_custom_border(None)
             await self.agent_loop.clear_history()
             if self.event_handler:
                 await self.event_handler.finalize_streaming()
@@ -1348,6 +1556,8 @@ class VibeApp(App):  # noqa: PLR0904
                 self.event_handler.current_compact = None
 
     def _get_session_resume_info(self) -> str | None:
+        if self._remote_manager.is_active:
+            return None
         if not self.agent_loop.session_logger.enabled:
             return None
         if not self.agent_loop.session_logger.session_id:
@@ -1358,7 +1568,7 @@ class VibeApp(App):  # noqa: PLR0904
         )
         if session_path is None:
             return None
-        return self.agent_loop.session_logger.session_id[:8]
+        return short_session_id(self.agent_loop.session_logger.session_id)
 
     async def _exit_app(self) -> None:
         await self._narrator_manager.close()
@@ -1918,6 +2128,14 @@ class VibeApp(App):  # noqa: PLR0904
         if self._chat_input_container:
             self._chat_input_container.set_safety(profile.safety)
             self._chat_input_container.set_agent_name(profile.display_name.lower())
+            if self._remote_manager.is_active:
+                session_id = self._remote_manager.session_id
+                self._chat_input_container.set_custom_border(
+                    f"Remote session {short_session_id(session_id, source='remote') if session_id else ''}",
+                    ChatInputContainer.REMOTE_BORDER_CLASS,
+                )
+            else:
+                self._chat_input_container.set_custom_border(None)
 
     async def _cycle_agent(self) -> None:
         new_profile = self.agent_loop.agent_manager.next_agent(
@@ -1965,6 +2183,7 @@ class VibeApp(App):  # noqa: PLR0904
     def action_force_quit(self) -> None:
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
+        self._remote_manager.cancel_stream_task()
 
         self._narrator_manager.cancel()
         self.exit(result=self._get_session_resume_info())

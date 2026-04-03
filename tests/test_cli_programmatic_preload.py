@@ -141,3 +141,38 @@ def test_run_programmatic_ignores_system_messages_in_previous(
         assert spy.emitted[1][1] == "Continue our previous discussion."
         assert spy.emitted[2][1] == "Let's move on to practical examples."
         assert spy.emitted[3][1] == "Understood."
+
+
+def test_run_programmatic_teleport_ignored_when_nuage_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spy = SpyStreamingFormatter()
+    monkeypatch.setattr(
+        "vibe.core.programmatic.create_formatter", lambda *_args, **_kwargs: spy
+    )
+
+    with mock_backend_factory(
+        Backend.MISTRAL,
+        lambda provider, **kwargs: FakeBackend([
+            mock_llm_chunk(content="Normal response.")
+        ]),
+    ):
+        cfg = build_test_vibe_config(
+            system_prompt_id="tests",
+            include_project_context=False,
+            include_prompt_detail=False,
+            include_model_info=False,
+            include_commit_signature=False,
+            nuage_enabled=False,
+        )
+
+        run_programmatic(
+            config=cfg,
+            prompt="Hello",
+            output_format=OutputFormat.STREAMING,
+            teleport=True,
+        )
+
+        roles = [r for r, _ in spy.emitted]
+        assert roles == [Role.system, Role.user, Role.assistant]
+        assert spy.emitted[2][1] == "Normal response."

@@ -11,6 +11,7 @@ class TestCommandRegistry:
         assert registry.get_command_name("/model") == "model"
         assert registry.get_command_name("/clear") == "clear"
         assert registry.get_command_name("/exit") == "exit"
+        assert registry.get_command_name("/data-retention") == "data-retention"
 
     def test_get_command_name_normalizes_input(self) -> None:
         registry = CommandRegistry()
@@ -60,3 +61,9 @@ class TestCommandRegistry:
         cmd = registry.find_command("/resume")
         assert cmd is not None
         assert cmd.handler == "_show_session_picker"
+
+    def test_data_retention_command_registration(self) -> None:
+        registry = CommandRegistry()
+        cmd = registry.find_command("/data-retention")
+        assert cmd is not None
+        assert cmd.handler == "_show_data_retention"

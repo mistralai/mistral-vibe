@@ -5,6 +5,17 @@ import json
 import sys
 from typing import TextIO
 
+from vibe.core.teleport.types import (
+    TeleportAuthCompleteEvent,
+    TeleportAuthRequiredEvent,
+    TeleportCheckingGitEvent,
+    TeleportCompleteEvent,
+    TeleportFetchingUrlEvent,
+    TeleportPushingEvent,
+    TeleportPushRequiredEvent,
+    TeleportStartingWorkflowEvent,
+    TeleportWaitingForGitHubEvent,
+)
 from vibe.core.types import AssistantEvent, BaseEvent, LLMMessage, OutputFormat
 
 
@@ -36,9 +47,31 @@ class TextOutputFormatter(OutputFormatter):
     def on_message_added(self, message: LLMMessage) -> None:
         self._messages.append(message)
 
+    def _print(self, text: str) -> None:
+        print(text, file=self.stream)
+
     def on_event(self, event: BaseEvent) -> None:
-        if isinstance(event, AssistantEvent):
-            self._final_response = event.content
+        match event:
+            case AssistantEvent():
+                self._final_response = event.content
+            case TeleportCheckingGitEvent():
+                self._print("Preparing workspace...")
+            case TeleportPushRequiredEvent(unpushed_count=count):
+                self._print(f"Pushing {count} commit(s)...")
+            case TeleportPushingEvent():
+                self._print("Syncing with remote...")
+            case TeleportStartingWorkflowEvent():
+                self._print("Teleporting...")
+            case TeleportWaitingForGitHubEvent():
+                self._print("Connecting to GitHub...")
+            case TeleportAuthRequiredEvent(oauth_url=url):
+                self._print(f"Open to authorize GitHub: {url}")
+            case TeleportAuthCompleteEvent():
+                self._print("GitHub authorized")
+            case TeleportFetchingUrlEvent():
+                self._print("Finalizing...")
+            case TeleportCompleteEvent():
+                self._final_response = event.url
 
     def finalize(self) -> str | None:
         return self._final_response
