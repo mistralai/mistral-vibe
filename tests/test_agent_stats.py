@@ -4,21 +4,25 @@ from collections.abc import Callable
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_config,
+    make_test_models,
+)
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
-    Backend,
     ModelConfig,
     ProviderConfig,
     SessionLoggingConfig,
     VibeConfig,
 )
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
+from vibe.core.tools.base import ToolPermission
 from vibe.core.types import (
     AgentStats,
     AssistantEvent,
+    Backend,
     CompactEndEvent,
     CompactStartEvent,
     FunctionCall,
@@ -49,6 +53,7 @@ def make_config(
             alias="devstral-latest",
             input_price=input_price,
             output_price=output_price,
+            auto_compact_threshold=auto_compact_threshold,
         ),
         ModelConfig(
             name="devstral-small-latest",
@@ -56,6 +61,7 @@ def make_config(
             alias="devstral-small",
             input_price=0.1,
             output_price=0.3,
+            auto_compact_threshold=auto_compact_threshold,
         ),
         ModelConfig(
             name="strawberry",
@@ -63,6 +69,7 @@ def make_config(
             alias="strawberry",
             input_price=2.5,
             output_price=10.0,
+            auto_compact_threshold=auto_compact_threshold,
         ),
     ]
     providers = [
@@ -81,7 +88,6 @@ def make_config(
     ]
     return build_test_vibe_config(
         session_logging=SessionLoggingConfig(enabled=not disable_logging),
-        auto_compact_threshold=auto_compact_threshold,
         system_prompt_id=system_prompt_id,
         include_project_context=include_project_context,
         include_prompt_detail=include_prompt_detail,
@@ -89,7 +95,7 @@ def make_config(
         models=models,
         providers=providers,
         enabled_tools=enabled_tools or [],
-        tools={"todo": BaseToolConfig(permission=todo_permission)},
+        tools={"todo": {"permission": todo_permission.value}},
     )
 
 
@@ -378,9 +384,7 @@ class TestReloadPreservesMessages:
         assert agent.messages[0].role == Role.system
 
     @pytest.mark.asyncio
-    async def test_reload_notifies_observer_with_all_messages(
-        self, observer_capture
-    ) -> None:
+    async def test_reload_does_not_reemit_to_observer(self, observer_capture) -> None:
         observed, observer = observer_capture
         backend = FakeBackend(mock_llm_chunk(content="Response"))
         agent = build_test_agent_loop(
@@ -394,10 +398,7 @@ class TestReloadPreservesMessages:
 
         await agent.reload_with_initial_messages()
 
-        assert len(observed) == 3
-        assert observed[0].role == Role.system
-        assert observed[1].role == Role.user
-        assert observed[2].role == Role.assistant
+        assert len(observed) == 0
 
 
 class TestCompactStatsHandling:
@@ -510,7 +511,7 @@ class TestAutoCompactIntegration:
             [mock_llm_chunk(content="<summary>")],
             [mock_llm_chunk(content="<final>")],
         ])
-        cfg = build_test_vibe_config(auto_compact_threshold=1)
+        cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
         agent = build_test_agent_loop(
             config=cfg, message_observer=observer, backend=backend
         )
@@ -536,10 +537,31 @@ class TestAutoCompactIntegration:
 
         roles = [r for r, _ in observed]
         assert roles == [Role.system, Role.user, Role.assistant]
-        assert observed[1][1] is not None and "<summary>" in observed[1][1]
+        assert observed[1][1] == "Hello"
 
 
 class TestClearHistoryFullReset:
+    @pytest.mark.asyncio
+    async def test_clear_history_preserves_listeners(self) -> None:
+        backend = FakeBackend(mock_llm_chunk(content="Response"))
+        agent = build_test_agent_loop(config=make_config(), backend=backend)
+
+        listener_calls: list[int] = []
+        agent.stats.add_listener(
+            "context_tokens", lambda s: listener_calls.append(s.context_tokens)
+        )
+
+        async for _ in agent.act("Hello"):
+            pass
+
+        assert agent.stats.context_tokens > 0
+        listener_calls.clear()
+
+        await agent.clear_history()
+
+        assert agent.stats.context_tokens == 0
+        assert any(v == 0 for v in listener_calls)
+
     @pytest.mark.asyncio
     async def test_clear_history_fully_resets_stats(self) -> None:
         backend = FakeBackend(mock_llm_chunk(content="Response"))
@@ -605,6 +627,37 @@ class TestClearHistoryFullReset:
 
         assert agent.session_id != original_session_id
         assert agent.session_id == agent.session_logger.session_id
+
+
+class TestClearHistoryObserverBugfix:
+    @pytest.mark.asyncio
+    async def test_clear_history_observer_sees_new_messages(
+        self, observer_capture
+    ) -> None:
+        """Bug fix: clear_history previously left a stale index, so new messages
+        appended after clearing were never observed.
+        """
+        observed, observer = observer_capture
+        backend = FakeBackend([
+            [mock_llm_chunk(content="First")],
+            [mock_llm_chunk(content="Second")],
+        ])
+        agent = build_test_agent_loop(
+            config=make_config(), message_observer=observer, backend=backend
+        )
+
+        async for _ in agent.act("Hello"):
+            pass
+
+        await agent.clear_history()
+        observed.clear()
+
+        async for _ in agent.act("After clear"):
+            pass
+
+        roles = [msg.role for msg in observed]
+        assert Role.user in roles
+        assert Role.assistant in roles
 
 
 class TestStatsEdgeCases:

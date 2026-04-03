@@ -10,6 +10,7 @@ from typing import ClassVar, NamedTuple, final
 import anyio
 from pydantic import BaseModel, Field
 
+from vibe.core.rewind.manager import FileSnapshot
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -17,8 +18,11 @@ from vibe.core.tools.base import (
     InvokeContext,
     ToolError,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
+from vibe.core.tools.utils import resolve_file_tool_permission
+from vibe.core.types import ToolResultEvent, ToolStreamEvent
+from vibe.core.utils.io import read_safe_async
 
 SEARCH_REPLACE_BLOCK_RE = re.compile(
     r"<{5,} SEARCH\r?\n(.*?)\r?\n?={5,}\r?\n(.*?)\r?\n?>{5,} REPLACE", flags=re.DOTALL
@@ -63,18 +67,18 @@ class SearchReplaceResult(BaseModel):
 
 
 class SearchReplaceConfig(BaseToolConfig):
+    sensitive_patterns: list[str] = Field(
+        default=["**/.env", "**/.env.*"],
+        description="File patterns that trigger ASK even when permission is ALWAYS.",
+    )
     max_content_size: int = 100_000
     create_backup: bool = False
     fuzzy_threshold: float = 0.9
 
 
-class SearchReplaceState(BaseToolState):
-    pass
-
-
 class SearchReplace(
     BaseTool[
-        SearchReplaceArgs, SearchReplaceResult, SearchReplaceConfig, SearchReplaceState
+        SearchReplaceArgs, SearchReplaceResult, SearchReplaceConfig, BaseToolState
     ],
     ToolUIData[SearchReplaceArgs, SearchReplaceResult],
 ):
@@ -85,13 +89,8 @@ class SearchReplace(
     )
 
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-        if not isinstance(event.args, SearchReplaceArgs):
-            return ToolCallDisplay(summary="Invalid arguments")
-
-        args = event.args
+    def format_call_display(cls, args: SearchReplaceArgs) -> ToolCallDisplay:
         blocks = cls._parse_search_replace_blocks(args.content)
-
         return ToolCallDisplay(
             summary=f"Patching {args.file_path} ({len(blocks)} blocks)",
             content=args.content,
@@ -111,6 +110,19 @@ class SearchReplace(
     @classmethod
     def get_status_text(cls) -> str:
         return "Editing files"
+
+    def get_file_snapshot(self, args: SearchReplaceArgs) -> FileSnapshot | None:
+        return self.get_file_snapshot_for_path(args.file_path)
+
+    def resolve_permission(self, args: SearchReplaceArgs) -> PermissionContext | None:
+        return resolve_file_tool_permission(
+            args.file_path,
+            tool_name=self.get_name(),
+            allowlist=self.config.allowlist,
+            denylist=self.config.denylist,
+            config_permission=self.config.permission,
+            sensitive_patterns=self.config.sensitive_patterns,
+        )
 
     @final
     async def run(
@@ -210,12 +222,11 @@ class SearchReplace(
 
     async def _read_file(self, file_path: Path) -> str:
         try:
-            async with await anyio.Path(file_path).open(encoding="utf-8") as f:
-                return await f.read()
-        except UnicodeDecodeError as e:
-            raise ToolError(f"Unicode decode error reading {file_path}: {e}") from e
+            return await read_safe_async(file_path, raise_on_error=True)
         except PermissionError:
             raise ToolError(f"Permission denied reading file: {file_path}")
+        except OSError as e:
+            raise ToolError(f"OS error reading {file_path}: {e}") from e
         except Exception as e:
             raise ToolError(f"Unexpected error reading {file_path}: {e}") from e
 

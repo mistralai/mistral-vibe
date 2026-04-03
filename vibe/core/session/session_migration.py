@@ -6,6 +6,7 @@ from pathlib import Path
 
 from vibe.core.config import SessionLoggingConfig
 from vibe.core.session.session_logger import SessionLogger
+from vibe.core.utils.io import read_safe
 
 
 def migrate_sessions_entrypoint(session_config: SessionLoggingConfig) -> int:
@@ -22,8 +23,7 @@ async def migrate_sessions(session_config: SessionLoggingConfig) -> int:
     session_files = list(Path(save_dir).glob(f"{session_config.session_prefix}_*.json"))
     for session_file in session_files:
         try:
-            with open(session_file) as f:
-                session_data = f.read()
+            session_data = read_safe(session_file)
             session_json = json.loads(session_data)
             metadata = session_json["metadata"]
             messages = session_json["messages"]

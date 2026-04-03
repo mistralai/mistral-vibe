@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import json
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -502,6 +502,61 @@ class TestSessionLoggerSaveInteraction:
         with open(messages_file) as f:
             assert len(f.readlines()) == 2
 
+    @pytest.mark.asyncio
+    async def test_save_interaction_throttles_tmp_cleanup(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="Hello"),
+            LLMMessage(role=Role.assistant, content="Hi there!"),
+        ]
+
+        cleanup_spy = MagicMock()
+        with (
+            patch.object(
+                SessionLogger, "persist_messages", new_callable=AsyncMock
+            ) as persist_messages_mock,
+            patch.object(
+                SessionLogger, "persist_metadata", new_callable=AsyncMock
+            ) as persist_metadata_mock,
+            patch.object(logger, "cleanup_tmp_files", cleanup_spy),
+            patch(
+                "vibe.core.session.session_logger.utc_now",
+                # a bit brittle, but required for the call-count choregraphy...
+                side_effect=[
+                    datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC),
+                    datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC),
+                    datetime(2026, 1, 1, 10, 0, 1, tzinfo=UTC),
+                    datetime(2026, 1, 1, 10, 0, 1, tzinfo=UTC),
+                ],
+            ),
+        ):
+            await logger.save_interaction(
+                messages=messages,
+                stats=AgentStats(steps=1),
+                base_config=mock_vibe_config,
+                tool_manager=mock_tool_manager,
+                agent_profile=mock_agent_profile,
+            )
+            await logger.save_interaction(
+                messages=messages,
+                stats=AgentStats(steps=2),
+                base_config=mock_vibe_config,
+                tool_manager=mock_tool_manager,
+                agent_profile=mock_agent_profile,
+            )
+
+        assert persist_messages_mock.await_count == 2
+        assert persist_metadata_mock.await_count == 2
+        assert cleanup_spy.call_count == 1
+
 
 class TestSessionLoggerResetSession:
     def test_reset_session(self, session_config: SessionLoggingConfig) -> None:
@@ -701,3 +756,27 @@ class TestSessionLoggerCleanupTmpFiles:
 
         assert old_tmp_file.exists()
         assert not another_old_tmp_file.exists()
+
+    def test_maybe_cleanup_tmp_files_throttles_calls(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_id = "test-session-123"
+        logger = SessionLogger(session_config, session_id)
+
+        cleanup_spy = MagicMock()
+        with (
+            patch.object(logger, "cleanup_tmp_files", cleanup_spy),
+            patch(
+                "vibe.core.session.session_logger.utc_now",
+                side_effect=[
+                    datetime(2026, 1, 1, 10, 0, 0, tzinfo=UTC),
+                    datetime(2026, 1, 1, 10, 0, 1, tzinfo=UTC),
+                    datetime(2026, 1, 1, 10, 0, 6, tzinfo=UTC),
+                ],
+            ),
+        ):
+            logger.maybe_cleanup_tmp_files()
+            logger.maybe_cleanup_tmp_files()
+            logger.maybe_cleanup_tmp_files()
+
+        assert cleanup_spy.call_count == 2

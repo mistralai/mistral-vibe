@@ -71,12 +71,14 @@ class NuageClient:
         api_key: str,
         workflow_id: str,
         *,
+        task_queue: str | None = None,
         client: httpx.AsyncClient | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._workflow_id = workflow_id
+        self._task_queue = task_queue
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
@@ -113,7 +115,10 @@ class NuageClient:
         response = await self._http_client.post(
             f"{self._base_url}/v1/workflows/{self._workflow_id}/execute",
             headers=self._headers(),
-            json={"input": params.model_dump(mode="json")},
+            json={
+                "input": params.model_dump(mode="json"),
+                "task_queue": self._task_queue,
+            },
         )
         if not response.is_success:
             error_msg = f"Nuage workflow trigger failed: {response.text}"

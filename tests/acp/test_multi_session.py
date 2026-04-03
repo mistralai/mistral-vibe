@@ -51,7 +51,8 @@ class TestMultiSessionCore:
             )
 
         assert isinstance(exc_info.value, RequestError)
-        assert str(exc_info.value) == "Invalid params"
+        assert exc_info.value.code == -32602
+        assert "Session not found" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_simultaneous_message_processing(

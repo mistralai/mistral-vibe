@@ -9,7 +9,7 @@ from rich import print as rprint
 
 from vibe import __version__
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.paths.config_paths import unlock_config_paths
+from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.trusted_folders import has_trustable_content, trusted_folders_manager
 from vibe.setup.trusted_folders.trust_folder_dialog import (
     TrustDialogQuitException,
@@ -97,8 +97,11 @@ def parse_arguments() -> argparse.Namespace:
     )
     continuation_group.add_argument(
         "--resume",
+        nargs="?",
+        const=True,
+        default=None,
         metavar="SESSION_ID",
-        help="Resume a specific session by its ID (supports partial matching)",
+        help="Resume a session. Without SESSION_ID, shows an interactive picker.",
     )
     return parser.parse_args()
 
@@ -152,7 +155,7 @@ def main() -> None:
     is_interactive = args.prompt is None
     if is_interactive:
         check_and_resolve_trusted_folder()
-    unlock_config_paths()
+    init_harness_files_manager("user", "project")
 
     from vibe.cli.cli import run_cli
 

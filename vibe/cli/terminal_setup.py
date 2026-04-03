@@ -9,11 +9,14 @@ import platform
 import subprocess
 from typing import Any, Literal
 
+from vibe.core.utils.io import read_safe
+
 
 class Terminal(Enum):
     VSCODE = "vscode"
     VSCODE_INSIDERS = "vscode_insiders"
     CURSOR = "cursor"
+    JETBRAINS = "jetbrains"
     ITERM2 = "iterm2"
     WEZTERM = "wezterm"
     GHOSTTY = "ghostty"
@@ -50,6 +53,16 @@ def _detect_vscode_terminal() -> Literal[Terminal.VSCODE, Terminal.VSCODE_INSIDE
     return Terminal.VSCODE
 
 
+def _detect_terminal_from_env() -> Terminal | None:
+    if os.environ.get("WEZTERM_PANE"):
+        return Terminal.WEZTERM
+    if os.environ.get("GHOSTTY_RESOURCES_DIR"):
+        return Terminal.GHOSTTY
+    if "jetbrains" in os.environ.get("TERMINAL_EMULATOR", "").lower():
+        return Terminal.JETBRAINS
+    return None
+
+
 def detect_terminal() -> Terminal:
     term_program = os.environ.get("TERM_PROGRAM", "").lower()
 
@@ -66,12 +79,7 @@ def detect_terminal() -> Terminal:
     if term_program in term_map:
         return term_map[term_program]
 
-    if os.environ.get("WEZTERM_PANE"):
-        return Terminal.WEZTERM
-    if os.environ.get("GHOSTTY_RESOURCES_DIR"):
-        return Terminal.GHOSTTY
-
-    return Terminal.UNKNOWN
+    return _detect_terminal_from_env() or Terminal.UNKNOWN
 
 
 def _get_vscode_keybindings_path(is_stable: bool) -> Path | None:
@@ -183,7 +191,7 @@ def _setup_vscode_like_terminal(terminal: Terminal) -> SetupResult:
 
 def _read_existing_keybindings(keybindings_path: Path) -> list[dict[str, Any]]:
     if keybindings_path.exists():
-        content = keybindings_path.read_text()
+        content = read_safe(keybindings_path)
         return _parse_keybindings(content)
     keybindings_path.parent.mkdir(parents=True, exist_ok=True)
     return []
@@ -303,6 +311,13 @@ def setup_terminal() -> SetupResult:
     match terminal:
         case Terminal.VSCODE | Terminal.VSCODE_INSIDERS | Terminal.CURSOR:
             return _setup_vscode_like_terminal(terminal)
+        case Terminal.JETBRAINS:
+            return SetupResult(
+                success=False,
+                terminal=Terminal.JETBRAINS,
+                message="Jetbrains terminal is not supported.\n"
+                "You can manually configure Shift+Enter to send: \\x1b[13;2u",
+            )
         case Terminal.ITERM2:
             return _setup_iterm2()
         case Terminal.WEZTERM:

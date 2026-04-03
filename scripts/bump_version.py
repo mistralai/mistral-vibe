@@ -79,7 +79,7 @@ def get_current_version() -> str:
     return version_match.group(1)
 
 
-def update_changelog(new_version: str) -> None:
+def update_changelog(current_version: str, new_version: str) -> None:
     changelog_path = Path("CHANGELOG.md")
 
     if not changelog_path.exists():
@@ -104,30 +104,54 @@ def update_changelog(new_version: str) -> None:
     updated_content = content[:insert_position] + new_entry + content[insert_position:]
     changelog_path.write_text(updated_content)
 
-    print(f"Added changelog entry for version {new_version}")
+    # Auto-fill changelog using Vibe in headless mode
+    print("Filling CHANGELOG.md...")
+    prompt = f"""Fill the new CHANGELOG.md section for version {new_version} (the one that was just added).
+
+Rules:
+- Use only commits that touch the `vibe` folder in this repo since version {current_version}. Inspect git history to list relevant changes.
+- Follow the existing file convention: Keep a Changelog format with ### Added, ### Changed, ### Fixed, ### Removed. One bullet per line, concise. Match the tone and style of the entries already in the file.
+- Do not mention commit hashes or PR numbers.
+- Remove any subsection that has no bullets (leave no empty ### Added / ### Changed / etc)."""
+    try:
+        result = subprocess.run(
+            ["vibe", "-p", prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        if result.returncode != 0:
+            raise RuntimeError("Failed to auto-fill CHANGELOG.md")
+    except Exception:
+        print(
+            "Warning: failed to auto-fill CHANGELOG.md, please fill it manually.",
+            file=sys.stderr,
+        )
 
 
-def print_warning(new_version: str) -> None:
-    warning = f"""
-{"=" * 80}
-⚠️  WARNING: CHANGELOG UPDATE REQUIRED ⚠️
-{"=" * 80}
-
-Don't forget to fill in the changelog entry for version {new_version} in CHANGELOG.md! 📝
-
-Also, remember to fill in vibe/whats_new.md if needed (you can leave it blank). 📝
-
-{"=" * 80}
-"""
-    print(warning, file=sys.stderr)
-
-
-def clean_up_whats_new_message() -> None:
+def fill_whats_new_message(new_version: str) -> None:
     whats_new_path = Path("vibe/whats_new.md")
     if not whats_new_path.exists():
         raise FileNotFoundError("whats_new.md not found in current directory")
 
     whats_new_path.write_text("")
+
+    print("Filling whats_new.md...")
+    prompt = f"""Fill vibe/whats_new.md using only the CHANGELOG.md section for version {new_version}.
+
+Rules:
+- Include only the most important user-facing changes: visible CLI/UI behavior, new commands or key bindings, UX improvements. Exclude internal refactors, API-only changes, and dev/tooling updates.
+- If there are no such changes, write nothing (empty file).
+- Otherwise: first line must be "# What's new in v{new_version}" (no extra heading). Then one bullet per item, format: "- **Feature**: short summary" (e.g. - **Interactive resume**: Added a /resume command to choose which session to resume). One line per bullet, concise.
+- Do not copy the full changelog; summarize only what matters to someone reading "what's new" in the app."""
+    try:
+        result = subprocess.run(
+            ["vibe", "-p", prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        if result.returncode != 0:
+            raise RuntimeError("Failed to auto-fill whats_new.md")
+    except Exception:
+        print(
+            "Warning: failed to auto-fill whats_new.md, please fill it manually.",
+            file=sys.stderr,
+        )
 
 
 def main() -> None:
@@ -158,7 +182,7 @@ Examples:
 
         # Calculate new version
         new_version = bump_version(current_version, args.bump_type)
-        print(f"New version: {new_version}")
+        print(f"New version: {new_version}\n")
 
         # Update pyproject.toml
         update_hard_values_files(
@@ -193,15 +217,15 @@ Examples:
             [(f'version="{current_version}"', f'version="{new_version}"')],
         )
 
-        # Update CHANGELOG.md
-        update_changelog(new_version)
+        print()
+        update_changelog(current_version=current_version, new_version=new_version)
 
-        clean_up_whats_new_message()
+        fill_whats_new_message(new_version=new_version)
+        print()
 
         subprocess.run(["uv", "lock"], check=True)
 
         print(f"\nSuccessfully bumped version from {current_version} to {new_version}")
-        print_warning(new_version)
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

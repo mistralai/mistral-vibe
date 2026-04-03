@@ -6,12 +6,11 @@ from enum import StrEnum, auto
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vibe.core.agents import AgentProfile
-from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.utils import VIBE_WARNING_TAG
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
-    from vibe.core.types import AgentStats, LLMMessage
+    from vibe.core.types import AgentStats, MessageList
 
 
 class MiddlewareAction(StrEnum):
@@ -28,7 +27,7 @@ class ResetReason(StrEnum):
 
 @dataclass
 class ConversationContext:
-    messages: list[LLMMessage]
+    messages: MessageList
     stats: AgentStats
     config: VibeConfig
 
@@ -44,8 +43,6 @@ class MiddlewareResult:
 class ConversationMiddleware(Protocol):
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult: ...
 
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult: ...
-
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None: ...
 
 
@@ -59,9 +56,6 @@ class TurnLimitMiddleware:
                 action=MiddlewareAction.STOP,
                 reason=f"Turn limit of {self.max_turns} reached",
             )
-        return MiddlewareResult()
-
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
         return MiddlewareResult()
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
@@ -80,29 +74,21 @@ class PriceLimitMiddleware:
             )
         return MiddlewareResult()
 
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        return MiddlewareResult()
-
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         pass
 
 
 class AutoCompactMiddleware:
-    def __init__(self, threshold: int) -> None:
-        self.threshold = threshold
-
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
-        if context.stats.context_tokens >= self.threshold:
+        threshold = context.config.get_active_model().auto_compact_threshold
+        if threshold > 0 and context.stats.context_tokens >= threshold:
             return MiddlewareResult(
                 action=MiddlewareAction.COMPACT,
                 metadata={
                     "old_tokens": context.stats.context_tokens,
-                    "threshold": self.threshold,
+                    "threshold": threshold,
                 },
             )
-        return MiddlewareResult()
-
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
         return MiddlewareResult()
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
@@ -110,19 +96,16 @@ class AutoCompactMiddleware:
 
 
 class ContextWarningMiddleware:
-    def __init__(
-        self, threshold_percent: float = 0.5, max_context: int | None = None
-    ) -> None:
+    def __init__(self, threshold_percent: float = 0.5) -> None:
         self.threshold_percent = threshold_percent
-        self.max_context = max_context
         self.has_warned = False
 
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
         if self.has_warned:
             return MiddlewareResult()
 
-        max_context = self.max_context
-        if max_context is None:
+        max_context = context.config.get_active_model().auto_compact_threshold
+        if max_context <= 0:
             return MiddlewareResult()
 
         if context.stats.context_tokens >= max_context * self.threshold_percent:
@@ -137,42 +120,78 @@ class ContextWarningMiddleware:
 
         return MiddlewareResult()
 
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        return MiddlewareResult()
-
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
         self.has_warned = False
 
 
-PLAN_AGENT_REMINDER = f"""<{VIBE_WARNING_TAG}>Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received (for example, to make edits). Instead, you should:
-1. Answer the user's query comprehensively
-2. When you're done researching, present your plan by giving the full plan and not doing further tool calls to return input to the user. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.</{VIBE_WARNING_TAG}>"""
+def make_plan_agent_reminder(plan_file_path: str) -> str:
+    return f"""<{VIBE_WARNING_TAG}>Plan mode is active. You MUST NOT make any edits (except to the plan file below), run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
+
+## Plan File Info
+Create or edit your plan at {plan_file_path} using the write_file and search_replace tools.
+Build your plan incrementally by writing to or editing this file.
+This is the only file you are allowed to edit. Make sure to create it early and edit as soon as you internally update your plan.
+
+## Instructions
+1. Research the user's query using read-only tools (grep, read_file, etc.)
+2. If you are unsure about requirements or approach, use the ask_user_question tool to clarify before finalizing your plan
+3. Write your plan to the plan file above
+4. When your plan is complete, call the exit_plan_mode tool to request user approval and switch to implementation mode</{VIBE_WARNING_TAG}>"""
 
 
-class PlanAgentMiddleware:
+PLAN_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Plan mode has ended. If you have a plan ready, you can now start executing it. If not, you can now use editing tools and make changes to the system.</{VIBE_WARNING_TAG}>"""
+
+CHAT_AGENT_REMINDER = f"""<{VIBE_WARNING_TAG}>Chat mode is active. The user wants to have a conversation -- ask questions, get explanations, or discuss code and architecture. You MUST NOT make any edits, run any non-readonly tools, or otherwise make any changes to the system. This supersedes any other instructions you have received. Instead, you should:
+1. Answer the user's questions directly and comprehensively
+2. Explain code, concepts, or architecture as requested
+3. Use read-only tools (grep, read_file) to look up relevant code when needed
+4. Focus on being informative and conversational -- your response IS the deliverable, not a precursor to action</{VIBE_WARNING_TAG}>"""
+
+CHAT_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Chat mode has ended. You can now use editing tools and make changes to the system.</{VIBE_WARNING_TAG}>"""
+
+
+class ReadOnlyAgentMiddleware:
     def __init__(
         self,
         profile_getter: Callable[[], AgentProfile],
-        reminder: str = PLAN_AGENT_REMINDER,
+        agent_name: str,
+        reminder: str | Callable[[], str],
+        exit_message: str,
     ) -> None:
         self._profile_getter = profile_getter
-        self.reminder = reminder
+        self._agent_name = agent_name
+        self._reminder = reminder
+        self.exit_message = exit_message
+        self._was_active = False
 
-    def _is_plan_agent(self) -> bool:
-        return self._profile_getter().name == BuiltinAgentName.PLAN
+    @property
+    def reminder(self) -> str:
+        return self._reminder() if callable(self._reminder) else self._reminder
+
+    def _is_active(self) -> bool:
+        return self._profile_getter().name == self._agent_name
 
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
-        if not self._is_plan_agent():
-            return MiddlewareResult()
-        return MiddlewareResult(
-            action=MiddlewareAction.INJECT_MESSAGE, message=self.reminder
-        )
+        is_active = self._is_active()
+        was_active = self._was_active
 
-    async def after_turn(self, context: ConversationContext) -> MiddlewareResult:
+        if was_active and not is_active:
+            self._was_active = False
+            return MiddlewareResult(
+                action=MiddlewareAction.INJECT_MESSAGE, message=self.exit_message
+            )
+
+        if is_active and not was_active:
+            self._was_active = True
+            return MiddlewareResult(
+                action=MiddlewareAction.INJECT_MESSAGE, message=self.reminder
+            )
+
+        self._was_active = is_active
         return MiddlewareResult()
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
-        pass
+        self._was_active = False
 
 
 class MiddlewarePipeline:
@@ -204,17 +223,5 @@ class MiddlewarePipeline:
             return MiddlewareResult(
                 action=MiddlewareAction.INJECT_MESSAGE, message=combined_message
             )
-
-        return MiddlewareResult()
-
-    async def run_after_turn(self, context: ConversationContext) -> MiddlewareResult:
-        for mw in self.middlewares:
-            result = await mw.after_turn(context)
-            if result.action == MiddlewareAction.INJECT_MESSAGE:
-                raise ValueError(
-                    f"INJECT_MESSAGE not allowed in after_turn (from {type(mw).__name__})"
-                )
-            if result.action in {MiddlewareAction.STOP, MiddlewareAction.COMPACT}:
-                return result
 
         return MiddlewareResult()

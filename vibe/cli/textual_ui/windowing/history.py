@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from weakref import WeakKeyDictionary
 
 from textual.widget import Widget
@@ -13,11 +14,11 @@ from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.core.types import LLMMessage, Role
 
 
-def non_system_history_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
+def non_system_history_messages(messages: Sequence[LLMMessage]) -> list[LLMMessage]:
     return [msg for msg in messages if msg.role != Role.system]
 
 
-def build_tool_call_map(messages: list[LLMMessage]) -> dict[str, str]:
+def build_tool_call_map(messages: Sequence[LLMMessage]) -> dict[str, str]:
     tool_call_map: dict[str, str] = {}
     for msg in messages:
         if msg.role != Role.assistant or not msg.tool_calls:
@@ -29,7 +30,7 @@ def build_tool_call_map(messages: list[LLMMessage]) -> dict[str, str]:
 
 
 def build_history_widgets(
-    batch: list[LLMMessage],
+    batch: Sequence[LLMMessage],
     tool_call_map: dict[str, str],
     *,
     start_index: int,
@@ -38,12 +39,17 @@ def build_history_widgets(
 ) -> list[Widget]:
     widgets: list[Widget] = []
 
-    for offset, msg in enumerate(batch):
-        history_index = start_index + offset
+    for history_index, msg in zip(
+        range(start_index, start_index + len(batch)), batch, strict=True
+    ):
+        if msg.injected:
+            continue
         match msg.role:
             case Role.user:
                 if msg.content:
-                    widget = UserMessage(msg.content)
+                    # history_index is 0-based in non-system messages;
+                    # agent_loop.messages index = history_index + 1 (system msg at 0)
+                    widget = UserMessage(msg.content, message_index=history_index + 1)
                     widgets.append(widget)
                     history_widget_indices[widget] = history_index
 

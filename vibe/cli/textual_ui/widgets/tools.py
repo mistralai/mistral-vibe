@@ -20,7 +20,7 @@ class ToolCallMessage(StatusMessage):
             raise ValueError("Either event or tool_name must be provided")
 
         self._event = event
-        self._tool_name = tool_name or (event.tool_name if event else "unknown")
+        self._tool_name = tool_name or (event.tool_name if event else None) or "unknown"
         self._is_history = event is None
         self._stream_widget: NoMarkupStatic | None = None
 
@@ -44,6 +44,7 @@ class ToolCallMessage(StatusMessage):
             yield self._stream_widget
 
     def on_mount(self) -> None:
+        super().on_mount()
         siblings = list(self.parent.children) if self.parent else []
         idx = siblings.index(self) if self in siblings else -1
         if idx > 0 and isinstance(
@@ -51,12 +52,22 @@ class ToolCallMessage(StatusMessage):
         ):
             self.add_class("no-gap")
 
+    @property
+    def tool_call_id(self) -> str | None:
+        return self._event.tool_call_id if self._event else None
+
     def get_content(self) -> str:
-        if self._event and self._event.tool_class:
+        if self._event:
             adapter = ToolUIDataAdapter(self._event.tool_class)
             display = adapter.get_call_display(self._event)
             return display.summary
         return self._tool_name
+
+    def update_event(self, event: ToolCallEvent) -> None:
+        self._event = event
+        self._tool_name = event.tool_name
+        if self._text_widget:
+            self._text_widget.update(self.get_content())
 
     def set_stream_message(self, message: str) -> None:
         """Update the stream message displayed below the tool call indicator."""
@@ -151,7 +162,13 @@ class ToolResultMessage(Static):
         await self._content_container.remove_children()
 
         if self._event is None:
-            self.display = False
+            if self._content:
+                await self._content_container.mount(
+                    NoMarkupStatic(self._content, classes="tool-result-detail")
+                )
+                self.display = not self.collapsed
+            else:
+                self.display = False
             return
 
         if self._event.error:

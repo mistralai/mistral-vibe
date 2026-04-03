@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from abc import ABC
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 import copy
 from enum import StrEnum, auto
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, overload
 from uuid import uuid4
 
 if TYPE_CHECKING:
     from vibe.core.tools.base import BaseTool
+    from vibe.core.tools.permissions import RequiredPermission
 else:
     BaseTool = Any
 
@@ -22,6 +24,11 @@ from pydantic import (
     computed_field,
     model_validator,
 )
+
+
+class Backend(StrEnum):
+    MISTRAL = auto()
+    GENERIC = auto()
 
 
 class AgentStats(BaseModel):
@@ -60,6 +67,12 @@ class AgentStats(BaseModel):
         self, attr_name: str, listener: Callable[[AgentStats], None]
     ) -> None:
         self._listeners[attr_name] = listener
+
+    @staticmethod
+    def create_fresh(previous: AgentStats) -> AgentStats:
+        fresh = AgentStats()
+        fresh._listeners = previous._listeners.copy()
+        return fresh
 
     @computed_field
     @property
@@ -130,6 +143,18 @@ class SessionMetadata(BaseModel):
     username: str
 
 
+class ClientMetadata(BaseModel):
+    name: str
+    version: str
+
+
+class EntrypointMetadata(BaseModel):
+    agent_entrypoint: Literal["cli", "acp", "programmatic"]
+    agent_version: str
+    client_name: str
+    client_version: str
+
+
 StrToolChoice = Literal["auto", "none", "any", "required"]
 
 
@@ -153,7 +178,7 @@ class ToolCall(BaseModel):
     id: str | None = None
     index: int | None = None
     function: FunctionCall = Field(default_factory=FunctionCall)
-    type: str = "function"
+    type: Literal["function"] = "function"
 
 
 def _content_before(v: Any) -> str:
@@ -190,7 +215,10 @@ class LLMMessage(BaseModel):
 
     role: Role
     content: Content | None = None
+    injected: bool = False
     reasoning_content: Content | None = None
+    reasoning_signature: str | None = None
+    reasoning_message_id: str | None = None
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
@@ -202,14 +230,20 @@ class LLMMessage(BaseModel):
         if isinstance(v, dict):
             v.setdefault("content", "")
             v.setdefault("role", "assistant")
-            if "message_id" not in v and v.get("role") != "tool":
+            if v.get("message_id") is None and v.get("role") != "tool":
                 v["message_id"] = str(uuid4())
+            if v.get("reasoning_message_id") is None and v.get("reasoning_content"):
+                v["reasoning_message_id"] = str(uuid4())
             return v
         role = str(getattr(v, "role", "assistant"))
+        reasoning_content = getattr(v, "reasoning_content", None)
         return {
             "role": role,
             "content": getattr(v, "content", ""),
-            "reasoning_content": getattr(v, "reasoning_content", None),
+            "reasoning_content": reasoning_content,
+            "reasoning_signature": getattr(v, "reasoning_signature", None),
+            "reasoning_message_id": getattr(v, "reasoning_message_id", None)
+            or (str(uuid4()) if reasoning_content else None),
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
@@ -238,6 +272,12 @@ class LLMMessage(BaseModel):
         if not reasoning_content:
             reasoning_content = None
 
+        reasoning_signature = (self.reasoning_signature or "") + (
+            other.reasoning_signature or ""
+        )
+        if not reasoning_signature:
+            reasoning_signature = None
+
         tool_calls_map = OrderedDict[int, ToolCall]()
         for tool_calls in [self.tool_calls or [], other.tool_calls or []]:
             for tc in tool_calls:
@@ -263,6 +303,9 @@ class LLMMessage(BaseModel):
             role=self.role,
             content=content,
             reasoning_content=reasoning_content,
+            reasoning_signature=reasoning_signature,
+            reasoning_message_id=self.reasoning_message_id
+            or other.reasoning_message_id,
             tool_calls=list(tool_calls_map.values()) or None,
             name=self.name,
             tool_call_id=self.tool_call_id,
@@ -286,13 +329,18 @@ class LLMChunk(BaseModel):
     model_config = ConfigDict(frozen=True)
     message: LLMMessage
     usage: LLMUsage | None = None
+    correlation_id: str | None = None
 
     def __add__(self, other: LLMChunk) -> LLMChunk:
         if self.usage is None and other.usage is None:
             new_usage = None
         else:
             new_usage = (self.usage or LLMUsage()) + (other.usage or LLMUsage())
-        return LLMChunk(message=self.message + other.message, usage=new_usage)
+        return LLMChunk(
+            message=self.message + other.message,
+            usage=new_usage,
+            correlation_id=other.correlation_id or self.correlation_id,
+        )
 
 
 class BaseEvent(BaseModel, ABC):
@@ -324,10 +372,11 @@ class ReasoningEvent(BaseEvent):
 
 
 class ToolCallEvent(BaseEvent):
+    tool_call_id: str
     tool_name: str
     tool_class: type[BaseTool]
-    args: BaseModel
-    tool_call_id: str
+    tool_call_index: int | None = None
+    args: BaseModel | None = None
 
 
 class ToolResultEvent(BaseEvent):
@@ -337,6 +386,7 @@ class ToolResultEvent(BaseEvent):
     error: str | None = None
     skipped: bool = False
     skip_reason: str | None = None
+    cancelled: bool = False
     duration: float | None = None
     tool_call_id: str
 
@@ -368,23 +418,100 @@ class CompactEndEvent(BaseEvent):
     tool_call_id: str
 
 
+class AgentProfileChangedEvent(BaseEvent):
+    """Emitted when the active agent profile changes during a turn."""
+
+    agent_name: str
+
+
 class OutputFormat(StrEnum):
     TEXT = auto()
     JSON = auto()
     STREAMING = auto()
 
 
-type AsyncApprovalCallback = Callable[
-    [str, BaseModel, str], Awaitable[tuple[ApprovalResponse, str | None]]
+type ApprovalCallback = Callable[
+    [str, BaseModel, str, list[RequiredPermission] | None],
+    Awaitable[tuple[ApprovalResponse, str | None]],
 ]
 
-type SyncApprovalCallback = Callable[
-    [str, BaseModel, str], tuple[ApprovalResponse, str | None]
-]
-
-type ApprovalCallback = AsyncApprovalCallback | SyncApprovalCallback
 
 type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
+
+type SwitchAgentCallback = Callable[[str], Awaitable[None]]
+
+
+class MessageList(Sequence[LLMMessage]):
+    def __init__(
+        self,
+        initial: list[LLMMessage] | None = None,
+        observer: Callable[[LLMMessage], None] | None = None,
+    ) -> None:
+        self._data: list[LLMMessage] = list(initial) if initial else []
+        self._observer = observer
+        self._reset_hooks: list[Callable[[], None]] = []
+        self._silent = False
+        if self._observer:
+            for msg in self._data:
+                self._observer(msg)
+
+    def _notify(self, msg: LLMMessage) -> None:
+        if not self._silent and self._observer is not None:
+            self._observer(msg)
+
+    def append(self, msg: LLMMessage) -> None:
+        self._data.append(msg)
+        self._notify(msg)
+
+    def insert(self, i: int, msg: LLMMessage) -> None:
+        self._data.insert(i, msg)
+
+    def extend(self, msgs: list[LLMMessage]) -> None:
+        for msg in msgs:
+            self.append(msg)
+
+    def on_reset(self, hook: Callable[[], None]) -> None:
+        """Register a callback that fires whenever the list is reset."""
+        self._reset_hooks.append(hook)
+
+    def reset(self, new: list[LLMMessage]) -> None:
+        """Replace contents silently (never notifies)."""
+        self._data = list(new)
+        for hook in self._reset_hooks:
+            hook()
+
+    def update_system_prompt(self, new: str) -> None:
+        """Update the system prompt in place."""
+        self._data[0] = LLMMessage(role=Role.system, content=new)
+
+    @contextmanager
+    def silent(self) -> Iterator[None]:
+        """Context manager that suppresses notifications."""
+        prev = self._silent
+        self._silent = True
+        try:
+            yield
+        finally:
+            self._silent = prev
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    @overload
+    def __getitem__(self, index: int) -> LLMMessage: ...
+    @overload
+    def __getitem__(self, index: slice) -> list[LLMMessage]: ...
+    def __getitem__(self, index: int | slice) -> LLMMessage | list[LLMMessage]:
+        return self._data[index]
+
+    def __iter__(self) -> Iterator[LLMMessage]:
+        return iter(self._data)
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._data
+
+    def __bool__(self) -> bool:
+        return bool(self._data)
 
 
 class RateLimitError(Exception):

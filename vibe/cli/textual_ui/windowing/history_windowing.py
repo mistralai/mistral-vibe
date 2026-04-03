@@ -5,7 +5,6 @@ from weakref import WeakKeyDictionary
 
 from textual.widget import Widget
 
-from vibe.cli.textual_ui.widgets.messages import WhatsNewMessage
 from vibe.cli.textual_ui.windowing.history import (
     build_tool_call_map,
     split_history_tail,
@@ -29,10 +28,7 @@ class HistoryResumePlan:
 
 
 def should_resume_history(messages_children: list[Widget]) -> bool:
-    allowed_pre_existing_types = (WhatsNewMessage,)
-    return all(
-        isinstance(child, allowed_pre_existing_types) for child in messages_children
-    )
+    return len(messages_children) == 0
 
 
 def create_resume_plan(

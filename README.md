@@ -35,6 +35,7 @@ curl -LsSf https://mistral.ai/vibe/install.sh | bash
 **Windows**
 
 First, install uv
+
 ```bash
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
@@ -65,6 +66,7 @@ pip install mistral-vibe
   - [Interactive Mode](#interactive-mode)
   - [Trust Folder System](#trust-folder-system)
   - [Programmatic Mode](#programmatic-mode)
+- [Voice Mode](#voice-mode)
 - [Slash Commands](#slash-commands)
   - [Built-in Slash Commands](#built-in-slash-commands)
   - [Custom Slash Commands via Skills](#custom-slash-commands-via-skills)
@@ -84,6 +86,7 @@ pip install mistral-vibe
   - [Custom Vibe Home Directory](#custom-vibe-home-directory)
 - [Editors/IDEs](#editorsides)
 - [Resources](#resources)
+- [Data collection & usage](#data-collection--usage)
 - [License](#license)
 
 ## Features
@@ -183,7 +186,6 @@ Most modern terminals should work, but older or minimal terminal emulators may h
    ```
 
 3. If this is your first time running Vibe, it will:
-
    - Create a default configuration file at `~/.vibe/config.toml`
    - Prompt you to enter your API key if it's not already configured
    - Save your API key to `~/.vibe/.env` for future use
@@ -262,6 +264,30 @@ Example:
 vibe --prompt "Analyze the codebase" --max-turns 5 --max-price 1.0 --output json
 ```
 
+## Voice Mode
+
+> [!WARNING]
+> Voice mode is experimental and may change in future releases.
+
+Voice mode allows you to dictate input using your microphone instead of typing.
+
+### Activating Voice Mode
+
+Toggle voice mode on or off with the `/voice` slash command:
+
+```
+> /voice
+```
+
+### Recording Shortcuts
+
+| Shortcut | Action           |
+| -------- | ---------------- |
+| `Ctrl+R` | Start recording  |
+| Any key  | Stop recording   |
+| `Escape` | Cancel recording |
+| `Ctrl+C` | Cancel recording |
+
 ## Slash Commands
 
 Use slash commands for meta-actions and configuration changes during a session.
@@ -328,9 +354,10 @@ This skill helps analyze code quality and suggest improvements.
 
 Vibe discovers skills from multiple locations:
 
-1. **Global skills directory**: `~/.vibe/skills/`
-2. **Local project skills**: `.vibe/skills/` in your project
-3. **Custom paths**: Configured in `config.toml`
+1. **Custom paths**: Configured in `config.toml` via `skill_paths`
+2. **Standard Agent Skills path** (project root, trusted folders only): `.agents/skills/` — [Agent Skills](https://agentskills.io) standard
+3. **Local project skills** (project root, trusted folders only): `.vibe/skills/` in your project
+4. **Global skills directory**: `~/.vibe/skills/`
 
 ```toml
 skill_paths = ["/path/to/custom/skills"]
@@ -569,6 +596,16 @@ To disable auto-updates, add this to your `config.toml`:
 enable_auto_update = false
 ```
 
+### Notification Settings
+
+Vibe can notify you when the agent needs your attention (awaiting approval, asking a question, or task complete). This is useful when you switch to another window while the agent works.
+
+To disable notifications:
+
+```toml
+enable_notifications = false
+```
+
 ### Custom Vibe Home Directory
 
 By default, Vibe stores its configuration in `~/.vibe/`. You can override this by setting the `VIBE_HOME` environment variable:
@@ -594,6 +631,10 @@ Mistral Vibe can be used in text editors and IDEs that support [Agent Client Pro
 
 - [CHANGELOG](CHANGELOG.md) - See what's new in each version
 - [CONTRIBUTING](CONTRIBUTING.md) - Guidelines for feature requests, feedback and bug reports
+
+## Data collection & usage
+
+Use of Vibe is subject to our [Privacy Policy](https://legal.mistral.ai/terms/privacy-policy) and may include the collection and processing of data related to your use of the service, such as usage data, to operate, maintain, and improve Vibe. You can disable telemetry in your `config.toml` by setting `enable_telemetry = false`.
 
 ## License
 

@@ -12,17 +12,16 @@ from acp.schema import (
 
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
-from vibe.core.tools.base import ToolError
+from vibe.core.tools.base import BaseToolState, ToolError
 from vibe.core.tools.builtins.search_replace import (
     SearchReplace as CoreSearchReplaceTool,
     SearchReplaceArgs,
     SearchReplaceResult,
-    SearchReplaceState,
 )
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
 
-class AcpSearchReplaceState(SearchReplaceState, AcpToolState):
+class AcpSearchReplaceState(BaseToolState, AcpToolState):
     file_backup_content: str | None = None
 
 
@@ -73,6 +72,15 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
     @classmethod
     def tool_call_session_update(cls, event: ToolCallEvent) -> SessionUpdate | None:
         args = event.args
+        if args is None:
+            return ToolCallStart(
+                session_update="tool_call",
+                title="search_replace",
+                tool_call_id=event.tool_call_id,
+                kind="edit",
+                content=None,
+                raw_input=None,
+            )
         if not isinstance(args, SearchReplaceArgs):
             return None
 

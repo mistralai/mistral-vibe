@@ -72,6 +72,22 @@ This section is for developers who want to set up the repository for local devel
 
    Pre-commit hooks will automatically run checks before each commit.
 
+### Logging Configuration
+
+Logs are written to `~/.vibe/logs/vibe.log` by default. Control logging via environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LOG_LEVEL` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) | `WARNING` |
+| `LOG_MAX_BYTES` | Max log file size in bytes before rotation | `10485760` (10 MB) |
+| `DEBUG_MODE` | When `true`, forces `DEBUG` level | - |
+
+Example:
+
+```bash
+LOG_LEVEL=DEBUG uv run vibe
+```
+
 ### Running Tests
 
 Run all tests:

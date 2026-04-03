@@ -13,6 +13,7 @@ from textual.widgets import Static
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.core.config import VibeConfig
+from vibe.core.tools.permissions import RequiredPermission
 
 
 class ApprovalApp(Container):
@@ -38,12 +39,15 @@ class ApprovalApp(Container):
 
     class ApprovalGrantedAlwaysTool(Message):
         def __init__(
-            self, tool_name: str, tool_args: BaseModel, save_permanently: bool
+            self,
+            tool_name: str,
+            tool_args: BaseModel,
+            required_permissions: list[RequiredPermission],
         ) -> None:
             super().__init__()
             self.tool_name = tool_name
             self.tool_args = tool_args
-            self.save_permanently = save_permanently
+            self.required_permissions = required_permissions
 
     class ApprovalRejected(Message):
         def __init__(self, tool_name: str, tool_args: BaseModel) -> None:
@@ -52,12 +56,17 @@ class ApprovalApp(Container):
             self.tool_args = tool_args
 
     def __init__(
-        self, tool_name: str, tool_args: BaseModel, config: VibeConfig
+        self,
+        tool_name: str,
+        tool_args: BaseModel,
+        config: VibeConfig,
+        required_permissions: list[RequiredPermission] | None = None,
     ) -> None:
         super().__init__(id="approval-app")
         self.tool_name = tool_name
         self.tool_args = tool_args
         self.config = config
+        self.required_permissions = required_permissions or []
         self.selected_option = 0
         self.content_container: Vertical | None = None
         self.title_widget: Static | None = None
@@ -104,9 +113,15 @@ class ApprovalApp(Container):
         await self.tool_info_container.mount(approval_widget)
 
     def _update_options(self) -> None:
+        if self.required_permissions:
+            labels = ", ".join(rp.label for rp in self.required_permissions)
+            always_text = f"Yes and always allow for this session: {labels}"
+        else:
+            always_text = f"Yes and always allow {self.tool_name} for this session"
+
         options = [
             ("Yes", "yes"),
-            (f"Yes and always allow {self.tool_name} for this session", "yes"),
+            (always_text, "yes"),
             ("No and tell the agent what to do instead", "no"),
         ]
 
@@ -178,7 +193,7 @@ class ApprovalApp(Container):
                     self.ApprovalGrantedAlwaysTool(
                         tool_name=self.tool_name,
                         tool_args=self.tool_args,
-                        save_permanently=False,
+                        required_permissions=self.required_permissions,
                     )
                 )
             case 2:

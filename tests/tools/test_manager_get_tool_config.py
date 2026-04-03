@@ -36,7 +36,7 @@ def test_merges_user_overrides_with_defaults():
     vibe_config = build_test_vibe_config(
         system_prompt_id="tests",
         include_project_context=False,
-        tools={"bash": BaseToolConfig(permission=ToolPermission.ALWAYS)},
+        tools={"bash": {"permission": "always"}},
     )
     manager = ToolManager(lambda: vibe_config)
 
@@ -53,9 +53,9 @@ def test_preserves_tool_specific_fields_from_overrides():
     vibe_config = build_test_vibe_config(
         system_prompt_id="tests",
         include_project_context=False,
-        tools={"bash": BaseToolConfig(permission=ToolPermission.ASK)},
+        tools={"bash": {"permission": "ask"}},
     )
-    vibe_config.tools["bash"].__pydantic_extra__ = {"default_timeout": 600}
+    vibe_config.tools["bash"]["default_timeout"] = 600
     manager = ToolManager(lambda: vibe_config)
 
     config = manager.get_tool_config("bash")
@@ -69,6 +69,23 @@ def test_falls_back_to_base_config_for_unknown_tool(tool_manager):
 
     assert type(config) is BaseToolConfig
     assert config.permission == ToolPermission.ASK
+
+
+def test_partial_override_preserves_tool_defaults():
+    vibe_config = build_test_vibe_config(
+        system_prompt_id="tests",
+        include_project_context=False,
+        tools={"read_file": {"max_read_bytes": 32000}},
+    )
+    manager = ToolManager(lambda: vibe_config)
+
+    config = manager.get_tool_config("read_file")
+
+    assert (
+        config.permission == ToolPermission.ALWAYS
+    )  # ReadFileToolConfig default, not BaseToolConfig.ASK
+    assert config.sensitive_patterns == ["**/.env", "**/.env.*"]  # type: ignore[attr-defined]
+    assert config.max_read_bytes == 32000  # type: ignore[attr-defined]
 
 
 class TestToolManagerFiltering:
@@ -225,6 +242,70 @@ class FileTool(BaseTool[FileToolArgs, FileToolResult, BaseToolConfig, BaseToolSt
         tools = manager.available_tools
         assert "dir_tool" in tools
         assert "file_tool" in tools
+
+
+class TestToolRuntimeAvailability:
+    """Tests for is_available() filtering in ToolManager."""
+
+    def test_unavailable_tool_excluded_from_available_tools(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Tools where is_available() returns False should be excluded."""
+        import sys
+
+        tool_dir = tmp_path / "tools"
+        tool_dir.mkdir()
+        (tool_dir / "conditional_tool.py").write_text("""
+import os
+from vibe.core.tools.base import BaseTool, BaseToolConfig, BaseToolState
+from pydantic import BaseModel
+
+class ConditionalToolArgs(BaseModel):
+    pass
+
+class ConditionalToolResult(BaseModel):
+    pass
+
+class ConditionalTool(BaseTool[ConditionalToolArgs, ConditionalToolResult, BaseToolConfig, BaseToolState]):
+    description = "Tool that requires TEST_VAR"
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return bool(os.getenv("TEST_VAR"))
+
+    async def run(self, args, ctx=None):
+        yield ConditionalToolResult()
+""")
+
+        to_remove = [k for k in sys.modules if "conditional_tool" in k]
+        for k in to_remove:
+            del sys.modules[k]
+
+        monkeypatch.delenv("TEST_VAR", raising=False)
+        vibe_config = build_test_vibe_config(
+            system_prompt_id="tests",
+            include_project_context=False,
+            tool_paths=[tool_dir],
+        )
+        manager = ToolManager(lambda: vibe_config)
+        assert "conditional_tool" not in manager.available_tools
+
+        to_remove = [k for k in sys.modules if "conditional_tool" in k]
+        for k in to_remove:
+            del sys.modules[k]
+
+        monkeypatch.setenv("TEST_VAR", "1")
+        manager2 = ToolManager(lambda: vibe_config)
+        assert "conditional_tool" in manager2.available_tools
+
+    def test_default_is_available_returns_true(self):
+        """Tools without is_available() override should be available."""
+        vibe_config = build_test_vibe_config(
+            system_prompt_id="tests", include_project_context=False
+        )
+        manager = ToolManager(lambda: vibe_config)
+
+        assert "bash" in manager.available_tools
 
 
 class TestToolManagerModuleReuse:

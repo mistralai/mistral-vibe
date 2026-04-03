@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
 
 from rich import print as rprint
+import tomli_w
 
-from vibe.cli.textual_ui.app import run_textual_ui
+from vibe import __version__
+from vibe.cli.textual_ui.app import StartupOptions, run_textual_ui
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
@@ -14,11 +17,14 @@ from vibe.core.config import (
     VibeConfig,
     load_dotenv_values,
 )
-from vibe.core.paths.config_paths import CONFIG_FILE, HISTORY_FILE
+from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.logger import logger
+from vibe.core.paths import HISTORY_FILE
 from vibe.core.programmatic import run_programmatic
 from vibe.core.session.session_loader import SessionLoader
-from vibe.core.types import LLMMessage, OutputFormat, Role
-from vibe.core.utils import ConversationLimitException, logger
+from vibe.core.tracing import setup_tracing
+from vibe.core.types import EntrypointMetadata, LLMMessage, OutputFormat, Role
+from vibe.core.utils import ConversationLimitException
 from vibe.setup.onboarding import run_onboarding
 
 
@@ -58,23 +64,28 @@ def load_config_or_exit() -> VibeConfig:
 
 
 def bootstrap_config_files() -> None:
-    if not CONFIG_FILE.path.exists():
+    mgr = get_harness_files_manager()
+    config_file = mgr.user_config_file
+    if not config_file.exists():
         try:
-            VibeConfig.save_updates(VibeConfig.create_default())
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            with config_file.open("wb") as f:
+                tomli_w.dump(VibeConfig.create_default(), f)
         except Exception as e:
             rprint(f"[yellow]Could not create default config file: {e}[/]")
 
-    if not HISTORY_FILE.path.exists():
+    history_file = HISTORY_FILE.path
+    if not history_file.exists():
         try:
-            HISTORY_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-            HISTORY_FILE.path.write_text("Hello Vibe!\n", "utf-8")
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            history_file.write_text("Hello Vibe!\n", "utf-8")
         except Exception as e:
             rprint(f"[yellow]Could not create history file: {e}[/]")
 
 
 def load_session(
     args: argparse.Namespace, config: VibeConfig
-) -> list[LLMMessage] | None:
+) -> tuple[list[LLMMessage], Path] | None:
     if not args.continue_session and not args.resume:
         return None
 
@@ -94,6 +105,8 @@ def load_session(
                 f"{config.session_logging.save_dir}[/]"
             )
             sys.exit(1)
+    elif args.resume is True:
+        return None
     else:
         session_to_load = SessionLoader.find_session_by_id(
             args.resume, config.session_logging
@@ -107,18 +120,26 @@ def load_session(
 
     try:
         loaded_messages, _ = SessionLoader.load_session(session_to_load)
-        return loaded_messages
+        return loaded_messages, session_to_load
     except Exception as e:
         rprint(f"[red]Failed to load session: {e}[/]")
         sys.exit(1)
 
 
-def _load_messages_from_previous_session(
-    agent_loop: AgentLoop, loaded_messages: list[LLMMessage]
+def _resume_previous_session(
+    agent_loop: AgentLoop, loaded_messages: list[LLMMessage], session_path: Path
 ) -> None:
     non_system_messages = [msg for msg in loaded_messages if msg.role != Role.system]
     agent_loop.messages.extend(non_system_messages)
-    logger.info("Loaded %d messages from previous session", len(non_system_messages))
+
+    _, metadata = SessionLoader.load_session(session_path)
+    session_id = metadata.get("session_id", agent_loop.session_id)
+    agent_loop.session_id = session_id
+    agent_loop.session_logger.resume_existing_session(session_id, session_path)
+
+    logger.info(
+        "Resumed session %s with %d messages", session_id, len(non_system_messages)
+    )
 
 
 def run_cli(args: argparse.Namespace) -> None:
@@ -132,14 +153,16 @@ def run_cli(args: argparse.Namespace) -> None:
     try:
         initial_agent_name = get_initial_agent_name(args)
         config = load_config_or_exit()
+        setup_tracing(config)
 
         if args.enabled_tools:
             config.enabled_tools = args.enabled_tools
 
-        loaded_messages = load_session(args, config)
+        loaded_session = load_session(args, config)
 
         stdin_prompt = get_prompt_from_stdin()
         if args.prompt is not None:
+            config.disabled_tools = [*config.disabled_tools, "ask_user_question"]
             programmatic_prompt = args.prompt or stdin_prompt
             if not programmatic_prompt:
                 print(
@@ -157,7 +180,7 @@ def run_cli(args: argparse.Namespace) -> None:
                     max_turns=args.max_turns,
                     max_price=args.max_price,
                     output_format=output_format,
-                    previous_messages=loaded_messages,
+                    previous_messages=loaded_session[0] if loaded_session else None,
                     agent_name=initial_agent_name,
                 )
                 if final_response:
@@ -171,16 +194,27 @@ def run_cli(args: argparse.Namespace) -> None:
                 sys.exit(1)
         else:
             agent_loop = AgentLoop(
-                config, agent_name=initial_agent_name, enable_streaming=True
+                config,
+                agent_name=initial_agent_name,
+                enable_streaming=True,
+                entrypoint_metadata=EntrypointMetadata(
+                    agent_entrypoint="cli",
+                    agent_version=__version__,
+                    client_name="vibe_cli",
+                    client_version=__version__,
+                ),
             )
 
-            if loaded_messages:
-                _load_messages_from_previous_session(agent_loop, loaded_messages)
+            if loaded_session:
+                _resume_previous_session(agent_loop, *loaded_session)
 
             run_textual_ui(
                 agent_loop=agent_loop,
-                initial_prompt=args.initial_prompt or stdin_prompt,
-                teleport_on_start=args.teleport,
+                startup=StartupOptions(
+                    initial_prompt=args.initial_prompt or stdin_prompt,
+                    teleport_on_start=args.teleport,
+                    show_resume_picker=args.resume is True,
+                ),
             )
 
     except (KeyboardInterrupt, EOFError):

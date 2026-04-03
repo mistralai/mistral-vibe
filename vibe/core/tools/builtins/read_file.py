@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar, NamedTuple, final
 import anyio
 from pydantic import BaseModel, Field
 
+from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -15,11 +16,14 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
+from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils import VIBE_WARNING_TAG
 
 if TYPE_CHECKING:
-    from vibe.core.types import ToolCallEvent, ToolResultEvent
+    from vibe.core.types import ToolResultEvent
 
 
 class _ReadResult(NamedTuple):
@@ -50,17 +54,18 @@ class ReadFileResult(BaseModel):
 
 class ReadFileToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
+    sensitive_patterns: list[str] = Field(
+        default=["**/.env", "**/.env.*"],
+        description="File patterns that trigger ASK even when permission is ALWAYS.",
+    )
 
     max_read_bytes: int = Field(
         default=64_000, description="Maximum total bytes to read from a file in one go."
     )
-    max_state_history: int = Field(
-        default=10, description="Number of recently read files to remember in state."
-    )
 
 
 class ReadFileState(BaseToolState):
-    recently_read_files: list[str] = Field(default_factory=list)
+    injected_agents_md: set[str] = Field(default_factory=set)
 
 
 class ReadFile(
@@ -80,8 +85,6 @@ class ReadFile(
 
         read_result = await self._read_file(args, file_path)
 
-        self._update_state_history(file_path)
-
         yield ReadFileResult(
             path=str(file_path),
             content="".join(read_result.lines),
@@ -89,23 +92,36 @@ class ReadFile(
             was_truncated=read_result.was_truncated,
         )
 
-    def check_allowlist_denylist(self, args: ReadFileArgs) -> ToolPermission | None:
-        import fnmatch
+    def resolve_permission(self, args: ReadFileArgs) -> PermissionContext | None:
+        return resolve_file_tool_permission(
+            args.path,
+            tool_name=self.get_name(),
+            allowlist=self.config.allowlist,
+            denylist=self.config.denylist,
+            config_permission=self.config.permission,
+            sensitive_patterns=self.config.sensitive_patterns,
+        )
 
-        file_path = Path(args.path).expanduser()
-        if not file_path.is_absolute():
-            file_path = Path.cwd() / file_path
-        file_str = str(file_path)
-
-        for pattern in self.config.denylist:
-            if fnmatch.fnmatch(file_str, pattern):
-                return ToolPermission.NEVER
-
-        for pattern in self.config.allowlist:
-            if fnmatch.fnmatch(file_str, pattern):
-                return ToolPermission.ALWAYS
-
-        return None
+    def get_result_extra(self, result: ReadFileResult) -> str | None:
+        try:
+            mgr = get_harness_files_manager()
+        except RuntimeError:
+            return None
+        docs = mgr.find_subdirectory_agents_md(Path(result.path))
+        new_docs = [
+            (d, c)
+            for d, c in docs
+            if str(d.resolve()) not in self.state.injected_agents_md
+        ]
+        if not new_docs:
+            return None
+        for d, _ in new_docs:
+            self.state.injected_agents_md.add(str(d.resolve()))
+        sections = [
+            f"Contents of {d}/AGENTS.md (project instructions for this directory):\n\n{c.strip()}"
+            for d, c in new_docs
+        ]
+        return f"<{VIBE_WARNING_TAG}>\n{'\n\n'.join(sections)}\n</{VIBE_WARNING_TAG}>"
 
     def _prepare_and_validate_path(self, args: ReadFileArgs) -> Path:
         self._validate_inputs(args)
@@ -119,12 +135,25 @@ class ReadFile(
 
     async def _read_file(self, args: ReadFileArgs, file_path: Path) -> _ReadResult:
         try:
+            return await self._do_read_file(args, file_path, encoding="utf-8")
+        except (UnicodeDecodeError, ValueError):
+            return await self._do_read_file(args, file_path, errors="replace")
+
+    async def _do_read_file(
+        self,
+        args: ReadFileArgs,
+        file_path: Path,
+        *,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> _ReadResult:
+        try:
             lines_to_return: list[str] = []
             bytes_read = 0
             was_truncated = False
 
             async with await anyio.Path(file_path).open(
-                encoding="utf-8", errors="ignore"
+                encoding=encoding, errors=errors
             ) as f:
                 line_index = 0
                 async for line in f:
@@ -176,25 +205,16 @@ class ReadFile(
         if resolved_path.is_dir():
             raise ToolError(f"Path is a directory, not a file: {file_path}")
 
-    def _update_state_history(self, file_path: Path) -> None:
-        self.state.recently_read_files.append(str(file_path.resolve()))
-        if len(self.state.recently_read_files) > self.config.max_state_history:
-            self.state.recently_read_files.pop(0)
-
     @classmethod
-    def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
-        if not isinstance(event.args, ReadFileArgs):
-            return ToolCallDisplay(summary="read_file")
-
-        summary = f"Reading {event.args.path}"
-        if event.args.offset > 0 or event.args.limit is not None:
+    def format_call_display(cls, args: ReadFileArgs) -> ToolCallDisplay:
+        summary = f"Reading {args.path}"
+        if args.offset > 0 or args.limit is not None:
             parts = []
-            if event.args.offset > 0:
-                parts.append(f"from line {event.args.offset}")
-            if event.args.limit is not None:
-                parts.append(f"limit {event.args.limit} lines")
+            if args.offset > 0:
+                parts.append(f"from line {args.offset}")
+            if args.limit is not None:
+                parts.append(f"limit {args.limit} lines")
             summary += f" ({', '.join(parts)})"
-
         return ToolCallDisplay(summary=summary)
 
     @classmethod

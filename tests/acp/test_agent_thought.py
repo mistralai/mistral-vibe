@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from acp.schema import AgentThoughtChunk, TextContentBlock
+from acp.schema import AgentMessageChunk, AgentThoughtChunk, TextContentBlock
 import pytest
 
 from tests.acp.conftest import _create_acp_agent
@@ -146,9 +146,16 @@ class TestACPAgentThought:
             for update in fake_client._session_updates
             if isinstance(update.update, AgentThoughtChunk)
         ]
+        agent_updates = [
+            update
+            for update in fake_client._session_updates
+            if isinstance(update.update, AgentMessageChunk)
+        ]
 
         assert len(thought_updates) == 1
         thought_chunk = thought_updates[0].update
-        assert thought_chunk.field_meta is not None
-        assert "messageId" in thought_chunk.field_meta
-        assert thought_chunk.field_meta["messageId"] is not None
+        assert thought_chunk.message_id is not None
+
+        assert len(agent_updates) == 1
+        agent_chunk = agent_updates[0].update
+        assert thought_chunk.message_id != agent_chunk.message_id

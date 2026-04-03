@@ -29,7 +29,7 @@ async def test_ui_clipboard_notification_does_not_crash_on_markup_text(
 ) -> None:
     async with vibe_app.run_test(notifications=True) as pilot:
         await vibe_app.mount(ClipboardSelectionWidget("[/]"))
-        with patch("vibe.cli.clipboard._copy_osc52"):
+        with patch("vibe.cli.clipboard._copy_to_clipboard"):
             copy_selection_to_clipboard(vibe_app)
 
         await pilot.pause(0.1)

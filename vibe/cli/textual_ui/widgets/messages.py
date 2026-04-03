@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from vibe.cli.textual_ui.app import ChatScroll
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -35,11 +38,17 @@ class ExpandingBorder(NonSelectableStatic):
 
 
 class UserMessage(Static):
-    def __init__(self, content: str, pending: bool = False) -> None:
+    def __init__(
+        self, content: str, pending: bool = False, message_index: int | None = None
+    ) -> None:
         super().__init__()
         self.add_class("user-message")
         self._content = content
         self._pending = pending
+        self.message_index: int | None = message_index
+
+    def get_content(self) -> str:
+        return self._content
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="user-message-container"):
@@ -67,6 +76,7 @@ class StreamingMessageBase(Static):
         self._markdown: Markdown | None = None
         self._stream: MarkdownStream | None = None
         self._content_initialized = False
+        self._to_write_buffer = ""
 
     def _get_markdown(self) -> Markdown:
         if self._markdown is None:
@@ -80,23 +90,46 @@ class StreamingMessageBase(Static):
             self._stream = Markdown.get_stream(self._get_markdown())
         return self._stream
 
+    def _is_chat_at_bottom(self) -> bool:
+        try:
+            chat = cast("ChatScroll", self.app.query_one("#chat"))
+            return chat.is_at_bottom
+        except Exception:
+            return True
+
     async def append_content(self, content: str) -> None:
         if not content:
             return
 
         self._content += content
-        if self._should_write_content():
+
+        if not self._should_write_content():
+            return
+
+        if self._is_chat_at_bottom():
+            to_write = self._to_write_buffer + content
+            self._to_write_buffer = ""
             stream = self._ensure_stream()
-            await stream.write(content)
+            await stream.write(to_write)
+            return
+
+        self._to_write_buffer += content
 
     async def write_initial_content(self) -> None:
         if self._content_initialized:
             return
+        self._content_initialized = True
         if self._content and self._should_write_content():
             stream = self._ensure_stream()
             await stream.write(self._content)
+            self._to_write_buffer = ""
 
     async def stop_stream(self) -> None:
+        if self._to_write_buffer and self._should_write_content():
+            stream = self._ensure_stream()
+            await stream.write(self._to_write_buffer)
+        self._to_write_buffer = ""
+
         if self._stream is None:
             return
 
@@ -105,6 +138,9 @@ class StreamingMessageBase(Static):
 
     def _should_write_content(self) -> bool:
         return True
+
+    def is_stripped_content_empty(self) -> bool:
+        return self._content.strip() == ""
 
 
 class AssistantMessage(StreamingMessageBase):
@@ -184,6 +220,7 @@ class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
                 await self._markdown.update("")
                 stream = self._ensure_stream()
                 await stream.write(self._content)
+                self._to_write_buffer = ""
 
 
 class UserCommandMessage(Static):

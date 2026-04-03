@@ -6,7 +6,7 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Input
 
-from vibe.core.paths.global_paths import GLOBAL_ENV_FILE
+from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.setup.onboarding import OnboardingApp
 from vibe.setup.onboarding.screens.api_key import ApiKeyScreen
 
@@ -41,7 +41,6 @@ async def test_ui_gets_through_the_onboarding_successfully() -> None:
 
     async with app.run_test() as pilot:
         await pass_welcome_screen(pilot)
-
         api_screen = app.screen
         input_widget = api_screen.query_one("#key", Input)
         await pilot.press(*api_key_value)

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import fnmatch
 from pathlib import Path
 
+from vibe.core.utils.io import read_safe
+
 DEFAULT_IGNORE_PATTERNS: list[tuple[str, bool]] = [
     (".git/", True),
     ("__pycache__/", True),
@@ -60,6 +62,32 @@ class IgnoreRules:
         self._patterns: list[CompiledPattern] | None = None
         self._root: Path | None = None
 
+    def _compile_default_patterns(self) -> list[CompiledPattern]:
+        patterns: list[CompiledPattern] = []
+        for raw, is_exclude in self._defaults:
+            anchor_root = raw.startswith("/")
+            if anchor_root:
+                raw = raw[1:]
+            stripped = raw.rstrip("/")
+            patterns.append(
+                CompiledPattern(
+                    raw=raw,
+                    stripped=stripped,
+                    is_exclude=is_exclude,
+                    dir_only=raw.endswith("/"),
+                    name_only="/" not in stripped,
+                    anchor_root=anchor_root,
+                )
+            )
+        return patterns
+
+    def get_walk_skip_dir_names(self) -> frozenset[str]:
+        return frozenset(
+            p.stripped
+            for p in self._compile_default_patterns()
+            if p.dir_only and p.name_only and not p.anchor_root
+        )
+
     def ensure_for_root(self, root: Path) -> None:
         resolved_root = root.resolve()
         if self._patterns is None or self._root != resolved_root:
@@ -81,28 +109,11 @@ class IgnoreRules:
         self._root = None
 
     def _build_patterns(self, root: Path) -> list[CompiledPattern]:
-        patterns: list[CompiledPattern] = []
-        for raw, is_exclude in self._defaults:
-            anchor_root = raw.startswith("/")
-            if anchor_root:
-                raw = raw[1:]
-
-            stripped = raw.rstrip("/")
-            patterns.append(
-                CompiledPattern(
-                    raw=raw,
-                    stripped=stripped,
-                    is_exclude=is_exclude,
-                    dir_only=raw.endswith("/"),
-                    name_only="/" not in stripped,
-                    anchor_root=anchor_root,
-                )
-            )
-
+        patterns = self._compile_default_patterns()
         gitignore_path = root / ".gitignore"
         if gitignore_path.exists():
             try:
-                text = gitignore_path.read_text(encoding="utf-8")
+                text = read_safe(gitignore_path)
             except Exception:
                 return patterns
 
@@ -154,3 +165,6 @@ class IgnoreRules:
             return False
 
         return not pattern.dir_only or is_dir
+
+
+WALK_SKIP_DIR_NAMES: frozenset[str] = IgnoreRules().get_walk_skip_dir_names()

@@ -58,7 +58,7 @@ class HistoryManager:
         self._save_history()
         self.reset_navigation()
 
-    def get_previous(self, current_input: str, prefix: str = "") -> str | None:
+    def get_previous(self, current_input: str) -> str | None:
         if not self._entries:
             return None
 
@@ -66,21 +66,19 @@ class HistoryManager:
             self._temp_input = current_input
             self._current_index = len(self._entries)
 
-        for i in range(self._current_index - 1, -1, -1):
-            if self._entries[i].startswith(prefix):
-                self._current_index = i
-                return self._entries[i]
+        if self._current_index <= 0:
+            return None
 
-        return None
+        self._current_index -= 1
+        return self._entries[self._current_index]
 
-    def get_next(self, prefix: str = "") -> str | None:
+    def get_next(self) -> str | None:
         if self._current_index == -1:
             return None
 
-        for i in range(self._current_index + 1, len(self._entries)):
-            if self._entries[i].startswith(prefix):
-                self._current_index = i
-                return self._entries[i]
+        if self._current_index < len(self._entries) - 1:
+            self._current_index += 1
+            return self._entries[self._current_index]
 
         result = self._temp_input
         self.reset_navigation()

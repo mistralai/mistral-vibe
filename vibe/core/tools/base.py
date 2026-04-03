@@ -23,11 +23,22 @@ from typing import (
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from vibe.core.logger import logger
+from vibe.core.rewind.manager import FileSnapshot
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
-    from vibe.core.types import ApprovalCallback, UserInputCallback
+    from vibe.core.skills.manager import SkillManager
+    from vibe.core.tools.mcp_sampling import MCPSamplingHandler
+    from vibe.core.tools.permissions import PermissionContext
+    from vibe.core.types import (
+        ApprovalCallback,
+        EntrypointMetadata,
+        SwitchAgentCallback,
+        UserInputCallback,
+    )
 
 ARGS_COUNT = 4
 
@@ -40,6 +51,12 @@ class InvokeContext:
     approval_callback: ApprovalCallback | None = field(default=None)
     agent_manager: AgentManager | None = field(default=None)
     user_input_callback: UserInputCallback | None = field(default=None)
+    sampling_callback: MCPSamplingHandler | None = field(default=None)
+    session_dir: Path | None = field(default=None)
+    entrypoint_metadata: EntrypointMetadata | None = field(default=None)
+    plan_file_path: Path | None = field(default=None)
+    switch_agent_callback: SwitchAgentCallback | None = field(default=None)
+    skill_manager: SkillManager | None = field(default=None)
 
 
 class ToolError(Exception):
@@ -86,6 +103,7 @@ class BaseToolConfig(BaseModel):
         permission: The permission level required to use the tool.
         allowlist: Patterns that automatically allow tool execution.
         denylist: Patterns that automatically deny tool execution.
+        sensitive_patterns: Patterns that trigger ASK even when permission is ALWAYS.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -93,6 +111,7 @@ class BaseToolConfig(BaseModel):
     permission: ToolPermission = ToolPermission.ASK
     allowlist: list[str] = Field(default_factory=list)
     denylist: list[str] = Field(default_factory=list)
+    sensitive_patterns: list[str] = Field(default_factory=list)
 
 
 class BaseToolState(BaseModel):
@@ -142,7 +161,7 @@ class BaseTool[
             prompt_dir = class_path.parent / "prompts"
             prompt_path = cls.prompt_path or prompt_dir / f"{class_path.stem}.md"
 
-            return prompt_path.read_text("utf-8")
+            return read_safe(prompt_path)
         except (FileNotFoundError, TypeError, OSError):
             pass
 
@@ -317,20 +336,56 @@ class BaseTool[
         return snake_case
 
     @classmethod
+    def is_available(cls) -> bool:
+        return True
+
+    @classmethod
     def create_config_with_permission(
         cls, permission: ToolPermission
     ) -> BaseToolConfig:
         config_class = cls._get_tool_config_class()
         return config_class(permission=permission)
 
-    def check_allowlist_denylist(self, args: ToolArgs) -> ToolPermission | None:
-        """Check if args match allowlist/denylist patterns.
+    def resolve_permission(self, args: ToolArgs) -> PermissionContext | None:
+        """Per-invocation permission override, checked before config-level permission.
 
         Returns:
-            ToolPermission.ALWAYS if allowlisted
-            ToolPermission.NEVER if denylisted
-            None if no match (proceed with normal permission check)
+            PermissionContext with granular required_permissions and a permission
+            level (ALWAYS/NEVER/ASK), or None to fall through to config permission.
 
-        Base implementation returns None. Override in subclasses for specific logic.
+        Override in subclasses for domain-specific rules (e.g. workdir checks).
+        """
+        return None
+
+    def get_file_snapshot(self, args: ToolArgs) -> FileSnapshot | None:
+        """Return a snapshot of the file this tool is about to modify.
+
+        Called before ``run()`` so the checkpoint system can capture
+        the file's state *before* the tool writes to it.
+        Override in tools that modify files on disk.
+        """
+        return None
+
+    @staticmethod
+    def get_file_snapshot_for_path(path: str) -> FileSnapshot:
+        file_path = Path(path).expanduser()
+        if not file_path.is_absolute():
+            file_path = Path.cwd() / file_path
+        file_path = file_path.resolve()
+        try:
+            content: bytes | None = file_path.read_bytes()
+        except FileNotFoundError:
+            content = None
+        except Exception:
+            logger.warning("Failed to read file for tool snapshot: %s", file_path)
+            content = None
+        return FileSnapshot(path=str(file_path), content=content)
+
+    def get_result_extra(self, result: ToolResult) -> str | None:
+        """Optional extra context appended to the result text sent to the LLM.
+
+        Override in subclasses to inject contextual information alongside
+        tool results (e.g. directory-level instructions discovered during
+        file reads).  The default returns ``None`` (no annotation).
         """
         return None

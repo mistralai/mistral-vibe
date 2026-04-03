@@ -14,7 +14,7 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
 )
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIResponse
+from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.update_notifier import UpdateCache
 
 
@@ -52,8 +52,8 @@ class SnapshotTestAppWithPlanUpgradeCTA(SnapshotTestAppWithWhatsNew):
     def __init__(self):
         plan_offer_gateway = FakeWhoAmIGateway(
             WhoAmIResponse(
-                is_pro_plan=False,
-                advertise_pro_plan=True,
+                plan_type=WhoAmIPlanType.API,
+                plan_name="FREE",
                 prompt_switching_to_pro_plan=False,
             )
         )
@@ -65,8 +65,8 @@ class SnapshotTestAppWithSwitchKeyCTA(SnapshotTestAppWithWhatsNew):
     def __init__(self):
         plan_offer_gateway = FakeWhoAmIGateway(
             WhoAmIResponse(
-                is_pro_plan=False,
-                advertise_pro_plan=False,
+                plan_type=WhoAmIPlanType.API,
+                plan_name="FREE",
                 prompt_switching_to_pro_plan=True,
             )
         )
@@ -78,8 +78,8 @@ class SnapshotTestAppWithWhatsNewNoPlanCTA(SnapshotTestAppWithWhatsNew):
     def __init__(self):
         plan_offer_gateway = FakeWhoAmIGateway(
             WhoAmIResponse(
-                is_pro_plan=True,
-                advertise_pro_plan=False,
+                plan_type=WhoAmIPlanType.CHAT,
+                plan_name="INDIVIDUAL",
                 prompt_switching_to_pro_plan=False,
             )
         )

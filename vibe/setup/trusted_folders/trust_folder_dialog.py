@@ -11,7 +11,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.paths.global_paths import TRUSTED_FOLDERS_FILE
+from vibe.core.paths import TRUSTED_FOLDERS_FILE
 
 
 class TrustDialogQuitException(Exception):
@@ -46,14 +46,16 @@ class TrustFolderDialog(CenterMiddle):
 
     def compose(self) -> ComposeResult:
         with CenterMiddle(id="trust-dialog"):
-            yield NoMarkupStatic("⚠ Trust this folder?", id="trust-dialog-title")
+            yield NoMarkupStatic(
+                "⚠ Trust this folder and all its subfolders?", id="trust-dialog-title"
+            )
             yield NoMarkupStatic(
                 str(self.folder_path),
                 id="trust-dialog-path",
                 classes="trust-dialog-path",
             )
             yield NoMarkupStatic(
-                "Files that can modify your Mistral Vibe setup were found here. Do you trust this folder?",
+                "Files that can modify your Mistral Vibe setup were found here. Do you trust this folder and all its subfolders?",
                 id="trust-dialog-message",
                 classes="trust-dialog-message",
             )

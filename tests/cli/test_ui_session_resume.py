@@ -16,7 +16,7 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
 )
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIResponse
+from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     UserMessage,
@@ -165,8 +165,8 @@ async def test_ui_rebuilds_history_when_whats_new_is_shown(
     update_cache_repository = FakeUpdateCacheRepository(update_cache=update_cache)
     plan_offer_gateway = FakeWhoAmIGateway(
         WhoAmIResponse(
-            is_pro_plan=False,
-            advertise_pro_plan=True,
+            plan_type=WhoAmIPlanType.API,
+            plan_name="FREE",
             prompt_switching_to_pro_plan=False,
         )
     )
@@ -193,5 +193,5 @@ async def test_ui_rebuilds_history_when_whats_new_is_shown(
 
     assert message._content == "Hello from the previous session."
     assert whats_new_message is not None
-    assert "after-history" in whats_new_message.classes
-    assert children == [message, assistant_message, whats_new_message]
+    assert whats_new_message.parent is not messages_area
+    assert children == [message, assistant_message]

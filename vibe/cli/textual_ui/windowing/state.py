@@ -60,9 +60,23 @@ class SessionWindowing:
             self._backfill_cursor = 0
             return False
         if visible_indices:
-            backfill_end = min(visible_indices)
+            oldest_widget = min(visible_indices)
+            # _backfill_cursor is the first history index in the loaded window (tail + prepends).
+            # Oldest widgets can start *after* that when the tail begins with injected-only slots
+            # (no widgets). Using min(visible_indices) alone would shrink the backfill prefix into
+            # the already-mounted tail and break load-more batch start_index alignment.
+            if oldest_widget > self._backfill_cursor:
+                prefix = history_messages[self._backfill_cursor : oldest_widget]
+                backfill_end = (
+                    self._backfill_cursor
+                    if prefix and all(m.injected for m in prefix)
+                    else oldest_widget
+                )
+            else:
+                backfill_end = self._backfill_cursor
         else:
             backfill_end = max(len(history_messages) - visible_history_widgets_count, 0)
+        backfill_end = min(backfill_end, len(history_messages))
         self._backfill_messages = history_messages[:backfill_end]
         self._backfill_cursor = len(self._backfill_messages)
         return self._backfill_cursor > 0

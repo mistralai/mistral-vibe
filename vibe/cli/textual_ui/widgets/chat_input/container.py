@@ -17,6 +17,7 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
 )
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
+from vibe.cli.voice_manager.voice_manager_port import VoiceManagerPort
 from vibe.core.agents import AgentSafety
 from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
 
@@ -42,7 +43,9 @@ class ChatInputContainer(Vertical):
         safety: AgentSafety = AgentSafety.NEUTRAL,
         agent_name: str = "",
         skill_entries_getter: Callable[[], list[tuple[str, str]]] | None = None,
+        file_watcher_for_autocomplete_getter: Callable[[], bool] | None = None,
         nuage_enabled: bool = False,
+        voice_manager: VoiceManagerPort | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -51,11 +54,20 @@ class ChatInputContainer(Vertical):
         self._safety = safety
         self._agent_name = agent_name
         self._skill_entries_getter = skill_entries_getter
+        self._file_watcher_for_autocomplete_getter = (
+            file_watcher_for_autocomplete_getter
+        )
         self._nuage_enabled = nuage_enabled
+        self._voice_manager = voice_manager
 
         self._completion_manager = MultiCompletionManager([
             SlashCommandController(CommandCompleter(self._get_slash_entries), self),
-            PathCompletionController(PathCompleter(), self),
+            PathCompletionController(
+                PathCompleter(
+                    watcher_enabled_getter=self._file_watcher_for_autocomplete_getter
+                ),
+                self,
+            ),
         ])
         self._completion_popup: CompletionPopup | None = None
         self._body: ChatInputBody | None = None
@@ -81,6 +93,7 @@ class ChatInputContainer(Vertical):
                 history_file=self._history_file,
                 id="input-body",
                 nuage_enabled=self._nuage_enabled,
+                voice_manager=self._voice_manager,
             )
 
             yield self._body
@@ -170,6 +183,15 @@ class ChatInputContainer(Vertical):
     def on_chat_input_body_submitted(self, event: ChatInputBody.Submitted) -> None:
         event.stop()
         self.post_message(self.Submitted(event.value))
+
+    @property
+    def switching_mode(self) -> bool:
+        return self._body.switching_mode if self._body else False
+
+    @switching_mode.setter
+    def switching_mode(self, value: bool) -> None:
+        if self._body:
+            self._body.switching_mode = value
 
     def set_safety(self, safety: AgentSafety) -> None:
         self._safety = safety

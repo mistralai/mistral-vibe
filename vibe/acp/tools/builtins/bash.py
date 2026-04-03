@@ -13,10 +13,10 @@ from acp.schema import (
 
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
+from vibe.core.logger import logger
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.bash import Bash as CoreBashTool, BashArgs, BashResult
 from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
-from vibe.core.utils import logger
 
 
 class AcpBashState(BaseToolState, AcpToolState):
@@ -110,7 +110,16 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
             raise self._build_timeout_error(command, timeout)
 
     @classmethod
-    def tool_call_session_update(cls, event: ToolCallEvent) -> ToolCallStart:
+    def tool_call_session_update(cls, event: ToolCallEvent) -> ToolCallStart | None:
+        if event.args is None:
+            return ToolCallStart(
+                session_update="tool_call",
+                title="bash",
+                tool_call_id=event.tool_call_id,
+                kind="execute",
+                content=None,
+                raw_input=None,
+            )
         if not isinstance(event.args, BashArgs):
             raise ValueError(f"Unexpected tool args: {event.args}")
 
