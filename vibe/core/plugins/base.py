@@ -103,6 +103,7 @@ class VibePlugin(abc.ABC):
     def metadata(cls) -> PluginMetadata:
         """Return static metadata for this plugin."""
 
+    @abc.abstractmethod
     async def setup(self, context: PluginContext) -> None:
         """Called once after the plugin is instantiated and the config is ready.
 
@@ -110,6 +111,7 @@ class VibePlugin(abc.ABC):
         pre-compute any state that should persist across turns.
         """
 
+    @abc.abstractmethod
     async def teardown(self) -> None:
         """Called when Vibe is shutting down.
 
@@ -144,21 +146,16 @@ class ToolEventPlugin(VibePlugin, abc.ABC):
 
     # File-access tools whose ``path`` / ``file_path`` argument tells us
     # which file the agent is looking at.  Subclasses may extend this set.
-    FILE_ACCESS_TOOLS: frozenset[str] = frozenset(
-        {
-            "read_file",
-            "write_file",
-            "search_replace",
-            "grep",
-            "ls",
-        }
-    )
+    FILE_ACCESS_TOOLS: frozenset[str] = frozenset({
+        "read_file",
+        "write_file",
+        "search_replace",
+        "grep",
+        "ls",
+    })
 
     async def on_tool_call(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any],
-        context: PluginContext,
+        self, tool_name: str, arguments: dict[str, Any], context: PluginContext
     ) -> None:
         """Called just *before* a tool is executed.
 

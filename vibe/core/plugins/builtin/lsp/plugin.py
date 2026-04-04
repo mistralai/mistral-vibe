@@ -100,7 +100,7 @@ class LspPlugin(ToolEventPlugin):
         workdir = context.workdir
 
         # 1. Detect languages present in the project
-        self._detected_languages = detect_languages_in_dir(workdir)
+        self._detected_languages = detect_languages_in_dir(str(workdir))
         logger.info(
             "LSP plugin: detected languages in %s: %s",
             workdir,
@@ -125,7 +125,7 @@ class LspPlugin(ToolEventPlugin):
 
     def is_applicable(self, context: PluginContext) -> bool:
         """Active only when at least one supported language is present."""
-        langs = detect_languages_in_dir(context.workdir, max_files=1000)
+        langs = detect_languages_in_dir(str(context.workdir), max_files=1000)
         return bool(langs)
 
     # ── ToolEventPlugin hooks ─────────────────────────────────────────────────
@@ -274,8 +274,8 @@ class LspPlugin(ToolEventPlugin):
             workdir=str(context.workdir),
         )
         try:
-            for tool_class in tools:
-                tm.register_dynamic_tool(tool_class)
+            for tool in tools:
+                tm.register_dynamic_tool(type(tool))
             logger.debug("LSP plugin: registered %d tools into ToolManager", len(tools))
         except Exception as exc:
             logger.warning(
@@ -339,12 +339,11 @@ def _format_diagnostics_block(file_path: str, diags: list[dict[str, Any]]) -> st
         source = d.get("source", "")
         source_tag = f"[{source}]" if source else ""
         core = f"line {line_no:>4} col {col_no:>3}  {msg}"
-        # Available width = total - borders(4) - icon - spacing(2) - source_tag
         available = _WIDTH - 4 - len(icon) - 2 - len(source_tag)
         if len(core) > available:
             core = core[: available - 1] + "…"
-        pad = " " * max(0, available - len(core))
-        rows.append(f"│ {icon}  {core}{pad}  {source_tag} │")
+        pad_len = max(0, available - len(core))
+        rows.append(f"│ {icon}  {core}{' ' * pad_len}  {source_tag} │")
 
     n_errors = sum(1 for d in diags if d.get("severity") == "Error")
     n_warnings = sum(1 for d in diags if d.get("severity") == "Warning")

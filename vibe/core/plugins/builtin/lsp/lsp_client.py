@@ -29,14 +29,31 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from lsprotocol.types import (
+    ClientCapabilities,
+    ClientCompletionItemOptions,
+    CompletionClientCapabilities,
+    DefinitionClientCapabilities,
+    DidChangeWatchedFilesClientCapabilities,
+    DocumentDiagnosticParams,
+    HoverClientCapabilities,
+    InitializeParams,
+    MarkupKind,
+    PublishDiagnosticsClientCapabilities,
+    ReferenceClientCapabilities,
+    TextDocumentClientCapabilities,
+    TextDocumentIdentifier,
+    TextDocumentSyncClientCapabilities,
+    TraceValue,
+    WorkspaceClientCapabilities,
+    WorkspaceFolder,
+)
 from pygls.lsp.client import BaseLanguageClient
 
 from vibe.core.plugins.builtin.lsp.registry import LspConfig
 
 logger = logging.getLogger(__name__)
 
-# Seconds to wait for diagnostics to arrive after opening a document.
-_DIAG_SETTLE_SECS = 1.0
 # Seconds to wait for server to respond to requests.
 _REQUEST_TIMEOUT = 10.0
 
@@ -90,29 +107,38 @@ class LspClient:
             ) from exc
 
         root_uri = self._root.as_uri()
-        await self._client.initialize_async({
-            "rootUri": root_uri,
-            "capabilities": {
-                "textDocument": {
-                    "synchronization": {
-                        "dynamicRegistration": False,
-                        "didSave": True,
-                        "willSave": False,
-                    },
-                    "publishDiagnostics": {"relatedInformation": True},
-                    "completion": {"completionItem": {"snippetSupport": False}},
-                    "hover": {"contentFormat": ["plaintext", "markdown"]},
-                    "definition": {"linkSupport": False},
-                    "references": {},
-                },
-                "workspace": {
-                    "workspaceFolders": True,
-                    "didChangeWatchedFiles": {"dynamicRegistration": False},
-                },
-            },
-            "workspaceFolders": [{"uri": root_uri, "name": self._root.name}],
-        })
-        await self._client.initialized_async({})
+        params: InitializeParams = InitializeParams(
+            capabilities=ClientCapabilities(
+                text_document=TextDocumentClientCapabilities(
+                    synchronization=TextDocumentSyncClientCapabilities(
+                        dynamic_registration=False, did_save=True, will_save=False
+                    ),
+                    publish_diagnostics=PublishDiagnosticsClientCapabilities(
+                        related_information=True
+                    ),
+                    completion=CompletionClientCapabilities(
+                        completion_item=ClientCompletionItemOptions(
+                            snippet_support=False
+                        )
+                    ),
+                    hover=HoverClientCapabilities(
+                        content_format=[MarkupKind.Markdown, MarkupKind.PlainText]
+                    ),
+                    definition=DefinitionClientCapabilities(link_support=False),
+                    references=ReferenceClientCapabilities(),
+                ),
+                workspace=WorkspaceClientCapabilities(
+                    workspace_folders=True,
+                    did_change_watched_files=DidChangeWatchedFilesClientCapabilities(
+                        dynamic_registration=False
+                    ),
+                ),
+            ),
+            root_uri=root_uri,
+            workspace_folders=[WorkspaceFolder(uri=root_uri, name=self._root.name)],
+            trace=TraceValue.Verbose,  # Enable verbose logging for LSP
+        )
+        await self._client.initialize_async(params)
         self._started = True
         logger.info("LSP started: %s (%s)", self._cfg.language, self._cfg.command[0])
 
@@ -122,7 +148,7 @@ class LspClient:
             return
         try:
             await asyncio.wait_for(self._client.shutdown_async(None), timeout=5.0)
-            await asyncio.wait_for(self._client.exit_async(None), timeout=2.0)
+            self._client.exit(None)
         except Exception as exc:
             logger.debug("LSP stop error (%s): %s", self._cfg.language, exc)
         finally:
@@ -140,27 +166,36 @@ class LspClient:
         assert self._client is not None
         path = Path(file_path).resolve()
         uri = path.as_uri()
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = await asyncio.to_thread(
+            path.read_text, encoding="utf-8", errors="replace"
+        )
         lang_id = self._cfg.language_id
 
         if uri not in self._open_docs:
             version = 1
             self._open_docs[uri] = version
-            await self._client.text_document_did_open_async({
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": lang_id,
-                    "version": version,
-                    "text": text,
-                }
-            })
+            from lsprotocol.types import DidOpenTextDocumentParams, TextDocumentItem
+
+            open_params = DidOpenTextDocumentParams(
+                text_document=TextDocumentItem(
+                    uri=uri, language_id=lang_id, version=version, text=text
+                )
+            )
+            self._client.text_document_did_open(open_params)
         else:
             version = self._open_docs[uri] + 1
             self._open_docs[uri] = version
-            await self._client.text_document_did_change_async({
-                "textDocument": {"uri": uri, "version": version},
-                "contentChanges": [{"text": text}],
-            })
+            from lsprotocol.types import (
+                DidChangeTextDocumentParams,
+                TextDocumentContentChangeWholeDocument,
+                VersionedTextDocumentIdentifier,
+            )
+
+            change_params = DidChangeTextDocumentParams(
+                text_document=VersionedTextDocumentIdentifier(uri=uri, version=version),
+                content_changes=[TextDocumentContentChangeWholeDocument(text=text)],
+            )
+            self._client.text_document_did_change(change_params)
         return uri
 
     # ── LSP capabilities ───────────────────────────────────────────────────────
@@ -168,16 +203,19 @@ class LspClient:
     async def diagnostics(self, file_path: str) -> list[dict[str, Any]]:
         """Return diagnostics for *file_path*.
 
-        Opens / refreshes the document, waits briefly for the server to
-        publish diagnostics, then returns the cached list.
+        Opens / refreshes the document and requests diagnostics from the server.
         """
         self._assert_started()
         assert self._client is not None
         uri = await self._sync_document(file_path)
-        # Give the server time to analyse and push diagnostics
-        await asyncio.sleep(_DIAG_SETTLE_SECS)
-        raw = self._client.diagnostics.get(uri, [])
-        return [self._format_diagnostic(d) for d in raw]
+        # Request diagnostics explicitly instead of waiting for publishDiagnostics
+        params = DocumentDiagnosticParams(text_document=TextDocumentIdentifier(uri=uri))
+        result = await asyncio.wait_for(
+            self._client.text_document_diagnostic_async(params),
+            timeout=_REQUEST_TIMEOUT,
+        )
+        diags: list[Any] = getattr(result, "items", []) if result else []
+        return [self._format_diagnostic(d) for d in diags]
 
     async def completion(
         self, file_path: str, line: int, col: int
@@ -186,15 +224,28 @@ class LspClient:
         self._assert_started()
         assert self._client is not None
         uri = await self._sync_document(file_path)
+        from lsprotocol.types import (
+            CompletionContext,
+            CompletionParams,
+            CompletionTriggerKind,
+            Position,
+            TextDocumentIdentifier,
+        )
+
+        params = CompletionParams(
+            text_document=TextDocumentIdentifier(uri=uri),
+            position=Position(line=line - 1, character=col - 1),
+            context=CompletionContext(
+                trigger_kind=CompletionTriggerKind.Invoked, trigger_character=None
+            ),
+        )
         result = await asyncio.wait_for(
-            self._client.text_document_completion_async({
-                "textDocument": {"uri": uri},
-                "position": {"line": line - 1, "character": col - 1},
-                "context": {"triggerKind": 1},
-            }),
+            self._client.text_document_completion_async(params),
             timeout=_REQUEST_TIMEOUT,
         )
-        items = result.items if hasattr(result, "items") else (result or [])
+        from lsprotocol.types import CompletionList
+
+        items = result.items if isinstance(result, CompletionList) else (result or [])
         return [self._format_completion_item(i) for i in items[:50]]
 
     async def hover(self, file_path: str, line: int, col: int) -> dict[str, Any]:
@@ -202,17 +253,21 @@ class LspClient:
         self._assert_started()
         assert self._client is not None
         uri = await self._sync_document(file_path)
+        from lsprotocol.types import HoverParams, Position, TextDocumentIdentifier
+
+        params = HoverParams(
+            text_document=TextDocumentIdentifier(uri=uri),
+            position=Position(line=line - 1, character=col - 1),
+        )
         result = await asyncio.wait_for(
-            self._client.text_document_hover_async({
-                "textDocument": {"uri": uri},
-                "position": {"line": line - 1, "character": col - 1},
-            }),
-            timeout=_REQUEST_TIMEOUT,
+            self._client.text_document_hover_async(params), timeout=_REQUEST_TIMEOUT
         )
         if result is None:
             return {"content": "", "kind": "plaintext"}
+        from lsprotocol.types import MarkedStringWithLanguage, MarkupContent
+
         contents = result.contents
-        if hasattr(contents, "value"):
+        if isinstance(contents, (MarkupContent, MarkedStringWithLanguage)):
             return {
                 "content": contents.value,
                 "kind": getattr(contents, "kind", "markdown"),
@@ -226,14 +281,22 @@ class LspClient:
         self._assert_started()
         assert self._client is not None
         uri = await self._sync_document(file_path)
+        from lsprotocol.types import DefinitionParams, Position, TextDocumentIdentifier
+
+        params = DefinitionParams(
+            text_document=TextDocumentIdentifier(uri=uri),
+            position=Position(line=line - 1, character=col - 1),
+        )
         result = await asyncio.wait_for(
-            self._client.text_document_definition_async({
-                "textDocument": {"uri": uri},
-                "position": {"line": line - 1, "character": col - 1},
-            }),
+            self._client.text_document_definition_async(params),
             timeout=_REQUEST_TIMEOUT,
         )
-        locations = result if isinstance(result, list) else ([result] if result else [])
+        if isinstance(result, list):
+            locations = result
+        elif result:
+            locations = [result]
+        else:
+            locations = []
         return [self._format_location(loc) for loc in locations if loc is not None]
 
     async def references(
@@ -243,12 +306,20 @@ class LspClient:
         self._assert_started()
         assert self._client is not None
         uri = await self._sync_document(file_path)
+        from lsprotocol.types import (
+            Position,
+            ReferenceContext,
+            ReferenceParams,
+            TextDocumentIdentifier,
+        )
+
+        params = ReferenceParams(
+            text_document=TextDocumentIdentifier(uri=uri),
+            position=Position(line=line - 1, character=col - 1),
+            context=ReferenceContext(include_declaration=include_declaration),
+        )
         result = await asyncio.wait_for(
-            self._client.text_document_references_async({
-                "textDocument": {"uri": uri},
-                "position": {"line": line - 1, "character": col - 1},
-                "context": {"includeDeclaration": include_declaration},
-            }),
+            self._client.text_document_references_async(params),
             timeout=_REQUEST_TIMEOUT,
         )
         return [self._format_location(loc) for loc in (result or [])]
@@ -260,7 +331,11 @@ class LspClient:
         severity_map = {1: "Error", 2: "Warning", 3: "Information", 4: "Hint"}
         sev_int = getattr(d.severity, "value", d.severity) if d.severity else None
         return {
-            "severity": severity_map.get(sev_int, "Unknown"),
+            "severity": severity_map.get(
+                int(sev_int) if isinstance(sev_int, int) else sev_int
+            )
+            if sev_int is not None
+            else "Unknown",
             "line": d.range.start.line + 1,
             "col": d.range.start.character + 1,
             "end_line": d.range.end.line + 1,
@@ -291,7 +366,11 @@ class LspClient:
         kind_int = getattr(i.kind, "value", i.kind) if i.kind else None
         return {
             "label": i.label,
-            "kind": kind_map.get(kind_int, "Unknown"),
+            "kind": kind_map.get(
+                int(kind_int) if isinstance(kind_int, int) else kind_int
+            )
+            if kind_int is not None
+            else "Unknown",
             "detail": i.detail or "",
             "documentation": doc_text,
         }

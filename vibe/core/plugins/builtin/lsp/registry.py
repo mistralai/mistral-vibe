@@ -25,7 +25,10 @@ Callers can extend this registry at runtime::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 import shutil
+
+from vibe.core.paths._vibe_home import LOG_DIR, GlobalPath
 
 
 @dataclass
@@ -49,7 +52,12 @@ LSP_REGISTRY: dict[str, LspConfig] = {
     "python": LspConfig(
         language="python",
         extensions=frozenset({".py", ".pyi"}),
-        command=["pylsp"],
+        command=[
+            "pylsp",
+            "--log-file",
+            GlobalPath(lambda: LOG_DIR.path / "pylsp.log").path.as_posix(),
+            "-vvv",
+        ],
         language_id="python",
         root_markers=frozenset({
             "pyproject.toml",
@@ -101,12 +109,10 @@ def language_for_extension(ext: str) -> str | None:
 
 def language_for_path(path: str) -> str | None:
     """Return the language name for a file path, or None."""
-    from pathlib import Path
-
     return language_for_extension(Path(path).suffix)
 
 
-def detect_languages_in_dir(root: Path, max_files: int = 1000) -> set[str]:
+def detect_languages_in_dir(root: str, max_files: int = 1000) -> set[str]:
     """Walk *root* and return the set of languages whose files are present.
 
     Stops scanning after *max_files* entries to stay fast on large repos.
