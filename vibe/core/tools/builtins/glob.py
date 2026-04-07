@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import fnmatch
 from collections.abc import AsyncGenerator
+import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -130,9 +130,7 @@ class Glob(
                 matched.append(rel)
 
         yield GlobResult(
-            files=matched,
-            total_count=total,
-            was_truncated=total > max_results,
+            files=matched, total_count=total, was_truncated=total > max_results
         )
 
     def _validate_args(self, args: GlobArgs) -> None:

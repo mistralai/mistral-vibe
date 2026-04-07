@@ -36,7 +36,9 @@ async def test_searches_in_subdirectory(glob_tool, tmp_path):
     (subdir / "app.py").write_text("pass\n")
     (tmp_path / "root.py").write_text("pass\n")
 
-    result = await collect_result(glob_tool.run(GlobArgs(pattern="**/*.py", path="src")))
+    result = await collect_result(
+        glob_tool.run(GlobArgs(pattern="**/*.py", path="src"))
+    )
 
     assert result.total_count == 1
     assert any("app.py" in f for f in result.files)
