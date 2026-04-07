@@ -190,7 +190,7 @@ class Glob(
 
     @classmethod
     def format_call_display(cls, args: GlobArgs) -> ToolCallDisplay:
-        summary = f"Globbing '{args.pattern}'"
+        summary = f"Searching for '{args.pattern}'"
         if args.path != ".":
             summary += f" in {args.path}"
         if args.max_results:
