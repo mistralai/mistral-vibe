@@ -146,6 +146,9 @@ class Glob(
         if not path_obj.exists():
             raise ToolError(f"Path does not exist: {args.path}")
 
+        if path_obj.exists() and not path_obj.is_dir():
+            raise ToolError(f"Path is not a directory: {args.path}")
+
     def _collect_exclude_patterns(self) -> list[str]:
         patterns = list(self.config.exclude_patterns)
 
