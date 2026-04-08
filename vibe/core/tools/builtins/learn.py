@@ -120,24 +120,65 @@ class Learn(
     def _analyze_session(self, messages: list[LLMMessage]) -> list[LearnedMemory]:
         """Analyze a session's messages for learnable patterns."""
         learned: list[LearnedMemory] = []
+        seen_slugs: set[str] = set()
 
         for i, msg in enumerate(messages):
             if msg.role != Role.user or not msg.content:
                 continue
 
-            content = msg.content.strip().lower()
+            content_lower = msg.content.strip().lower()
 
-            if self._is_correction(content):
+            # Skip very short messages (unlikely to be meaningful feedback)
+            if len(content_lower) < 15:
+                continue
+
+            # Skip messages that look like tool invocations or meta-prompts
+            if self._is_meta_message(content_lower):
+                continue
+
+            # Corrections take priority over preferences (elif, not if)
+            if self._is_correction(content_lower):
                 memory = self._extract_correction(msg.content, messages, i)
-                if memory:
-                    learned.append(memory)
-
-            if self._is_preference(content):
+            elif self._is_preference(content_lower):
                 memory = self._extract_preference(msg.content)
-                if memory:
-                    learned.append(memory)
+            else:
+                continue
+
+            if not memory:
+                continue
+
+            # Deduplicate within session by slug
+            slug = self._slugify(memory.description[:50])
+            if slug in seen_slugs:
+                continue
+            seen_slugs.add(slug)
+
+            learned.append(memory)
 
         return learned
+
+    def _is_meta_message(self, content: str) -> bool:
+        """Filter out tool invocations and meta-prompts that aren't real feedback."""
+        meta_patterns = [
+            "use the ",
+            "run the ",
+            "call the ",
+            "execute ",
+            "analyze ",
+            "search for ",
+            "find ",
+            "list ",
+            "show me ",
+            "read ",
+            "open ",
+            "create a ",
+            "write a ",
+            "help me ",
+            "can you ",
+            "could you ",
+            "please ",
+        ]
+        return any(content.startswith(p) for p in meta_patterns)
 
     def _is_correction(self, content: str) -> bool:
         correction_starts = [
@@ -149,26 +190,30 @@ class Learn(
             "wrong",
             "not like that",
             "that's wrong",
+            "that's not",
             "nu,",
             "nu ",
             "nu face",
             "nu folosi",
             "opreste",
+            "gresit",
         ]
         return any(content.startswith(s) for s in correction_starts)
 
     def _is_preference(self, content: str) -> bool:
-        preference_indicators = [
+        # Must start with a preference indicator, not just contain it
+        # This prevents "use the learn tool" from matching
+        preference_starts = [
             "always ",
             "never ",
             "prefer ",
-            "use ",
-            "mereu ",
-            "niciodata ",
             "from now on",
             "de acum",
+            "mereu ",
+            "niciodata ",
+            "intotdeauna ",
         ]
-        return any(indicator in content for indicator in preference_indicators)
+        return any(content.startswith(s) for s in preference_starts)
 
     def _extract_correction(
         self, content: str, messages: list[LLMMessage], idx: int

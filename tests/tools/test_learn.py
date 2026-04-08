@@ -53,7 +53,10 @@ def session_dir(tmp_path):
 async def test_analyzes_correction_pattern(tool, session_dir):
     mock_messages = [
         LLMMessage(role=Role.assistant, content="I'll use spaces for indentation."),
-        LLMMessage(role=Role.user, content="No, always use tabs instead of spaces."),
+        LLMMessage(
+            role=Role.user,
+            content="No, always use tabs instead of spaces for indentation.",
+        ),
         LLMMessage(role=Role.assistant, content="Got it, I'll use tabs."),
     ]
 
@@ -91,7 +94,10 @@ async def test_analyzes_correction_pattern(tool, session_dir):
 @pytest.mark.asyncio
 async def test_analyzes_preference_pattern(tool, session_dir):
     mock_messages = [
-        LLMMessage(role=Role.user, content="Always use pytest for testing."),
+        LLMMessage(
+            role=Role.user,
+            content="Always use pytest for testing in this project.",
+        ),
         LLMMessage(role=Role.assistant, content="Understood, I'll use pytest."),
     ]
 
@@ -153,7 +159,10 @@ async def test_skips_duplicate_memories(tool, session_dir, memory_dirs):
     _, project_dir = memory_dirs
 
     mock_messages = [
-        LLMMessage(role=Role.user, content="Always use black for formatting."),
+        LLMMessage(
+            role=Role.user,
+            content="Always use black for formatting in this project.",
+        ),
         LLMMessage(role=Role.assistant, content="Ok."),
     ]
 
@@ -232,3 +241,94 @@ async def test_handles_empty_sessions(tool):
     assert result.sessions_analyzed == 0
     assert result.memories_created == 0
     assert result.memories == []
+
+
+@pytest.mark.asyncio
+async def test_ignores_meta_messages(tool, session_dir):
+    """Messages like 'use the learn tool' should not be captured as preferences."""
+    mock_messages = [
+        LLMMessage(
+            role=Role.user,
+            content="Use the learn tool to analyze past sessions and extract learnings",
+        ),
+        LLMMessage(role=Role.assistant, content="Ok, analyzing..."),
+        LLMMessage(role=Role.user, content="Find all Python files in this project"),
+        LLMMessage(role=Role.assistant, content="Found 10 files."),
+    ]
+
+    with (
+        patch(
+            "vibe.core.tools.builtins.learn.SessionLoader.list_sessions",
+            return_value=[_make_session_info("meta1234")],
+        ),
+        patch(
+            "vibe.core.tools.builtins.learn.SessionLoader.find_session_by_id",
+            return_value=session_dir,
+        ),
+        patch(
+            "vibe.core.tools.builtins.learn.SessionLoader.load_session",
+            return_value=(mock_messages, {}),
+        ),
+    ):
+        result = await collect_result(tool.run(LearnArgs(max_sessions=5)))
+
+    assert result.memories_created == 0
+
+
+@pytest.mark.asyncio
+async def test_ignores_short_messages(tool, session_dir):
+    """Very short messages should not be captured."""
+    mock_messages = [
+        LLMMessage(role=Role.user, content="No, wrong."),
+        LLMMessage(role=Role.assistant, content="Sorry about that."),
+    ]
+
+    with (
+        patch(
+            "vibe.core.tools.builtins.learn.SessionLoader.list_sessions",
+            return_value=[_make_session_info("short123")],
+        ),
+        patch(
+            "vibe.core.tools.builtins.learn.SessionLoader.find_session_by_id",
+            return_value=session_dir,
+        ),
+        patch(
+            "vibe.core.tools.builtins.learn.SessionLoader.load_session",
+            return_value=(mock_messages, {}),
+        ),
+    ):
+        result = await collect_result(tool.run(LearnArgs(max_sessions=5)))
+
+    assert result.memories_created == 0
+
+
+@pytest.mark.asyncio
+async def test_correction_takes_priority_over_preference(tool, session_dir):
+    """A message starting with 'No' that also contains 'always' should be a correction, not both."""
+    mock_messages = [
+        LLMMessage(role=Role.assistant, content="I'll use spaces."),
+        LLMMessage(
+            role=Role.user,
+            content="No, always use tabs for indentation in this project.",
+        ),
+        LLMMessage(role=Role.assistant, content="Got it."),
+    ]
+
+    with (
+        patch(
+            "vibe.core.tools.builtins.learn.SessionLoader.list_sessions",
+            return_value=[_make_session_info("prio1234")],
+        ),
+        patch(
+            "vibe.core.tools.builtins.learn.SessionLoader.find_session_by_id",
+            return_value=session_dir,
+        ),
+        patch(
+            "vibe.core.tools.builtins.learn.SessionLoader.load_session",
+            return_value=(mock_messages, {}),
+        ),
+    ):
+        result = await collect_result(tool.run(LearnArgs(max_sessions=5)))
+
+    assert result.memories_created == 1
+    assert result.memories[0].name.startswith("correction_")
