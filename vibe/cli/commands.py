@@ -125,6 +125,11 @@ class CommandRegistry:
                 description="Show data retention information",
                 handler="_show_data_retention",
             ),
+            "learn": Command(
+                aliases=frozenset(["/learn"]),
+                description="Learn from past sessions and save memories",
+                handler="_learn_from_sessions",
+            ),
         }
 
         for command in excluded_commands:
