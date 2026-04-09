@@ -56,7 +56,9 @@ def _default_profile() -> AgentProfile:
 
 @pytest.fixture
 def tool() -> ExitPlanMode:
-    return ExitPlanMode(config=ExitPlanModeConfig(), state=BaseToolState())
+    return ExitPlanMode(
+        config_getter=lambda: ExitPlanModeConfig(), state=BaseToolState()
+    )
 
 
 @pytest.fixture

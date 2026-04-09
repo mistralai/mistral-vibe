@@ -23,37 +23,48 @@ _MAX_DIRS = 2000
 
 def _collect_config_dirs_at(
     path: Path,
-    entries: set[str],
+    entry_names: set[str],
     tools: list[Path],
     skills: list[Path],
     agents: list[Path],
 ) -> None:
     """Check a single directory for .vibe/ and .agents/ config subdirs."""
-    if _VIBE_DIR in entries:
+    if _VIBE_DIR in entry_names:
         if (candidate := path / _TOOLS_SUBDIR).is_dir():
             tools.append(candidate)
         if (candidate := path / _VIBE_SKILLS_SUBDIR).is_dir():
             skills.append(candidate)
         if (candidate := path / _AGENTS_SUBDIR).is_dir():
             agents.append(candidate)
-    if _AGENTS_DIR in entries:
+    if _AGENTS_DIR in entry_names:
         if (candidate := path / _AGENTS_SKILLS_SUBDIR).is_dir():
             skills.append(candidate)
 
 
-def _iter_child_dirs(path: Path, entries: set[str]) -> list[Path]:
-    """Return sorted child directories to descend into, skipping ignored and dot-dirs."""
+def _scandir_entries(path: Path) -> tuple[set[str], list[Path]]:
+    """Scan a directory, returning entry names and sorted child directories to descend into.
+
+    Uses ``os.scandir`` so that ``DirEntry.is_dir()`` leverages the dirent
+    d_type field and avoids a separate ``stat`` syscall on most filesystems.
+    """
+    try:
+        entries = list(os.scandir(path))
+    except OSError:
+        return set(), []
+
+    entry_names = {e.name for e in entries}
     children: list[Path] = []
-    for name in sorted(entries):
+    for entry in entries:
+        name = entry.name
         if name in WALK_SKIP_DIR_NAMES or name.startswith("."):
             continue
-        child = path / name
         try:
-            if child.is_dir():
-                children.append(child)
+            if entry.is_dir():
+                children.append(path / name)
         except OSError:
             continue
-    return children
+    children.sort()
+    return entry_names, children
 
 
 @cache
@@ -77,17 +88,16 @@ def walk_local_config_dirs_all(
         current, depth = queue.popleft()
         visited += 1
 
-        try:
-            entries = set(os.listdir(current))
-        except OSError:
+        entry_names, children = _scandir_entries(current)
+        if not entry_names:
             continue
 
-        _collect_config_dirs_at(current, entries, tools_dirs, skills_dirs, agents_dirs)
+        _collect_config_dirs_at(
+            current, entry_names, tools_dirs, skills_dirs, agents_dirs
+        )
 
         if depth < WALK_MAX_DEPTH:
-            queue.extend(
-                (child, depth + 1) for child in _iter_child_dirs(current, entries)
-            )
+            queue.extend((child, depth + 1) for child in children)
 
     if visited >= _MAX_DIRS:
         logger.warning(
@@ -116,18 +126,15 @@ def has_config_dirs_nearby(
         current, depth = queue.popleft()
         visited += 1
 
-        try:
-            entries = set(os.listdir(current))
-        except OSError:
+        entry_names, children = _scandir_entries(current)
+        if not entry_names:
             continue
 
-        _collect_config_dirs_at(current, entries, found, found, found)
+        _collect_config_dirs_at(current, entry_names, found, found, found)
         if found:
             return True
 
         if depth < max_depth:
-            queue.extend(
-                (child, depth + 1) for child in _iter_child_dirs(current, entries)
-            )
+            queue.extend((child, depth + 1) for child in children)
 
     return False

@@ -16,7 +16,7 @@ from vibe.core.types import AssistantEvent, LLMMessage, Role
 
 @pytest.fixture
 def task_tool() -> Task:
-    return Task(config=TaskToolConfig(), state=BaseToolState())
+    return Task(config_getter=lambda: TaskToolConfig(), state=BaseToolState())
 
 
 class TestTaskArgs:
@@ -91,7 +91,7 @@ class TestTaskToolResolvePermission:
 
     def test_denylist_takes_precedence(self) -> None:
         config = TaskToolConfig(allowlist=["explore"], denylist=["explore"])
-        tool = Task(config=config, state=BaseToolState())
+        tool = Task(config_getter=lambda: config, state=BaseToolState())
         args = TaskArgs(task="do something", agent="explore")
         result = tool.resolve_permission(args)
         assert isinstance(result, PermissionContext)
@@ -99,7 +99,7 @@ class TestTaskToolResolvePermission:
 
     def test_glob_pattern_in_allowlist(self) -> None:
         config = TaskToolConfig(allowlist=["exp*"])
-        tool = Task(config=config, state=BaseToolState())
+        tool = Task(config_getter=lambda: config, state=BaseToolState())
         args = TaskArgs(task="do something", agent="explore")
         result = tool.resolve_permission(args)
         assert isinstance(result, PermissionContext)
@@ -107,7 +107,7 @@ class TestTaskToolResolvePermission:
 
     def test_glob_pattern_in_denylist(self) -> None:
         config = TaskToolConfig(denylist=["danger*"])
-        tool = Task(config=config, state=BaseToolState())
+        tool = Task(config_getter=lambda: config, state=BaseToolState())
         args = TaskArgs(task="do something", agent="dangerous_agent")
         result = tool.resolve_permission(args)
         assert isinstance(result, PermissionContext)
@@ -115,7 +115,7 @@ class TestTaskToolResolvePermission:
 
     def test_empty_lists_returns_none(self) -> None:
         config = TaskToolConfig(allowlist=[], denylist=[])
-        tool = Task(config=config, state=BaseToolState())
+        tool = Task(config_getter=lambda: config, state=BaseToolState())
         args = TaskArgs(task="do something", agent="explore")
         result = tool.resolve_permission(args)
         assert result is None

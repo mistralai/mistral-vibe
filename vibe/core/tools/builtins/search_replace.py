@@ -99,9 +99,10 @@ class SearchReplace(
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if isinstance(event.result, SearchReplaceResult):
+            path_name = Path(event.result.file).name
             return ToolResultDisplay(
                 success=True,
-                message=f"Applied {event.result.blocks_applied} block{'' if event.result.blocks_applied == 1 else 's'}",
+                message=f"Applied {event.result.blocks_applied} block{'' if event.result.blocks_applied == 1 else 's'} to {path_name}",
                 warnings=event.result.warnings,
             )
 

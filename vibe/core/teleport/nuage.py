@@ -82,7 +82,7 @@ class GitHubPublicData(BaseModel):
 
 
 class ChatAssistantPublicData(BaseModel):
-    chat_url: str
+    chat_url: str | None = None
 
 
 class GetChatAssistantIntegrationResponse(BaseModel):
@@ -195,7 +195,7 @@ class NuageClient:
             await asyncio.sleep(min(interval, remaining))
         raise ServiceTeleportError("GitHub connection timed out")
 
-    async def get_chat_assistant_url(self, execution_id: str) -> str:
+    async def get_chat_assistant_url(self, execution_id: str) -> str | None:
         response = await self._http_client.post(
             f"{self._base_url}/v1/workflows/executions/{execution_id}/updates",
             headers=self._headers(),

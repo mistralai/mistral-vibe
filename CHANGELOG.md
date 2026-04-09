@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.4] - 2026-04-09
+
+### Added
+
+- Console View for enhanced debugging and monitoring
+- `/mcp` command to display MCP servers and their status
+- Manual command output forwarding to agent context
+
+### Changed
+
+- Improved web_fetch content truncation for better readability
+- Lazily load heavy dependencies to improve startup time
+- Optimized folder parsing at startup using scandir
+- Include file name in search_replace result display
+
+### Fixed
+
+- Stale configurations from subagent switch
+- ValueError on OTEL context detach in agent_span
+- Clipboard toast preview replaced with fixed text
+- Only agents with type "agent" are loadable with --agent flag
+- Made chat_url nullable in ChatAssistantPublicData
+- Normalized OTEL span exporter endpoint
+- Removed redundant permission prompts for parallel tool calls needing the same permission
+- Removed bottom margin issue in UI
+- Never crash before ACP server starts
+- Use skill in recent commands via the up-arrow navigation
+- Fixed loading order issues in vibe initialization
+
+
 ## [2.7.3] - 2026-04-03
 
 ### Added

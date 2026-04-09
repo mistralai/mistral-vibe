@@ -44,7 +44,7 @@ class HistoryManager:
 
     def add(self, text: str) -> None:
         text = text.strip()
-        if not text or text.startswith("/"):
+        if not text:
             return
 
         if self._entries and self._entries[-1] == text:

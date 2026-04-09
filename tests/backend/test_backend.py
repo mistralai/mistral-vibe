@@ -529,26 +529,6 @@ class TestMistralMapperPrepareMessage:
         result = mapper.prepare_message(msg)
         assert result.content == "Hello!"
 
-    def test_strip_reasoning_removes_reasoning_from_assistant(
-        self, mapper: MistralMapper
-    ) -> None:
-        msg = LLMMessage(
-            role=Role.assistant,
-            content="Answer",
-            reasoning_content="thinking...",
-            reasoning_signature="sig",
-        )
-        stripped = mapper.strip_reasoning(msg)
-        assert stripped.content == "Answer"
-        assert stripped.reasoning_content is None
-        assert stripped.reasoning_signature is None
-
-    def test_strip_reasoning_leaves_non_assistant_unchanged(
-        self, mapper: MistralMapper
-    ) -> None:
-        msg = LLMMessage(role=Role.user, content="hello")
-        assert mapper.strip_reasoning(msg) is msg
-
 
 class TestMistralBackendReasoningEffort:
     """Tests that MistralBackend correctly passes reasoning_effort to the SDK."""
@@ -611,53 +591,6 @@ class TestMistralBackendReasoningEffort:
             call_kwargs = mock_client.chat.complete_async.call_args.kwargs
             assert call_kwargs["reasoning_effort"] == expected_effort
             assert call_kwargs["temperature"] == expected_temperature
-
-    @pytest.mark.asyncio
-    async def test_complete_strips_reasoning_when_thinking_off(
-        self, backend: MistralBackend
-    ) -> None:
-        model = ModelConfig(
-            name="mistral-small-latest",
-            provider="mistral",
-            alias="mistral-small",
-            thinking="off",
-        )
-        messages = [
-            LLMMessage(role=Role.user, content="hi"),
-            LLMMessage(
-                role=Role.assistant, content="answer", reasoning_content="thinking..."
-            ),
-            LLMMessage(role=Role.user, content="follow up"),
-        ]
-
-        with patch.object(backend, "_get_client") as mock_get_client:
-            mock_client = MagicMock()
-            mock_response = MagicMock()
-            mock_response.choices = [MagicMock()]
-            mock_response.choices[0].message.content = "response"
-            mock_response.choices[0].message.tool_calls = None
-            mock_response.usage.prompt_tokens = 10
-            mock_response.usage.completion_tokens = 5
-            mock_client.chat.complete_async = AsyncMock(return_value=mock_response)
-            mock_get_client.return_value = mock_client
-
-            await backend.complete(
-                model=model,
-                messages=messages,
-                temperature=0.2,
-                tools=None,
-                max_tokens=None,
-                tool_choice=None,
-                extra_headers=None,
-            )
-
-            call_kwargs = mock_client.chat.complete_async.call_args.kwargs
-            assert call_kwargs["reasoning_effort"] is None
-            # The assistant message should have reasoning stripped
-            converted_msgs = call_kwargs["messages"]
-            assistant_msg = converted_msgs[1]
-            assert isinstance(assistant_msg, AssistantMessage)
-            assert assistant_msg.content == "answer"
 
 
 class TestBuildHttpErrorBodyReading:

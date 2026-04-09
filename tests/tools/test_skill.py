@@ -54,7 +54,7 @@ def _make_ctx(skill_manager: SkillManager | None = None) -> InvokeContext:
 
 @pytest.fixture
 def skill_tool() -> Skill:
-    return Skill(config=SkillToolConfig(), state=BaseToolState())
+    return Skill(config_getter=lambda: SkillToolConfig(), state=BaseToolState())
 
 
 class TestSkillRun:
