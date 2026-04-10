@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.7.3"
+version = "2.7.4"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -97,6 +97,7 @@ required-version = ">=0.8.0"
 dev = [
     "debugpy>=1.8.19",
     "pre-commit>=4.2.0",
+    "pyinstrument>=5.1.2",
     "pyright>=1.1.403",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.2.0",
@@ -175,7 +176,7 @@ max-branches = 15
 max-locals = 15
 max-args = 9
 max-returns = 6
-max-nested-blocks = 4
+max-nested-blocks = 5
 
 [tool.vulture]
 ignore_decorators = ["@*"]

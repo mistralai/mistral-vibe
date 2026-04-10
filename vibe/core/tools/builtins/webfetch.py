@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+import functools
 from typing import TYPE_CHECKING, ClassVar, final
 from urllib.parse import urlparse
 
 import httpx
-from markdownify import MarkdownConverter
 from pydantic import BaseModel, Field
 
 from vibe.core.tools.base import (
@@ -32,10 +32,16 @@ _HONEST_USER_AGENT = "vibe-cli"
 _HTTP_FORBIDDEN = 403
 
 
-class _Converter(MarkdownConverter):
-    convert_script = convert_style = convert_noscript = convert_iframe = (
-        convert_object
-    ) = convert_embed = lambda *_, **__: ""
+@functools.cache
+def _make_converter_class() -> type:
+    from markdownify import MarkdownConverter
+
+    class _Converter(MarkdownConverter):
+        convert_script = convert_style = convert_noscript = convert_iframe = (
+            convert_object
+        ) = convert_embed = lambda *_, **__: ""
+
+    return _Converter
 
 
 class WebFetchArgs(BaseModel):
@@ -49,6 +55,7 @@ class WebFetchResult(BaseModel):
     url: str
     content: str
     content_type: str
+    was_truncated: bool = False
 
 
 class WebFetchConfig(BaseToolConfig):
@@ -57,7 +64,8 @@ class WebFetchConfig(BaseToolConfig):
     default_timeout: int = Field(default=30, description="Default timeout in seconds.")
     max_timeout: int = Field(default=120, description="Maximum allowed timeout.")
     max_content_bytes: int = Field(
-        default=512_000, description="Maximum content size to fetch."
+        default=120_000,
+        description="Maximum content size in bytes returned to the model.",
     )
     user_agent: str = Field(
         default=(
@@ -120,7 +128,20 @@ class WebFetch(
         if "text/html" in content_type:
             content = _html_to_markdown(content)
 
-        yield WebFetchResult(url=url, content=content, content_type=content_type)
+        content_bytes = content.encode("utf-8")
+        was_truncated = len(content_bytes) > self.config.max_content_bytes
+        if was_truncated:
+            content = content_bytes[: self.config.max_content_bytes].decode(
+                "utf-8", errors="ignore"
+            )
+            content += "\n\n[Content truncated due to size limit]"
+
+        yield WebFetchResult(
+            url=url,
+            content=content,
+            content_type=content_type,
+            was_truncated=was_truncated,
+        )
 
     def _validate_args(self, args: WebFetchArgs) -> None:
         if not args.url.strip():
@@ -169,11 +190,7 @@ class WebFetch(
 
         content_type = response.headers.get("Content-Type", "text/plain")
 
-        content_bytes = response.content[: self.config.max_content_bytes]
-        content = content_bytes.decode("utf-8", errors="ignore")
-
-        if len(response.content) > self.config.max_content_bytes:
-            content += "[Content truncated due to size limit]"
+        content = response.content.decode("utf-8", errors="ignore")
 
         return content, content_type
 
@@ -222,6 +239,8 @@ class WebFetch(
         message = (
             f"Fetched {content_len:,} chars ({event.result.content_type.split(';')[0]})"
         )
+        if event.result.was_truncated:
+            message += " [truncated]"
 
         return ToolResultDisplay(success=True, message=message)
 
@@ -231,4 +250,5 @@ class WebFetch(
 
 
 def _html_to_markdown(html: str) -> str:
-    return _Converter(heading_style="ATX", bullets="-").convert(html)
+    converter_class = _make_converter_class()
+    return converter_class(heading_style="ATX", bullets="-").convert(html)

@@ -17,7 +17,7 @@ from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core import tracing
-from vibe.core.config import OtelExporterConfig
+from vibe.core.config import OtelSpanExporterConfig
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tracing import agent_span, setup_tracing, tool_span
 from vibe.core.types import BaseEvent, FunctionCall, ToolCall
@@ -54,7 +54,7 @@ class TestSetupTracing:
         mock_set.assert_not_called()
 
     def test_noop_when_exporter_config_is_none(self) -> None:
-        config = MagicMock(enable_otel=True, otel_exporter_config=None)
+        config = MagicMock(enable_otel=True, otel_span_exporter_config=None)
         with patch("vibe.core.tracing.trace.set_tracer_provider") as mock_set:
             setup_tracing(config)
         mock_set.assert_not_called()
@@ -62,7 +62,7 @@ class TestSetupTracing:
     def test_configures_provider_from_exporter_config(self) -> None:
         config = MagicMock(
             enable_otel=True,
-            otel_exporter_config=OtelExporterConfig(
+            otel_span_exporter_config=OtelSpanExporterConfig(
                 endpoint="https://customer.mistral.ai/telemetry/v1/traces",
                 headers={"Authorization": "Bearer sk-test"},
             ),
@@ -86,7 +86,7 @@ class TestSetupTracing:
     def test_custom_endpoint_has_no_auth_headers(self) -> None:
         config = MagicMock(
             enable_otel=True,
-            otel_exporter_config=OtelExporterConfig(
+            otel_span_exporter_config=OtelSpanExporterConfig(
                 endpoint="https://my-collector:4318/v1/traces"
             ),
         )

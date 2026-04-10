@@ -34,7 +34,7 @@ def _setup_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
 
 
 def _make_read_file() -> ReadFile:
-    return ReadFile(config=ReadFileToolConfig(), state=ReadFileState())
+    return ReadFile(config_getter=lambda: ReadFileToolConfig(), state=ReadFileState())
 
 
 class TestGetResultExtra:

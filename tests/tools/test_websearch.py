@@ -38,7 +38,7 @@ def _make_response(
 def websearch(monkeypatch):
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     config = WebSearchConfig()
-    return WebSearch(config=config, state=BaseToolState())
+    return WebSearch(config_getter=lambda: config, state=BaseToolState())
 
 
 def test_parse_text_chunks(websearch):
@@ -104,7 +104,7 @@ def test_parse_skips_non_message_entries(websearch):
 async def test_run_missing_api_key(monkeypatch):
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     config = WebSearchConfig()
-    ws = WebSearch(config=config, state=BaseToolState())
+    ws = WebSearch(config_getter=lambda: config, state=BaseToolState())
     with pytest.raises(ToolError, match="MISTRAL_API_KEY"):
         await collect_result(ws.run(WebSearchArgs(query="test")))
 

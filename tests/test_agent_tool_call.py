@@ -613,8 +613,8 @@ async def test_parallel_tool_calls_with_approval_callback(
 
 @pytest.mark.asyncio
 async def test_parallel_approvals_can_run_concurrently() -> None:
-    """The core does not serialize approval callbacks — that is a CLI-layer concern.
-    Parallel tool calls may invoke the approval callback concurrently.
+    """Approval callbacks are serialized by _approval_lock so that an 'always allow'
+    grant from the first call is visible to subsequent parallel calls.
     """
     concurrency = 0
     max_concurrency = 0
@@ -642,7 +642,7 @@ async def test_parallel_approvals_can_run_concurrently() -> None:
 
     await act_and_collect_events(agent_loop, "Go")
 
-    assert max_concurrency > 1
+    assert max_concurrency == 1
     assert agent_loop.stats.tool_calls_agreed == 3
     assert agent_loop.stats.tool_calls_succeeded == 3
 

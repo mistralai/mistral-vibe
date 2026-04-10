@@ -24,46 +24,62 @@ class TestCommandRegistry:
         assert registry.get_command_name("hello") is None
         assert registry.get_command_name("") is None
 
-    def test_find_command_returns_command_when_alias_matches(self) -> None:
+    def test_parse_command_returns_command_when_alias_matches(self) -> None:
         registry = CommandRegistry()
-        cmd = registry.find_command("/help")
-        assert cmd is not None
+        result = registry.parse_command("/help")
+        assert result is not None
+        cmd_name, cmd, cmd_args = result
+        assert cmd_name == "help"
         assert cmd.handler == "_show_help"
         assert isinstance(cmd, Command)
+        assert cmd_args == ""
 
-    def test_find_command_returns_none_when_no_match(self) -> None:
+    def test_parse_command_returns_none_when_no_match(self) -> None:
         registry = CommandRegistry()
-        assert registry.find_command("/nonexistent") is None
+        assert registry.parse_command("/nonexistent") is None
 
-    def test_find_command_uses_get_command_name(self) -> None:
-        """find_command and get_command_name stay in sync for same input."""
+    def test_parse_command_uses_get_command_name(self) -> None:
+        """parse_command and get_command_name stay in sync for same input."""
         registry = CommandRegistry()
         for alias in ["/help", "/config", "/clear", "/exit"]:
             cmd_name = registry.get_command_name(alias)
-            cmd = registry.find_command(alias)
+            result = registry.parse_command(alias)
             if cmd_name is None:
-                assert cmd is None
+                assert result is None
             else:
-                assert cmd is not None
-                assert cmd_name in registry.commands
-                assert registry.commands[cmd_name] is cmd
+                assert result is not None
+                found_name, found_cmd, _ = result
+                assert found_name == cmd_name
+                assert registry.commands[cmd_name] is found_cmd
 
     def test_excluded_commands_not_in_registry(self) -> None:
         registry = CommandRegistry(excluded_commands=["exit"])
         assert registry.get_command_name("/exit") is None
-        assert registry.find_command("/exit") is None
+        assert registry.parse_command("/exit") is None
         assert registry.get_command_name("/help") == "help"
 
     def test_resume_command_registration(self) -> None:
         registry = CommandRegistry()
         assert registry.get_command_name("/resume") == "resume"
         assert registry.get_command_name("/continue") == "resume"
-        cmd = registry.find_command("/resume")
-        assert cmd is not None
+        result = registry.parse_command("/resume")
+        assert result is not None
+        _, cmd, _ = result
         assert cmd.handler == "_show_session_picker"
+
+    def test_parse_command_keeps_args_for_no_arg_commands(self) -> None:
+        registry = CommandRegistry()
+        result = registry.parse_command("/help extra")
+        assert result == ("help", registry.commands["help"], "extra")
+
+    def test_parse_command_keeps_args_for_argument_commands(self) -> None:
+        registry = CommandRegistry()
+        result = registry.parse_command("/mcp filesystem")
+        assert result == ("mcp", registry.commands["mcp"], "filesystem")
 
     def test_data_retention_command_registration(self) -> None:
         registry = CommandRegistry()
-        cmd = registry.find_command("/data-retention")
-        assert cmd is not None
+        result = registry.parse_command("/data-retention")
+        assert result is not None
+        _, cmd, _ = result
         assert cmd.handler == "_show_data_retention"

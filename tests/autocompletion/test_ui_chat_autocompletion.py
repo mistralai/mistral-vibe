@@ -277,6 +277,20 @@ async def test_finds_files_recursively_with_partial_path(
 
 
 @pytest.mark.asyncio
+async def test_popup_is_positioned_near_cursor(vibe_app: VibeApp) -> None:
+    async with vibe_app.run_test() as pilot:
+        popup = vibe_app.query_one(CompletionPopup)
+
+        await pilot.press(*"/com")
+
+        assert popup.styles.display == "block"
+        offset = popup.styles.offset
+        # The popup should have an explicit offset set by _position_popup
+        assert offset.x is not None
+        assert offset.y is not None
+
+
+@pytest.mark.asyncio
 async def test_does_not_trigger_completion_when_navigating_history(
     file_tree: Path, vibe_app: VibeApp
 ) -> None:

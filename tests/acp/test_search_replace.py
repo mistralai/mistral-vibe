@@ -85,7 +85,7 @@ def acp_search_replace_tool(
         session_id="test_session_123",
         tool_call_id="test_tool_call_456",
     )
-    return SearchReplace(config=config, state=state)
+    return SearchReplace(config_getter=lambda: config, state=state)
 
 
 class TestAcpSearchReplaceBasic:
@@ -139,7 +139,7 @@ class TestAcpSearchReplaceExecution:
         monkeypatch.chdir(tmp_path)
         config = SearchReplaceConfig(create_backup=True)
         tool = SearchReplace(
-            config=config,
+            config_getter=lambda: config,
             state=AcpSearchReplaceState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -169,7 +169,7 @@ class TestAcpSearchReplaceExecution:
         mock_client._read_error = RuntimeError("File not found")
 
         tool = SearchReplace(
-            config=SearchReplaceConfig(),
+            config_getter=lambda: SearchReplaceConfig(),
             state=AcpSearchReplaceState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -200,7 +200,7 @@ class TestAcpSearchReplaceExecution:
         mock_client._file_content = "old"  # Update mock to return correct content
 
         tool = SearchReplace(
-            config=SearchReplaceConfig(),
+            config_getter=lambda: SearchReplaceConfig(),
             state=AcpSearchReplaceState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -243,7 +243,7 @@ class TestAcpSearchReplaceExecution:
         test_file = tmp_path / "test.txt"
         test_file.touch()
         tool = SearchReplace(
-            config=SearchReplaceConfig(),
+            config_getter=lambda: SearchReplaceConfig(),
             state=AcpSearchReplaceState.model_construct(
                 client=client, session_id=session_id, tool_call_id="test_call"
             ),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from dataclasses import dataclass
 from enum import StrEnum, auto
 import gc
@@ -56,9 +57,11 @@ from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
+from vibe.cli.textual_ui.widgets.debug_console import DebugConsole
 from vibe.cli.textual_ui.widgets.feedback_bar import FeedbackBar
 from vibe.cli.textual_ui.widgets.load_more import HistoryLoadMoreRequested
 from vibe.cli.textual_ui.widgets.loading import LoadingWidget, paused_timer
+from vibe.cli.textual_ui.widgets.mcp_app import MCPApp
 from vibe.cli.textual_ui.widgets.messages import (
     BashOutputMessage,
     ErrorMessage,
@@ -112,6 +115,7 @@ from vibe.core.audio_recorder import AudioRecorder
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import VibeConfig
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
+from vibe.core.log_reader import LogReader
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.rewind import RewindError
@@ -171,6 +175,7 @@ class BottomApp(StrEnum):
     Approval = auto()
     Config = auto()
     Input = auto()
+    MCP = auto()
     ModelPicker = auto()
     ProxySetup = auto()
     Question = auto()
@@ -184,7 +189,7 @@ class ChatScroll(VerticalScroll):
 
     @property
     def is_at_bottom(self) -> bool:
-        return self.scroll_target_y >= (self.max_scroll_y - 3)
+        return self.scroll_target_y >= self.max_scroll_y
 
     _reanchor_pending: bool = False
     _scrolling_down: bool = False
@@ -281,6 +286,7 @@ class VibeApp(App):  # noqa: PLR0904
         Binding(
             "shift+down", "scroll_chat_down", "Scroll Down", show=False, priority=True
         ),
+        Binding("ctrl+backslash", "toggle_debug_console", "Debug Console", show=False),
         Binding("alt+up", "rewind_prev", "Rewind Previous", show=False, priority=True),
         Binding("ctrl+p", "rewind_prev", "Rewind Previous", show=False, priority=True),
         Binding("alt+down", "rewind_next", "Rewind Next", show=False, priority=True),
@@ -354,6 +360,8 @@ class VibeApp(App):  # noqa: PLR0904
         self._cached_messages_area: Widget | None = None
         self._cached_chat: ChatScroll | None = None
         self._cached_loading_area: Widget | None = None
+        self._log_reader = LogReader()
+        self._debug_console: DebugConsole | None = None
         self._switch_agent_generation = 0
         self._plan_info: PlanInfo | None = None
         self._narrator_manager: NarratorManagerPort = (
@@ -663,6 +671,10 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         await self._switch_to_input_app()
 
+    async def on_mcpapp_mcpclosed(self, _message: MCPApp.MCPClosed) -> None:
+        await self._mount_and_scroll(UserCommandMessage("MCP servers closed."))
+        await self._switch_to_input_app()
+
     async def on_proxy_setup_app_proxy_setup_closed(
         self, message: ProxySetupApp.ProxySetupClosed
     ) -> None:
@@ -700,17 +712,17 @@ class VibeApp(App):  # noqa: PLR0904
                 await widget.remove()
 
     async def _handle_command(self, user_input: str) -> bool:
-        if command := self.commands.find_command(user_input):
-            if cmd_name := self.commands.get_command_name(user_input):
-                self.agent_loop.telemetry_client.send_slash_command_used(
-                    cmd_name, "builtin"
-                )
+        if resolved := self.commands.parse_command(user_input):
+            cmd_name, command, cmd_args = resolved
+            self.agent_loop.telemetry_client.send_slash_command_used(
+                cmd_name, "builtin"
+            )
             await self._mount_and_scroll(UserMessage(user_input))
             handler = getattr(self, command.handler)
             if asyncio.iscoroutinefunction(handler):
-                await handler()
+                await handler(cmd_args=cmd_args)
             else:
-                handler()
+                handler(cmd_args=cmd_args)
             return True
         return False
 
@@ -781,17 +793,103 @@ class VibeApp(App):  # noqa: PLR0904
             await self._mount_and_scroll(
                 BashOutputMessage(command, str(Path.cwd()), output, exit_code)
             )
-        except subprocess.TimeoutExpired:
+            await self.agent_loop.inject_user_context(
+                self._format_manual_command_context(
+                    command=command,
+                    cwd=str(Path.cwd()),
+                    exit_code=exit_code,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout = (
+                error.stdout.decode("utf-8", errors="replace")
+                if isinstance(error.stdout, bytes)
+                else (error.stdout or "")
+            )
+            stderr = (
+                error.stderr.decode("utf-8", errors="replace")
+                if isinstance(error.stderr, bytes)
+                else (error.stderr or "")
+            )
             await self._mount_and_scroll(
                 ErrorMessage(
                     "Command timed out after 30 seconds",
                     collapsed=self._tools_collapsed,
                 )
             )
+            await self.agent_loop.inject_user_context(
+                self._format_manual_command_context(
+                    command=command,
+                    cwd=str(Path.cwd()),
+                    stdout=stdout,
+                    stderr=stderr,
+                    status="timed out after 30 seconds",
+                )
+            )
         except Exception as e:
             await self._mount_and_scroll(
                 ErrorMessage(f"Command failed: {e}", collapsed=self._tools_collapsed)
             )
+            await self.agent_loop.inject_user_context(
+                self._format_manual_command_context(
+                    command=command,
+                    cwd=str(Path.cwd()),
+                    status=f"failed before completion: {e}",
+                )
+            )
+
+    def _get_bash_max_output_bytes(self) -> int:
+        from vibe.core.tools.builtins.bash import BashToolConfig
+
+        config = self.agent_loop.tool_manager.get_tool_config("bash")
+        if isinstance(config, BashToolConfig):
+            return config.max_output_bytes
+        return BashToolConfig().max_output_bytes
+
+    @staticmethod
+    def _cap_output(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "\n... [truncated]"
+
+    def _format_manual_command_context(
+        self,
+        *,
+        command: str,
+        cwd: str,
+        stdout: str = "",
+        stderr: str = "",
+        exit_code: int | None = None,
+        status: str | None = None,
+    ) -> str:
+        limit = self._get_bash_max_output_bytes()
+        stdout = self._cap_output(stdout, limit)
+        stderr = self._cap_output(stderr, limit)
+
+        sections = [
+            "Manual `!` command result from the user. Use this as context only.",
+            f"Command: `{command}`",
+            f"Working directory: `{cwd}`",
+        ]
+
+        if status is not None:
+            sections.append(f"Status: {status}")
+
+        if exit_code is not None:
+            sections.append(f"Exit code: {exit_code}")
+
+        if stdout:
+            sections.append(f"Stdout:\n```text\n{stdout.rstrip()}\n```")
+
+        if stderr:
+            sections.append(f"Stderr:\n```text\n{stderr.rstrip()}\n```")
+
+        if not stdout and not stderr:
+            sections.append("Output:\n```text\n(no output)\n```")
+
+        return "\n\n".join(sections)
 
     async def _handle_user_message(self, message: str) -> None:
         if self._remote_manager.is_active:
@@ -967,20 +1065,21 @@ class VibeApp(App):  # noqa: PLR0904
             rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
             self._narrator_manager.cancel()
             self._narrator_manager.on_turn_start(rendered_prompt)
-            async for event in self.agent_loop.act(rendered_prompt):
-                self._narrator_manager.on_turn_event(event)
-                if isinstance(event, WaitingForInputEvent):
-                    await self._remove_loading_widget()
-                    if self._remote_manager.is_active:
-                        await self._handle_remote_waiting_input(event)
-                elif self._loading_widget is None and is_progress_event(event):
-                    await self._ensure_loading_widget()
-                if self.event_handler:
-                    await self.event_handler.handle_event(
-                        event,
-                        loading_active=self._loading_widget is not None,
-                        loading_widget=self._loading_widget,
-                    )
+            async with aclosing(self.agent_loop.act(rendered_prompt)) as events:
+                async for event in events:
+                    self._narrator_manager.on_turn_event(event)
+                    if isinstance(event, WaitingForInputEvent):
+                        await self._remove_loading_widget()
+                        if self._remote_manager.is_active:
+                            await self._handle_remote_waiting_input(event)
+                    elif self._loading_widget is None and is_progress_event(event):
+                        await self._ensure_loading_widget()
+                    if self.event_handler:
+                        await self.event_handler.handle_event(
+                            event,
+                            loading_active=self._loading_widget is not None,
+                            loading_widget=self._loading_widget,
+                        )
 
         except asyncio.CancelledError:
             await self._handle_turn_error()
@@ -1020,7 +1119,7 @@ class VibeApp(App):  # noqa: PLR0904
             return "Rate limits exceeded. Please wait a moment before trying again, or upgrade to Pro for higher rate limits and uninterrupted access."
         return "Rate limits exceeded. Please wait a moment before trying again."
 
-    async def _teleport_command(self) -> None:
+    async def _teleport_command(self, **kwargs: Any) -> None:
         await self._handle_teleport_command(show_message=False)
 
     async def _handle_teleport_command(
@@ -1172,11 +1271,39 @@ class VibeApp(App):  # noqa: PLR0904
 
         self._interrupt_requested = False
 
-    async def _show_help(self) -> None:
+    async def _show_help(self, **kwargs: Any) -> None:
         help_text = self.commands.get_help_text()
         await self._mount_and_scroll(UserCommandMessage(help_text))
 
-    async def _show_status(self) -> None:
+    async def _show_mcp(self, cmd_args: str = "", **kwargs: Any) -> None:
+        mcp_servers = self.config.mcp_servers
+        if not mcp_servers:
+            await self._mount_and_scroll(
+                UserCommandMessage("No MCP servers configured.")
+            )
+            return
+        if self._current_bottom_app == BottomApp.MCP:
+            return
+        name = cmd_args.strip()
+        if name and not any(s.name == name for s in mcp_servers):
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Unknown MCP server: {name}. Known servers: "
+                    + ", ".join(s.name for s in mcp_servers),
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+        await self._mount_and_scroll(UserCommandMessage("MCP servers opened..."))
+        await self._switch_from_input(
+            MCPApp(
+                mcp_servers=mcp_servers,
+                tool_manager=self.agent_loop.tool_manager,
+                initial_server=name,
+            )
+        )
+
+    async def _show_status(self, **kwargs: Any) -> None:
         stats = self.agent_loop.stats
         status_text = f"""## Agent Statistics
 
@@ -1189,27 +1316,27 @@ class VibeApp(App):  # noqa: PLR0904
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
-    async def _show_config(self) -> None:
+    async def _show_config(self, **kwargs: Any) -> None:
         """Switch to the configuration app in the bottom panel."""
         if self._current_bottom_app == BottomApp.Config:
             return
         await self._switch_to_config_app()
 
-    async def _show_model(self) -> None:
+    async def _show_model(self, **kwargs: Any) -> None:
         """Switch to the model picker in the bottom panel."""
         if self._current_bottom_app == BottomApp.ModelPicker:
             return
         await self._switch_to_model_picker_app()
 
-    async def _show_proxy_setup(self) -> None:
+    async def _show_proxy_setup(self, **kwargs: Any) -> None:
         if self._current_bottom_app == BottomApp.ProxySetup:
             return
         await self._switch_to_proxy_setup_app()
 
-    async def _show_data_retention(self) -> None:
+    async def _show_data_retention(self, **kwargs: Any) -> None:
         await self._mount_and_scroll(UserCommandMessage(DATA_RETENTION_MESSAGE))
 
-    async def _show_session_picker(self) -> None:
+    async def _show_session_picker(self, **kwargs: Any) -> None:
         cwd = str(Path.cwd())
         local_sessions = (
             list_local_resume_sessions(self.config, cwd)
@@ -1405,7 +1532,7 @@ class VibeApp(App):  # noqa: PLR0904
     def loading_widget(self) -> LoadingWidget | None:
         return self._loading_widget
 
-    async def _reload_config(self) -> None:
+    async def _reload_config(self, **kwargs: Any) -> None:
         try:
             self._reset_ui_state()
             await self._load_more.hide()
@@ -1422,7 +1549,11 @@ class VibeApp(App):  # noqa: PLR0904
                     self.agent_loop.mcp_registry,
                     plan_title(self._plan_info),
                 )
-            await self._mount_and_scroll(UserCommandMessage("Configuration reloaded."))
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    "Configuration reloaded (includes agent instructions and skills)."
+                )
+            )
         except Exception as e:
             await self._mount_and_scroll(
                 ErrorMessage(
@@ -1430,7 +1561,7 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
 
-    async def _install_lean(self) -> None:
+    async def _install_lean(self, **kwargs: Any) -> None:
         current = list(self.agent_loop.base_config.installed_agents)
         if "lean" in current:
             await self._mount_and_scroll(
@@ -1440,7 +1571,7 @@ class VibeApp(App):  # noqa: PLR0904
         VibeConfig.save_updates({"installed_agents": sorted([*current, "lean"])})
         await self._reload_config()
 
-    async def _uninstall_lean(self) -> None:
+    async def _uninstall_lean(self, **kwargs: Any) -> None:
         current = list(self.agent_loop.base_config.installed_agents)
         if "lean" not in current:
             await self._mount_and_scroll(
@@ -1452,7 +1583,7 @@ class VibeApp(App):  # noqa: PLR0904
         })
         await self._reload_config()
 
-    async def _clear_history(self) -> None:
+    async def _clear_history(self, **kwargs: Any) -> None:
         try:
             self._reset_ui_state()
             if self._remote_manager.is_active:
@@ -1482,7 +1613,7 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
 
-    async def _show_log_path(self) -> None:
+    async def _show_log_path(self, **kwargs: Any) -> None:
         if not self.agent_loop.session_logger.enabled:
             await self._mount_and_scroll(
                 ErrorMessage(
@@ -1506,7 +1637,7 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
 
-    async def _compact_history(self) -> None:
+    async def _compact_history(self, **kwargs: Any) -> None:
         if self._agent_running:
             await self._mount_and_scroll(
                 ErrorMessage(
@@ -1570,11 +1701,12 @@ class VibeApp(App):  # noqa: PLR0904
             return None
         return short_session_id(self.agent_loop.session_logger.session_id)
 
-    async def _exit_app(self) -> None:
+    async def _exit_app(self, **kwargs: Any) -> None:
+        self._log_reader.shutdown()
         await self._narrator_manager.close()
         self.exit(result=self._get_session_resume_info())
 
-    async def _setup_terminal(self) -> None:
+    async def _setup_terminal(self, **kwargs: Any) -> None:
         result = setup_terminal()
 
         if result.success:
@@ -1612,7 +1744,7 @@ class VibeApp(App):  # noqa: PLR0904
             telemetry_client=self.agent_loop.telemetry_client,
         )
 
-    async def _show_voice_settings(self) -> None:
+    async def _show_voice_settings(self, **kwargs: Any) -> None:
         if self._current_bottom_app == BottomApp.Voice:
             return
         await self._switch_to_voice_app()
@@ -1720,6 +1852,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(QuestionApp).focus()
                 case BottomApp.SessionPicker:
                     self.query_one(SessionPickerApp).focus()
+                case BottomApp.MCP:
+                    self.query_one(MCPApp).focus()
                 case BottomApp.Rewind:
                     self.query_one(RewindApp).focus()
                 case BottomApp.Voice:
@@ -1794,7 +1928,7 @@ class VibeApp(App):  # noqa: PLR0904
             if isinstance(child, UserMessage) and child.message_index is not None
         ]
 
-    def _start_rewind_mode(self) -> None:
+    def _start_rewind_mode(self, **kwargs: Any) -> None:
         self.action_rewind_prev()
 
     def action_rewind_prev(self) -> None:
@@ -1987,6 +2121,15 @@ class VibeApp(App):  # noqa: PLR0904
         self.agent_loop.telemetry_client.send_user_cancelled_action("interrupt_agent")
         self.run_worker(self._interrupt_agent_loop(), exclusive=False)
 
+    def _handle_bottom_app_close_escape(
+        self, widget_type: type[MCPApp] | type[ProxySetupApp]
+    ) -> None:
+        try:
+            self.query_one(widget_type).action_close()
+        except Exception:
+            pass
+        self._last_escape_time = None
+
     def action_interrupt(self) -> None:  # noqa: PLR0911
         if self._voice_manager.transcribe_state != TranscribeState.IDLE:
             self._voice_manager.cancel_recording()
@@ -2002,13 +2145,12 @@ class VibeApp(App):  # noqa: PLR0904
             self._handle_voice_app_escape()
             return
 
+        if self._current_bottom_app == BottomApp.MCP:
+            self._handle_bottom_app_close_escape(MCPApp)
+            return
+
         if self._current_bottom_app == BottomApp.ProxySetup:
-            try:
-                proxy_setup_app = self.query_one(ProxySetupApp)
-                proxy_setup_app.action_close()
-            except Exception:
-                pass
-            self._last_escape_time = None
+            self._handle_bottom_app_close_escape(ProxySetupApp)
             return
 
         if self._current_bottom_app == BottomApp.Approval:
@@ -2170,6 +2312,14 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.call_after_refresh(schedule_switch)
 
+    async def action_toggle_debug_console(self) -> None:
+        if self._debug_console is not None:
+            await self._debug_console.remove()
+            self._debug_console = None
+        else:
+            self._debug_console = DebugConsole(log_reader=self._log_reader)
+            await self.mount(self._debug_console)
+
     def action_clear_quit(self) -> None:
         input_widgets = self.query(ChatInputContainer)
         if input_widgets:
@@ -2185,6 +2335,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._agent_task.cancel()
         self._remote_manager.cancel_stream_task()
 
+        self._log_reader.shutdown()
         self._narrator_manager.cancel()
         self.exit(result=self._get_session_resume_info())
 

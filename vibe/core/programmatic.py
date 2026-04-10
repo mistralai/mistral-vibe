@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 
 from vibe import __version__
 from vibe.core.agent_loop import AgentLoop, TeleportError
@@ -79,13 +80,14 @@ def run_programmatic(
                         )
                         formatter.on_event(next_event)
             else:
-                async for event in agent_loop.act(prompt):
-                    formatter.on_event(event)
-                    if (
-                        isinstance(event, AssistantEvent)
-                        and event.stopped_by_middleware
-                    ):
-                        raise ConversationLimitException(event.content)
+                async with aclosing(agent_loop.act(prompt)) as events:
+                    async for event in events:
+                        formatter.on_event(event)
+                        if (
+                            isinstance(event, AssistantEvent)
+                            and event.stopped_by_middleware
+                        ):
+                            raise ConversationLimitException(event.content)
 
             return formatter.finalize()
         finally:

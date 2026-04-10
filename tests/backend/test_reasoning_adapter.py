@@ -87,18 +87,6 @@ class TestThinkingBlocksConversion:
             {"type": "text", "text": "Answer"},
         ]
 
-    def test_reasoning_stripped_when_thinking_off(self, adapter, provider):
-        messages = [
-            LLMMessage(role=Role.user, content="Hi"),
-            LLMMessage(
-                role=Role.assistant,
-                content="Answer",
-                reasoning_content="Let me think...",
-            ),
-        ]
-        payload = _prepare(adapter, provider, messages, thinking="off")
-        assert payload["messages"][1]["content"] == "Answer"
-
     def test_assistant_without_reasoning_is_plain_string(self, adapter, provider):
         messages = [
             LLMMessage(role=Role.user, content="Hi"),

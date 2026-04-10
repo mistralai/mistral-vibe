@@ -292,6 +292,42 @@ class TestLoadSession:
         assert thought_updates[0].update.content.text == "Let me think step by step..."
 
     @pytest.mark.asyncio
+    async def test_load_session_replays_reasoning_before_assistant_message(
+        self,
+        acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
+        temp_session_dir: Path,
+        create_test_session,
+    ) -> None:
+        acp_agent, client = acp_agent_with_session_config
+
+        session_id = "replay-order-1234"
+        cwd = str(Path.cwd())
+        messages = [
+            {"role": "user", "content": "Think about this"},
+            {
+                "role": "assistant",
+                "content": "Here is my answer",
+                "reasoning_content": "Let me think step by step...",
+            },
+        ]
+        create_test_session(temp_session_dir, session_id, cwd, messages=messages)
+
+        await acp_agent.load_session(cwd=cwd, mcp_servers=[], session_id=session_id)
+
+        response_updates = [
+            update.update
+            for update in client._session_updates
+            if isinstance(update.update, (AgentThoughtChunk, AgentMessageChunk))
+        ]
+
+        assert [type(update) for update in response_updates] == [
+            AgentThoughtChunk,
+            AgentMessageChunk,
+        ]
+        assert response_updates[0].content.text == "Let me think step by step..."
+        assert response_updates[1].content.text == "Here is my answer"
+
+    @pytest.mark.asyncio
     async def test_load_session_not_found_raises_error(
         self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
     ) -> None:
