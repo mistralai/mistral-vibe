@@ -83,6 +83,7 @@ include = ["vibe/"]
 [project.scripts]
 vibe = "vibe.cli.entrypoint:main"
 vibe-acp = "vibe.acp.entrypoint:main"
+vibe-mcp = "vibe.mcp.entrypoint:main"
 
 
 [tool.uv]

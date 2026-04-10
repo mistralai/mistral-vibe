@@ -87,6 +87,16 @@ def parse_arguments() -> argparse.Namespace:
     # Feature flag for teleport, not exposed to the user yet
     parser.add_argument("--teleport", action="store_true", help=argparse.SUPPRESS)
 
+    parser.add_argument(
+        "--mcp-server",
+        nargs="?",
+        const="subagents",
+        metavar="MODE",
+        help="Run in MCP server mode instead of interactive UI. "
+        "MODE can be: 'agents' (all agents), 'subagents' (default), "
+        "or comma-separated list of specific agent names.",
+    )
+
     continuation_group = parser.add_mutually_exclusive_group()
     continuation_group.add_argument(
         "-c",
@@ -151,6 +161,14 @@ def main() -> None:
             )
             sys.exit(1)
         os.chdir(workdir)
+
+
+
+    # Handle MCP server mode
+    if args.mcp_server:
+        from vibe.mcp.entrypoint import run_mcp_server
+        run_mcp_server(agent_mode=args.mcp_server)
+        return
 
     is_interactive = args.prompt is None
     if is_interactive:
