@@ -11,7 +11,7 @@ from vibe.core.tools.builtins.glob import Glob, GlobArgs, GlobToolConfig
 def glob_tool(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = GlobToolConfig()
-    return Glob(config=config, state=BaseToolState())
+    return Glob(config_getter=lambda: config, state=BaseToolState())
 
 
 @pytest.mark.asyncio
