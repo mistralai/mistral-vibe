@@ -16,7 +16,7 @@ from vibe.core.types import ToolCallEvent, ToolResultEvent
 def think_tool(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = ThinkToolConfig()
-    return Think(config=config, state=BaseToolState())
+    return Think(config_getter=lambda: config, state=BaseToolState())
 
 
 async def _run(tool: Think, args: ThinkArgs) -> ThinkResult | None:
