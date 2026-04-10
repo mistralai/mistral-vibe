@@ -11,7 +11,7 @@ from vibe.core.tools.builtins.ls import Ls, LsArgs, LsToolConfig
 def ls(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = LsToolConfig()
-    return Ls(config=config, state=BaseToolState())
+    return Ls(config_getter=lambda: config, state=BaseToolState())
 
 
 @pytest.mark.asyncio
