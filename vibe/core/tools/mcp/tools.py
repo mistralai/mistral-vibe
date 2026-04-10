@@ -71,6 +71,22 @@ class MCPToolResult(BaseModel):
     structured: dict[str, Any] | None = None
 
 
+class MCPTool(
+    BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState],
+    ToolUIData[_OpenArgs, MCPToolResult],
+):
+    _server_name: ClassVar[str] = ""
+    _remote_name: ClassVar[str] = ""
+
+    @classmethod
+    def get_server_name(cls) -> str | None:
+        return cls._server_name or None
+
+    @classmethod
+    def get_remote_name(cls) -> str:
+        return cls._remote_name or cls.get_name()
+
+
 class RemoteTool(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -207,17 +223,16 @@ def create_mcp_http_proxy_tool_class(
         port = f"_{p.port}" if p.port else ""
         return f"{host}{port}"
 
-    published_name = f"{(alias or _alias_from_url(url))}_{remote.name}"
+    computed_alias = alias or _alias_from_url(url)
+    published_name = f"{computed_alias}_{remote.name}"
 
-    class MCPHttpProxyTool(
-        BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState],
-        ToolUIData[_OpenArgs, MCPToolResult],
-    ):
+    class MCPHttpProxyTool(MCPTool):
         description: ClassVar[str] = (
-            (f"[{alias}] " if alias else "")
+            (f"[{computed_alias}] " if computed_alias else "")
             + (remote.description or f"MCP tool '{remote.name}' from {url}")
             + (f"\nHint: {server_hint}" if server_hint else "")
         )
+        _server_name: ClassVar[str] = computed_alias
         _mcp_url: ClassVar[str] = url
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
@@ -269,7 +284,7 @@ def create_mcp_http_proxy_tool_class(
         def get_status_text(cls) -> str:
             return f"Calling MCP tool {remote.name}"
 
-    MCPHttpProxyTool.__name__ = f"MCP_{(alias or _alias_from_url(url))}__{remote.name}"
+    MCPHttpProxyTool.__name__ = f"MCP_{computed_alias}__{remote.name}"
     return MCPHttpProxyTool
 
 
@@ -344,10 +359,7 @@ def create_mcp_stdio_proxy_tool_class(
     computed_alias = alias or _alias_from_command(command)
     published_name = f"{computed_alias}_{remote.name}"
 
-    class MCPStdioProxyTool(
-        BaseTool[_OpenArgs, MCPToolResult, BaseToolConfig, BaseToolState],
-        ToolUIData[_OpenArgs, MCPToolResult],
-    ):
+    class MCPStdioProxyTool(MCPTool):
         description: ClassVar[str] = (
             (f"[{computed_alias}] " if computed_alias else "")
             + (
@@ -356,6 +368,7 @@ def create_mcp_stdio_proxy_tool_class(
             )
             + (f"\nHint: {server_hint}" if server_hint else "")
         )
+        _server_name: ClassVar[str] = computed_alias
         _stdio_command: ClassVar[list[str]] = command
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema

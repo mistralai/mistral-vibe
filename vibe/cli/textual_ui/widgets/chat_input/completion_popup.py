@@ -33,14 +33,11 @@ class CompletionPopup(Static):
                 text.append(description, style=description_style)
 
         self.update(text)
-        self.show()
+        self.styles.display = "block"
 
     def hide(self) -> None:
         self.update("")
         self.styles.display = "none"
-
-    def show(self) -> None:
-        self.styles.display = "block"
 
     def _display_label(self, label: str) -> str:
         if label.startswith("@"):

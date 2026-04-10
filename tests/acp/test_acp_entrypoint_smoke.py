@@ -240,6 +240,32 @@ def test_vibe_acp_setup_shows_onboarding_and_exits_on_cancel(
 
 
 @pytest.mark.asyncio
+async def test_vibe_acp_survives_broken_config(vibe_home_dir: Path) -> None:
+    vibe_home_dir.mkdir(parents=True, exist_ok=True)
+    (vibe_home_dir / "config.toml").write_text("{{{{invalid toml content!!")
+
+    proc, _initialize_response, conn = await _connect_and_initialize(
+        vibe_home_dir=vibe_home_dir, include_api_key=True
+    )
+
+    try:
+        # new_session should return a structured JSON-RPC error, not crash the server
+        with pytest.raises(RequestError):
+            await asyncio.wait_for(
+                conn.new_session(cwd=str(Path.cwd()), mcp_servers=[]), timeout=10
+            )
+        assert proc.returncode is None, "Server crashed after broken config"
+
+        (vibe_home_dir / "config.toml").write_text("")
+        session = await asyncio.wait_for(
+            conn.new_session(cwd=str(Path.cwd()), mcp_servers=[]), timeout=10
+        )
+        assert session.session_id
+    finally:
+        await _terminate_process(proc)
+
+
+@pytest.mark.asyncio
 async def test_vibe_acp_new_session_fails_without_api_key(vibe_home_dir: Path) -> None:
     proc, _initialize_response, conn = await _connect_and_initialize(
         vibe_home_dir=vibe_home_dir, include_api_key=False

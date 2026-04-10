@@ -36,7 +36,7 @@ class CommandRegistry:
             ),
             "reload": Command(
                 aliases=frozenset(["/reload"]),
-                description="Reload configuration from disk",
+                description="Reload configuration, agent instructions, and skills from disk",
                 handler="_reload_config",
             ),
             "clear": Command(
@@ -48,6 +48,11 @@ class CommandRegistry:
                 aliases=frozenset(["/log"]),
                 description="Show path to current interaction log file",
                 handler="_show_log_path",
+            ),
+            "debug": Command(
+                aliases=frozenset(["/debug"]),
+                description="Toggle debug console",
+                handler="action_toggle_debug_console",
             ),
             "compact": Command(
                 aliases=frozenset(["/compact"]),
@@ -85,6 +90,11 @@ class CommandRegistry:
                 description="Browse and resume past sessions",
                 handler="_show_session_picker",
             ),
+            "mcp": Command(
+                aliases=frozenset(["/mcp"]),
+                description="Display available MCP servers. Pass the name of a server to list its tools",
+                handler="_show_mcp",
+            ),
             "voice": Command(
                 aliases=frozenset(["/voice"]),
                 description="Configure voice settings",
@@ -120,12 +130,22 @@ class CommandRegistry:
             for alias in cmd.aliases:
                 self._alias_map[alias] = cmd_name
 
-    def find_command(self, user_input: str) -> Command | None:
-        cmd_name = self.get_command_name(user_input)
-        return self.commands.get(cmd_name) if cmd_name else None
-
     def get_command_name(self, user_input: str) -> str | None:
         return self._alias_map.get(user_input.lower().strip())
+
+    def parse_command(self, user_input: str) -> tuple[str, Command, str] | None:
+        parts = user_input.strip().split(None, 1)
+        if not parts:
+            return None
+
+        cmd_word = parts[0]
+        cmd_args = parts[1] if len(parts) > 1 else ""
+        cmd_name = self.get_command_name(cmd_word)
+        if cmd_name is None:
+            return None
+
+        command = self.commands[cmd_name]
+        return cmd_name, command, cmd_args
 
     def get_help_text(self) -> str:
         lines: list[str] = [

@@ -159,11 +159,14 @@ class AgentLoop:
         backend: BackendLike | None = None,
         enable_streaming: bool = False,
         entrypoint_metadata: EntrypointMetadata | None = None,
+        is_subagent: bool = False,
     ) -> None:
         self._base_config = config
         self.mcp_registry = MCPRegistry()
         self.agent_manager = AgentManager(
-            lambda: self._base_config, initial_agent=agent_name
+            lambda: self._base_config,
+            initial_agent=agent_name,
+            allow_subagent=is_subagent,
         )
         self.tool_manager = ToolManager(
             lambda: self.config, mcp_registry=self.mcp_registry
@@ -209,6 +212,7 @@ class AgentLoop:
         self._is_user_prompt_call: bool = False
 
         self._session_rules: list[ApprovedRule] = []
+        self._approval_lock = asyncio.Lock()
 
         self.telemetry_client = TelemetryClient(
             config_getter=lambda: self.config, session_id_getter=lambda: self.session_id
@@ -267,7 +271,6 @@ class AgentLoop:
             self.config.tools[tool_name] = {}
 
         self.config.tools[tool_name]["permission"] = permission.value
-        self.tool_manager.invalidate_tool(tool_name)
 
     def add_session_rule(self, rule: ApprovedRule) -> None:
         self._session_rules.append(rule)
@@ -349,6 +352,10 @@ class AgentLoop:
             self.tool_manager,
             self.agent_profile,
         )
+
+    async def inject_user_context(self, content: str) -> None:
+        self.messages.append(LLMMessage(role=Role.user, content=content, injected=True))
+        await self._save_messages()
 
     async def act(
         self, msg: str, client_message_id: str | None = None
@@ -1019,40 +1026,41 @@ class AgentLoop:
                 approval_type=ToolPermission.ALWAYS,
             )
 
-        tool_name = tool.get_name()
-        ctx = tool.resolve_permission(args)
+        async with self._approval_lock:
+            tool_name = tool.get_name()
+            ctx = tool.resolve_permission(args)
 
-        if ctx is None:
-            config_perm = self.tool_manager.get_tool_config(tool_name).permission
-            ctx = PermissionContext(permission=config_perm)
+            if ctx is None:
+                config_perm = self.tool_manager.get_tool_config(tool_name).permission
+                ctx = PermissionContext(permission=config_perm)
 
-        match ctx.permission:
-            case ToolPermission.ALWAYS:
-                return ToolDecision(
-                    verdict=ToolExecutionResponse.EXECUTE,
-                    approval_type=ToolPermission.ALWAYS,
-                )
-            case ToolPermission.NEVER:
-                return ToolDecision(
-                    verdict=ToolExecutionResponse.SKIP,
-                    approval_type=ToolPermission.NEVER,
-                    feedback=ctx.reason
-                    or f"Tool '{tool_name}' is permanently disabled",
-                )
-            case _:
-                uncovered = [
-                    rp
-                    for rp in ctx.required_permissions
-                    if not self._is_permission_covered(tool_name, rp)
-                ]
-                if ctx.required_permissions and not uncovered:
+            match ctx.permission:
+                case ToolPermission.ALWAYS:
                     return ToolDecision(
                         verdict=ToolExecutionResponse.EXECUTE,
                         approval_type=ToolPermission.ALWAYS,
                     )
-                return await self._ask_approval(
-                    tool_name, args, tool_call_id, uncovered
-                )
+                case ToolPermission.NEVER:
+                    return ToolDecision(
+                        verdict=ToolExecutionResponse.SKIP,
+                        approval_type=ToolPermission.NEVER,
+                        feedback=ctx.reason
+                        or f"Tool '{tool_name}' is permanently disabled",
+                    )
+                case _:
+                    uncovered = [
+                        rp
+                        for rp in ctx.required_permissions
+                        if not self._is_permission_covered(tool_name, rp)
+                    ]
+                    if ctx.required_permissions and not uncovered:
+                        return ToolDecision(
+                            verdict=ToolExecutionResponse.EXECUTE,
+                            approval_type=ToolPermission.ALWAYS,
+                        )
+                    return await self._ask_approval(
+                        tool_name, args, tool_call_id, uncovered
+                    )
 
     async def _ask_approval(
         self,

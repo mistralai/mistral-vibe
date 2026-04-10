@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 import functools
@@ -134,9 +134,15 @@ class BaseTool[
 
     prompt_path: ClassVar[Path] | None = None
 
-    def __init__(self, config: ToolConfig, state: ToolState) -> None:
-        self.config = config
+    def __init__(
+        self, config_getter: Callable[[], ToolConfig], state: ToolState
+    ) -> None:
+        self._config_getter = config_getter
         self.state = state
+
+    @property
+    def config(self) -> ToolConfig:
+        return self._config_getter()
 
     @abstractmethod
     async def run(
@@ -184,11 +190,11 @@ class BaseTool[
 
     @classmethod
     def from_config(
-        cls, config: ToolConfig
+        cls, config_getter: Callable[[], ToolConfig]
     ) -> BaseTool[ToolArgs, ToolResult, ToolConfig, ToolState]:
         state_class = cls._get_tool_state_class()
         initial_state = state_class()
-        return cls(config=config, state=initial_state)
+        return cls(config_getter=config_getter, state=initial_state)
 
     @classmethod
     def _get_tool_config_class(cls) -> type[ToolConfig]:

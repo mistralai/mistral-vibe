@@ -72,7 +72,6 @@ class ChatInputContainer(Vertical):
                 self,
             ),
         ])
-        self._completion_popup: CompletionPopup | None = None
         self._body: ChatInputBody | None = None
 
     def _get_slash_entries(self) -> list[tuple[str, str]]:
@@ -86,8 +85,7 @@ class ChatInputContainer(Vertical):
         return sorted(entries)
 
     def compose(self) -> ComposeResult:
-        self._completion_popup = CompletionPopup()
-        yield self._completion_popup
+        yield CompletionPopup()
 
         border_class = self._get_border_class()
         with Vertical(id=self.ID_INPUT_BOX, classes=border_class) as input_box:
@@ -138,12 +136,32 @@ class ChatInputContainer(Vertical):
     def render_completion_suggestions(
         self, suggestions: list[tuple[str, str]], selected_index: int
     ) -> None:
-        if self._completion_popup:
-            self._completion_popup.update_suggestions(suggestions, selected_index)
+        try:
+            popup = self.query_one(CompletionPopup)
+        except Exception:
+            return
+        popup.update_suggestions(suggestions, selected_index)
+        self._position_popup(popup, len(suggestions))
 
     def clear_completion_suggestions(self) -> None:
-        if self._completion_popup:
-            self._completion_popup.hide()
+        try:
+            popup = self.query_one(CompletionPopup)
+        except Exception:
+            return
+        popup.hide()
+
+    def _position_popup(self, popup: CompletionPopup, line_count: int) -> None:
+        widget = self.input_widget
+        if not widget:
+            return
+        cursor = widget.cursor_screen_offset
+        my_region = self.region
+        # Place popup bottom edge just above the cursor row
+        popup_height = line_count + 2  # +2 for solid border
+        popup.styles.offset = (
+            cursor.x - my_region.x,
+            cursor.y - popup_height - my_region.y,
+        )
 
     def _format_insertion(self, replacement: str, suffix: str) -> str:
         """Format the insertion text with appropriate spacing.

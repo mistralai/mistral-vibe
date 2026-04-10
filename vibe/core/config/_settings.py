@@ -11,6 +11,9 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urljoin
 
 from dotenv import dotenv_values
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+    DEFAULT_TRACES_EXPORT_PATH,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_core import to_jsonable_python
@@ -291,7 +294,7 @@ class TTSModelConfig(BaseModel):
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
 
 
-class OtelExporterConfig(BaseModel):
+class OtelSpanExporterConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     endpoint: str
@@ -299,7 +302,7 @@ class OtelExporterConfig(BaseModel):
 
 
 DEFAULT_MISTRAL_API_ENV_KEY = "MISTRAL_API_KEY"
-MISTRAL_OTEL_TRACES_PATH = "/telemetry/v1/traces"
+MISTRAL_OTEL_PATH = "/telemetry"
 _DEFAULT_MISTRAL_SERVER_URL = "https://api.mistral.ai"
 
 DEFAULT_PROVIDERS = [
@@ -523,12 +526,17 @@ class VibeConfig(BaseSettings):
         return os.getenv(self.nuage_api_key_env_var, "")
 
     @property
-    def otel_exporter_config(self) -> OtelExporterConfig | None:
+    def otel_span_exporter_config(self) -> OtelSpanExporterConfig | None:
         # When otel_endpoint is set explicitly, authentication is the user's responsibility
         # (via OTEL_EXPORTER_OTLP_* env vars), so headers are left empty.
         # Otherwise endpoint and API key are derived from the first MISTRAL provider.
+        traces_export_path = DEFAULT_TRACES_EXPORT_PATH.lstrip("/")
         if self.otel_endpoint:
-            return OtelExporterConfig(endpoint=self.otel_endpoint)
+            return OtelSpanExporterConfig(
+                endpoint=urljoin(
+                    f"{self.otel_endpoint.rstrip('/')}/", traces_export_path
+                )
+            )
 
         provider = next(
             (p for p in self.providers if p.backend == Backend.MISTRAL), None
@@ -542,7 +550,8 @@ class VibeConfig(BaseSettings):
             api_key_env = DEFAULT_MISTRAL_API_ENV_KEY
 
         endpoint = urljoin(
-            server_url or _DEFAULT_MISTRAL_SERVER_URL, MISTRAL_OTEL_TRACES_PATH
+            f"{urljoin(server_url or _DEFAULT_MISTRAL_SERVER_URL, MISTRAL_OTEL_PATH).rstrip('/')}/",
+            traces_export_path,
         )
 
         if not (api_key := os.getenv(api_key_env)):
@@ -551,7 +560,7 @@ class VibeConfig(BaseSettings):
             )
             return None
 
-        return OtelExporterConfig(
+        return OtelSpanExporterConfig(
             endpoint=endpoint, headers={"Authorization": f"Bearer {api_key}"}
         )
 

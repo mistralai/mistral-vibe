@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.core.config import OtelExporterConfig, ProviderConfig, VibeConfig
+from vibe.core.config import OtelSpanExporterConfig, ProviderConfig, VibeConfig
 from vibe.core.types import Backend
 
 
-class TestOtelExporterConfig:
+class TestOtelSpanExporterConfig:
     def test_derives_endpoint_from_mistral_provider(
         self, vibe_config: VibeConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -22,7 +22,7 @@ class TestOtelExporterConfig:
                 ]
             }
         )
-        result = config.otel_exporter_config
+        result = config.otel_span_exporter_config
         assert result is not None
         assert result.endpoint == "https://customer.mistral.ai/telemetry/v1/traces"
         assert result.headers == {"Authorization": "Bearer sk-test"}
@@ -49,7 +49,7 @@ class TestOtelExporterConfig:
                 ]
             }
         )
-        result = config.otel_exporter_config
+        result = config.otel_span_exporter_config
         assert result is not None
         assert result.endpoint == "https://eu.mistral.ai/telemetry/v1/traces"
         assert result.headers == {"Authorization": "Bearer sk-eu"}
@@ -67,7 +67,7 @@ class TestOtelExporterConfig:
                 ]
             }
         )
-        result = config.otel_exporter_config
+        result = config.otel_span_exporter_config
         assert result is not None
         assert result.endpoint == "https://api.mistral.ai/telemetry/v1/traces"
         assert result.headers == {"Authorization": "Bearer sk-fallback"}
@@ -76,7 +76,7 @@ class TestOtelExporterConfig:
         self, vibe_config: VibeConfig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("MISTRAL_API_KEY", "sk-default")
-        result = vibe_config.otel_exporter_config
+        result = vibe_config.otel_span_exporter_config
         assert result is not None
         assert result.endpoint == "https://api.mistral.ai/telemetry/v1/traces"
 
@@ -88,7 +88,7 @@ class TestOtelExporterConfig:
     ) -> None:
         monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
         with caplog.at_level("WARNING"):
-            assert vibe_config.otel_exporter_config is None
+            assert vibe_config.otel_span_exporter_config is None
         assert "OTEL tracing enabled but MISTRAL_API_KEY is not set" in caplog.text
 
     def test_custom_api_key_env_var(
@@ -108,20 +108,33 @@ class TestOtelExporterConfig:
                 ]
             }
         )
-        result = config.otel_exporter_config
+        result = config.otel_span_exporter_config
         assert result is not None
         assert result.endpoint == "https://onprem.corp.com/telemetry/v1/traces"
         assert result.headers == {"Authorization": "Bearer sk-custom"}
 
-    def test_explicit_otel_endpoint_bypasses_provider_derivation(
+    def test_explicit_otel_endpoint_appends_default_traces_path(
         self, vibe_config: VibeConfig
     ) -> None:
         config = vibe_config.model_copy(
-            update={"otel_endpoint": "https://my-collector:4318/v1/traces"}
+            update={"otel_endpoint": "https://my-collector:4318"}
         )
-        result = config.otel_exporter_config
+        result = config.otel_span_exporter_config
         assert result is not None
-        assert result == OtelExporterConfig(
+        assert result == OtelSpanExporterConfig(
             endpoint="https://my-collector:4318/v1/traces"
+        )
+        assert result.headers is None
+
+    def test_explicit_otel_endpoint_preserves_path_prefix(
+        self, vibe_config: VibeConfig
+    ) -> None:
+        config = vibe_config.model_copy(
+            update={"otel_endpoint": "https://my-collector:4318/api/public/otel"}
+        )
+        result = config.otel_span_exporter_config
+        assert result is not None
+        assert result == OtelSpanExporterConfig(
+            endpoint="https://my-collector:4318/api/public/otel/v1/traces"
         )
         assert result.headers is None

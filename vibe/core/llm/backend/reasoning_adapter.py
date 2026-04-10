@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 
 from vibe.core.config import ProviderConfig
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
-from vibe.core.llm.message_utils import merge_consecutive_user_messages, strip_reasoning
+from vibe.core.llm.message_utils import merge_consecutive_user_messages
 from vibe.core.types import (
     AvailableTool,
     FunctionCall,
@@ -122,8 +122,6 @@ class ReasoningAdapter(APIAdapter):
         thinking: str = "off",
     ) -> PreparedRequest:
         merged_messages = merge_consecutive_user_messages(messages)
-        if thinking == "off":
-            merged_messages = [strip_reasoning(msg) for msg in merged_messages]
         converted_messages = [self._convert_message(msg) for msg in merged_messages]
 
         payload = self._build_payload(
