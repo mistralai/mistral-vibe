@@ -175,6 +175,10 @@ class ToolManager:
         return defaults
 
     @property
+    def registered_tools(self) -> dict[str, type[BaseTool]]:
+        return self._available
+
+    @property
     def available_tools(self) -> dict[str, type[BaseTool]]:
         runtime_available = {
             name: cls for name, cls in self._available.items() if cls.is_available()
@@ -241,12 +245,10 @@ class ToolManager:
             )
 
         tool_class = self._available[tool_name]
-        tool_config = self.get_tool_config(tool_name)
-        self._instances[tool_name] = tool_class.from_config(tool_config)
+        self._instances[tool_name] = tool_class.from_config(
+            lambda: self.get_tool_config(tool_name)
+        )
         return self._instances[tool_name]
 
     def reset_all(self) -> None:
         self._instances.clear()
-
-    def invalidate_tool(self, tool_name: str) -> None:
-        self._instances.pop(tool_name, None)

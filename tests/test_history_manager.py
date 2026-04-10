@@ -61,14 +61,15 @@ def test_history_manager_filters_invalid_and_duplicated_entries(tmp_path: Path) 
     assert reloaded.get_previous(current_input="") is None
 
 
-def test_history_manager_filters_commands(tmp_path: Path) -> None:
+def test_history_manager_stores_slash_prefixed_entries(tmp_path: Path) -> None:
     history_file = tmp_path / "history.jsonl"
     manager = HistoryManager(history_file, max_entries=5)
     manager.add("first")
-    manager.add("/skip")
+    manager.add("/tool_call arg1 arg2")
 
     reloaded = HistoryManager(history_file)
 
+    assert reloaded.get_previous(current_input="") == "/tool_call arg1 arg2"
     assert reloaded.get_previous(current_input="") == "first"
     assert reloaded.get_previous(current_input="") is None
 

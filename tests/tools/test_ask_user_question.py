@@ -18,7 +18,7 @@ from vibe.core.types import ToolCallEvent, ToolResultEvent
 @pytest.fixture
 def tool():
     config = AskUserQuestionConfig()
-    return AskUserQuestion(config=config, state=BaseToolState())
+    return AskUserQuestion(config_getter=lambda: config, state=BaseToolState())
 
 
 @pytest.fixture

@@ -193,6 +193,9 @@ class TeleportService:
         yield TeleportFetchingUrlEvent()
         chat_url = await self._nuage_client.get_chat_assistant_url(execution_id)
 
+        if not chat_url:
+            raise ServiceTeleportError("Chat assistant URL is not available yet")
+
         yield TeleportCompleteEvent(url=chat_url)
 
     async def _push_or_fail(self) -> None:

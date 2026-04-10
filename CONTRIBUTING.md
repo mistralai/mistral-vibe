@@ -88,6 +88,8 @@ Example:
 LOG_LEVEL=DEBUG uv run vibe
 ```
 
+You can also view logs in real-time within the application by pressing `Ctrl+\` to open the debug console.
+
 ### Running Tests
 
 Run all tests:
@@ -107,6 +109,30 @@ Run a specific test file:
 ```bash
 uv run pytest tests/test_agent_tool_call.py
 ```
+
+### Profiling
+
+Vibe ships a lightweight profiler module (`vibe.cli.profiler`) that wraps [pyinstrument](https://github.com/joerick/pyinstrument). It silently no-ops when pyinstrument is not installed or the `VIBE_PROFILE` env var is unset, so instrumentation can stay in the code with zero overhead in normal use.
+
+**1. Add profiling calls** around the code you want to measure:
+
+```python
+from vibe.cli import profiler
+
+profiler.start("startup")
+# ... code to measure ...
+profiler.stop_and_print()
+```
+
+Only one profiler can run at a time. The label passed to `start()` is used to name the output file. Each call to `stop_and_print` writes an HTML report (`<label>-profile.html`) and prints a text summary to stderr.
+
+**2. Run with profiling enabled:**
+
+```bash
+VIBE_PROFILE=1 uv run vibe
+```
+
+Without `VIBE_PROFILE=1`, all `start` / `stop_and_print` calls are no-ops.
 
 ### Linting and Type Checking
 

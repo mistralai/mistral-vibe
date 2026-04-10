@@ -46,7 +46,7 @@ class TestBashGranularPermissions:
 
     def _bash(self, **kwargs):
         config = BashToolConfig(**kwargs)
-        return Bash(config=config, state=BaseToolState())
+        return Bash(config_getter=lambda: config, state=BaseToolState())
 
     def test_allowlisted_command_always(self):
         bash = self._bash()
@@ -264,7 +264,7 @@ class TestReadFileGranularPermissions:
 
     def _read_file(self, **kwargs):
         config = ReadFileToolConfig(**kwargs)
-        return ReadFile(config=config, state=ReadFileState())
+        return ReadFile(config_getter=lambda: config, state=ReadFileState())
 
     def test_in_workdir_normal_file_returns_none(self):
         (self.workdir / "test.py").touch()
@@ -346,7 +346,7 @@ class TestWriteFileGranularPermissions:
 
     def _write_file(self):
         config = WriteFileConfig()
-        return WriteFile(config=config, state=BaseToolState())
+        return WriteFile(config_getter=lambda: config, state=BaseToolState())
 
     def test_in_workdir_returns_none(self):
         tool = self._write_file()
@@ -379,7 +379,7 @@ class TestSearchReplaceGranularPermissions:
 
     def test_outside_workdir_returns_permission_context(self):
         config = SearchReplaceConfig()
-        tool = SearchReplace(config=config, state=BaseToolState())
+        tool = SearchReplace(config_getter=lambda: config, state=BaseToolState())
         result = tool.resolve_permission(
             SearchReplaceArgs(file_path="/tmp/file.py", content="x")
         )
@@ -395,7 +395,7 @@ class TestGrepGranularPermissions:
 
     def _grep(self):
         config = GrepToolConfig()
-        return Grep(config=config, state=BaseToolState())
+        return Grep(config_getter=lambda: config, state=BaseToolState())
 
     def test_in_workdir_normal_path_returns_none(self):
         tool = self._grep()
@@ -442,7 +442,7 @@ class TestApprovalFlowSimulation:
                 session_pattern="mkdir *",
             )
         ]
-        bash = Bash(config=BashToolConfig(), state=BaseToolState())
+        bash = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
         result = bash.resolve_permission(BashArgs(command="mkdir another_dir"))
         assert isinstance(result, PermissionContext)
         uncovered = [
@@ -460,7 +460,7 @@ class TestApprovalFlowSimulation:
                 session_pattern="mkdir *",
             )
         ]
-        bash = Bash(config=BashToolConfig(), state=BaseToolState())
+        bash = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
         result = bash.resolve_permission(BashArgs(command="npm install"))
         assert isinstance(result, PermissionContext)
         uncovered = [
@@ -472,7 +472,7 @@ class TestApprovalFlowSimulation:
         assert uncovered[0].session_pattern == "npm install *"
 
     def test_outside_dir_approved_covers_subsequent(self):
-        bash = Bash(config=BashToolConfig(), state=BaseToolState())
+        bash = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
         result = bash.resolve_permission(BashArgs(command="mkdir /tmp/newdir"))
         assert isinstance(result, PermissionContext)
         outside_rps = [
@@ -509,7 +509,7 @@ class TestApprovalFlowSimulation:
                 session_pattern="rm *",
             )
         ]
-        bash = Bash(config=BashToolConfig(), state=BaseToolState())
+        bash = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
         result = bash.resolve_permission(BashArgs(command="rm -rf /tmp/something"))
         assert isinstance(result, PermissionContext)
         cmd_perms = [
@@ -529,7 +529,7 @@ class TestApprovalFlowSimulation:
                 session_pattern="sudo apt install foo",
             )
         ]
-        bash = Bash(config=BashToolConfig(), state=BaseToolState())
+        bash = Bash(config_getter=lambda: BashToolConfig(), state=BaseToolState())
         result = bash.resolve_permission(BashArgs(command="sudo apt install bar"))
         assert isinstance(result, PermissionContext)
         cmd_perms = [
@@ -575,7 +575,7 @@ class TestApprovalFlowSimulation:
 
 class TestWebFetchPermissions:
     def _make_webfetch(self) -> WebFetch:
-        return WebFetch(config=WebFetchConfig(), state=BaseToolState())
+        return WebFetch(config_getter=lambda: WebFetchConfig(), state=BaseToolState())
 
     def test_returns_url_pattern_with_domain(self):
         wf = self._make_webfetch()
@@ -671,7 +671,7 @@ class TestWebFetchPermissions:
 
     def test_config_permission_always_honored(self):
         wf = WebFetch(
-            config=WebFetchConfig(permission=ToolPermission.ALWAYS),
+            config_getter=lambda: WebFetchConfig(permission=ToolPermission.ALWAYS),
             state=BaseToolState(),
         )
         result = wf.resolve_permission(WebFetchArgs(url="https://example.com"))
@@ -680,7 +680,7 @@ class TestWebFetchPermissions:
 
     def test_config_permission_never_honored(self):
         wf = WebFetch(
-            config=WebFetchConfig(permission=ToolPermission.NEVER),
+            config_getter=lambda: WebFetchConfig(permission=ToolPermission.NEVER),
             state=BaseToolState(),
         )
         result = wf.resolve_permission(WebFetchArgs(url="https://example.com"))
@@ -689,7 +689,8 @@ class TestWebFetchPermissions:
 
     def test_config_permission_ask_falls_through_to_domain(self):
         wf = WebFetch(
-            config=WebFetchConfig(permission=ToolPermission.ASK), state=BaseToolState()
+            config_getter=lambda: WebFetchConfig(permission=ToolPermission.ASK),
+            state=BaseToolState(),
         )
         result = wf.resolve_permission(WebFetchArgs(url="https://example.com"))
         assert isinstance(result, PermissionContext)

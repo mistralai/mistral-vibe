@@ -8,7 +8,7 @@ import sys
 import tomli_w
 
 from vibe import __version__
-from vibe.core.config import MissingAPIKeyError, VibeConfig
+from vibe.core.config import VibeConfig
 from vibe.core.config.harness_files import (
     get_harness_files_manager,
     init_harness_files_manager,
@@ -92,8 +92,8 @@ def main() -> None:
     try:
         config = VibeConfig.load()
         setup_tracing(config)
-    except MissingAPIKeyError:
-        pass  # tracing disabled, but server can still handle the error properly in new_session
+    except Exception:
+        pass  # tracing disabled
 
     run_acp_server()
 

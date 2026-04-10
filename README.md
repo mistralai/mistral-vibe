@@ -218,6 +218,7 @@ Simply run `vibe` to enter the interactive chat loop.
 - **External Editor**: Press `Ctrl+G` to edit your current input in an external editor.
 - **Tool Output Toggle**: Press `Ctrl+O` to toggle the tool output view.
 - **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.
+- **Debug Console**: Press `Ctrl+\` to toggle the debug console.
 - **Auto-Approve Toggle**: Press `Shift+Tab` to toggle auto-approve mode on/off.
 
 You can start Vibe with a prompt using the following command:
@@ -635,6 +636,7 @@ Mistral Vibe can be used in text editors and IDEs that support [Agent Client Pro
 ## Data collection & usage
 
 Use of Vibe is subject to our [Privacy Policy](https://legal.mistral.ai/terms/privacy-policy) and may include the collection and processing of data related to your use of the service, such as usage data, to operate, maintain, and improve Vibe. You can disable telemetry in your `config.toml` by setting `enable_telemetry = false`.
+
 
 ## License
 
