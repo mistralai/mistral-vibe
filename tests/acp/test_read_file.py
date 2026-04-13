@@ -76,7 +76,7 @@ def acp_read_file_tool(
         session_id="test_session_123",
         tool_call_id="test_tool_call_456",
     )
-    return ReadFile(config=config, state=state)
+    return ReadFile(config_getter=lambda: config, state=state)
 
 
 class TestAcpReadFileBasic:
@@ -116,7 +116,7 @@ class TestAcpReadFileExecution:
         test_file = tmp_path / "test_file.txt"
         test_file.touch()
         tool = ReadFile(
-            config=ReadFileToolConfig(),
+            config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -139,7 +139,7 @@ class TestAcpReadFileExecution:
         test_file = tmp_path / "test_file.txt"
         test_file.touch()
         tool = ReadFile(
-            config=ReadFileToolConfig(),
+            config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -162,7 +162,7 @@ class TestAcpReadFileExecution:
         test_file = tmp_path / "test_file.txt"
         test_file.touch()
         tool = ReadFile(
-            config=ReadFileToolConfig(),
+            config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -187,7 +187,7 @@ class TestAcpReadFileExecution:
         test_file = tmp_path / "test.txt"
         test_file.touch()
         tool = ReadFile(
-            config=ReadFileToolConfig(),
+            config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
                 client=mock_client, session_id="test_session", tool_call_id="test_call"
             ),
@@ -207,7 +207,7 @@ class TestAcpReadFileExecution:
         test_file = tmp_path / "test.txt"
         test_file.touch()
         tool = ReadFile(
-            config=ReadFileToolConfig(),
+            config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
                 client=None, session_id="test_session", tool_call_id="test_call"
             ),
@@ -231,7 +231,7 @@ class TestAcpReadFileExecution:
         test_file.touch()
         mock_client = MockClient()
         tool = ReadFile(
-            config=ReadFileToolConfig(),
+            config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
                 client=mock_client, session_id=None, tool_call_id="test_call"
             ),

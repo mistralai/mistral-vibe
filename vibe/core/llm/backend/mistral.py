@@ -32,10 +32,7 @@ from mistralai.client.models import (
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 
 from vibe.core.llm.exceptions import BackendErrorBuilder
-from vibe.core.llm.message_utils import (
-    merge_consecutive_user_messages,
-    strip_reasoning as strip_reasoning_message,
-)
+from vibe.core.llm.message_utils import merge_consecutive_user_messages
 from vibe.core.types import (
     AvailableTool,
     Content,
@@ -171,9 +168,6 @@ class MistralMapper:
             for tool_call in tool_calls
         ]
 
-    def strip_reasoning(self, msg: LLMMessage) -> LLMMessage:
-        return strip_reasoning_message(msg)
-
 
 ReasoningEffortValue = Literal["none", "high"]
 
@@ -271,10 +265,6 @@ class MistralBackend:
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
             if reasoning_effort is not None:
                 temperature = 1.0
-            else:
-                merged_messages = [
-                    strip_reasoning_message(msg) for msg in merged_messages
-                ]
 
             response = await self._get_client().chat.complete_async(
                 model=model.name,
@@ -355,10 +345,6 @@ class MistralBackend:
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
             if reasoning_effort is not None:
                 temperature = 1.0
-            else:
-                merged_messages = [
-                    strip_reasoning_message(msg) for msg in merged_messages
-                ]
 
             stream = await self._get_client().chat.stream_async(
                 model=model.name,

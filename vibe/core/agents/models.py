@@ -177,7 +177,7 @@ LEAN = AgentProfile(
             }
         ],
         "compaction_model": {
-            "name": "mistral-vibe-cli-latest",
+            "name": "mistral-small-latest",
             "provider": "mistral-testing",
             "alias": "devstral-compact",
             "temperature": 0.2,

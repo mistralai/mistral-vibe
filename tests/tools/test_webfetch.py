@@ -12,13 +12,13 @@ from vibe.core.tools.builtins.webfetch import WebFetch, WebFetchArgs, WebFetchCo
 @pytest.fixture
 def webfetch():
     config = WebFetchConfig()
-    return WebFetch(config=config, state=BaseToolState())
+    return WebFetch(config_getter=lambda: config, state=BaseToolState())
 
 
 @pytest.fixture
 def webfetch_small():
     config = WebFetchConfig(max_content_bytes=100)
-    return WebFetch(config=config, state=BaseToolState())
+    return WebFetch(config_getter=lambda: config, state=BaseToolState())
 
 
 @pytest.mark.asyncio
@@ -32,6 +32,7 @@ async def test_bare_domain_gets_https(webfetch):
     result = await collect_result(webfetch.run(WebFetchArgs(url="example.com")))
     assert result.url == "https://example.com"
     assert result.content == "ok"
+    assert result.was_truncated is False
 
 
 @pytest.mark.asyncio
@@ -167,6 +168,7 @@ async def test_truncates_to_max_bytes_with_disclaimer(webfetch_small):
     )
     assert result.content.startswith("a" * 100)
     assert "[Content truncated due to size limit]" in result.content
+    assert result.was_truncated is True
 
 
 @pytest.mark.asyncio
@@ -189,6 +191,7 @@ async def test_truncates_html_with_disclaimer(webfetch_small):
     assert "## first title" in result.content
     assert "## second title" not in result.content
     assert "[Content truncated due to size limit]" in result.content
+    assert result.was_truncated is True
 
 
 @pytest.mark.asyncio

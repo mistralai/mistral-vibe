@@ -24,7 +24,7 @@ def setup_tracing(config: VibeConfig) -> None:
     if not config.enable_otel:
         return
 
-    exporter_cfg = config.otel_exporter_config
+    exporter_cfg = config.otel_span_exporter_config
     if exporter_cfg is None:
         return
 

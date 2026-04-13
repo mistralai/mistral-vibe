@@ -159,20 +159,24 @@ class AgentLoop:
         backend: BackendLike | None = None,
         enable_streaming: bool = False,
         entrypoint_metadata: EntrypointMetadata | None = None,
+        is_subagent: bool = False,
     ) -> None:
         self._base_config = config
-        self._max_turns = max_turns
-        self._max_price = max_price
-        self._plan_session = PlanSession()
-
-        self.agent_manager = AgentManager(
-            lambda: self._base_config, initial_agent=agent_name
-        )
         self.mcp_registry = MCPRegistry()
+        self.agent_manager = AgentManager(
+            lambda: self._base_config,
+            initial_agent=agent_name,
+            allow_subagent=is_subagent,
+        )
         self.tool_manager = ToolManager(
             lambda: self.config, mcp_registry=self.mcp_registry
         )
         self.skill_manager = SkillManager(lambda: self.config)
+        self.message_observer = message_observer
+        self._max_turns = max_turns
+        self._max_price = max_price
+        self._plan_session = PlanSession()
+
         self.format_handler = APIToolFormatHandler()
 
         self.backend_factory = lambda: backend or self._select_backend()
@@ -181,7 +185,6 @@ class AgentLoop:
             backend_getter=lambda: self.backend, config_getter=lambda: self.config
         )
 
-        self.message_observer = message_observer
         self.enable_streaming = enable_streaming
         self.middleware_pipeline = MiddlewarePipeline()
         self._setup_middleware()
@@ -193,6 +196,11 @@ class AgentLoop:
         self.messages = MessageList(initial=[system_message], observer=message_observer)
 
         self.stats = AgentStats()
+        self.approval_callback: ApprovalCallback | None = None
+        self.user_input_callback: UserInputCallback | None = None
+        self.entrypoint_metadata = entrypoint_metadata
+        self.session_id = str(uuid4())
+
         try:
             active_model = config.get_active_model()
             self.stats.input_price_per_million = active_model.input_price
@@ -200,15 +208,11 @@ class AgentLoop:
         except ValueError:
             pass
 
-        self.approval_callback: ApprovalCallback | None = None
-        self.user_input_callback: UserInputCallback | None = None
-
-        self.entrypoint_metadata = entrypoint_metadata
-        self.session_id = str(uuid4())
         self._current_user_message_id: str | None = None
         self._is_user_prompt_call: bool = False
 
         self._session_rules: list[ApprovedRule] = []
+        self._approval_lock = asyncio.Lock()
 
         self.telemetry_client = TelemetryClient(
             config_getter=lambda: self.config, session_id_getter=lambda: self.session_id
@@ -245,6 +249,16 @@ class AgentLoop:
     def auto_approve(self) -> bool:
         return self.config.auto_approve
 
+    def refresh_config(self) -> None:
+        self._base_config = VibeConfig.load()
+        self.agent_manager.invalidate_config()
+
+    def set_approval_callback(self, callback: ApprovalCallback) -> None:
+        self.approval_callback = callback
+
+    def set_user_input_callback(self, callback: UserInputCallback) -> None:
+        self.user_input_callback = callback
+
     def set_tool_permission(
         self, tool_name: str, permission: ToolPermission, save_permanently: bool = False
     ) -> None:
@@ -257,7 +271,6 @@ class AgentLoop:
             self.config.tools[tool_name] = {}
 
         self.config.tools[tool_name]["permission"] = permission.value
-        self.tool_manager.invalidate_tool(tool_name)
 
     def add_session_rule(self, rule: ApprovedRule) -> None:
         self._session_rules.append(rule)
@@ -290,10 +303,6 @@ class AgentLoop:
             self.set_tool_permission(
                 tool_name, ToolPermission.ALWAYS, save_permanently=save_permanently
             )
-
-    def refresh_config(self) -> None:
-        self._base_config = VibeConfig.load()
-        self.agent_manager.invalidate_config()
 
     def emit_new_session_telemetry(self) -> None:
         entrypoint = (
@@ -344,9 +353,13 @@ class AgentLoop:
             self.agent_profile,
         )
 
+    async def inject_user_context(self, content: str) -> None:
+        self.messages.append(LLMMessage(role=Role.user, content=content, injected=True))
+        await self._save_messages()
+
     async def act(
         self, msg: str, client_message_id: str | None = None
-    ) -> AsyncGenerator[BaseEvent]:
+    ) -> AsyncGenerator[BaseEvent, None]:
         self._clean_message_history()
         self.rewind_manager.create_checkpoint()
         try:
@@ -376,6 +389,7 @@ class AgentLoop:
                 nuage_workflow_id=self.config.nuage_workflow_id,
                 nuage_api_key=self.config.nuage_api_key,
                 nuage_task_queue=self.config.nuage_task_queue,
+                vibe_config=self._base_config,
             )
         return self._teleport_service
 
@@ -1012,40 +1026,41 @@ class AgentLoop:
                 approval_type=ToolPermission.ALWAYS,
             )
 
-        tool_name = tool.get_name()
-        ctx = tool.resolve_permission(args)
+        async with self._approval_lock:
+            tool_name = tool.get_name()
+            ctx = tool.resolve_permission(args)
 
-        if ctx is None:
-            config_perm = self.tool_manager.get_tool_config(tool_name).permission
-            ctx = PermissionContext(permission=config_perm)
+            if ctx is None:
+                config_perm = self.tool_manager.get_tool_config(tool_name).permission
+                ctx = PermissionContext(permission=config_perm)
 
-        match ctx.permission:
-            case ToolPermission.ALWAYS:
-                return ToolDecision(
-                    verdict=ToolExecutionResponse.EXECUTE,
-                    approval_type=ToolPermission.ALWAYS,
-                )
-            case ToolPermission.NEVER:
-                return ToolDecision(
-                    verdict=ToolExecutionResponse.SKIP,
-                    approval_type=ToolPermission.NEVER,
-                    feedback=ctx.reason
-                    or f"Tool '{tool_name}' is permanently disabled",
-                )
-            case _:
-                uncovered = [
-                    rp
-                    for rp in ctx.required_permissions
-                    if not self._is_permission_covered(tool_name, rp)
-                ]
-                if ctx.required_permissions and not uncovered:
+            match ctx.permission:
+                case ToolPermission.ALWAYS:
                     return ToolDecision(
                         verdict=ToolExecutionResponse.EXECUTE,
                         approval_type=ToolPermission.ALWAYS,
                     )
-                return await self._ask_approval(
-                    tool_name, args, tool_call_id, uncovered
-                )
+                case ToolPermission.NEVER:
+                    return ToolDecision(
+                        verdict=ToolExecutionResponse.SKIP,
+                        approval_type=ToolPermission.NEVER,
+                        feedback=ctx.reason
+                        or f"Tool '{tool_name}' is permanently disabled",
+                    )
+                case _:
+                    uncovered = [
+                        rp
+                        for rp in ctx.required_permissions
+                        if not self._is_permission_covered(tool_name, rp)
+                    ]
+                    if ctx.required_permissions and not uncovered:
+                        return ToolDecision(
+                            verdict=ToolExecutionResponse.EXECUTE,
+                            approval_type=ToolPermission.ALWAYS,
+                        )
+                    return await self._ask_approval(
+                        tool_name, args, tool_call_id, uncovered
+                    )
 
     async def _ask_approval(
         self,
@@ -1129,12 +1144,6 @@ class AgentLoop:
     def _reset_session(self) -> None:
         self.session_id = str(uuid4())
         self.session_logger.reset_session(self.session_id)
-
-    def set_approval_callback(self, callback: ApprovalCallback) -> None:
-        self.approval_callback = callback
-
-    def set_user_input_callback(self, callback: UserInputCallback) -> None:
-        self.user_input_callback = callback
 
     async def clear_history(self) -> None:
         await self.session_logger.save_interaction(

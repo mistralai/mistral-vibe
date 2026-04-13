@@ -37,4 +37,4 @@ async def test_ui_clipboard_notification_does_not_crash_on_markup_text(
         assert notifications
         notification = notifications[-1]
         assert notification.markup is False
-        assert "copied to clipboard" in notification.message
+        assert "Selection copied to clipboard" in notification.message

@@ -4,8 +4,7 @@ from vibe.core.types import BaseEvent
 
 
 class TeleportAuthRequiredEvent(BaseEvent):
-    user_code: str
-    verification_uri: str
+    oauth_url: str
 
 
 class TeleportAuthCompleteEvent(BaseEvent):
@@ -22,6 +21,7 @@ class TeleportCheckingGitEvent(BaseEvent):
 
 class TeleportPushRequiredEvent(BaseEvent):
     unpushed_count: int = 1
+    branch_not_pushed: bool = False
 
 
 class TeleportPushResponseEvent(BaseEvent):
@@ -32,7 +32,11 @@ class TeleportPushingEvent(BaseEvent):
     pass
 
 
-class TeleportSendingGithubTokenEvent(BaseEvent):
+class TeleportWaitingForGitHubEvent(BaseEvent):
+    pass
+
+
+class TeleportFetchingUrlEvent(BaseEvent):
     pass
 
 
@@ -47,7 +51,8 @@ type TeleportYieldEvent = (
     | TeleportPushRequiredEvent
     | TeleportPushingEvent
     | TeleportStartingWorkflowEvent
-    | TeleportSendingGithubTokenEvent
+    | TeleportWaitingForGitHubEvent
+    | TeleportFetchingUrlEvent
     | TeleportCompleteEvent
 )
 

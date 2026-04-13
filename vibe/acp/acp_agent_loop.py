@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 import os
 from pathlib import Path
 import sys
@@ -100,6 +101,7 @@ from vibe.core.config import (
     VibeConfig,
     load_dotenv_values,
 )
+from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.proxy_setup import (
     ProxySetupError,
     parse_proxy_command,
@@ -444,13 +446,13 @@ class VibeAcpAgentLoop(AcpAgent):
                 await self.client.session_update(session_id=session_id, update=update)
 
             elif msg.role == Role.assistant:
-                if text_update := create_assistant_message_replay(msg):
-                    await self.client.session_update(
-                        session_id=session_id, update=text_update
-                    )
                 if reasoning_update := create_reasoning_replay(msg):
                     await self.client.session_update(
                         session_id=session_id, update=reasoning_update
+                    )
+                if text_update := create_assistant_message_replay(msg):
+                    await self.client.session_update(
+                        session_id=session_id, update=text_update
                     )
                 await self._replay_tool_calls(session_id, msg)
 
@@ -474,6 +476,11 @@ class VibeAcpAgentLoop(AcpAgent):
             AvailableCommand(
                 name="leanstall",
                 description="Install the Lean 4 agent (leanstral)",
+                input=AvailableCommandInput(root=UnstructuredCommandInput(hint="")),
+            ),
+            AvailableCommand(
+                name="data-retention",
+                description="Show data retention information",
                 input=AvailableCommandInput(root=UnstructuredCommandInput(hint="")),
             ),
             AvailableCommand(
@@ -540,6 +547,19 @@ class VibeAcpAgentLoop(AcpAgent):
             update=AgentMessageChunk(
                 session_update="agent_message_chunk",
                 content=TextContentBlock(type="text", text=message),
+                message_id=str(uuid4()),
+            ),
+        )
+        return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
+
+    async def _handle_data_retention_command(
+        self, session_id: str, message_id: str
+    ) -> PromptResponse:
+        await self.client.session_update(
+            session_id=session_id,
+            update=AgentMessageChunk(
+                session_update="agent_message_chunk",
+                content=TextContentBlock(type="text", text=DATA_RETENTION_MESSAGE),
                 message_id=str(uuid4()),
             ),
         )
@@ -772,6 +792,11 @@ class VibeAcpAgentLoop(AcpAgent):
         if text_prompt.strip().lower().startswith("/leanstall"):
             return await self._handle_leanstall_command(session_id, resolved_message_id)
 
+        if text_prompt.strip().lower().startswith("/data-retention"):
+            return await self._handle_data_retention_command(
+                session_id, resolved_message_id
+            )
+
         async def agent_loop_task() -> None:
             async for update in self._run_agent_loop(
                 session, text_prompt, resolved_message_id
@@ -861,61 +886,64 @@ class VibeAcpAgentLoop(AcpAgent):
     ) -> AsyncGenerator[SessionUpdate]:
         rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
 
-        async for event in session.agent_loop.act(
-            rendered_prompt, client_message_id=client_message_id
-        ):
-            if isinstance(event, AssistantEvent):
-                yield AgentMessageChunk(
-                    session_update="agent_message_chunk",
-                    content=TextContentBlock(type="text", text=event.content),
-                    message_id=event.message_id,
-                )
-
-            elif isinstance(event, ReasoningEvent):
-                yield AgentThoughtChunk(
-                    session_update="agent_thought_chunk",
-                    content=TextContentBlock(type="text", text=event.content),
-                    message_id=event.message_id,
-                )
-
-            elif isinstance(event, ToolCallEvent):
-                if issubclass(event.tool_class, BaseAcpTool):
-                    event.tool_class.update_tool_state(
-                        tool_manager=session.agent_loop.tool_manager,
-                        client=self.client,
-                        session_id=session.id,
-                        tool_call_id=event.tool_call_id,
+        async with aclosing(
+            session.agent_loop.act(rendered_prompt, client_message_id=client_message_id)
+        ) as events:
+            async for event in events:
+                if isinstance(event, AssistantEvent):
+                    yield AgentMessageChunk(
+                        session_update="agent_message_chunk",
+                        content=TextContentBlock(type="text", text=event.content),
+                        message_id=event.message_id,
                     )
 
-                session_update = tool_call_session_update(event)
-                if session_update:
-                    yield session_update
+                elif isinstance(event, ReasoningEvent):
+                    yield AgentThoughtChunk(
+                        session_update="agent_thought_chunk",
+                        content=TextContentBlock(type="text", text=event.content),
+                        message_id=event.message_id,
+                    )
 
-            elif isinstance(event, ToolResultEvent):
-                session_update = tool_result_session_update(event)
-                if session_update:
-                    yield session_update
-
-            elif isinstance(event, ToolStreamEvent):
-                yield ToolCallProgress(
-                    session_update="tool_call_update",
-                    tool_call_id=event.tool_call_id,
-                    content=[
-                        ContentToolCallContent(
-                            type="content",
-                            content=TextContentBlock(type="text", text=event.message),
+                elif isinstance(event, ToolCallEvent):
+                    if issubclass(event.tool_class, BaseAcpTool):
+                        event.tool_class.update_tool_state(
+                            tool_manager=session.agent_loop.tool_manager,
+                            client=self.client,
+                            session_id=session.id,
+                            tool_call_id=event.tool_call_id,
                         )
-                    ],
-                )
 
-            elif isinstance(event, CompactStartEvent):
-                yield create_compact_start_session_update(event)
+                    session_update = tool_call_session_update(event)
+                    if session_update:
+                        yield session_update
 
-            elif isinstance(event, CompactEndEvent):
-                yield create_compact_end_session_update(event)
+                elif isinstance(event, ToolResultEvent):
+                    session_update = tool_result_session_update(event)
+                    if session_update:
+                        yield session_update
 
-            elif isinstance(event, AgentProfileChangedEvent):
-                pass
+                elif isinstance(event, ToolStreamEvent):
+                    yield ToolCallProgress(
+                        session_update="tool_call_update",
+                        tool_call_id=event.tool_call_id,
+                        content=[
+                            ContentToolCallContent(
+                                type="content",
+                                content=TextContentBlock(
+                                    type="text", text=event.message
+                                ),
+                            )
+                        ],
+                    )
+
+                elif isinstance(event, CompactStartEvent):
+                    yield create_compact_start_session_update(event)
+
+                elif isinstance(event, CompactEndEvent):
+                    yield create_compact_end_session_update(event)
+
+                elif isinstance(event, AgentProfileChangedEvent):
+                    pass
 
     @override
     async def close_session(
