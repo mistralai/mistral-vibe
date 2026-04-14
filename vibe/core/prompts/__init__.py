@@ -15,7 +15,7 @@ class Prompt(StrEnum):
         return (_PROMPTS_DIR / self.value).with_suffix(".md")
 
     def read(self) -> str:
-        return read_safe(self.path).strip()
+        return read_safe(self.path).text.strip()
 
 
 class SystemPrompt(Prompt):

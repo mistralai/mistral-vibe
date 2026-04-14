@@ -9,7 +9,8 @@ import pytest
 
 from vibe.core.config import SessionLoggingConfig
 from vibe.core.session.session_loader import SessionLoader
-from vibe.core.types import LLMMessage, Role, ToolCall
+from vibe.core.types import LLMMessage, Role, SessionMetadata, ToolCall
+from vibe.core.utils.io import read_safe
 
 
 @pytest.fixture
@@ -1008,7 +1009,7 @@ class TestSessionLoaderUTF8Encoding:
         session_folder = session_dir / "test_20230101_120000_latin100"
         session_folder.mkdir()
 
-        # \x81 invalid UTF-8 and undefined in CP1252 → U+FFFD on all platforms
+        # Path contains U+0081; file written as Latin-1. Decoding matches read_safe.
         metadata_content = {
             "session_id": "latin1-test",
             "start_time": "2023-01-01T12:00:00Z",
@@ -1026,9 +1027,10 @@ class TestSessionLoaderUTF8Encoding:
         messages_file = session_folder / "messages.jsonl"
         messages_file.write_text('{"role": "user", "content": "Hello"}\n')
 
+        expected = SessionMetadata.model_validate_json(read_safe(metadata_file).text)
         metadata = SessionLoader.load_metadata(session_folder)
         assert metadata.session_id == "latin1-test"
-        assert metadata.environment["working_directory"] == "/home/user/caf�_project"
+        assert metadata == expected
 
     def test_load_session_with_utf8_metadata_and_messages(
         self, session_config: SessionLoggingConfig

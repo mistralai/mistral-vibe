@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Generator
 import contextlib
+import copy
 from enum import StrEnum, auto
 from http import HTTPStatus
 from pathlib import Path
+import threading
 from threading import Thread
 import time
 from typing import TYPE_CHECKING, Any, Literal
@@ -152,6 +154,7 @@ class AgentLoop:
     def __init__(
         self,
         config: VibeConfig,
+        *,
         agent_name: str = BuiltinAgentName.DEFAULT,
         message_observer: Callable[[LLMMessage], None] | None = None,
         max_turns: int | None = None,
@@ -160,8 +163,12 @@ class AgentLoop:
         enable_streaming: bool = False,
         entrypoint_metadata: EntrypointMetadata | None = None,
         is_subagent: bool = False,
+        defer_heavy_init: bool = False,
     ) -> None:
         self._base_config = config
+        self._init_complete = threading.Event()
+        self._init_error: Exception | None = None
+
         self.mcp_registry = MCPRegistry()
         self.agent_manager = AgentManager(
             lambda: self._base_config,
@@ -169,7 +176,9 @@ class AgentLoop:
             allow_subagent=is_subagent,
         )
         self.tool_manager = ToolManager(
-            lambda: self.config, mcp_registry=self.mcp_registry
+            lambda: self.config,
+            mcp_registry=self.mcp_registry,
+            defer_mcp=defer_heavy_init,
         )
         self.skill_manager = SkillManager(lambda: self.config)
         self.message_observer = message_observer
@@ -190,10 +199,17 @@ class AgentLoop:
         self._setup_middleware()
 
         system_prompt = get_universal_system_prompt(
-            self.tool_manager, self.config, self.skill_manager, self.agent_manager
+            self.tool_manager,
+            self.config,
+            self.skill_manager,
+            self.agent_manager,
+            include_git_status=not defer_heavy_init,
         )
         system_message = LLMMessage(role=Role.system, content=system_prompt)
         self.messages = MessageList(initial=[system_message], observer=message_observer)
+
+        if not defer_heavy_init:
+            self._init_complete.set()
 
         self.stats = AgentStats()
         self.approval_callback: ApprovalCallback | None = None
@@ -232,6 +248,55 @@ class AgentLoop:
             name="migrate_sessions",
         )
         thread.start()
+
+    def start_deferred_init(self) -> threading.Thread:
+        """Spawn a daemon thread that finishes deferred heavy I/O.
+
+        Returns the started thread so callers can join if needed.
+        """
+        thread = threading.Thread(
+            target=self._complete_init, daemon=True, name="agent_loop_init"
+        )
+        thread.start()
+        return thread
+
+    @property
+    def is_initialized(self) -> bool:
+        """Whether deferred initialization has completed (successfully or not)."""
+        return self._init_complete.is_set()
+
+    def _complete_init(self) -> None:
+        """Run deferred heavy I/O: MCP discovery and git status.
+
+        Intended to be called from a background thread when
+        ``defer_heavy_init=True`` was passed to ``__init__``.
+        """
+        try:
+            self.tool_manager.integrate_mcp(raise_on_failure=True)
+            system_prompt = get_universal_system_prompt(
+                self.tool_manager, self.config, self.skill_manager, self.agent_manager
+            )
+            self.messages.update_system_prompt(system_prompt)
+        except Exception as exc:
+            self._init_error = exc
+        finally:
+            self._init_complete.set()
+
+    async def wait_for_init(self) -> None:
+        """Await deferred initialization from an async context.
+
+        If deferred init failed, all callers raise the stored error.
+
+        A copy of the stored exception is raised each time so that concurrent
+        callers do not share (and mutate) the same ``__traceback__`` object.
+        """
+        if self.is_initialized:
+            if err := self._init_error:
+                raise copy.copy(err).with_traceback(err.__traceback__)
+            return
+        await asyncio.to_thread(self._init_complete.wait)
+        if err := self._init_error:
+            raise copy.copy(err).with_traceback(err.__traceback__)
 
     @property
     def agent_profile(self) -> AgentProfile:
@@ -272,7 +337,7 @@ class AgentLoop:
 
         self.config.tools[tool_name]["permission"] = permission.value
 
-    def add_session_rule(self, rule: ApprovedRule) -> None:
+    def _add_session_rule(self, rule: ApprovedRule) -> None:
         self._session_rules.append(rule)
 
     def _is_permission_covered(self, tool_name: str, rp: RequiredPermission) -> bool:
@@ -292,7 +357,7 @@ class AgentLoop:
         """Handle 'Allow Always' approval: add session rules or set tool-level permission."""
         if required_permissions:
             for rp in required_permissions:
-                self.add_session_rule(
+                self._add_session_rule(
                     ApprovedRule(
                         tool_name=tool_name,
                         scope=rp.scope,

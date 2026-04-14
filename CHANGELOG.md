@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.5] - 2026-04-14
+
+### Changed
+
+- Display detected files and LLM risks in trust folder dialog
+- Text-to-speech via the Mistral SDK with telemetry tracking
+- Deferred MCP and git I/O to background thread for faster CLI startup
+- Made telemetry URL configurable
+- Bumped Textual to 8.2.1
+
+### Fixed
+
+- Encoding detection fallback in `read_safe` for non-UTF-8 files
+- Config saving logic cleanup
+
+
 ## [2.7.4] - 2026-04-09
 
 ### Added

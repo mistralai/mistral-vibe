@@ -68,6 +68,8 @@ class Banner(Static):
         self.state = self._initial_state
 
     def watch_state(self) -> None:
+        if not self.is_mounted:
+            return
         self.query_one("#banner-model", NoMarkupStatic).update(self.state.active_model)
         self.query_one("#banner-meta-counts", NoMarkupStatic).update(
             self._format_meta_counts()

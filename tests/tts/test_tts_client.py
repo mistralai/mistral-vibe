@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import base64
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 from vibe.core.config import TTSModelConfig, TTSProviderConfig
@@ -27,13 +27,20 @@ def _make_model() -> TTSModelConfig:
 
 
 class TestMistralTTSClientInit:
-    def test_client_configured_with_base_url_and_auth(
+    def test_lazy_client_creation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+        client = MistralTTSClient(_make_provider(), _make_model())
+        assert client._client is None
+
+    def test_get_client_creates_mistral_instance(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
         client = MistralTTSClient(_make_provider(), _make_model())
-        assert str(client._client.base_url) == "https://api.mistral.ai/v1/"
-        assert client._client.headers["authorization"] == "Bearer test-key"
+        sdk_client = client._get_client()
+        assert sdk_client is not None
+        assert client._client is sdk_client
+        assert client._get_client() is sdk_client
 
 
 class TestMistralTTSClient:
@@ -46,55 +53,62 @@ class TestMistralTTSClient:
         raw_audio = b"fake-audio-data-for-testing"
         encoded_audio = base64.b64encode(raw_audio).decode()
 
-        async def mock_post(self_client, url, **kwargs):
-            assert url == "/audio/speech"
-            body = kwargs["json"]
-            assert body["model"] == "voxtral-mini-tts-latest"
-            assert body["input"] == "Hello"
-            assert body["voice_id"] == "gb_jane_neutral"
-            assert body["stream"] is False
-            assert body["response_format"] == "wav"
-            return httpx.Response(
-                status_code=200,
-                json={"audio_data": encoded_audio},
-                request=httpx.Request("POST", url),
-            )
+        mock_response = MagicMock()
+        mock_response.audio_data = encoded_audio
 
-        monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+        mock_complete_async = AsyncMock(return_value=mock_response)
 
         client = MistralTTSClient(_make_provider(), _make_model())
-        result = await client.speak("Hello")
+
+        with patch.object(
+            type(client._get_client().audio.speech),
+            "complete_async",
+            mock_complete_async,
+        ):
+            result = await client.speak("Hello")
 
         assert isinstance(result, TTSResult)
         assert result.audio_data == raw_audio
-        await client.close()
+        mock_complete_async.assert_called_once_with(
+            model="voxtral-mini-tts-latest",
+            input="Hello",
+            voice_id="gb_jane_neutral",
+            response_format="wav",
+        )
 
     @pytest.mark.asyncio
-    async def test_speak_raises_on_http_error(
+    async def test_speak_raises_on_sdk_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+        import httpx
+        from mistralai.client.errors import SDKError
 
-        async def mock_post(self_client, url, **kwargs):
-            return httpx.Response(
-                status_code=500,
-                json={"error": "Internal Server Error"},
-                request=httpx.Request("POST", url),
-            )
-
-        monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+        fake_response = httpx.Response(
+            status_code=500,
+            request=httpx.Request("POST", "https://api.mistral.ai/v1/audio/speech"),
+        )
+        mock_complete_async = AsyncMock(
+            side_effect=SDKError("API error", fake_response)
+        )
 
         client = MistralTTSClient(_make_provider(), _make_model())
-        with pytest.raises(httpx.HTTPStatusError):
+
+        with (
+            patch.object(
+                type(client._get_client().audio.speech),
+                "complete_async",
+                mock_complete_async,
+            ),
+            pytest.raises(SDKError),
+        ):
             await client.speak("Hello")
-        await client.close()
 
     @pytest.mark.asyncio
-    async def test_close_closes_underlying_client(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_close_resets_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
-
         client = MistralTTSClient(_make_provider(), _make_model())
+        client._get_client()
+        assert client._client is not None
         await client.close()
-        assert client._client.is_closed
+        assert client._client is None

@@ -15,7 +15,7 @@ class TeleportMessage(StatusMessage):
         if self._error:
             return f"Teleport failed: {self._error}"
         if self._final_url:
-            return f"Teleported to Nuage: {self._final_url}"
+            return f"Teleported to a new async coding session: {self._final_url}"
         return self._status
 
     def set_status(self, status: str) -> None:

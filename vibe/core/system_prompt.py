@@ -136,8 +136,8 @@ class ProjectContextProvider:
         except Exception as e:
             return f"Error getting git status: {e}"
 
-    def get_full_context(self) -> str:
-        git_status = self.get_git_status()
+    def get_full_context(self, *, include_git_status: bool = True) -> str:
+        git_status = self.get_git_status() if include_git_status else ""
 
         template = UtilityPrompt.PROJECT_CONTEXT.read()
         return Template(template).safe_substitute(
@@ -249,6 +249,8 @@ def get_universal_system_prompt(
     config: VibeConfig,
     skill_manager: SkillManager,
     agent_manager: AgentManager,
+    *,
+    include_git_status: bool = True,
 ) -> str:
     sections = [config.system_prompt]
 
@@ -285,7 +287,7 @@ def get_universal_system_prompt(
         else:
             context = ProjectContextProvider(
                 config=config.project_context, root_path=Path.cwd()
-            ).get_full_context()
+            ).get_full_context(include_git_status=include_git_status)
 
         sections.append(context)
 

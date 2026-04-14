@@ -1,6 +1,6 @@
 """Utilities package. Re-exports all public and test-used symbols from submodules.
 
-Import read_safe/read_safe_async from vibe.core.utils.io and create_slug from
+Import read_safe / read_safe_async / decode_safe (returns ReadSafeResult) from vibe.core.utils.io and create_slug from
 vibe.core.utils.slug when needed to avoid circular imports with config.
 """
 

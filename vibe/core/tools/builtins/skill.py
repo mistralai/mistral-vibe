@@ -99,7 +99,7 @@ class Skill(
             )
 
         try:
-            raw = read_safe(skill_info.skill_path)
+            raw = read_safe(skill_info.skill_path).text
             _, body = parse_frontmatter(raw)
         except (OSError, SkillParseError) as e:
             raise ToolError(f"Cannot load skill file: {e}") from e

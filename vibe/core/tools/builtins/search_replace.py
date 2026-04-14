@@ -22,7 +22,7 @@ from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils.io import read_safe_async
+from vibe.core.utils.io import ReadSafeResult, read_safe_async
 
 SEARCH_REPLACE_BLOCK_RE = re.compile(
     r"<{5,} SEARCH\r?\n(.*?)\r?\n?={5,}\r?\n(.*?)\r?\n?>{5,} REPLACE", flags=re.DOTALL
@@ -131,7 +131,8 @@ class SearchReplace(
     ) -> AsyncGenerator[ToolStreamEvent | SearchReplaceResult, None]:
         file_path, search_replace_blocks = self._prepare_and_validate_args(args)
 
-        original_content = await self._read_file(file_path)
+        decoded = await self._read_file(file_path)
+        original_content = decoded.text
 
         block_result = self._apply_blocks(
             original_content,
@@ -166,7 +167,7 @@ class SearchReplace(
             except Exception:
                 pass
 
-            await self._write_file(file_path, modified_content)
+            await self._write_file(file_path, modified_content, decoded.encoding)
 
         yield SearchReplaceResult(
             file=str(file_path),
@@ -221,7 +222,7 @@ class SearchReplace(
 
         return file_path, search_replace_blocks
 
-    async def _read_file(self, file_path: Path) -> str:
+    async def _read_file(self, file_path: Path) -> ReadSafeResult:
         try:
             return await read_safe_async(file_path, raise_on_error=True)
         except PermissionError:
@@ -234,12 +235,16 @@ class SearchReplace(
     async def _backup_file(self, file_path: Path) -> None:
         shutil.copy2(file_path, file_path.with_suffix(file_path.suffix + ".bak"))
 
-    async def _write_file(self, file_path: Path, content: str) -> None:
+    async def _write_file(self, file_path: Path, content: str, encoding: str) -> None:
         try:
             async with await anyio.Path(file_path).open(
-                mode="w", encoding="utf-8"
+                mode="w", encoding=encoding
             ) as f:
                 await f.write(content)
+        except UnicodeEncodeError as e:
+            raise ToolError(
+                f"Cannot encode patched content for {file_path} using {encoding!r}: {e}"
+            ) from e
         except PermissionError:
             raise ToolError(f"Permission denied writing to file: {file_path}")
         except OSError as e:

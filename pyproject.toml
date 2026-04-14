@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.7.4"
+version = "2.7.5"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -30,11 +30,13 @@ dependencies = [
     "agent-client-protocol==0.9.0",
     "anyio>=4.12.0",
     "cachetools>=5.5.0",
+    "charset-normalizer>=3.4.4",
     "cryptography>=44.0.0,<=46.0.3",
     "gitpython>=3.1.46",
     "giturlparse>=0.14.0",
     "google-auth>=2.0.0",
     "httpx>=0.28.1",
+    "jsonpatch>=1.33",
     "keyring>=25.6.0",
     "markdownify>=1.2.2",
     "mcp>=1.14.0",
@@ -53,7 +55,7 @@ dependencies = [
     "requests>=2.20.0",
     "rich>=14.0.0",
     "sounddevice>=0.5.1",
-    "textual>=8.1.1",
+    "textual>=8.2.1",
     "textual-speedups>=0.2.1",
     "tomli-w>=1.2.0",
     "tree-sitter>=0.25.2",
@@ -171,10 +173,12 @@ order-by-type = true
 required-imports = ["from __future__ import annotations"]
 
 [tool.ruff.lint.pylint]
+max-public-methods = 25
+max-positional-args = 10
 max-statements = 50
 max-branches = 15
 max-locals = 15
-max-args = 9
+max-args = 10
 max-returns = 6
 max-nested-blocks = 5
 

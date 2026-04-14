@@ -1,4 +1,4 @@
-# What's new in v2.7.4
-- **MCP command**: New `/mcp` command to display MCP servers and their status
-- **Manual command output**: Manual `!` commands now forward their output to the agent as context
-- **Console view**: New `ctrl+\` keybind to toggle logs display.
+# What's new in v2.7.5
+
+- **Trust dialog**: Display detected files and LLM risks in the trust folder dialog
+- **Faster startup**: Deferred MCP and git I/O to a background thread for faster CLI startup

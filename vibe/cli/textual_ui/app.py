@@ -370,6 +370,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         self._rewind_mode = False
         self._rewind_highlighted_widget: UserMessage | None = None
+        self._fatal_init_error = False
 
     @property
     def config(self) -> VibeConfig:
@@ -449,6 +450,8 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.call_after_refresh(self._refresh_banner)
 
+        self.run_worker(self._watch_init_completion(), exclusive=False)
+
         if self._show_resume_picker:
             self.run_worker(self._show_session_picker(), exclusive=False)
         elif self._initial_prompt or self._teleport_on_start:
@@ -456,6 +459,37 @@ class VibeApp(App):  # noqa: PLR0904
 
         gc.collect()
         gc.freeze()
+
+    async def _watch_init_completion(self) -> None:
+        """Show 'Initializing' loading indicator until background init finishes."""
+        init_widget = None
+        try:
+            if not self.agent_loop.is_initialized:
+                await self._ensure_loading_widget("Initializing")
+                init_widget = self._loading_widget
+            await self.agent_loop.wait_for_init()
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Background initialization failed: {e}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            await self._mount_and_scroll(
+                Static("Press any key to exit...", classes="error-hint")
+            )
+            if self._chat_input_container:
+                self._chat_input_container.disabled = True
+                self._chat_input_container.display = False
+            self._fatal_init_error = True
+        finally:
+            if self._loading_widget is init_widget:
+                await self._remove_loading_widget()
+            self._refresh_banner()
+            try:
+                self.query_one(MCPApp).refresh_index()
+            except Exception:
+                pass
 
     def _process_initial_prompt(self) -> None:
         if self._teleport_on_start:
@@ -469,6 +503,10 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _is_file_watcher_enabled(self) -> bool:
         return self.config.file_watcher_for_autocomplete
+
+    def on_key(self) -> None:
+        if self._fatal_init_error:
+            self.exit()
 
     async def on_chat_input_container_submitted(
         self, event: ChatInputContainer.Submitted
@@ -754,7 +792,7 @@ class VibeApp(App):  # noqa: PLR0904
         self.agent_loop.telemetry_client.send_slash_command_used(skill_name, "skill")
 
         try:
-            skill_content = read_safe(skill_info.skill_path)
+            skill_content = read_safe(skill_info.skill_path).text
         except OSError as e:
             await self._mount_and_scroll(
                 ErrorMessage(
@@ -1059,9 +1097,17 @@ class VibeApp(App):  # noqa: PLR0904
         self._agent_running = True
 
         await self._remove_loading_widget()
-        await self._ensure_loading_widget()
 
         try:
+            show_init_spinner = not self.agent_loop.is_initialized
+            if show_init_spinner:
+                await self._ensure_loading_widget("Initializing")
+            await self.agent_loop.wait_for_init()
+            if show_init_spinner:
+                await self._remove_loading_widget()
+                self._refresh_banner()
+
+            await self._ensure_loading_widget()
             rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
             self._narrator_manager.cancel()
             self._narrator_manager.on_turn_start(rendered_prompt)
@@ -1087,6 +1133,11 @@ class VibeApp(App):  # noqa: PLR0904
             raise
         except Exception as e:
             await self._handle_turn_error()
+
+            # _watch_init_completion already rendered the fatal startup error
+            # and told the user to exit -- don't duplicate the message.
+            if self._fatal_init_error:
+                return
 
             message = str(e)
             if isinstance(e, RateLimitError):
@@ -2542,7 +2593,9 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _make_default_narrator_manager(self) -> NarratorManager:
         return NarratorManager(
-            config_getter=lambda: self.config, audio_player=AudioPlayer()
+            config_getter=lambda: self.config,
+            audio_player=AudioPlayer(),
+            telemetry_client=self.agent_loop.telemetry_client,
         )
 
 

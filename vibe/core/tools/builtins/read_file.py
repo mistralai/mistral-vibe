@@ -21,6 +21,7 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import VIBE_WARNING_TAG
+from vibe.core.utils.io import decode_safe
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -73,8 +74,8 @@ class ReadFile(
     ToolUIData[ReadFileArgs, ReadFileResult],
 ):
     description: ClassVar[str] = (
-        "Read a UTF-8 file, returning content from a specific line range. "
-        "Reading is capped by a byte limit for safety."
+        "Read a text file (encoding detected safely), returning content from a "
+        "specific line range. Reading is capped by a byte limit for safety."
     )
 
     @final
@@ -135,52 +136,37 @@ class ReadFile(
 
     async def _read_file(self, args: ReadFileArgs, file_path: Path) -> _ReadResult:
         try:
-            return await self._do_read_file(args, file_path, encoding="utf-8")
-        except (UnicodeDecodeError, ValueError):
-            return await self._do_read_file(args, file_path, errors="replace")
-
-    async def _do_read_file(
-        self,
-        args: ReadFileArgs,
-        file_path: Path,
-        *,
-        encoding: str | None = None,
-        errors: str | None = None,
-    ) -> _ReadResult:
-        try:
-            lines_to_return: list[str] = []
+            raw_lines: list[bytes] = []
             bytes_read = 0
             was_truncated = False
 
-            async with await anyio.Path(file_path).open(
-                encoding=encoding, errors=errors
-            ) as f:
+            async with await anyio.Path(file_path).open("rb") as f:
                 line_index = 0
-                async for line in f:
+                while raw_line := await f.readline():
                     if line_index < args.offset:
                         line_index += 1
                         continue
 
-                    if args.limit is not None and len(lines_to_return) >= args.limit:
+                    if args.limit is not None and len(raw_lines) >= args.limit:
                         break
 
-                    line_bytes = len(line.encode("utf-8"))
+                    line_bytes = len(raw_line)
                     if bytes_read + line_bytes > self.config.max_read_bytes:
                         was_truncated = True
                         break
 
-                    lines_to_return.append(line)
+                    raw_lines.append(raw_line)
                     bytes_read += line_bytes
                     line_index += 1
-
-            return _ReadResult(
-                lines=lines_to_return,
-                bytes_read=bytes_read,
-                was_truncated=was_truncated,
-            )
-
         except OSError as exc:
             raise ToolError(f"Error reading {file_path}: {exc}") from exc
+
+        lines_to_return = decode_safe(b"".join(raw_lines)).text.splitlines(
+            keepends=True
+        )
+        return _ReadResult(
+            lines=lines_to_return, bytes_read=bytes_read, was_truncated=was_truncated
+        )
 
     def _validate_inputs(self, args: ReadFileArgs) -> None:
         if not args.path.strip():

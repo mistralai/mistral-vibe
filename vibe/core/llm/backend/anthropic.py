@@ -454,7 +454,7 @@ class AnthropicAdapter(APIAdapter):
 
         return payload
 
-    def prepare_request(  # noqa: PLR0913
+    def prepare_request(
         self,
         *,
         model_name: str,

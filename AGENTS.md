@@ -134,6 +134,20 @@ guidelines:
       - uv run script.py to run a script within the uv environment
       - uv run pytest (or any other python tool) to run the tool within the uv environment
 
+  - title: "Safe File Reading"
+    description: >
+      When reading files from disk, prefer the helpers in `vibe.core.utils.io` over raw
+      `Path.read_text()`, `Path.read_bytes().decode()`, or `open()` calls:
+      - `read_safe(path)` — synchronous read with automatic encoding detection.
+      - `read_safe_async(path)` — async equivalent (anyio-based).
+      - `decode_safe(raw)` — decode an already-read `bytes` object.
+      These functions try UTF-8 first, then BOM detection, the locale encoding, and
+      `charset_normalizer` (lazily, only when cheaper candidates fail). They return a
+      `ReadSafeResult(text, encoding)` so callers always get valid `str` output without
+      having to handle encoding errors manually.
+      Use `raise_on_error=True` only when the caller must distinguish corrupt files from
+      valid ones; the default (`False`) replaces undecodable bytes with U+FFFD.
+
   - title: "Imports in Cursor (no Pylance)"
     description: >
       Cursor's built-in Pyright does not offer the "Add import" quick fix (Ctrl+.). To add a missing import:

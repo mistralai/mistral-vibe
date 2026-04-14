@@ -107,7 +107,7 @@ class SkillManager:
 
     def _parse_skill_file(self, skill_path: Path) -> SkillInfo:
         try:
-            content = read_safe(skill_path)
+            content = read_safe(skill_path).text
         except OSError as e:
             raise SkillParseError(f"Cannot read file: {e}") from e
 

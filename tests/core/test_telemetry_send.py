@@ -10,7 +10,7 @@ from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_tool import FakeTool, FakeToolArgs
 from vibe.core.agent_loop import ToolDecision, ToolExecutionResponse
 from vibe.core.llm.format import ResolvedToolCall
-from vibe.core.telemetry.send import DATALAKE_EVENTS_URL, TelemetryClient
+from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.tools.base import BaseTool, ToolPermission
 from vibe.core.types import Backend
 from vibe.core.utils import get_user_agent
@@ -44,6 +44,13 @@ def _run_telemetry_tasks() -> None:
 
 
 class TestTelemetryClient:
+    def test_send_telemetry_event_swallows_config_getter_value_error(self) -> None:
+        def _raise_config_error() -> Any:
+            raise ValueError("config not ready")
+
+        client = TelemetryClient(config_getter=_raise_config_error)
+        client.send_telemetry_event("vibe.test", {})
+
     def test_send_telemetry_event_does_nothing_when_api_key_is_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -104,7 +111,7 @@ class TestTelemetryClient:
         await client.aclose()
 
         mock_post.assert_called_once_with(
-            DATALAKE_EVENTS_URL,
+            "https://api.mistral.ai/v1/datalake/events",
             json={"event": "vibe.test_event", "properties": {"key": "value"}},
             headers={
                 "Content-Type": "application/json",
@@ -302,7 +309,7 @@ class TestTelemetryClient:
         await client.aclose()
 
         mock_post.assert_called_once_with(
-            DATALAKE_EVENTS_URL,
+            "https://api.mistral.ai/v1/datalake/events",
             json={
                 "event": "vibe.test_event",
                 "properties": {"session_id": session_id, "key": "value"},
@@ -336,7 +343,7 @@ class TestTelemetryClient:
         await client.aclose()
 
         mock_post.assert_called_once_with(
-            DATALAKE_EVENTS_URL,
+            "https://api.mistral.ai/v1/datalake/events",
             json={"event": "vibe.test_event", "properties": {"key": "value"}},
             headers={
                 "Content-Type": "application/json",
@@ -414,3 +421,109 @@ class TestTelemetryClient:
 
         assert len(telemetry_events) == 1
         assert "correlation_id" not in telemetry_events[0]
+
+    def test_telemetry_url_custom_provider_config(self) -> None:
+        from vibe.core.config import ProviderConfig
+        from vibe.core.types import Backend
+
+        custom_api_base = "https://api.custom.host/v2"
+
+        config = build_test_vibe_config(
+            enable_telemetry=True,
+            providers=[
+                ProviderConfig(
+                    name="mistral",
+                    api_base=custom_api_base,
+                    api_key_env_var="MISTRAL_API_KEY",
+                    backend=Backend.MISTRAL,
+                )
+            ],
+        )
+        client = TelemetryClient(config_getter=lambda: config)
+
+        assert (
+            client._get_telemetry_url(custom_api_base)
+            == "https://api.custom.host/v1/datalake/events"
+        )
+
+    def test_telemetry_url_preserves_port_in_api_base(self) -> None:
+        from vibe.core.config import ProviderConfig
+        from vibe.core.types import Backend
+
+        custom_api_base = "http://api.custom.host:8080/v1/"
+
+        config = build_test_vibe_config(
+            enable_telemetry=True,
+            providers=[
+                ProviderConfig(
+                    name="mistral",
+                    api_base=custom_api_base,
+                    api_key_env_var="MISTRAL_API_KEY",
+                    backend=Backend.MISTRAL,
+                )
+            ],
+        )
+        client = TelemetryClient(config_getter=lambda: config)
+
+        assert (
+            client._get_telemetry_url(custom_api_base)
+            == "http://api.custom.host:8080/v1/datalake/events"
+        )
+
+    def test_telemetry_url_falls_back_to_default_when_api_base_malformed(self) -> None:
+        from vibe.core.config import ProviderConfig
+        from vibe.core.types import Backend
+
+        config = build_test_vibe_config(
+            enable_telemetry=True,
+            providers=[
+                ProviderConfig(
+                    name="mistral",
+                    api_base="not-a-valid-url",
+                    api_key_env_var="MISTRAL_API_KEY",
+                    backend=Backend.MISTRAL,
+                )
+            ],
+        )
+        client = TelemetryClient(config_getter=lambda: config)
+
+        assert (
+            client._get_telemetry_url("not-a-valid-url")
+            == "https://codestral.mistral.ai/v1/datalake/events"
+        )
+
+    def test_is_active_false_when_mistral_provider_exists_but_no_api_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        env_key = config.get_provider_for_model(
+            config.get_active_model()
+        ).api_key_env_var
+        monkeypatch.delenv(env_key, raising=False)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        assert client.is_active() is False
+
+    def test_is_active_false_when_no_mistral_provider(self) -> None:
+        from vibe.core.config import ProviderConfig
+
+        config = build_test_vibe_config(
+            enable_telemetry=True,
+            providers=[
+                ProviderConfig(
+                    name="llamacpp",
+                    api_base="http://127.0.0.1:8080/v1",
+                    api_key_env_var="",
+                )
+            ],
+        )
+        client = TelemetryClient(config_getter=lambda: config)
+
+        assert client.is_active() is False
+
+    def test_is_active_false_when_config_getter_raises_value_error(self) -> None:
+        def _raise_config_error() -> Any:
+            raise ValueError("config not ready")
+
+        client = TelemetryClient(config_getter=_raise_config_error)
+        assert client.is_active() is False

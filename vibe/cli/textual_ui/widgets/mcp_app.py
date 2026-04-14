@@ -78,6 +78,11 @@ class MCPApp(Container):
         self._refresh_view(self._viewing_server)
         self.query_one(OptionList).focus()
 
+    def refresh_index(self) -> None:
+        """Re-snapshot the tool index (e.g. after deferred MCP discovery)."""
+        self._index = collect_mcp_tool_index(self._mcp_servers, self._tool_manager)
+        self._refresh_view(self._viewing_server)
+
     def on_descendant_blur(self, _event: DescendantBlur) -> None:
         self.query_one(OptionList).focus()
 

@@ -185,7 +185,9 @@ class TestTeleportServiceCheckSupported:
         self, service: TeleportService
     ) -> None:
         service._git.get_info = AsyncMock(
-            side_effect=ServiceTeleportNotSupportedError("Not a git repository")
+            side_effect=ServiceTeleportNotSupportedError(
+                "Teleport requires a git repository. cd into a project with a .git directory and try again."
+            )
         )
         with pytest.raises(ServiceTeleportNotSupportedError):
             await service.check_supported()

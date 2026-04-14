@@ -7,6 +7,7 @@ from vibe.cli.narrator_manager.narrator_manager_port import (
     NarratorManagerListener,
     NarratorState,
 )
+from vibe.cli.narrator_manager.telemetry import ReadAloudTrackingState
 from vibe.cli.turn_summary import (
     NoopTurnSummary,
     TurnSummaryResult,
@@ -24,16 +25,21 @@ if TYPE_CHECKING:
     from vibe.cli.turn_summary import TurnSummaryPort
     from vibe.core.audio_player.audio_player_port import AudioPlayerPort
     from vibe.core.config import VibeConfig
+    from vibe.core.telemetry.send import TelemetryClient
     from vibe.core.tts.tts_client_port import TTSClientPort
     from vibe.core.types import BaseEvent
 
 
 class NarratorManager:
     def __init__(
-        self, config_getter: Callable[[], VibeConfig], audio_player: AudioPlayerPort
+        self,
+        config_getter: Callable[[], VibeConfig],
+        audio_player: AudioPlayerPort,
+        telemetry_client: TelemetryClient | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._audio_player = audio_player
+        self._telemetry_client = telemetry_client
         config = config_getter()
         self._turn_summary: TurnSummaryPort = self._make_turn_summary(config)
         self._turn_summary.on_summary = self._on_turn_summary
@@ -43,6 +49,7 @@ class NarratorManager:
         self._cancel_summary: Callable[[], bool] | None = None
         self._close_tasks: set[asyncio.Task[Any]] = set()
         self._listeners: list[NarratorManagerListener] = []
+        self._tracking = ReadAloudTrackingState()
 
     @property
     def state(self) -> NarratorState:
@@ -99,8 +106,12 @@ class NarratorManager:
         ):
             self._cancel_summary = cancel_summary
             self._set_state(NarratorState.SUMMARIZING)
+            self._tracking.reset()
+            self._on_read_aloud_requested()
 
     def cancel(self) -> None:
+        if self._state != NarratorState.IDLE:
+            self._on_read_aloud_ended("canceled")
         if self._cancel_summary is not None:
             self._cancel_summary()
             self._cancel_summary = None
@@ -178,16 +189,64 @@ class NarratorManager:
             loop = asyncio.get_running_loop()
             tts_result = await self._tts_client.speak(text)
             self._set_state(NarratorState.SPEAKING)
+            self._tracking.mark_play_started()
+            self._on_read_aloud_play_started()
             self._audio_player.play(
                 tts_result.audio_data,
                 AudioFormat.WAV,
                 on_finished=lambda: loop.call_soon_threadsafe(
-                    self._set_state, NarratorState.IDLE
+                    self._on_playback_finished
                 ),
             )
-        except Exception:
+        except Exception as exc:
             logger.warning("TTS speak failed", exc_info=True)
+            self._on_read_aloud_ended("error", error_type=type(exc).__name__)
             self._set_state(NarratorState.IDLE)
+
+    def _on_playback_finished(self) -> None:
+        if self._state != NarratorState.SPEAKING:
+            return
+        self._on_read_aloud_ended("completed")
+        self._set_state(NarratorState.IDLE)
+
+    def _on_read_aloud_requested(self) -> None:
+        if not self._telemetry_client:
+            return
+        self._telemetry_client.send_telemetry_event(
+            "vibe.read_aloud.requested",
+            {
+                "read_aloud_session_id": self._tracking.session_id,
+                "trigger": "autoplay_next_message",
+            },
+        )
+
+    def _on_read_aloud_play_started(self) -> None:
+        if not self._telemetry_client:
+            return
+        self._telemetry_client.send_telemetry_event(
+            "vibe.read_aloud.play_started",
+            {
+                "read_aloud_session_id": self._tracking.session_id,
+                "time_to_first_read_s": self._tracking.time_to_first_read_s(),
+                "speed_selection": None,
+            },
+        )
+
+    def _on_read_aloud_ended(
+        self, status: str, *, error_type: str | None = None
+    ) -> None:
+        if not self._telemetry_client:
+            return
+        self._telemetry_client.send_telemetry_event(
+            "vibe.read_aloud.ended",
+            {
+                "read_aloud_session_id": self._tracking.session_id,
+                "status": status,
+                "error_type": error_type,
+                "speed_selection": None,
+                "elapsed_seconds": self._tracking.elapsed_since_play_s(),
+            },
+        )
 
     def _set_state(self, state: NarratorState) -> None:
         self._state = state

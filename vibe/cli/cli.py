@@ -207,10 +207,13 @@ def run_cli(args: argparse.Namespace) -> None:
                     client_name="vibe_cli",
                     client_version=__version__,
                 ),
+                defer_heavy_init=True,
             )
 
             if loaded_session:
                 _resume_previous_session(agent_loop, *loaded_session)
+
+            agent_loop.start_deferred_init()
 
             run_textual_ui(
                 agent_loop=agent_loop,

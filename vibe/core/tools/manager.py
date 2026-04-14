@@ -7,6 +7,7 @@ import inspect
 from pathlib import Path
 import re
 import sys
+import threading
 from typing import TYPE_CHECKING, Any
 
 from vibe.core.config.harness_files import get_harness_files_manager
@@ -69,16 +70,21 @@ class ToolManager:
         self,
         config_getter: Callable[[], VibeConfig],
         mcp_registry: MCPRegistry | None = None,
+        *,
+        defer_mcp: bool = False,
     ) -> None:
         self._config_getter = config_getter
         self._mcp_registry = mcp_registry or MCPRegistry()
         self._instances: dict[str, BaseTool] = {}
         self._search_paths: list[Path] = self._compute_search_paths(self._config)
+        self._lock = threading.Lock()
+        self._mcp_integrated = False
 
         self._available: dict[str, type[BaseTool]] = {
             cls.get_name(): cls for cls in self._iter_tool_classes(self._search_paths)
         }
-        self._integrate_mcp()
+        if not defer_mcp:
+            self.integrate_mcp()
 
     @property
     def _config(self) -> VibeConfig:
@@ -176,13 +182,15 @@ class ToolManager:
 
     @property
     def registered_tools(self) -> dict[str, type[BaseTool]]:
-        return self._available
+        with self._lock:
+            return dict(self._available)
 
     @property
     def available_tools(self) -> dict[str, type[BaseTool]]:
-        runtime_available = {
-            name: cls for name, cls in self._available.items() if cls.is_available()
-        }
+        with self._lock:
+            runtime_available = {
+                name: cls for name, cls in self._available.items() if cls.is_available()
+            }
 
         if self._config.enabled_tools:
             return {
@@ -198,7 +206,14 @@ class ToolManager:
             }
         return runtime_available
 
-    def _integrate_mcp(self) -> None:
+    def integrate_mcp(self, *, raise_on_failure: bool = False) -> None:
+        """Discover and register MCP tools.
+
+        Idempotent: subsequent calls after a successful integration are
+        no-ops to avoid redundant MCP discovery.
+        """
+        if self._mcp_integrated:
+            return
         if not self._config.mcp_servers:
             return
 
@@ -206,15 +221,20 @@ class ToolManager:
             mcp_tools = self._mcp_registry.get_tools(self._config.mcp_servers)
         except Exception as exc:
             logger.warning("MCP integration failed: %s", exc)
+            if raise_on_failure:
+                raise
             return
 
-        self._available.update(mcp_tools)
+        with self._lock:
+            self._available = {**self._available, **mcp_tools}
+        self._mcp_integrated = True
         logger.info(
             "MCP integration registered %d tools (via registry)", len(mcp_tools)
         )
 
     def get_tool_config(self, tool_name: str) -> BaseToolConfig:
-        tool_class = self._available.get(tool_name)
+        with self._lock:
+            tool_class = self._available.get(tool_name)
 
         if tool_class:
             config_class = tool_class._get_tool_config_class()
@@ -239,12 +259,12 @@ class ToolManager:
         if tool_name in self._instances:
             return self._instances[tool_name]
 
-        if tool_name not in self._available:
-            raise NoSuchToolError(
-                f"Unknown tool: {tool_name}. Available: {list(self._available.keys())}"
-            )
-
-        tool_class = self._available[tool_name]
+        with self._lock:
+            if tool_name not in self._available:
+                raise NoSuchToolError(
+                    f"Unknown tool: {tool_name}. Available: {list(self._available.keys())}"
+                )
+            tool_class = self._available[tool_name]
         self._instances[tool_name] = tool_class.from_config(
             lambda: self.get_tool_config(tool_name)
         )

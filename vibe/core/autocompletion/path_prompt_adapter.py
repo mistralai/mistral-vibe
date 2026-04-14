@@ -9,6 +9,7 @@ from vibe.core.autocompletion.path_prompt import (
     PathResource,
     build_path_prompt_payload,
 )
+from vibe.core.utils.io import decode_safe
 
 DEFAULT_MAX_EMBED_BYTES = 256 * 1024
 
@@ -67,11 +68,7 @@ def _try_embed_text_resource(
     if not _is_probably_text(resource, data):
         return None
 
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-
+    text = decode_safe(data).text
     return {"type": "resource", "uri": resource.path.as_uri(), "text": text}
 
 

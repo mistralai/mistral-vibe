@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator, Callable
 import json
 from typing import Any, cast
 
+from jsonpatch import JsonPatch, JsonPatchException  # type: ignore[import-untyped]
 from pydantic import BaseModel, ValidationError
 
 from vibe.core.nuage.agent_models import AgentCompletionState
@@ -16,7 +17,6 @@ from vibe.core.nuage.events import (
     CustomTaskTimedOut,
     JSONPatchAppend,
     JSONPatchPayload,
-    JSONPatchRemove,
     JSONPatchReplace,
     JSONPayload,
     WorkflowEvent,
@@ -61,9 +61,55 @@ from vibe.core.types import (
 )
 
 _WAIT_FOR_INPUT_TASK_TYPE = "wait_for_input"
+_STEER_INPUT_LABEL = "Send a message to steer..."
 # These names must match the remote workflow's tool naming convention
 _ASK_USER_QUESTION_TOOL = "ask_user_question"
 _SEND_USER_MESSAGE_TOOL = "send_user_message"
+
+
+def _get_value_at_path(path: str, obj: Any) -> Any:
+    if not path or path == "/":
+        return obj
+    parts = path.split("/")[1:]
+    current = obj
+    for part in parts:
+        if current is None:
+            return None
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        elif isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            return None
+    return current
+
+
+def _set_value_at_path(path: str, obj: Any, value: Any) -> None:
+    if not path or path == "/":
+        return
+    parts = path.split("/")[1:]
+    current = obj
+    for part in parts[:-1]:
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        elif isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                return
+        else:
+            return
+    last = parts[-1]
+    if isinstance(current, dict):
+        current[last] = value
+    elif isinstance(current, list):
+        try:
+            current[int(last)] = value
+        except (ValueError, IndexError):
+            pass
 
 
 class _RemoteTool(
@@ -146,6 +192,7 @@ class RemoteWorkflowEventTranslator:
         self._pending_input_request: PendingInputRequest | None = None
         self._pending_question_prompt: str | None = None
         self._pending_ask_user_question_call_id: str | None = None
+        self._steer_task_ids: set[str] = set()
         self._last_status: WorkflowExecutionStatus | None = None
 
     @property
@@ -316,11 +363,17 @@ class RemoteWorkflowEventTranslator:
         payload_value = event.attributes.payload.value
         label: str | None = None
         if isinstance(payload_value, dict):
+            label = payload_value.get("label")
+
+        if label == _STEER_INPUT_LABEL:
+            self._steer_task_ids.add(event.attributes.custom_task_id)
+            return []
+
+        if isinstance(payload_value, dict):
             self._pending_input_request = PendingInputRequest.model_validate({
                 "task_id": event.attributes.custom_task_id,
                 **payload_value,
             })
-            label = self._pending_input_request.label
 
         events: list[BaseEvent] = []
         if label:
@@ -344,6 +397,10 @@ class RemoteWorkflowEventTranslator:
     ) -> list[BaseEvent] | None:
         if event.attributes.custom_task_type != _WAIT_FOR_INPUT_TASK_TYPE:
             return None
+
+        if event.attributes.custom_task_id in self._steer_task_ids:
+            self._steer_task_ids.discard(event.attributes.custom_task_id)
+            return []
 
         self._pending_input_request = None
         self._pending_question_prompt = None
@@ -431,52 +488,24 @@ class RemoteWorkflowEventTranslator:
         self, previous_state: dict[str, Any], payload: JSONPatchPayload
     ) -> dict[str, Any]:
         new_state = cast(dict[str, Any], self._json_safe_value(previous_state))
+
         for patch in payload.value:
-            path = [part for part in patch.path.split("/") if part]
-            if not path:
-                if isinstance(patch, JSONPatchReplace):
-                    new_state = self._normalize_state(patch.value)
-                continue
-
-            if isinstance(patch, JSONPatchRemove):
-                self._remove_path(new_state, path)
-                continue
-
             if isinstance(patch, JSONPatchAppend):
-                current = self._get_path(new_state, path)
-                self._set_path(new_state, path, f"{current or ''}{patch.value}")
-                continue
-
-            self._set_path(new_state, path, patch.value)
+                current = _get_value_at_path(patch.path, new_state)
+                _set_value_at_path(
+                    patch.path, new_state, f"{current or ''}{patch.value}"
+                )
+            elif isinstance(patch, JSONPatchReplace) and not patch.path.strip("/"):
+                new_state = self._normalize_state(patch.value)
+            else:
+                try:
+                    new_state = JsonPatch([
+                        {"op": patch.op, "path": patch.path, "value": patch.value}
+                    ]).apply(new_state)
+                except JsonPatchException:
+                    pass
 
         return new_state
-
-    def _get_path(self, state: dict[str, Any], path: list[str]) -> Any:
-        current: Any = state
-        for part in path:
-            if not isinstance(current, dict):
-                return None
-            current = current.get(part)
-        return current
-
-    def _set_path(self, state: dict[str, Any], path: list[str], value: Any) -> None:
-        current: dict[str, Any] = state
-        for part in path[:-1]:
-            child = current.get(part)
-            if not isinstance(child, dict):
-                child = {}
-                current[part] = child
-            current = child
-        current[path[-1]] = value
-
-    def _remove_path(self, state: dict[str, Any], path: list[str]) -> None:
-        current: dict[str, Any] = state
-        for part in path[:-1]:
-            child = current.get(part)
-            if not isinstance(child, dict):
-                return
-            current = child
-        current.pop(path[-1], None)
 
     def _completion_events(
         self, task_id: str, previous_state: dict[str, Any], state: dict[str, Any]
