@@ -1167,7 +1167,7 @@ class AgentLoop:
             pass
 
         self.middleware_pipeline.reset()
-        self.tool_manager.reset_all()
+        await self.tool_manager.reset_all()
         self._reset_session()
 
     async def compact(self) -> str:

@@ -250,5 +250,17 @@ class ToolManager:
         )
         return self._instances[tool_name]
 
-    def reset_all(self) -> None:
+    async def reset_all(self) -> None:
+        """Release per-tool resources and drop cached instances.
+
+        Iterates over all currently instantiated tools and awaits each one's
+        ``on_reset`` hook, logging any exception without interrupting the
+        reset of the remaining tools.  Tools are then removed from the cache
+        so the next ``get()`` call recreates them from scratch.
+        """
+        for name, tool in self._instances.items():
+            try:
+                await tool.on_reset()
+            except Exception:
+                logger.exception("Error during on_reset for tool %r", name)
         self._instances.clear()
