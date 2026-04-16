@@ -319,7 +319,7 @@ class ModelConfig(BaseModel):
     temperature: float = 0.2
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
-    thinking: Literal["off", "low", "medium", "high"] = "off"
+    thinking: Literal["off", "low", "medium", "high", "max"] = "off"
     auto_compact_threshold: int = 200_000
 
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)

@@ -489,7 +489,7 @@ class TestTelemetryClient:
 
         assert (
             client._get_telemetry_url("not-a-valid-url")
-            == "https://codestral.mistral.ai/v1/datalake/events"
+            == "https://api.mistral.ai/v1/datalake/events"
         )
 
     def test_is_active_false_when_mistral_provider_exists_but_no_api_key(

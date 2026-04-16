@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
-from vibe.core.skills.models import SkillInfo, SkillMetadata
+from vibe.core.skills.models import ParsedSkillCommand, SkillInfo, SkillMetadata
 from vibe.core.skills.parser import SkillParseError, parse_frontmatter
 from vibe.core.utils import name_matches
 from vibe.core.utils.io import read_safe
@@ -127,3 +127,32 @@ class SkillManager:
 
     def get_skill(self, name: str) -> SkillInfo | None:
         return self.available_skills.get(name)
+
+    def parse_skill_command(self, text_prompt: str) -> ParsedSkillCommand | None:
+        stripped = text_prompt.strip()
+        if not stripped.startswith("/"):
+            return None
+
+        parts = stripped[1:].split(None, 1)
+        if not parts:
+            return None
+
+        skill_name = parts[0].lower()
+        skill_info = self.get_skill(skill_name)
+        if skill_info is None:
+            return None
+
+        skill_content = read_safe(skill_info.skill_path).text
+        extra_instructions = parts[1] if len(parts) > 1 else None
+
+        return ParsedSkillCommand(
+            name=skill_name,
+            content=skill_content,
+            extra_instructions=extra_instructions,
+        )
+
+    @staticmethod
+    def build_skill_prompt(text_prompt: str, parsed: ParsedSkillCommand) -> str:
+        if parsed.extra_instructions is not None:
+            return f"{text_prompt}\n\n{parsed.content}"
+        return parsed.content

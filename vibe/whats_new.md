@@ -1,4 +1,3 @@
-# What's new in v2.7.5
+# What's new in v2.7.6
 
-- **Trust dialog**: Display detected files and LLM risks in the trust folder dialog
-- **Faster startup**: Deferred MCP and git I/O to a background thread for faster CLI startup
+- **Streaming fix**: Fixed markdown fence context loss causing streaming rendering problems

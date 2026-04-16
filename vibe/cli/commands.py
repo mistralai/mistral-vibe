@@ -95,6 +95,11 @@ class CommandRegistry:
                 description="Display available MCP servers. Pass the name of a server to list its tools",
                 handler="_show_mcp",
             ),
+            "connectors": Command(
+                aliases=frozenset(["/connectors"]),
+                description="Manage workspace connectors. Subcommands: refresh",
+                handler="_handle_connectors",
+            ),
             "voice": Command(
                 aliases=frozenset(["/voice"]),
                 description="Configure voice settings",

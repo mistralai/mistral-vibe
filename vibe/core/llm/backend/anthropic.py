@@ -321,12 +321,14 @@ class AnthropicAdapter(APIAdapter):
     BETA_FEATURES = (
         "interleaved-thinking-2025-05-14,"
         "fine-grained-tool-streaming-2025-05-14,"
-        "prompt-caching-2024-07-31"
+        "prompt-caching-2024-07-31,"
+        "context-1m-2025-08-07"
     )
     THINKING_BUDGETS: ClassVar[dict[str, int]] = {
         "low": 1024,
         "medium": 10_000,
         "high": 32_000,
+        "max": 128_000,
     }
     DEFAULT_ADAPTIVE_MAX_TOKENS: ClassVar[int] = 32_768
     DEFAULT_MAX_TOKENS = 8192

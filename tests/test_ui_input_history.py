@@ -123,13 +123,13 @@ async def test_ui_alt_left_and_alt_right_move_by_word(vibe_app: VibeApp) -> None
         await pilot.press(*"hello brave world")
         assert textarea.cursor_location == (0, len("hello brave world"))
 
-        await pilot.press("alt+left")
+        await pilot.press("ctrl+left")
         assert textarea.cursor_location == (0, len("hello brave "))
 
-        await pilot.press("alt+left")
+        await pilot.press("ctrl+left")
         assert textarea.cursor_location == (0, len("hello "))
 
-        await pilot.press("alt+right")
+        await pilot.press("ctrl+right")
         assert textarea.cursor_location == (0, len("hello brave"))
 
         assert chat_input.value == "hello brave world"

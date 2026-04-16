@@ -90,3 +90,9 @@ class SkillInfo(BaseModel):
             user_invocable=meta.user_invocable,
             skill_path=skill_path.resolve(),
         )
+
+
+class ParsedSkillCommand(BaseModel):
+    name: str
+    content: str
+    extra_instructions: str | None = None

@@ -13,7 +13,16 @@ from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import VibeConfig
 from vibe.core.skills.manager import SkillManager
+from vibe.core.tools.connectors import ConnectorRegistry
 from vibe.core.tools.mcp.registry import MCPRegistry
+
+
+def _pluralize(count: int, singular: str) -> str:
+    return f"{count} {singular}{'s' if count != 1 else ''}"
+
+
+def _connector_count(registry: ConnectorRegistry | None) -> int:
+    return registry.connector_count if registry else 0
 
 
 @dataclass
@@ -21,6 +30,7 @@ class BannerState:
     active_model: str = ""
     models_count: int = 0
     mcp_servers_count: int = 0
+    connectors_count: int = 0
     skills_count: int = 0
     plan_description: str | None = None
 
@@ -33,6 +43,7 @@ class Banner(Static):
         config: VibeConfig,
         skill_manager: SkillManager,
         mcp_registry: MCPRegistry,
+        connector_registry: ConnectorRegistry | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -41,6 +52,7 @@ class Banner(Static):
             active_model=config.active_model,
             models_count=len(config.models),
             mcp_servers_count=mcp_registry.count_loaded(config.mcp_servers),
+            connectors_count=_connector_count(connector_registry),
             skills_count=len(skill_manager.available_skills),
             plan_description=None,
         )
@@ -85,22 +97,25 @@ class Banner(Static):
         config: VibeConfig,
         skill_manager: SkillManager,
         mcp_registry: MCPRegistry,
+        connector_registry: ConnectorRegistry | None = None,
         plan_description: str | None = None,
     ) -> None:
         self.state = BannerState(
             active_model=config.active_model,
             models_count=len(config.models),
             mcp_servers_count=mcp_registry.count_loaded(config.mcp_servers),
+            connectors_count=_connector_count(connector_registry),
             skills_count=len(skill_manager.available_skills),
             plan_description=plan_description,
         )
 
     def _format_meta_counts(self) -> str:
-        return (
-            f"{self.state.models_count} model{'s' if self.state.models_count != 1 else ''}"
-            f" · {self.state.mcp_servers_count} MCP server{'s' if self.state.mcp_servers_count != 1 else ''}"
-            f" · {self.state.skills_count} skill{'s' if self.state.skills_count != 1 else ''}"
-        )
+        parts = [_pluralize(self.state.models_count, "model")]
+        if self.state.connectors_count > 0:
+            parts.append(_pluralize(self.state.connectors_count, "connector"))
+        parts.append(_pluralize(self.state.mcp_servers_count, "MCP server"))
+        parts.append(_pluralize(self.state.skills_count, "skill"))
+        return " · ".join(parts)
 
     def _format_plan(self) -> str:
         return (

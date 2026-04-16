@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import html
 import os
 from pathlib import Path
@@ -37,85 +38,79 @@ class ProjectContextProvider:
         _git_status_cache[self.root_path] = result
         return result
 
+    def _run_git(
+        self, args: list[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            check=True,
+            cwd=self.root_path,
+            stdin=subprocess.DEVNULL if is_windows() else None,
+            text=True,
+            timeout=timeout,
+        )
+
+    @staticmethod
+    def _format_git_status(status_output: str) -> str:
+        if not status_output:
+            return "(clean)"
+        status_lines = status_output.splitlines()
+        MAX_GIT_STATUS_SIZE = 50
+        if len(status_lines) > MAX_GIT_STATUS_SIZE:
+            return f"({len(status_lines)} changes - use 'git status' for details)"
+        return f"({len(status_lines)} changes)"
+
+    @staticmethod
+    def _parse_git_log(log_output: str) -> list[str]:
+        recent_commits: list[str] = []
+        for line in log_output.split("\n"):
+            if not (line := line.strip()):
+                continue
+            if " " in line:
+                commit_hash, commit_msg = line.split(" ", 1)
+                if (
+                    "(" in commit_msg
+                    and ")" in commit_msg
+                    and (paren_index := commit_msg.rfind("(")) > 0
+                ):
+                    commit_msg = commit_msg[:paren_index].strip()
+                recent_commits.append(f"{commit_hash} {commit_msg}")
+            else:
+                recent_commits.append(line)
+        return recent_commits
+
     def _fetch_git_status(self) -> str:
         try:
             timeout = min(self.config.timeout_seconds, 10.0)
             num_commits = self.config.default_commit_count
 
-            current_branch = subprocess.run(
-                ["git", "branch", "--show-current"],
-                capture_output=True,
-                check=True,
-                cwd=self.root_path,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=timeout,
-            ).stdout.strip()
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                branch_future = pool.submit(
+                    self._run_git, ["branch", "--show-current"], timeout
+                )
+                remote_future = pool.submit(self._run_git, ["branch", "-r"], timeout)
+                status_future = pool.submit(
+                    self._run_git, ["status", "--porcelain"], timeout
+                )
+                log_future = pool.submit(
+                    self._run_git,
+                    ["log", "--oneline", f"-{num_commits}", "--decorate"],
+                    timeout,
+                )
+
+            current_branch = branch_future.result().stdout.strip()
 
             main_branch = "main"
             try:
-                branches_output = subprocess.run(
-                    ["git", "branch", "-r"],
-                    capture_output=True,
-                    check=True,
-                    cwd=self.root_path,
-                    stdin=subprocess.DEVNULL if is_windows() else None,
-                    text=True,
-                    timeout=timeout,
-                ).stdout
+                branches_output = remote_future.result().stdout
                 if "origin/master" in branches_output:
                     main_branch = "master"
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 pass
 
-            status_output = subprocess.run(
-                ["git", "status", "--porcelain"],
-                capture_output=True,
-                check=True,
-                cwd=self.root_path,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=timeout,
-            ).stdout.strip()
-
-            if status_output:
-                status_lines = status_output.splitlines()
-                MAX_GIT_STATUS_SIZE = 50
-                if len(status_lines) > MAX_GIT_STATUS_SIZE:
-                    status = (
-                        f"({len(status_lines)} changes - use 'git status' for details)"
-                    )
-                else:
-                    status = f"({len(status_lines)} changes)"
-            else:
-                status = "(clean)"
-
-            log_output = subprocess.run(
-                ["git", "log", "--oneline", f"-{num_commits}", "--decorate"],
-                capture_output=True,
-                check=True,
-                cwd=self.root_path,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=timeout,
-            ).stdout.strip()
-
-            recent_commits = []
-            for line in log_output.split("\n"):
-                if not (line := line.strip()):
-                    continue
-
-                if " " in line:
-                    commit_hash, commit_msg = line.split(" ", 1)
-                    if (
-                        "(" in commit_msg
-                        and ")" in commit_msg
-                        and (paren_index := commit_msg.rfind("(")) > 0
-                    ):
-                        commit_msg = commit_msg[:paren_index].strip()
-                    recent_commits.append(f"{commit_hash} {commit_msg}")
-                else:
-                    recent_commits.append(line)
+            status = self._format_git_status(status_future.result().stdout.strip())
+            recent_commits = self._parse_git_log(log_future.result().stdout.strip())
 
             git_info_parts = [
                 f"Current branch: {current_branch}",

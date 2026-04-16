@@ -77,6 +77,7 @@ class MCPTool(
 ):
     _server_name: ClassVar[str] = ""
     _remote_name: ClassVar[str] = ""
+    _is_connector: ClassVar[bool] = False
 
     @classmethod
     def get_server_name(cls) -> str | None:
@@ -85,6 +86,10 @@ class MCPTool(
     @classmethod
     def get_remote_name(cls) -> str:
         return cls._remote_name or cls.get_name()
+
+    @classmethod
+    def is_connector(cls) -> bool:
+        return cls._is_connector
 
 
 class RemoteTool(BaseModel):

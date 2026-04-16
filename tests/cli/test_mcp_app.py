@@ -142,7 +142,9 @@ class TestMCPAppInit:
         app = MCPApp(mcp_servers=servers, tool_manager=mgr)
         app._viewing_server = "srv"
         render_calls: list[str | None] = []
-        app._refresh_view = lambda server_name: render_calls.append(server_name)
+        app._refresh_view = lambda server_name, *, kind=None: render_calls.append(
+            server_name
+        )
         app.action_back()
         assert render_calls == [None]
 
@@ -151,6 +153,8 @@ class TestMCPAppInit:
         app = MCPApp(mcp_servers=[], tool_manager=mgr)
         app._viewing_server = None
         render_calls: list[str | None] = []
-        app._refresh_view = lambda server_name: render_calls.append(server_name)
+        app._refresh_view = lambda server_name, *, kind=None: render_calls.append(
+            server_name
+        )
         app.action_back()
         assert render_calls == []

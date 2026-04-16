@@ -31,7 +31,7 @@ class TestCompleteInit:
         loop = build_test_agent_loop(defer_heavy_init=True)
         error = RuntimeError("mcp boom")
 
-        with patch.object(loop.tool_manager, "integrate_mcp", side_effect=error):
+        with patch.object(loop.tool_manager, "integrate_all", side_effect=error):
             loop._complete_init()
 
         assert loop.is_initialized
@@ -44,7 +44,7 @@ class TestCompleteInit:
 
         with patch.object(
             loop.tool_manager._mcp_registry,
-            "get_tools",
+            "get_tools_async",
             side_effect=RuntimeError("mcp discovery boom"),
         ):
             loop._complete_init()
@@ -84,7 +84,7 @@ class TestWaitForInit:
         loop = build_test_agent_loop(defer_heavy_init=True)
         error = RuntimeError("init failed")
 
-        with patch.object(loop.tool_manager, "integrate_mcp", side_effect=error):
+        with patch.object(loop.tool_manager, "integrate_all", side_effect=error):
             loop._complete_init()
 
         with pytest.raises(RuntimeError, match="init failed"):
@@ -95,7 +95,7 @@ class TestWaitForInit:
         loop = build_test_agent_loop(defer_heavy_init=True)
         error = RuntimeError("once only")
 
-        with patch.object(loop.tool_manager, "integrate_mcp", side_effect=error):
+        with patch.object(loop.tool_manager, "integrate_all", side_effect=error):
             loop._complete_init()
 
         with pytest.raises(RuntimeError):

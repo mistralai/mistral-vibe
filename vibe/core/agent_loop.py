@@ -6,6 +6,7 @@ import contextlib
 import copy
 from enum import StrEnum, auto
 from http import HTTPStatus
+import os
 from pathlib import Path
 import threading
 from threading import Thread
@@ -60,6 +61,7 @@ from vibe.core.tools.base import (
     ToolPermission,
     ToolPermissionError,
 )
+from vibe.core.tools.connectors import ConnectorRegistry, connectors_enabled
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.mcp import MCPRegistry
 from vibe.core.tools.mcp_sampling import MCPSamplingHandler
@@ -100,6 +102,7 @@ from vibe.core.utils import (
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
     CancellationReason,
+    get_server_url_from_api_base,
     get_user_agent,
     get_user_cancellation_message,
     is_user_cancellation_event,
@@ -170,6 +173,7 @@ class AgentLoop:
         self._init_error: Exception | None = None
 
         self.mcp_registry = MCPRegistry()
+        self.connector_registry = self._create_connector_registry()
         self.agent_manager = AgentManager(
             lambda: self._base_config,
             initial_agent=agent_name,
@@ -178,6 +182,7 @@ class AgentLoop:
         self.tool_manager = ToolManager(
             lambda: self.config,
             mcp_registry=self.mcp_registry,
+            connector_registry=self.connector_registry,
             defer_mcp=defer_heavy_init,
         )
         self.skill_manager = SkillManager(lambda: self.config)
@@ -266,13 +271,13 @@ class AgentLoop:
         return self._init_complete.is_set()
 
     def _complete_init(self) -> None:
-        """Run deferred heavy I/O: MCP discovery and git status.
+        """Run deferred heavy I/O: MCP discovery, connectors, and git status.
 
         Intended to be called from a background thread when
         ``defer_heavy_init=True`` was passed to ``__init__``.
         """
         try:
-            self.tool_manager.integrate_mcp(raise_on_failure=True)
+            self.tool_manager.integrate_all(raise_on_mcp_failure=True)
             system_prompt = get_universal_system_prompt(
                 self.tool_manager, self.config, self.skill_manager, self.agent_manager
             )
@@ -402,6 +407,29 @@ class AgentLoop:
             client_version=client_version,
             terminal_emulator=terminal_emulator,
         )
+
+    def _create_connector_registry(self) -> ConnectorRegistry | None:
+        if not connectors_enabled():
+            return None
+
+        provider = self._base_config.get_mistral_provider()
+        if provider is None:
+            return None
+
+        api_key_env = provider.api_key_env_var or "MISTRAL_API_KEY"
+        api_key = os.getenv(api_key_env, "")
+        if not api_key:
+            return None
+
+        server_url = get_server_url_from_api_base(provider.api_base)
+        return ConnectorRegistry(api_key=api_key, server_url=server_url)
+
+    def refresh_system_prompt(self) -> None:
+        """Rebuild and replace the system prompt with current tool/skill state."""
+        system_prompt = get_universal_system_prompt(
+            self.tool_manager, self.config, self.skill_manager, self.agent_manager
+        )
+        self.messages.update_system_prompt(system_prompt)
 
     def _select_backend(self) -> BackendLike:
         active_model = self.config.get_active_model()
@@ -582,6 +610,7 @@ class AgentLoop:
             "call_type": (
                 "main_call" if self._is_user_prompt_call else "secondary_call"
             ),
+            "call_source": "vibe_code",
         }
         if self._current_user_message_id is not None:
             metadata["message_id"] = self._current_user_message_id
@@ -1342,7 +1371,9 @@ class AgentLoop:
             self._max_price = max_price
 
         self.tool_manager = ToolManager(
-            lambda: self.config, mcp_registry=self.mcp_registry
+            lambda: self.config,
+            mcp_registry=self.mcp_registry,
+            connector_registry=self.connector_registry,
         )
         self.skill_manager = SkillManager(lambda: self.config)
 

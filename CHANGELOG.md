@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.6] - 2026-04-16
+
+### Added
+
+- `MergeStrategy` enum and merge logic for configuration
+- `call_source=vibe_code` field in LLM request metadata
+- "Other" task type for non-code requests in CLI prompt
+
+### Changed
+
+- Parallelized git subprocess calls during startup
+- Extracted command registry and refactored skill resolution
+- 1M context window and thinking budget max for opus
+- Updated default telemetry URL to `api.mistral.ai`
+
+### Fixed
+
+- Markdown fence context loss causing streaming rendering problems
+- Proxy chain URLs in `api_base` parsing
+
+### Removed
+
+- Alt+Left / Alt+Right key bindings from chat input
+
+
 ## [2.7.5] - 2026-04-14
 
 ### Changed

@@ -126,6 +126,7 @@ from vibe.core.session.resume_sessions import (
     short_session_id,
 )
 from vibe.core.session.session_loader import SessionLoader
+from vibe.core.skills.manager import SkillManager
 from vibe.core.teleport.types import (
     TeleportAuthCompleteEvent,
     TeleportAuthRequiredEvent,
@@ -144,6 +145,8 @@ from vibe.core.tools.builtins.ask_user_question import (
     Choice,
     Question,
 )
+from vibe.core.tools.connectors import CONNECTORS_ENV_VAR, connectors_enabled
+from vibe.core.tools.mcp.tools import MCPTool
 from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.transcribe import make_transcribe_client
 from vibe.core.types import (
@@ -161,7 +164,6 @@ from vibe.core.utils import (
     get_user_cancellation_message,
     is_dangerous_directory,
 )
-from vibe.core.utils.io import read_safe
 
 
 class BottomApp(StrEnum):
@@ -332,6 +334,8 @@ class VibeApp(App):  # noqa: PLR0904
         excluded_commands = []
         if not self.config.nuage_enabled:
             excluded_commands.append("teleport")
+        if not connectors_enabled():
+            excluded_commands.append("connectors")
         self.commands = CommandRegistry(excluded_commands=excluded_commands)
 
         self._chat_input_container: ChatInputContainer | None = None
@@ -376,10 +380,17 @@ class VibeApp(App):  # noqa: PLR0904
     def config(self) -> VibeConfig:
         return self.agent_loop.config
 
+    @property
+    def _connectors_enabled(self) -> bool:
+        return connectors_enabled() and self.agent_loop.connector_registry is not None
+
     def compose(self) -> ComposeResult:
         with ChatScroll(id="chat"):
             self._banner = Banner(
-                self.config, self.agent_loop.skill_manager, self.agent_loop.mcp_registry
+                config=self.config,
+                skill_manager=self.agent_loop.skill_manager,
+                mcp_registry=self.agent_loop.mcp_registry,
+                connector_registry=self.agent_loop.connector_registry,
             )
             yield self._banner
             yield VerticalGroup(id="messages")
@@ -774,25 +785,11 @@ class VibeApp(App):  # noqa: PLR0904
         ]
 
     async def _handle_skill(self, user_input: str) -> bool:
-        if not user_input.startswith("/"):
-            return False
-
         if not self.agent_loop:
             return False
 
-        parts = user_input[1:].strip().split(None, 1)
-        if not parts:
-            return False
-        skill_name = parts[0].lower()
-
-        skill_info = self.agent_loop.skill_manager.get_skill(skill_name)
-        if not skill_info:
-            return False
-
-        self.agent_loop.telemetry_client.send_slash_command_used(skill_name, "skill")
-
         try:
-            skill_content = read_safe(skill_info.skill_path).text
+            skill = self.agent_loop.skill_manager.parse_skill_command(user_input)
         except OSError as e:
             await self._mount_and_scroll(
                 ErrorMessage(
@@ -801,10 +798,12 @@ class VibeApp(App):  # noqa: PLR0904
             )
             return True
 
-        if len(parts) > 1:
-            skill_content = f"{user_input}\n\n{skill_content}"
+        if skill is None:
+            return False
 
-        await self._handle_user_message(skill_content)
+        self.agent_loop.telemetry_client.send_slash_command_used(skill.name, "skill")
+        prompt = SkillManager.build_skill_prompt(user_input, skill)
+        await self._handle_user_message(prompt)
         return True
 
     async def _handle_bash_command(self, command: str) -> None:
@@ -1038,11 +1037,14 @@ class VibeApp(App):  # noqa: PLR0904
                 return
             if before is not None:
                 await messages_area.mount_all(widgets, before=before)
-                return
-            if after is not None:
+            elif after is not None:
                 await messages_area.mount_all(widgets, after=after)
-                return
-            await messages_area.mount_all(widgets)
+            else:
+                await messages_area.mount_all(widgets)
+
+        for widget in widgets:
+            if isinstance(widget, StreamingMessageBase):
+                await widget.write_initial_content()
 
     def _is_tool_enabled_in_main_agent(self, tool: str) -> bool:
         return tool in self.agent_loop.tool_manager.available_tools
@@ -1328,19 +1330,36 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _show_mcp(self, cmd_args: str = "", **kwargs: Any) -> None:
         mcp_servers = self.config.mcp_servers
-        if not mcp_servers:
-            await self._mount_and_scroll(
-                UserCommandMessage("No MCP servers configured.")
+        connector_registry = (
+            self.agent_loop.connector_registry if self._connectors_enabled else None
+        )
+        has_connectors = (
+            connector_registry is not None and connector_registry.connector_count > 0
+        )
+        if not mcp_servers and not has_connectors:
+            msg = (
+                "No MCP servers or connectors configured."
+                if self._connectors_enabled
+                else "No MCP servers configured."
             )
+            await self._mount_and_scroll(UserCommandMessage(msg))
             return
         if self._current_bottom_app == BottomApp.MCP:
             return
         name = cmd_args.strip()
-        if name and not any(s.name == name for s in mcp_servers):
+        connector_names = (
+            connector_registry.get_connector_names() if connector_registry else []
+        )
+        if (
+            name
+            and not any(s.name == name for s in mcp_servers)
+            and name not in connector_names
+        ):
+            all_names = [s.name for s in mcp_servers] + connector_names
+            entity = "MCP server or connector" if has_connectors else "MCP server"
             await self._mount_and_scroll(
                 ErrorMessage(
-                    f"Unknown MCP server: {name}. Known servers: "
-                    + ", ".join(s.name for s in mcp_servers),
+                    f"Unknown {entity}: {name}. Known: " + ", ".join(all_names),
                     collapsed=self._tools_collapsed,
                 )
             )
@@ -1351,8 +1370,51 @@ class VibeApp(App):  # noqa: PLR0904
                 mcp_servers=mcp_servers,
                 tool_manager=self.agent_loop.tool_manager,
                 initial_server=name,
+                connector_registry=connector_registry,
             )
         )
+
+    async def _handle_connectors(self, cmd_args: str = "", **kwargs: Any) -> None:
+        if not self._connectors_enabled:
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    f"Connectors are disabled. Set {CONNECTORS_ENV_VAR}=1 to enable."
+                )
+            )
+            return
+        registry = self.agent_loop.connector_registry
+        assert registry is not None  # guaranteed by _connectors_enabled
+
+        subcmd = cmd_args.strip().lower()
+        match subcmd:
+            case "refresh":
+                registry.clear()
+                tool_manager = self.agent_loop.tool_manager
+                await tool_manager.integrate_connectors_async()
+                self.agent_loop.refresh_system_prompt()
+                self._refresh_banner()
+                count = registry.connector_count
+                tools = sum(
+                    1
+                    for cls in tool_manager.registered_tools.values()
+                    if issubclass(cls, MCPTool) and cls.is_connector()
+                )
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        f"Connectors refreshed: {count} connectors, {tools} tools"
+                    )
+                )
+            case "":
+                await self._mount_and_scroll(
+                    UserCommandMessage("Usage: /connectors refresh")
+                )
+            case _:
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        f"Unknown subcommand: {subcmd}. Available: refresh",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
 
     async def _show_status(self, **kwargs: Any) -> None:
         stats = self.agent_loop.stats
@@ -1598,7 +1660,8 @@ class VibeApp(App):  # noqa: PLR0904
                     base_config,
                     self.agent_loop.skill_manager,
                     self.agent_loop.mcp_registry,
-                    plan_title(self._plan_info),
+                    connector_registry=self.agent_loop.connector_registry,
+                    plan_description=plan_title(self._plan_info),
                 )
             await self._mount_and_scroll(
                 UserCommandMessage(
@@ -2314,7 +2377,8 @@ class VibeApp(App):  # noqa: PLR0904
                 self.config,
                 self.agent_loop.skill_manager,
                 self.agent_loop.mcp_registry,
-                plan_title(self._plan_info),
+                connector_registry=self.agent_loop.connector_registry,
+                plan_description=plan_title(self._plan_info),
             )
 
     def _update_profile_widgets(self, profile: AgentProfile) -> None:

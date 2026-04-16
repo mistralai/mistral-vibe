@@ -16,7 +16,7 @@ from vibe.core.utils import get_server_url_from_api_base, get_user_agent
 if TYPE_CHECKING:
     from vibe.core.agent_loop import ToolDecision
 
-_DEFAULT_TELEMETRY_BASE_URL = "https://codestral.mistral.ai"
+_DEFAULT_TELEMETRY_BASE_URL = "https://api.mistral.ai"
 _DATALAKE_EVENTS_PATH = "/v1/datalake/events"
 
 
