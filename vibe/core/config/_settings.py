@@ -385,6 +385,7 @@ DEFAULT_PROVIDERS = [
 ]
 
 DEFAULT_MODELS = [
+    # Devstral models (optimized for coding/tool use)
     ModelConfig(
         name="mistral-vibe-cli-latest",
         provider="mistral",
@@ -399,6 +400,36 @@ DEFAULT_MODELS = [
         input_price=0.1,
         output_price=0.3,
     ),
+    # General Mistral models
+    ModelConfig(
+        name="mistral-large-latest",
+        provider="mistral",
+        alias="mistral-large",
+        input_price=2.0,
+        output_price=6.0,
+    ),
+    ModelConfig(
+        name="mistral-small-latest",
+        provider="mistral",
+        alias="mistral-small",
+        input_price=0.2,
+        output_price=0.6,
+    ),
+    ModelConfig(
+        name="mistral-large-2512",
+        provider="mistral",
+        alias="mistral-large-2512",
+        input_price=2.0,
+        output_price=6.0,
+    ),
+    ModelConfig(
+        name="mistral-small-2603",
+        provider="mistral",
+        alias="mistral-small-2603",
+        input_price=0.2,
+        output_price=0.6,
+    ),
+    # Local/self-hosted
     ModelConfig(
         name="devstral",
         provider="llamacpp",
