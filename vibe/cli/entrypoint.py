@@ -160,10 +160,7 @@ def run_image_command() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "path",
-        nargs="?",
-        metavar="PATH",
-        help="Path to the input image file.",
+        "path", nargs="?", metavar="PATH", help="Path to the input image file."
     )
     parser.add_argument(
         "-p",
@@ -173,10 +170,7 @@ def run_image_command() -> None:
         help="Prompt to send alongside the image.",
     )
     parser.add_argument(
-        "--output",
-        default=None,
-        metavar="PATH",
-        help="Save result to this file.",
+        "--output", default=None, metavar="PATH", help="Save result to this file."
     )
     parser.add_argument(
         "--model",

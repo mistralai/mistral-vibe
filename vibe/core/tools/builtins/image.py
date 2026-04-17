@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import base64
-import os
 from collections.abc import AsyncGenerator
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, final
 
 from mistralai.client import Mistral
 from mistralai.client.errors import SDKError
 from pydantic import BaseModel, Field
+
+_HTTP_UNAUTHORIZED = 401
+_HTTP_RATE_LIMIT = 429
 
 from vibe.core.tools.base import (
     BaseTool,
@@ -26,21 +29,16 @@ if TYPE_CHECKING:
 
 
 class ImageArgs(BaseModel):
-    path: str | None = Field(
-        default=None,
-        description="Path to the input image file.",
-    )
+    path: str | None = Field(default=None, description="Path to the input image file.")
     prompt: str | None = Field(
         default=None,
         description="Prompt to send alongside the image, or alone for text-to-image.",
     )
     output: str | None = Field(
-        default=None,
-        description="Save result to this file path.",
+        default=None, description="Save result to this file path."
     )
     model: str = Field(
-        default="mistral-small-2506",
-        description="Mistral vision model to use.",
+        default="mistral-small-2506", description="Mistral vision model to use."
     )
     language: str | None = Field(
         default=None,
@@ -90,11 +88,9 @@ class Image(
             )
         except SDKError as e:
             status = getattr(e.raw_response, "status_code", None)
-            if status == 401:
-                raise ToolError(
-                    "API key does not have access to vision models."
-                ) from e
-            if status == 429:
+            if status == _HTTP_UNAUTHORIZED:
+                raise ToolError("API key does not have access to vision models.") from e
+            if status == _HTTP_RATE_LIMIT:
                 raise ToolError("Rate limit reached. Try again later.") from e
             raise ToolError(f"Mistral API error: {e}") from e
 
@@ -107,11 +103,7 @@ class Image(
         yield ImageResult(text=text, saved_to=saved_to)
 
     async def _call_vision_api(
-        self,
-        image_path: Path,
-        prompt: str | None,
-        model: str,
-        language: str | None,
+        self, image_path: Path, prompt: str | None, model: str, language: str | None
     ) -> str:
         raw = image_path.read_bytes()
         b64 = base64.b64encode(raw).decode()
@@ -137,16 +129,11 @@ class Image(
 
         api_key = os.getenv("MISTRAL_API_KEY")
         async with Mistral(api_key=api_key) as client:
-            response = await client.chat.complete_async(
-                model=model,
-                messages=messages,
-            )
+            response = await client.chat.complete_async(model=model, messages=messages)
 
         content = response.choices[0].message.content
         if isinstance(content, list):
-            return "".join(
-                chunk.text for chunk in content if hasattr(chunk, "text")
-            )
+            return "".join(chunk.text for chunk in content if hasattr(chunk, "text"))
         return content or ""
 
     @classmethod
