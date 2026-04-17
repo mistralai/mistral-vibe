@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 from pathlib import Path
 import sys
@@ -145,7 +146,92 @@ def check_and_resolve_trusted_folder() -> None:
         trusted_folders_manager.add_untrusted(cwd)
 
 
+def run_image_command() -> None:
+    """Handle the `vibe image` subcommand."""
+    parser = argparse.ArgumentParser(
+        prog="vibe image",
+        description=(
+            "Analyze images using Mistral vision models.\n\n"
+            "Examples:\n"
+            "  vibe image photo.jpg                    # describe an image\n"
+            "  vibe image photo.jpg -p 'add snow'     # vision with prompt\n"
+            "  vibe image -p 'a black cat'            # text-to-image (coming soon)\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        metavar="PATH",
+        help="Path to the input image file.",
+    )
+    parser.add_argument(
+        "-p",
+        "--prompt",
+        default=None,
+        metavar="TEXT",
+        help="Prompt to send alongside the image.",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="Save result to this file.",
+    )
+    parser.add_argument(
+        "--model",
+        default="mistral-small-2506",
+        metavar="MODEL",
+        help="Mistral model to use (default: mistral-small-2506).",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["png", "jpg"],
+        default="png",
+        dest="fmt",
+        help="Output image format when generating (default: png).",
+    )
+    parser.add_argument(
+        "--language",
+        default=None,
+        metavar="LANG",
+        help="Response language (e.g. french). Defaults to prompt language.",
+    )
+
+    args = parser.parse_args(sys.argv[2:])
+
+    from vibe.core.tools.base import BaseToolState, ToolError
+    from vibe.core.tools.builtins.image import Image, ImageArgs, ImageToolConfig
+
+    tool = Image(config_getter=lambda: ImageToolConfig(), state=BaseToolState())
+
+    async def run() -> None:
+        async for result in tool.run(
+            ImageArgs(
+                path=args.path,
+                prompt=args.prompt,
+                output=args.output,
+                model=args.model,
+                language=args.language,
+            )
+        ):
+            if hasattr(result, "text"):
+                print(result.text)
+                if result.saved_to:
+                    rprint(f"[green]Saved to {result.saved_to}[/]", file=sys.stderr)
+
+    try:
+        asyncio.run(run())
+    except ToolError as e:
+        rprint(f"[yellow]⚠ {e}[/]", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "image":
+        run_image_command()
+        return
+
     args = parse_arguments()
 
     if args.workdir:
