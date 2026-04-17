@@ -200,6 +200,8 @@ def run_image_command() -> None:
     tool = Image(config_getter=lambda: ImageToolConfig(), state=BaseToolState())
 
     async def run() -> None:
+        from vibe.core.types import ToolStreamEvent
+
         async for result in tool.run(
             ImageArgs(
                 path=args.path,
@@ -209,10 +211,11 @@ def run_image_command() -> None:
                 language=args.language,
             )
         ):
-            if hasattr(result, "text"):
-                print(result.text)
-                if result.saved_to:
-                    rprint(f"[green]Saved to {result.saved_to}[/]", file=sys.stderr)
+            if isinstance(result, ToolStreamEvent):
+                continue
+            print(result.text)
+            if result.saved_to:
+                rprint(f"[green]Saved to {result.saved_to}[/]", file=sys.stderr)
 
     try:
         asyncio.run(run())

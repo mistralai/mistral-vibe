@@ -4,10 +4,12 @@ import base64
 from collections.abc import AsyncGenerator
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, final
+from typing import ClassVar, final
 
 from mistralai.client import Mistral
 from mistralai.client.errors import SDKError
+from mistralai.client.models import ImageURLChunk, TextChunk, UserMessage
+from mistralai.client.models.imageurl import ImageURL
 from pydantic import BaseModel, Field
 
 _HTTP_UNAUTHORIZED = 401
@@ -23,9 +25,6 @@ from vibe.core.tools.base import (
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolUIData
 from vibe.core.types import ToolStreamEvent
-
-if TYPE_CHECKING:
-    pass
 
 
 class ImageArgs(BaseModel):
@@ -114,27 +113,30 @@ class Image(
         if language:
             user_text += f" Answer in {language}."
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{b64}"},
-                    },
-                    {"type": "text", "text": user_text},
-                ],
-            }
-        ]
+        message = UserMessage(
+            content=[
+                ImageURLChunk(image_url=ImageURL(url=f"data:{mime};base64,{b64}")),
+                TextChunk(text=user_text),
+            ]
+        )
 
         api_key = os.getenv("MISTRAL_API_KEY")
         async with Mistral(api_key=api_key) as client:
-            response = await client.chat.complete_async(model=model, messages=messages)
+            response = await client.chat.complete_async(model=model, messages=[message])
 
-        content = response.choices[0].message.content
-        if isinstance(content, list):
-            return "".join(chunk.text for chunk in content if hasattr(chunk, "text"))
-        return content or ""
+        if response.choices is None or not response.choices:
+            return ""
+        message = response.choices[0].message
+        if message is None:
+            return ""
+        msg_content = message.content
+        if isinstance(msg_content, list):
+            parts: list[str] = []
+            for chunk in msg_content:
+                if isinstance(chunk, TextChunk):
+                    parts.append(chunk.text)
+            return "".join(parts)
+        return msg_content or ""
 
     @classmethod
     def get_status_text(cls) -> str:
