@@ -11,9 +11,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, TextIO
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mcp import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
 from vibe.core.logger import logger
 from vibe.core.tools.base import (
     BaseTool,
@@ -173,6 +170,9 @@ async def list_tools_http(
     headers: dict[str, str] | None = None,
     startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
     timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     async with streamablehttp_client(url, headers=headers) as (read, write, _):
         async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
@@ -191,6 +191,9 @@ async def call_tool_http(
     tool_timeout_sec: float | None = None,
     sampling_callback: MCPSamplingHandler | None = None,
 ) -> MCPToolResult:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
     init_timeout = (
         timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     )
@@ -299,6 +302,9 @@ async def list_tools_stdio(
     env: dict[str, str] | None = None,
     startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
     params = StdioServerParameters(command=command[0], args=command[1:], env=env)
     timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     async with (
@@ -321,6 +327,9 @@ async def call_tool_stdio(
     tool_timeout_sec: float | None = None,
     sampling_callback: MCPSamplingHandler | None = None,
 ) -> MCPToolResult:
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
     params = StdioServerParameters(command=command[0], args=command[1:], env=env)
     init_timeout = (
         timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
