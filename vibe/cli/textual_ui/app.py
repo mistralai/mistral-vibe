@@ -1751,6 +1751,60 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
 
+    async def _learn_from_sessions(self, **kwargs: Any) -> None:
+        if self._agent_running:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Cannot learn while agent loop is processing. Please wait.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        try:
+            from vibe.core.session.session_loader import SessionLoader as SL
+            from vibe.core.tools.base import BaseToolState
+            from vibe.core.tools.builtins.learn import Learn, LearnArgs, LearnConfig
+            from vibe.core.types import ToolStreamEvent
+
+            config = self.agent_loop.session_logger.session_config
+            sessions = SL.list_sessions(config)
+
+            if not sessions:
+                await self._mount_and_scroll(
+                    WarningMessage("No past sessions found to analyze.")
+                )
+                return
+
+            learn_tool = Learn(config=LearnConfig(), state=BaseToolState())
+
+            result = None
+            async for item in learn_tool.run(
+                LearnArgs(max_sessions=10, scope="project")
+            ):
+                if not isinstance(item, ToolStreamEvent):
+                    result = item
+
+            if result and result.memories_created > 0:
+                names = ", ".join(m.name for m in result.memories)
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        f"Learned {result.memories_created} memories from {result.sessions_analyzed} sessions: {names}"
+                    )
+                )
+            else:
+                sessions_count = result.sessions_analyzed if result else 0
+                await self._mount_and_scroll(
+                    WarningMessage(
+                        f"Analyzed {sessions_count} sessions - no new learnings found."
+                    )
+                )
+
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(f"Learning failed: {e}", collapsed=self._tools_collapsed)
+            )
+
     async def _compact_history(self, **kwargs: Any) -> None:
         if self._agent_running:
             await self._mount_and_scroll(
@@ -1817,8 +1871,42 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _exit_app(self, **kwargs: Any) -> None:
         self._log_reader.shutdown()
+        await self._auto_learn_on_exit()
         await self._narrator_manager.close()
         self.exit(result=self._get_session_resume_info())
+
+    async def _auto_learn_on_exit(self) -> None:
+        try:
+            from vibe.core.memory.manager import MemoryManager
+            from vibe.core.tools.base import BaseToolState
+            from vibe.core.tools.builtins.learn import Learn, LearnConfig
+
+            messages = self.agent_loop.messages
+            if len(messages) < 2:  # noqa: PLR2004
+                return
+
+            learn_tool = Learn(config=LearnConfig(), state=BaseToolState())
+            learned = learn_tool._analyze_session(list(messages))
+
+            if not learned:
+                return
+
+            manager = MemoryManager()
+            existing = {m.name for m in manager.list_memories()}
+
+            for mem in learned:
+                if mem.name not in existing:
+                    manager.write_memory(
+                        name=mem.name,
+                        type=mem.type,
+                        description=mem.description,
+                        content=mem.content,
+                        scope="project",
+                        source="auto-learned",
+                    )
+
+        except Exception:
+            pass
 
     async def _setup_terminal(self, **kwargs: Any) -> None:
         result = setup_terminal()

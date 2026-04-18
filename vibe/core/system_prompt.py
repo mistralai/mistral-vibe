@@ -239,7 +239,17 @@ def _get_available_subagents_section(agent_manager: AgentManager) -> str:
     return "\n".join(lines)
 
 
-def get_universal_system_prompt(
+def _get_memory_context() -> str:
+    """Load memories from global and project memory directories."""
+    try:
+        from vibe.core.memory.manager import MemoryManager
+        manager = MemoryManager()
+        return manager.get_context_string()
+    except Exception:
+        return ""
+
+
+def get_universal_system_prompt(  # noqa: PLR0912
     tool_manager: ToolManager,
     config: VibeConfig,
     skill_manager: SkillManager,
@@ -306,5 +316,10 @@ def get_universal_system_prompt(
             sections.append(
                 Template(template).safe_substitute(sections="\n\n".join(doc_sections))
             )
+
+        # Load persistent memories
+        memory_context = _get_memory_context()
+        if memory_context:
+            sections.append(memory_context)
 
     return "\n\n".join(sections)
