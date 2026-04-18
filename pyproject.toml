@@ -31,7 +31,7 @@ dependencies = [
     "anyio>=4.12.0",
     "cachetools>=5.5.0",
     "charset-normalizer>=3.4.4",
-    "cryptography>=44.0.0,<=46.0.3",
+    "cryptography>=44.0.0,<=46.0.7",
     "gitpython>=3.1.46",
     "giturlparse>=0.14.0",
     "google-auth>=2.0.0",
