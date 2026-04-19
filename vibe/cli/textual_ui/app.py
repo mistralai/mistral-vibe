@@ -25,7 +25,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from vibe import __version__ as CORE_VERSION
-from vibe.cli.clipboard import copy_selection_to_clipboard
+from vibe.cli.clipboard import _copy_to_clipboard, copy_selection_to_clipboard
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.narrator_manager import (
     NarratorManager,
@@ -1750,6 +1750,43 @@ class VibeApp(App):  # noqa: PLR0904
                     f"Failed to get log path: {e}", collapsed=self._tools_collapsed
                 )
             )
+
+    async def _copy_last_answer(self, **kwargs: Any) -> None:
+        last_assistant = next(
+            (
+                m
+                for m in reversed(self.agent_loop.messages)
+                if m.role == Role.assistant and m.content
+            ),
+            None,
+        )
+        if last_assistant is None or not last_assistant.content:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "No assistant answer available yet.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        text = last_assistant.content
+        try:
+            _copy_to_clipboard(text)
+        except Exception as exc:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to copy to clipboard: {exc}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        self.notify(
+            f"Copied last answer ({len(text)} chars) to clipboard",
+            severity="information",
+            timeout=2,
+            markup=False,
+        )
 
     async def _compact_history(self, **kwargs: Any) -> None:
         if self._agent_running:
