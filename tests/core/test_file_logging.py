@@ -8,7 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vibe.core.logger import StructuredLogFormatter, apply_logging_config
+from vibe.core.logger import (
+    StructuredLogFormatter,
+    apply_logging_config,
+    decode_log_message,
+    encode_log_message,
+)
 
 
 @pytest.fixture
@@ -278,3 +283,63 @@ class TestApplyLoggingConfig:
         handler = test_logger.handlers[-1]
         assert isinstance(handler, RotatingFileHandler)
         assert handler.maxBytes == 5242880
+
+
+class TestDecodeLogMessage:
+    def test_plain_message_unchanged(self) -> None:
+        assert decode_log_message("Hello world") == "Hello world"
+
+    def test_decodes_escaped_newline(self) -> None:
+        assert decode_log_message("hello\\nworld") == "hello\nworld"
+
+    def test_decodes_escaped_backslash(self) -> None:
+        assert decode_log_message("C:\\\\path") == "C:\\path"
+
+    def test_decodes_escaped_backslash_before_n(self) -> None:
+        # This is the bug case: C:\new encoded as C:\\new must decode back to C:\new
+        assert decode_log_message("C:\\\\new") == "C:\\new"
+
+    def test_roundtrip_with_newlines(self) -> None:
+        original = "line one\nline two\nline three"
+        encoded = encode_log_message(original)
+        assert decode_log_message(encoded) == original
+
+    def test_roundtrip_with_backslashes(self) -> None:
+        original = "C:\\Users\\test\\file.txt"
+        encoded = encode_log_message(original)
+        assert decode_log_message(encoded) == original
+
+    def test_roundtrip_with_backslash_n(self) -> None:
+        original = "C:\\new folder\\notes.txt"
+        encoded = encode_log_message(original)
+        assert decode_log_message(encoded) == original
+
+    def test_roundtrip_mixed(self) -> None:
+        original = "path: C:\\new\nand a newline"
+        encoded = encode_log_message(original)
+        assert decode_log_message(encoded) == original
+
+    def test_exception_encoding_escapes_backslashes(self) -> None:
+        formatter = StructuredLogFormatter()
+        try:
+            raise ValueError("error in C:\\new\\path")
+        except ValueError:
+            import sys
+
+            exc_info = sys.exc_info()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname="test.py",
+            lineno=1,
+            msg="fail",
+            args=(),
+            exc_info=exc_info,
+        )
+
+        output = formatter.format(record)
+
+        assert "\n" not in output
+        # The backslashes in the exception should be escaped
+        assert "C:\\\\new\\\\path" in output

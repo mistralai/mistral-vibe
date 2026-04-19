@@ -25,7 +25,7 @@ class TestEdit:
     def test_returns_modified_content(self) -> None:
         with patch.dict("os.environ", {"VISUAL": "vim"}, clear=True):
             with patch("subprocess.run") as mock_run:
-                with patch("pathlib.Path.read_text", return_value="modified"):
+                with patch("pathlib.Path.read_bytes", return_value=b"modified"):
                     with patch("pathlib.Path.unlink"):
                         editor = ExternalEditor()
                         result = editor.edit("original")
@@ -35,7 +35,7 @@ class TestEdit:
     def test_returns_none_when_content_unchanged(self) -> None:
         with patch.dict("os.environ", {"VISUAL": "vim"}, clear=True):
             with patch("subprocess.run"):
-                with patch("pathlib.Path.read_text", return_value="same"):
+                with patch("pathlib.Path.read_bytes", return_value=b"same"):
                     with patch("pathlib.Path.unlink"):
                         editor = ExternalEditor()
                         result = editor.edit("same")
@@ -44,7 +44,7 @@ class TestEdit:
     def test_strips_trailing_whitespace(self) -> None:
         with patch.dict("os.environ", {"VISUAL": "vim"}, clear=True):
             with patch("subprocess.run"):
-                with patch("pathlib.Path.read_text", return_value="content\n\n"):
+                with patch("pathlib.Path.read_bytes", return_value=b"content\n\n"):
                     with patch("pathlib.Path.unlink"):
                         editor = ExternalEditor()
                         result = editor.edit("original")
@@ -53,7 +53,7 @@ class TestEdit:
     def test_handles_editor_with_args(self) -> None:
         with patch.dict("os.environ", {"VISUAL": "code --wait"}, clear=True):
             with patch("subprocess.run") as mock_run:
-                with patch("pathlib.Path.read_text", return_value="edited"):
+                with patch("pathlib.Path.read_bytes", return_value=b"edited"):
                     with patch("pathlib.Path.unlink"):
                         editor = ExternalEditor()
                         editor.edit("original")

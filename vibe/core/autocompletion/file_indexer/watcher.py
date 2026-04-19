@@ -41,6 +41,10 @@ class WatchController:
         thread.start()
         ready_event.wait(timeout=0.5)
 
+    @property
+    def is_watching(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def stop(self) -> None:
         thread = self._thread
         if self._stop_event:

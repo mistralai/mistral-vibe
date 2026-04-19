@@ -36,6 +36,12 @@ class MCPRegistry:
 
     def get_tools(self, servers: list[MCPServer]) -> dict[str, type[BaseTool]]:
         """Return proxy tool classes for *servers*, using cache when possible."""
+        return run_sync(self.get_tools_async(servers))
+
+    async def get_tools_async(
+        self, servers: list[MCPServer]
+    ) -> dict[str, type[BaseTool]]:
+        """Async variant of :meth:`get_tools`."""
         result: dict[str, type[BaseTool]] = {}
         to_discover: list[tuple[str, MCPServer]] = []
 
@@ -47,7 +53,7 @@ class MCPRegistry:
                 to_discover.append((key, srv))
 
         if to_discover:
-            discovered = run_sync(self._discover_all(to_discover))
+            discovered = await self._discover_all(to_discover)
             result.update(discovered)
 
         return result

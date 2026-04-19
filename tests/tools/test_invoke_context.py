@@ -36,7 +36,7 @@ class SimpleTool(BaseTool[SimpleArgs, SimpleResult, BaseToolConfig, BaseToolStat
 
 @pytest.fixture
 def simple_tool() -> SimpleTool:
-    return SimpleTool(config=BaseToolConfig(), state=BaseToolState())
+    return SimpleTool(config_getter=lambda: BaseToolConfig(), state=BaseToolState())
 
 
 class TestInvokeContext:

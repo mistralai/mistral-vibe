@@ -76,9 +76,7 @@ class ToolCallMessage(StatusMessage):
             self._stream_widget.display = True
 
     def stop_spinning(self, success: bool = True) -> None:
-        """Stop the spinner and hide the stream widget."""
-        if self._stream_widget:
-            self._stream_widget.display = False
+        """Stop the spinner while keeping stream row stable to avoid layout jumps."""
         super().stop_spinning(success)
 
     def set_result_text(self, text: str) -> None:

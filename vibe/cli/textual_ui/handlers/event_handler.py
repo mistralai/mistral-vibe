@@ -4,7 +4,11 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
-from vibe.cli.textual_ui.widgets.messages import AssistantMessage, ReasoningMessage
+from vibe.cli.textual_ui.widgets.messages import (
+    AssistantMessage,
+    ReasoningMessage,
+    UserMessage,
+)
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.core.tools.ui import ToolUIDataAdapter
@@ -19,6 +23,7 @@ from vibe.core.types import (
     ToolResultEvent,
     ToolStreamEvent,
     UserMessageEvent,
+    WaitingForInputEvent,
 )
 from vibe.core.utils import TaggedText
 
@@ -32,10 +37,12 @@ class EventHandler:
         mount_callback: Callable,
         get_tools_collapsed: Callable[[], bool],
         on_profile_changed: Callable[[], None] | None = None,
+        is_remote: bool = False,
     ) -> None:
         self.mount_callback = mount_callback
         self.get_tools_collapsed = get_tools_collapsed
         self.on_profile_changed = on_profile_changed
+        self.is_remote = is_remote
         self.tool_calls: dict[str, ToolCallMessage] = {}
         self.current_compact: CompactMessage | None = None
         self.current_streaming_message: AssistantMessage | None = None
@@ -71,6 +78,10 @@ class EventHandler:
                 if self.on_profile_changed:
                     self.on_profile_changed()
             case UserMessageEvent():
+                await self.finalize_streaming()
+                if self.is_remote:
+                    await self.mount_callback(UserMessage(event.content))
+            case WaitingForInputEvent():
                 await self.finalize_streaming()
             case _:
                 await self.finalize_streaming()

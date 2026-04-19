@@ -76,10 +76,28 @@ class GitRepository:
             diff=diff,
         )
 
-    async def is_commit_pushed(self, commit: str, remote: str = "origin") -> bool:
+    async def fetch(self, remote: str = "origin") -> None:
         repo = self._repo_or_raise()
         await self._fetch(repo, remote)
+
+    async def is_commit_pushed(
+        self, commit: str, remote: str = "origin", *, fetch: bool = True
+    ) -> bool:
+        repo = self._repo_or_raise()
+        if fetch:
+            await self._fetch(repo, remote)
         return await self._branch_contains(repo, commit, remote)
+
+    async def is_branch_pushed(
+        self, remote: str = "origin", *, fetch: bool = True
+    ) -> bool:
+        repo = self._repo_or_raise()
+        if repo.head.is_detached:
+            return True  # Detached HEAD doesn't have a branch to check
+        branch = repo.active_branch.name
+        if fetch:
+            await self._fetch(repo, remote)
+        return await self._ref_exists(repo, f"{remote}/{branch}")
 
     async def get_unpushed_commit_count(self, remote: str = "origin") -> int:
         repo = self._repo_or_raise()
@@ -116,7 +134,9 @@ class GitRepository:
             try:
                 self._repo = Repo(self._workdir, search_parent_directories=True)
             except InvalidGitRepositoryError as e:
-                raise ServiceTeleportNotSupportedError("Not a git repository") from e
+                raise ServiceTeleportNotSupportedError(
+                    "Teleport requires a git repository. cd into a project with a .git directory and try again."
+                ) from e
         return self._repo
 
     def _find_github_remote(self, repo: Repo) -> tuple[str, str] | None:
@@ -179,7 +199,13 @@ class GitRepository:
 
     async def _push(self, repo: Repo, branch: str, remote: str) -> bool:
         try:
-            await self._executor.run(lambda: repo.remote(remote).push(branch))
+            result = await self._executor.run(
+                lambda: repo.remote(remote).push(branch, set_upstream=True)
+            )
+            # Check if any push info indicates an error
+            for info in result:
+                if info.flags & info.ERROR:
+                    return False
             return True
         except (TimeoutError, ValueError, GitCommandError):
             return False

@@ -14,46 +14,69 @@ jobs:
       contents: read
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      smoke_matrix: ${{ steps.set-matrix.outputs.smoke_matrix }}
     steps:
       - name: Set matrix
         id: set-matrix
         run: |
+          # Linux: manylinux_2_28 containers → binary works on glibc >= 2.28 (RHEL 8+, Ubuntu 20.04+)
           if [[ "${{ github.repository }}" == "mistralai/mistral-vibe" ]]; then
             matrix='{
               "include": [
-                {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64"},
-                {"runner": "ubuntu-22.04-arm", "os": "linux", "arch": "aarch64"},
+                {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64", "container": "quay.io/pypa/manylinux_2_28_x86_64"},
+                {"runner": "ubuntu-22.04-arm", "os": "linux", "arch": "aarch64", "container": "quay.io/pypa/manylinux_2_28_aarch64"},
                 {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
                 {"runner": "macos-14", "os": "darwin", "arch": "aarch64"},
                 {"runner": "windows-2022", "os": "windows", "arch": "x86_64"},
                 {"runner": "windows-11-arm", "os": "windows", "arch": "aarch64"}
               ]
             }'
+            smoke_matrix='{
+              "include": [
+                {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64"},
+                {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64", "tag": "old-glibc", "container": "almalinux:8"},
+                {"runner": "ubuntu-24.04-arm", "os": "linux", "arch": "aarch64"},
+                {"runner": "macos-15", "os": "darwin", "arch": "aarch64"},
+                {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
+                {"runner": "windows-latest", "os": "windows", "arch": "x86_64"},
+                {"runner": "windows-11-arm", "os": "windows", "arch": "aarch64"}
+              ]
+            }'
           else  # skip ARM Linux/Windows (runners not available on non public repos)
             matrix='{
               "include": [
-                {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64"},
+                {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64", "container": "quay.io/pypa/manylinux_2_28_x86_64"},
                 {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
                 {"runner": "macos-14", "os": "darwin", "arch": "aarch64"},
                 {"runner": "windows-2022", "os": "windows", "arch": "x86_64"}
               ]
             }'
+            smoke_matrix='{
+              "include": [
+                {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64"},
+                {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64", "tag": "old-glibc", "container": "almalinux:8"},
+                {"runner": "macos-15", "os": "darwin", "arch": "aarch64"},
+                {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
+                {"runner": "windows-latest", "os": "windows", "arch": "x86_64"}
+              ]
+            }'
           fi
           echo "matrix=$(echo $matrix | jq -c .)" >> $GITHUB_OUTPUT
+          echo "smoke_matrix=$(echo $smoke_matrix | jq -c .)" >> $GITHUB_OUTPUT
 
   build-and-upload:
     needs: configure
-    name: ${{ matrix.os }}-${{ matrix.arch }}
+    name: "Build and upload: ${{ matrix.os }}-${{ matrix.arch }}"
     permissions:
       contents: read
     strategy:
       matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || '' }}
 
     steps:
       - name: echo
         run: echo github.repository=${{ github.repository }}
-
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
@@ -65,9 +88,22 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Set up Python
+        if: ${{ matrix.os != 'linux' }}
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
+
+      - name: Install Python (Linux)
+        if: ${{ matrix.os == 'linux' }}
+        run: |
+          uv python install 3.12
+          # Install patchelf >= 0.18 (yum/EPEL8 ships 0.12 which lacks --clear-execstack)
+          PATCHELF_VERSION=0.18.0
+          curl -sL "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-$(uname -m).tar.gz" \
+            | tar xz -C /usr/local
+          # python-build-standalone ships libpython with GNU_STACK RWE (executable stack)
+          # which is rejected by hardened Linux kernels — clear it with patchelf
+          find "$(uv python dir)" -name 'libpython*.so*' -exec patchelf --clear-execstack {} \;
 
       - name: Sync dependencies
         run: uv sync --no-dev --group build
@@ -75,34 +111,92 @@ jobs:
       - name: Build with PyInstaller
         run: uv run --no-dev --group build pyinstaller vibe-acp.spec
 
-      - name: Get package version with uv (Unix)
-        id: get_version_unix
-        if: ${{ matrix.os != 'windows' }}
-        run: python -c "import subprocess; version = subprocess.check_output(['uv', 'version']).decode().split()[1]; print(f'version={version}')" >> $GITHUB_OUTPUT
+      - name: Clear executable stack on bundled libraries
+        if: ${{ matrix.os == 'linux' }}
+        run: |
+          find dist/vibe-acp-dir/_internal -name '*.so*' -type f -print0 \
+            | xargs -0 -I{} patchelf --clear-execstack {}
+          patchelf --clear-execstack dist/vibe-acp-dir/vibe-acp || true
 
-      - name: Get package version with uv (Windows)
-        id: get_version_windows
-        if: ${{ matrix.os == 'windows' }}
-        shell: pwsh
-        run: python -c "import subprocess; version = subprocess.check_output(['uv', 'version']).decode().split()[1]; print(f'version={version}')" >> $env:GITHUB_OUTPUT
-
-      - name: Smoke test bundled binary (Unix)
-        if: ${{ matrix.os != 'windows' }}
-        run: ./dist/vibe-acp-dir/vibe-acp --version
-
-      - name: Smoke test bundled binary (Windows)
-        if: ${{ matrix.os == 'windows' }}
-        shell: pwsh
-        run: .\dist\vibe-acp-dir\vibe-acp.exe --version
+      - name: Get package version
+        id: get_version
+        shell: bash
+        run: echo "version=$(uv version | cut -d' ' -f2)" >> $GITHUB_OUTPUT
 
       - name: Upload binary as artifact
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.os == 'windows' && steps.get_version_windows.outputs.version || steps.get_version_unix.outputs.version }}
+          name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}
           path: dist/vibe-acp-dir/
 
+  nix-build:
+    needs: configure
+    name: "Nix build and upload: ${{ matrix.os }}-${{ matrix.arch }}"
+    permissions:
+      contents: read
+    strategy:
+      matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        if: matrix.os != 'windows'
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      - name: Install Nix
+        if: matrix.os != 'windows'
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31
+
+      - name: Build with Nix
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          nix build .#
+
+      - name: Nix Smoke Test
+        if: matrix.os != 'windows'
+        shell: bash
+        run: |
+          nix run .# -- --version
+
+  smoke-test:
+    needs: [configure, build-and-upload]
+    name: "Test: ${{ matrix.os }}-${{ matrix.arch }}${{ matrix.tag && format('-{0}', matrix.tag) || '' }}"
+    permissions:
+      contents: read
+    strategy:
+      matrix: ${{ fromJSON(needs.configure.outputs.smoke_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+
+      - name: Set up Python
+        if: ${{ !matrix.container }}
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Python (container)
+        if: ${{ matrix.container }}
+        run: yum install -y python3.11 python3.11-pip
+
+      - name: Install smoke test deps
+        run: ${{ matrix.container && 'python3.11' || 'python' }} -m pip install agent-client-protocol==0.9.0
+
+      - name: Download artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-*
+          merge-multiple: true
+          path: dist/vibe-acp-dir
+
+      - name: Run smoke tests
+        run: ${{ matrix.container && 'python3.11' || 'python' }} tests/acp/smoke_binary.py dist/vibe-acp-dir
+
   attach-to-release:
-    needs: build-and-upload
+    needs: [build-and-upload, smoke-test]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     permissions:
@@ -130,32 +224,3 @@ jobs:
           files: release-assets/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  nix-build:
-    needs: configure
-    name: "Nix: ${{ matrix.os }}-${{ matrix.arch }}"
-    permissions:
-      contents: read
-    strategy:
-      matrix: ${{ fromJSON(needs.configure.outputs.matrix) }}
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Checkout repository
-        if: matrix.os != 'windows'
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
-
-      - name: Install Nix
-        if: matrix.os != 'windows'
-        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31
-
-      - name: Build with Nix
-        if: matrix.os != 'windows'
-        shell: bash
-        run: |
-          nix build .#
-
-      - name: Nix Smoke Test
-        if: matrix.os != 'windows'
-        shell: bash
-        run: |
-          nix run .# -- --version

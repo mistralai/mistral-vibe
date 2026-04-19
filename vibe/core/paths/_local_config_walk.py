@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass, field
 from functools import cache
 import logging
 import os
@@ -21,113 +22,122 @@ WALK_MAX_DEPTH = 4
 _MAX_DIRS = 2000
 
 
-def _collect_config_dirs_at(
-    path: Path,
-    entries: set[str],
-    tools: list[Path],
-    skills: list[Path],
-    agents: list[Path],
+@dataclass(frozen=True)
+class ConfigWalkResult:
+    """Aggregated results of a config directory walk."""
+
+    config_dirs: tuple[Path, ...] = ()
+    tools: tuple[Path, ...] = ()
+    skills: tuple[Path, ...] = ()
+    agents: tuple[Path, ...] = ()
+
+
+@dataclass
+class _ConfigWalkCollector:
+    """Mutable accumulator used during BFS, frozen into ConfigWalkResult at the end."""
+
+    config_dirs: list[Path] = field(default_factory=list)
+    tools: list[Path] = field(default_factory=list)
+    skills: list[Path] = field(default_factory=list)
+    agents: list[Path] = field(default_factory=list)
+
+    def freeze(self) -> ConfigWalkResult:
+        return ConfigWalkResult(
+            config_dirs=tuple(self.config_dirs),
+            tools=tuple(self.tools),
+            skills=tuple(self.skills),
+            agents=tuple(self.agents),
+        )
+
+
+def _collect_at(
+    path: Path, entry_names: set[str], collector: _ConfigWalkCollector
 ) -> None:
     """Check a single directory for .vibe/ and .agents/ config subdirs."""
-    if _VIBE_DIR in entries:
+    if _VIBE_DIR in entry_names and (vibe_dir := path / _VIBE_DIR).is_dir():
+        has_content = False
         if (candidate := path / _TOOLS_SUBDIR).is_dir():
-            tools.append(candidate)
+            collector.tools.append(candidate)
+            has_content = True
         if (candidate := path / _VIBE_SKILLS_SUBDIR).is_dir():
-            skills.append(candidate)
+            collector.skills.append(candidate)
+            has_content = True
         if (candidate := path / _AGENTS_SUBDIR).is_dir():
-            agents.append(candidate)
-    if _AGENTS_DIR in entries:
+            collector.agents.append(candidate)
+            has_content = True
+        if (
+            has_content
+            or (vibe_dir / "prompts").is_dir()
+            or (vibe_dir / "config.toml").is_file()
+        ):
+            collector.config_dirs.append(vibe_dir)
+    if _AGENTS_DIR in entry_names and (agents_dir := path / _AGENTS_DIR).is_dir():
         if (candidate := path / _AGENTS_SKILLS_SUBDIR).is_dir():
-            skills.append(candidate)
+            collector.skills.append(candidate)
+            collector.config_dirs.append(agents_dir)
 
 
-def _iter_child_dirs(path: Path, entries: set[str]) -> list[Path]:
-    """Return sorted child directories to descend into, skipping ignored and dot-dirs."""
+def _scandir_entries(path: Path) -> tuple[set[str], list[Path]]:
+    """Scan a directory, returning entry names and sorted child directories to descend into.
+
+    Uses ``os.scandir`` so that ``DirEntry.is_dir()`` leverages the dirent
+    d_type field and avoids a separate ``stat`` syscall on most filesystems.
+    """
+    try:
+        entries = list(os.scandir(path))
+    except OSError:
+        return set(), []
+
+    entry_names = {e.name for e in entries}
     children: list[Path] = []
-    for name in sorted(entries):
+    for entry in entries:
+        name = entry.name
         if name in WALK_SKIP_DIR_NAMES or name.startswith("."):
             continue
-        child = path / name
         try:
-            if child.is_dir():
-                children.append(child)
+            if entry.is_dir():
+                children.append(path / name)
         except OSError:
             continue
-    return children
+    children.sort()
+    return entry_names, children
 
 
 @cache
-def walk_local_config_dirs_all(
-    root: Path,
-) -> tuple[tuple[Path, ...], tuple[Path, ...], tuple[Path, ...]]:
+def walk_local_config_dirs(
+    root: Path, *, max_depth: int = WALK_MAX_DEPTH, max_dirs: int = _MAX_DIRS
+) -> ConfigWalkResult:
     """Discover .vibe/ and .agents/ config directories under *root*.
 
-    Uses breadth-first search bounded by ``WALK_MAX_DEPTH`` and ``_MAX_DIRS``
+    Uses breadth-first search bounded by *max_depth* and *max_dirs*
     to avoid unbounded traversal in large repositories.
-    """
-    tools_dirs: list[Path] = []
-    skills_dirs: list[Path] = []
-    agents_dirs: list[Path] = []
 
+    Returns a ``ConfigWalkResult`` containing both the parent config dirs
+    (for trust decisions) and the categorised subdirs (for loading).
+    """
+    collector = _ConfigWalkCollector()
     resolved_root = root.resolve()
     queue: deque[tuple[Path, int]] = deque([(resolved_root, 0)])
     visited = 0
-
-    while queue and visited < _MAX_DIRS:
-        current, depth = queue.popleft()
-        visited += 1
-
-        try:
-            entries = set(os.listdir(current))
-        except OSError:
-            continue
-
-        _collect_config_dirs_at(current, entries, tools_dirs, skills_dirs, agents_dirs)
-
-        if depth < WALK_MAX_DEPTH:
-            queue.extend(
-                (child, depth + 1) for child in _iter_child_dirs(current, entries)
-            )
-
-    if visited >= _MAX_DIRS:
-        logger.warning(
-            "Config directory scan reached directory limit (%d dirs) at %s",
-            _MAX_DIRS,
-            resolved_root,
-        )
-
-    return (tuple(tools_dirs), tuple(skills_dirs), tuple(agents_dirs))
-
-
-def has_config_dirs_nearby(
-    root: Path, *, max_depth: int = WALK_MAX_DEPTH, max_dirs: int = 200
-) -> bool:
-    """Quick check for .vibe/ or .agents/ config dirs in the near subtree.
-
-    Returns ``True`` as soon as any config directory is found, without
-    enumerating all of them.
-    """
-    resolved = root.resolve()
-    queue: deque[tuple[Path, int]] = deque([(resolved, 0)])
-    visited = 0
-    found: list[Path] = []
 
     while queue and visited < max_dirs:
         current, depth = queue.popleft()
         visited += 1
 
-        try:
-            entries = set(os.listdir(current))
-        except OSError:
+        entry_names, children = _scandir_entries(current)
+        if not entry_names:
             continue
 
-        _collect_config_dirs_at(current, entries, found, found, found)
-        if found:
-            return True
+        _collect_at(current, entry_names, collector)
 
         if depth < max_depth:
-            queue.extend(
-                (child, depth + 1) for child in _iter_child_dirs(current, entries)
-            )
+            queue.extend((child, depth + 1) for child in children)
 
-    return False
+    if visited >= max_dirs:
+        logger.warning(
+            "Config directory scan reached directory limit (%d dirs) at %s",
+            max_dirs,
+            resolved_root,
+        )
+
+    return collector.freeze()

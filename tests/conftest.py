@@ -39,6 +39,8 @@ def get_base_config() -> dict[str, Any]:
                 "name": "mistral",
                 "api_base": "https://api.mistral.ai/v1",
                 "api_key_env_var": "MISTRAL_API_KEY",
+                "browser_auth_base_url": "https://console.mistral.ai",
+                "browser_auth_api_base_url": "https://console.mistral.ai/api",
                 "backend": "mistral",
             }
         ],
@@ -73,6 +75,12 @@ def config_dir(
     config_file.write_text(tomli_w.dumps(get_base_config()), encoding="utf-8")
 
     monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", config_dir)
+
+    # Re-evaluate PLAN agent overrides so the allowlist uses the monkeypatched path
+    from vibe.core.agents.models import PLAN, _plan_overrides
+
+    object.__setattr__(PLAN, "overrides", _plan_overrides())
+
     return config_dir
 
 

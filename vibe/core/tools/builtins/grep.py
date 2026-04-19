@@ -167,7 +167,7 @@ class Grep(
     def _load_codeignore_patterns(self, codeignore_path: Path) -> list[str]:
         patterns = []
         try:
-            content = read_safe(codeignore_path)
+            content = read_safe(codeignore_path).text
             for line in content.splitlines():
                 line = line.strip()
                 if line and not line.startswith("#"):

@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.6] - 2026-04-16
+
+### Added
+
+- `MergeStrategy` enum and merge logic for configuration
+- `call_source=vibe_code` field in LLM request metadata
+- "Other" task type for non-code requests in CLI prompt
+
+### Changed
+
+- Parallelized git subprocess calls during startup
+- Extracted command registry and refactored skill resolution
+- 1M context window and thinking budget max for opus
+- Updated default telemetry URL to `api.mistral.ai`
+
+### Fixed
+
+- Markdown fence context loss causing streaming rendering problems
+- Proxy chain URLs in `api_base` parsing
+
+### Removed
+
+- Alt+Left / Alt+Right key bindings from chat input
+
+
+## [2.7.5] - 2026-04-14
+
+### Changed
+
+- Display detected files and LLM risks in trust folder dialog
+- Text-to-speech via the Mistral SDK with telemetry tracking
+- Deferred MCP and git I/O to background thread for faster CLI startup
+- Made telemetry URL configurable
+- Bumped Textual to 8.2.1
+
+### Fixed
+
+- Encoding detection fallback in `read_safe` for non-UTF-8 files
+- Config saving logic cleanup
+
+
+## [2.7.4] - 2026-04-09
+
+### Added
+
+- Console View for enhanced debugging and monitoring
+- `/mcp` command to display MCP servers and their status
+- Manual command output forwarding to agent context
+
+### Changed
+
+- Improved web_fetch content truncation for better readability
+- Lazily load heavy dependencies to improve startup time
+- Optimized folder parsing at startup using scandir
+- Include file name in search_replace result display
+
+### Fixed
+
+- Stale configurations from subagent switch
+- ValueError on OTEL context detach in agent_span
+- Clipboard toast preview replaced with fixed text
+- Only agents with type "agent" are loadable with --agent flag
+- Made chat_url nullable in ChatAssistantPublicData
+- Normalized OTEL span exporter endpoint
+- Removed redundant permission prompts for parallel tool calls needing the same permission
+- Removed bottom margin issue in UI
+- Never crash before ACP server starts
+- Use skill in recent commands via the up-arrow navigation
+- Fixed loading order issues in vibe initialization
+
+
+## [2.7.3] - 2026-04-03
+
+### Added
+
+- `/data-retention` slash command to view Mistral AI's data retention notice and privacy settings
+
+
 ## [2.7.2] - 2026-04-01
 
 ### Added

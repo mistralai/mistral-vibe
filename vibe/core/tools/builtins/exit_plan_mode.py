@@ -75,7 +75,7 @@ class ExitPlanMode(
         plan_content: str | None = None
         if ctx.plan_file_path and ctx.plan_file_path.is_file():
             try:
-                plan_content = read_safe(ctx.plan_file_path)
+                plan_content = read_safe(ctx.plan_file_path).text
             except OSError as e:
                 raise ToolError(
                     f"Failed to read plan file at {ctx.plan_file_path}: {e}"

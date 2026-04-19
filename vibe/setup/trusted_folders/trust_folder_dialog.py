@@ -6,7 +6,7 @@ from typing import Any, ClassVar
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import CenterMiddle, Horizontal
+from textual.containers import Center, CenterMiddle, Horizontal, VerticalScroll
 from textual.message import Message
 from textual.widgets import Static
 
@@ -38,46 +38,77 @@ class TrustFolderDialog(CenterMiddle):
     class Untrusted(Message):
         pass
 
-    def __init__(self, folder_path: Path, **kwargs: Any) -> None:
+    def __init__(
+        self, folder_path: Path, detected_files: list[str], **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.folder_path = folder_path
+        self.detected_files = detected_files
         self.selected_option = 0
         self.option_widgets: list[Static] = []
 
+    def _compose_scroll_content(self) -> ComposeResult:
+        why_content = (
+            "Files here can modify AI behavior. Malicious "
+            "configs may exfiltrate data, run destructive "
+            "commands, or silently alter your code."
+        )
+        with Center(classes="trust-dialog-section-center"):
+            yield NoMarkupStatic(
+                why_content,
+                id="trust-dialog-warning",
+                classes="trust-dialog-section-content",
+            )
+
+        if self.detected_files:
+            yield NoMarkupStatic(
+                "Detected configuration files\n", classes="trust-dialog-section-header"
+            )
+            file_list = "\n".join(f"\u2022 {f}" for f in self.detected_files)
+            with Center(classes="trust-dialog-section-center"):
+                yield NoMarkupStatic(
+                    file_list,
+                    id="trust-dialog-files",
+                    classes="trust-dialog-section-content",
+                )
+
     def compose(self) -> ComposeResult:
-        with CenterMiddle(id="trust-dialog"):
-            yield NoMarkupStatic(
-                "⚠ Trust this folder and all its subfolders?", id="trust-dialog-title"
-            )
-            yield NoMarkupStatic(
-                str(self.folder_path),
-                id="trust-dialog-path",
-                classes="trust-dialog-path",
-            )
-            yield NoMarkupStatic(
-                "Files that can modify your Mistral Vibe setup were found here. Do you trust this folder and all its subfolders?",
-                id="trust-dialog-message",
-                classes="trust-dialog-message",
-            )
+        with CenterMiddle(id="trust-dialog-container"):
+            with CenterMiddle(id="trust-dialog"):
+                yield NoMarkupStatic("Trust this folder?", id="trust-dialog-title")
+                yield NoMarkupStatic(
+                    str(self.folder_path),
+                    id="trust-dialog-path",
+                    classes="trust-dialog-path",
+                )
 
-            with Horizontal(id="trust-options-container"):
-                options = ["Yes", "No"]
-                for idx, text in enumerate(options):
-                    widget = NoMarkupStatic(
-                        f"  {idx + 1}. {text}", classes="trust-option"
-                    )
-                    self.option_widgets.append(widget)
-                    yield widget
+                with VerticalScroll(id="trust-dialog-content"):
+                    yield from self._compose_scroll_content()
 
-            yield NoMarkupStatic(
-                "← → navigate  Enter select", classes="trust-dialog-help"
-            )
+                yield NoMarkupStatic(
+                    "Only trust folders you fully control",
+                    id="trust-dialog-footer-warning",
+                    classes="trust-dialog-footer-warning",
+                )
 
-            yield NoMarkupStatic(
-                f"Setting will be saved in: {TRUSTED_FOLDERS_FILE.path}",
-                id="trust-dialog-save-info",
-                classes="trust-dialog-save-info",
-            )
+                with Horizontal(id="trust-options-container"):
+                    options = ["Yes, trust this folder", "No, ignore config files"]
+                    for idx, text in enumerate(options):
+                        widget = NoMarkupStatic(
+                            f"  {idx + 1}. {text}", classes="trust-option"
+                        )
+                        self.option_widgets.append(widget)
+                        yield widget
+
+                yield NoMarkupStatic(
+                    "← → navigate  Enter select", classes="trust-dialog-help"
+                )
+
+                yield NoMarkupStatic(
+                    f"Setting will be saved in: {TRUSTED_FOLDERS_FILE.path}",
+                    id="trust-dialog-save-info",
+                    classes="trust-dialog-save-info",
+                )
 
     async def on_mount(self) -> None:
         self.selected_option = 1  # Default to "No"
@@ -85,7 +116,7 @@ class TrustFolderDialog(CenterMiddle):
         self.focus()
 
     def _update_options(self) -> None:
-        options = ["Yes", "No"]
+        options = ["Yes, trust this folder", "No, ignore config files"]
 
         if len(self.option_widgets) != len(options):
             return
@@ -146,9 +177,12 @@ class TrustFolderApp(App):
         Binding("ctrl+c", "quit_without_saving", "Quit", show=False, priority=True),
     ]
 
-    def __init__(self, folder_path: Path, **kwargs: Any) -> None:
+    def __init__(
+        self, folder_path: Path, detected_files: list[str], **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.folder_path = folder_path
+        self.detected_files = detected_files
         self._result: bool | None = None
         self._quit_without_saving = False
 
@@ -156,7 +190,7 @@ class TrustFolderApp(App):
         self.theme = "textual-ansi"
 
     def compose(self) -> ComposeResult:
-        yield TrustFolderDialog(self.folder_path)
+        yield TrustFolderDialog(self.folder_path, self.detected_files)
 
     def action_quit_without_saving(self) -> None:
         self._quit_without_saving = True
@@ -177,6 +211,6 @@ class TrustFolderApp(App):
         return self._result
 
 
-def ask_trust_folder(folder_path: Path) -> bool | None:
-    app = TrustFolderApp(folder_path)
+def ask_trust_folder(folder_path: Path, detected_files: list[str]) -> bool | None:
+    app = TrustFolderApp(folder_path, detected_files)
     return app.run_trust_dialog()

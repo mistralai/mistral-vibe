@@ -149,9 +149,7 @@ class AssistantMessage(StreamingMessageBase):
         self.add_class("assistant-message")
 
     def compose(self) -> ComposeResult:
-        if self._content:
-            self._content_initialized = True
-        markdown = Markdown(self._content)
+        markdown = Markdown("")
         self._markdown = markdown
         yield markdown
 

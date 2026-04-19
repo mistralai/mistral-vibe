@@ -518,3 +518,77 @@ class TestSkillUserInvocable:
         assert skills["visible-skill"].user_invocable is True
         assert skills["hidden-skill"].user_invocable is False
         assert skills["default-skill"].user_invocable is True
+
+
+class TestParseSkillCommand:
+    def test_plain_text_returns_none(self, skill_manager: SkillManager) -> None:
+        assert skill_manager.parse_skill_command("hello world") is None
+
+    def test_unknown_skill_returns_none(self, skill_manager: SkillManager) -> None:
+        assert skill_manager.parse_skill_command("/nonexistent") is None
+
+    def test_slash_only_returns_none(self, skill_manager: SkillManager) -> None:
+        assert skill_manager.parse_skill_command("/") is None
+
+    def test_parses_skill_without_args(
+        self, skills_dir: Path, skill_config: VibeConfig
+    ) -> None:
+        create_skill(skills_dir, "my-skill", body="Do the thing.")
+        manager = SkillManager(lambda: skill_config)
+
+        parsed = manager.parse_skill_command("/my-skill")
+        assert parsed is not None
+        assert parsed.name == "my-skill"
+        assert "Do the thing." in parsed.content
+        assert parsed.extra_instructions is None
+
+    def test_parses_skill_with_args(
+        self, skills_dir: Path, skill_config: VibeConfig
+    ) -> None:
+        create_skill(skills_dir, "my-skill", body="Do the thing.")
+        manager = SkillManager(lambda: skill_config)
+
+        parsed = manager.parse_skill_command("/my-skill fix the bug")
+        assert parsed is not None
+        assert parsed.name == "my-skill"
+        assert parsed.extra_instructions == "fix the bug"
+
+    def test_case_insensitive(self, skills_dir: Path, skill_config: VibeConfig) -> None:
+        create_skill(skills_dir, "my-skill", body="Do the thing.")
+        manager = SkillManager(lambda: skill_config)
+
+        parsed = manager.parse_skill_command("/MY-SKILL")
+        assert parsed is not None
+        assert parsed.name == "my-skill"
+
+    def test_raises_on_unreadable_skill(
+        self, skills_dir: Path, skill_config: VibeConfig
+    ) -> None:
+        create_skill(skills_dir, "bad-skill", body="content")
+        manager = SkillManager(lambda: skill_config)
+        (skills_dir / "bad-skill" / "SKILL.md").unlink()
+
+        with pytest.raises(OSError):
+            manager.parse_skill_command("/bad-skill")
+
+
+class TestBuildSkillPrompt:
+    def test_without_args(self, skills_dir: Path, skill_config: VibeConfig) -> None:
+        create_skill(skills_dir, "my-skill", body="Do the thing.")
+        manager = SkillManager(lambda: skill_config)
+
+        parsed = manager.parse_skill_command("/my-skill")
+        assert parsed is not None
+        prompt = SkillManager.build_skill_prompt("/my-skill", parsed)
+        assert prompt == parsed.content
+
+    def test_with_args(self, skills_dir: Path, skill_config: VibeConfig) -> None:
+        create_skill(skills_dir, "my-skill", body="Do the thing.")
+        manager = SkillManager(lambda: skill_config)
+
+        text = "/my-skill fix the bug"
+        parsed = manager.parse_skill_command(text)
+        assert parsed is not None
+        prompt = SkillManager.build_skill_prompt(text, parsed)
+        assert prompt.startswith("/my-skill fix the bug")
+        assert "Do the thing." in prompt

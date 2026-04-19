@@ -15,5 +15,5 @@ def get_user_agent(backend: Backend | None) -> str:
 
 
 def get_server_url_from_api_base(api_base: str) -> str | None:
-    match = re.match(r"(https?://[^/]+)(/v.*)", api_base)
+    match = re.match(r"(https?://.+)(/v\d+.*)", api_base)
     return match.group(1) if match else None

@@ -1,2 +1,3 @@
-# What's new in v2.7.0
-- **Rewind mode**: Added navigation and forking of conversation history with /rewind
+# What's new in v2.7.6
+
+- **Streaming fix**: Fixed markdown fence context loss causing streaming rendering problems

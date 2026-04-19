@@ -78,3 +78,29 @@ class TestAgentManager:
 
         assert agent.name == "default"
         assert agent.agent_type == AgentType.AGENT
+
+    def test_initial_agent_rejects_subagent(self) -> None:
+        """Test that creating AgentManager with a subagent as initial_agent raises."""
+        config = build_test_vibe_config(
+            include_project_context=False, include_prompt_detail=False
+        )
+        with pytest.raises(ValueError, match="cannot be used as the primary agent"):
+            AgentManager(lambda: config, initial_agent="explore")
+
+    def test_initial_agent_accepts_subagent_when_allowed(self) -> None:
+        """Test that allow_subagent=True permits subagent as initial_agent."""
+        config = build_test_vibe_config(
+            include_project_context=False, include_prompt_detail=False
+        )
+        manager = AgentManager(
+            lambda: config, initial_agent="explore", allow_subagent=True
+        )
+        assert manager.active_profile.name == "explore"
+
+    def test_initial_agent_accepts_agent_type(self) -> None:
+        """Test that creating AgentManager with an agent-type agent works."""
+        config = build_test_vibe_config(
+            include_project_context=False, include_prompt_detail=False
+        )
+        manager = AgentManager(lambda: config, initial_agent="plan")
+        assert manager.active_profile.name == "plan"

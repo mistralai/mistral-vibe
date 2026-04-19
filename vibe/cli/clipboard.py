@@ -9,8 +9,6 @@ import subprocess
 import pyperclip
 from textual.app import App
 
-_PREVIEW_MAX_LENGTH = 40
-
 
 def _copy_osc52(text: str) -> None:
     encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
@@ -117,13 +115,6 @@ def _copy_to_clipboard(text: str) -> None:
         raise RuntimeError("All clipboard strategies failed")
 
 
-def _shorten_preview(texts: list[str]) -> str:
-    dense_text = "⏎".join(texts).replace("\n", "⏎")
-    if len(dense_text) > _PREVIEW_MAX_LENGTH:
-        return f"{dense_text[: _PREVIEW_MAX_LENGTH - 1]}…"
-    return dense_text
-
-
 def _get_selected_texts(app: App) -> list[str]:
     selected_texts = []
 
@@ -156,7 +147,7 @@ def copy_selection_to_clipboard(app: App, show_toast: bool = True) -> str | None
         _copy_to_clipboard(combined_text)
         if show_toast:
             app.notify(
-                f'"{_shorten_preview(selected_texts)}" copied to clipboard',
+                "Selection copied to clipboard",
                 severity="information",
                 timeout=2,
                 markup=False,

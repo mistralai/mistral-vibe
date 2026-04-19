@@ -529,26 +529,6 @@ class TestMistralMapperPrepareMessage:
         result = mapper.prepare_message(msg)
         assert result.content == "Hello!"
 
-    def test_strip_reasoning_removes_reasoning_from_assistant(
-        self, mapper: MistralMapper
-    ) -> None:
-        msg = LLMMessage(
-            role=Role.assistant,
-            content="Answer",
-            reasoning_content="thinking...",
-            reasoning_signature="sig",
-        )
-        stripped = mapper.strip_reasoning(msg)
-        assert stripped.content == "Answer"
-        assert stripped.reasoning_content is None
-        assert stripped.reasoning_signature is None
-
-    def test_strip_reasoning_leaves_non_assistant_unchanged(
-        self, mapper: MistralMapper
-    ) -> None:
-        msg = LLMMessage(role=Role.user, content="hello")
-        assert mapper.strip_reasoning(msg) is msg
-
 
 class TestMistralBackendReasoningEffort:
     """Tests that MistralBackend correctly passes reasoning_effort to the SDK."""

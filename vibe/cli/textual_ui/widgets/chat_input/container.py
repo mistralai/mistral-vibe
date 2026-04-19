@@ -30,6 +30,7 @@ SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
 
 class ChatInputContainer(Vertical):
     ID_INPUT_BOX = "input-box"
+    REMOTE_BORDER_CLASS = "border-remote"
 
     class Submitted(Message):
         def __init__(self, value: str) -> None:
@@ -61,6 +62,8 @@ class ChatInputContainer(Vertical):
         self._nuage_enabled = nuage_enabled
         self._voice_manager = voice_manager
         self._transcript_router = transcript_router
+        self._custom_border_label: str | None = None
+        self._custom_border_class: str | None = None
 
         self._completion_manager = MultiCompletionManager([
             SlashCommandController(CommandCompleter(self._get_slash_entries), self),
@@ -71,7 +74,6 @@ class ChatInputContainer(Vertical):
                 self,
             ),
         ])
-        self._completion_popup: CompletionPopup | None = None
         self._body: ChatInputBody | None = None
 
     def _get_slash_entries(self) -> list[tuple[str, str]]:
@@ -85,12 +87,11 @@ class ChatInputContainer(Vertical):
         return sorted(entries)
 
     def compose(self) -> ComposeResult:
-        self._completion_popup = CompletionPopup()
-        yield self._completion_popup
+        yield CompletionPopup()
 
-        border_class = SAFETY_BORDER_CLASSES.get(self._safety, "")
+        border_class = self._get_border_class()
         with Vertical(id=self.ID_INPUT_BOX, classes=border_class) as input_box:
-            input_box.border_title = self._agent_name
+            input_box.border_title = self._get_border_title()
             self._body = ChatInputBody(
                 history_file=self._history_file,
                 id="input-body",
@@ -138,12 +139,32 @@ class ChatInputContainer(Vertical):
     def render_completion_suggestions(
         self, suggestions: list[tuple[str, str]], selected_index: int
     ) -> None:
-        if self._completion_popup:
-            self._completion_popup.update_suggestions(suggestions, selected_index)
+        try:
+            popup = self.query_one(CompletionPopup)
+        except Exception:
+            return
+        popup.update_suggestions(suggestions, selected_index)
+        self._position_popup(popup, len(suggestions))
 
     def clear_completion_suggestions(self) -> None:
-        if self._completion_popup:
-            self._completion_popup.hide()
+        try:
+            popup = self.query_one(CompletionPopup)
+        except Exception:
+            return
+        popup.hide()
+
+    def _position_popup(self, popup: CompletionPopup, line_count: int) -> None:
+        widget = self.input_widget
+        if not widget:
+            return
+        cursor = widget.cursor_screen_offset
+        my_region = self.region
+        # Place popup bottom edge just above the cursor row
+        popup_height = line_count + 2  # +2 for solid border
+        popup.styles.offset = (
+            cursor.x - my_region.x,
+            cursor.y - popup_height - my_region.y,
+        )
 
     def _format_insertion(self, replacement: str, suffix: str) -> str:
         """Format the insertion text with appropriate spacing.
@@ -198,23 +219,43 @@ class ChatInputContainer(Vertical):
 
     def set_safety(self, safety: AgentSafety) -> None:
         self._safety = safety
+        self._apply_input_box_chrome()
 
+    def set_agent_name(self, name: str) -> None:
+        self._agent_name = name
+        self._apply_input_box_chrome()
+
+    def set_custom_border(
+        self, label: str | None, border_class: str | None = None
+    ) -> None:
+        self._custom_border_label = label
+        self._custom_border_class = border_class
+        self._apply_input_box_chrome()
+
+    def _get_border_class(self) -> str:
+        if self._custom_border_class is not None:
+            return self._custom_border_class
+        if self._custom_border_label is not None:
+            return ""
+        return SAFETY_BORDER_CLASSES.get(self._safety, "")
+
+    def _get_border_title(self) -> str:
+        if self._custom_border_label is not None:
+            return self._custom_border_label
+        return self._agent_name
+
+    def _apply_input_box_chrome(self) -> None:
         try:
             input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
         except Exception:
             return
 
+        input_box.remove_class(self.REMOTE_BORDER_CLASS)
         for border_class in SAFETY_BORDER_CLASSES.values():
             input_box.remove_class(border_class)
 
-        if safety in SAFETY_BORDER_CLASSES:
-            input_box.add_class(SAFETY_BORDER_CLASSES[safety])
+        border_class = self._get_border_class()
+        if border_class:
+            input_box.add_class(border_class)
 
-    def set_agent_name(self, name: str) -> None:
-        self._agent_name = name
-
-        try:
-            input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
-            input_box.border_title = name
-        except Exception:
-            pass
+        input_box.border_title = self._get_border_title()

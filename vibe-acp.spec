@@ -3,14 +3,16 @@
 # Build: uv run --group build pyinstaller vibe-acp.spec
 # Output: dist/vibe-acp-dir/vibe-acp  (+  dist/vibe-acp-dir/_internal/)
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 # Collect all dependencies (including hidden imports and binaries) from builtins modules
 core_builtins_deps = collect_all('vibe.core.tools.builtins')
 acp_builtins_deps = collect_all('vibe.acp.tools.builtins')
 
 # Extract hidden imports and binaries, filtering to ensure only strings are in hiddenimports
-hidden_imports = ["truststore"]
+# rich lazily loads Unicode width tables via importlib.import_module() at runtime,
+# which PyInstaller's static analysis cannot discover.
+hidden_imports = ["truststore"] + collect_submodules("rich._unicode_data")
 for item in core_builtins_deps[2] + acp_builtins_deps[2]:
     if isinstance(item, str):
         hidden_imports.append(item)

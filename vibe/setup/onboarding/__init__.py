@@ -26,6 +26,15 @@ def run_onboarding(app: App | None = None) -> None:
         case None:
             rprint("\n[yellow]Setup cancelled. See you next time![/]")
             sys.exit(0)
+        case str() as s if s.startswith("env_var_error:"):
+            env_key = s.removeprefix("env_var_error:")
+            rprint(
+                "\n[yellow]Could not save the API key because this provider is "
+                f"configured with an invalid environment variable name: {env_key}.[/]"
+                "\n[dim]The API key was not saved for this session. "
+                "Update the provider's `api_key_env_var` setting in your config and try again.[/]\n"
+            )
+            sys.exit(1)
         case str() as s if s.startswith("save_error:"):
             err = s.removeprefix("save_error:")
             rprint(

@@ -124,7 +124,7 @@ guidelines:
 
   - title: "Use uv for All Commands"
     description: >
-      We use uv to manage our python environment. You should nevery try to run a bare python commands.
+      We use uv to manage our python environment. You should never try to run bare python commands.
       Always run commands using `uv` instead of invoking `python` or `pip` directly.
       For example, use `uv add package` and `uv run script.py` rather than `pip install package` or `python script.py`.
       This practice helps avoid environment drift and leverages modern Python packaging best practices.
@@ -134,9 +134,32 @@ guidelines:
       - uv run script.py to run a script within the uv environment
       - uv run pytest (or any other python tool) to run the tool within the uv environment
 
+  - title: "Safe File Reading"
+    description: >
+      When reading files from disk, prefer the helpers in `vibe.core.utils.io` over raw
+      `Path.read_text()`, `Path.read_bytes().decode()`, or `open()` calls:
+      - `read_safe(path)` — synchronous read with automatic encoding detection.
+      - `read_safe_async(path)` — async equivalent (anyio-based).
+      - `decode_safe(raw)` — decode an already-read `bytes` object.
+      These functions try UTF-8 first, then BOM detection, the locale encoding, and
+      `charset_normalizer` (lazily, only when cheaper candidates fail). They return a
+      `ReadSafeResult(text, encoding)` so callers always get valid `str` output without
+      having to handle encoding errors manually.
+      Use `raise_on_error=True` only when the caller must distinguish corrupt files from
+      valid ones; the default (`False`) replaces undecodable bytes with U+FFFD.
+
   - title: "Imports in Cursor (no Pylance)"
     description: >
       Cursor's built-in Pyright does not offer the "Add import" quick fix (Ctrl+.). To add a missing import:
       - Use the workspace snippets: type the prefix (e.g. acpschema, acphelpers, vibetypes, vibeconfig) and accept the suggestion to insert the import line, then change the symbol name.
       - Or ask Cursor: select the undefined symbol, then Cmd+K and request "Add the missing import for <symbol>".
       - Or copy the import from an existing file in the repo (e.g. acp.schema, acp.helpers, vibe.core.*).
+
+  - title: "No Docstrings in Tests"
+    description: >
+      Do not add docstrings to test functions, test methods, or test classes.
+      Test names should be descriptive enough to convey intent (e.g.,
+      `test_create_user_returns_403_when_unauthorized`). Docstrings in tests add
+      noise, duplicate the function name, and can suppress pytest's default output
+      (pytest displays the docstring instead of the node id when one is present).
+      Use inline comments sparingly for non-obvious setup or assertions instead.

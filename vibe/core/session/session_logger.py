@@ -231,7 +231,7 @@ class SessionLogger:
         # Read old metadata and get total_messages
         try:
             if self.metadata_filepath.exists():
-                raw = await read_safe_async(self.metadata_filepath)
+                raw = (await read_safe_async(self.metadata_filepath)).text
                 old_metadata = json.loads(raw)
                 old_total_messages = old_metadata["total_messages"]
             else:

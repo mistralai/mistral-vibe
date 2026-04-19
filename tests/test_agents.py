@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
 
+from tests import TESTS_ROOT
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.manager import AgentManager
@@ -655,4 +657,23 @@ class TestAgentLoopInitialization:
         assert custom_prompt_content in system_message.content, (
             f"System message should contain custom prompt content. "
             f"Expected '{custom_prompt_content}' to be in system message."
+        )
+
+
+class TestActConsumersUseAclosing:
+    def test_no_bare_async_for_over_act(self) -> None:
+        vibe_pkg = TESTS_ROOT.parent / "vibe"
+        violations: list[str] = []
+        for path in vibe_pkg.rglob("*.py"):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.AsyncFor):
+                    continue
+                match node.iter:
+                    case ast.Call(func=ast.Attribute(attr="act")):
+                        violations.append(f"{path}:{node.lineno}")
+
+        assert not violations, (
+            "Bare `async for ... in .act()` found — wrap in "
+            "contextlib.aclosing(). See issue #569.\n" + "\n".join(violations)
         )

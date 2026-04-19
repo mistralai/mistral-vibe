@@ -113,7 +113,7 @@ class IgnoreRules:
         gitignore_path = root / ".gitignore"
         if gitignore_path.exists():
             try:
-                text = read_safe(gitignore_path)
+                text = read_safe(gitignore_path).text
             except Exception:
                 return patterns
 
