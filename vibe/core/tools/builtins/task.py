@@ -135,6 +135,7 @@ class Task(
             agent_name=args.agent,
             entrypoint_metadata=ctx.entrypoint_metadata,
             is_subagent=True,
+            defer_heavy_init=True,
         )
 
         if ctx and ctx.approval_callback:

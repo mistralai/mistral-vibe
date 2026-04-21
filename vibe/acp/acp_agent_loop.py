@@ -295,6 +295,7 @@ class VibeAcpAgentLoop(AcpAgent):
                 agent_name=BuiltinAgentName.DEFAULT,
                 enable_streaming=True,
                 entrypoint_metadata=self._build_entrypoint_metadata(),
+                defer_heavy_init=True,
             )
             agent_loop.agent_manager.register_agent(CHAT_AGENT)
             # NOTE: For now, we pin session.id to agent_loop.session_id right after init time.
@@ -541,6 +542,7 @@ class VibeAcpAgentLoop(AcpAgent):
             agent_name=BuiltinAgentName.DEFAULT,
             enable_streaming=True,
             entrypoint_metadata=self._build_entrypoint_metadata(),
+            defer_heavy_init=True,
         )
         agent_loop.agent_manager.register_agent(CHAT_AGENT)
 

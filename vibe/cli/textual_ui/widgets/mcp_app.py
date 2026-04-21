@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 from rich.text import Text
@@ -11,6 +11,7 @@ from textual.events import DescendantBlur
 from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
+from textual.worker import Worker
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.tools.connectors import ConnectorRegistry, connectors_enabled
@@ -58,6 +59,7 @@ class MCPApp(Container):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "close", "Close", show=False),
         Binding("backspace", "back", "Back", show=False),
+        Binding("r", "refresh", "Refresh", show=False),
     ]
 
     class MCPClosed(Message):
@@ -69,6 +71,7 @@ class MCPApp(Container):
         tool_manager: ToolManager,
         initial_server: str = "",
         connector_registry: ConnectorRegistry | None = None,
+        refresh_callback: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         super().__init__(id="mcp-app")
         self._mcp_servers = mcp_servers
@@ -83,6 +86,9 @@ class MCPApp(Container):
         # disambiguate entries that share the same normalised name.
         self._viewing_server: str | None = initial_server.strip() or None
         self._viewing_kind: str | None = None
+        self._refresh_callback = refresh_callback
+        self._status_message: str | None = None
+        self._refreshing = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="mcp-content"):
@@ -116,11 +122,43 @@ class MCPApp(Container):
             self._refresh_view(option_id.removeprefix("connector:"), kind="connector")
 
     def action_back(self) -> None:
+        if self._refreshing:
+            return
         if self._viewing_server is not None:
             self._refresh_view(None)
 
     def action_close(self) -> None:
+        if self._refreshing:
+            return
         self.post_message(self.MCPClosed())
+
+    async def action_refresh(self) -> None:
+        if self._refresh_callback is None:
+            return
+
+        self._status_message = "Refreshing..."
+        self._refresh_view(self._viewing_server, kind=self._viewing_kind)
+
+        self._refreshing = True
+        self.run_worker(self._run_refresh(), exclusive=True, group="refresh")
+
+    async def _run_refresh(self) -> str:
+        assert self._refresh_callback is not None
+        return await self._refresh_callback()
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.group != "refresh":
+            return
+        if event.worker.is_finished:
+            self._refreshing = False
+            result = event.worker.result
+            self._status_message = result if isinstance(result, str) else "Refreshed."
+            self.refresh_index()
+
+    def _set_help_text(self, text: str) -> None:
+        if self._status_message:
+            text = f"{self._status_message}  {text}"
+        self.query_one("#mcp-help", NoMarkupStatic).update(text)
 
     # ── list view ────────────────────────────────────────────────────
 
@@ -153,9 +191,7 @@ class MCPApp(Container):
         has_connectors = connectors_enabled() and bool(self._connector_names)
         title = "MCP Servers & Connectors" if has_connectors else "MCP Servers"
         self.query_one("#mcp-title", NoMarkupStatic).update(title)
-        self.query_one("#mcp-help", NoMarkupStatic).update(
-            "↑↓ Navigate  Enter Show tools  Esc Close"
-        )
+        self._set_help_text("↑↓ Navigate  Enter Show tools  R Refresh  Esc Close")
 
         has_servers = bool(self._mcp_servers)
 
@@ -180,47 +216,11 @@ class MCPApp(Container):
 
         # ── Workspace Connectors ──
         if has_connectors:
-            max_name = max(len(n) for n in self._connector_names)
-            type_tag = "[connector]"
-            type_width = len(type_tag)
-            tool_texts = {
-                n: _tool_count_text(
-                    sum(
-                        1
-                        for t, _ in index.connector_tools.get(n, [])
-                        if t in index.enabled_tools
-                    )
-                )
-                for n in self._connector_names
-            }
-            max_tools = max(len(t) for t in tool_texts.values())
             if has_servers:
                 option_list.add_option(Option(Text("", no_wrap=True), disabled=True))
-            option_list.add_option(
-                Option(
-                    Text("Workspace Connectors", style="bold", no_wrap=True),
-                    disabled=True,
-                )
+            self._add_connector_options(
+                option_list, index, self._connector_names, self._connector_registry
             )
-            for cname in self._connector_names:
-                connected = (
-                    self._connector_registry.is_connected(cname)
-                    if self._connector_registry
-                    else False
-                )
-                label = Text(no_wrap=True)
-                label.append(f"  {cname:<{max_name}}")
-                label.append(f"  {type_tag:<{type_width}}", style="dim")
-                label.append(f"  {tool_texts[cname]:<{max_tools}}", style="dim")
-                if connected:
-                    label.append("  ")
-                    label.append("●", style="green")
-                    label.append(" connected", style="dim")
-                else:
-                    label.append("  ")
-                    label.append("○", style="dim")
-                    label.append(" not connected", style="dim")
-                option_list.add_option(Option(label, id=f"connector:{cname}"))
 
         if not has_servers and not has_connectors:
             empty_msg = (
@@ -236,6 +236,55 @@ class MCPApp(Container):
                 (i for i, opt in enumerate(option_list._options) if not opt.disabled), 0
             )
             option_list.highlighted = first_enabled
+
+    def _add_connector_options(
+        self,
+        option_list: OptionList,
+        index: MCPToolIndex,
+        connector_names: Sequence[str],
+        connector_registry: ConnectorRegistry | None,
+    ) -> None:
+        ordered_connector_names = _sort_connector_names_for_menu(
+            connector_names, connector_registry
+        )
+        max_name = max(len(name) for name in ordered_connector_names)
+        type_tag = "[connector]"
+        type_width = len(type_tag)
+        tool_texts = {
+            name: _tool_count_text(
+                sum(
+                    1
+                    for tool_name, _ in index.connector_tools.get(name, [])
+                    if tool_name in index.enabled_tools
+                )
+            )
+            for name in ordered_connector_names
+        }
+        max_tools = max(len(text) for text in tool_texts.values())
+        option_list.add_option(
+            Option(
+                Text("Workspace Connectors", style="bold", no_wrap=True), disabled=True
+            )
+        )
+        for connector_name in ordered_connector_names:
+            connected = (
+                connector_registry.is_connected(connector_name)
+                if connector_registry
+                else False
+            )
+            label = Text(no_wrap=True)
+            label.append(f"  {connector_name:<{max_name}}")
+            label.append(f"  {type_tag:<{type_width}}", style="dim")
+            label.append(f"  {tool_texts[connector_name]:<{max_tools}}", style="dim")
+            if connected:
+                label.append("  ")
+                label.append("●", style="green")
+                label.append(" connected", style="dim")
+            else:
+                label.append("  ")
+                label.append("○", style="dim")
+                label.append(" not connected", style="dim")
+            option_list.add_option(Option(label, id=f"connector:{connector_name}"))
 
     # ── detail view ──────────────────────────────────────────────────
 
@@ -254,9 +303,7 @@ class MCPApp(Container):
         self.query_one("#mcp-title", NoMarkupStatic).update(
             f"{title_prefix}: {server_name}"
         )
-        self.query_one("#mcp-help", NoMarkupStatic).update(
-            "↑↓ Navigate  Backspace Back  Esc Close"
-        )
+        self._set_help_text("↑↓ Navigate  Backspace Back  R Refresh  Esc Close")
         tools_source = index.connector_tools if is_connector else index.server_tools
         all_tools = sorted(tools_source.get(server_name, []), key=lambda t: t[0])
         visible_tools = [(n, c) for n, c in all_tools if n in index.enabled_tools]
@@ -284,3 +331,15 @@ def _tool_count_text(count: int) -> str:
         return "no tools"
     noun = "tool" if count == 1 else "tools"
     return f"{count} {noun}"
+
+
+def _sort_connector_names_for_menu(
+    connector_names: Sequence[str], connector_registry: ConnectorRegistry | None
+) -> list[str]:
+    return sorted(
+        connector_names,
+        key=lambda name: (
+            not connector_registry.is_connected(name) if connector_registry else True,
+            name.lower(),
+        ),
+    )

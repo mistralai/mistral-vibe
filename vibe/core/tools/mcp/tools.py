@@ -297,9 +297,12 @@ async def list_tools_stdio(
     command: list[str],
     *,
     env: dict[str, str] | None = None,
+    cwd: str | None = None,
     startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
-    params = StdioServerParameters(command=command[0], args=command[1:], env=env)
+    params = StdioServerParameters(
+        command=command[0], args=command[1:], env=env, cwd=cwd
+    )
     timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     async with (
         _mcp_stderr_capture() as errlog,
@@ -317,11 +320,14 @@ async def call_tool_stdio(
     arguments: dict[str, Any],
     *,
     env: dict[str, str] | None = None,
+    cwd: str | None = None,
     startup_timeout_sec: float | None = None,
     tool_timeout_sec: float | None = None,
     sampling_callback: MCPSamplingHandler | None = None,
 ) -> MCPToolResult:
-    params = StdioServerParameters(command=command[0], args=command[1:], env=env)
+    params = StdioServerParameters(
+        command=command[0], args=command[1:], env=env, cwd=cwd
+    )
     init_timeout = (
         timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     )
@@ -350,6 +356,7 @@ def create_mcp_stdio_proxy_tool_class(
     alias: str | None = None,
     server_hint: str | None = None,
     env: dict[str, str] | None = None,
+    cwd: str | None = None,
     startup_timeout_sec: float | None = None,
     tool_timeout_sec: float | None = None,
     sampling_enabled: bool = True,
@@ -378,6 +385,7 @@ def create_mcp_stdio_proxy_tool_class(
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
         _env: ClassVar[dict[str, str] | None] = env
+        _cwd: ClassVar[str | None] = cwd
         _startup_timeout_sec: ClassVar[float | None] = startup_timeout_sec
         _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
         _sampling_enabled: ClassVar[bool] = sampling_enabled
@@ -403,6 +411,7 @@ def create_mcp_stdio_proxy_tool_class(
                     self._remote_name,
                     payload,
                     env=self._env,
+                    cwd=self._cwd,
                     startup_timeout_sec=self._startup_timeout_sec,
                     tool_timeout_sec=self._tool_timeout_sec,
                     sampling_callback=sampling_callback,

@@ -41,7 +41,6 @@ from vibe.cli.plan_offer.decide_plan_offer import (
     resolve_api_key_for_plan,
 )
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway, WhoAmIPlanType
-from vibe.cli.terminal_setup import setup_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.notifications import (
     NotificationContext,
@@ -145,8 +144,7 @@ from vibe.core.tools.builtins.ask_user_question import (
     Choice,
     Question,
 )
-from vibe.core.tools.connectors import CONNECTORS_ENV_VAR, connectors_enabled
-from vibe.core.tools.mcp.tools import MCPTool
+from vibe.core.tools.connectors import connectors_enabled
 from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.transcribe import make_transcribe_client
 from vibe.core.types import (
@@ -334,8 +332,6 @@ class VibeApp(App):  # noqa: PLR0904
         excluded_commands = []
         if not self.config.nuage_enabled:
             excluded_commands.append("teleport")
-        if not connectors_enabled():
-            excluded_commands.append("connectors")
         self.commands = CommandRegistry(excluded_commands=excluded_commands)
 
         self._chat_input_container: ChatInputContainer | None = None
@@ -478,7 +474,7 @@ class VibeApp(App):  # noqa: PLR0904
             if not self.agent_loop.is_initialized:
                 await self._ensure_loading_widget("Initializing")
                 init_widget = self._loading_widget
-            await self.agent_loop.wait_for_init()
+            await self.agent_loop.wait_until_ready()
         except Exception as e:
             await self._mount_and_scroll(
                 ErrorMessage(
@@ -788,15 +784,7 @@ class VibeApp(App):  # noqa: PLR0904
         if not self.agent_loop:
             return False
 
-        try:
-            skill = self.agent_loop.skill_manager.parse_skill_command(user_input)
-        except OSError as e:
-            await self._mount_and_scroll(
-                ErrorMessage(
-                    f"Failed to read skill file: {e}", collapsed=self._tools_collapsed
-                )
-            )
-            return True
+        skill = self.agent_loop.skill_manager.parse_skill_command(user_input)
 
         if skill is None:
             return False
@@ -1104,7 +1092,7 @@ class VibeApp(App):  # noqa: PLR0904
             show_init_spinner = not self.agent_loop.is_initialized
             if show_init_spinner:
                 await self._ensure_loading_widget("Initializing")
-            await self.agent_loop.wait_for_init()
+            await self.agent_loop.wait_until_ready()
             if show_init_spinner:
                 await self._remove_loading_widget()
                 self._refresh_banner()
@@ -1328,6 +1316,12 @@ class VibeApp(App):  # noqa: PLR0904
         help_text = self.commands.get_help_text()
         await self._mount_and_scroll(UserCommandMessage(help_text))
 
+    async def _refresh_mcp_browser(self) -> str:
+        await self.agent_loop.tool_manager.refresh_remote_tools_async()
+        await self.agent_loop.refresh_system_prompt()
+        self._refresh_banner()
+        return "Refreshed."
+
     async def _show_mcp(self, cmd_args: str = "", **kwargs: Any) -> None:
         mcp_servers = self.config.mcp_servers
         connector_registry = (
@@ -1371,50 +1365,9 @@ class VibeApp(App):  # noqa: PLR0904
                 tool_manager=self.agent_loop.tool_manager,
                 initial_server=name,
                 connector_registry=connector_registry,
+                refresh_callback=self._refresh_mcp_browser,
             )
         )
-
-    async def _handle_connectors(self, cmd_args: str = "", **kwargs: Any) -> None:
-        if not self._connectors_enabled:
-            await self._mount_and_scroll(
-                UserCommandMessage(
-                    f"Connectors are disabled. Set {CONNECTORS_ENV_VAR}=1 to enable."
-                )
-            )
-            return
-        registry = self.agent_loop.connector_registry
-        assert registry is not None  # guaranteed by _connectors_enabled
-
-        subcmd = cmd_args.strip().lower()
-        match subcmd:
-            case "refresh":
-                registry.clear()
-                tool_manager = self.agent_loop.tool_manager
-                await tool_manager.integrate_connectors_async()
-                self.agent_loop.refresh_system_prompt()
-                self._refresh_banner()
-                count = registry.connector_count
-                tools = sum(
-                    1
-                    for cls in tool_manager.registered_tools.values()
-                    if issubclass(cls, MCPTool) and cls.is_connector()
-                )
-                await self._mount_and_scroll(
-                    UserCommandMessage(
-                        f"Connectors refreshed: {count} connectors, {tools} tools"
-                    )
-                )
-            case "":
-                await self._mount_and_scroll(
-                    UserCommandMessage("Usage: /connectors refresh")
-                )
-            case _:
-                await self._mount_and_scroll(
-                    ErrorMessage(
-                        f"Unknown subcommand: {subcmd}. Available: refresh",
-                        collapsed=self._tools_collapsed,
-                    )
-                )
 
     async def _show_status(self, **kwargs: Any) -> None:
         stats = self.agent_loop.stats
@@ -1819,25 +1772,6 @@ class VibeApp(App):  # noqa: PLR0904
         self._log_reader.shutdown()
         await self._narrator_manager.close()
         self.exit(result=self._get_session_resume_info())
-
-    async def _setup_terminal(self, **kwargs: Any) -> None:
-        result = setup_terminal()
-
-        if result.success:
-            if result.requires_restart:
-                message = f"{result.message or 'Set up Shift+Enter keybind'} (You may need to restart your terminal.)"
-                await self._mount_and_scroll(
-                    UserCommandMessage(f"{result.terminal.value}: {message}")
-                )
-            else:
-                message = result.message or "Shift+Enter keybind already set up"
-                await self._mount_and_scroll(
-                    WarningMessage(f"{result.terminal.value}: {message}")
-                )
-        else:
-            await self._mount_and_scroll(
-                ErrorMessage(result.message, collapsed=self._tools_collapsed)
-            )
 
     def _make_default_voice_manager(self) -> VoiceManager:
         try:
@@ -2427,7 +2361,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.call_after_refresh(schedule_switch)
 
-    async def action_toggle_debug_console(self) -> None:
+    async def action_toggle_debug_console(self, **kwargs: Any) -> None:
         if self._debug_console is not None:
             await self._debug_console.remove()
             self._debug_console = None

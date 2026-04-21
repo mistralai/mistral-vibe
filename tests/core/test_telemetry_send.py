@@ -135,6 +135,7 @@ class TestTelemetryClient:
             status="success",
             decision=decision,
             agent_profile_name="default",
+            model="mistral-large",
         )
 
         assert len(telemetry_events) == 1
@@ -146,6 +147,7 @@ class TestTelemetryClient:
         assert properties["decision"] == "execute"
         assert properties["approval_type"] == "always"
         assert properties["agent_profile_name"] == "default"
+        assert properties["model"] == "mistral-large"
         assert properties["nb_files_created"] == 0
         assert properties["nb_files_modified"] == 0
 
@@ -161,6 +163,7 @@ class TestTelemetryClient:
             status="success",
             decision=None,
             agent_profile_name="default",
+            model="mistral-large",
             result={"file_existed": False},
         )
 
@@ -179,6 +182,7 @@ class TestTelemetryClient:
             status="success",
             decision=None,
             agent_profile_name="default",
+            model="mistral-large",
             result={"file_existed": True},
         )
 
@@ -197,6 +201,7 @@ class TestTelemetryClient:
             status="skipped",
             decision=None,
             agent_profile_name="default",
+            model="mistral-large",
         )
 
         assert telemetry_events[0]["properties"]["decision"] is None
@@ -383,6 +388,27 @@ class TestTelemetryClient:
         assert (
             calls[1].kwargs["json"]["properties"]["session_id"] == "second-session-id"
         )
+
+    def test_send_request_sent_payload(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_request_sent(
+            model="codestral",
+            nb_context_chars=1234,
+            nb_context_messages=5,
+            nb_prompt_chars=42,
+        )
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.request_sent"
+        properties = telemetry_events[0]["properties"]
+        assert properties["model"] == "codestral"
+        assert properties["nb_context_chars"] == 1234
+        assert properties["nb_context_messages"] == 5
+        assert properties["nb_prompt_chars"] == 42
 
     def test_send_user_rating_feedback_payload(
         self, telemetry_events: list[dict[str, Any]]

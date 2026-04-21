@@ -254,6 +254,17 @@ class ToolManager:
             self._available.pop(key, None)
             self._instances.pop(key, None)
 
+    def _purge_mcp_state(self) -> None:
+        """Remove stale MCP tool classes and cached instances."""
+        stale_keys = [
+            name
+            for name, cls in self._available.items()
+            if issubclass(cls, MCPTool) and not cls.is_connector()
+        ]
+        for key in stale_keys:
+            self._available.pop(key, None)
+            self._instances.pop(key, None)
+
     def integrate_connectors(self) -> None:
         """Discover and register connector tools (sync wrapper)."""
         run_sync(self.integrate_connectors_async())
@@ -278,6 +289,22 @@ class ToolManager:
             self._purge_connector_state()
             self._available.update(connector_tools)
         logger.info(f"Connector integration registered {len(connector_tools)} tools")
+
+    async def refresh_remote_tools_async(self) -> None:
+        """Force MCP and connector re-discovery for the current config."""
+        with self._lock:
+            self._mcp_registry.clear()
+            self._purge_mcp_state()
+            self._mcp_integrated = False
+            self._purge_connector_state()
+            if self._connector_registry is not None:
+                self._connector_registry.clear()
+
+        await self._integrate_all_async()
+
+    def refresh_remote_tools(self) -> None:
+        """Sync wrapper for :meth:`refresh_remote_tools_async`."""
+        run_sync(self.refresh_remote_tools_async())
 
     def integrate_all(self, *, raise_on_mcp_failure: bool = False) -> None:
         """Discover MCP and connector tools in parallel.

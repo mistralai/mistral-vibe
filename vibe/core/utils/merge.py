@@ -18,6 +18,16 @@ class MergeConflictError(Exception):
         self.field_name = field_name
 
 
+class MergeKeyError(KeyError):
+    """Raised when a UNION merge item is missing the expected merge key."""
+
+    def __init__(self, key: str, item: Any) -> None:
+        msg = f"UNION merge key {key!r} not found in item {item!r}"
+        super().__init__(msg)
+        self.key = key
+        self.item = item
+
+
 class MergeStrategy(StrEnum):
     REPLACE = auto()
     CONCAT = auto()
@@ -81,10 +91,11 @@ class MergeStrategy(StrEnum):
                 f"UNION requires list operands, got {type(base).__name__} and {type(override).__name__}"
             )
         merged: dict[str, Any] = {}
-        for item in base:
-            merged[key_fn(item)] = item
-        for item in override:
-            merged[key_fn(item)] = item
+        for item in [*base, *override]:
+            try:
+                merged[key_fn(item)] = item
+            except KeyError as exc:
+                raise MergeKeyError(exc.args[0], item) from exc
         return list(merged.values())
 
     def _merge(self, base: Any, override: Any) -> Any:

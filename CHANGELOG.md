@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] - 2026-04-21
+
+### Added
+
+- Builtin skills system with self-awareness skill
+- `/copy` slash command to copy messages to clipboard
+- Merge field info support for configuration
+- Glob tool for file pattern matching
+- `exit` (without slash) to exit the application
+- Current git branch and GitHub PR display in bottom bar
+- Diff view for `write_file` overwrites in approval and result widgets
+- Windowed virtualization for chat scroll with scroll-based auto-load
+
+### Changed
+
+- Deferred heavy initialization in subagents/ACP to prevent UI freeze
+- Removed `/terminal-setup` command
+- Strengthened user-level AGENTS.md instruction injection
+- Allowed safe `find` commands by default with forced approval for execution predicates
+
+### Fixed
+
+- UI freeze on sub-agent initialization
+- Race condition in banner initialization
+- Scroll ghost artifacts in chat
+- MergeKeyError key extraction for KeyError
+- Task subagent deferred initialization signaling
+- Word-drag state on mouse up to stop extending selection
+- Full-widget selection flash on double-click
+- Tab character handling in Textual selection
+- Double-click word selection to match screen coordinates
+
 ## [2.7.6] - 2026-04-16
 
 ### Added
@@ -29,7 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Alt+Left / Alt+Right key bindings from chat input
 
-
 ## [2.7.5] - 2026-04-14
 
 ### Changed
@@ -44,7 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Encoding detection fallback in `read_safe` for non-UTF-8 files
 - Config saving logic cleanup
-
 
 ## [2.7.4] - 2026-04-09
 
@@ -75,13 +105,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use skill in recent commands via the up-arrow navigation
 - Fixed loading order issues in vibe initialization
 
-
 ## [2.7.3] - 2026-04-03
 
 ### Added
 
 - `/data-retention` slash command to view Mistral AI's data retention notice and privacy settings
-
 
 ## [2.7.2] - 2026-04-01
 
@@ -99,7 +127,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Errored MCP servers are now excluded from the banner count
 - Improved bash denylist matching and error messages
 - Command messages are now skipped during rewind navigation
-
 
 ## [2.7.1] - 2026-03-31
 
@@ -121,7 +148,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Text selection errors when copying from unmounting components
 - Excluded "injected" field from user messages in generic backend
 
-
 ## [2.7.0] - 2026-03-24
 
 ### Added
@@ -133,7 +159,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve message_id when aggregating streaming LLM chunks
 - Improved error handling for SDK response errors
 
-
 ## [2.6.2] - 2026-03-23
 
 ### Changed
@@ -144,13 +169,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Context usage updates via ACP
 
-
 ## [2.6.1] - 2026-03-23
 
 ### Changed
 
 - Loosened agent-client-protocol version constraint from pinned to minimum bound
-
 
 ## [2.6.0] - 2026-03-23
 
@@ -188,7 +211,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Context usage updates sent via ACP
 - Include `exit_plan_mode` tool only in plan mode
 
-
 ## [2.5.0] - 2026-03-16
 
 ### Added
@@ -215,7 +237,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved scrolling performance
 - Web search tool now infers server URL from provider config
 
-
 ## [2.4.2] - 2026-03-12
 
 ### Added
@@ -228,7 +249,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auto-compact threshold falls back to global setting when not defined at model level
 - Update notification toast no longer times out, ensuring the user sees the restart prompt
 - Removed `file_content_before` from Vibe Code, reducing payload size
-
 
 ## [2.4.1] - 2026-03-10
 
@@ -245,7 +265,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Space key fix extended to all `Input` widgets (question prompts, proxy setup) in VS Code terminal
 - Ruff isort/formatter config conflict resolved (`split-on-trailing-comma` set to `false`)
-
 
 ## [2.4.0] - 2026-03-09
 
@@ -267,7 +286,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Arrow-key history navigation at wrapped-line boundaries in chat input
 - UTF-8 encoding enforced when reading metadata files
 - Update notifier no longer crashes on unexpected response fields
-
 
 ## [2.3.0] - 2026-02-27
 
@@ -306,7 +324,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-
 ## [2.2.1] - 2026-02-18
 
 ### Added
@@ -328,7 +345,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Context token widget: preserve stats listeners across `/clear` so token percentage updates correctly
 - Vertex AI: cache credentials to avoid blocking the event loop on every LLM request
 - Bash tool: remove `NO_COLOR` from subprocess env to fix snapshot tests and colored output
-
 
 ## [2.2.0] - 2026-02-17
 
@@ -357,7 +373,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Middleware injection: use standalone user messages instead of mutating flushed messages
 - Revert cryptography 46.0.5 bump for compatibility
 - Pin banner version in UI snapshot tests for stability
-
 
 ## [2.1.0] - 2026-02-11
 
@@ -388,7 +403,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Legacy terminal theme module and agent indicator widget
 - Standalone onboarding theme selection screen (replaced by redesign)
 
-
 ## [2.0.2] - 2026-01-30
 
 ### Added
@@ -409,13 +423,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix global agent prompt not being loaded correctly
 - Do not propose to "resume" when there is nothing to resume
 
-
 ## [2.0.1] - 2026-01-28
 
 ### Fixed
 
 - Fix encoding issues in Windows
-
 
 ## [2.0.0] - 2026-01-27
 
@@ -461,7 +473,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - instructions.md support
 - workdir setting in config file
-
 
 ## [1.3.5] - 2026-01-12
 

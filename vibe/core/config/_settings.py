@@ -290,6 +290,9 @@ class MCPStdio(_MCPBase):
         default_factory=dict,
         description="Environment variables to set for the MCP server process.",
     )
+    cwd: str | None = Field(
+        default=None, description="Working directory for the MCP server process."
+    )
 
     def argv(self) -> list[str]:
         base = (

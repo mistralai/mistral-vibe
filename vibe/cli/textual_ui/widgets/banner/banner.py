@@ -53,7 +53,7 @@ class Banner(Static):
             models_count=len(config.models),
             mcp_servers_count=mcp_registry.count_loaded(config.mcp_servers),
             connectors_count=_connector_count(connector_registry),
-            skills_count=len(skill_manager.available_skills),
+            skills_count=skill_manager.custom_skills_count,
             plan_description=None,
         )
         self._animated = not config.disable_welcome_banner_animation
@@ -80,7 +80,7 @@ class Banner(Static):
         self.state = self._initial_state
 
     def watch_state(self) -> None:
-        if not self.is_mounted:
+        if not self.is_attached:
             return
         self.query_one("#banner-model", NoMarkupStatic).update(self.state.active_model)
         self.query_one("#banner-meta-counts", NoMarkupStatic).update(
@@ -105,7 +105,7 @@ class Banner(Static):
             models_count=len(config.models),
             mcp_servers_count=mcp_registry.count_loaded(config.mcp_servers),
             connectors_count=_connector_count(connector_registry),
-            skills_count=len(skill_manager.available_skills),
+            skills_count=skill_manager.custom_skills_count,
             plan_description=plan_description,
         )
 

@@ -70,16 +70,21 @@ class SkillInfo(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
     allowed_tools: list[str] = Field(default_factory=list)
     user_invocable: bool = True
-    skill_path: Path
+    skill_path: Path | None = None
+    prompt: str
 
     model_config = {"arbitrary_types_allowed": True}
 
     @property
-    def skill_dir(self) -> Path:
+    def skill_dir(self) -> Path | None:
+        if self.skill_path is None:
+            return None
         return self.skill_path.parent.resolve()
 
     @classmethod
-    def from_metadata(cls, meta: SkillMetadata, skill_path: Path) -> SkillInfo:
+    def from_metadata(
+        cls, meta: SkillMetadata, skill_path: Path, prompt: str
+    ) -> SkillInfo:
         return cls(
             name=meta.name,
             description=meta.description,
@@ -89,6 +94,7 @@ class SkillInfo(BaseModel):
             allowed_tools=meta.allowed_tools,
             user_invocable=meta.user_invocable,
             skill_path=skill_path.resolve(),
+            prompt=prompt,
         )
 
 

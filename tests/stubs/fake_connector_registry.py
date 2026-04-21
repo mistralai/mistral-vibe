@@ -39,8 +39,14 @@ class FakeConnectorRegistry(ConnectorRegistry):
             self._connector_connected[alias] = bool(tool_map)
 
     def get_tools(self) -> dict[str, type[BaseTool]]:
+        if self._cache is None:
+            self._build_cache()
+
         result: dict[str, type[BaseTool]] = {}
         if self._cache:
             for tools in self._cache.values():
                 result.update(tools)
         return result
+
+    async def get_tools_async(self) -> dict[str, type[BaseTool]]:
+        return self.get_tools()

@@ -155,6 +155,22 @@ guidelines:
       - Or ask Cursor: select the undefined symbol, then Cmd+K and request "Add the missing import for <symbol>".
       - Or copy the import from an existing file in the repo (e.g. acp.schema, acp.helpers, vibe.core.*).
 
+  - title: "Keep Builtin Vibe Skill Up-to-Date"
+    description: >
+      The file `vibe/core/skills/builtins/vibe.py` is the builtin self-awareness skill.
+      It documents the CLI's features for the model: config.toml fields, CLI parameters, slash
+      commands, agents, skills, tools, VIBE_HOME structure, and environment variables.
+      When you change any of the following, update `vibe/core/skills/builtins/vibe.py`
+      to reflect the new behavior:
+      - CLI arguments or flags (vibe/cli/entrypoint.py)
+      - config.toml fields or defaults (vibe/core/config/_settings.py)
+      - Slash commands (vibe/cli/commands.py)
+      - Built-in agents (vibe/core/agents/)
+      - VIBE_HOME directory layout or paths (vibe/core/paths/)
+      - Skill, tool, or agent discovery logic
+      - Environment variables
+      If in doubt, read the skill file and check whether your change makes any section stale.
+
   - title: "No Docstrings in Tests"
     description: >
       Do not add docstrings to test functions, test methods, or test classes.

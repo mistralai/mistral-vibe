@@ -65,11 +65,6 @@ class CommandRegistry:
                 handler="_exit_app",
                 exits=True,
             ),
-            "terminal-setup": Command(
-                aliases=frozenset(["/terminal-setup"]),
-                description="Configure Shift+Enter for newlines",
-                handler="_setup_terminal",
-            ),
             "status": Command(
                 aliases=frozenset(["/status"]),
                 description="Display agent statistics",
@@ -91,14 +86,12 @@ class CommandRegistry:
                 handler="_show_session_picker",
             ),
             "mcp": Command(
-                aliases=frozenset(["/mcp"]),
-                description="Display available MCP servers. Pass the name of a server to list its tools",
+                aliases=frozenset(["/mcp", "/connectors"]),
+                description=(
+                    "Display available MCP servers and connectors. "
+                    "Pass a name to list its tools"
+                ),
                 handler="_show_mcp",
-            ),
-            "connectors": Command(
-                aliases=frozenset(["/connectors"]),
-                description="Manage workspace connectors. Subcommands: refresh",
-                handler="_handle_connectors",
             ),
             "voice": Command(
                 aliases=frozenset(["/voice"]),

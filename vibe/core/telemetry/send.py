@@ -157,6 +157,7 @@ class TelemetryClient:
         status: Literal["success", "failure", "skipped"],
         decision: ToolDecision | None,
         agent_profile_name: str,
+        model: str,
         result: dict[str, Any] | None = None,
     ) -> None:
         verdict_value = decision.verdict.value if decision else None
@@ -172,6 +173,7 @@ class TelemetryClient:
             "decision": verdict_value,
             "approval_type": approval_type_value,
             "agent_profile_name": agent_profile_name,
+            "model": model,
             "nb_files_created": nb_files_created,
             "nb_files_modified": nb_files_modified,
         }
@@ -223,6 +225,22 @@ class TelemetryClient:
         self.send_telemetry_event(
             "vibe.onboarding_api_key_added", {"version": __version__}
         )
+
+    def send_request_sent(
+        self,
+        *,
+        model: str,
+        nb_context_chars: int,
+        nb_context_messages: int,
+        nb_prompt_chars: int,
+    ) -> None:
+        payload = {
+            "model": model,
+            "nb_context_chars": nb_context_chars,
+            "nb_context_messages": nb_context_messages,
+            "nb_prompt_chars": nb_prompt_chars,
+        }
+        self.send_telemetry_event("vibe.request_sent", payload)
 
     def send_user_rating_feedback(self, rating: int, model: str) -> None:
         self.send_telemetry_event(

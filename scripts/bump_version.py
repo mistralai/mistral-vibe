@@ -201,11 +201,6 @@ Examples:
                 (f"-{current_version}.zip", f"-{new_version}.zip"),
             ],
         )
-        # Update .vscode/launch.json
-        update_hard_values_files(
-            ".vscode/launch.json",
-            [(f'"version": "{current_version}"', f'"version": "{new_version}"')],
-        )
         # Update vibe/core/__init__.py
         update_hard_values_files(
             "vibe/__init__.py",

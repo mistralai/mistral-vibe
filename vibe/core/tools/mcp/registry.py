@@ -139,7 +139,10 @@ class MCPRegistry:
 
         try:
             remotes = await list_tools_stdio(
-                cmd, env=srv.env or None, startup_timeout_sec=srv.startup_timeout_sec
+                cmd,
+                env=srv.env or None,
+                cwd=srv.cwd,
+                startup_timeout_sec=srv.startup_timeout_sec,
             )
         except Exception as exc:
             logger.warning("MCP stdio discovery failed for %r: %s", cmd, exc)
@@ -154,6 +157,7 @@ class MCPRegistry:
                     alias=srv.name,
                     server_hint=srv.prompt,
                     env=srv.env or None,
+                    cwd=srv.cwd,
                     startup_timeout_sec=srv.startup_timeout_sec,
                     tool_timeout_sec=srv.tool_timeout_sec,
                     sampling_enabled=srv.sampling_enabled,

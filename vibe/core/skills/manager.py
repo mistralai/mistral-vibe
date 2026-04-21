@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
+from vibe.core.skills.builtins import BUILTIN_SKILLS
 from vibe.core.skills.models import ParsedSkillCommand, SkillInfo, SkillMetadata
-from vibe.core.skills.parser import SkillParseError, parse_frontmatter
+from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
 from vibe.core.utils import name_matches
 from vibe.core.utils.io import read_safe
 
@@ -19,12 +21,14 @@ class SkillManager:
     def __init__(self, config_getter: Callable[[], VibeConfig]) -> None:
         self._config_getter = config_getter
         self._search_paths = self._compute_search_paths(self._config)
-        self._available: dict[str, SkillInfo] = self._discover_skills()
+        self.available_skills: Mapping[str, SkillInfo] = MappingProxyType(
+            self._apply_filters(self._discover_skills())
+        )
 
-        if self._available:
+        if self.available_skills:
             logger.info(
                 "Discovered %d skill(s) from %d search path(s)",
-                len(self._available),
+                len(self.available_skills),
                 len(self._search_paths),
             )
 
@@ -32,21 +36,20 @@ class SkillManager:
     def _config(self) -> VibeConfig:
         return self._config_getter()
 
-    @property
-    def available_skills(self) -> dict[str, SkillInfo]:
+    def _apply_filters(self, skills: dict[str, SkillInfo]) -> dict[str, SkillInfo]:
         if self._config.enabled_skills:
             return {
                 name: info
-                for name, info in self._available.items()
+                for name, info in skills.items()
                 if name_matches(name, self._config.enabled_skills)
             }
         if self._config.disabled_skills:
             return {
                 name: info
-                for name, info in self._available.items()
+                for name, info in skills.items()
                 if not name_matches(name, self._config.disabled_skills)
             }
-        return dict(self._available)
+        return dict(skills)
 
     @staticmethod
     def _compute_search_paths(config: VibeConfig) -> list[Path]:
@@ -69,7 +72,7 @@ class SkillManager:
         return unique
 
     def _discover_skills(self) -> dict[str, SkillInfo]:
-        skills: dict[str, SkillInfo] = {}
+        skills: dict[str, SkillInfo] = {**BUILTIN_SKILLS}
         for base in self._search_paths:
             if not base.is_dir():
                 continue
@@ -93,8 +96,24 @@ class SkillManager:
             skill_file = skill_dir / "SKILL.md"
             if not skill_file.is_file():
                 continue
-            if (skill_info := self._try_load_skill(skill_file)) is not None:
-                skills[skill_info.name] = skill_info
+            if (skill_info := self._try_load_skill(skill_file)) is None:
+                continue
+            if skill_info.name in BUILTIN_SKILLS:
+                logger.debug(
+                    "Skipping skill '%s' at %s because builtin skill names are reserved",
+                    skill_info.name,
+                    skill_info.skill_path,
+                )
+                continue
+            if skill_info.name in skills:
+                logger.debug(
+                    "Skipping duplicate skill '%s' at %s (already loaded from %s)",
+                    skill_info.name,
+                    skill_info.skill_path,
+                    skills[skill_info.name].skill_path,
+                )
+                continue
+            skills[skill_info.name] = skill_info
         return skills
 
     def _try_load_skill(self, skill_file: Path) -> SkillInfo | None:
@@ -111,7 +130,7 @@ class SkillManager:
         except OSError as e:
             raise SkillParseError(f"Cannot read file: {e}") from e
 
-        frontmatter, _ = parse_frontmatter(content)
+        frontmatter, body = parse_skill_markdown(content)
         metadata = SkillMetadata.model_validate(frontmatter)
 
         skill_name_from_dir = skill_path.parent.name
@@ -123,7 +142,11 @@ class SkillManager:
                 skill_path,
             )
 
-        return SkillInfo.from_metadata(metadata, skill_path)
+        return SkillInfo.from_metadata(metadata, skill_path, prompt=body.strip())
+
+    @property
+    def custom_skills_count(self) -> int:
+        return sum(name not in BUILTIN_SKILLS for name in self.available_skills)
 
     def get_skill(self, name: str) -> SkillInfo | None:
         return self.available_skills.get(name)
@@ -142,12 +165,11 @@ class SkillManager:
         if skill_info is None:
             return None
 
-        skill_content = read_safe(skill_info.skill_path).text
         extra_instructions = parts[1] if len(parts) > 1 else None
 
         return ParsedSkillCommand(
             name=skill_name,
-            content=skill_content,
+            content=skill_info.prompt,
             extra_instructions=extra_instructions,
         )
 

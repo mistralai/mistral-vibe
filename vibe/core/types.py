@@ -491,7 +491,7 @@ class MessageList(Sequence[LLMMessage]):
 
         Called from a background thread during deferred init.  A single
         list-item assignment is atomic under CPython's GIL, and the
-        ``_init_complete`` event ensures no ``act()`` call reads the
+        ``@requires_init`` decorator ensures no ``act()`` call reads the
         prompt concurrently, so no additional lock is needed here.
         """
         self._data[0] = LLMMessage(role=Role.system, content=new)

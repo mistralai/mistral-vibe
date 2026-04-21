@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
-from vibe.cli.textual_ui.widgets.mcp_app import MCPApp, collect_mcp_tool_index
+import pytest
+
+from tests.stubs.fake_connector_registry import FakeConnectorRegistry
+from vibe.cli.textual_ui.widgets.mcp_app import (
+    MCPApp,
+    _sort_connector_names_for_menu,
+    collect_mcp_tool_index,
+)
 from vibe.core.config import MCPStdio
 from vibe.core.tools.base import InvokeContext
+from vibe.core.tools.connectors.connector_registry import RemoteTool
 from vibe.core.tools.mcp.tools import MCPTool, MCPToolResult, _OpenArgs
 from vibe.core.types import ToolStreamEvent
 
@@ -158,3 +166,103 @@ class TestMCPAppInit:
         )
         app.action_back()
         assert render_calls == []
+
+    @pytest.mark.asyncio
+    async def test_action_refresh_dispatches_worker(self) -> None:
+        servers = [MCPStdio(name="srv", transport="stdio", command="cmd")]
+        mgr = _make_tool_manager({})
+        refresh_callback = AsyncMock(return_value="Refreshed.")
+        app = MCPApp(
+            mcp_servers=servers, tool_manager=mgr, refresh_callback=refresh_callback
+        )
+        app._viewing_server = "srv"
+        render_calls: list[tuple[str | None, str | None]] = []
+        app._refresh_view = lambda server_name, *, kind=None: render_calls.append((
+            server_name,
+            kind,
+        ))
+        app.run_worker = MagicMock()
+
+        await app.action_refresh()
+
+        assert app._status_message == "Refreshing..."
+        assert render_calls == [("srv", None)]
+        app.run_worker.assert_called_once()
+
+    def test_on_worker_state_changed_updates_after_refresh(self) -> None:
+        from textual.worker import Worker
+
+        servers = [MCPStdio(name="srv", transport="stdio", command="cmd")]
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=servers, tool_manager=mgr)
+        app.refresh_index = MagicMock()
+
+        worker = MagicMock(spec=Worker)
+        worker.group = "refresh"
+        worker.is_finished = True
+        worker.result = "Refreshed."
+        event = MagicMock(spec=Worker.StateChanged)
+        event.worker = worker
+
+        app.on_worker_state_changed(event)
+
+        assert app._status_message == "Refreshed."
+        assert app._refreshing is False
+        app.refresh_index.assert_called_once()
+
+    def test_close_blocked_while_refreshing(self) -> None:
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[], tool_manager=mgr)
+        app._refreshing = True
+        app.post_message = MagicMock()
+
+        app.action_close()
+
+        app.post_message.assert_not_called()
+
+    def test_back_blocked_while_refreshing(self) -> None:
+        servers = [MCPStdio(name="srv", transport="stdio", command="cmd")]
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=servers, tool_manager=mgr)
+        app._viewing_server = "srv"
+        app._refreshing = True
+        render_calls: list[str | None] = []
+        app._refresh_view = lambda server_name, *, kind=None: render_calls.append(
+            server_name
+        )
+
+        app.action_back()
+
+        assert render_calls == []
+
+
+class TestConnectorMenuOrdering:
+    def test_connectors_are_sorted_by_connected_state_then_name(self) -> None:
+        registry = FakeConnectorRegistry(
+            connectors={
+                "zeta": [],
+                "alpha": [RemoteTool(name="lookup", description="Lookup")],
+                "beta": [],
+            }
+        )
+
+        ordered = _sort_connector_names_for_menu(
+            registry.get_connector_names(), registry
+        )
+
+        assert ordered == ["alpha", "beta", "zeta"]
+
+    def test_sorting_is_case_insensitive(self) -> None:
+        registry = FakeConnectorRegistry(
+            connectors={
+                "Zeta": [],
+                "alpha": [RemoteTool(name="lookup", description="Lookup")],
+                "Beta": [],
+            }
+        )
+
+        ordered = _sort_connector_names_for_menu(
+            registry.get_connector_names(), registry
+        )
+
+        assert ordered == ["alpha", "Beta", "Zeta"]

@@ -207,7 +207,7 @@ def _get_available_skills_section(skill_manager: SkillManager) -> str:
         "# Available Skills",
         "",
         "You have access to the following skills. When a task matches a skill's description,",
-        "use the `skill` tool if available to load the full skill instructions, if it is not available, read the files manually.",
+        "use the `skill` tool if available to load the full skill instructions, if it is not available, read the files manually if they exist.",
         "",
         "<available_skills>",
     ]
@@ -218,7 +218,8 @@ def _get_available_skills_section(skill_manager: SkillManager) -> str:
         lines.append(
             f"    <description>{html.escape(str(info.description))}</description>"
         )
-        lines.append(f"    <path>{html.escape(str(info.skill_path))}</path>")
+        if info.skill_path is not None:
+            lines.append(f"    <path>{html.escape(str(info.skill_path))}</path>")
         lines.append("  </skill>")
 
     lines.append("</available_skills>")

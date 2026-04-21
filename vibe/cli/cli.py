@@ -213,8 +213,6 @@ def run_cli(args: argparse.Namespace) -> None:
             if loaded_session:
                 _resume_previous_session(agent_loop, *loaded_session)
 
-            agent_loop.start_deferred_init()
-
             run_textual_ui(
                 agent_loop=agent_loop,
                 startup=StartupOptions(
