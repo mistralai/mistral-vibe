@@ -34,6 +34,13 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
     async def run(
         self, args: BashArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
+        if args.run_in_background:
+            raise ToolError(
+                "Background bash (run_in_background=True) is not yet supported "
+                "over the ACP terminal protocol. Run the command in foreground "
+                "mode, or use the core runtime for long-running processes."
+            )
+
         client, session_id, _ = self._load_state()
 
         timeout = args.timeout or self.config.default_timeout

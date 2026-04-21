@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
+from dataclasses import dataclass
 from functools import lru_cache
+import json
 import os
 from pathlib import Path
 import signal
 import sys
+import time
 from typing import ClassVar, Literal, final
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 from tree_sitter import Language, Node, Parser
 import tree_sitter_bash as tsbash
 
+from vibe.core.logger import logger
 from vibe.core.tools.arity import build_session_pattern
 from vibe.core.tools.base import (
     BaseTool,
@@ -121,6 +126,111 @@ async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
         await proc.wait()
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+_MAX_BACKGROUND_OUTPUT_BYTES = 1_000_000
+"""Per-stream cap for background-process output on disk.
+
+Background processes (dev servers, watchers) can produce unbounded output.
+We tail the most recent bytes up to this cap so the session directory stays
+manageable; callers reading via ``bash_output`` still see the newest output.
+"""
+
+
+@dataclass
+class BackgroundProcess:
+    """Live handle for a bash command started with ``run_in_background=True``.
+
+    Held in memory on ``BashState`` so ``on_reset`` can terminate the process
+    and its drain tasks when the session is cleared.  The authoritative view
+    of status and accumulated output lives on disk under ``session_dir`` and
+    is what the ``bash_output`` tool reads.
+    """
+
+    bash_id: str
+    command: str
+    proc: asyncio.subprocess.Process
+    started_at: float
+    stdout_path: Path
+    stderr_path: Path
+    metadata_path: Path
+    stdout_task: asyncio.Task[None]
+    stderr_task: asyncio.Task[None]
+    wait_task: asyncio.Task[None]
+
+
+def _background_dir(session_dir: Path) -> Path:
+    return session_dir / "bash_processes"
+
+
+def _write_background_metadata(
+    metadata_path: Path,
+    *,
+    bash_id: str,
+    pid: int,
+    command: str,
+    status: str,
+    started_at: float,
+    returncode: int | None = None,
+    ended_at: float | None = None,
+) -> None:
+    payload = {
+        "bash_id": bash_id,
+        "pid": pid,
+        "command": command,
+        "status": status,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "returncode": returncode,
+    }
+    try:
+        metadata_path.write_text(json.dumps(payload, indent=2))
+    except OSError:
+        logger.exception(
+            "Failed to write background bash metadata to %s", metadata_path
+        )
+
+
+async def _drain_stream_to_file(
+    stream: asyncio.StreamReader | None, path: Path
+) -> None:
+    """Append ``stream`` contents to ``path`` until EOF, with a byte cap.
+
+    The file is created up front so readers can tail it even before the
+    first chunk arrives.  Once the cap is reached we keep draining the
+    stream (to avoid back-pressuring the child) but stop writing, which
+    gives a natural "head" view of the output.
+    """
+    if stream is None:
+        return
+
+    try:
+        path.write_bytes(b"")
+    except OSError:
+        logger.exception("Failed to initialise background output file %s", path)
+        return
+
+    bytes_written = 0
+    try:
+        with path.open("ab", buffering=0) as fh:
+            while True:
+                chunk = await stream.read(4096)
+                if not chunk:
+                    break
+                if bytes_written >= _MAX_BACKGROUND_OUTPUT_BYTES:
+                    continue
+                remaining = _MAX_BACKGROUND_OUTPUT_BYTES - bytes_written
+                to_write = chunk if len(chunk) <= remaining else chunk[:remaining]
+                try:
+                    fh.write(to_write)
+                except OSError:
+                    logger.exception("Failed to write background output to %s", path)
+                    return
+                bytes_written += len(to_write)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Background output drain failed for %s", path)
 
 
 def _get_default_allowlist() -> list[str]:
@@ -266,13 +376,34 @@ class BashArgs(BaseModel):
     timeout: int | None = Field(
         default=None, description="Override the default command timeout."
     )
+    run_in_background: bool = Field(
+        default=False,
+        description=(
+            "Start the command as a background process and return immediately "
+            "with a `bash_id` handle.  Use the `bash_output` tool to tail the "
+            "output and check whether it has exited.  Intended for long-running "
+            "processes (dev servers, test watchers, builds) that would otherwise "
+            "block the agent.  Requires an active session directory."
+        ),
+    )
 
 
 class BashResult(BaseModel):
     command: str
-    stdout: str
-    stderr: str
-    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+    returncode: int = 0
+    bash_id: str | None = Field(
+        default=None,
+        description=(
+            "Set when the command was started with ``run_in_background=True``. "
+            "Pass this id to the ``bash_output`` tool to tail the process."
+        ),
+    )
+    background: bool = Field(
+        default=False,
+        description="True when the command was started in background mode.",
+    )
 
 
 class Bash(
@@ -280,6 +411,16 @@ class Bash(
     ToolUIData[BashArgs, BashResult],
 ):
     description: ClassVar[str] = "Run a one-off bash command and capture its output."
+
+    def __init__(
+        self, config_getter: Callable[[], BashToolConfig], state: BaseToolState
+    ) -> None:
+        super().__init__(config_getter, state)
+        # Live handles for background processes started in this session.
+        # Stored on the instance (not on the Pydantic state model) because
+        # they carry non-serialisable subprocess handles and asyncio tasks;
+        # the authoritative view lives on disk under the session directory.
+        self._background_processes: dict[str, BackgroundProcess] = {}
 
     @classmethod
     def format_call_display(cls, args: BashArgs) -> ToolCallDisplay:
@@ -439,6 +580,17 @@ class Bash(
     async def run(
         self, args: BashArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
+        if args.run_in_background:
+            async for item in self._run_background(args, ctx):
+                yield item
+            return
+
+        async for item in self._run_foreground(args):
+            yield item
+
+    async def _run_foreground(
+        self, args: BashArgs
+    ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
 
@@ -495,3 +647,152 @@ class Bash(
         finally:
             if proc is not None:
                 await _kill_process_tree(proc)
+
+    async def _run_background(
+        self, args: BashArgs, ctx: InvokeContext | None
+    ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
+        if ctx is None or ctx.session_dir is None:
+            raise ToolError(
+                "Background bash requires an active session directory. "
+                "run_in_background=True cannot be used outside a session."
+            )
+
+        bg_dir = _background_dir(ctx.session_dir)
+        try:
+            bg_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ToolError(
+                f"Could not create background bash directory {bg_dir}: {exc}"
+            ) from exc
+
+        bash_id = uuid4().hex[:12]
+        stdout_path = bg_dir / f"{bash_id}.stdout"
+        stderr_path = bg_dir / f"{bash_id}.stderr"
+        metadata_path = bg_dir / f"{bash_id}.json"
+        started_at = time.time()
+
+        # Pre-create output files so ``bash_output`` can tail them immediately,
+        # even before the drain tasks have scheduled their first read.
+        for p in (stdout_path, stderr_path):
+            try:
+                p.write_bytes(b"")
+            except OSError as exc:
+                raise ToolError(
+                    f"Could not create background bash output file {p}: {exc}"
+                ) from exc
+
+        kwargs: dict[Literal["start_new_session"], bool] = (
+            {} if is_windows() else {"start_new_session": True}
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                args.command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
+                env=_get_base_env(),
+                executable=_get_shell_executable(),
+                **kwargs,
+            )
+        except Exception as spawn_exc:
+            raise ToolError(
+                f"Failed to start background command {args.command!r}: {spawn_exc}"
+            ) from spawn_exc
+
+        _write_background_metadata(
+            metadata_path,
+            bash_id=bash_id,
+            pid=proc.pid or -1,
+            command=args.command,
+            status="running",
+            started_at=started_at,
+        )
+
+        stdout_task = asyncio.create_task(
+            _drain_stream_to_file(proc.stdout, stdout_path)
+        )
+        stderr_task = asyncio.create_task(
+            _drain_stream_to_file(proc.stderr, stderr_path)
+        )
+
+        async def _wait_and_finalize() -> None:
+            try:
+                await proc.wait()
+            finally:
+                # Wait for the drain tasks so the last bytes land on disk
+                # before we flip the status to "exited".
+                for drain in (stdout_task, stderr_task):
+                    try:
+                        await drain
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        logger.exception(
+                            "Background output drain task failed for bash_id=%s",
+                            bash_id,
+                        )
+                _write_background_metadata(
+                    metadata_path,
+                    bash_id=bash_id,
+                    pid=proc.pid or -1,
+                    command=args.command,
+                    status="exited",
+                    started_at=started_at,
+                    returncode=proc.returncode,
+                    ended_at=time.time(),
+                )
+                self._background_processes.pop(bash_id, None)
+
+        wait_task = asyncio.create_task(_wait_and_finalize())
+
+        self._background_processes[bash_id] = BackgroundProcess(
+            bash_id=bash_id,
+            command=args.command,
+            proc=proc,
+            started_at=started_at,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            metadata_path=metadata_path,
+            stdout_task=stdout_task,
+            stderr_task=stderr_task,
+            wait_task=wait_task,
+        )
+
+        yield BashResult(
+            command=args.command,
+            stdout="",
+            stderr="",
+            returncode=0,
+            bash_id=bash_id,
+            background=True,
+        )
+
+    async def on_reset(self) -> None:
+        """Terminate all background processes started in this session.
+
+        Called by ``ToolManager.reset_all`` during history clears and at any
+        point the tool cache is rebuilt.  Each managed process has its drain
+        and wait tasks cancelled, then the process tree is killed and the
+        metadata file updated so external readers (e.g. a later ``bash_output``
+        call with the same id) see a stable ``terminated`` state.
+        """
+        procs = list(self._background_processes.values())
+        self._background_processes.clear()
+        for bp in procs:
+            for task in (bp.stdout_task, bp.stderr_task, bp.wait_task):
+                task.cancel()
+            try:
+                await _kill_process_tree(bp.proc)
+            except Exception:
+                logger.exception("Error terminating background bash %s", bp.bash_id)
+            _write_background_metadata(
+                bp.metadata_path,
+                bash_id=bp.bash_id,
+                pid=bp.proc.pid or -1,
+                command=bp.command,
+                status="terminated",
+                started_at=bp.started_at,
+                returncode=bp.proc.returncode,
+                ended_at=time.time(),
+            )

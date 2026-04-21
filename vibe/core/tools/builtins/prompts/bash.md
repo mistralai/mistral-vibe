@@ -8,6 +8,14 @@ Use the `bash` tool to run one-off shell commands.
 - When `timeout` is not specified (or set to `None`), the config default is used
 - If a command is timing out, do not hesitate to increase the timeout using the `timeout` argument
 
+**Background execution (`run_in_background=True`):**
+- Use for long-running processes that you don't want to block the agent: dev servers, file watchers, `pytest --watch`, builds, `tail -f` on logs.
+- The tool returns immediately with a `bash_id` handle while the command keeps running. The `returncode` in the initial result is always `0` and the initial `stdout`/`stderr` are empty — the process has only just been started.
+- Poll the process with the `bash_output` tool, passing the same `bash_id`, to read accumulated stdout/stderr and check whether it is still running.
+- Background processes are automatically terminated when the session history is cleared (for example via `/clear`) or when the session ends.
+- `timeout` is **ignored** in background mode — foreground timeouts make no sense for a process you explicitly detached. Kill the process by clearing the session or letting it finish naturally.
+- Do **not** start a one-shot command in the background just to avoid waiting; the foreground path is faster and simpler for anything that finishes in seconds.
+
 **IMPORTANT: Use dedicated tools if available instead of these bash commands:**
 
 **File Operations - DO NOT USE:**

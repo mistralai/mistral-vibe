@@ -395,3 +395,18 @@ class BaseTool[
         file reads).  The default returns ``None`` (no annotation).
         """
         return None
+
+    async def on_reset(self) -> None:
+        """Release any resources held by this tool instance before it is discarded.
+
+        Called by ``ToolManager.reset_all()`` when the session history is cleared
+        or the tool cache is rebuilt, giving tools with live resources
+        (subprocesses, network connections, open files, etc.) a chance to shut
+        down cleanly.  The default implementation is a no-op so existing tools
+        remain unaffected.
+
+        Override in subclasses that accumulate lifecycle-bound state.  Errors
+        raised from this method are logged by the caller and do not prevent
+        other tools from being reset.
+        """
+        return None
