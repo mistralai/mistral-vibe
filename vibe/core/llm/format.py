@@ -108,8 +108,10 @@ class APIToolFormatHandler:
                 continue
             try:
                 args = json.loads(function_call.arguments or "{}")
+                function_call.arguments = json.dumps(args)
             except json.JSONDecodeError:
                 args = {}
+                function_call.arguments = "{}"
 
             tool_calls.append(
                 ParsedToolCall(

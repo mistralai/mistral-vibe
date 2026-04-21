@@ -6,6 +6,7 @@ import contextlib
 import copy
 from enum import StrEnum, auto
 from http import HTTPStatus
+import json
 import os
 from pathlib import Path
 import threading
@@ -30,6 +31,7 @@ from vibe.core.llm.format import (
     ResolvedToolCall,
 )
 from vibe.core.llm.types import BackendLike
+from vibe.core.types import Backend
 from vibe.core.middleware import (
     CHAT_AGENT_EXIT,
     CHAT_AGENT_REMINDER,
@@ -621,6 +623,15 @@ class AgentLoop:
             "user-agent": get_user_agent(provider.backend),
             "x-affinity": self.session_id,
         }
+        if dp_rank := os.environ.get("VIBE_DP_RANK"):
+            headers["X-data-parallel-rank"] = dp_rank
+        if (
+            provider.backend == Backend.MISTRAL
+            and self._current_user_message_id is not None
+        ):
+            headers["metadata"] = json.dumps({
+                "message_id": self._current_user_message_id
+            })
         return headers
 
     async def _conversation_loop(
