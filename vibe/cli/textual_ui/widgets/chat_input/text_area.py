@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, Literal
 
-from textual import events
+from textual import events, work
 from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import TextArea
 
 from vibe.cli.autocompletion.base import CompletionResult
+from vibe.cli.clipboard import _read_clipboard
 from vibe.cli.textual_ui.external_editor import ExternalEditor
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
@@ -87,6 +88,18 @@ class ChatTextArea(TextArea):
 
     def on_click(self, event: events.Click) -> None:
         self._mark_cursor_moved_if_needed()
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button in {2, 3}:
+            event.prevent_default()
+            event.stop()
+            self._paste_from_clipboard()
+
+    @work(thread=True)
+    def _paste_from_clipboard(self) -> None:
+        text = _read_clipboard()
+        if text:
+            self.app.call_from_thread(self.post_message, events.Paste(text))
 
     def action_insert_newline(self) -> None:
         self.insert("\n")
