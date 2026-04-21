@@ -5,37 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.1] - 2026-04-21
+
+### Fixed
+
+- Fixed changelog and whats_new
+
+
 ## [2.8.0] - 2026-04-21
 
 ### Added
 
 - Builtin skills system with self-awareness skill
-- `/copy` slash command to copy messages to clipboard
-- Merge field info support for configuration
-- Glob tool for file pattern matching
-- `exit` (without slash) to exit the application
-- Current git branch and GitHub PR display in bottom bar
-- Diff view for `write_file` overwrites in approval and result widgets
-- Windowed virtualization for chat scroll with scroll-based auto-load
+- `cwd` configuration parameter for MCP stdio servers
+- `/connectors` as alias for `/mcp` and `R` refresh shortcut in MCP browser
+- `MergeFieldMetadata` and annotated merge strategy helpers for config schemas
+- `vibe.request_sent` telemetry event fired before each LLM API call
+- Model alias to `tool_call_finished` telemetry event
 
 ### Changed
 
-- Deferred heavy initialization in subagents/ACP to prevent UI freeze
-- Removed `/terminal-setup` command
-- Strengthened user-level AGENTS.md instruction injection
-- Allowed safe `find` commands by default with forced approval for execution predicates
+- Deferred heavy init in subagents and ACP sessions to background thread
+- Renamed `request_sent` telemetry fields and added `nb_prompt_chars`
+- Sorted connectors in `/mcp` menu by connection state then alphabetically
 
 ### Fixed
 
-- UI freeze on sub-agent initialization
-- Race condition in banner initialization
-- Scroll ghost artifacts in chat
-- MergeKeyError key extraction for KeyError
-- Task subagent deferred initialization signaling
-- Word-drag state on mouse up to stop extending selection
-- Full-widget selection flash on double-click
-- Tab character handling in Textual selection
-- Double-click word selection to match screen coordinates
+- `/debug` command no longer throws
+- Race condition in banner initialization dropping initial state
+
+### Removed
+
+- `/terminal-setup` command
 
 ## [2.7.6] - 2026-04-16
 
