@@ -19,15 +19,27 @@ ImageMediaType = Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
 _OSASCRIPT_SAVE_PNG = """\
 on run argv
     set destPath to item 1 of argv
+    set imageData to missing value
     try
-        set pngData to (the clipboard as «class PNGf»)
-    on error
-        return "no_image"
+        set imageData to (the clipboard as «class PNGf»)
     end try
+    if imageData is missing value then
+        try
+            set imageData to (the clipboard as «class TIFF»)
+        end try
+    end if
+    if imageData is missing value then
+        try
+            set imageData to (the clipboard as JPEG picture)
+        end try
+    end if
+    if imageData is missing value then
+        return "no_image"
+    end if
     try
         set fp to open for access (POSIX file destPath) with write permission
         set eof of fp to 0
-        write pngData to fp
+        write imageData to fp
         close access fp
     on error errMsg
         try
