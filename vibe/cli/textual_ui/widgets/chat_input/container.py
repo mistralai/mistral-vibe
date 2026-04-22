@@ -20,6 +20,7 @@ from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.voice_manager.voice_manager_port import VoiceManagerPort
 from vibe.core.agents import AgentSafety
 from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
+from vibe.core.types import ImageContentPart
 
 SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
     AgentSafety.SAFE: "border-safe",
@@ -33,8 +34,13 @@ class ChatInputContainer(Vertical):
     REMOTE_BORDER_CLASS = "border-remote"
 
     class Submitted(Message):
-        def __init__(self, value: str) -> None:
+        def __init__(
+            self,
+            value: str,
+            image_parts: list[ImageContentPart] | None = None,
+        ) -> None:
             self.value = value
+            self.image_parts = image_parts
             super().__init__()
 
     def __init__(
@@ -203,7 +209,9 @@ class ChatInputContainer(Vertical):
 
     def on_chat_input_body_submitted(self, event: ChatInputBody.Submitted) -> None:
         event.stop()
-        self.post_message(self.Submitted(event.value))
+        self.post_message(
+            self.Submitted(event.value, image_parts=event.image_parts)
+        )
 
     @property
     def switching_mode(self) -> bool:

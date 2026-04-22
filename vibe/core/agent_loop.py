@@ -85,6 +85,7 @@ from vibe.core.types import (
     CompactEndEvent,
     CompactStartEvent,
     EntrypointMetadata,
+    ImageContentPart,
     LLMChunk,
     LLMMessage,
     LLMUsage,
@@ -480,7 +481,10 @@ class AgentLoop:
 
     @requires_init
     async def act(
-        self, msg: str, client_message_id: str | None = None
+        self,
+        msg: str,
+        client_message_id: str | None = None,
+        image_parts: list[ImageContentPart] | None = None,
     ) -> AsyncGenerator[BaseEvent, None]:
         self._clean_message_history()
         self.rewind_manager.create_checkpoint()
@@ -490,7 +494,9 @@ class AgentLoop:
             model_name = None
         async with agent_span(model=model_name, session_id=self.session_id):
             async for event in self._conversation_loop(
-                msg, client_message_id=client_message_id
+                msg,
+                client_message_id=client_message_id,
+                image_parts=image_parts,
             ):
                 yield event
 
@@ -648,10 +654,16 @@ class AgentLoop:
         return headers
 
     async def _conversation_loop(
-        self, user_msg: str, client_message_id: str | None = None
+        self,
+        user_msg: str,
+        client_message_id: str | None = None,
+        image_parts: list[ImageContentPart] | None = None,
     ) -> AsyncGenerator[BaseEvent]:
         user_message = LLMMessage(
-            role=Role.user, content=user_msg, message_id=client_message_id
+            role=Role.user,
+            content=user_msg,
+            message_id=client_message_id,
+            image_parts=image_parts or None,
         )
         self.messages.append(user_message)
         self.stats.steps += 1

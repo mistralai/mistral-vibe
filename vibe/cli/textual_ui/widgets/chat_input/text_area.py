@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, Literal
 
-from textual import events
+from textual import events, work
 from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import TextArea
 
 from vibe.cli.autocompletion.base import CompletionResult
+from vibe.cli.clipboard import (
+    _encode_image_data_url,
+    _read_clipboard,
+    _read_clipboard_image,
+)
 from vibe.cli.textual_ui.external_editor import ExternalEditor
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
@@ -18,6 +23,7 @@ from vibe.cli.voice_manager.voice_manager_port import (
     TranscribeState,
     VoiceManagerPort,
 )
+from vibe.core.types import ImageContentPart
 
 InputMode = Literal["!", "/", ">", "&"]
 
@@ -32,6 +38,13 @@ class ChatTextArea(TextArea):
             priority=True,
         ),
         Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
+        Binding(
+            "ctrl+v",
+            "paste_with_images",
+            "Paste",
+            show=False,
+            priority=True,
+        ),
     ]
 
     DEFAULT_MODE: ClassVar[Literal[">"]] = ">"
@@ -74,6 +87,7 @@ class ChatTextArea(TextArea):
         self._completion_manager: MultiCompletionManager | None = None
         self._app_has_focus: bool = True
         self._voice_manager = voice_manager
+        self._pending_images: list[ImageContentPart] = []
 
     def on_blur(self, event: events.Blur) -> None:
         if self._app_has_focus:
@@ -90,6 +104,48 @@ class ChatTextArea(TextArea):
 
     def action_insert_newline(self) -> None:
         self.insert("\n")
+
+    def action_paste_with_images(self) -> None:
+        self._paste_with_images_worker()
+
+    @work(thread=True, exclusive=True, group="clipboard-paste")
+    def _paste_with_images_worker(self) -> None:
+        try:
+            image_result = _read_clipboard_image()
+        except Exception:
+            image_result = None
+
+        if image_result is not None:
+            data, media_type = image_result
+            url = _encode_image_data_url(data, media_type)
+            part = ImageContentPart(image_url=url, media_type=media_type)
+            kb = len(data) // 1024
+            self.app.call_from_thread(self._attach_image_placeholder, part, kb)
+            return
+
+        text = _read_clipboard()
+        if text:
+            self.app.call_from_thread(self.insert, text)
+
+    def _attach_image_placeholder(self, part: ImageContentPart, size_kb: int) -> None:
+        self._pending_images.append(part)
+        placeholder = f"[Image #{len(self._pending_images)}]"
+        self.insert(placeholder)
+        self.notify(
+            f"Image attached ({size_kb} KB)",
+            severity="information",
+            timeout=2,
+            markup=False,
+        )
+
+    def take_pending_images(self) -> list[ImageContentPart]:
+        images = self._pending_images
+        self._pending_images = []
+        return images
+
+    @property
+    def has_pending_images(self) -> bool:
+        return bool(self._pending_images)
 
     def action_open_external_editor(self) -> None:
         editor = ExternalEditor()
@@ -332,6 +388,7 @@ class ChatTextArea(TextArea):
     def clear_text(self) -> None:
         self.clear()
         self.reset_history_state()
+        self._pending_images = []
         self._set_mode(self.DEFAULT_MODE)
 
     def _set_mode(self, mode: InputMode) -> None:

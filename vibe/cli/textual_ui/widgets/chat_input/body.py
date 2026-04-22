@@ -21,6 +21,7 @@ from vibe.cli.voice_manager.voice_manager_port import (
     VoiceManagerPort,
 )
 from vibe.core.logger import logger
+from vibe.core.types import ImageContentPart
 
 
 class _PromptSpinner(SpinnerMixin, Static):
@@ -38,8 +39,13 @@ class _PromptSpinner(SpinnerMixin, Static):
 
 class ChatInputBody(VoiceManagerListener, Widget):
     class Submitted(Message):
-        def __init__(self, value: str) -> None:
+        def __init__(
+            self,
+            value: str,
+            image_parts: list[ImageContentPart] | None = None,
+        ) -> None:
             self.value = value
+            self.image_parts = image_parts
             super().__init__()
 
     def __init__(
@@ -177,12 +183,13 @@ class ChatInputBody(VoiceManagerListener, Widget):
                 self.history.add(value)
                 self.history.reset_navigation()
 
+            image_parts = self.input_widget.take_pending_images() or None
             self.input_widget.clear_text()
             self._update_prompt()
 
             self._notify_completion_reset()
 
-            self.post_message(self.Submitted(value))
+            self.post_message(self.Submitted(value, image_parts=image_parts))
 
     @property
     def switching_mode(self) -> bool:

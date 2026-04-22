@@ -152,6 +152,7 @@ from vibe.core.types import (
     ApprovalResponse,
     Backend,
     BaseEvent,
+    ImageContentPart,
     LLMMessage,
     RateLimitError,
     Role,
@@ -547,10 +548,10 @@ class VibeApp(App):  # noqa: PLR0904
         if await self._handle_command(value):
             return
 
-        if await self._handle_skill(value):
+        if await self._handle_skill(value, image_parts=event.image_parts):
             return
 
-        await self._handle_user_message(value)
+        await self._handle_user_message(value, image_parts=event.image_parts)
 
     async def on_approval_app_approval_granted(
         self, message: ApprovalApp.ApprovalGranted
@@ -780,7 +781,11 @@ class VibeApp(App):  # noqa: PLR0904
             if info.user_invocable
         ]
 
-    async def _handle_skill(self, user_input: str) -> bool:
+    async def _handle_skill(
+        self,
+        user_input: str,
+        image_parts: list[ImageContentPart] | None = None,
+    ) -> bool:
         if not self.agent_loop:
             return False
 
@@ -791,7 +796,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.agent_loop.telemetry_client.send_slash_command_used(skill.name, "skill")
         prompt = SkillManager.build_skill_prompt(user_input, skill)
-        await self._handle_user_message(prompt)
+        await self._handle_user_message(prompt, image_parts=image_parts)
         return True
 
     async def _handle_bash_command(self, command: str) -> None:
@@ -916,7 +921,11 @@ class VibeApp(App):  # noqa: PLR0904
 
         return "\n\n".join(sections)
 
-    async def _handle_user_message(self, message: str) -> None:
+    async def _handle_user_message(
+        self,
+        message: str,
+        image_parts: list[ImageContentPart] | None = None,
+    ) -> None:
         if self._remote_manager.is_active:
             await self._handle_remote_user_message(message)
             return
@@ -934,7 +943,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self._remote_manager.stop_stream()
             await self._remove_loading_widget()
             self._agent_task = asyncio.create_task(
-                self._handle_agent_loop_turn(message)
+                self._handle_agent_loop_turn(message, image_parts=image_parts)
             )
 
     async def _handle_remote_user_message(self, message: str) -> None:
@@ -1083,7 +1092,11 @@ class VibeApp(App):  # noqa: PLR0904
         if self.event_handler:
             self.event_handler.stop_current_tool_call(success=False)
 
-    async def _handle_agent_loop_turn(self, prompt: str) -> None:
+    async def _handle_agent_loop_turn(
+        self,
+        prompt: str,
+        image_parts: list[ImageContentPart] | None = None,
+    ) -> None:
         self._agent_running = True
 
         await self._remove_loading_widget()
@@ -1101,7 +1114,9 @@ class VibeApp(App):  # noqa: PLR0904
             rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
             self._narrator_manager.cancel()
             self._narrator_manager.on_turn_start(rendered_prompt)
-            async with aclosing(self.agent_loop.act(rendered_prompt)) as events:
+            async with aclosing(
+                self.agent_loop.act(rendered_prompt, image_parts=image_parts)
+            ) as events:
                 async for event in events:
                     self._narrator_manager.on_turn_event(event)
                     if isinstance(event, WaitingForInputEvent):
