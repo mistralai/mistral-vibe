@@ -19,6 +19,8 @@ from mistralai.client.models import (
     Function,
     FunctionCall as MistralFunctionCall,
     FunctionName,
+    ImageURL,
+    ImageURLChunk,
     SystemMessage,
     TextChunk,
     ThinkChunk,
@@ -61,7 +63,16 @@ class MistralMapper:
             case Role.system:
                 return SystemMessage(role="system", content=msg.content or "")
             case Role.user:
-                return UserMessage(role="user", content=msg.content)
+                if not msg.image_parts:
+                    return UserMessage(role="user", content=msg.content)
+                user_chunks: list[ContentChunk] = []
+                if msg.content:
+                    user_chunks.append(TextChunk(type="text", text=msg.content))
+                for part in msg.image_parts:
+                    user_chunks.append(
+                        ImageURLChunk(image_url=ImageURL(url=part.image_url))
+                    )
+                return UserMessage(role="user", content=user_chunks)
             case Role.assistant:
                 content: AssistantMessageContent
                 if msg.reasoning_content:
@@ -249,6 +260,23 @@ class MistralBackend:
             self._client = self._create_mistral_client()
         return self._client
 
+    @staticmethod
+    def _strip_image_parts_if_needed(
+        model: ModelConfig, messages: Sequence[LLMMessage]
+    ) -> Sequence[LLMMessage]:
+        """Drop image attachments when the target model doesn't support vision.
+
+        Sending an ImageURLChunk to a non-vision model triggers a 400 from the
+        Mistral API; stripping keeps the conversation usable after a model
+        switch mid-session.
+        """
+        if model.supports_vision:
+            return messages
+        return [
+            msg.model_copy(update={"image_parts": None}) if msg.image_parts else msg
+            for msg in messages
+        ]
+
     async def complete(
         self,
         *,
@@ -262,6 +290,7 @@ class MistralBackend:
         metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
         try:
+            messages = self._strip_image_parts_if_needed(model, messages)
             merged_messages = merge_consecutive_user_messages(messages)
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
             if reasoning_effort is not None:
@@ -341,6 +370,7 @@ class MistralBackend:
         metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
+            messages = self._strip_image_parts_if_needed(model, messages)
             merged_messages = merge_consecutive_user_messages(messages)
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
             if reasoning_effort is not None:

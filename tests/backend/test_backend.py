@@ -42,7 +42,15 @@ from vibe.core.llm.backend.generic import GenericBackend
 from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper
 from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
 from vibe.core.llm.types import BackendLike
-from vibe.core.types import Backend, FunctionCall, LLMChunk, LLMMessage, Role, ToolCall
+from vibe.core.types import (
+    Backend,
+    FunctionCall,
+    ImageContentPart,
+    LLMChunk,
+    LLMMessage,
+    Role,
+    ToolCall,
+)
 from vibe.core.utils import get_user_agent
 
 
@@ -528,6 +536,124 @@ class TestMistralMapperPrepareMessage:
         msg = LLMMessage(role=Role.assistant, content="Hello!")
         result = mapper.prepare_message(msg)
         assert result.content == "Hello!"
+
+
+class TestMistralMapperUserImageParts:
+    """prepare_message must route LLMMessage.image_parts into Mistral chunks."""
+
+    _SAMPLE_DATA_URL = "data:image/png;base64,iVBORw0KGgo="
+
+    @pytest.fixture
+    def mapper(self) -> MistralMapper:
+        return MistralMapper()
+
+    def test_user_message_without_image_parts_stays_string(
+        self, mapper: MistralMapper
+    ) -> None:
+        msg = LLMMessage(role=Role.user, content="hello")
+        result = mapper.prepare_message(msg)
+        assert result.content == "hello"
+
+    def test_user_message_with_image_and_text(self, mapper: MistralMapper) -> None:
+        from mistralai.client.models import ImageURL, ImageURLChunk, TextChunk
+
+        msg = LLMMessage(
+            role=Role.user,
+            content="what is this?",
+            image_parts=[ImageContentPart(image_url=self._SAMPLE_DATA_URL)],
+        )
+        result = mapper.prepare_message(msg)
+        content = result.content
+        assert isinstance(content, list)
+        assert len(content) == 2
+        text_chunk = content[0]
+        image_chunk = content[1]
+        assert isinstance(text_chunk, TextChunk)
+        assert text_chunk.text == "what is this?"
+        assert isinstance(image_chunk, ImageURLChunk)
+        assert isinstance(image_chunk.image_url, ImageURL)
+        assert image_chunk.image_url.url == self._SAMPLE_DATA_URL
+
+    def test_user_message_with_image_only(self, mapper: MistralMapper) -> None:
+        msg = LLMMessage(
+            role=Role.user,
+            content=None,
+            image_parts=[ImageContentPart(image_url=self._SAMPLE_DATA_URL)],
+        )
+        result = mapper.prepare_message(msg)
+        content = result.content
+        assert isinstance(content, list)
+        assert len(content) == 1
+        assert content[0].type == "image_url"
+
+    def test_user_message_with_multiple_images(self, mapper: MistralMapper) -> None:
+        msg = LLMMessage(
+            role=Role.user,
+            content="compare these",
+            image_parts=[
+                ImageContentPart(image_url="data:image/png;base64,AAAA"),
+                ImageContentPart(image_url="data:image/png;base64,BBBB"),
+                ImageContentPart(image_url="data:image/png;base64,CCCC"),
+            ],
+        )
+        result = mapper.prepare_message(msg)
+        content = result.content
+        assert isinstance(content, list)
+        assert [c.type for c in content] == [
+            "text",
+            "image_url",
+            "image_url",
+            "image_url",
+        ]
+
+
+class TestStripImagePartsIfNeeded:
+    """MistralBackend must drop image attachments for non-vision models."""
+
+    @staticmethod
+    def _model(alias: str, *, supports_vision: bool) -> ModelConfig:
+        return ModelConfig(
+            name=alias,
+            provider="mistral",
+            alias=alias,
+            supports_vision=supports_vision,
+        )
+
+    def test_keeps_image_parts_for_vision_model(self) -> None:
+        model = self._model("devstral-2", supports_vision=True)
+        messages = [
+            LLMMessage(
+                role=Role.user,
+                content="hi",
+                image_parts=[
+                    ImageContentPart(image_url="data:image/png;base64,AAAA")
+                ],
+            )
+        ]
+        result = MistralBackend._strip_image_parts_if_needed(model, messages)
+        assert result[0].image_parts is not None
+        assert len(result[0].image_parts) == 1
+
+    def test_strips_image_parts_for_non_vision_model(self) -> None:
+        model = self._model("local", supports_vision=False)
+        messages = [
+            LLMMessage(
+                role=Role.user,
+                content="hi",
+                image_parts=[
+                    ImageContentPart(image_url="data:image/png;base64,AAAA")
+                ],
+            )
+        ]
+        result = MistralBackend._strip_image_parts_if_needed(model, messages)
+        assert result[0].image_parts is None
+        assert result[0].content == "hi"
+
+    def test_leaves_text_only_messages_unchanged(self) -> None:
+        model = self._model("local", supports_vision=False)
+        original = LLMMessage(role=Role.user, content="hi")
+        result = MistralBackend._strip_image_parts_if_needed(model, [original])
+        assert result[0] is original
 
 
 class TestMistralBackendReasoningEffort:
