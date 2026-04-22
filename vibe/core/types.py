@@ -181,6 +181,15 @@ class ToolCall(BaseModel):
     type: Literal["function"] = "function"
 
 
+class ImageContentPart(BaseModel):
+    """An image attached to a user message, encoded as a base64 data URL."""
+
+    image_url: str
+    media_type: Literal["image/png", "image/jpeg", "image/webp", "image/gif"] = (
+        "image/png"
+    )
+
+
 def _content_before(v: Any) -> str:
     if isinstance(v, str):
         return v
@@ -223,6 +232,7 @@ class LLMMessage(BaseModel):
     name: str | None = None
     tool_call_id: str | None = None
     message_id: str | None = None
+    image_parts: list[ImageContentPart] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -249,6 +259,7 @@ class LLMMessage(BaseModel):
             "tool_call_id": getattr(v, "tool_call_id", None),
             "message_id": getattr(v, "message_id", None)
             or (str(uuid4()) if role != "tool" else None),
+            "image_parts": getattr(v, "image_parts", None),
         }
 
     def __add__(self, other: LLMMessage) -> LLMMessage:
