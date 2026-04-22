@@ -51,20 +51,33 @@ def _image_from_dropped_path(
     file) returns None so the normal text-paste path can take over.
     """
     candidate = text.strip().strip("'\"")
-    if not candidate or "\n" in candidate or " " in candidate:
+    if not candidate or "\n" in candidate:
         return None
-    path = Path(candidate)
-    if not path.is_absolute() or not path.is_file():
+    # macOS Terminal escapes shell-unsafe characters in dragged paths, so
+    # `/path/My Folder/img.png` arrives as `/path/My\ Folder/img.png`. Undo
+    # the common escape sequences before validating.
+    unescaped = (
+        candidate.replace("\\ ", " ")
+        .replace("\\(", "(")
+        .replace("\\)", ")")
+        .replace("\\&", "&")
+        .replace("\\'", "'")
+    )
+    has_unescaped_space = " " in unescaped and "\\ " not in candidate
+    if has_unescaped_space:
         return None
+    path = Path(unescaped)
     media_type = _IMAGE_SUFFIX_TO_MEDIA.get(path.suffix.lower())
-    if media_type is None:
+    if media_type is None or not path.is_absolute() or not path.is_file():
         return None
     try:
-        if path.stat().st_size > MAX_IMAGE_BYTES:
-            return None
-        return path.read_bytes(), media_type
+        size = path.stat().st_size
+        data = path.read_bytes() if size <= MAX_IMAGE_BYTES else None
     except OSError:
         return None
+    if data is None:
+        return None
+    return data, media_type
 
 InputMode = Literal["!", "/", ">", "&"]
 
@@ -154,7 +167,6 @@ class ChatTextArea(TextArea):
             self.insert(text)
 
     def on_paste(self, event: events.Paste) -> None:
-        logger.debug("ChatTextArea.on_paste fired: text=%r", event.text[:200])
         if self._handle_image_attach(fallback_text=event.text):
             event.prevent_default()
             event.stop()
@@ -172,7 +184,7 @@ class ChatTextArea(TextArea):
         try:
             clipboard_image = _read_clipboard_image()
         except Exception:
-            logger.exception("clipboard image read failed")
+            logger.warning("clipboard image read failed", exc_info=True)
             clipboard_image = None
 
         if clipboard_image is not None:

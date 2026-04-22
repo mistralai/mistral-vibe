@@ -144,6 +144,35 @@ def test_image_from_dropped_path_rejects_multi_word_text(tmp_path: Path) -> None
     assert _image_from_dropped_path(f"hey {img}") is None
 
 
+def test_image_from_dropped_path_unescapes_backslash_space(tmp_path: Path) -> None:
+    folder = tmp_path / "My Folder"
+    folder.mkdir()
+    img = folder / "shot.png"
+    img.write_bytes(PNG_BYTES)
+    escaped = f"{tmp_path}/My\\ Folder/shot.png"
+    result = _image_from_dropped_path(escaped)
+    assert result is not None
+    assert result == (PNG_BYTES, "image/png")
+
+
+def test_image_from_dropped_path_unescapes_parens(tmp_path: Path) -> None:
+    folder = tmp_path / "dir(1)"
+    folder.mkdir()
+    img = folder / "shot.png"
+    img.write_bytes(PNG_BYTES)
+    escaped = f"{tmp_path}/dir\\(1\\)/shot.png"
+    result = _image_from_dropped_path(escaped)
+    assert result is not None
+
+
+def test_image_from_dropped_path_accepts_uppercase_extension(tmp_path: Path) -> None:
+    img = tmp_path / "SHOT.PNG"
+    img.write_bytes(PNG_BYTES)
+    result = _image_from_dropped_path(str(img))
+    assert result is not None
+    assert result[1] == "image/png"
+
+
 def test_image_from_dropped_path_rejects_non_image_extension(tmp_path: Path) -> None:
     txt = tmp_path / "notes.txt"
     txt.write_text("hello")
