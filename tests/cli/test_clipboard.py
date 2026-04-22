@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, mock_open, patch
@@ -8,13 +9,20 @@ from unittest.mock import MagicMock, mock_open, patch
 import pytest
 from textual.app import App
 
+from vibe.cli import clipboard as clipboard_module
 from vibe.cli.clipboard import (
+    MAX_IMAGE_BYTES,
     _copy_osc52,
     _copy_pbcopy,
     _copy_to_clipboard,
     _copy_wl_copy,
     _copy_xclip,
+    _encode_image_data_url,
+    _paste_image_osascript,
+    _paste_image_wl_paste,
+    _paste_image_xclip,
     _read_clipboard,
+    _read_clipboard_image,
     copy_selection_to_clipboard,
 )
 
@@ -324,3 +332,165 @@ def test_copy_osc52_unicode(
     expected_seq = f"\033]52;c;{encoded}\a"
     handle = mock_file()
     handle.write.assert_called_once_with(expected_seq)
+
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+SAMPLE_PNG = PNG_SIGNATURE + b"rest-of-fake-png-bytes"
+
+
+def test_paste_image_xclip_returns_bytes() -> None:
+    completed = SimpleNamespace(returncode=0, stdout=SAMPLE_PNG, stderr=b"")
+    with patch("subprocess.run", return_value=completed) as run:
+        assert _paste_image_xclip() == SAMPLE_PNG
+    run.assert_called_once()
+    args = run.call_args.args[0]
+    assert args[0] == "xclip"
+    assert "image/png" in args
+
+
+def test_paste_image_xclip_returns_none_on_failure() -> None:
+    completed = SimpleNamespace(returncode=1, stdout=b"", stderr=b"err")
+    with patch("subprocess.run", return_value=completed):
+        assert _paste_image_xclip() is None
+
+
+def test_paste_image_xclip_returns_none_on_empty_stdout() -> None:
+    completed = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+    with patch("subprocess.run", return_value=completed):
+        assert _paste_image_xclip() is None
+
+
+def test_paste_image_wl_paste_returns_bytes() -> None:
+    completed = SimpleNamespace(returncode=0, stdout=SAMPLE_PNG, stderr=b"")
+    with patch("subprocess.run", return_value=completed) as run:
+        assert _paste_image_wl_paste() == SAMPLE_PNG
+    args = run.call_args.args[0]
+    assert args[0] == "wl-paste"
+    assert "image/png" in args
+
+
+def test_paste_image_wl_paste_returns_none_on_failure() -> None:
+    completed = SimpleNamespace(returncode=1, stdout=b"", stderr=b"")
+    with patch("subprocess.run", return_value=completed):
+        assert _paste_image_wl_paste() is None
+
+
+def test_paste_image_osascript_roundtrips_tempfile(tmp_path: Path) -> None:
+    tmpfile = tmp_path / "clipboard.png"
+    tmpfile.write_bytes(SAMPLE_PNG)
+
+    def fake_mkstemp(suffix: str = "") -> tuple[int, str]:
+        return 0, str(tmpfile)
+
+    completed = SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+    with (
+        patch("vibe.cli.clipboard.tempfile.mkstemp", side_effect=fake_mkstemp),
+        patch("subprocess.run", return_value=completed),
+    ):
+        assert _paste_image_osascript() == SAMPLE_PNG
+
+
+def test_paste_image_osascript_returns_none_when_clipboard_has_no_image(
+    tmp_path: Path,
+) -> None:
+    tmpfile = tmp_path / "clipboard.png"
+
+    def fake_mkstemp(suffix: str = "") -> tuple[int, str]:
+        return 0, str(tmpfile)
+
+    completed = SimpleNamespace(returncode=0, stdout="no_image\n", stderr="")
+    with (
+        patch("vibe.cli.clipboard.tempfile.mkstemp", side_effect=fake_mkstemp),
+        patch("subprocess.run", return_value=completed),
+    ):
+        assert _paste_image_osascript() is None
+
+
+def test_paste_image_osascript_returns_none_on_empty_file(tmp_path: Path) -> None:
+    tmpfile = tmp_path / "clipboard.png"
+    tmpfile.write_bytes(b"")
+
+    def fake_mkstemp(suffix: str = "") -> tuple[int, str]:
+        return 0, str(tmpfile)
+
+    completed = SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+    with (
+        patch("vibe.cli.clipboard.tempfile.mkstemp", side_effect=fake_mkstemp),
+        patch("subprocess.run", return_value=completed),
+    ):
+        assert _paste_image_osascript() is None
+
+
+def test_paste_image_osascript_cleans_tempfile(tmp_path: Path) -> None:
+    tmpfile = tmp_path / "clipboard.png"
+    tmpfile.write_bytes(SAMPLE_PNG)
+
+    def fake_mkstemp(suffix: str = "") -> tuple[int, str]:
+        return 0, str(tmpfile)
+
+    completed = SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+    with (
+        patch("vibe.cli.clipboard.tempfile.mkstemp", side_effect=fake_mkstemp),
+        patch("subprocess.run", return_value=completed),
+    ):
+        _paste_image_osascript()
+    assert not tmpfile.exists()
+
+
+def test_read_clipboard_image_picks_first_available_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        clipboard_module, "_has_cmd", lambda cmd: cmd == "xclip"
+    )
+    completed = SimpleNamespace(returncode=0, stdout=SAMPLE_PNG, stderr=b"")
+    with patch("subprocess.run", return_value=completed):
+        result = _read_clipboard_image()
+    assert result == (SAMPLE_PNG, "image/png")
+
+
+def test_read_clipboard_image_returns_none_when_no_tools_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(clipboard_module, "_has_cmd", lambda cmd: False)
+    assert _read_clipboard_image() is None
+
+
+def test_read_clipboard_image_rejects_oversized_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        clipboard_module, "_has_cmd", lambda cmd: cmd == "xclip"
+    )
+    oversized = b"\x00" * (MAX_IMAGE_BYTES + 1)
+    completed = SimpleNamespace(returncode=0, stdout=oversized, stderr=b"")
+    with patch("subprocess.run", return_value=completed):
+        assert _read_clipboard_image() is None
+
+
+def test_read_clipboard_image_falls_through_on_reader_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        clipboard_module,
+        "_has_cmd",
+        lambda cmd: cmd in {"xclip", "wl-paste"},
+    )
+
+    def raise_then_succeed(*args: object, **kwargs: object) -> SimpleNamespace:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise OSError("xclip blew up")
+        return SimpleNamespace(returncode=0, stdout=SAMPLE_PNG, stderr=b"")
+
+    call_count = {"n": 0}
+    with patch("subprocess.run", side_effect=raise_then_succeed):
+        result = _read_clipboard_image()
+    assert result == (SAMPLE_PNG, "image/png")
+
+
+def test_encode_image_data_url_round_trip() -> None:
+    url = _encode_image_data_url(SAMPLE_PNG, "image/png")
+    assert url.startswith("data:image/png;base64,")
+    decoded = base64.b64decode(url.split(",", 1)[1])
+    assert decoded == SAMPLE_PNG

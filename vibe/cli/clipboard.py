@@ -3,11 +3,41 @@ from __future__ import annotations
 import base64
 from collections.abc import Callable
 import os
+from pathlib import Path
 import shutil
 import subprocess
+import tempfile
+from typing import Literal
 
 import pyperclip
 from textual.app import App
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+ImageMediaType = Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
+
+_OSASCRIPT_SAVE_PNG = """\
+on run argv
+    set destPath to item 1 of argv
+    try
+        set pngData to (the clipboard as «class PNGf»)
+    on error
+        return "no_image"
+    end try
+    try
+        set fp to open for access (POSIX file destPath) with write permission
+        set eof of fp to 0
+        write pngData to fp
+        close access fp
+    on error errMsg
+        try
+            close access (POSIX file destPath)
+        end try
+        return "write_failed: " & errMsg
+    end try
+    return "ok"
+end run
+"""
 
 
 def _copy_osc52(text: str) -> None:
@@ -97,6 +127,86 @@ def _read_clipboard() -> str | None:
         except Exception:
             pass
     return None
+
+
+def _paste_image_osascript() -> bytes | None:
+    tmp = Path(tempfile.mkstemp(suffix=".png")[1])
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", _OSASCRIPT_SAVE_PNG, str(tmp)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        if result.stdout.strip() != "ok":
+            return None
+        if not tmp.exists() or tmp.stat().st_size == 0:
+            return None
+        return tmp.read_bytes()
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _paste_image_xclip() -> bytes | None:
+    result = subprocess.run(
+        ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return result.stdout
+
+
+def _paste_image_wl_paste() -> bytes | None:
+    result = subprocess.run(
+        ["wl-paste", "-t", "image/png"],
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return result.stdout
+
+
+_IMAGE_CMD_STRATEGIES: list[tuple[str, Callable[[], bytes | None]]] = [
+    ("osascript", _paste_image_osascript),
+    ("xclip", _paste_image_xclip),
+    ("wl-paste", _paste_image_wl_paste),
+]
+
+
+def _read_clipboard_image() -> tuple[bytes, ImageMediaType] | None:
+    """Read an image from the system clipboard as raw bytes.
+
+    Returns None when the clipboard holds no image, no supported platform
+    tool is installed, or the image exceeds MAX_IMAGE_BYTES. The returned
+    bytes are always PNG-encoded regardless of the source format, since the
+    platform helpers all request PNG.
+    """
+    for cmd, reader in _IMAGE_CMD_STRATEGIES:
+        if not _has_cmd(cmd):
+            continue
+        try:
+            data = reader()
+        except Exception:
+            continue
+        if not data:
+            continue
+        if len(data) > MAX_IMAGE_BYTES:
+            return None
+        return data, "image/png"
+    return None
+
+
+def _encode_image_data_url(data: bytes, media_type: ImageMediaType) -> str:
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{media_type};base64,{encoded}"
 
 
 def _copy_to_clipboard(text: str) -> None:
