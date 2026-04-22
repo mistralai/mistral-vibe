@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from textual import events, work
+from textual import events
 from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import TextArea
@@ -25,6 +25,7 @@ from vibe.cli.voice_manager.voice_manager_port import (
     TranscribeState,
     VoiceManagerPort,
 )
+from vibe.core.logger import logger
 from vibe.core.types import ImageContentPart
 
 _IMAGE_SUFFIX_TO_MEDIA: dict[
@@ -146,38 +147,41 @@ class ChatTextArea(TextArea):
         self.insert("\n")
 
     def action_paste_with_images(self) -> None:
-        self._paste_with_images_worker(fallback_text=None)
+        if self._handle_image_attach(fallback_text=None):
+            return
+        text = _read_clipboard()
+        if text:
+            self.insert(text)
 
     def on_paste(self, event: events.Paste) -> None:
-        event.prevent_default()
-        event.stop()
-        self._paste_with_images_worker(fallback_text=event.text)
+        logger.debug("ChatTextArea.on_paste fired: text=%r", event.text[:200])
+        if self._handle_image_attach(fallback_text=event.text):
+            event.prevent_default()
+            event.stop()
 
-    @work(thread=True, exclusive=True, group="clipboard-paste")
-    def _paste_with_images_worker(self, fallback_text: str | None) -> None:
-        try:
-            clipboard_image = _read_clipboard_image()
-        except Exception:
-            clipboard_image = None
-
-        if clipboard_image is not None:
-            self._dispatch_image_attach(*clipboard_image)
-            return
-
-        if fallback_text is None:
-            try:
-                fallback_text = _read_clipboard()
-            except Exception:
-                fallback_text = None
-
+    def _handle_image_attach(self, fallback_text: str | None) -> bool:
+        # A dragged file path wins over the clipboard: drag-drop does NOT
+        # update the clipboard, so reading it first would attach an unrelated
+        # stale screenshot instead of the file the user just dropped.
         if fallback_text:
             dropped = _image_from_dropped_path(fallback_text)
             if dropped is not None:
-                self._dispatch_image_attach(*dropped)
-                return
-            self.app.call_from_thread(self.insert, fallback_text)
+                self._attach_image_from_bytes(*dropped)
+                return True
 
-    def _dispatch_image_attach(
+        try:
+            clipboard_image = _read_clipboard_image()
+        except Exception:
+            logger.exception("clipboard image read failed")
+            clipboard_image = None
+
+        if clipboard_image is not None:
+            self._attach_image_from_bytes(*clipboard_image)
+            return True
+
+        return False
+
+    def _attach_image_from_bytes(
         self,
         data: bytes,
         media_type: Literal["image/png", "image/jpeg", "image/webp", "image/gif"],
@@ -185,7 +189,7 @@ class ChatTextArea(TextArea):
         url = _encode_image_data_url(data, media_type)
         part = ImageContentPart(image_url=url, media_type=media_type)
         kb = len(data) // 1024
-        self.app.call_from_thread(self._attach_image_placeholder, part, kb)
+        self._attach_image_placeholder(part, kb)
 
     def _attach_image_placeholder(self, part: ImageContentPart, size_kb: int) -> None:
         self._pending_images.append(part)
