@@ -324,6 +324,7 @@ class ModelConfig(BaseModel):
     output_price: float = 0.0  # Price per million output tokens
     thinking: Literal["off", "low", "medium", "high", "max"] = "off"
     auto_compact_threshold: int = 200_000
+    supports_vision: bool = False
 
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
 
@@ -394,6 +395,7 @@ DEFAULT_MODELS = [
         alias="devstral-2",
         input_price=0.4,
         output_price=2.0,
+        supports_vision=True,
     ),
     ModelConfig(
         name="devstral-small-latest",
@@ -401,6 +403,7 @@ DEFAULT_MODELS = [
         alias="devstral-small",
         input_price=0.1,
         output_price=0.3,
+        supports_vision=True,
     ),
     ModelConfig(
         name="devstral",
