@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -7,8 +8,13 @@ import pytest
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.body import ChatInputBody
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
-from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
+from vibe.cli.textual_ui.widgets.chat_input.text_area import (
+    ChatTextArea,
+    _image_from_dropped_path,
+)
 from vibe.core.types import ImageContentPart
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\ntest-payload"
 
 
 def _make_part(idx: int) -> ImageContentPart:
@@ -103,6 +109,61 @@ async def test_submitted_without_images_passes_none(vibe_app: VibeApp) -> None:
         event = post_message.call_args.args[0]
         assert isinstance(event, ChatInputBody.Submitted)
         assert event.image_parts is None
+
+
+def test_image_from_dropped_path_reads_image_file(tmp_path: Path) -> None:
+    img = tmp_path / "shot.png"
+    img.write_bytes(PNG_BYTES)
+    result = _image_from_dropped_path(str(img))
+    assert result is not None
+    assert result == (PNG_BYTES, "image/png")
+
+
+def test_image_from_dropped_path_strips_whitespace(tmp_path: Path) -> None:
+    img = tmp_path / "shot.jpg"
+    img.write_bytes(PNG_BYTES)
+    result = _image_from_dropped_path(f"  {img}\n")
+    assert result is not None
+    assert result[1] == "image/jpeg"
+
+
+def test_image_from_dropped_path_strips_quotes(tmp_path: Path) -> None:
+    img = tmp_path / "shot.png"
+    img.write_bytes(PNG_BYTES)
+    result = _image_from_dropped_path(f'"{img}"')
+    assert result is not None
+
+
+def test_image_from_dropped_path_rejects_relative_path() -> None:
+    assert _image_from_dropped_path("./shot.png") is None
+
+
+def test_image_from_dropped_path_rejects_multi_word_text(tmp_path: Path) -> None:
+    img = tmp_path / "shot.png"
+    img.write_bytes(PNG_BYTES)
+    assert _image_from_dropped_path(f"hey {img}") is None
+
+
+def test_image_from_dropped_path_rejects_non_image_extension(tmp_path: Path) -> None:
+    txt = tmp_path / "notes.txt"
+    txt.write_text("hello")
+    assert _image_from_dropped_path(str(txt)) is None
+
+
+def test_image_from_dropped_path_rejects_missing_file(tmp_path: Path) -> None:
+    ghost = tmp_path / "ghost.png"
+    assert _image_from_dropped_path(str(ghost)) is None
+
+
+def test_image_from_dropped_path_rejects_oversize_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    img = tmp_path / "big.png"
+    img.write_bytes(PNG_BYTES)
+    monkeypatch.setattr(
+        "vibe.cli.textual_ui.widgets.chat_input.text_area.MAX_IMAGE_BYTES", 4
+    )
+    assert _image_from_dropped_path(str(img)) is None
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from textual import events, work
@@ -9,6 +10,7 @@ from textual.widgets import TextArea
 
 from vibe.cli.autocompletion.base import CompletionResult
 from vibe.cli.clipboard import (
+    MAX_IMAGE_BYTES,
     _encode_image_data_url,
     _read_clipboard,
     _read_clipboard_image,
@@ -24,6 +26,44 @@ from vibe.cli.voice_manager.voice_manager_port import (
     VoiceManagerPort,
 )
 from vibe.core.types import ImageContentPart
+
+_IMAGE_SUFFIX_TO_MEDIA: dict[
+    str, Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
+] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def _image_from_dropped_path(
+    text: str,
+) -> tuple[bytes, Literal["image/png", "image/jpeg", "image/webp", "image/gif"]] | None:
+    """Turn a pasted file path into raw image bytes if it points at one image.
+
+    Handles the Finder drag-and-drop case: the terminal inserts the dragged
+    file's absolute path. If that path is an image file under MAX_IMAGE_BYTES
+    the caller can attach it as if it had been on the clipboard. Anything
+    ambiguous (multi-word text, relative paths, non-image extensions, missing
+    file) returns None so the normal text-paste path can take over.
+    """
+    candidate = text.strip().strip("'\"")
+    if not candidate or "\n" in candidate or " " in candidate:
+        return None
+    path = Path(candidate)
+    if not path.is_absolute() or not path.is_file():
+        return None
+    media_type = _IMAGE_SUFFIX_TO_MEDIA.get(path.suffix.lower())
+    if media_type is None:
+        return None
+    try:
+        if path.stat().st_size > MAX_IMAGE_BYTES:
+            return None
+        return path.read_bytes(), media_type
+    except OSError:
+        return None
 
 InputMode = Literal["!", "/", ">", "&"]
 
@@ -106,26 +146,46 @@ class ChatTextArea(TextArea):
         self.insert("\n")
 
     def action_paste_with_images(self) -> None:
-        self._paste_with_images_worker()
+        self._paste_with_images_worker(fallback_text=None)
+
+    def on_paste(self, event: events.Paste) -> None:
+        event.prevent_default()
+        event.stop()
+        self._paste_with_images_worker(fallback_text=event.text)
 
     @work(thread=True, exclusive=True, group="clipboard-paste")
-    def _paste_with_images_worker(self) -> None:
+    def _paste_with_images_worker(self, fallback_text: str | None) -> None:
         try:
-            image_result = _read_clipboard_image()
+            clipboard_image = _read_clipboard_image()
         except Exception:
-            image_result = None
+            clipboard_image = None
 
-        if image_result is not None:
-            data, media_type = image_result
-            url = _encode_image_data_url(data, media_type)
-            part = ImageContentPart(image_url=url, media_type=media_type)
-            kb = len(data) // 1024
-            self.app.call_from_thread(self._attach_image_placeholder, part, kb)
+        if clipboard_image is not None:
+            self._dispatch_image_attach(*clipboard_image)
             return
 
-        text = _read_clipboard()
-        if text:
-            self.app.call_from_thread(self.insert, text)
+        if fallback_text is None:
+            try:
+                fallback_text = _read_clipboard()
+            except Exception:
+                fallback_text = None
+
+        if fallback_text:
+            dropped = _image_from_dropped_path(fallback_text)
+            if dropped is not None:
+                self._dispatch_image_attach(*dropped)
+                return
+            self.app.call_from_thread(self.insert, fallback_text)
+
+    def _dispatch_image_attach(
+        self,
+        data: bytes,
+        media_type: Literal["image/png", "image/jpeg", "image/webp", "image/gif"],
+    ) -> None:
+        url = _encode_image_data_url(data, media_type)
+        part = ImageContentPart(image_url=url, media_type=media_type)
+        kb = len(data) // 1024
+        self.app.call_from_thread(self._attach_image_placeholder, part, kb)
 
     def _attach_image_placeholder(self, part: ImageContentPart, size_kb: int) -> None:
         self._pending_images.append(part)
