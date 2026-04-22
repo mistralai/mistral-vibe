@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 from typing import Any, ClassVar, Literal
 
 from textual import events
@@ -49,35 +50,29 @@ def _image_from_dropped_path(
     the caller can attach it as if it had been on the clipboard. Anything
     ambiguous (multi-word text, relative paths, non-image extensions, missing
     file) returns None so the normal text-paste path can take over.
+
+    shlex.split handles macOS Terminal's shell-style escaping of dragged
+    paths (backslash-escaped spaces, parens, quotes) uniformly — this is
+    the same approach textual-filedrop uses for cross-terminal file drops.
     """
-    candidate = text.strip().strip("'\"")
+    candidate = text.strip()
     if not candidate or "\n" in candidate:
         return None
-    # macOS Terminal escapes shell-unsafe characters in dragged paths, so
-    # `/path/My Folder/img.png` arrives as `/path/My\ Folder/img.png`. Undo
-    # the common escape sequences before validating.
-    unescaped = (
-        candidate.replace("\\ ", " ")
-        .replace("\\(", "(")
-        .replace("\\)", ")")
-        .replace("\\&", "&")
-        .replace("\\'", "'")
-    )
-    has_unescaped_space = " " in unescaped and "\\ " not in candidate
-    if has_unescaped_space:
+    try:
+        tokens = shlex.split(candidate)
+    except ValueError:
+        tokens = []
+    if len(tokens) != 1:
         return None
-    path = Path(unescaped)
+    path = Path(tokens[0])
     media_type = _IMAGE_SUFFIX_TO_MEDIA.get(path.suffix.lower())
     if media_type is None or not path.is_absolute() or not path.is_file():
         return None
     try:
-        size = path.stat().st_size
-        data = path.read_bytes() if size <= MAX_IMAGE_BYTES else None
+        data = path.read_bytes() if path.stat().st_size <= MAX_IMAGE_BYTES else None
     except OSError:
-        return None
-    if data is None:
-        return None
-    return data, media_type
+        data = None
+    return (data, media_type) if data is not None else None
 
 InputMode = Literal["!", "/", ">", "&"]
 
