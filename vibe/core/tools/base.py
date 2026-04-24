@@ -57,6 +57,7 @@ class InvokeContext:
     plan_file_path: Path | None = field(default=None)
     switch_agent_callback: SwitchAgentCallback | None = field(default=None)
     skill_manager: SkillManager | None = field(default=None)
+    auto_approve: bool = field(default=False)
 
 
 class ToolError(Exception):

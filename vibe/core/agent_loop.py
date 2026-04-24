@@ -862,6 +862,7 @@ class AgentLoop:
                     plan_file_path=self._plan_session.plan_file_path,
                     switch_agent_callback=self.switch_agent,
                     skill_manager=self.skill_manager,
+                    auto_approve=self.auto_approve,
                 ),
                 **tool_call.args_dict,
             ):

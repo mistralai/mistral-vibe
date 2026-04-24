@@ -69,6 +69,17 @@ class ExitPlanMode(
         if ctx.agent_manager.active_profile.name != BuiltinAgentName.PLAN:
             raise ToolError("ExitPlanMode can only be used in plan mode.")
 
+        if ctx.auto_approve:
+            if ctx.switch_agent_callback:
+                await ctx.switch_agent_callback(BuiltinAgentName.AUTO_APPROVE)
+            else:
+                ctx.agent_manager.switch_profile(BuiltinAgentName.AUTO_APPROVE)
+            yield ExitPlanModeResult(
+                switched=True,
+                message="Switched to auto-approve mode. Proceeding with implementation.",
+            )
+            return
+
         if ctx.user_input_callback is None:
             raise ToolError("ExitPlanMode requires an interactive UI.")
 
