@@ -167,7 +167,7 @@ class BaseTool[
             prompt_dir = class_path.parent / "prompts"
             prompt_path = cls.prompt_path or prompt_dir / f"{class_path.stem}.md"
 
-            return read_safe(prompt_path)
+            return read_safe(prompt_path).text
         except (FileNotFoundError, TypeError, OSError):
             pass
 

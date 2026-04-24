@@ -207,6 +207,7 @@ def run_cli(args: argparse.Namespace) -> None:
                     client_name="vibe_cli",
                     client_version=__version__,
                 ),
+                defer_heavy_init=True,
             )
 
             if loaded_session:

@@ -5,131 +5,164 @@ from pathlib import Path
 from vibe.core.paths._local_config_walk import (
     _MAX_DIRS,
     WALK_MAX_DEPTH,
-    has_config_dirs_nearby,
-    walk_local_config_dirs_all,
+    walk_local_config_dirs,
 )
 
 
-class TestBoundedWalk:
+class TestWalkTools:
     def test_finds_config_at_root(self, tmp_path: Path) -> None:
         (tmp_path / ".vibe" / "tools").mkdir(parents=True)
-        tools, skills, agents = walk_local_config_dirs_all(tmp_path)
-        assert tmp_path / ".vibe" / "tools" in tools
+        result = walk_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / ".vibe" / "tools" in result.tools
 
     def test_finds_config_within_depth_limit(self, tmp_path: Path) -> None:
         nested = tmp_path
         for i in range(WALK_MAX_DEPTH):
             nested = nested / f"level{i}"
         (nested / ".vibe" / "skills").mkdir(parents=True)
-        _, skills, _ = walk_local_config_dirs_all(tmp_path)
-        assert nested / ".vibe" / "skills" in skills
+        result = walk_local_config_dirs(tmp_path)
+        assert nested.resolve() / ".vibe" / "skills" in result.skills
 
     def test_does_not_find_config_beyond_depth_limit(self, tmp_path: Path) -> None:
         nested = tmp_path
         for i in range(WALK_MAX_DEPTH + 1):
             nested = nested / f"level{i}"
         (nested / ".vibe" / "tools").mkdir(parents=True)
-        tools, skills, agents = walk_local_config_dirs_all(tmp_path)
-        assert not tools
-        assert not skills
-        assert not agents
+        result = walk_local_config_dirs(tmp_path)
+        assert not result.tools
+        assert not result.skills
+        assert not result.agents
 
     def test_respects_dir_count_limit(self, tmp_path: Path) -> None:
-        # Create more directories than _MAX_DIRS at depth 1
         for i in range(_MAX_DIRS + 10):
             (tmp_path / f"dir{i:05d}").mkdir()
-        # Place config in a directory that would be scanned late
         (tmp_path / "zzz_last" / ".vibe" / "tools").mkdir(parents=True)
-
-        tools, _, _ = walk_local_config_dirs_all(tmp_path)
-        # The walk should stop before visiting all dirs.
-        # Whether zzz_last is found depends on sort order and limit,
-        # but total visited dirs should be bounded.
-        # We just verify no crash and the function returns.
-        assert isinstance(tools, tuple)
+        result = walk_local_config_dirs(tmp_path)
+        assert isinstance(result.tools, tuple)
 
     def test_skips_ignored_directories(self, tmp_path: Path) -> None:
         (tmp_path / "node_modules" / ".vibe" / "tools").mkdir(parents=True)
         (tmp_path / ".vibe" / "tools").mkdir(parents=True)
-        tools, _, _ = walk_local_config_dirs_all(tmp_path)
-        assert tools == (tmp_path / ".vibe" / "tools",)
+        result = walk_local_config_dirs(tmp_path)
+        assert result.tools == (tmp_path.resolve() / ".vibe" / "tools",)
 
     def test_skips_dot_directories(self, tmp_path: Path) -> None:
         (tmp_path / ".hidden" / ".vibe" / "tools").mkdir(parents=True)
-        tools, _, _ = walk_local_config_dirs_all(tmp_path)
-        assert not tools
+        result = walk_local_config_dirs(tmp_path)
+        assert not result.tools
 
     def test_preserves_alphabetical_ordering(self, tmp_path: Path) -> None:
         (tmp_path / "bbb" / ".vibe" / "tools").mkdir(parents=True)
         (tmp_path / "aaa" / ".vibe" / "tools").mkdir(parents=True)
         (tmp_path / ".vibe" / "tools").mkdir(parents=True)
-        tools, _, _ = walk_local_config_dirs_all(tmp_path)
-        assert tools == (
-            tmp_path / ".vibe" / "tools",
-            tmp_path / "aaa" / ".vibe" / "tools",
-            tmp_path / "bbb" / ".vibe" / "tools",
+        result = walk_local_config_dirs(tmp_path)
+        resolved = tmp_path.resolve()
+        assert result.tools == (
+            resolved / ".vibe" / "tools",
+            resolved / "aaa" / ".vibe" / "tools",
+            resolved / "bbb" / ".vibe" / "tools",
         )
 
     def test_finds_agents_skills(self, tmp_path: Path) -> None:
         (tmp_path / ".agents" / "skills").mkdir(parents=True)
-        _, skills, _ = walk_local_config_dirs_all(tmp_path)
-        assert tmp_path / ".agents" / "skills" in skills
+        result = walk_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / ".agents" / "skills" in result.skills
 
     def test_finds_all_config_types(self, tmp_path: Path) -> None:
         (tmp_path / ".vibe" / "tools").mkdir(parents=True)
         (tmp_path / ".vibe" / "skills").mkdir(parents=True)
         (tmp_path / ".vibe" / "agents").mkdir(parents=True)
         (tmp_path / ".agents" / "skills").mkdir(parents=True)
-        tools, skills, agents = walk_local_config_dirs_all(tmp_path)
-        assert tmp_path / ".vibe" / "tools" in tools
-        assert tmp_path / ".vibe" / "skills" in skills
-        assert tmp_path / ".vibe" / "agents" in agents
-        assert tmp_path / ".agents" / "skills" in skills
+        result = walk_local_config_dirs(tmp_path)
+        resolved = tmp_path.resolve()
+        assert resolved / ".vibe" / "tools" in result.tools
+        assert resolved / ".vibe" / "skills" in result.skills
+        assert resolved / ".vibe" / "agents" in result.agents
+        assert resolved / ".agents" / "skills" in result.skills
 
 
-class TestHasConfigDirsNearby:
-    def test_returns_true_when_vibe_tools_exist(self, tmp_path: Path) -> None:
+class TestWalkConfigDirs:
+    def test_finds_vibe_with_tools(self, tmp_path: Path) -> None:
         (tmp_path / ".vibe" / "tools").mkdir(parents=True)
-        assert has_config_dirs_nearby(tmp_path) is True
+        result = walk_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / ".vibe" in result.config_dirs
 
-    def test_returns_true_when_vibe_skills_exist(self, tmp_path: Path) -> None:
+    def test_finds_vibe_with_skills(self, tmp_path: Path) -> None:
         (tmp_path / ".vibe" / "skills").mkdir(parents=True)
-        assert has_config_dirs_nearby(tmp_path) is True
+        result = walk_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / ".vibe" in result.config_dirs
 
-    def test_returns_true_when_agents_skills_exist(self, tmp_path: Path) -> None:
+    def test_finds_agents_with_skills(self, tmp_path: Path) -> None:
         (tmp_path / ".agents" / "skills").mkdir(parents=True)
-        assert has_config_dirs_nearby(tmp_path) is True
+        result = walk_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / ".agents" in result.config_dirs
 
-    def test_returns_false_when_empty(self, tmp_path: Path) -> None:
-        assert has_config_dirs_nearby(tmp_path) is False
-
-    def test_returns_false_for_vibe_dir_without_subdirs(self, tmp_path: Path) -> None:
+    def test_ignores_empty_vibe_dir(self, tmp_path: Path) -> None:
         (tmp_path / ".vibe").mkdir()
-        assert has_config_dirs_nearby(tmp_path) is False
+        result = walk_local_config_dirs(tmp_path)
+        assert result.config_dirs == ()
 
-    def test_returns_true_for_shallow_nested(self, tmp_path: Path) -> None:
+    def test_ignores_empty_agents_dir(self, tmp_path: Path) -> None:
+        (tmp_path / ".agents").mkdir()
+        result = walk_local_config_dirs(tmp_path)
+        assert result.config_dirs == ()
+
+    def test_returns_empty_when_empty(self, tmp_path: Path) -> None:
+        result = walk_local_config_dirs(tmp_path)
+        assert result.config_dirs == ()
+
+    def test_finds_shallow_nested(self, tmp_path: Path) -> None:
         (tmp_path / "sub" / ".vibe" / "skills").mkdir(parents=True)
-        assert has_config_dirs_nearby(tmp_path) is True
+        result = walk_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / "sub" / ".vibe" in result.config_dirs
 
-    def test_returns_true_at_depth_2(self, tmp_path: Path) -> None:
+    def test_finds_at_depth_2(self, tmp_path: Path) -> None:
         (tmp_path / "a" / "b" / ".agents" / "skills").mkdir(parents=True)
-        assert has_config_dirs_nearby(tmp_path) is True
+        result = walk_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / "a" / "b" / ".agents" in result.config_dirs
 
-    def test_returns_false_beyond_default_depth(self, tmp_path: Path) -> None:
+    def test_returns_empty_beyond_default_depth(self, tmp_path: Path) -> None:
         (tmp_path / "a" / "b" / "c" / "d" / "e" / ".vibe" / "tools").mkdir(parents=True)
-        assert has_config_dirs_nearby(tmp_path) is False
+        result = walk_local_config_dirs(tmp_path)
+        assert result.config_dirs == ()
 
     def test_custom_depth(self, tmp_path: Path) -> None:
         (tmp_path / "a" / "b" / "c" / "d" / "e" / ".vibe" / "tools").mkdir(parents=True)
-        assert has_config_dirs_nearby(tmp_path, max_depth=5) is True
+        result = walk_local_config_dirs(tmp_path, max_depth=5)
+        assert (
+            tmp_path.resolve() / "a" / "b" / "c" / "d" / "e" / ".vibe"
+            in result.config_dirs
+        )
 
-    def test_early_exit_on_first_match(self, tmp_path: Path) -> None:
-        # Create many dirs but put config early; function should return quickly
+    def test_finds_match_among_many_dirs(self, tmp_path: Path) -> None:
         (tmp_path / ".vibe" / "tools").mkdir(parents=True)
         for i in range(100):
             (tmp_path / f"dir{i}").mkdir()
-        assert has_config_dirs_nearby(tmp_path) is True
+        result = walk_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / ".vibe" in result.config_dirs
 
     def test_skips_ignored_directories(self, tmp_path: Path) -> None:
         (tmp_path / "node_modules" / ".vibe" / "skills").mkdir(parents=True)
-        assert has_config_dirs_nearby(tmp_path) is False
+        result = walk_local_config_dirs(tmp_path)
+        assert result.config_dirs == ()
+
+    def test_finds_vibe_with_prompts(self, tmp_path: Path) -> None:
+        (tmp_path / ".vibe" / "prompts").mkdir(parents=True)
+        result = walk_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / ".vibe" in result.config_dirs
+
+    def test_finds_vibe_with_config_toml(self, tmp_path: Path) -> None:
+        (tmp_path / ".vibe").mkdir()
+        (tmp_path / ".vibe" / "config.toml").write_text("")
+        result = walk_local_config_dirs(tmp_path)
+        assert tmp_path.resolve() / ".vibe" in result.config_dirs
+
+    def test_finds_multiple_config_dirs(self, tmp_path: Path) -> None:
+        (tmp_path / ".vibe" / "skills").mkdir(parents=True)
+        (tmp_path / ".agents" / "skills").mkdir(parents=True)
+        (tmp_path / "sub" / ".vibe" / "tools").mkdir(parents=True)
+        result = walk_local_config_dirs(tmp_path)
+        resolved = tmp_path.resolve()
+        assert resolved / ".vibe" in result.config_dirs
+        assert resolved / ".agents" in result.config_dirs
+        assert resolved / "sub" / ".vibe" in result.config_dirs

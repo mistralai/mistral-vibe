@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.core.skills.parser import SkillParseError, parse_frontmatter
+from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
 
 
-class TestParseFrontmatter:
+class TestParseSkillMarkdown:
     def test_parses_valid_frontmatter(self) -> None:
         content = """---
 name: test-skill
@@ -14,7 +14,7 @@ description: A test skill
 
 ## Body content here
 """
-        frontmatter, body = parse_frontmatter(content)
+        frontmatter, body = parse_skill_markdown(content)
 
         assert frontmatter["name"] == "test-skill"
         assert frontmatter["description"] == "A test skill"
@@ -34,7 +34,7 @@ allowed-tools: bash read_file
 
 Instructions here.
 """
-        frontmatter, body = parse_frontmatter(content)
+        frontmatter, body = parse_skill_markdown(content)
 
         assert frontmatter["name"] == "full-skill"
         assert frontmatter["description"] == "A skill with all fields"
@@ -49,7 +49,7 @@ Instructions here.
         content = "Just markdown content without frontmatter"
 
         with pytest.raises(SkillParseError) as exc_info:
-            parse_frontmatter(content)
+            parse_skill_markdown(content)
 
         assert "Missing or invalid YAML frontmatter" in str(exc_info.value)
 
@@ -60,7 +60,7 @@ description: Missing closing delimiter
 """
 
         with pytest.raises(SkillParseError) as exc_info:
-            parse_frontmatter(content)
+            parse_skill_markdown(content)
 
         assert "Missing or invalid YAML frontmatter" in str(exc_info.value)
 
@@ -74,7 +74,7 @@ Body here.
 """
 
         with pytest.raises(SkillParseError) as exc_info:
-            parse_frontmatter(content)
+            parse_skill_markdown(content)
 
         assert "Invalid YAML frontmatter" in str(exc_info.value)
 
@@ -88,7 +88,7 @@ Body here.
 """
 
         with pytest.raises(SkillParseError) as exc_info:
-            parse_frontmatter(content)
+            parse_skill_markdown(content)
 
         assert "must be a mapping" in str(exc_info.value)
 
@@ -98,7 +98,7 @@ Body here.
 
 Body content.
 """
-        frontmatter, body = parse_frontmatter(content)
+        frontmatter, body = parse_skill_markdown(content)
 
         assert frontmatter == {}
         assert "Body content." in body
@@ -109,7 +109,7 @@ name: minimal
 description: No body
 ---
 """
-        frontmatter, body = parse_frontmatter(content)
+        frontmatter, body = parse_skill_markdown(content)
 
         assert frontmatter["name"] == "minimal"
         assert body.strip() == ""

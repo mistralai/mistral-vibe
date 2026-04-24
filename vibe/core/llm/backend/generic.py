@@ -78,7 +78,7 @@ class OpenAIAdapter(APIAdapter):
             msg_dict["reasoning_content"] = msg_dict.pop(field_name)
         return msg_dict
 
-    def prepare_request(  # noqa: PLR0913
+    def prepare_request(
         self,
         *,
         model_name: str,

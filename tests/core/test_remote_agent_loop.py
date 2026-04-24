@@ -724,3 +724,46 @@ def test_working_completed_with_tool_call_id_emits_error_result() -> None:
     assert len(result_events) == 1
     assert result_events[0].error is not None
     assert result_events[0].tool_call_id == "call-write-err"
+
+
+def test_json_patch_with_array_index_preserves_list_structure() -> None:
+    loop = _make_loop()
+    started = _started(
+        "msg-1",
+        "assistant_message",
+        {"contentChunks": [{"type": "text", "text": "Hello"}]},
+    )
+    in_progress = _in_progress(
+        "msg-1",
+        "assistant_message",
+        [JSONPatchReplace(path="/contentChunks/0/text", value="Hello world")],
+    )
+
+    loop._consume_workflow_event(started)
+    progress_events = loop._consume_workflow_event(in_progress)
+
+    assert len(progress_events) == 1
+    assert isinstance(progress_events[0], AssistantEvent)
+    assert progress_events[0].content == " world"
+
+
+def test_steer_input_events_are_suppressed() -> None:
+    loop = _make_loop()
+    steer_started = _started(
+        "steer-1",
+        "wait_for_input",
+        {"input_schema": {"title": "ChatInput"}, "label": "Send a message to steer..."},
+    )
+    steer_completed = _completed(
+        "steer-1",
+        "wait_for_input",
+        {
+            "input_schema": {"title": "ChatInput"},
+            "label": "Send a message to steer...",
+            "input": None,
+        },
+    )
+
+    assert loop._consume_workflow_event(steer_started) == []
+    assert loop._consume_workflow_event(steer_completed) == []
+    assert loop._translator.pending_input_request is None

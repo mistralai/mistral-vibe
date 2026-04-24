@@ -39,6 +39,8 @@ def get_base_config() -> dict[str, Any]:
                 "name": "mistral",
                 "api_base": "https://api.mistral.ai/v1",
                 "api_key_env_var": "MISTRAL_API_KEY",
+                "browser_auth_base_url": "https://console.mistral.ai",
+                "browser_auth_api_base_url": "https://console.mistral.ai/api",
                 "backend": "mistral",
             }
         ],

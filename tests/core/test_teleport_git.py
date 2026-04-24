@@ -129,7 +129,7 @@ class TestGitRepositoryGetInfo:
     async def test_raises_when_not_git_repo(self, tmp_path: Path) -> None:
         repo = GitRepository(tmp_path)
         with pytest.raises(
-            ServiceTeleportNotSupportedError, match="Not a git repository"
+            ServiceTeleportNotSupportedError, match="Teleport requires a git repository"
         ):
             await repo.get_info()
 

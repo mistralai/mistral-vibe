@@ -10,7 +10,12 @@ from vibe.core.config.harness_files._paths import (
     GLOBAL_SKILLS_DIR,
     GLOBAL_TOOLS_DIR,
 )
-from vibe.core.paths import AGENTS_MD_FILENAME, VIBE_HOME, walk_local_config_dirs_all
+from vibe.core.paths import (
+    AGENTS_MD_FILENAME,
+    VIBE_HOME,
+    ConfigWalkResult,
+    walk_local_config_dirs,
+)
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.utils.io import read_safe
 
@@ -72,25 +77,23 @@ class HarnessFilesManager:
         d = GLOBAL_AGENTS_DIR.path
         return [d] if d.is_dir() else []
 
-    def _walk_project_dirs(
-        self,
-    ) -> tuple[tuple[Path, ...], tuple[Path, ...], tuple[Path, ...]]:
+    def _walk_project_dirs(self) -> ConfigWalkResult:
         workdir = self.trusted_workdir
         if workdir is None:
-            return ((), (), ())
-        return walk_local_config_dirs_all(workdir)
+            return ConfigWalkResult()
+        return walk_local_config_dirs(workdir)
 
     @property
     def project_tools_dirs(self) -> list[Path]:
-        return list(self._walk_project_dirs()[0])
+        return list(self._walk_project_dirs().tools)
 
     @property
     def project_skills_dirs(self) -> list[Path]:
-        return list(self._walk_project_dirs()[1])
+        return list(self._walk_project_dirs().skills)
 
     @property
     def project_agents_dirs(self) -> list[Path]:
-        return list(self._walk_project_dirs()[2])
+        return list(self._walk_project_dirs().agents)
 
     @property
     def user_config_file(self) -> Path:
@@ -116,7 +119,7 @@ class HarnessFilesManager:
             return ""
         path = VIBE_HOME.path / AGENTS_MD_FILENAME
         try:
-            stripped = read_safe(path).strip()
+            stripped = read_safe(path).text.strip()
             return stripped if stripped else ""
         except (FileNotFoundError, OSError):
             return ""
@@ -140,7 +143,7 @@ class HarnessFilesManager:
                 break
             path = current / AGENTS_MD_FILENAME
             try:
-                stripped = read_safe(path).strip()
+                stripped = read_safe(path).text.strip()
                 if stripped:
                     docs.append((current, stripped))
             except (FileNotFoundError, OSError):

@@ -10,7 +10,7 @@ from rich import print as rprint
 from vibe import __version__
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.harness_files import init_harness_files_manager
-from vibe.core.trusted_folders import has_trustable_content, trusted_folders_manager
+from vibe.core.trusted_folders import find_trustable_files, trusted_folders_manager
 from vibe.setup.trusted_folders.trust_folder_dialog import (
     TrustDialogQuitException,
     ask_trust_folder,
@@ -118,7 +118,12 @@ def check_and_resolve_trusted_folder() -> None:
         )
         sys.exit(1)
 
-    if not has_trustable_content(cwd) or cwd.resolve() == Path.home().resolve():
+    if cwd.resolve() == Path.home().resolve():
+        return
+
+    detected_files = find_trustable_files(cwd)
+
+    if not detected_files:
         return
 
     is_folder_trusted = trusted_folders_manager.is_trusted(cwd)
@@ -127,7 +132,7 @@ def check_and_resolve_trusted_folder() -> None:
         return
 
     try:
-        is_folder_trusted = ask_trust_folder(cwd)
+        is_folder_trusted = ask_trust_folder(cwd, detected_files)
     except (KeyboardInterrupt, EOFError, TrustDialogQuitException):
         sys.exit(0)
     except Exception as e:

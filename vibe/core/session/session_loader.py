@@ -34,21 +34,19 @@ class SessionLoader:
             return False
 
         try:
-            with metadata_path.open("r", encoding="utf-8", errors="ignore") as f:
-                metadata = json.load(f)
+            metadata = json.loads(read_safe(metadata_path).text)
             if not isinstance(metadata, dict):
                 return False
 
-            with messages_path.open("r", encoding="utf-8", errors="ignore") as f:
-                has_messages = False
-                for line in f:
-                    has_messages = True
-                    message = json.loads(line)
-                    if not isinstance(message, dict):
-                        return False
+            has_messages = False
+            for line in read_safe(messages_path).text.splitlines():
+                has_messages = True
+                message = json.loads(line)
+                if not isinstance(message, dict):
+                    return False
             if not has_messages:
                 return False
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
             return False
 
         return True
@@ -144,8 +142,7 @@ class SessionLoader:
 
             metadata_path = session_dir / METADATA_FILENAME
             try:
-                with metadata_path.open("r", encoding="utf-8") as f:
-                    metadata = json.load(f)
+                metadata = json.loads(read_safe(metadata_path).text)
             except (OSError, json.JSONDecodeError):
                 continue
 
@@ -182,7 +179,7 @@ class SessionLoader:
             raise ValueError(f"Session metadata not found at {session_dir}")
 
         try:
-            metadata_content = read_safe(metadata_path)
+            metadata_content = read_safe(metadata_path).text
             return SessionMetadata.model_validate_json(metadata_content)
         except ValueError:
             raise
@@ -197,7 +194,7 @@ class SessionLoader:
         messages_filepath = filepath / MESSAGES_FILENAME
 
         try:
-            content = read_safe(messages_filepath).split("\n")
+            content = read_safe(messages_filepath).text.split("\n")
             if content and content[-1] == "":
                 content.pop()
         except Exception as e:
@@ -228,10 +225,7 @@ class SessionLoader:
 
         if metadata_filepath.exists():
             try:
-                with metadata_filepath.open(
-                    "r", encoding="utf-8", errors="ignore"
-                ) as f:
-                    metadata = json.load(f)
+                metadata = json.loads(read_safe(metadata_filepath).text)
             except json.JSONDecodeError as e:
                 raise ValueError(
                     f"Session metadata contains invalid JSON (may have been corrupted): "

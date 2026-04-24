@@ -109,7 +109,7 @@ def update_changelog(current_version: str, new_version: str) -> None:
     prompt = f"""Fill the new CHANGELOG.md section for version {new_version} (the one that was just added).
 
 Rules:
-- Use only commits that touch the `vibe` folder in this repo since version {current_version}. Inspect git history to list relevant changes.
+- Use only commits in origin/main that touch the `vibe` folder in this repo since version {current_version}. Inspect git history to list relevant changes.
 - Follow the existing file convention: Keep a Changelog format with ### Added, ### Changed, ### Fixed, ### Removed. One bullet per line, concise. Match the tone and style of the entries already in the file.
 - Do not mention commit hashes or PR numbers.
 - Remove any subsection that has no bullets (leave no empty ### Added / ### Changed / etc)."""
@@ -200,11 +200,6 @@ Examples:
                 ),
                 (f"-{current_version}.zip", f"-{new_version}.zip"),
             ],
-        )
-        # Update .vscode/launch.json
-        update_hard_values_files(
-            ".vscode/launch.json",
-            [(f'"version": "{current_version}"', f'"version": "{new_version}"')],
         )
         # Update vibe/core/__init__.py
         update_hard_values_files(

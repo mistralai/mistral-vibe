@@ -326,7 +326,27 @@ class QuestionApp(Container):
 
     def _switch_question(self, new_idx: int) -> None:
         self.current_question_idx = new_idx
-        self.selected_option = 0
+        self.selected_option = self._restore_cursor(new_idx)
+
+    def _restore_cursor(self, question_idx: int) -> int:
+        """Return the option index to restore the cursor to for a previously answered question."""
+        q = self.questions[question_idx]
+
+        if q.multi_select:
+            if selections := self.multi_selections.get(question_idx):
+                return min(selections)
+            return 0
+
+        if question_idx not in self.answers:
+            return 0
+
+        answer_text, is_other = self.answers[question_idx]
+        if is_other:
+            return len(q.options)
+
+        return next(
+            (i for i, opt in enumerate(q.options) if opt.label == answer_text), 0
+        )
 
     def action_next_question(self) -> None:
         if self._is_other_selected:
@@ -427,7 +447,32 @@ class QuestionApp(Container):
         elif not has_text and other_idx in selections:
             selections.discard(other_idx)
 
+    def _handle_number_key(self, event: events.Key) -> bool:
+        """Handle number key press to quickly select an option. Returns True if handled."""
+        if self.other_input and self.other_input.has_focus:
+            return False
+        if not event.character or not event.character.isdigit():
+            return False
+
+        option_idx = int(event.character) - 1
+        # Only handle valid option indices, excluding submit button
+        if option_idx < 0 or option_idx >= len(self._current_question.options) + (
+            1 if self._has_other else 0
+        ):
+            return False
+
+        event.stop()
+        event.prevent_default()
+        self.selected_option = option_idx
+
+        if not (self._has_other and option_idx == self._other_option_idx):
+            self.action_select()
+        return True
+
     def on_key(self, event: events.Key) -> None:
+        if self._handle_number_key(event):
+            return
+
         if len(self.questions) <= 1:
             return
         if self.other_input and self.other_input.has_focus:

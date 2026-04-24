@@ -24,7 +24,7 @@ def load_whats_new_content() -> str | None:
     if not whats_new_file.exists():
         return None
     try:
-        content = read_safe(whats_new_file).strip()
+        content = read_safe(whats_new_file).text.strip()
         return content if content else None
     except OSError:
         return None

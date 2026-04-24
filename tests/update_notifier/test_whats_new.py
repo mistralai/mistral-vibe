@@ -122,7 +122,7 @@ def test_load_whats_new_content_handles_os_error(tmp_path: Path) -> None:
     whats_new_file.write_text("content")
 
     with patch("vibe.cli.update_notifier.whats_new.VIBE_ROOT", tmp_path):
-        with patch.object(Path, "read_text", side_effect=OSError("Permission denied")):
+        with patch.object(Path, "read_bytes", side_effect=OSError("Permission denied")):
             result = load_whats_new_content()
 
     assert result is None

@@ -134,7 +134,9 @@ class GitRepository:
             try:
                 self._repo = Repo(self._workdir, search_parent_directories=True)
             except InvalidGitRepositoryError as e:
-                raise ServiceTeleportNotSupportedError("Not a git repository") from e
+                raise ServiceTeleportNotSupportedError(
+                    "Teleport requires a git repository. cd into a project with a .git directory and try again."
+                ) from e
         return self._repo
 
     def _find_github_remote(self, repo: Repo) -> tuple[str, str] | None:

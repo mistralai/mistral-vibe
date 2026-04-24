@@ -71,8 +71,16 @@ def stop_and_print() -> None:
 
     output_path = Path(f"{_state.label}-profile.html")
     output_path.write_text(_state.profiler.output_html(), encoding="utf-8")
+
+    text_path = Path(f"{_state.label}-profile.txt")
+    text_path.write_text(_state.profiler.output_text(color=False), encoding="utf-8")
+
     print(
         f"\n[profiler:{_state.label}] Saved HTML profile to {output_path.resolve()}",
+        file=sys.stderr,
+    )
+    print(
+        f"[profiler:{_state.label}] Saved text profile to {text_path.resolve()}",
         file=sys.stderr,
     )
     print(_state.profiler.output_text(color=True), file=sys.stderr)

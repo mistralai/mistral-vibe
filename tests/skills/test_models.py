@@ -127,13 +127,14 @@ class TestSkillInfo:
         meta = SkillMetadata(
             name="test-skill", description="A test skill", license="MIT"
         )
-        info = SkillInfo.from_metadata(meta, skill_path)
+        info = SkillInfo.from_metadata(meta, skill_path, prompt="Skill body")
+        skill_dir = info.skill_dir
 
         assert info.name == "test-skill"
         assert info.description == "A test skill"
         assert info.license == "MIT"
         assert info.skill_path == skill_path.resolve()
-        assert info.skill_dir == skill_path.parent.resolve()
+        assert skill_dir == skill_path.parent.resolve()
 
     def test_creates_with_all_fields(self, tmp_path: Path) -> None:
         skill_path = tmp_path / "full-skill" / "SKILL.md"
@@ -149,6 +150,7 @@ class TestSkillInfo:
             allowed_tools=["bash"],
             user_invocable=False,
             skill_path=skill_path,
+            prompt="Skill body",
         )
 
         assert info.name == "full-skill"
@@ -167,9 +169,11 @@ class TestSkillInfo:
         skill_path.touch()
 
         meta = SkillMetadata(name="test-skill", description="A test skill")
-        info = SkillInfo.from_metadata(meta, skill_path)
+        info = SkillInfo.from_metadata(meta, skill_path, prompt="Skill body")
 
+        assert info.skill_path is not None
         assert info.skill_path.is_absolute()
+        assert info.skill_dir is not None
         assert info.skill_dir.is_absolute()
 
     def test_inherits_all_metadata_fields(self, tmp_path: Path) -> None:
@@ -186,10 +190,18 @@ class TestSkillInfo:
             allowed_tools=["bash", "grep"],
             user_invocable=False,
         )
-        info = SkillInfo.from_metadata(meta, skill_path)
+        info = SkillInfo.from_metadata(meta, skill_path, prompt="Skill body")
 
         assert info.license == meta.license
         assert info.compatibility == meta.compatibility
         assert info.metadata == meta.metadata
         assert info.allowed_tools == meta.allowed_tools
         assert info.user_invocable == meta.user_invocable
+
+    def test_can_omit_skill_path_for_builtin_inline_prompt(self) -> None:
+        info = SkillInfo(
+            name="vibe", description="Builtin skill", prompt="Inline prompt"
+        )
+
+        assert info.skill_path is None
+        assert info.skill_dir is None

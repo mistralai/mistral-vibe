@@ -5,12 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.mock.utils import collect_result
 from vibe.core.config.harness_files import (
     init_harness_files_manager,
     reset_harness_files_manager,
 )
 from vibe.core.tools.builtins.read_file import (
     ReadFile,
+    ReadFileArgs,
     ReadFileResult,
     ReadFileState,
     ReadFileToolConfig,
@@ -35,6 +37,30 @@ def _setup_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
 
 def _make_read_file() -> ReadFile:
     return ReadFile(config_getter=lambda: ReadFileToolConfig(), state=ReadFileState())
+
+
+class TestReadFileExecution:
+    @pytest.mark.asyncio
+    async def test_run_with_large_offset_still_reads_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        test_file = tmp_path / "large_file.txt"
+        test_file.write_text(
+            "".join(f"line {i}\n" for i in range(200)), encoding="utf-8"
+        )
+        tool = ReadFile(
+            config_getter=lambda: ReadFileToolConfig(max_read_bytes=64),
+            state=ReadFileState(),
+        )
+
+        result = await collect_result(
+            tool.run(ReadFileArgs(path=str(test_file), offset=50, limit=2))
+        )
+
+        assert result.content == "line 50\nline 51\n"
+        assert result.lines_read == 2
+        assert not result.was_truncated
 
 
 class TestGetResultExtra:

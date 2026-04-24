@@ -18,6 +18,11 @@ _BROKEN_SERVER_NAME = "broken-server"
 
 
 class FakeMCPRegistry(MCPRegistry):
+    async def get_tools_async(
+        self, servers: list[MCPServer]
+    ) -> dict[str, type[BaseTool]]:
+        return self.get_tools(servers)
+
     def get_tools(self, servers: list[MCPServer]) -> dict[str, type[BaseTool]]:
         result: dict[str, type[BaseTool]] = {}
         for srv in servers:

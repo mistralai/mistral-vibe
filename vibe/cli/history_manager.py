@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from vibe.core.utils.io import read_safe
+
 
 class HistoryManager:
     def __init__(self, history_file: Path, max_entries: int = 100) -> None:
@@ -18,20 +20,22 @@ class HistoryManager:
             return
 
         try:
-            with self.history_file.open("r", encoding="utf-8") as f:
-                entries = []
-                for raw_line in f:
-                    raw_line = raw_line.rstrip("\n\r")
-                    if not raw_line:
-                        continue
-                    try:
-                        entry = json.loads(raw_line)
-                    except json.JSONDecodeError:
-                        entry = raw_line
-                    entries.append(entry if isinstance(entry, str) else str(entry))
-                self._entries = entries[-self.max_entries :]
-        except (OSError, UnicodeDecodeError):
+            text = read_safe(self.history_file).text
+        except OSError:
             self._entries = []
+            return
+
+        entries = []
+        for raw_line in text.splitlines():
+            raw_line = raw_line.rstrip("\n\r")
+            if not raw_line:
+                continue
+            try:
+                entry = json.loads(raw_line)
+            except json.JSONDecodeError:
+                entry = raw_line
+            entries.append(entry if isinstance(entry, str) else str(entry))
+        self._entries = entries[-self.max_entries :]
 
     def _save_history(self) -> None:
         try:

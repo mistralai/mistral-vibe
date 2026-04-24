@@ -13,11 +13,12 @@ from textual.widgets import Input, Link, Static
 
 from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import VibeConfig
+from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig, VibeConfig
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.types import Backend
 from vibe.setup.onboarding.base import OnboardingScreen
+from vibe.setup.onboarding.context import OnboardingContext
 
 PROVIDER_HELP = {
     "mistral": ("https://console.mistral.ai/codestral/cli", "Mistral AI Studio")
@@ -32,6 +33,42 @@ def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
     set_key(GLOBAL_ENV_FILE.path, env_key, api_key)
 
 
+def persist_api_key(provider: ProviderConfig, api_key: str) -> str:
+    env_key = provider.api_key_env_var
+    if not env_key:
+        return "env_var_error:<empty>"
+    try:
+        os.environ[env_key] = api_key
+    except ValueError:
+        return f"env_var_error:{env_key}"
+    try:
+        _save_api_key_to_env_file(env_key, api_key)
+    except (OSError, ValueError) as err:
+        return f"save_error:{err}"
+    if provider.backend == Backend.MISTRAL:
+        try:
+            telemetry = TelemetryClient(config_getter=VibeConfig)
+            telemetry.send_onboarding_api_key_added()
+        except Exception:
+            pass
+    return "completed"
+
+
+def _get_mistral_provider() -> ProviderConfig:
+    return next(
+        provider for provider in DEFAULT_PROVIDERS if provider.name == "mistral"
+    )
+
+
+def _resolve_onboarding_provider(
+    provider: ProviderConfig | None = None,
+) -> ProviderConfig:
+    resolved_provider = provider or OnboardingContext.load().provider
+    if resolved_provider.api_key_env_var:
+        return resolved_provider
+    return _get_mistral_provider()
+
+
 class ApiKeyScreen(OnboardingScreen):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+c", "cancel", "Cancel", show=False),
@@ -40,11 +77,9 @@ class ApiKeyScreen(OnboardingScreen):
 
     NEXT_SCREEN = None
 
-    def __init__(self) -> None:
+    def __init__(self, provider: ProviderConfig | None = None) -> None:
         super().__init__()
-        config = VibeConfig.model_construct()
-        active_model = config.get_active_model()
-        self.provider = config.get_provider_for_model(active_model)
+        self.provider = _resolve_onboarding_provider(provider)
 
     def _compose_provider_link(self, provider_name: str) -> ComposeResult:
         if self.provider.name not in PROVIDER_HELP:
@@ -124,20 +159,7 @@ class ApiKeyScreen(OnboardingScreen):
             self._save_and_finish(event.value)
 
     def _save_and_finish(self, api_key: str) -> None:
-        env_key = self.provider.api_key_env_var
-        os.environ[env_key] = api_key
-        try:
-            _save_api_key_to_env_file(env_key, api_key)
-        except OSError as err:
-            self.app.exit(f"save_error:{err}")
-            return
-        if self.provider.backend == Backend.MISTRAL:
-            try:
-                telemetry = TelemetryClient(config_getter=VibeConfig)
-                telemetry.send_onboarding_api_key_added()
-            except Exception:
-                pass  # Telemetry is fire-and-forget; don't fail onboarding
-        self.app.exit("completed")
+        self.app.exit(persist_api_key(self.provider, api_key))
 
     def on_mouse_up(self, event: MouseUp) -> None:
         copy_selection_to_clipboard(self.app)

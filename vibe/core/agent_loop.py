@@ -3,9 +3,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Generator
 import contextlib
+import copy
 from enum import StrEnum, auto
+from functools import wraps
 from http import HTTPStatus
+import inspect
+import os
 from pathlib import Path
+import threading
 from threading import Thread
 import time
 from typing import TYPE_CHECKING, Any, Literal
@@ -14,7 +19,7 @@ from uuid import uuid4
 from opentelemetry import trace
 from pydantic import BaseModel
 
-from vibe.cli.terminal_setup import detect_terminal
+from vibe.cli.terminal_detect import detect_terminal
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
@@ -58,6 +63,7 @@ from vibe.core.tools.base import (
     ToolPermission,
     ToolPermissionError,
 )
+from vibe.core.tools.connectors import ConnectorRegistry, connectors_enabled
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.mcp import MCPRegistry
 from vibe.core.tools.mcp_sampling import MCPSamplingHandler
@@ -98,6 +104,7 @@ from vibe.core.utils import (
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
     CancellationReason,
+    get_server_url_from_api_base,
     get_user_agent,
     get_user_cancellation_message,
     is_user_cancellation_event,
@@ -112,7 +119,6 @@ except ImportError:
     _TeleportService = None
 
 if TYPE_CHECKING:
-    from vibe.core.teleport.nuage import TeleportSession
     from vibe.core.teleport.teleport import TeleportService
     from vibe.core.teleport.types import TeleportPushResponseEvent, TeleportYieldEvent
 
@@ -148,10 +154,38 @@ def _should_raise_rate_limit_error(e: Exception) -> bool:
     return isinstance(e, BackendError) and e.status == HTTPStatus.TOO_MANY_REQUESTS
 
 
+def requires_init(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator that awaits deferred initialization before executing the method."""
+    if inspect.isasyncgenfunction(fn):
+
+        @wraps(fn)
+        async def gen_wrapper(self: AgentLoop, *args: Any, **kwargs: Any) -> Any:
+            await self.wait_until_ready()
+            agen = fn(self, *args, **kwargs)
+            sent: Any = None
+            try:
+                while True:
+                    sent = yield await agen.asend(sent)
+            except StopAsyncIteration:
+                return
+            finally:
+                await agen.aclose()
+
+        return gen_wrapper
+
+    @wraps(fn)
+    async def wrapper(self: AgentLoop, *args: Any, **kwargs: Any) -> Any:
+        await self.wait_until_ready()
+        return await fn(self, *args, **kwargs)
+
+    return wrapper
+
+
 class AgentLoop:
     def __init__(
         self,
         config: VibeConfig,
+        *,
         agent_name: str = BuiltinAgentName.DEFAULT,
         message_observer: Callable[[LLMMessage], None] | None = None,
         max_turns: int | None = None,
@@ -160,16 +194,27 @@ class AgentLoop:
         enable_streaming: bool = False,
         entrypoint_metadata: EntrypointMetadata | None = None,
         is_subagent: bool = False,
+        defer_heavy_init: bool = False,
     ) -> None:
         self._base_config = config
+
+        self._defer_heavy_init = defer_heavy_init
+        self._deferred_init_thread: threading.Thread | None = None
+        self._deferred_init_lock = threading.Lock()
+        self._init_error: Exception | None = None
+
         self.mcp_registry = MCPRegistry()
+        self.connector_registry = self._create_connector_registry()
         self.agent_manager = AgentManager(
             lambda: self._base_config,
             initial_agent=agent_name,
             allow_subagent=is_subagent,
         )
         self.tool_manager = ToolManager(
-            lambda: self.config, mcp_registry=self.mcp_registry
+            lambda: self.config,
+            mcp_registry=self.mcp_registry,
+            connector_registry=self.connector_registry,
+            defer_mcp=defer_heavy_init,
         )
         self.skill_manager = SkillManager(lambda: self.config)
         self.message_observer = message_observer
@@ -190,7 +235,11 @@ class AgentLoop:
         self._setup_middleware()
 
         system_prompt = get_universal_system_prompt(
-            self.tool_manager, self.config, self.skill_manager, self.agent_manager
+            self.tool_manager,
+            self.config,
+            self.skill_manager,
+            self.agent_manager,
+            include_git_status=not defer_heavy_init,
         )
         system_message = LLMMessage(role=Role.system, content=system_prompt)
         self.messages = MessageList(initial=[system_message], observer=message_observer)
@@ -225,13 +274,60 @@ class AgentLoop:
         )
         self._teleport_service: TeleportService | None = None
 
-        thread = Thread(
+        Thread(
             target=migrate_sessions_entrypoint,
             args=(config.session_logging,),
             daemon=True,
             name="migrate_sessions",
-        )
-        thread.start()
+        ).start()
+
+        if defer_heavy_init:
+            self._start_deferred_init()
+
+    def _start_deferred_init(self) -> threading.Thread:
+        """Spawn a daemon thread that finishes deferred heavy I/O once."""
+        with self._deferred_init_lock:
+            if self._deferred_init_thread is not None:
+                return self._deferred_init_thread
+
+            thread = threading.Thread(
+                target=self._complete_init, daemon=True, name="agent_loop_init"
+            )
+            self._deferred_init_thread = thread
+            thread.start()
+            return thread
+
+    @property
+    def is_initialized(self) -> bool:
+        """Whether deferred initialization has completed (successfully or not)."""
+        if not self._defer_heavy_init:
+            return True
+        thread = self._deferred_init_thread
+        return thread is not None and not thread.is_alive()
+
+    def _complete_init(self) -> None:
+        """Run deferred heavy I/O: MCP and connector discovery.
+
+        Intended to be called from a background thread when
+        ``defer_heavy_init=True`` was passed to ``__init__``.
+        """
+        try:
+            self.tool_manager.integrate_all(raise_on_mcp_failure=True)
+            system_prompt = get_universal_system_prompt(
+                self.tool_manager, self.config, self.skill_manager, self.agent_manager
+            )
+            self.messages.update_system_prompt(system_prompt)
+        except Exception as exc:
+            self._init_error = exc
+
+    async def wait_until_ready(self) -> None:
+        """Await deferred initialization from an async context."""
+        if not self._defer_heavy_init:
+            return
+        thread = self._start_deferred_init()
+        await asyncio.to_thread(thread.join)
+        if err := self._init_error:
+            raise copy.copy(err).with_traceback(err.__traceback__)
 
     @property
     def agent_profile(self) -> AgentProfile:
@@ -272,7 +368,7 @@ class AgentLoop:
 
         self.config.tools[tool_name]["permission"] = permission.value
 
-    def add_session_rule(self, rule: ApprovedRule) -> None:
+    def _add_session_rule(self, rule: ApprovedRule) -> None:
         self._session_rules.append(rule)
 
     def _is_permission_covered(self, tool_name: str, rp: RequiredPermission) -> bool:
@@ -292,7 +388,7 @@ class AgentLoop:
         """Handle 'Allow Always' approval: add session rules or set tool-level permission."""
         if required_permissions:
             for rp in required_permissions:
-                self.add_session_rule(
+                self._add_session_rule(
                     ApprovedRule(
                         tool_name=tool_name,
                         scope=rp.scope,
@@ -338,6 +434,30 @@ class AgentLoop:
             terminal_emulator=terminal_emulator,
         )
 
+    def _create_connector_registry(self) -> ConnectorRegistry | None:
+        if not connectors_enabled():
+            return None
+
+        provider = self._base_config.get_mistral_provider()
+        if provider is None:
+            return None
+
+        api_key_env = provider.api_key_env_var or "MISTRAL_API_KEY"
+        api_key = os.getenv(api_key_env, "")
+        if not api_key:
+            return None
+
+        server_url = get_server_url_from_api_base(provider.api_base)
+        return ConnectorRegistry(api_key=api_key, server_url=server_url)
+
+    @requires_init
+    async def refresh_system_prompt(self) -> None:
+        """Rebuild and replace the system prompt with current tool/skill state."""
+        system_prompt = get_universal_system_prompt(
+            self.tool_manager, self.config, self.skill_manager, self.agent_manager
+        )
+        self.messages.update_system_prompt(system_prompt)
+
     def _select_backend(self) -> BackendLike:
         active_model = self.config.get_active_model()
         provider = self.config.get_provider_for_model(active_model)
@@ -353,10 +473,12 @@ class AgentLoop:
             self.agent_profile,
         )
 
+    @requires_init
     async def inject_user_context(self, content: str) -> None:
         self.messages.append(LLMMessage(role=Role.user, content=content, injected=True))
         await self._save_messages()
 
+    @requires_init
     async def act(
         self, msg: str, client_message_id: str | None = None
     ) -> AsyncGenerator[BaseEvent, None]:
@@ -393,9 +515,11 @@ class AgentLoop:
             )
         return self._teleport_service
 
-    def teleport_to_vibe_nuage(
+    @requires_init
+    async def teleport_to_vibe_nuage(
         self, prompt: str | None
     ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
+        from vibe.core.teleport.errors import ServiceTeleportError
         from vibe.core.teleport.nuage import TeleportSession
 
         session = TeleportSession(
@@ -406,13 +530,6 @@ class AgentLoop:
             },
             messages=[msg.model_dump(exclude_none=True) for msg in self.messages[1:]],
         )
-        return self._teleport_generator(prompt, session)
-
-    async def _teleport_generator(
-        self, prompt: str | None, session: TeleportSession
-    ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
-        from vibe.core.teleport.errors import ServiceTeleportError
-
         try:
             async with self.teleport_service:
                 gen = self.teleport_service.execute(prompt=prompt, session=session)
@@ -517,6 +634,7 @@ class AgentLoop:
             "call_type": (
                 "main_call" if self._is_user_prompt_call else "secondary_call"
             ),
+            "call_source": "vibe_code",
         }
         if self._current_user_message_id is not None:
             metadata["message_id"] = self._current_user_message_id
@@ -885,6 +1003,7 @@ class AgentLoop:
         self.telemetry_client.send_tool_call_finished(
             tool_call=tool_call,
             agent_profile_name=self.agent_profile.name,
+            model=self.config.active_model,
             status=status,
             decision=decision,
             result=result,
@@ -916,6 +1035,23 @@ class AgentLoop:
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
         tool_choice = self.format_handler.get_tool_choice()
+
+        last_user_message = next(
+            (
+                m
+                for m in reversed(self.messages)
+                if m.role == Role.user and not m.injected
+            ),
+            None,
+        )
+        self.telemetry_client.send_request_sent(
+            model=active_model.alias,
+            nb_context_chars=sum(len(m.content or "") for m in self.messages),
+            nb_context_messages=len(self.messages),
+            nb_prompt_chars=len(last_user_message.content or "")
+            if last_user_message
+            else 0,
+        )
 
         try:
             start_time = time.perf_counter()
@@ -962,6 +1098,24 @@ class AgentLoop:
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
         tool_choice = self.format_handler.get_tool_choice()
+
+        last_user_message = next(
+            (
+                m
+                for m in reversed(self.messages)
+                if m.role == Role.user and not m.injected
+            ),
+            None,
+        )
+        self.telemetry_client.send_request_sent(
+            model=active_model.alias,
+            nb_context_chars=sum(len(m.content or "") for m in self.messages),
+            nb_context_messages=len(self.messages),
+            nb_prompt_chars=len(last_user_message.content or "")
+            if last_user_message
+            else 0,
+        )
+
         try:
             start_time = time.perf_counter()
             usage = LLMUsage()
@@ -1145,6 +1299,7 @@ class AgentLoop:
         self.session_id = str(uuid4())
         self.session_logger.reset_session(self.session_id)
 
+    @requires_init
     async def clear_history(self) -> None:
         await self.session_logger.save_interaction(
             self.messages,
@@ -1170,6 +1325,7 @@ class AgentLoop:
         self.tool_manager.reset_all()
         self._reset_session()
 
+    @requires_init
     async def compact(self) -> str:
         try:
             self._clean_message_history()
@@ -1238,12 +1394,14 @@ class AgentLoop:
             )
             raise
 
+    @requires_init
     async def switch_agent(self, agent_name: str) -> None:
         if agent_name == self.agent_profile.name:
             return
         self.agent_manager.switch_profile(agent_name)
         await self.reload_with_initial_messages(reset_middleware=False)
 
+    @requires_init
     async def reload_with_initial_messages(
         self,
         base_config: VibeConfig | None = None,
@@ -1277,7 +1435,9 @@ class AgentLoop:
             self._max_price = max_price
 
         self.tool_manager = ToolManager(
-            lambda: self.config, mcp_registry=self.mcp_registry
+            lambda: self.config,
+            mcp_registry=self.mcp_registry,
+            connector_registry=self.connector_registry,
         )
         self.skill_manager = SkillManager(lambda: self.config)
 

@@ -131,6 +131,7 @@ async def test_passes_session_id_to_backend(vibe_config: VibeConfig):
     assert "message_id" in meta
     assert meta["is_user_prompt"] == "true"
     assert meta["call_type"] == "main_call"
+    assert meta["call_source"] == "vibe_code"
 
 
 @pytest.mark.asyncio
@@ -162,6 +163,7 @@ async def test_passes_entrypoint_metadata_to_backend(vibe_config: VibeConfig):
     assert "message_id" in meta
     assert meta["is_user_prompt"] == "true"
     assert meta["call_type"] == "main_call"
+    assert meta["call_source"] == "vibe_code"
 
 
 @pytest.mark.asyncio

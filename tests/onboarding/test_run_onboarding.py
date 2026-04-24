@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
 from typing import override
 
@@ -25,7 +24,7 @@ def _exit_raiser(code: int = 0) -> None:
 
 
 def test_exits_on_cancel(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "exit", _exit_raiser)
 
@@ -38,7 +37,7 @@ def test_exits_on_cancel(
 
 
 def test_warns_on_save_error(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "exit", _exit_raiser)
 
@@ -49,8 +48,25 @@ def test_warns_on_save_error(
     assert "disk full" in out
 
 
+def test_exits_on_invalid_api_key_env_var(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "exit", _exit_raiser)
+
+    with pytest.raises(SystemExit) as excinfo:
+        onboarding.run_onboarding(StubApp("env_var_error:BAD=NAME"))
+
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "Could not save the API key because this provider is configured" in out
+    assert "invalid" in out
+    assert "environment variable name: BAD=NAME" in out
+    assert "was not saved for this session" in out
+    assert "set for this session only" not in out
+
+
 def test_successfully_completes(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "exit", _exit_raiser)
 
