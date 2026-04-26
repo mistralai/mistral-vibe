@@ -232,6 +232,184 @@ class LspClient:
 
         return [self._format_location(loc) for loc in (result or [])]
 
+    async def document_symbols(self, file_path: str) -> list[dict[str, Any]]:
+        """Return all symbols defined in a document."""
+        self._assert_started()
+        try:
+            result = await self._client.request_document_symbol(file_path=file_path)
+        except Exception as e:
+            logger.warning("document_symbols error: %s", e)
+            return []
+        symbols = result if isinstance(result, list) else ([result] if result else [])
+        return [self._format_document_symbol(s) for s in symbols]
+
+    async def workspace_symbols(self, query: str) -> list[dict[str, Any]]:
+        """Search symbols across the workspace."""
+        self._assert_started()
+        try:
+            result = await self._client.request_workspace_symbol(query=query)
+        except Exception as e:
+            logger.warning("workspace_symbols error: %s", e)
+            return []
+        return [self._format_workspace_symbol(s) for s in (result or [])]
+
+    async def rename(
+        self, file_path: str, line: int, col: int, new_name: str
+    ) -> dict[str, Any]:
+        """Rename a symbol across all references."""
+        self._assert_started()
+        from lsp_client import Position
+        try:
+            result = await self._client.request_rename(
+                file_path=file_path,
+                position=Position(line - 1, col - 1),
+                new_name=new_name,
+            )
+        except Exception as e:
+            logger.warning("rename error: %s", e)
+            return {}
+        return self._format_rename_result(result)
+
+    async def formatting(
+        self, file_path: str, options: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Format a document according to language rules."""
+        self._assert_started()
+        try:
+            result = await self._client.request_document_formatting(
+                file_path=file_path,
+                options=options or {},
+            )
+        except Exception as e:
+            logger.warning("formatting error: %s", e)
+            return []
+        return [self._format_text_edit(e) for e in (result or [])]
+
+    async def range_formatting(
+        self,
+        file_path: str,
+        start_line: int,
+        start_col: int,
+        end_line: int,
+        end_col: int,
+        options: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Format a specific range in a document."""
+        self._assert_started()
+        from lsp_client import Position, Range
+        try:
+            result = await self._client.request_document_range_formatting(
+                file_path=file_path,
+                range=Range(
+                    Position(start_line - 1, start_col - 1),
+                    Position(end_line - 1, end_col - 1),
+                ),
+                options=options or {},
+            )
+        except Exception as e:
+            logger.warning("range_formatting error: %s", e)
+            return []
+        return [self._format_text_edit(e) for e in (result or [])]
+
+    async def code_actions(
+        self,
+        file_path: str,
+        line: int,
+        col: int,
+        end_line: int | None = None,
+        end_col: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get available code actions at a position."""
+        self._assert_started()
+        from lsp_client import Position, Range
+        try:
+            start_pos = Position(line - 1, col - 1)
+            end_pos = Position((end_line or line) - 1, (end_col or col) - 1)
+            result = await self._client.request_code_actions(
+                file_path=file_path,
+                range=Range(start_pos, end_pos),
+            )
+        except Exception as e:
+            logger.warning("code_actions error: %s", e)
+            return []
+        return [self._format_code_action(a) for a in (result or [])]
+
+    async def signature_help(
+        self, file_path: str, line: int, col: int
+    ) -> dict[str, Any]:
+        """Get function signature help at a position."""
+        self._assert_started()
+        from lsp_client import Position
+        try:
+            result = await self._client.request_signature_help(
+                file_path=file_path,
+                position=Position(line - 1, col - 1),
+            )
+        except Exception as e:
+            logger.warning("signature_help error: %s", e)
+            return {}
+        return self._format_signature_help(result)
+
+    async def document_highlight(
+        self, file_path: str, line: int, col: int
+    ) -> list[dict[str, Any]]:
+        """Highlight all references to symbol under cursor."""
+        self._assert_started()
+        from lsp_client import Position
+        try:
+            result = await self._client.request_document_highlight(
+                file_path=file_path,
+                position=Position(line - 1, col - 1),
+            )
+        except Exception as e:
+            logger.warning("document_highlight error: %s", e)
+            return []
+        return [self._format_document_highlight(h) for h in (result or [])]
+
+    async def folding_ranges(self, file_path: str) -> list[dict[str, Any]]:
+        """Get foldable code regions in a document."""
+        self._assert_started()
+        try:
+            result = await self._client.request_folding_ranges(file_path=file_path)
+        except Exception as e:
+            logger.warning("folding_ranges error: %s", e)
+            return []
+        return [self._format_folding_range(r) for r in (result or [])]
+
+    async def implementation(
+        self, file_path: str, line: int, col: int
+    ) -> list[dict[str, Any]]:
+        """Find implementations of an interface or abstract definition."""
+        self._assert_started()
+        from lsp_client import Position
+        try:
+            result = await self._client.request_implementation(
+                file_path=file_path,
+                position=Position(line - 1, col - 1),
+            )
+        except Exception as e:
+            logger.warning("implementation error: %s", e)
+            return []
+        locations = result if isinstance(result, list) else ([result] if result else [])
+        return [self._format_location(loc) for loc in locations]
+
+    async def type_definition(
+        self, file_path: str, line: int, col: int
+    ) -> list[dict[str, Any]]:
+        """Find type definition of a symbol."""
+        self._assert_started()
+        from lsp_client import Position
+        try:
+            result = await self._client.request_type_definition(
+                file_path=file_path,
+                position=Position(line - 1, col - 1),
+            )
+        except Exception as e:
+            logger.warning("type_definition error: %s", e)
+            return []
+        locations = result if isinstance(result, list) else ([result] if result else [])
+        return [self._format_location(loc) for loc in locations]
+
     # ── Formatters ────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -308,6 +486,166 @@ class LspClient:
             line = col = 1
 
         return {"file": file_path, "line": line, "col": col}
+
+    @staticmethod
+    def _format_range(rng: Any) -> dict[str, Any]:
+        if hasattr(rng, "start"):
+            start_line = rng.start.line + 1 if hasattr(rng.start, "line") else 1
+            start_col = rng.start.character + 1 if hasattr(rng.start, "character") else 1
+            end_line = rng.end.line + 1 if hasattr(rng.end, "line") else start_line
+            end_col = rng.end.character + 1 if hasattr(rng.end, "character") else start_col
+        elif isinstance(rng, dict):
+            start_line = rng.get("start", {}).get("line", 0) + 1
+            start_col = rng.get("start", {}).get("character", 0) + 1
+            end_line = rng.get("end", {}).get("line", 0) + 1
+            end_col = rng.get("end", {}).get("character", 0) + 1
+        else:
+            start_line = start_col = end_line = end_col = 1
+        return {"start_line": start_line, "start_col": start_col, "end_line": end_line, "end_col": end_col}
+
+    @staticmethod
+    def _format_document_symbol(s: Any) -> dict[str, Any]:
+        name = getattr(s, "name", s.get("name", "") if isinstance(s, dict) else "")
+        kind = getattr(s, "kind", None) if hasattr(s, "kind") else s.get("kind") if isinstance(s, dict) else None
+        if hasattr(kind, "value"):
+            kind = kind.value
+        kind_map = {1: "File", 2: "Module", 3: "Namespace", 4: "Package", 5: "Class",
+                    6: "Method", 7: "Property", 8: "Field", 9: "Constructor", 10: "Enum",
+                    11: "Interface", 12: "Function", 13: "Variable", 14: "Constant",
+                    15: "String", 16: "Number", 17: "Boolean", 18: "Array", 19: "Object",
+                    20: "Key", 21: "Null", 22: "EnumMember", 23: "Event", 24: "Operator",
+                    25: "TypeParameter"}
+        detail = getattr(s, "detail", s.get("detail", "") if isinstance(s, dict) else "")
+        rng = getattr(s, "range", None) or getattr(s, "selectionRange", None) or (s.get("range") if isinstance(s, dict) else None)
+        location = LspClient._format_range(rng) if rng else {"start_line": 1, "start_col": 1, "end_line": 1, "end_col": 1}
+        return {
+            "name": name,
+            "kind": kind_map.get(int(kind) if kind else 0, "Unknown"),
+            "detail": detail,
+            "file": location.get("file", ""),
+            "line": location.get("start_line", 1),
+            "col": location.get("start_col", 1),
+        }
+
+    @staticmethod
+    def _format_workspace_symbol(s: Any) -> dict[str, Any]:
+        name = getattr(s, "name", s.get("name", "") if isinstance(s, dict) else "")
+        kind = getattr(s, "kind", None) if hasattr(s, "kind") else s.get("kind") if isinstance(s, dict) else None
+        if hasattr(kind, "value"):
+            kind = kind.value
+        kind_map = {1: "File", 2: "Module", 3: "Namespace", 4: "Package", 5: "Class",
+                    6: "Method", 7: "Property", 8: "Field", 9: "Constructor", 10: "Enum",
+                    11: "Interface", 12: "Function", 13: "Variable", 14: "Constant",
+                    15: "String", 16: "Number", 17: "Boolean", 18: "Array", 19: "Object",
+                    20: "Key", 21: "Null", 22: "EnumMember", 23: "Event", 24: "Operator",
+                    25: "TypeParameter"}
+        loc = getattr(s, "location", s.get("location") if isinstance(s, dict) else None)
+        if loc:
+            file_path = getattr(loc, "uri", "") or (loc.get("uri") if isinstance(loc, dict) else "")
+            file_path = file_path.replace("file://", "") if file_path.startswith("file://") else file_path
+            rng = getattr(loc, "range", None) or (loc.get("range") if isinstance(loc, dict) else None)
+            line = rng.start.line + 1 if rng and hasattr(rng.start, "line") else 1
+            col = rng.start.character + 1 if rng and hasattr(rng.start, "character") else 1
+        else:
+            file_path = ""
+            line = col = 1
+        return {"name": name, "kind": kind_map.get(int(kind) if kind else 0, "Unknown"), "file": file_path, "line": line, "col": col}
+
+    @staticmethod
+    def _format_text_edit(e: Any) -> dict[str, Any]:
+        rng = getattr(e, "range", None) or (e.get("range") if isinstance(e, dict) else None)
+        range_dict = LspClient._format_range(rng) if rng else {"start_line": 1, "start_col": 1, "end_line": 1, "end_col": 1}
+        new_text = getattr(e, "newText", e.get("newText", "") if isinstance(e, dict) else "")
+        return {
+            "start_line": range_dict["start_line"],
+            "start_col": range_dict["start_col"],
+            "end_line": range_dict["end_line"],
+            "end_col": range_dict["end_col"],
+            "new_text": new_text,
+        }
+
+    @staticmethod
+    def _format_code_action(a: Any) -> dict[str, Any]:
+        title = getattr(a, "title", a.get("title", "") if isinstance(a, dict) else "")
+        kind = getattr(a, "kind", None) if hasattr(a, "kind") else (a.get("kind") if isinstance(a, dict) else None)
+        if hasattr(kind, "value"):
+            kind = kind.value
+        return {
+            "title": title,
+            "kind": str(kind) if kind else None,
+            "is_preferred": getattr(a, "is_preferred", a.get("is_preferred") if isinstance(a, dict) else False),
+            "has_edit": bool(getattr(a, "edit", None) or (a.get("edit") if isinstance(a, dict) else None)),
+            "has_command": bool(getattr(a, "command", None) or (a.get("command") if isinstance(a, dict) else None)),
+        }
+
+    @staticmethod
+    def _format_signature_help(h: Any) -> dict[str, Any]:
+        if not h:
+            return {"signatures": [], "active_signature": 0, "active_parameter": 0}
+        signatures = []
+        sigs = getattr(h, "signatures", h.get("signatures", []) if isinstance(h, dict) else [])
+        for sig in sigs:
+            label = getattr(sig, "label", sig.get("label", "") if isinstance(sig, dict) else "")
+            doc = getattr(sig, "documentation", sig.get("documentation", "") if isinstance(sig, dict) else "")
+            if hasattr(doc, "value"):
+                doc = doc.value
+            params = []
+            for p in getattr(sig, "parameters", sig.get("parameters", []) if isinstance(sig, dict) else []):
+                p_label = getattr(p, "label", p.get("label", "") if isinstance(p, dict) else "")
+                p_doc = getattr(p, "documentation", p.get("documentation", "") if isinstance(p, dict) else "")
+                if hasattr(p_doc, "value"):
+                    p_doc = p_doc.value
+                params.append({"label": p_label, "documentation": p_doc})
+            signatures.append({"label": label, "documentation": doc, "parameters": params})
+        active_sig = getattr(h, "activeSignature", h.get("activeSignature", 0) if isinstance(h, dict) else 0)
+        active_param = getattr(h, "activeParameter", h.get("activeParameter", 0) if isinstance(h, dict) else 0)
+        return {"signatures": signatures, "active_signature": active_sig, "active_parameter": active_param}
+
+    @staticmethod
+    def _format_document_highlight(h: Any) -> dict[str, Any]:
+        kind = getattr(h, "kind", None) if hasattr(h, "kind") else (h.get("kind") if isinstance(h, dict) else None)
+        if hasattr(kind, "value"):
+            kind = kind.value
+        kind_map = {1: "Text", 2: "Read", 3: "Write"}
+        rng = getattr(h, "range", None) or (h.get("range") if isinstance(h, dict) else None)
+        range_dict = LspClient._format_range(rng) if rng else {"start_line": 1, "start_col": 1, "end_line": 1, "end_col": 1}
+        return {
+            "kind": kind_map.get(int(kind) if kind else 1, "Text"),
+            "line": range_dict["start_line"],
+            "col": range_dict["start_col"],
+            "end_line": range_dict["end_line"],
+            "end_col": range_dict["end_col"],
+        }
+
+    @staticmethod
+    def _format_folding_range(r: Any) -> dict[str, Any]:
+        kind = getattr(r, "kind", None) if hasattr(r, "kind") else (r.get("kind") if isinstance(r, dict) else None)
+        if hasattr(kind, "value"):
+            kind = kind.value
+        kind_map = {1: "Comment", 2: "Imports", 3: "Region"}
+        start = getattr(r, "startLine", r.get("startLine", 1) if isinstance(r, dict) else 1)
+        end = getattr(r, "endLine", r.get("endLine", 1) if isinstance(r, dict) else 1)
+        return {
+            "start_line": int(start) + 1,
+            "end_line": int(end) + 1,
+            "kind": kind_map.get(int(kind) if kind else None, None),
+        }
+
+    @staticmethod
+    def _format_rename_result(r: Any) -> dict[str, Any]:
+        if not r:
+            return {"changes": {}, "message": "No changes possible"}
+        changes = {}
+        docs = getattr(r, "documentChanges", r.get("documentChanges", []) if isinstance(r, dict) else [])
+        for doc in (docs or []):
+            uri = getattr(doc, "uri", doc.get("uri", "") if isinstance(doc, dict) else "")
+            file_path = uri.replace("file://", "") if uri.startswith("file://") else uri
+            edits = getattr(doc, "edits", doc.get("edits", []) if isinstance(doc, dict) else [])
+            if file_path:
+                if file_path not in changes:
+                    changes[file_path] = []
+                changes[file_path].extend([LspClient._format_text_edit(e) for e in edits])
+        return {"changes": changes, "message": f"Rename changes in {len(changes)} file(s)" if changes else "No changes possible"}
 
     # ── Internal ───────────────────────────────────────────────────────────
 
