@@ -202,6 +202,22 @@ class TestGitClone:
                 "https://github.com/test/repo", Path("/tmp/dest"), "--evil"
             )
 
+    def test_install_from_git_persists_url_ref(
+        self,
+        installer: PluginInstaller,
+        registry: PluginRegistryManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fake_git_clone(_url: str, dest: Path, _ref: str | None) -> None:
+            _create_local_plugin(dest.parent, "plugin")
+
+        monkeypatch.setattr(PluginInstaller, "_git_clone", staticmethod(fake_git_clone))
+
+        installer.install_from_git("https://github.com/org/repo/tree/release")
+
+        entry = registry.get_all_plugins()["plugin"]
+        assert entry.pinned_ref == "release"
+
 
 class TestParseGithubUrl:
     def test_plain_github_url(self) -> None:

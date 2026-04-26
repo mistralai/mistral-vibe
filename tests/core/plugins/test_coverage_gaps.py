@@ -169,6 +169,35 @@ class TestMarketplaceManagerFetch:
             # Only one subprocess call (the forced pull)
             assert len(call_count) == 1
 
+    def test_fetch_ttl_skips_repull_across_manager_instances(
+        self, tmp_path: Path
+    ) -> None:
+        cache_dir = tmp_path / "cache"
+        config = MarketplaceConfig(url="https://github.com/test/market")
+        mgr = MarketplaceManager(cache_dir=cache_dir)
+
+        clone_target = cache_dir / mgr._cache_key(mgr.normalize_url(config.url))
+        clone_target.mkdir(parents=True)
+        (clone_target / ".git").mkdir()
+        data = {"name": "test-market", "plugins": []}
+        (clone_target / "marketplace.toml").write_text(
+            tomli_w.dumps(data), encoding="utf-8"
+        )
+
+        call_count = []
+
+        def fake_subprocess_run(cmd: list[str], *, check: bool = False) -> None:
+            call_count.append(cmd)
+
+        with patch(
+            "vibe.core.plugins.marketplace.subprocess.run",
+            side_effect=fake_subprocess_run,
+        ):
+            mgr.fetch(config, force=True)
+            MarketplaceManager(cache_dir=cache_dir).fetch(config)
+
+        assert len(call_count) == 1
+
     def test_is_marketplace_returns_false_on_missing_index(
         self, tmp_path: Path
     ) -> None:

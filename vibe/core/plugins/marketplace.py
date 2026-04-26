@@ -12,8 +12,10 @@ from vibe.core.plugins.models import (
     MarketplaceIndex,
     MarketplacePluginRef,
 )
+from vibe.core.utils.io import read_safe
 
 _FETCH_TTL_SECONDS = 300  # Skip re-fetch if pulled within this window
+_FETCH_TIMESTAMP_FILE = ".vibe-last-fetch"
 
 
 class MarketplaceManager:
@@ -21,7 +23,6 @@ class MarketplaceManager:
 
     def __init__(self, cache_dir: Path | None = None) -> None:
         self._cache_dir = cache_dir or VIBE_HOME.path / "marketplace-cache"
-        self._fetch_timestamps: dict[str, float] = {}
 
     def fetch(
         self, config: MarketplaceConfig, *, force: bool = False
@@ -32,8 +33,8 @@ class MarketplaceManager:
             raise ValueError(msg)
         clone_dir = self._cache_dir / self._cache_key(url)
 
-        now = time.monotonic()
-        last_fetch = self._fetch_timestamps.get(url, 0.0)
+        now = time.time()
+        last_fetch = self._read_last_fetch(clone_dir)
         skip_pull = not force and (now - last_fetch) < _FETCH_TTL_SECONDS
 
         if (clone_dir / ".git").is_dir():
@@ -42,14 +43,14 @@ class MarketplaceManager:
                 subprocess.run(
                     ["git", "-C", str(clone_dir), "pull", "--ff-only"], check=True
                 )
-                self._fetch_timestamps[url] = now
+                self._write_last_fetch(clone_dir, now)
         else:
             clone_dir.parent.mkdir(parents=True, exist_ok=True)
             logger.info("Cloning marketplace from %s", url)
             subprocess.run(
                 ["git", "clone", "--depth", "1", "--", url, str(clone_dir)], check=True
             )
-            self._fetch_timestamps[url] = now
+            self._write_last_fetch(clone_dir, now)
 
         return MarketplaceIndex.from_dir(clone_dir)
 
@@ -108,8 +109,25 @@ class MarketplaceManager:
     def normalize_url(url: str) -> str:
         if url.startswith(("https://", "http://", "git@")):
             return url
-        return f"https://github.com/{url}.git"
+        slug = url.rstrip("/")
+        if slug.endswith(".git"):
+            return f"https://github.com/{slug}"
+        return f"https://github.com/{slug}.git"
 
     @staticmethod
     def _cache_key(url: str) -> str:
         return hashlib.sha256(url.encode()).hexdigest()[:12]
+
+    @staticmethod
+    def _read_last_fetch(clone_dir: Path) -> float:
+        timestamp_path = clone_dir / _FETCH_TIMESTAMP_FILE
+        if not timestamp_path.is_file():
+            return 0.0
+        try:
+            return float(read_safe(timestamp_path).text.strip())
+        except (OSError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _write_last_fetch(clone_dir: Path, timestamp: float) -> None:
+        (clone_dir / _FETCH_TIMESTAMP_FILE).write_text(str(timestamp), encoding="utf-8")

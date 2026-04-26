@@ -120,6 +120,21 @@ def _handle_install(
     registry: PluginRegistryManager,
 ) -> None:
     scope = PluginScope(args.scope)
+    try:
+        registry.get_plugins_dir_for_scope(scope)
+    except KeyError:
+        if scope in {PluginScope.PROJECT, PluginScope.LOCAL}:
+            rprint(
+                f"[red]Scope '{scope.value}' requires running inside a trusted "
+                "project directory.[/]"
+            )
+            rprint(
+                "[dim]Hint: run this command in a trusted project workdir or use "
+                "'--scope user'.[/]"
+            )
+            return
+        raise
+
     if args.local:
         manifest = installer.install_from_local(Path(args.source), scope=scope)
         rprint(f"[green]Installed plugin '{manifest.name}' v{manifest.version}[/]")

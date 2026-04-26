@@ -152,7 +152,18 @@ def check_and_resolve_trusted_folder() -> None:
         trusted_folders_manager.add_untrusted(cwd)
 
 
-_GLOBAL_FLAGS_WITH_VALUE = frozenset({"--workdir", "--plugin-dir"})
+_GLOBAL_FLAGS_WITH_VALUE = frozenset({
+    "--agent",
+    "--enabled-tools",
+    "--max-price",
+    "--max-turns",
+    "--output",
+    "--plugin-dir",
+    "--prompt",
+    "--resume",
+    "--workdir",
+    "-p",
+})
 
 
 def _find_plugin_subcommand_idx() -> int | None:

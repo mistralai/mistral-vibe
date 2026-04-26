@@ -309,7 +309,7 @@ Vibe provides several built-in slash commands. Use slash commands by typing them
 
 Plugins add their own interactive workflow inside the chat UI:
 
-- `/plugin` and `/plugins` open the installed-plugin picker so you can change a plugin's enabled state without leaving the session.
+- `/plugin` opens the installed-plugin picker so you can change a plugin's enabled state without leaving the session.
 - `/reload-plugins` reloads plugin-discovered components after you install, edit, or toggle a plugin.
 - Enabled plugin commands appear in slash-command completion using the form `/plugin-name:command-name`.
 

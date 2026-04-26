@@ -72,7 +72,7 @@ class PluginInstaller:
                     source_uri=url,
                     enabled=True,
                     installed_at=datetime.now(UTC).isoformat(),
-                    pinned_ref=ref,
+                    pinned_ref=effective_ref,
                 ),
                 scope=scope,
             )

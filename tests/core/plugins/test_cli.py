@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import tomli_w
 
 from vibe.core.plugins.cli import build_plugin_parser, handle_plugin_command
 from vibe.core.plugins.models import PluginEntry, PluginSource
@@ -24,6 +27,44 @@ class TestBuildPluginParser:
         parser = build_plugin_parser()
         args = parser.parse_args(["install", "/some/path", "--local"])
         assert args.local is True
+
+
+class TestHandlePluginInstall:
+    def test_project_scope_without_project_registry_prints_user_error(
+        self,
+        tmp_path: Path,
+        registry: PluginRegistryManager,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        plugin_dir = tmp_path / "my-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / "plugin.toml").write_text(
+            tomli_w.dumps({
+                "name": "my-plugin",
+                "description": "My plugin",
+                "version": "1.0.0",
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "vibe.core.config.harness_files._harness_manager._get_plugin_registry_manager",
+            lambda: registry,
+        )
+
+        parser = build_plugin_parser()
+        args = parser.parse_args([
+            "install",
+            str(plugin_dir),
+            "--local",
+            "--scope",
+            "project",
+        ])
+        handle_plugin_command(args)
+
+        captured = capsys.readouterr()
+        assert "requires running inside a trusted project directory" in captured.out
+        assert "my-plugin" not in registry.get_all_plugins()
 
 
 class TestHandlePluginList:

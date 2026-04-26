@@ -18,6 +18,18 @@ class TestNormalizeUrl:
             == "https://github.com/owner/repo.git"
         )
 
+    def test_shorthand_with_dot_git_does_not_duplicate_suffix(self) -> None:
+        assert (
+            MarketplaceManager.normalize_url("owner/repo.git")
+            == "https://github.com/owner/repo.git"
+        )
+
+    def test_shorthand_with_trailing_slash(self) -> None:
+        assert (
+            MarketplaceManager.normalize_url("owner/repo/")
+            == "https://github.com/owner/repo.git"
+        )
+
     def test_https_passthrough(self) -> None:
         url = "https://example.com/repo.git"
         assert MarketplaceManager.normalize_url(url) == url

@@ -127,7 +127,7 @@ class TestDiscoverPluginCommands:
 
         assert result == {}
 
-    def test_discover_commands_missing_manifest_skipped(
+    def test_discover_commands_missing_manifest_uses_synthesized_manifest(
         self, plugins_dir: Path
     ) -> None:
         _write_plugin(
@@ -141,7 +141,8 @@ class TestDiscoverPluginCommands:
         mgr = PluginRegistryManager(plugins_dir=plugins_dir)
         result = discover_all_plugin_commands(mgr)
 
-        assert result == {}
+        assert "test-plugin:review" in result
+        assert result["test-plugin:review"].description == "Review"
 
 
 class TestExtractDescriptionMalformedYaml:
