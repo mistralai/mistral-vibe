@@ -74,6 +74,11 @@ def handle_debug_mode() -> None:
 
 
 def main() -> None:
+    # Mark this process as running in ACP mode.  Other parts of the codebase
+    # (e.g. path resolution in ``vibe/core/paths/_vibe_home.py``) use this
+    # sentinel to choose a context-appropriate VIBE_HOME location.
+    os.environ["ACP_MODE"] = "1"
+
     handle_debug_mode()
     init_harness_files_manager("user", "project")
 
