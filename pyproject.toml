@@ -68,11 +68,11 @@ dependencies = [
     # ── LSP plugin ────────────────────────────────────────────────────────────
     # lsp-client provides async LSP client supporting lsprotocol 2025+.
     # vibe/core/plugins/builtin/lsp/lsp_client.py uses lsp-client to communicate
-    # with language servers (basedpyright, typescript-language-server, etc.).
+    # with language servers (pygls, typescript-language-server, etc.).
     # Requires python >=3.12.
     "lsp-client>=0.3.0",
-    # Basedpyright LSP server (supports lsprotocol 2025+)
-    "basedpyright>=1.0.0",
+    # pylsp (python-lsp-server) LSP server for Python
+    "python-lsp-server>=1.12.0",
     "mypy>=1.19.1",
 ]
 
