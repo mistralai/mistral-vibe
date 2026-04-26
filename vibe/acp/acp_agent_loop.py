@@ -872,7 +872,11 @@ class VibeAcpAgentLoop(AcpAgent):
     async def close_session(
         self, session_id: str, **kwargs: Any
     ) -> CloseSessionResponse | None:
-        raise NotImplementedMethodError("close_session")
+        session = self._get_session(session_id)
+        if session.task and not session.task.done():
+            session.task.cancel()
+        del self.sessions[session_id]
+        return CloseSessionResponse()
 
     @override
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
