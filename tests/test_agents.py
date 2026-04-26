@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
 
+from tests import TESTS_ROOT
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.manager import AgentManager
@@ -160,6 +162,32 @@ class TestAgentProfile:
 
 
 class TestAgentApplyToConfig:
+    def test_profile_disabled_tools_are_merged_with_base_config(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=["ask_user_question"],
+        )
+
+        result = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].apply_to_config(base)
+
+        assert set(result.disabled_tools) == {"ask_user_question", "exit_plan_mode"}
+
+    def test_profile_disabled_tools_preserve_user_disabled_tools(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=["ask_user_question", "custom_tool"],
+        )
+
+        result = BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].apply_to_config(base)
+
+        assert set(result.disabled_tools) == {
+            "ask_user_question",
+            "custom_tool",
+            "exit_plan_mode",
+        }
+
     def test_custom_prompt_found_in_global_when_missing_from_project(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -204,8 +232,9 @@ class TestAgentApplyToConfig:
 
 
 class TestAgentProfileOverrides:
-    def test_default_agent_has_no_overrides(self) -> None:
-        assert BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].overrides == {}
+    def test_default_agent_disables_exit_plan_mode(self) -> None:
+        overrides = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].overrides
+        assert "exit_plan_mode" in overrides.get("base_disabled", [])
 
     def test_auto_approve_agent_sets_auto_approve(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].overrides
@@ -628,4 +657,23 @@ class TestAgentLoopInitialization:
         assert custom_prompt_content in system_message.content, (
             f"System message should contain custom prompt content. "
             f"Expected '{custom_prompt_content}' to be in system message."
+        )
+
+
+class TestActConsumersUseAclosing:
+    def test_no_bare_async_for_over_act(self) -> None:
+        vibe_pkg = TESTS_ROOT.parent / "vibe"
+        violations: list[str] = []
+        for path in vibe_pkg.rglob("*.py"):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.AsyncFor):
+                    continue
+                match node.iter:
+                    case ast.Call(func=ast.Attribute(attr="act")):
+                        violations.append(f"{path}:{node.lineno}")
+
+        assert not violations, (
+            "Bare `async for ... in .act()` found — wrap in "
+            "contextlib.aclosing(). See issue #569.\n" + "\n".join(violations)
         )

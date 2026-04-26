@@ -84,10 +84,17 @@ TextArea > .text-area--cursor {
 }
 
 #completion-popup {
-    width: 100%;
-    padding: 1;
-    padding-left: 3;
+    overlay: screen;
+    constrain: inside inside;
+    display: none;
+    width: auto;
+    max-width: 80;
+    height: auto;
+    max-height: 12;
+    padding: 0 1;
     color: ansi_default;
+    background: $surface;
+    border: solid ansi_bright_black;
 }
 
 #input-box {
@@ -115,6 +122,11 @@ TextArea > .text-area--cursor {
     }
 
     &.border-recording {
+        border: solid $mistral_orange;
+        border-title-color: $mistral_orange;
+    }
+
+    &.border-remote {
         border: solid $mistral_orange;
         border-title-color: $mistral_orange;
     }
@@ -160,7 +172,7 @@ Markdown {
     color: ansi_default;
 
     .code_inline {
-        color: ansi_yellow;
+        color: ansi_green;
         background: transparent;
         text-style: bold;
     }
@@ -529,6 +541,24 @@ StatusMessage {
     height: auto;
 }
 
+.tool-result-widget Markdown,
+.tool-approval-widget Markdown {
+    padding: 0;
+    margin: 0;
+}
+
+.tool-result-widget Markdown > *,
+.tool-approval-widget Markdown > * {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.tool-result-widget Markdown MarkdownFence,
+.tool-approval-widget Markdown MarkdownFence {
+    margin: 0;
+    padding: 0;
+}
+
 .tool-call-detail,
 .tool-result-detail {
     height: auto;
@@ -625,7 +655,8 @@ StatusMessage {
 .loading-hint {
     width: auto;
     height: auto;
-    color: $foreground;
+    color: ansi_bright_black;
+
 }
 
 .history-load-more-message {
@@ -655,7 +686,7 @@ StatusMessage {
 
 }
 
-#config-app {
+#config-app, #voice-app, #mcp-app {
     width: 100%;
     height: auto;
     background: transparent;
@@ -664,7 +695,7 @@ StatusMessage {
     margin: 0;
 }
 
-#config-content {
+#config-content, #voice-content, #mcp-content {
     width: 100%;
     height: auto;
 }
@@ -675,41 +706,14 @@ StatusMessage {
     color: ansi_blue;
 }
 
-.settings-option {
-    height: auto;
-    color: ansi_default;
+#config-options, #mcp-options {
+    width: 100%;
+    max-height: 50vh;
+    border: none;
 }
 
-.settings-cursor-selected {
-    color: ansi_blue;
-    text-style: bold;
-}
-
-.settings-label-selected {
-    color: ansi_default;
-    text-style: bold;
-}
-
-.settings-value-toggle-on-selected {
-    color: ansi_green;
-    text-style: bold;
-}
-
-.settings-value-toggle-on-unselected {
-    color: ansi_green;
-}
-
-.settings-value-toggle-off {
-    color: ansi_bright_black;
-}
-
-.settings-value-cycle-selected {
-    color: ansi_blue;
-    text-style: bold;
-}
-
-.settings-value-cycle-unselected {
-    color: ansi_blue;
+#config-options:focus, #mcp-options:focus {
+    border: none;
 }
 
 .settings-help {
@@ -953,6 +957,14 @@ ContextProgress {
     color: ansi_bright_black;
 }
 
+NarratorStatus {
+    width: auto;
+    height: auto;
+    background: transparent;
+    padding: 0;
+    margin: 0 0 0 1;
+}
+
 #banner-container {
     align: left middle;
     padding: 0 1 0 0;
@@ -1084,6 +1096,44 @@ ContextProgress {
     margin-top: 1;
 }
 
+/* Debug Console */
+
+#debug-console {
+    dock: right;
+    width: 40%;
+    max-width: 80;
+    min-width: 40;
+    height: 100%;
+    background: transparent;
+    border-left: solid ansi_bright_black;
+    padding: 0 1;
+}
+
+#debug-console-header {
+    width: 100%;
+    height: auto;
+    color: ansi_default;
+    padding: 0 0 1 0;
+    text-align: left;
+}
+
+#debug-console-log {
+    width: 100%;
+    height: 1fr;
+    background: transparent;
+    overflow-x: hidden;
+    scrollbar-size: 1 1;
+}
+
+#modelpicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
 #pluginpicker-app {
     width: 100%;
     height: auto;
@@ -1093,9 +1143,29 @@ ContextProgress {
     margin: 0;
 }
 
+#modelpicker-content {
+    width: 100%;
+    height: auto;
+}
+
 #pluginpicker-content {
     width: 100%;
     height: auto;
+}
+
+
+.modelpicker-title {
+    height: auto;
+    text-style: bold;
+    color: ansi_blue;
+}
+
+#modelpicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
 }
 
 #pluginpicker-options {
@@ -1104,6 +1174,17 @@ ContextProgress {
     text-wrap: nowrap;
     text-overflow: ellipsis;
     border: none;
+}
+
+#modelpicker-options:focus {
+    border: none;
+}
+
+.modelpicker-help {
+    width: 100%;
+    height: auto;
+    color: ansi_bright_black;
+    margin-top: 1;
 }
 
 #pluginpicker-options:focus {
@@ -1115,4 +1196,61 @@ ContextProgress {
     height: auto;
     color: ansi_bright_black;
     margin-top: 1;
+}
+
+FeedbackBar {
+    width: auto;
+    height: auto;
+    margin-left: 1;
+}
+
+.user-message.rewind-selected {
+    .user-message-content {
+        text-style: bold reverse;
+    }
+}
+
+#rewind-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
+#rewind-content {
+    width: 100%;
+    height: auto;
+}
+
+.rewind-title {
+    height: auto;
+    text-style: bold;
+    color: ansi_blue;
+}
+
+.rewind-option {
+    height: auto;
+    color: ansi_default;
+}
+
+.rewind-cursor-selected {
+    color: ansi_blue;
+    text-style: bold;
+}
+
+.rewind-option-unselected {
+    color: ansi_default;
+}
+
+.rewind-help {
+    height: auto;
+    color: ansi_bright_black;
+}
+
+#feedback-text {
+    width: auto;
+    height: auto;
+    color: ansi_default;
 }

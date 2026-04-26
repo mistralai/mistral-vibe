@@ -158,7 +158,7 @@ class TestMistralMapperPrepareMessage:
 
         assert isinstance(result, AssistantMessage)
         assert isinstance(result.content, list)
-        assert len(result.content) == 2
+        assert len(result.content) == 1
 
         think_chunk = result.content[0]
         assert isinstance(think_chunk, ThinkChunk)
@@ -167,10 +167,6 @@ class TestMistralMapperPrepareMessage:
         inner_chunk = think_chunk.thinking[0]
         assert isinstance(inner_chunk, TextChunk)
         assert inner_chunk.text == "Just thinking..."
-
-        text_chunk = result.content[1]
-        assert isinstance(text_chunk, TextChunk)
-        assert text_chunk.text == ""
 
 
 class TestGenericBackendReasoningContent:

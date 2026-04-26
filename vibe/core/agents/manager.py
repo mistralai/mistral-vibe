@@ -23,6 +23,7 @@ class AgentManager:
         self,
         config_getter: Callable[[], VibeConfig],
         initial_agent: str = BuiltinAgentName.DEFAULT,
+        allow_subagent: bool = False,
     ) -> None:
         self._config_getter = config_getter
         self._search_paths = self._compute_search_paths(self._config)
@@ -39,9 +40,18 @@ class AgentManager:
                 " ".join(str(p) for p in self._search_paths),
             )
 
-        self.active_profile = self._available.get(
-            initial_agent, self._available[BuiltinAgentName.DEFAULT]
-        )
+        profile = self._available.get(initial_agent)
+        if (
+            not allow_subagent
+            and profile is not None
+            and profile.agent_type != AgentType.AGENT
+        ):
+            raise ValueError(
+                f"Agent '{initial_agent}' is a {profile.agent_type} and cannot be used"
+                f" as the primary agent. Only agents of type 'agent' can be selected"
+                f" with --agent."
+            )
+        self.active_profile = profile or self._available[BuiltinAgentName.DEFAULT]
         self._cached_config: VibeConfig | None = None
 
     @property

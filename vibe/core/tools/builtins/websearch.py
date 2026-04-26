@@ -14,7 +14,6 @@ from mistralai.client.models import (
 )
 from pydantic import BaseModel, Field
 
-from vibe.core.config import Backend
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -24,7 +23,7 @@ from vibe.core.tools.base import (
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import ToolStreamEvent
+from vibe.core.types import Backend, ToolStreamEvent
 from vibe.core.utils import get_server_url_from_api_base
 
 if TYPE_CHECKING:

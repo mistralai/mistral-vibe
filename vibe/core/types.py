@@ -11,6 +11,7 @@ from uuid import uuid4
 
 if TYPE_CHECKING:
     from vibe.core.tools.base import BaseTool
+    from vibe.core.tools.permissions import RequiredPermission
 else:
     BaseTool = Any
 
@@ -23,6 +24,11 @@ from pydantic import (
     computed_field,
     model_validator,
 )
+
+
+class Backend(StrEnum):
+    MISTRAL = auto()
+    GENERIC = auto()
 
 
 class AgentStats(BaseModel):
@@ -209,8 +215,10 @@ class LLMMessage(BaseModel):
 
     role: Role
     content: Content | None = None
+    injected: bool = False
     reasoning_content: Content | None = None
     reasoning_signature: str | None = None
+    reasoning_message_id: str | None = None
     tool_calls: list[ToolCall] | None = None
     name: str | None = None
     tool_call_id: str | None = None
@@ -222,15 +230,20 @@ class LLMMessage(BaseModel):
         if isinstance(v, dict):
             v.setdefault("content", "")
             v.setdefault("role", "assistant")
-            if "message_id" not in v and v.get("role") != "tool":
+            if v.get("message_id") is None and v.get("role") != "tool":
                 v["message_id"] = str(uuid4())
+            if v.get("reasoning_message_id") is None and v.get("reasoning_content"):
+                v["reasoning_message_id"] = str(uuid4())
             return v
         role = str(getattr(v, "role", "assistant"))
+        reasoning_content = getattr(v, "reasoning_content", None)
         return {
             "role": role,
             "content": getattr(v, "content", ""),
-            "reasoning_content": getattr(v, "reasoning_content", None),
+            "reasoning_content": reasoning_content,
             "reasoning_signature": getattr(v, "reasoning_signature", None),
+            "reasoning_message_id": getattr(v, "reasoning_message_id", None)
+            or (str(uuid4()) if reasoning_content else None),
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
@@ -291,6 +304,8 @@ class LLMMessage(BaseModel):
             content=content,
             reasoning_content=reasoning_content,
             reasoning_signature=reasoning_signature,
+            reasoning_message_id=self.reasoning_message_id
+            or other.reasoning_message_id,
             tool_calls=list(tool_calls_map.values()) or None,
             name=self.name,
             tool_call_id=self.tool_call_id,
@@ -314,13 +329,18 @@ class LLMChunk(BaseModel):
     model_config = ConfigDict(frozen=True)
     message: LLMMessage
     usage: LLMUsage | None = None
+    correlation_id: str | None = None
 
     def __add__(self, other: LLMChunk) -> LLMChunk:
         if self.usage is None and other.usage is None:
             new_usage = None
         else:
             new_usage = (self.usage or LLMUsage()) + (other.usage or LLMUsage())
-        return LLMChunk(message=self.message + other.message, usage=new_usage)
+        return LLMChunk(
+            message=self.message + other.message,
+            usage=new_usage,
+            correlation_id=other.correlation_id or self.correlation_id,
+        )
 
 
 class BaseEvent(BaseModel, ABC):
@@ -377,6 +397,12 @@ class ToolStreamEvent(BaseEvent):
     tool_call_id: str
 
 
+class WaitingForInputEvent(BaseEvent):
+    task_id: str
+    label: str | None = None
+    predefined_answers: list[str] | None = None
+
+
 class CompactStartEvent(BaseEvent):
     current_context_tokens: int
     threshold: int
@@ -398,6 +424,12 @@ class CompactEndEvent(BaseEvent):
     tool_call_id: str
 
 
+class AgentProfileChangedEvent(BaseEvent):
+    """Emitted when the active agent profile changes during a turn."""
+
+    agent_name: str
+
+
 class OutputFormat(StrEnum):
     TEXT = auto()
     JSON = auto()
@@ -405,8 +437,10 @@ class OutputFormat(StrEnum):
 
 
 type ApprovalCallback = Callable[
-    [str, BaseModel, str], Awaitable[tuple[ApprovalResponse, str | None]]
+    [str, BaseModel, str, list[RequiredPermission] | None],
+    Awaitable[tuple[ApprovalResponse, str | None]],
 ]
+
 
 type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
 
@@ -421,6 +455,7 @@ class MessageList(Sequence[LLMMessage]):
     ) -> None:
         self._data: list[LLMMessage] = list(initial) if initial else []
         self._observer = observer
+        self._reset_hooks: list[Callable[[], None]] = []
         self._silent = False
         if self._observer:
             for msg in self._data:
@@ -441,9 +476,25 @@ class MessageList(Sequence[LLMMessage]):
         for msg in msgs:
             self.append(msg)
 
+    def on_reset(self, hook: Callable[[], None]) -> None:
+        """Register a callback that fires whenever the list is reset."""
+        self._reset_hooks.append(hook)
+
     def reset(self, new: list[LLMMessage]) -> None:
         """Replace contents silently (never notifies)."""
         self._data = list(new)
+        for hook in self._reset_hooks:
+            hook()
+
+    def update_system_prompt(self, new: str) -> None:
+        """Update the system prompt in place.
+
+        Called from a background thread during deferred init.  A single
+        list-item assignment is atomic under CPython's GIL, and the
+        ``@requires_init`` decorator ensures no ``act()`` call reads the
+        prompt concurrently, so no additional lock is needed here.
+        """
+        self._data[0] = LLMMessage(role=Role.system, content=new)
 
     @contextmanager
     def silent(self) -> Iterator[None]:

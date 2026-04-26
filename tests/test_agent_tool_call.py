@@ -13,7 +13,7 @@ from tests.stubs.fake_tool import FakeTool
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import VibeConfig
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
+from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.builtins.todo import TodoItem
 from vibe.core.types import (
     ApprovalCallback,
@@ -37,7 +37,7 @@ async def act_and_collect_events(agent_loop: AgentLoop, prompt: str) -> list[Bas
 def make_config(todo_permission: ToolPermission = ToolPermission.ALWAYS) -> VibeConfig:
     return build_test_vibe_config(
         enabled_tools=["todo"],
-        tools={"todo": BaseToolConfig(permission=todo_permission)},
+        tools={"todo": {"permission": todo_permission.value}},
         system_prompt_id="tests",
         include_project_context=False,
         include_prompt_detail=False,
@@ -166,7 +166,7 @@ async def test_tool_call_requires_approval_if_not_auto_approved(
 @pytest.mark.asyncio
 async def test_tool_call_approved_by_callback(telemetry_events: list[dict]) -> None:
     async def approval_callback(
-        _tool_name: str, _args: BaseModel, _tool_call_id: str
+        _tool_name: str, _args: BaseModel, _tool_call_id: str, _rp: list | None = None
     ) -> tuple[ApprovalResponse, str | None]:
         return (ApprovalResponse.YES, None)
 
@@ -210,7 +210,7 @@ async def test_tool_call_rejected_when_auto_approve_disabled_and_rejected_by_cal
     custom_feedback = "User declined tool execution"
 
     async def approval_callback(
-        _tool_name: str, _args: BaseModel, _tool_call_id: str
+        _tool_name: str, _args: BaseModel, _tool_call_id: str, _rp: list | None = None
     ) -> tuple[ApprovalResponse, str | None]:
         return (ApprovalResponse.NO, custom_feedback)
 
@@ -299,14 +299,14 @@ async def test_approval_always_sets_tool_permission_for_subsequent_calls() -> No
     agent_ref: AgentLoop | None = None
 
     async def approval_callback(
-        tool_name: str, _args: BaseModel, _tool_call_id: str
+        tool_name: str, _args: BaseModel, _tool_call_id: str, _rp: list | None = None
     ) -> tuple[ApprovalResponse, str | None]:
         callback_invocations.append(tool_name)
         # Set permission to ALWAYS for this tool (simulating the new behavior)
         assert agent_ref is not None
         if tool_name not in agent_ref.config.tools:
-            agent_ref.config.tools[tool_name] = BaseToolConfig()
-        agent_ref.config.tools[tool_name].permission = ToolPermission.ALWAYS
+            agent_ref.config.tools[tool_name] = {}
+        agent_ref.config.tools[tool_name]["permission"] = "always"
         return (ApprovalResponse.YES, None)
 
     agent_loop = make_agent_loop(
@@ -517,26 +517,6 @@ async def test_fill_missing_tool_responses_inserts_placeholders() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_assistant_after_tool_appends_understood() -> None:
-    agent_loop = build_test_agent_loop(
-        config=make_config(),
-        agent_name=BuiltinAgentName.AUTO_APPROVE,
-        backend=FakeBackend(mock_llm_chunk(content="ok")),
-    )
-    tool_msg = LLMMessage(
-        role=Role.tool, tool_call_id="tc_z", name="todo", content="Done"
-    )
-    agent_loop.messages.reset([agent_loop.messages[0], tool_msg])
-
-    await act_and_collect_events(agent_loop, "Next")
-
-    # find the seeded tool message and ensure the next message is "Understood."
-    idx = next(i for i, m in enumerate(agent_loop.messages) if m.role == Role.tool)
-    assert agent_loop.messages[idx + 1].role == Role.assistant
-    assert agent_loop.messages[idx + 1].content == "Understood."
-
-
-@pytest.mark.asyncio
 async def test_parallel_tool_calls_produce_correct_events(
     telemetry_events: list[dict],
 ) -> None:
@@ -596,7 +576,7 @@ async def test_parallel_tool_calls_with_approval_callback(
     approval_calls: list[str] = []
 
     async def approval_callback(
-        tool_name: str, _args: BaseModel, tool_call_id: str
+        tool_name: str, _args: BaseModel, tool_call_id: str, _rp: list | None = None
     ) -> tuple[ApprovalResponse, str | None]:
         approval_calls.append(tool_call_id)
         return (ApprovalResponse.YES, None)
@@ -633,14 +613,14 @@ async def test_parallel_tool_calls_with_approval_callback(
 
 @pytest.mark.asyncio
 async def test_parallel_approvals_can_run_concurrently() -> None:
-    """The core does not serialize approval callbacks — that is a CLI-layer concern.
-    Parallel tool calls may invoke the approval callback concurrently.
+    """Approval callbacks are serialized by _approval_lock so that an 'always allow'
+    grant from the first call is visible to subsequent parallel calls.
     """
     concurrency = 0
     max_concurrency = 0
 
     async def approval_callback(
-        tool_name: str, _args: BaseModel, tool_call_id: str
+        tool_name: str, _args: BaseModel, tool_call_id: str, _rp: list | None = None
     ) -> tuple[ApprovalResponse, str | None]:
         nonlocal concurrency, max_concurrency
         concurrency += 1
@@ -662,7 +642,7 @@ async def test_parallel_approvals_can_run_concurrently() -> None:
 
     await act_and_collect_events(agent_loop, "Go")
 
-    assert max_concurrency > 1
+    assert max_concurrency == 1
     assert agent_loop.stats.tool_calls_agreed == 3
     assert agent_loop.stats.tool_calls_succeeded == 3
 
@@ -674,7 +654,7 @@ async def test_parallel_mixed_approval_and_rejection(
     """One tool approved, one rejected — both should produce correct events."""
 
     async def approval_callback(
-        tool_name: str, _args: BaseModel, tool_call_id: str
+        tool_name: str, _args: BaseModel, tool_call_id: str, _rp: list | None = None
     ) -> tuple[ApprovalResponse, str | None]:
         if tool_call_id == "call_yes":
             return (ApprovalResponse.YES, None)
@@ -813,7 +793,7 @@ async def test_parallel_all_permission_never() -> None:
     approval_calls: list[str] = []
 
     async def approval_callback(
-        tool_name: str, _args: BaseModel, tool_call_id: str
+        tool_name: str, _args: BaseModel, tool_call_id: str, _rp: list | None = None
     ) -> tuple[ApprovalResponse, str | None]:
         approval_calls.append(tool_call_id)
         return (ApprovalResponse.YES, None)

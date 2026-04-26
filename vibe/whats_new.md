@@ -1,4 +1,3 @@
-# What's new in v2.5.0
-- **Lean mode**: Setup a dedicated theorem proving agent powered by leanstral with /leanstall
-- **Parallel tool execution**: Parallel tool calls are sped up by being ran at the same time
-- **Voice mode**: Real-time transcription support with /voice
+# What's new in v2.8.1
+
+- **Builtin skills system**: Added self-awareness skill for enhanced functionality

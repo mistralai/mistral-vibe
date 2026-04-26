@@ -19,10 +19,12 @@ from vibe.core.tools.builtins.search_replace import (
     SearchReplaceResult,
 )
 from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.utils.io import ReadSafeResult
 
 
 class AcpSearchReplaceState(BaseToolState, AcpToolState):
     file_backup_content: str | None = None
+    file_backup_encoding: str = "utf-8"
 
 
 class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
@@ -35,7 +37,7 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
     def _get_tool_state_class(cls) -> type[AcpSearchReplaceState]:
         return AcpSearchReplaceState
 
-    async def _read_file(self, file_path: Path) -> str:
+    async def _read_file(self, file_path: Path) -> ReadSafeResult:
         client, session_id, _ = self._load_state()
 
         await self._send_in_progress_session_update()
@@ -48,7 +50,8 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
             raise ToolError(f"Unexpected error reading {file_path}: {e}") from e
 
         self.state.file_backup_content = response.content
-        return response.content
+        self.state.file_backup_encoding = "utf-8"
+        return ReadSafeResult(response.content, "utf-8")
 
     async def _backup_file(self, file_path: Path) -> None:
         if self.state.file_backup_content is None:
@@ -57,9 +60,10 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
         await self._write_file(
             file_path.with_suffix(file_path.suffix + ".bak"),
             self.state.file_backup_content,
+            self.state.file_backup_encoding,
         )
 
-    async def _write_file(self, file_path: Path, content: str) -> None:
+    async def _write_file(self, file_path: Path, content: str, encoding: str) -> None:
         client, session_id, _ = self._load_state()
 
         try:

@@ -10,17 +10,19 @@ from typing import ClassVar, NamedTuple, final
 import anyio
 from pydantic import BaseModel, Field
 
+from vibe.core.rewind.manager import FileSnapshot
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
     BaseToolState,
     InvokeContext,
     ToolError,
-    ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
+from vibe.core.utils.io import ReadSafeResult, read_safe_async
 
 SEARCH_REPLACE_BLOCK_RE = re.compile(
     r"<{5,} SEARCH\r?\n(.*?)\r?\n?={5,}\r?\n(.*?)\r?\n?>{5,} REPLACE", flags=re.DOTALL
@@ -65,6 +67,10 @@ class SearchReplaceResult(BaseModel):
 
 
 class SearchReplaceConfig(BaseToolConfig):
+    sensitive_patterns: list[str] = Field(
+        default=["**/.env", "**/.env.*"],
+        description="File patterns that trigger ASK even when permission is ALWAYS.",
+    )
     max_content_size: int = 100_000
     create_backup: bool = False
     fuzzy_threshold: float = 0.9
@@ -93,9 +99,10 @@ class SearchReplace(
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if isinstance(event.result, SearchReplaceResult):
+            path_name = Path(event.result.file).name
             return ToolResultDisplay(
                 success=True,
-                message=f"Applied {event.result.blocks_applied} block{'' if event.result.blocks_applied == 1 else 's'}",
+                message=f"Applied {event.result.blocks_applied} block{'' if event.result.blocks_applied == 1 else 's'} to {path_name}",
                 warnings=event.result.warnings,
             )
 
@@ -105,12 +112,17 @@ class SearchReplace(
     def get_status_text(cls) -> str:
         return "Editing files"
 
-    def resolve_permission(self, args: SearchReplaceArgs) -> ToolPermission | None:
+    def get_file_snapshot(self, args: SearchReplaceArgs) -> FileSnapshot | None:
+        return self.get_file_snapshot_for_path(args.file_path)
+
+    def resolve_permission(self, args: SearchReplaceArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.file_path,
+            tool_name=self.get_name(),
             allowlist=self.config.allowlist,
             denylist=self.config.denylist,
             config_permission=self.config.permission,
+            sensitive_patterns=self.config.sensitive_patterns,
         )
 
     @final
@@ -119,7 +131,8 @@ class SearchReplace(
     ) -> AsyncGenerator[ToolStreamEvent | SearchReplaceResult, None]:
         file_path, search_replace_blocks = self._prepare_and_validate_args(args)
 
-        original_content = await self._read_file(file_path)
+        decoded = await self._read_file(file_path)
+        original_content = decoded.text
 
         block_result = self._apply_blocks(
             original_content,
@@ -154,7 +167,7 @@ class SearchReplace(
             except Exception:
                 pass
 
-            await self._write_file(file_path, modified_content)
+            await self._write_file(file_path, modified_content, decoded.encoding)
 
         yield SearchReplaceResult(
             file=str(file_path),
@@ -209,26 +222,29 @@ class SearchReplace(
 
         return file_path, search_replace_blocks
 
-    async def _read_file(self, file_path: Path) -> str:
+    async def _read_file(self, file_path: Path) -> ReadSafeResult:
         try:
-            async with await anyio.Path(file_path).open(encoding="utf-8") as f:
-                return await f.read()
-        except UnicodeDecodeError as e:
-            raise ToolError(f"Unicode decode error reading {file_path}: {e}") from e
+            return await read_safe_async(file_path, raise_on_error=True)
         except PermissionError:
             raise ToolError(f"Permission denied reading file: {file_path}")
+        except OSError as e:
+            raise ToolError(f"OS error reading {file_path}: {e}") from e
         except Exception as e:
             raise ToolError(f"Unexpected error reading {file_path}: {e}") from e
 
     async def _backup_file(self, file_path: Path) -> None:
         shutil.copy2(file_path, file_path.with_suffix(file_path.suffix + ".bak"))
 
-    async def _write_file(self, file_path: Path, content: str) -> None:
+    async def _write_file(self, file_path: Path, content: str, encoding: str) -> None:
         try:
             async with await anyio.Path(file_path).open(
-                mode="w", encoding="utf-8"
+                mode="w", encoding=encoding
             ) as f:
                 await f.write(content)
+        except UnicodeEncodeError as e:
+            raise ToolError(
+                f"Cannot encode patched content for {file_path} using {encoding!r}: {e}"
+            ) from e
         except PermissionError:
             raise ToolError(f"Permission denied writing to file: {file_path}")
         except OSError as e:

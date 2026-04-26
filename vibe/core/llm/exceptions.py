@@ -6,9 +6,12 @@ import json
 from typing import Any
 
 import httpx
+from mistralai.client.errors import SDKError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from vibe.core.types import AvailableTool, LLMMessage, StrToolChoice
+
+type HttpError = SDKError | httpx.HTTPStatusError
 
 
 class ErrorDetail(BaseModel):
@@ -58,9 +61,13 @@ class BackendError(RuntimeError):
             return "Rate limit exceeded. Please wait a moment before trying again."
 
         rid = self.headers.get("x-request-id") or self.headers.get("request-id")
-        status_label = (
-            f"{self.status} {HTTPStatus(self.status).phrase}" if self.status else "N/A"
-        )
+        if self.status:
+            try:
+                status_label = f"{self.status} {HTTPStatus(self.status).phrase}"
+            except ValueError:
+                status_label = str(self.status)
+        else:
+            status_label = "N/A"
         parts = [
             f"LLM backend error [{self.provider}]",
             f"  status: {status_label}",
@@ -111,25 +118,22 @@ class BackendErrorBuilder:
         *,
         provider: str,
         endpoint: str,
-        response: httpx.Response,
-        headers: Mapping[str, str] | None,
+        error: HttpError,
         model: str,
         messages: Sequence[LLMMessage],
         temperature: float,
         has_tools: bool,
         tool_choice: StrToolChoice | AvailableTool | None,
     ) -> BackendError:
-        try:
-            body_text = response.text
-        except Exception:  # On streaming responses, we can't read the body
-            body_text = None
+        response = error.raw_response if isinstance(error, SDKError) else error.response
+        body_text = cls._read_response_body(response, error)
 
         return BackendError(
             provider=provider,
             endpoint=endpoint,
             status=response.status_code,
             reason=response.reason_phrase,
-            headers=headers or {},
+            headers=response.headers,
             body_text=body_text,
             parsed_error=cls._parse_provider_error(body_text),
             model=model,
@@ -164,6 +168,17 @@ class BackendErrorBuilder:
                 model, messages, temperature, has_tools, tool_choice
             ),
         )
+
+    @staticmethod
+    def _read_response_body(response: httpx.Response, error: HttpError) -> str | None:
+        try:
+            response.read()
+            return response.text
+        except Exception:
+            pass
+        if body := getattr(error, "body", None):
+            return body
+        return str(error)
 
     @staticmethod
     def _parse_provider_error(body_text: str | None) -> str | None:

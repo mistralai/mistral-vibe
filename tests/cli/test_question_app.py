@@ -278,6 +278,65 @@ class TestQuestionAppActions:
         assert app._get_other_text(0) == "Text for Q1"
         assert app._get_other_text(1) == ""
 
+    def test_switch_question_restores_cursor_to_answered_option(
+        self, multi_question_args
+    ):
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(multi_question_args)
+        # Answer question 0 with MongoDB (index 1)
+        app.answers[0] = ("MongoDB", False)
+
+        # Switch away then back
+        app._switch_question(1)
+        app._switch_question(0)
+
+        assert app.selected_option == 1
+
+    def test_switch_question_restores_cursor_to_other(self, multi_question_args):
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(multi_question_args)
+        # Answer question 0 with Other
+        app.answers[0] = ("Custom DB", True)
+
+        app._switch_question(1)
+        app._switch_question(0)
+
+        assert app.selected_option == len(app.questions[0].options)
+        assert app._is_other_selected
+
+    def test_switch_question_defaults_to_zero_if_unanswered(self, multi_question_args):
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(multi_question_args)
+
+        app._switch_question(1)
+        assert app.selected_option == 0
+
+    def test_switch_question_restores_cursor_multi_select(self):
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        args = AskUserQuestionArgs(
+            questions=[
+                Question(
+                    question="Q1?", options=[Choice(label="A"), Choice(label="B")]
+                ),
+                Question(
+                    question="Q2?",
+                    options=[Choice(label="X"), Choice(label="Y"), Choice(label="Z")],
+                    multi_select=True,
+                ),
+            ]
+        )
+        app = QuestionApp(args)
+        # Select Y (1) and Z (2) for question 1
+        app.multi_selections[1] = {1, 2}
+
+        app._switch_question(1)
+
+        assert app.selected_option == 1  # min of {1, 2}
+
 
 class TestMultiSelectOtherBehavior:
     def test_multi_select_other_does_not_advance_on_save(self, multi_select_args):
@@ -487,6 +546,152 @@ class TestMultiSelectAutoSelect:
         assert 0 in app.multi_selections[0]
         assert 2 in app.multi_selections[0]
         assert app._other_option_idx in app.multi_selections[0]
+
+
+class TestNumberKeyShortcuts:
+    def test_number_key_selects_predefined_option(self, single_question_args):
+        from unittest.mock import patch
+
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        app.selected_option = 0
+
+        # Press "2" -> should select MongoDB (index 1) and save
+        event = events.Key("2", "2")
+        with patch.object(app, "_advance_or_submit"):
+            app._handle_number_key(event)
+
+        assert app.selected_option == 1
+        assert 0 in app.answers
+        answer_text, is_other = app.answers[0]
+        assert answer_text == "MongoDB"
+        assert is_other is False
+
+    def test_number_key_first_option(self, single_question_args):
+        from unittest.mock import patch
+
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+
+        event = events.Key("1", "1")
+        with patch.object(app, "_advance_or_submit"):
+            app._handle_number_key(event)
+
+        assert app.selected_option == 0
+        assert 0 in app.answers
+        answer_text, _ = app.answers[0]
+        assert answer_text == "PostgreSQL"
+
+    def test_number_key_other_empty_focuses(self, single_question_args):
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        # Other is option index 2 -> key "3"
+        event = events.Key("3", "3")
+        app._handle_number_key(event)
+
+        # Should navigate to Other but not validate (no text)
+        assert app.selected_option == 2
+        assert app._is_other_selected is True
+        assert 0 not in app.answers
+
+    def test_number_key_other_with_text_focuses_without_validating(
+        self, single_question_args
+    ):
+        from unittest.mock import MagicMock
+
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        app.other_texts[0] = "SQLite"
+        app.other_input = MagicMock()
+        app.other_input.has_focus = False
+
+        event = events.Key("3", "3")
+        app._handle_number_key(event)
+
+        # Should navigate to Other but not validate — just focus the input
+        assert app.selected_option == 2
+        assert app._is_other_selected is True
+        assert 0 not in app.answers
+
+    def test_number_key_out_of_range_ignored(self, single_question_args):
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        # 3 options total (2 + Other), so "4" is out of range
+        event = events.Key("4", "4")
+        app._handle_number_key(event)
+
+        assert app.selected_option == 0
+        assert 0 not in app.answers
+
+    def test_number_key_zero_ignored(self, single_question_args):
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        event = events.Key("0", "0")
+        app._handle_number_key(event)
+
+        assert app.selected_option == 0
+        assert 0 not in app.answers
+
+    def test_number_key_ignored_when_input_focused(self, single_question_args):
+        from unittest.mock import MagicMock
+
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        app.other_input = MagicMock()
+        app.other_input.has_focus = True
+
+        event = events.Key("1", "1")
+        app._handle_number_key(event)
+
+        assert app.selected_option == 0
+        assert 0 not in app.answers
+
+    def test_number_key_multi_select_toggles(self, multi_select_args):
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(multi_select_args)
+
+        # Press "1" in multi-select -> should toggle Auth
+        event = events.Key("1", "1")
+        app._handle_number_key(event)
+
+        assert 0 in app.multi_selections.get(0, set())
+
+    def test_number_key_multi_select_submit_ignored(self, multi_select_args):
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(multi_select_args)
+        # Submit is at index 4 -> key "5"
+        event = events.Key("5", "5")
+        app._handle_number_key(event)
+
+        # Should not navigate to submit
+        assert app.selected_option == 0
 
 
 class TestMultiSelectSubmit:

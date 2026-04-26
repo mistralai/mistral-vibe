@@ -13,7 +13,8 @@ from vibe.cli.plan_offer.decide_plan_offer import (
     resolve_api_key_for_plan,
 )
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIResponse
-from vibe.core.config import Backend, ProviderConfig
+from vibe.core.config import ProviderConfig
+from vibe.core.types import Backend
 
 
 @pytest.fixture

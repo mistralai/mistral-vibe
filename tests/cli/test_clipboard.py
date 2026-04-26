@@ -38,6 +38,12 @@ class MockWidget:
         return self._get_selection_result
 
 
+class MockWidgetNoScreen:
+    @property
+    def text_selection(self) -> object:
+        raise RuntimeError("node has no screen")
+
+
 @pytest.fixture
 def mock_app() -> App:
     app = MagicMock(spec=App)
@@ -73,6 +79,7 @@ def mock_app() -> App:
             ],
             "empty text",
         ),
+        ([MockWidgetNoScreen()], "widget with no screen (text_selection raises)"),
     ],
 )
 def test_copy_selection_to_clipboard_no_notification(
@@ -85,6 +92,22 @@ def test_copy_selection_to_clipboard_no_notification(
     result = copy_selection_to_clipboard(mock_app)
     assert result is None
     mock_app.notify.assert_not_called()
+
+
+@patch("vibe.cli.clipboard._copy_to_clipboard")
+def test_copy_selection_skips_detached_widget_and_collects_valid(
+    mock_copy_to_clipboard: MagicMock, mock_app: MagicMock
+) -> None:
+    detached = MockWidgetNoScreen()
+    valid = MockWidget(
+        text_selection=SimpleNamespace(), get_selection_result=("valid text", None)
+    )
+    mock_app.query.return_value = [detached, valid]
+
+    result = copy_selection_to_clipboard(mock_app)
+
+    assert result == "valid text"
+    mock_copy_to_clipboard.assert_called_once_with("valid text")
 
 
 @patch("vibe.cli.clipboard._copy_to_clipboard")
@@ -101,10 +124,7 @@ def test_copy_selection_to_clipboard_success(
     assert result == "selected text"
     mock_copy_to_clipboard.assert_called_once_with("selected text")
     mock_app.notify.assert_called_once_with(
-        '"selected text" copied to clipboard',
-        severity="information",
-        timeout=2,
-        markup=False,
+        "Selection copied to clipboard", severity="information", timeout=2, markup=False
     )
 
 
@@ -147,30 +167,11 @@ def test_copy_selection_to_clipboard_multiple_widgets(mock_app: MagicMock) -> No
             "first selection\nsecond selection"
         )
         mock_app.notify.assert_called_once_with(
-            '"first selection\u23cesecond selection" copied to clipboard',
+            "Selection copied to clipboard",
             severity="information",
             timeout=2,
             markup=False,
         )
-
-
-def test_copy_selection_to_clipboard_preview_shortening(mock_app: MagicMock) -> None:
-    long_text = "a" * 100
-    widget = MockWidget(
-        text_selection=SimpleNamespace(), get_selection_result=(long_text, None)
-    )
-    mock_app.query.return_value = [widget]
-
-    with patch("vibe.cli.clipboard._copy_to_clipboard") as mock_copy_to_clipboard:
-        result = copy_selection_to_clipboard(mock_app)
-        assert result == long_text
-
-        mock_copy_to_clipboard.assert_called_once_with(long_text)
-        notification_call = mock_app.notify.call_args
-        assert notification_call is not None
-        assert '"' in notification_call[0][0]
-        assert "copied to clipboard" in notification_call[0][0]
-        assert len(notification_call[0][0]) < len(long_text) + 30
 
 
 def test_copy_to_clipboard_stops_after_verified_copy() -> None:

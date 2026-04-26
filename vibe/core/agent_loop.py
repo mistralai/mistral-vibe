@@ -3,21 +3,26 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Generator
 import contextlib
+import copy
 from enum import StrEnum, auto
+from functools import wraps
 from http import HTTPStatus
-import json
+import inspect
+import os
 from pathlib import Path
+import threading
 from threading import Thread
 import time
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
+from opentelemetry import trace
 from pydantic import BaseModel
 
-from vibe.cli.terminal_setup import detect_terminal
+from vibe.cli.terminal_detect import detect_terminal
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
-from vibe.core.config import Backend, ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.exceptions import BackendError
 from vibe.core.llm.format import (
@@ -45,6 +50,7 @@ from vibe.core.middleware import (
 )
 from vibe.core.plan_session import PlanSession
 from vibe.core.prompts import UtilityPrompt
+from vibe.core.rewind import RewindManager
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.session.session_migration import migrate_sessions_entrypoint
 from vibe.core.skills.manager import SkillManager
@@ -52,17 +58,25 @@ from vibe.core.system_prompt import get_universal_system_prompt
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.tools.base import (
     BaseTool,
-    BaseToolConfig,
     InvokeContext,
     ToolError,
     ToolPermission,
     ToolPermissionError,
 )
+from vibe.core.tools.connectors import ConnectorRegistry, connectors_enabled
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.mcp import MCPRegistry
 from vibe.core.tools.mcp_sampling import MCPSamplingHandler
+from vibe.core.tools.permissions import (
+    ApprovedRule,
+    PermissionContext,
+    RequiredPermission,
+)
+from vibe.core.tools.utils import wildcard_match
+from vibe.core.tracing import agent_span, set_tool_result, tool_span
 from vibe.core.trusted_folders import has_agents_md_file
 from vibe.core.types import (
+    AgentProfileChangedEvent,
     AgentStats,
     ApprovalCallback,
     ApprovalResponse,
@@ -90,6 +104,7 @@ from vibe.core.utils import (
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
     CancellationReason,
+    get_server_url_from_api_base,
     get_user_agent,
     get_user_cancellation_message,
     is_user_cancellation_event,
@@ -104,7 +119,6 @@ except ImportError:
     _TeleportService = None
 
 if TYPE_CHECKING:
-    from vibe.core.teleport.nuage import TeleportSession
     from vibe.core.teleport.teleport import TeleportService
     from vibe.core.teleport.types import TeleportPushResponseEvent, TeleportYieldEvent
 
@@ -140,10 +154,38 @@ def _should_raise_rate_limit_error(e: Exception) -> bool:
     return isinstance(e, BackendError) and e.status == HTTPStatus.TOO_MANY_REQUESTS
 
 
+def requires_init(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator that awaits deferred initialization before executing the method."""
+    if inspect.isasyncgenfunction(fn):
+
+        @wraps(fn)
+        async def gen_wrapper(self: AgentLoop, *args: Any, **kwargs: Any) -> Any:
+            await self.wait_until_ready()
+            agen = fn(self, *args, **kwargs)
+            sent: Any = None
+            try:
+                while True:
+                    sent = yield await agen.asend(sent)
+            except StopAsyncIteration:
+                return
+            finally:
+                await agen.aclose()
+
+        return gen_wrapper
+
+    @wraps(fn)
+    async def wrapper(self: AgentLoop, *args: Any, **kwargs: Any) -> Any:
+        await self.wait_until_ready()
+        return await fn(self, *args, **kwargs)
+
+    return wrapper
+
+
 class AgentLoop:
     def __init__(
         self,
         config: VibeConfig,
+        *,
         agent_name: str = BuiltinAgentName.DEFAULT,
         message_observer: Callable[[LLMMessage], None] | None = None,
         max_turns: int | None = None,
@@ -151,20 +193,35 @@ class AgentLoop:
         backend: BackendLike | None = None,
         enable_streaming: bool = False,
         entrypoint_metadata: EntrypointMetadata | None = None,
+        is_subagent: bool = False,
+        defer_heavy_init: bool = False,
     ) -> None:
         self._base_config = config
+
+        self._defer_heavy_init = defer_heavy_init
+        self._deferred_init_thread: threading.Thread | None = None
+        self._deferred_init_lock = threading.Lock()
+        self._init_error: Exception | None = None
+
+        self.mcp_registry = MCPRegistry()
+        self.connector_registry = self._create_connector_registry()
+        self.agent_manager = AgentManager(
+            lambda: self._base_config,
+            initial_agent=agent_name,
+            allow_subagent=is_subagent,
+        )
+        self.tool_manager = ToolManager(
+            lambda: self.config,
+            mcp_registry=self.mcp_registry,
+            connector_registry=self.connector_registry,
+            defer_mcp=defer_heavy_init,
+        )
+        self.skill_manager = SkillManager(lambda: self.config)
+        self.message_observer = message_observer
         self._max_turns = max_turns
         self._max_price = max_price
         self._plan_session = PlanSession()
 
-        self.agent_manager = AgentManager(
-            lambda: self._base_config, initial_agent=agent_name
-        )
-        self._mcp_registry = MCPRegistry()
-        self.tool_manager = ToolManager(
-            lambda: self.config, mcp_registry=self._mcp_registry
-        )
-        self.skill_manager = SkillManager(lambda: self.config)
         self.format_handler = APIToolFormatHandler()
 
         self.backend_factory = lambda: backend or self._select_backend()
@@ -173,18 +230,26 @@ class AgentLoop:
             backend_getter=lambda: self.backend, config_getter=lambda: self.config
         )
 
-        self.message_observer = message_observer
         self.enable_streaming = enable_streaming
         self.middleware_pipeline = MiddlewarePipeline()
         self._setup_middleware()
 
         system_prompt = get_universal_system_prompt(
-            self.tool_manager, self.config, self.skill_manager, self.agent_manager
+            self.tool_manager,
+            self.config,
+            self.skill_manager,
+            self.agent_manager,
+            include_git_status=not defer_heavy_init,
         )
         system_message = LLMMessage(role=Role.system, content=system_prompt)
         self.messages = MessageList(initial=[system_message], observer=message_observer)
 
         self.stats = AgentStats()
+        self.approval_callback: ApprovalCallback | None = None
+        self.user_input_callback: UserInputCallback | None = None
+        self.entrypoint_metadata = entrypoint_metadata
+        self.session_id = str(uuid4())
+
         try:
             active_model = config.get_active_model()
             self.stats.input_price_per_million = active_model.input_price
@@ -192,26 +257,77 @@ class AgentLoop:
         except ValueError:
             pass
 
-        self.approval_callback: ApprovalCallback | None = None
-        self.user_input_callback: UserInputCallback | None = None
-
-        self.entrypoint_metadata = entrypoint_metadata
-        self.session_id = str(uuid4())
         self._current_user_message_id: str | None = None
+        self._is_user_prompt_call: bool = False
+
+        self._session_rules: list[ApprovedRule] = []
+        self._approval_lock = asyncio.Lock()
 
         self.telemetry_client = TelemetryClient(
             config_getter=lambda: self.config, session_id_getter=lambda: self.session_id
         )
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
+        self.rewind_manager = RewindManager(
+            messages=self.messages,
+            save_messages=self._save_messages,
+            reset_session=self._reset_session,
+        )
         self._teleport_service: TeleportService | None = None
 
-        thread = Thread(
+        Thread(
             target=migrate_sessions_entrypoint,
             args=(config.session_logging,),
             daemon=True,
             name="migrate_sessions",
-        )
-        thread.start()
+        ).start()
+
+        if defer_heavy_init:
+            self._start_deferred_init()
+
+    def _start_deferred_init(self) -> threading.Thread:
+        """Spawn a daemon thread that finishes deferred heavy I/O once."""
+        with self._deferred_init_lock:
+            if self._deferred_init_thread is not None:
+                return self._deferred_init_thread
+
+            thread = threading.Thread(
+                target=self._complete_init, daemon=True, name="agent_loop_init"
+            )
+            self._deferred_init_thread = thread
+            thread.start()
+            return thread
+
+    @property
+    def is_initialized(self) -> bool:
+        """Whether deferred initialization has completed (successfully or not)."""
+        if not self._defer_heavy_init:
+            return True
+        thread = self._deferred_init_thread
+        return thread is not None and not thread.is_alive()
+
+    def _complete_init(self) -> None:
+        """Run deferred heavy I/O: MCP and connector discovery.
+
+        Intended to be called from a background thread when
+        ``defer_heavy_init=True`` was passed to ``__init__``.
+        """
+        try:
+            self.tool_manager.integrate_all(raise_on_mcp_failure=True)
+            system_prompt = get_universal_system_prompt(
+                self.tool_manager, self.config, self.skill_manager, self.agent_manager
+            )
+            self.messages.update_system_prompt(system_prompt)
+        except Exception as exc:
+            self._init_error = exc
+
+    async def wait_until_ready(self) -> None:
+        """Await deferred initialization from an async context."""
+        if not self._defer_heavy_init:
+            return
+        thread = self._start_deferred_init()
+        await asyncio.to_thread(thread.join)
+        if err := self._init_error:
+            raise copy.copy(err).with_traceback(err.__traceback__)
 
     @property
     def agent_profile(self) -> AgentProfile:
@@ -229,6 +345,16 @@ class AgentLoop:
     def auto_approve(self) -> bool:
         return self.config.auto_approve
 
+    def refresh_config(self) -> None:
+        self._base_config = VibeConfig.load()
+        self.agent_manager.invalidate_config()
+
+    def set_approval_callback(self, callback: ApprovalCallback) -> None:
+        self.approval_callback = callback
+
+    def set_user_input_callback(self, callback: UserInputCallback) -> None:
+        self.user_input_callback = callback
+
     def set_tool_permission(
         self, tool_name: str, permission: ToolPermission, save_permanently: bool = False
     ) -> None:
@@ -238,20 +364,55 @@ class AgentLoop:
             })
 
         if tool_name not in self.config.tools:
-            self.config.tools[tool_name] = BaseToolConfig()
+            self.config.tools[tool_name] = {}
 
-        self.config.tools[tool_name].permission = permission
-        self.tool_manager.invalidate_tool(tool_name)
+        self.config.tools[tool_name]["permission"] = permission.value
 
-    def refresh_config(self) -> None:
-        self._base_config = VibeConfig.load()
-        self.agent_manager.invalidate_config()
+    def _add_session_rule(self, rule: ApprovedRule) -> None:
+        self._session_rules.append(rule)
+
+    def _is_permission_covered(self, tool_name: str, rp: RequiredPermission) -> bool:
+        return any(
+            rule.tool_name == tool_name
+            and rule.scope == rp.scope
+            and wildcard_match(rp.invocation_pattern, rule.session_pattern)
+            for rule in self._session_rules
+        )
+
+    def approve_always(
+        self,
+        tool_name: str,
+        required_permissions: list[RequiredPermission] | None,
+        save_permanently: bool = False,
+    ) -> None:
+        """Handle 'Allow Always' approval: add session rules or set tool-level permission."""
+        if required_permissions:
+            for rp in required_permissions:
+                self._add_session_rule(
+                    ApprovedRule(
+                        tool_name=tool_name,
+                        scope=rp.scope,
+                        session_pattern=rp.session_pattern,
+                    )
+                )
+        else:
+            self.set_tool_permission(
+                tool_name, ToolPermission.ALWAYS, save_permanently=save_permanently
+            )
 
     def emit_new_session_telemetry(self) -> None:
         entrypoint = (
             self.entrypoint_metadata.agent_entrypoint
             if self.entrypoint_metadata
             else "unknown"
+        )
+        client_name = (
+            self.entrypoint_metadata.client_name if self.entrypoint_metadata else None
+        )
+        client_version = (
+            self.entrypoint_metadata.client_version
+            if self.entrypoint_metadata
+            else None
         )
         has_agents_md = has_agents_md_file(Path.cwd())
         nb_skills = len(self.skill_manager.available_skills)
@@ -268,8 +429,34 @@ class AgentLoop:
             nb_mcp_servers=nb_mcp_servers,
             nb_models=nb_models,
             entrypoint=entrypoint,
+            client_name=client_name,
+            client_version=client_version,
             terminal_emulator=terminal_emulator,
         )
+
+    def _create_connector_registry(self) -> ConnectorRegistry | None:
+        if not connectors_enabled():
+            return None
+
+        provider = self._base_config.get_mistral_provider()
+        if provider is None:
+            return None
+
+        api_key_env = provider.api_key_env_var or "MISTRAL_API_KEY"
+        api_key = os.getenv(api_key_env, "")
+        if not api_key:
+            return None
+
+        server_url = get_server_url_from_api_base(provider.api_base)
+        return ConnectorRegistry(api_key=api_key, server_url=server_url)
+
+    @requires_init
+    async def refresh_system_prompt(self) -> None:
+        """Rebuild and replace the system prompt with current tool/skill state."""
+        system_prompt = get_universal_system_prompt(
+            self.tool_manager, self.config, self.skill_manager, self.agent_manager
+        )
+        self.messages.update_system_prompt(system_prompt)
 
     def _select_backend(self) -> BackendLike:
         active_model = self.config.get_active_model()
@@ -286,10 +473,26 @@ class AgentLoop:
             self.agent_profile,
         )
 
-    async def act(self, msg: str) -> AsyncGenerator[BaseEvent]:
+    @requires_init
+    async def inject_user_context(self, content: str) -> None:
+        self.messages.append(LLMMessage(role=Role.user, content=content, injected=True))
+        await self._save_messages()
+
+    @requires_init
+    async def act(
+        self, msg: str, client_message_id: str | None = None
+    ) -> AsyncGenerator[BaseEvent, None]:
         self._clean_message_history()
-        async for event in self._conversation_loop(msg):
-            yield event
+        self.rewind_manager.create_checkpoint()
+        try:
+            model_name = self.config.get_active_model().name
+        except ValueError:
+            model_name = None
+        async with agent_span(model=model_name, session_id=self.session_id):
+            async for event in self._conversation_loop(
+                msg, client_message_id=client_message_id
+            ):
+                yield event
 
     @property
     def teleport_service(self) -> TeleportService:
@@ -308,12 +511,15 @@ class AgentLoop:
                 nuage_workflow_id=self.config.nuage_workflow_id,
                 nuage_api_key=self.config.nuage_api_key,
                 nuage_task_queue=self.config.nuage_task_queue,
+                vibe_config=self._base_config,
             )
         return self._teleport_service
 
-    def teleport_to_vibe_nuage(
+    @requires_init
+    async def teleport_to_vibe_nuage(
         self, prompt: str | None
     ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
+        from vibe.core.teleport.errors import ServiceTeleportError
         from vibe.core.teleport.nuage import TeleportSession
 
         session = TeleportSession(
@@ -324,13 +530,6 @@ class AgentLoop:
             },
             messages=[msg.model_dump(exclude_none=True) for msg in self.messages[1:]],
         )
-        return self._teleport_generator(prompt, session)
-
-    async def _teleport_generator(
-        self, prompt: str | None, session: TeleportSession
-    ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
-        from vibe.core.teleport.errors import ServiceTeleportError
-
         try:
             async with self.teleport_service:
                 gen = self.teleport_service.execute(prompt=prompt, session=session)
@@ -390,7 +589,7 @@ class AgentLoop:
             case MiddlewareAction.INJECT_MESSAGE:
                 if result.message:
                     injected_message = LLMMessage(
-                        role=Role.user, content=result.message
+                        role=Role.user, content=result.message, injected=True
                     )
                     self.messages.append(injected_message)
 
@@ -429,24 +628,31 @@ class AgentLoop:
 
     def _build_metadata(self) -> dict[str, str]:
         base = self.entrypoint_metadata.model_dump() if self.entrypoint_metadata else {}
-        return base | {"session_id": self.session_id}
+        metadata = base | {
+            "session_id": self.session_id,
+            "is_user_prompt": "true" if self._is_user_prompt_call else "false",
+            "call_type": (
+                "main_call" if self._is_user_prompt_call else "secondary_call"
+            ),
+            "call_source": "vibe_code",
+        }
+        if self._current_user_message_id is not None:
+            metadata["message_id"] = self._current_user_message_id
+        return metadata
 
     def _get_extra_headers(self, provider: ProviderConfig) -> dict[str, str]:
         headers: dict[str, str] = {
             "user-agent": get_user_agent(provider.backend),
             "x-affinity": self.session_id,
         }
-        if (
-            provider.backend == Backend.MISTRAL
-            and self._current_user_message_id is not None
-        ):
-            headers["metadata"] = json.dumps({
-                "message_id": self._current_user_message_id
-            })
         return headers
 
-    async def _conversation_loop(self, user_msg: str) -> AsyncGenerator[BaseEvent]:
-        user_message = LLMMessage(role=Role.user, content=user_msg)
+    async def _conversation_loop(
+        self, user_msg: str, client_message_id: str | None = None
+    ) -> AsyncGenerator[BaseEvent]:
+        user_message = LLMMessage(
+            role=Role.user, content=user_msg, message_id=client_message_id
+        )
         self.messages.append(user_message)
         self.stats.steps += 1
         self._current_user_message_id = user_message.message_id
@@ -458,7 +664,9 @@ class AgentLoop:
 
         try:
             should_break_loop = False
+            first_llm_turn = True
             while not should_break_loop:
+                self._is_user_prompt_call = False
                 result = await self.middleware_pipeline.run_before_turn(
                     self._get_context()
                 )
@@ -470,11 +678,15 @@ class AgentLoop:
 
                 self.stats.steps += 1
                 user_cancelled = False
+                if first_llm_turn:
+                    self._is_user_prompt_call = True
+                    first_llm_turn = False
                 async for event in self._perform_llm_turn():
                     if is_user_cancellation_event(event):
                         user_cancelled = True
                     yield event
                     await self._save_messages()
+                self._is_user_prompt_call = False
 
                 last_message = self.messages[-1]
                 should_break_loop = last_message.role != Role.tool
@@ -502,8 +714,11 @@ class AgentLoop:
         if not resolved.tool_calls and not resolved.failed_calls:
             return
 
+        profile_before = self.agent_profile.name
         async for event in self._handle_tool_calls(resolved):
             yield event
+        if self.agent_profile.name != profile_before:
+            yield AgentProfileChangedEvent(agent_name=self.agent_profile.name)
 
     def _build_tool_call_events(
         self, tool_calls: list[ToolCall] | None, emitted_ids: set[str]
@@ -529,11 +744,14 @@ class AgentLoop:
         self,
     ) -> AsyncGenerator[AssistantEvent | ReasoningEvent | ToolCallEvent]:
         message_id: str | None = None
+        reasoning_message_id: str | None = None
         emitted_tool_call_ids = set[str]()
 
         async for chunk in self._chat_streaming():
             if message_id is None:
                 message_id = chunk.message.message_id
+            if reasoning_message_id is None:
+                reasoning_message_id = chunk.message.reasoning_message_id
 
             for event in self._build_tool_call_events(
                 chunk.message.tool_calls, emitted_tool_call_ids
@@ -543,7 +761,8 @@ class AgentLoop:
 
             if chunk.message.reasoning_content:
                 yield ReasoningEvent(
-                    content=chunk.message.reasoning_content, message_id=message_id
+                    content=chunk.message.reasoning_content,
+                    message_id=reasoning_message_id,
                 )
 
             if chunk.message.content:
@@ -579,11 +798,22 @@ class AgentLoop:
     async def _process_one_tool_call(
         self, tool_call: ResolvedToolCall
     ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent]:
+        async with tool_span(
+            tool_name=tool_call.tool_name,
+            call_id=tool_call.call_id,
+            arguments=tool_call.validated_args.model_dump_json(),
+        ) as span:
+            async for event in self._execute_tool_call(span, tool_call):
+                yield event
+
+    async def _execute_tool_call(
+        self, span: trace.Span, tool_call: ResolvedToolCall
+    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent]:
         try:
             tool_instance = self.tool_manager.get(tool_call.tool_name)
         except Exception as exc:
             error_msg = f"Error getting tool '{tool_call.tool_name}': {exc}"
-            yield self._tool_failure_event(tool_call, error_msg)
+            yield self._tool_failure_event(tool_call, error_msg, span=span)
             return
 
         decision: ToolDecision | None = None
@@ -607,10 +837,16 @@ class AgentLoop:
                     cancelled=f"<{CANCELLATION_TAG}>" in skip_reason,
                     tool_call_id=tool_call.call_id,
                 )
-                self._handle_tool_response(tool_call, skip_reason, "skipped", decision)
+                self._handle_tool_response(
+                    tool_call, skip_reason, "skipped", decision, span=span
+                )
                 return
 
             self.stats.tool_calls_agreed += 1
+
+            snapshot = tool_instance.get_file_snapshot(tool_call.validated_args)
+            if snapshot is not None:
+                self.rewind_manager.add_snapshot(snapshot)
 
             start_time = time.perf_counter()
             result_model = None
@@ -625,6 +861,7 @@ class AgentLoop:
                     sampling_callback=self._sampling_handler,
                     plan_file_path=self._plan_session.plan_file_path,
                     switch_agent_callback=self.switch_agent,
+                    skill_manager=self.skill_manager,
                 ),
                 **tool_call.args_dict,
             ):
@@ -643,7 +880,7 @@ class AgentLoop:
             if extra:
                 text += "\n\n" + extra
             self._handle_tool_response(
-                tool_call, text, "success", decision, result_dict
+                tool_call, text, "success", decision, result_dict, span=span
             )
             yield ToolResultEvent(
                 tool_name=tool_call.tool_name,
@@ -660,7 +897,9 @@ class AgentLoop:
                 get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
             )
             self.stats.tool_calls_failed += 1
-            yield self._tool_failure_event(tool_call, cancel, decision, cancelled=True)
+            yield self._tool_failure_event(
+                tool_call, cancel, decision, cancelled=True, span=span
+            )
             raise
 
         except Exception as exc:
@@ -670,7 +909,7 @@ class AgentLoop:
                 self.stats.tool_calls_rejected += 1
             else:
                 self.stats.tool_calls_failed += 1
-            yield self._tool_failure_event(tool_call, error_msg, decision)
+            yield self._tool_failure_event(tool_call, error_msg, decision, span=span)
 
     async def _handle_tool_calls(
         self, resolved: ResolvedMessage
@@ -751,6 +990,7 @@ class AgentLoop:
         status: Literal["success", "failure", "skipped"],
         decision: ToolDecision | None = None,
         result: dict[str, Any] | None = None,
+        span: trace.Span | None = None,
     ) -> None:
         self.messages.append(
             LLMMessage.model_validate(
@@ -758,9 +998,12 @@ class AgentLoop:
             )
         )
 
+        if span is not None:
+            set_tool_result(span, text)
         self.telemetry_client.send_tool_call_finished(
             tool_call=tool_call,
             agent_profile_name=self.agent_profile.name,
+            model=self.config.active_model,
             status=status,
             decision=decision,
             result=result,
@@ -772,9 +1015,10 @@ class AgentLoop:
         error_msg: str,
         decision: ToolDecision | None = None,
         cancelled: bool = False,
+        span: trace.Span | None = None,
     ) -> ToolResultEvent:
         """Create a ToolResultEvent for a failed tool and record the failure."""
-        self._handle_tool_response(tool_call, error_msg, "failure", decision)
+        self._handle_tool_response(tool_call, error_msg, "failure", decision, span=span)
         return ToolResultEvent(
             tool_name=tool_call.tool_name,
             tool_class=tool_call.tool_class,
@@ -791,6 +1035,23 @@ class AgentLoop:
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
         tool_choice = self.format_handler.get_tool_choice()
+
+        last_user_message = next(
+            (
+                m
+                for m in reversed(self.messages)
+                if m.role == Role.user and not m.injected
+            ),
+            None,
+        )
+        self.telemetry_client.send_request_sent(
+            model=active_model.alias,
+            nb_context_chars=sum(len(m.content or "") for m in self.messages),
+            nb_context_messages=len(self.messages),
+            nb_prompt_chars=len(last_user_message.content or "")
+            if last_user_message
+            else 0,
+        )
 
         try:
             start_time = time.perf_counter()
@@ -811,6 +1072,9 @@ class AgentLoop:
                     "Usage data missing in non-streaming completion response"
                 )
             self._update_stats(usage=result.usage, time_seconds=end_time - start_time)
+
+            if result.correlation_id:
+                self.telemetry_client.last_correlation_id = result.correlation_id
 
             processed_message = self.format_handler.process_api_response_message(
                 result.message
@@ -834,10 +1098,28 @@ class AgentLoop:
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
         tool_choice = self.format_handler.get_tool_choice()
+
+        last_user_message = next(
+            (
+                m
+                for m in reversed(self.messages)
+                if m.role == Role.user and not m.injected
+            ),
+            None,
+        )
+        self.telemetry_client.send_request_sent(
+            model=active_model.alias,
+            nb_context_chars=sum(len(m.content or "") for m in self.messages),
+            nb_context_messages=len(self.messages),
+            nb_prompt_chars=len(last_user_message.content or "")
+            if last_user_message
+            else 0,
+        )
+
         try:
             start_time = time.perf_counter()
             usage = LLMUsage()
-            chunk_agg = LLMChunk(message=LLMMessage(role=Role.assistant))
+            chunk_agg: LLMChunk | None = None
             async for chunk in self.backend.complete_streaming(
                 model=active_model,
                 messages=self.messages,
@@ -848,16 +1130,22 @@ class AgentLoop:
                 max_tokens=max_tokens,
                 metadata=self._build_metadata(),
             ):
+                if chunk.correlation_id:
+                    self.telemetry_client.last_correlation_id = chunk.correlation_id
                 processed_message = self.format_handler.process_api_response_message(
                     chunk.message
                 )
                 processed_chunk = LLMChunk(message=processed_message, usage=chunk.usage)
-                chunk_agg += processed_chunk
+                chunk_agg = (
+                    processed_chunk
+                    if chunk_agg is None
+                    else chunk_agg + processed_chunk
+                )
                 usage += chunk.usage or LLMUsage()
                 yield processed_chunk
             end_time = time.perf_counter()
 
-            if chunk_agg.usage is None:
+            if chunk_agg is None or chunk_agg.usage is None:
                 raise AgentLoopLLMResponseError(
                     "Usage data missing in final chunk of streamed completion"
                 )
@@ -892,29 +1180,48 @@ class AgentLoop:
                 approval_type=ToolPermission.ALWAYS,
             )
 
-        tool_name = tool.get_name()
-        effective = (
-            tool.resolve_permission(args)
-            or self.tool_manager.get_tool_config(tool_name).permission
-        )
+        async with self._approval_lock:
+            tool_name = tool.get_name()
+            ctx = tool.resolve_permission(args)
 
-        match effective:
-            case ToolPermission.ALWAYS:
-                return ToolDecision(
-                    verdict=ToolExecutionResponse.EXECUTE,
-                    approval_type=ToolPermission.ALWAYS,
-                )
-            case ToolPermission.NEVER:
-                return ToolDecision(
-                    verdict=ToolExecutionResponse.SKIP,
-                    approval_type=ToolPermission.NEVER,
-                    feedback=f"Tool '{tool_name}' is permanently disabled",
-                )
-            case _:
-                return await self._ask_approval(tool_name, args, tool_call_id)
+            if ctx is None:
+                config_perm = self.tool_manager.get_tool_config(tool_name).permission
+                ctx = PermissionContext(permission=config_perm)
+
+            match ctx.permission:
+                case ToolPermission.ALWAYS:
+                    return ToolDecision(
+                        verdict=ToolExecutionResponse.EXECUTE,
+                        approval_type=ToolPermission.ALWAYS,
+                    )
+                case ToolPermission.NEVER:
+                    return ToolDecision(
+                        verdict=ToolExecutionResponse.SKIP,
+                        approval_type=ToolPermission.NEVER,
+                        feedback=ctx.reason
+                        or f"Tool '{tool_name}' is permanently disabled",
+                    )
+                case _:
+                    uncovered = [
+                        rp
+                        for rp in ctx.required_permissions
+                        if not self._is_permission_covered(tool_name, rp)
+                    ]
+                    if ctx.required_permissions and not uncovered:
+                        return ToolDecision(
+                            verdict=ToolExecutionResponse.EXECUTE,
+                            approval_type=ToolPermission.ALWAYS,
+                        )
+                    return await self._ask_approval(
+                        tool_name, args, tool_call_id, uncovered
+                    )
 
     async def _ask_approval(
-        self, tool_name: str, args: BaseModel, tool_call_id: str
+        self,
+        tool_name: str,
+        args: BaseModel,
+        tool_call_id: str,
+        required_permissions: list[RequiredPermission],
     ) -> ToolDecision:
         if not self.approval_callback:
             return ToolDecision(
@@ -922,7 +1229,9 @@ class AgentLoop:
                 approval_type=ToolPermission.ASK,
                 feedback="Tool execution not permitted.",
             )
-        response, feedback = await self.approval_callback(tool_name, args, tool_call_id)
+        response, feedback = await self.approval_callback(
+            tool_name, args, tool_call_id, required_permissions
+        )
 
         match response:
             case ApprovalResponse.YES:
@@ -939,7 +1248,6 @@ class AgentLoop:
         if len(self.messages) < ACCEPTABLE_HISTORY_SIZE:
             return
         self._fill_missing_tool_responses()
-        self._ensure_assistant_after_tools()
 
     def _fill_missing_tool_responses(self) -> None:
         i = 1
@@ -987,26 +1295,11 @@ class AgentLoop:
 
             i += 1
 
-    def _ensure_assistant_after_tools(self) -> None:
-        MIN_MESSAGE_SIZE = 2
-        if len(self.messages) < MIN_MESSAGE_SIZE:
-            return
-
-        last_msg = self.messages[-1]
-        if last_msg.role is Role.tool:
-            empty_assistant_msg = LLMMessage(role=Role.assistant, content="Understood.")
-            self.messages.append(empty_assistant_msg)
-
     def _reset_session(self) -> None:
         self.session_id = str(uuid4())
         self.session_logger.reset_session(self.session_id)
 
-    def set_approval_callback(self, callback: ApprovalCallback) -> None:
-        self.approval_callback = callback
-
-    def set_user_input_callback(self, callback: UserInputCallback) -> None:
-        self.user_input_callback = callback
-
+    @requires_init
     async def clear_history(self) -> None:
         await self.session_logger.save_interaction(
             self.messages,
@@ -1032,6 +1325,7 @@ class AgentLoop:
         self.tool_manager.reset_all()
         self._reset_session()
 
+    @requires_init
     async def compact(self) -> str:
         try:
             self._clean_message_history()
@@ -1100,12 +1394,14 @@ class AgentLoop:
             )
             raise
 
+    @requires_init
     async def switch_agent(self, agent_name: str) -> None:
         if agent_name == self.agent_profile.name:
             return
         self.agent_manager.switch_profile(agent_name)
         await self.reload_with_initial_messages(reset_middleware=False)
 
+    @requires_init
     async def reload_with_initial_messages(
         self,
         base_config: VibeConfig | None = None,
@@ -1139,7 +1435,9 @@ class AgentLoop:
             self._max_price = max_price
 
         self.tool_manager = ToolManager(
-            lambda: self.config, mcp_registry=self._mcp_registry
+            lambda: self.config,
+            mcp_registry=self.mcp_registry,
+            connector_registry=self.connector_registry,
         )
         self.skill_manager = SkillManager(lambda: self.config)
 
@@ -1147,10 +1445,7 @@ class AgentLoop:
             self.tool_manager, self.config, self.skill_manager, self.agent_manager
         )
 
-        self.messages.reset([
-            LLMMessage(role=Role.system, content=new_system_prompt),
-            *[msg for msg in self.messages if msg.role != Role.system],
-        ])
+        self.messages.update_system_prompt(new_system_prompt)
 
         if len(self.messages) == 1:
             self.stats.reset_context_state()

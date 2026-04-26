@@ -11,6 +11,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.constants import MistralColors
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
@@ -28,7 +29,13 @@ def _format_elapsed(seconds: int) -> str:
 
 
 class LoadingWidget(SpinnerMixin, Static):
-    TARGET_COLORS = ("#FFD800", "#FFAF00", "#FF8205", "#FA500F", "#E10500")
+    TARGET_COLORS = (
+        MistralColors.YELLOW,
+        MistralColors.ORANGE_LIGHT,
+        MistralColors.ORANGE,
+        MistralColors.ORANGE_DARK,
+        MistralColors.RED,
+    )
     SPINNER_TYPE = SpinnerType.SNAKE
 
     EASTER_EGGS: ClassVar[list[str]] = [
@@ -71,6 +78,7 @@ class LoadingWidget(SpinnerMixin, Static):
         self.current_color_index = 0
         self._color_direction = 1
         self.transition_progress = 0
+        self._indicator_widget: Static | None = None
         self._status_widget: Static | None = None
         self.hint_widget: Static | None = None
         self.start_time: float | None = None

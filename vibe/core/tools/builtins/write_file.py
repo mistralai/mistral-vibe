@@ -7,6 +7,7 @@ from typing import ClassVar, final
 import anyio
 from pydantic import BaseModel, Field
 
+from vibe.core.rewind.manager import FileSnapshot
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -15,6 +16,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
@@ -37,6 +39,10 @@ class WriteFileResult(BaseModel):
 
 class WriteFileConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
+    sensitive_patterns: list[str] = Field(
+        default=["**/.env", "**/.env.*"],
+        description="File patterns that trigger ASK even when permission is ALWAYS.",
+    )
     max_write_bytes: int = 64_000
     create_parent_dirs: bool = True
 
@@ -70,12 +76,17 @@ class WriteFile(
     def get_status_text(cls) -> str:
         return "Writing file"
 
-    def resolve_permission(self, args: WriteFileArgs) -> ToolPermission | None:
+    def get_file_snapshot(self, args: WriteFileArgs) -> FileSnapshot | None:
+        return self.get_file_snapshot_for_path(args.path)
+
+    def resolve_permission(self, args: WriteFileArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.path,
+            tool_name=self.get_name(),
             allowlist=self.config.allowlist,
             denylist=self.config.denylist,
             config_permission=self.config.permission,
+            sensitive_patterns=self.config.sensitive_patterns,
         )
 
     @final

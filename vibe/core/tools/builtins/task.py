@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 import fnmatch
 from typing import ClassVar
 
@@ -17,6 +18,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import (
     ToolCallDisplay,
     ToolResultDisplay,
@@ -89,16 +91,16 @@ class Task(
     def get_status_text(cls) -> str:
         return "Running subagent"
 
-    def resolve_permission(self, args: TaskArgs) -> ToolPermission | None:
+    def resolve_permission(self, args: TaskArgs) -> PermissionContext | None:
         agent_name = args.agent
 
         for pattern in self.config.denylist:
             if fnmatch.fnmatch(agent_name, pattern):
-                return ToolPermission.NEVER
+                return PermissionContext(permission=ToolPermission.NEVER)
 
         for pattern in self.config.allowlist:
             if fnmatch.fnmatch(agent_name, pattern):
-                return ToolPermission.ALWAYS
+                return PermissionContext(permission=ToolPermission.ALWAYS)
 
         return None
 
@@ -132,6 +134,8 @@ class Task(
             config=base_config,
             agent_name=args.agent,
             entrypoint_metadata=ctx.entrypoint_metadata,
+            is_subagent=True,
+            defer_heavy_init=True,
         )
 
         if ctx and ctx.approval_callback:
@@ -140,23 +144,24 @@ class Task(
         accumulated_response: list[str] = []
         completed = True
         try:
-            async for event in subagent_loop.act(args.task):
-                if isinstance(event, AssistantEvent) and event.content:
-                    accumulated_response.append(event.content)
-                    if event.stopped_by_middleware:
-                        completed = False
-                elif isinstance(event, ToolResultEvent):
-                    if event.skipped:
-                        completed = False
-                    elif event.result and event.tool_class:
-                        adapter = ToolUIDataAdapter(event.tool_class)
-                        display = adapter.get_result_display(event)
-                        message = f"{event.tool_name}: {display.message}"
-                        yield ToolStreamEvent(
-                            tool_name=self.get_name(),
-                            message=message,
-                            tool_call_id=ctx.tool_call_id,
-                        )
+            async with aclosing(subagent_loop.act(args.task)) as events:
+                async for event in events:
+                    if isinstance(event, AssistantEvent) and event.content:
+                        accumulated_response.append(event.content)
+                        if event.stopped_by_middleware:
+                            completed = False
+                    elif isinstance(event, ToolResultEvent):
+                        if event.skipped:
+                            completed = False
+                        elif event.result and event.tool_class:
+                            adapter = ToolUIDataAdapter(event.tool_class)
+                            display = adapter.get_result_display(event)
+                            message = f"{event.tool_name}: {display.message}"
+                            yield ToolStreamEvent(
+                                tool_name=self.get_name(),
+                                message=message,
+                                tool_call_id=ctx.tool_call_id,
+                            )
 
             turns_used = sum(
                 msg.role == Role.assistant for msg in subagent_loop.messages

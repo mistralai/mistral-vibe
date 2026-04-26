@@ -8,8 +8,8 @@ from rich import print as rprint
 import tomli_w
 
 from vibe import __version__
-from vibe.cli.textual_ui.app import run_textual_ui
-from vibe.core.agent_loop import AgentLoop
+from vibe.cli.textual_ui.app import StartupOptions, run_textual_ui
+from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
     MissingAPIKeyError,
@@ -22,6 +22,7 @@ from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.programmatic import run_programmatic
 from vibe.core.session.session_loader import SessionLoader
+from vibe.core.tracing import setup_tracing
 from vibe.core.types import EntrypointMetadata, LLMMessage, OutputFormat, Role
 from vibe.core.utils import ConversationLimitException
 from vibe.setup.onboarding import run_onboarding
@@ -104,6 +105,8 @@ def load_session(
                 f"{config.session_logging.save_dir}[/]"
             )
             sys.exit(1)
+    elif args.resume is True:
+        return None
     else:
         session_to_load = SessionLoader.find_session_by_id(
             args.resume, config.session_logging
@@ -150,6 +153,7 @@ def run_cli(args: argparse.Namespace) -> None:
     try:
         initial_agent_name = get_initial_agent_name(args)
         config = load_config_or_exit()
+        setup_tracing(config)
 
         if args.enabled_tools:
             config.enabled_tools = args.enabled_tools
@@ -172,18 +176,22 @@ def run_cli(args: argparse.Namespace) -> None:
             try:
                 final_response = run_programmatic(
                     config=config,
-                    prompt=programmatic_prompt,
+                    prompt=programmatic_prompt or "",
                     max_turns=args.max_turns,
                     max_price=args.max_price,
                     output_format=output_format,
                     previous_messages=loaded_session[0] if loaded_session else None,
                     agent_name=initial_agent_name,
+                    teleport=args.teleport and config.nuage_enabled,
                 )
                 if final_response:
                     print(final_response)
                 sys.exit(0)
             except ConversationLimitException as e:
                 print(e, file=sys.stderr)
+                sys.exit(1)
+            except TeleportError as e:
+                print(f"Teleport error: {e}", file=sys.stderr)
                 sys.exit(1)
             except RuntimeError as e:
                 print(f"Error: {e}", file=sys.stderr)
@@ -199,6 +207,7 @@ def run_cli(args: argparse.Namespace) -> None:
                     client_name="vibe_cli",
                     client_version=__version__,
                 ),
+                defer_heavy_init=True,
             )
 
             if loaded_session:
@@ -206,8 +215,11 @@ def run_cli(args: argparse.Namespace) -> None:
 
             run_textual_ui(
                 agent_loop=agent_loop,
-                initial_prompt=args.initial_prompt or stdin_prompt,
-                teleport_on_start=args.teleport,
+                startup=StartupOptions(
+                    initial_prompt=args.initial_prompt or stdin_prompt,
+                    teleport_on_start=args.teleport,
+                    show_resume_picker=args.resume is True,
+                ),
             )
 
     except (KeyboardInterrupt, EOFError):

@@ -38,11 +38,17 @@ class ExpandingBorder(NonSelectableStatic):
 
 
 class UserMessage(Static):
-    def __init__(self, content: str, pending: bool = False) -> None:
+    def __init__(
+        self, content: str, pending: bool = False, message_index: int | None = None
+    ) -> None:
         super().__init__()
         self.add_class("user-message")
         self._content = content
         self._pending = pending
+        self.message_index: int | None = message_index
+
+    def get_content(self) -> str:
+        return self._content
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="user-message-container"):
@@ -143,9 +149,7 @@ class AssistantMessage(StreamingMessageBase):
         self.add_class("assistant-message")
 
     def compose(self) -> ComposeResult:
-        if self._content:
-            self._content_initialized = True
-        markdown = Markdown(self._content)
+        markdown = Markdown("")
         self._markdown = markdown
         yield markdown
 

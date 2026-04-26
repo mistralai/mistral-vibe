@@ -3,14 +3,25 @@ Screen {
     background: transparent 80%;
 }
 
+
 #trust-dialog {
-    width: 70;
-    max-width: 90%;
-    min-width: 50;
-    height: auto;
+    max-width: 70;
+    overflow-y: scroll;
     border: round ansi_bright_black;
     background: transparent;
+    height:auto;
+    max-height: 1fr;
     padding: 1;
+    padding-left:5;
+    padding-right:5;
+    scrollbar-size: 1 1;
+}
+
+#trust-dialog-content {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    max-height: 10;
 }
 
 #trust-dialog-title {
@@ -31,13 +42,40 @@ Screen {
     margin-bottom: 1;
 }
 
-#trust-dialog-message {
+.trust-dialog-section-header {
     width: 100%;
     height: auto;
     color: ansi_default;
     text-align: center;
     text-wrap: wrap;
+    padding: 0 2;
+}
+
+.trust-dialog-section-center {
+    width: 100%;
+    height: auto;
     margin-bottom: 1;
+}
+
+.trust-dialog-section-content {
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    color: ansi_default;
+    text-align: center;
+    text-overflow: fold;
+}
+
+.trust-dialog-footer-warning {
+    width: 100%;
+    height: auto;
+    color: ansi_yellow;
+    text-align: center;
+    text-style: bold;
+    border-top: solid ansi_bright_black;
+    border-bottom: solid ansi_bright_black;
+    margin-bottom: 1;
+    padding: 0 1;
 }
 
 #trust-options-container {
@@ -79,5 +117,4 @@ Screen {
     text-align: center;
     text-style: italic;
     text-wrap: wrap;
-    margin-bottom: 1;
 }

@@ -52,7 +52,7 @@ class MistralTranscribeClient:
             target_streaming_delay_ms=self._target_streaming_delay_ms,
         ):
             if isinstance(event, RealtimeTranscriptionSessionCreated):
-                yield TranscribeSessionCreated()
+                yield TranscribeSessionCreated(request_id=event.session.request_id)
             elif isinstance(event, TranscriptionStreamTextDelta):
                 yield TranscribeTextDelta(text=event.text)
             elif isinstance(event, TranscriptionStreamDone):

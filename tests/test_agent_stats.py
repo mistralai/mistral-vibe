@@ -13,16 +13,16 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
-    Backend,
     ModelConfig,
     ProviderConfig,
     SessionLoggingConfig,
     VibeConfig,
 )
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
+from vibe.core.tools.base import ToolPermission
 from vibe.core.types import (
     AgentStats,
     AssistantEvent,
+    Backend,
     CompactEndEvent,
     CompactStartEvent,
     FunctionCall,
@@ -95,7 +95,7 @@ def make_config(
         models=models,
         providers=providers,
         enabled_tools=enabled_tools or [],
-        tools={"todo": BaseToolConfig(permission=todo_permission)},
+        tools={"todo": {"permission": todo_permission.value}},
     )
 
 

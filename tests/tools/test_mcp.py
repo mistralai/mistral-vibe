@@ -4,7 +4,8 @@ import logging
 import os
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from pydantic import ValidationError
 import pytest
@@ -17,8 +18,10 @@ from vibe.core.tools.mcp import (
     _mcp_stderr_capture,
     _parse_call_result,
     _stderr_logger_thread,
+    call_tool_stdio,
     create_mcp_http_proxy_tool_class,
     create_mcp_stdio_proxy_tool_class,
+    list_tools_stdio,
 )
 
 
@@ -430,6 +433,21 @@ class TestMCPRegistry:
 
         assert len(registry._cache) == 0
 
+    def test_count_loaded_excludes_failed_servers(self):
+        registry = MCPRegistry()
+        ok_srv = self._make_http_server("ok", url="http://ok:1")
+        fail_srv = self._make_http_server("fail", url="http://fail:2")
+
+        proxy = create_mcp_http_proxy_tool_class(
+            url="http://ok:1", remote=RemoteTool(name="t"), alias="ok"
+        )
+        registry._cache[registry._server_key(ok_srv)] = {proxy.get_name(): proxy}
+
+        assert registry.count_loaded([ok_srv, fail_srv]) == 1
+        assert registry.count_loaded([ok_srv]) == 1
+        assert registry.count_loaded([fail_srv]) == 0
+        assert registry.count_loaded([]) == 0
+
     def test_cache_survives_multiple_get_tools_calls(self):
         registry = MCPRegistry()
         srv = self._make_http_server("stable")
@@ -551,3 +569,144 @@ class TestMCPRegistry:
         assert "cached_ct" in tools
         assert "new_nt" in tools
         assert len(registry._cache) == 2
+
+
+class TestMCPStdioCwd:
+    def test_mcp_stdio_cwd_defaults_to_none(self):
+        config = MCPStdio(name="test", transport="stdio", command="python -m srv")
+
+        assert config.cwd is None
+
+    def test_mcp_stdio_cwd_accepts_string(self):
+        config = MCPStdio(
+            name="test",
+            transport="stdio",
+            command="python -m srv",
+            cwd="/tmp/myproject",
+        )
+
+        assert config.cwd == "/tmp/myproject"
+
+    @pytest.mark.asyncio
+    async def test_list_tools_stdio_passes_cwd_to_params(self):
+        with (
+            patch("vibe.core.tools.mcp.tools.stdio_client") as mock_client,
+            patch("vibe.core.tools.mcp.tools.ClientSession") as mock_session_cls,
+            patch("vibe.core.tools.mcp.tools.StdioServerParameters") as mock_params_cls,
+        ):
+            mock_client.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock())
+            )
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session = MagicMock()
+            mock_session.initialize = AsyncMock()
+            mock_session.list_tools = AsyncMock(return_value=MagicMock(tools=[]))
+            mock_session_cls.return_value.__aenter__ = AsyncMock(
+                return_value=mock_session
+            )
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await list_tools_stdio(["python", "-m", "srv"], cwd="/tmp/myproject")
+
+            mock_params_cls.assert_called_once_with(
+                command="python", args=["-m", "srv"], env=None, cwd="/tmp/myproject"
+            )
+
+    @pytest.mark.asyncio
+    async def test_call_tool_stdio_passes_cwd_to_params(self):
+        with (
+            patch("vibe.core.tools.mcp.tools.stdio_client") as mock_client,
+            patch("vibe.core.tools.mcp.tools.ClientSession") as mock_session_cls,
+            patch("vibe.core.tools.mcp.tools.StdioServerParameters") as mock_params_cls,
+            patch("vibe.core.tools.mcp.tools._parse_call_result") as mock_parse,
+        ):
+            mock_client.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock())
+            )
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session = MagicMock()
+            mock_session.initialize = AsyncMock()
+            mock_session.call_tool = AsyncMock(return_value=MagicMock())
+            mock_session_cls.return_value.__aenter__ = AsyncMock(
+                return_value=mock_session
+            )
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_parse.return_value = MagicMock(spec=MCPToolResult)
+
+            await call_tool_stdio(
+                ["python", "-m", "srv"], "my_tool", {}, cwd="/tmp/myproject"
+            )
+
+            mock_params_cls.assert_called_once_with(
+                command="python", args=["-m", "srv"], env=None, cwd="/tmp/myproject"
+            )
+
+    @pytest.mark.asyncio
+    async def test_discover_stdio_passes_cwd_to_list_tools(self):
+        registry = MCPRegistry()
+        srv = MCPStdio(
+            name="local",
+            transport="stdio",
+            command="python -m srv",
+            cwd="/tmp/myproject",
+        )
+        remote = RemoteTool(name="run", description="Run it")
+
+        with patch(
+            "vibe.core.tools.mcp.registry.list_tools_stdio", return_value=[remote]
+        ) as mock_list:
+            await registry._discover_stdio(srv)
+
+        mock_list.assert_called_once_with(
+            ["python", "-m", "srv"],
+            env=None,
+            cwd="/tmp/myproject",
+            startup_timeout_sec=srv.startup_timeout_sec,
+        )
+
+    @pytest.mark.asyncio
+    async def test_discover_stdio_passes_cwd_to_proxy_class(self):
+        registry = MCPRegistry()
+        srv = MCPStdio(
+            name="local",
+            transport="stdio",
+            command="python -m srv",
+            cwd="/tmp/myproject",
+        )
+        remote = RemoteTool(name="run", description="Run it")
+
+        with (
+            patch(
+                "vibe.core.tools.mcp.registry.list_tools_stdio", return_value=[remote]
+            ),
+            patch(
+                "vibe.core.tools.mcp.registry.create_mcp_stdio_proxy_tool_class",
+                wraps=create_mcp_stdio_proxy_tool_class,
+            ) as mock_create,
+        ):
+            await registry._discover_stdio(srv)
+
+        _, kwargs = mock_create.call_args
+        assert kwargs["cwd"] == "/tmp/myproject"
+
+    def test_proxy_tool_stores_cwd(self):
+        remote = RemoteTool(name="run")
+        proxy_cls = cast(
+            Any,
+            create_mcp_stdio_proxy_tool_class(
+                command=["python", "-m", "srv"], remote=remote, cwd="/tmp/myproject"
+            ),
+        )
+
+        assert proxy_cls._cwd == "/tmp/myproject"
+
+    def test_proxy_tool_cwd_defaults_to_none(self):
+        remote = RemoteTool(name="run")
+        proxy_cls = cast(
+            Any,
+            create_mcp_stdio_proxy_tool_class(
+                command=["python", "-m", "srv"], remote=remote
+            ),
+        )
+
+        assert proxy_cls._cwd is None

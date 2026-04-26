@@ -129,24 +129,3 @@ async def test_skill_without_args_does_not_prepend_invocation_line(
             vibe_app_with_skills, pilot, "Do the thing."
         )
         assert "/my-skill" not in message._content
-
-
-@pytest.mark.asyncio
-async def test_skill_with_missing_file_shows_error(tmp_path: Path) -> None:
-    skills_dir = tmp_path / "skills"
-    skills_dir.mkdir()
-    skill_dir = create_skill(skills_dir, "my-skill", body=SKILL_BODY)
-    vibe_app = build_test_vibe_app(
-        config=build_test_vibe_config(skill_paths=[skills_dir])
-    )
-    (skill_dir / "SKILL.md").unlink()
-
-    async with vibe_app.run_test() as pilot:
-        await pilot.pause(0.1)
-        chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.post_message(ChatInputContainer.Submitted("/my-skill"))
-
-        error = await _wait_for_error_message_containing(
-            vibe_app, pilot, "Failed to read skill file"
-        )
-        assert "Failed to read skill file" in error._error

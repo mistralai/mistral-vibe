@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.core.slug import _ADJECTIVES, _NOUNS, create_slug
+from vibe.core.utils.slug import _ADJECTIVES, _NOUNS, create_slug
 
 
 class TestCreateSlug:

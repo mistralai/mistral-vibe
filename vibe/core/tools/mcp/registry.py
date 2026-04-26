@@ -36,6 +36,12 @@ class MCPRegistry:
 
     def get_tools(self, servers: list[MCPServer]) -> dict[str, type[BaseTool]]:
         """Return proxy tool classes for *servers*, using cache when possible."""
+        return run_sync(self.get_tools_async(servers))
+
+    async def get_tools_async(
+        self, servers: list[MCPServer]
+    ) -> dict[str, type[BaseTool]]:
+        """Async variant of :meth:`get_tools`."""
         result: dict[str, type[BaseTool]] = {}
         to_discover: list[tuple[str, MCPServer]] = []
 
@@ -47,7 +53,7 @@ class MCPRegistry:
                 to_discover.append((key, srv))
 
         if to_discover:
-            discovered = run_sync(self._discover_all(to_discover))
+            discovered = await self._discover_all(to_discover)
             result.update(discovered)
 
         return result
@@ -133,7 +139,10 @@ class MCPRegistry:
 
         try:
             remotes = await list_tools_stdio(
-                cmd, env=srv.env or None, startup_timeout_sec=srv.startup_timeout_sec
+                cmd,
+                env=srv.env or None,
+                cwd=srv.cwd,
+                startup_timeout_sec=srv.startup_timeout_sec,
             )
         except Exception as exc:
             logger.warning("MCP stdio discovery failed for %r: %s", cmd, exc)
@@ -148,6 +157,7 @@ class MCPRegistry:
                     alias=srv.name,
                     server_hint=srv.prompt,
                     env=srv.env or None,
+                    cwd=srv.cwd,
                     startup_timeout_sec=srv.startup_timeout_sec,
                     tool_timeout_sec=srv.tool_timeout_sec,
                     sampling_enabled=srv.sampling_enabled,
@@ -161,6 +171,10 @@ class MCPRegistry:
                     exc,
                 )
         return tools
+
+    def count_loaded(self, servers: list[MCPServer]) -> int:
+        """Return how many of *servers* were successfully discovered (cached)."""
+        return sum(self._server_key(srv) in self._cache for srv in servers)
 
     def clear(self) -> None:
         """Drop all cached entries, forcing re-discovery on next use."""

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.skills.conftest import create_skill
 from vibe.core.config import VibeConfig
+from vibe.core.skills.builtins import BUILTIN_SKILLS
 from vibe.core.skills.manager import SkillManager
 from vibe.core.trusted_folders import trusted_folders_manager
 
@@ -24,10 +26,15 @@ def skill_manager(config: VibeConfig) -> SkillManager:
 
 
 class TestSkillManagerDiscovery:
+    def test_available_skills_is_frozen(self, skill_manager: SkillManager) -> None:
+        frozen_skills = cast(dict[str, object], skill_manager.available_skills)
+        with pytest.raises(TypeError):
+            frozen_skills["new-skill"] = object()
+
     def test_discovers_no_skills_when_directory_empty(
         self, skill_manager: SkillManager
     ) -> None:
-        assert skill_manager.available_skills == {}
+        assert skill_manager.available_skills == BUILTIN_SKILLS
 
     def test_discovers_skill_from_skill_paths(self, skills_dir: Path) -> None:
         create_skill(skills_dir, "test-skill", "A test skill")
@@ -54,7 +61,7 @@ class TestSkillManagerDiscovery:
         )
         manager = SkillManager(lambda: config)
 
-        assert len(manager.available_skills) == 3
+        assert len(manager.available_skills) == 3 + len(BUILTIN_SKILLS)
         assert "skill-one" in manager.available_skills
         assert "skill-two" in manager.available_skills
         assert "skill-three" in manager.available_skills
@@ -76,7 +83,7 @@ class TestSkillManagerDiscovery:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1
+        assert len(skills) == 1 + len(BUILTIN_SKILLS)
         assert "valid-skill" in skills
         assert "not-a-skill" not in skills
 
@@ -95,7 +102,7 @@ class TestSkillManagerDiscovery:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1
+        assert len(skills) == 1 + len(BUILTIN_SKILLS)
         assert "valid-skill" in skills
 
     def test_discovers_skill_when_skill_md_is_directly_in_search_dir(
@@ -176,7 +183,7 @@ class TestSkillManagerParsing:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1
+        assert len(skills) == 1 + len(BUILTIN_SKILLS)
         assert "valid-skill" in skills
         assert "invalid-skill" not in skills
 
@@ -197,7 +204,7 @@ class TestSkillManagerParsing:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1
+        assert len(skills) == 1 + len(BUILTIN_SKILLS)
         assert "valid-skill" in skills
 
 
@@ -256,9 +263,10 @@ class TestSkillManagerSearchPaths:
         )
         manager = SkillManager(lambda: config)
 
-        assert len(manager.available_skills) == 2
-        assert manager.available_skills["vibe-only"].description == "From .vibe"
-        assert manager.available_skills["agents-only"].description == "From .agents"
+        skills = manager.available_skills
+        assert len(skills) == 2 + len(BUILTIN_SKILLS)
+        assert skills["vibe-only"].description == "From .vibe"
+        assert skills["agents-only"].description == "From .agents"
 
     def test_first_discovered_wins_when_same_skill_in_vibe_and_agents(
         self, tmp_working_directory: Path
@@ -276,10 +284,9 @@ class TestSkillManagerSearchPaths:
         )
         manager = SkillManager(lambda: config)
 
-        assert len(manager.available_skills) == 1
-        assert (
-            manager.available_skills["shared-skill"].description == "First from .vibe"
-        )
+        skills = manager.available_skills
+        assert len(skills) == 1 + len(BUILTIN_SKILLS)
+        assert skills["shared-skill"].description == "First from .vibe"
 
     def test_discovers_from_multiple_skill_paths(self, tmp_path: Path) -> None:
         # Create two separate skill directories
@@ -299,7 +306,7 @@ class TestSkillManagerSearchPaths:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 2
+        assert len(skills) == 2 + len(BUILTIN_SKILLS)
         assert "skill-from-dir1" in skills
         assert "skill-from-dir2" in skills
 
@@ -321,7 +328,7 @@ class TestSkillManagerSearchPaths:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1
+        assert len(skills) == 1 + len(BUILTIN_SKILLS)
         assert skills["duplicate-skill"].description == "First version"
 
     def test_ignores_nonexistent_skill_paths(self, tmp_path: Path) -> None:
@@ -336,8 +343,9 @@ class TestSkillManagerSearchPaths:
         )
         manager = SkillManager(lambda: config)
 
-        assert len(manager.available_skills) == 1
-        assert "valid-skill" in manager.available_skills
+        skills = manager.available_skills
+        assert len(skills) == 1 + len(BUILTIN_SKILLS)
+        assert "valid-skill" in skills
 
 
 class TestSkillManagerGetSkill:
@@ -393,7 +401,7 @@ class TestSkillManagerFiltering:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 2
+        assert len(skills) == 2 + len(BUILTIN_SKILLS)
         assert "skill-a" in skills
         assert "skill-b" not in skills
         assert "skill-c" in skills
@@ -531,7 +539,71 @@ class TestSkillUserInvocable:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 3
+        assert len(skills) == 3 + len(BUILTIN_SKILLS)
         assert skills["visible-skill"].user_invocable is True
         assert skills["hidden-skill"].user_invocable is False
         assert skills["default-skill"].user_invocable is True
+
+
+class TestParseSkillCommand:
+    def test_plain_text_returns_none(self, skill_manager: SkillManager) -> None:
+        assert skill_manager.parse_skill_command("hello world") is None
+
+    def test_unknown_skill_returns_none(self, skill_manager: SkillManager) -> None:
+        assert skill_manager.parse_skill_command("/nonexistent") is None
+
+    def test_slash_only_returns_none(self, skill_manager: SkillManager) -> None:
+        assert skill_manager.parse_skill_command("/") is None
+
+    def test_parses_skill_without_args(
+        self, skills_dir: Path, skill_config: VibeConfig
+    ) -> None:
+        create_skill(skills_dir, "my-skill", body="Do the thing.")
+        manager = SkillManager(lambda: skill_config)
+
+        parsed = manager.parse_skill_command("/my-skill")
+        assert parsed is not None
+        assert parsed.name == "my-skill"
+        assert "Do the thing." in parsed.content
+        assert parsed.extra_instructions is None
+
+    def test_parses_skill_with_args(
+        self, skills_dir: Path, skill_config: VibeConfig
+    ) -> None:
+        create_skill(skills_dir, "my-skill", body="Do the thing.")
+        manager = SkillManager(lambda: skill_config)
+
+        parsed = manager.parse_skill_command("/my-skill fix the bug")
+        assert parsed is not None
+        assert parsed.name == "my-skill"
+        assert parsed.extra_instructions == "fix the bug"
+
+    def test_case_insensitive(self, skills_dir: Path, skill_config: VibeConfig) -> None:
+        create_skill(skills_dir, "my-skill", body="Do the thing.")
+        manager = SkillManager(lambda: skill_config)
+
+        parsed = manager.parse_skill_command("/MY-SKILL")
+        assert parsed is not None
+        assert parsed.name == "my-skill"
+
+
+class TestBuildSkillPrompt:
+    def test_without_args(self, skills_dir: Path, skill_config: VibeConfig) -> None:
+        create_skill(skills_dir, "my-skill", body="Do the thing.")
+        manager = SkillManager(lambda: skill_config)
+
+        parsed = manager.parse_skill_command("/my-skill")
+        assert parsed is not None
+        prompt = SkillManager.build_skill_prompt("/my-skill", parsed)
+        assert prompt == parsed.content
+
+    def test_with_args(self, skills_dir: Path, skill_config: VibeConfig) -> None:
+        create_skill(skills_dir, "my-skill", body="Do the thing.")
+        manager = SkillManager(lambda: skill_config)
+
+        text = "/my-skill fix the bug"
+        parsed = manager.parse_skill_command(text)
+        assert parsed is not None
+        prompt = SkillManager.build_skill_prompt(text, parsed)
+        assert prompt.startswith("/my-skill fix the bug")
+        assert "Do the thing." in prompt

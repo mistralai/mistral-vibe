@@ -8,29 +8,33 @@ from vibe.cli.textual_ui.widgets.session_picker import (
     SessionPickerApp,
     _format_relative_time,
 )
-from vibe.core.session.session_loader import SessionInfo
+from vibe.core.session.resume_sessions import ResumeSessionInfo
 
 
 @pytest.fixture
-def sample_sessions() -> list[SessionInfo]:
+def sample_sessions() -> list[ResumeSessionInfo]:
     return [
-        SessionInfo(
+        ResumeSessionInfo(
             session_id="session-a",
+            source="local",
             cwd="/test",
             title="Session A",
             end_time=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
         ),
-        SessionInfo(
+        ResumeSessionInfo(
             session_id="session-b",
+            source="local",
             cwd="/test",
             title="Session B",
             end_time=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
         ),
-        SessionInfo(
+        ResumeSessionInfo(
             session_id="session-c",
+            source="remote",
             cwd="/test",
             title="Session C",
             end_time=(datetime.now(UTC) - timedelta(days=1)).isoformat(),
+            status="RUNNING",
         ),
     ]
 
@@ -38,9 +42,9 @@ def sample_sessions() -> list[SessionInfo]:
 @pytest.fixture
 def sample_latest_messages() -> dict[str, str]:
     return {
-        "session-a": "Help me fix this bug",
-        "session-b": "Refactor the authentication module",
-        "session-c": "Add unit tests for the API",
+        "local:session-a": "Help me fix this bug",
+        "local:session-b": "Refactor the authentication module",
+        "remote:session-c": "Add unit tests for the API",
     }
 
 
@@ -86,7 +90,9 @@ class TestFormatRelativeTime:
 
 class TestSessionPickerAppInit:
     def test_init_sets_properties(
-        self, sample_sessions: list[SessionInfo], sample_latest_messages: dict[str, str]
+        self,
+        sample_sessions: list[ResumeSessionInfo],
+        sample_latest_messages: dict[str, str],
     ) -> None:
         picker = SessionPickerApp(
             sessions=sample_sessions, latest_messages=sample_latest_messages
@@ -103,13 +109,20 @@ class TestSessionPickerAppInit:
 
 
 class TestSessionPickerMessages:
-    def test_session_selected_stores_session_id(self) -> None:
-        msg = SessionPickerApp.SessionSelected("test-session-id")
+    def test_session_selected_stores_option_id(self) -> None:
+        msg = SessionPickerApp.SessionSelected(
+            "local:test-session-id", "local", "test-session-id"
+        )
+        assert msg.option_id == "local:test-session-id"
+        assert msg.source == "local"
         assert msg.session_id == "test-session-id"
 
     def test_session_selected_with_full_uuid(self) -> None:
         session_id = "abc12345-6789-0123-4567-89abcdef0123"
-        msg = SessionPickerApp.SessionSelected(session_id)
+        option_id = f"remote:{session_id}"
+        msg = SessionPickerApp.SessionSelected(option_id, "remote", session_id)
+        assert msg.option_id == option_id
+        assert msg.source == "remote"
         assert msg.session_id == session_id
 
     def test_cancelled_can_be_instantiated(self) -> None:

@@ -14,7 +14,7 @@ def patch_vscode_space(event: events.Key) -> None:
     silently drop the keystroke because there is no printable character.
     Assigning ``event.character = " "`` restores normal behaviour.
     """
-    if event.key == "space" and event.character is None:
+    if event.key in {"space", "shift+space"} and event.character is None:
         event.character = " "
 
 

@@ -8,9 +8,14 @@ import re
 import shlex
 import tomllib
 from typing import Annotated, Any, Literal
+from urllib.parse import urljoin
 
 from dotenv import dotenv_values
-from pydantic import BaseModel, Field, field_validator, model_validator
+from mistralai.client.models import SpeechOutputFormat
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+    DEFAULT_TRACES_EXPORT_PATH,
+)
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_core import to_jsonable_python
 from pydantic_settings import (
@@ -21,10 +26,13 @@ from pydantic_settings import (
 import tomli_w
 
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
 from vibe.core.plugins.models import MarketplaceConfig
 from vibe.core.prompts import SystemPrompt
-from vibe.core.tools.base import BaseToolConfig
+from vibe.core.types import Backend
+from vibe.core.utils import get_server_url_from_api_base
+from vibe.core.utils.io import read_safe
 
 
 def load_dotenv_values(
@@ -90,6 +98,29 @@ class TomlFileSettingsSource(PydanticBaseSettingsSource):
         return self.toml_data
 
 
+def _remove_none_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: cleaned_value
+            for key, item in value.items()
+            if (cleaned_value := _remove_none_values(item)) is not None
+        }
+    if isinstance(value, list):
+        return [
+            cleaned_item
+            for item in value
+            if (cleaned_item := _remove_none_values(item)) is not None
+        ]
+    return value
+
+
+def _to_toml_document(value: Any) -> dict[str, Any]:
+    jsonable = to_jsonable_python(value, fallback=str)
+    if not isinstance(jsonable, dict):
+        return {}
+    return _remove_none_values(jsonable)
+
+
 class ProjectContextConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
@@ -115,20 +146,54 @@ class SessionLoggingConfig(BaseSettings):
         return str(Path(v).expanduser().resolve())
 
 
-class Backend(StrEnum):
-    MISTRAL = auto()
-    GENERIC = auto()
+DEFAULT_MISTRAL_API_ENV_KEY = "MISTRAL_API_KEY"
+DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL = "https://console.mistral.ai"
+DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL = "https://console.mistral.ai/api"
 
 
 class ProviderConfig(BaseModel):
     name: str
     api_base: str
     api_key_env_var: str = ""
+    browser_auth_base_url: str | None = None
+    browser_auth_api_base_url: str | None = None
     api_style: str = "openai"
     backend: Backend = Backend.GENERIC
     reasoning_field_name: str = "reasoning_content"
     project_id: str = ""
     region: str = ""
+
+    def _is_legacy_mistral_provider_without_backend(self) -> bool:
+        return (
+            self.name == "mistral"
+            and self.backend == Backend.GENERIC
+            and "backend" not in self.model_fields_set
+        )
+
+    def _uses_mistral_browser_sign_in_defaults(self) -> bool:
+        return self.name == "mistral" and (
+            self.backend == Backend.MISTRAL
+            or self._is_legacy_mistral_provider_without_backend()
+        )
+
+    @model_validator(mode="after")
+    def _apply_legacy_mistral_browser_auth_defaults(self) -> ProviderConfig:
+        if not self._uses_mistral_browser_sign_in_defaults():
+            return self
+
+        if self.browser_auth_base_url is None:
+            self.browser_auth_base_url = DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL
+        if self.browser_auth_api_base_url is None:
+            self.browser_auth_api_base_url = DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL
+        return self
+
+    @property
+    def supports_browser_sign_in(self) -> bool:
+        return (
+            (self.backend == Backend.MISTRAL or self.name == "mistral")
+            and bool(self.browser_auth_base_url)
+            and bool(self.browser_auth_api_base_url)
+        )
 
 
 class TranscribeClient(StrEnum):
@@ -225,6 +290,9 @@ class MCPStdio(_MCPBase):
         default_factory=dict,
         description="Environment variables to set for the MCP server process.",
     )
+    cwd: str | None = Field(
+        default=None, description="Working directory for the MCP server process."
+    )
 
     def argv(self) -> list[str]:
         base = (
@@ -254,7 +322,7 @@ class ModelConfig(BaseModel):
     temperature: float = 0.2
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
-    thinking: Literal["off", "low", "medium", "high"] = "off"
+    thinking: Literal["off", "low", "medium", "high", "max"] = "off"
     auto_compact_threshold: int = 200_000
 
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
@@ -272,14 +340,44 @@ class TranscribeModelConfig(BaseModel):
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
 
 
-DEFAULT_MISTRAL_API_ENV_KEY = "MISTRAL_API_KEY"
+class TTSClient(StrEnum):
+    MISTRAL = auto()
 
+
+class TTSProviderConfig(BaseModel):
+    name: str
+    api_base: str = "https://api.mistral.ai"
+    api_key_env_var: str = ""
+    client: TTSClient = TTSClient.MISTRAL
+
+
+class TTSModelConfig(BaseModel):
+    name: str
+    provider: str
+    alias: str
+    voice: str = "gb_jane_neutral"
+    response_format: SpeechOutputFormat = "wav"
+
+    _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
+
+
+class OtelSpanExporterConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    endpoint: str
+    headers: dict[str, str] | None = None
+
+
+MISTRAL_OTEL_PATH = "/telemetry"
+_DEFAULT_MISTRAL_SERVER_URL = "https://api.mistral.ai"
 
 DEFAULT_PROVIDERS = [
     ProviderConfig(
         name="mistral",
-        api_base="https://api.mistral.ai/v1",
+        api_base=f"{_DEFAULT_MISTRAL_SERVER_URL}/v1",
         api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
+        browser_auth_base_url=DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+        browser_auth_api_base_url=DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
         backend=Backend.MISTRAL,
     ),
     ProviderConfig(
@@ -313,6 +411,8 @@ DEFAULT_MODELS = [
     ),
 ]
 
+DEFAULT_ACTIVE_MODEL = DEFAULT_MODELS[0].alias
+
 DEFAULT_TRANSCRIBE_PROVIDERS = [
     TranscribeProviderConfig(
         name="mistral",
@@ -329,9 +429,23 @@ DEFAULT_TRANSCRIBE_MODELS = [
     )
 ]
 
+DEFAULT_TTS_PROVIDERS = [
+    TTSProviderConfig(
+        name="mistral",
+        api_base="https://api.mistral.ai",
+        api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
+    )
+]
+
+DEFAULT_TTS_MODELS = [
+    TTSModelConfig(
+        name="voxtral-mini-tts-latest", provider="mistral", alias="voxtral-tts"
+    )
+]
+
 
 class VibeConfig(BaseSettings):
-    active_model: str = "devstral-2"
+    active_model: str = DEFAULT_ACTIVE_MODEL
     vim_keybindings: bool = False
     disable_welcome_banner_animation: bool = False
     autocopy_to_clipboard: bool = True
@@ -339,7 +453,9 @@ class VibeConfig(BaseSettings):
     displayed_workdir: str = ""
     context_warnings: bool = False
     voice_mode_enabled: bool = False
+    narrator_enabled: bool = False
     active_transcribe_model: str = "voxtral-realtime"
+    active_tts_model: str = "voxtral-tts"
     auto_approve: bool = False
     enable_telemetry: bool = True
     system_prompt_id: str = "cli"
@@ -354,13 +470,16 @@ class VibeConfig(BaseSettings):
     api_timeout: float = 720.0
     auto_compact_threshold: int = 200_000
 
-    # TODO(vibe-nuage): remove exclude=True once the feature is publicly available
     nuage_enabled: bool = Field(default=False, exclude=True)
-    nuage_base_url: str = Field(default="https://api.globalaegis.net", exclude=True)
+    nuage_base_url: str = Field(default="https://api.mistral.ai", exclude=True)
     nuage_workflow_id: str = Field(default="__shared-nuage-workflow", exclude=True)
     nuage_task_queue: str | None = Field(default="shared-vibe-nuage", exclude=True)
-    # TODO(vibe-nuage): change default value to MISTRAL_API_KEY once prod has shared vibe-nuage workers
-    nuage_api_key_env_var: str = Field(default="STAGING_MISTRAL_API_KEY", exclude=True)
+    nuage_api_key_env_var: str = Field(default="MISTRAL_API_KEY", exclude=True)
+    nuage_project_name: str = Field(default="Vibe", exclude=True)
+
+    # TODO(otel): remove exclude=True once the feature is publicly available
+    enable_otel: bool = Field(default=False, exclude=True)
+    otel_endpoint: str = Field(default="", exclude=True)
 
     providers: list[ProviderConfig] = Field(
         default_factory=lambda: list(DEFAULT_PROVIDERS)
@@ -375,9 +494,16 @@ class VibeConfig(BaseSettings):
         default_factory=lambda: list(DEFAULT_TRANSCRIBE_MODELS)
     )
 
+    tts_providers: list[TTSProviderConfig] = Field(
+        default_factory=lambda: list(DEFAULT_TTS_PROVIDERS)
+    )
+    tts_models: list[TTSModelConfig] = Field(
+        default_factory=lambda: list(DEFAULT_TTS_MODELS)
+    )
+
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
-    tools: dict[str, BaseToolConfig] = Field(default_factory=dict)
+    tools: dict[str, dict[str, Any]] = Field(default_factory=dict)
     tool_paths: list[Path] = Field(
         default_factory=list,
         description=(
@@ -474,6 +600,44 @@ class VibeConfig(BaseSettings):
         return os.getenv(self.nuage_api_key_env_var, "")
 
     @property
+    def otel_span_exporter_config(self) -> OtelSpanExporterConfig | None:
+        # When otel_endpoint is set explicitly, authentication is the user's responsibility
+        # (via OTEL_EXPORTER_OTLP_* env vars), so headers are left empty.
+        # Otherwise endpoint and API key are derived from the active provider if it's Mistral,
+        # or the first Mistral provider.
+        traces_export_path = DEFAULT_TRACES_EXPORT_PATH.lstrip("/")
+        if self.otel_endpoint:
+            return OtelSpanExporterConfig(
+                endpoint=urljoin(
+                    f"{self.otel_endpoint.rstrip('/')}/", traces_export_path
+                )
+            )
+
+        provider = self.get_mistral_provider()
+
+        if provider is not None:
+            server_url = get_server_url_from_api_base(provider.api_base)
+            api_key_env = provider.api_key_env_var or DEFAULT_MISTRAL_API_ENV_KEY
+        else:
+            server_url = None
+            api_key_env = DEFAULT_MISTRAL_API_ENV_KEY
+
+        endpoint = urljoin(
+            f"{urljoin(server_url or _DEFAULT_MISTRAL_SERVER_URL, MISTRAL_OTEL_PATH).rstrip('/')}/",
+            traces_export_path,
+        )
+
+        if not (api_key := os.getenv(api_key_env)):
+            logger.warning(
+                "OTEL tracing enabled but %s is not set; skipping.", api_key_env
+            )
+            return None
+
+        return OtelSpanExporterConfig(
+            endpoint=endpoint, headers={"Authorization": f"Bearer {api_key}"}
+        )
+
+    @property
     def system_prompt(self) -> str:
         if self.custom_system_prompt is not None:
             return self.custom_system_prompt
@@ -489,7 +653,7 @@ class VibeConfig(BaseSettings):
                 ".md"
             )
             if custom_sp_path.is_file():
-                return custom_sp_path.read_text()
+                return read_safe(custom_sp_path).text
 
         raise MissingPromptFileError(
             self.system_prompt_id, *(str(d) for d in prompt_dirs)
@@ -507,6 +671,15 @@ class VibeConfig(BaseSettings):
         if self.compaction_model is not None:
             return self.compaction_model
         return self.get_active_model()
+
+    def get_mistral_provider(self) -> ProviderConfig | None:
+        try:
+            active_provider = self.get_provider_for_model(self.get_active_model())
+            if active_provider.backend == Backend.MISTRAL:
+                return active_provider
+        except ValueError:
+            pass
+        return next((p for p in self.providers if p.backend == Backend.MISTRAL), None)
 
     def get_provider_for_model(self, model: ModelConfig) -> ProviderConfig:
         for provider in self.providers:
@@ -532,6 +705,22 @@ class VibeConfig(BaseSettings):
                 return provider
         raise ValueError(
             f"Transcribe provider '{model.provider}' for transcribe model '{model.name}' not found in configuration."
+        )
+
+    def get_active_tts_model(self) -> TTSModelConfig:
+        for model in self.tts_models:
+            if model.alias == self.active_tts_model:
+                return model
+        raise ValueError(
+            f"Active TTS model '{self.active_tts_model}' not found in configuration."
+        )
+
+    def get_tts_provider_for_model(self, model: TTSModelConfig) -> TTSProviderConfig:
+        for provider in self.tts_providers:
+            if provider.name == model.provider:
+                return provider
+        raise ValueError(
+            f"TTS provider '{model.provider}' for TTS model '{model.name}' not found in configuration."
         )
 
     @classmethod
@@ -615,18 +804,16 @@ class VibeConfig(BaseSettings):
 
     @field_validator("tools", mode="before")
     @classmethod
-    def _normalize_tool_configs(cls, v: Any) -> dict[str, BaseToolConfig]:
+    def _normalize_tool_configs(cls, v: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(v, dict):
             return {}
 
-        normalized: dict[str, BaseToolConfig] = {}
+        normalized: dict[str, dict[str, Any]] = {}
         for tool_name, tool_config in v.items():
-            if isinstance(tool_config, BaseToolConfig):
+            if isinstance(tool_config, dict):
                 normalized[tool_name] = tool_config
-            elif isinstance(tool_config, dict):
-                normalized[tool_name] = BaseToolConfig.model_validate(tool_config)
             else:
-                normalized[tool_name] = BaseToolConfig()
+                normalized[tool_name] = {}
 
         return normalized
 
@@ -648,6 +835,17 @@ class VibeConfig(BaseSettings):
             if model.alias in seen_aliases:
                 raise ValueError(
                     f"Duplicate transcribe model alias found: '{model.alias}'. Aliases must be unique."
+                )
+            seen_aliases.add(model.alias)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_tts_model_uniqueness(self) -> VibeConfig:
+        seen_aliases: set[str] = set()
+        for model in self.tts_models:
+            if model.alias in seen_aliases:
+                raise ValueError(
+                    f"Duplicate TTS model alias found: '{model.alias}'. Aliases must be unique."
                 )
             seen_aliases.add(model.alias)
         return self
@@ -700,8 +898,10 @@ class VibeConfig(BaseSettings):
             return
         target = mgr.config_file or mgr.user_config_file
         target.parent.mkdir(parents=True, exist_ok=True)
+        toml_document = _to_toml_document(config)
+        cls.model_validate(toml_document)
         with target.open("wb") as f:
-            tomli_w.dump(to_jsonable_python(config, exclude_none=True, fallback=str), f)
+            tomli_w.dump(toml_document, f)
 
     @classmethod
     def _migrate(cls) -> None:

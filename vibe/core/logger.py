@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import re
 
 from vibe.core.paths import LOG_DIR, LOG_FILE
 
@@ -18,15 +19,25 @@ class StructuredLogFormatter(logging.Formatter):
         ppid = os.getppid()
         pid = os.getpid()
         level = record.levelname
-        message = record.getMessage().replace("\\", "\\\\").replace("\n", "\\n")
+        message = encode_log_message(record.getMessage())
 
         line = f"{timestamp} {ppid} {pid} {level} {message}"
 
         if record.exc_info:
-            exc_text = self.formatException(record.exc_info).replace("\n", "\\n")
+            exc_text = encode_log_message(self.formatException(record.exc_info))
             line = f"{line} {exc_text}"
 
         return line
+
+
+def encode_log_message(message: str) -> str:
+    return message.replace("\\", "\\\\").replace("\n", "\\n")
+
+
+def decode_log_message(encoded: str) -> str:
+    return re.sub(
+        r"\\(.)", lambda m: "\n" if m.group(1) == "n" else m.group(1), encoded
+    )
 
 
 def apply_logging_config(target_logger: logging.Logger) -> None:

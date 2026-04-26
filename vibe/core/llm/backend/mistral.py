@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator, Sequence
 import json
 import os
 import types
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 import httpx
 from mistralai.client import Mistral
@@ -14,6 +14,7 @@ from mistralai.client.models import (
     AssistantMessageContent,
     ChatCompletionRequestMessage,
     ChatCompletionStreamRequestToolChoice,
+    ContentChunk,
     FileChunk,
     Function,
     FunctionCall as MistralFunctionCall,
@@ -64,15 +65,17 @@ class MistralMapper:
             case Role.assistant:
                 content: AssistantMessageContent
                 if msg.reasoning_content:
-                    content = [
+                    chunks: list[ContentChunk] = [
                         ThinkChunk(
                             type="thinking",
                             thinking=[
                                 TextChunk(type="text", text=msg.reasoning_content)
                             ],
-                        ),
-                        TextChunk(type="text", text=msg.content or ""),
+                        )
                     ]
+                    if msg.content:
+                        chunks.append(TextChunk(type="text", text=msg.content))
+                    content = chunks
                 else:
                     content = msg.content or ""
 
@@ -166,6 +169,16 @@ class MistralMapper:
         ]
 
 
+ReasoningEffortValue = Literal["none", "high"]
+
+_THINKING_TO_REASONING_EFFORT: dict[str, ReasoningEffortValue] = {
+    "low": "none",
+    "medium": "high",
+    "high": "high",
+    "max": "high",
+}
+
+
 class MistralBackend:
     def __init__(self, provider: ProviderConfig, timeout: float = 720.0) -> None:
         self._client: Mistral | None = None
@@ -250,6 +263,10 @@ class MistralBackend:
     ) -> LLMChunk:
         try:
             merged_messages = merge_consecutive_user_messages(messages)
+            reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+            if reasoning_effort is not None:
+                temperature = 1.0
+
             response = await self._get_client().chat.complete_async(
                 model=model.name,
                 messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
@@ -264,11 +281,13 @@ class MistralBackend:
                 http_headers=extra_headers,
                 metadata=metadata,
                 stream=False,
+                reasoning_effort=reasoning_effort,
             )
 
+            message = response.choices[0].message
             parsed = (
-                self._mapper.parse_content(response.choices[0].message.content)
-                if response.choices[0].message.content
+                self._mapper.parse_content(message.content)
+                if message and message.content
                 else ParsedContent(content="", reasoning_content=None)
             )
             return LLMChunk(
@@ -276,10 +295,8 @@ class MistralBackend:
                     role=Role.assistant,
                     content=parsed.content,
                     reasoning_content=parsed.reasoning_content,
-                    tool_calls=self._mapper.parse_tool_calls(
-                        response.choices[0].message.tool_calls
-                    )
-                    if response.choices[0].message.tool_calls
+                    tool_calls=self._mapper.parse_tool_calls(message.tool_calls)
+                    if message and message.tool_calls
                     else None,
                 ),
                 usage=LLMUsage(
@@ -292,8 +309,7 @@ class MistralBackend:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
-                response=e.raw_response,
-                headers=e.raw_response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -326,7 +342,11 @@ class MistralBackend:
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
             merged_messages = merge_consecutive_user_messages(messages)
-            async for chunk in await self._get_client().chat.stream_async(
+            reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
+            if reasoning_effort is not None:
+                temperature = 1.0
+
+            stream = await self._get_client().chat.stream_async(
                 model=model.name,
                 messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
                 temperature=temperature,
@@ -339,7 +359,10 @@ class MistralBackend:
                 else None,
                 http_headers=extra_headers,
                 metadata=metadata,
-            ):
+                reasoning_effort=reasoning_effort,
+            )
+            correlation_id = stream.response.headers.get("mistral-correlation-id")
+            async for chunk in stream:
                 parsed = (
                     self._mapper.parse_content(chunk.data.choices[0].delta.content)
                     if chunk.data.choices[0].delta.content
@@ -364,14 +387,14 @@ class MistralBackend:
                         if chunk.data.usage
                         else 0,
                     ),
+                    correlation_id=correlation_id,
                 )
 
         except SDKError as e:
             raise BackendErrorBuilder.build_http_error(
                 provider=self._provider.name,
                 endpoint=self._server_url,
-                response=e.raw_response,
-                headers=e.raw_response.headers,
+                error=e,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,

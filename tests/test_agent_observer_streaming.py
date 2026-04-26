@@ -22,7 +22,6 @@ from vibe.core.middleware import (
     MiddlewareResult,
     ResetReason,
 )
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tools.builtins.todo import TodoArgs
 from vibe.core.types import (
     ApprovalResponse,
@@ -54,9 +53,7 @@ class InjectBeforeMiddleware:
 
 
 def make_config(
-    *,
-    enabled_tools: list[str] | None = None,
-    tools: dict[str, BaseToolConfig] | None = None,
+    *, enabled_tools: list[str] | None = None, tools: dict[str, dict] | None = None
 ) -> VibeConfig:
     return build_test_vibe_config(
         system_prompt_id="tests",
@@ -218,8 +215,7 @@ async def test_act_handles_streaming_with_tool_call_events_in_sequence() -> None
     ])
     agent = build_test_agent_loop(
         config=make_config(
-            enabled_tools=["todo"],
-            tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
+            enabled_tools=["todo"], tools={"todo": {"permission": "always"}}
         ),
         backend=backend,
         agent_name=BuiltinAgentName.AUTO_APPROVE,
@@ -268,8 +264,7 @@ async def test_act_handles_tool_call_chunk_with_content() -> None:
     ])
     agent = build_test_agent_loop(
         config=make_config(
-            enabled_tools=["todo"],
-            tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
+            enabled_tools=["todo"], tools={"todo": {"permission": "always"}}
         ),
         backend=backend,
         agent_name=BuiltinAgentName.AUTO_APPROVE,
@@ -324,8 +319,7 @@ async def test_act_merges_streamed_tool_call_arguments() -> None:
     ])
     agent = build_test_agent_loop(
         config=make_config(
-            enabled_tools=["todo"],
-            tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
+            enabled_tools=["todo"], tools={"todo": {"permission": "always"}}
         ),
         backend=backend,
         agent_name=BuiltinAgentName.AUTO_APPROVE,
@@ -387,8 +381,7 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     ])
     agent = build_test_agent_loop(
         config=make_config(
-            enabled_tools=["todo"],
-            tools={"todo": BaseToolConfig(permission=ToolPermission.ASK)},
+            enabled_tools=["todo"], tools={"todo": {"permission": "ask"}}
         ),
         backend=backend,
         agent_name=BuiltinAgentName.DEFAULT,
@@ -398,7 +391,7 @@ async def test_act_handles_user_cancellation_during_streaming() -> None:
     agent.middleware_pipeline.add(middleware)
 
     async def _reject_callback(
-        _name: str, _args: BaseModel, _id: str
+        _name: str, _args: BaseModel, _id: str, _rp: list | None = None
     ) -> tuple[ApprovalResponse, str | None]:
         return (
             ApprovalResponse.NO,
@@ -449,12 +442,16 @@ async def test_act_flushes_and_logs_when_streaming_errors(observer_capture) -> N
 @pytest.mark.asyncio
 async def test_rate_limit(observer_capture) -> None:
     observed, observer = observer_capture
-    response = httpx.Response(HTTPStatus.TOO_MANY_REQUESTS)
+    response = httpx.Response(
+        HTTPStatus.TOO_MANY_REQUESTS, request=httpx.Request("POST", "http://test")
+    )
+    error = httpx.HTTPStatusError(
+        "rate limited", request=response.request, response=response
+    )
     backend_error = BackendErrorBuilder.build_http_error(
         provider="mistral",
         endpoint="test",
-        response=response,
-        headers=None,
+        error=error,
         model="test-model",
         messages=[],
         temperature=0.0,
@@ -647,3 +644,27 @@ async def test_empty_content_chunks_do_not_trigger_false_yields() -> None:
         ("ReasoningEvent", " more reasoning"),
         ("AssistantEvent", "Actual content"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_assistant_event_message_id_matches_stored_message() -> None:
+    backend = FakeBackend([
+        mock_llm_chunk(content="Hello"),
+        mock_llm_chunk(content=" world"),
+    ])
+    agent = build_test_agent_loop(
+        config=make_config(), backend=backend, enable_streaming=True
+    )
+
+    events = [event async for event in agent.act("Test")]
+
+    assistant_events = [e for e in events if isinstance(e, AssistantEvent)]
+    assert len(assistant_events) == 2
+
+    # All chunks of the same assistant turn share one message_id
+    message_ids = {e.message_id for e in assistant_events}
+    assert len(message_ids) == 1
+
+    # The stored LLMMessage must carry that same message_id
+    stored_msg = next(m for m in agent.messages if m.role == Role.assistant)
+    assert stored_msg.message_id == assistant_events[0].message_id

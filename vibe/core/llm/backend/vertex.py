@@ -64,7 +64,7 @@ class VertexAnthropicAdapter(AnthropicAdapter):
         super().__init__()
         self.credentials = VertexCredentials()
 
-    def prepare_request(  # noqa: PLR0913
+    def prepare_request(
         self,
         *,
         model_name: str,

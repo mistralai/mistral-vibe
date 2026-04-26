@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 import functools
@@ -23,11 +23,16 @@ from typing import (
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from vibe.core.logger import logger
+from vibe.core.rewind.manager import FileSnapshot
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
+    from vibe.core.skills.manager import SkillManager
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
+    from vibe.core.tools.permissions import PermissionContext
     from vibe.core.types import (
         ApprovalCallback,
         EntrypointMetadata,
@@ -51,6 +56,7 @@ class InvokeContext:
     entrypoint_metadata: EntrypointMetadata | None = field(default=None)
     plan_file_path: Path | None = field(default=None)
     switch_agent_callback: SwitchAgentCallback | None = field(default=None)
+    skill_manager: SkillManager | None = field(default=None)
 
 
 class ToolError(Exception):
@@ -97,6 +103,7 @@ class BaseToolConfig(BaseModel):
         permission: The permission level required to use the tool.
         allowlist: Patterns that automatically allow tool execution.
         denylist: Patterns that automatically deny tool execution.
+        sensitive_patterns: Patterns that trigger ASK even when permission is ALWAYS.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -104,6 +111,7 @@ class BaseToolConfig(BaseModel):
     permission: ToolPermission = ToolPermission.ASK
     allowlist: list[str] = Field(default_factory=list)
     denylist: list[str] = Field(default_factory=list)
+    sensitive_patterns: list[str] = Field(default_factory=list)
 
 
 class BaseToolState(BaseModel):
@@ -126,9 +134,15 @@ class BaseTool[
 
     prompt_path: ClassVar[Path] | None = None
 
-    def __init__(self, config: ToolConfig, state: ToolState) -> None:
-        self.config = config
+    def __init__(
+        self, config_getter: Callable[[], ToolConfig], state: ToolState
+    ) -> None:
+        self._config_getter = config_getter
         self.state = state
+
+    @property
+    def config(self) -> ToolConfig:
+        return self._config_getter()
 
     @abstractmethod
     async def run(
@@ -153,7 +167,7 @@ class BaseTool[
             prompt_dir = class_path.parent / "prompts"
             prompt_path = cls.prompt_path or prompt_dir / f"{class_path.stem}.md"
 
-            return prompt_path.read_text("utf-8")
+            return read_safe(prompt_path).text
         except (FileNotFoundError, TypeError, OSError):
             pass
 
@@ -176,11 +190,11 @@ class BaseTool[
 
     @classmethod
     def from_config(
-        cls, config: ToolConfig
+        cls, config_getter: Callable[[], ToolConfig]
     ) -> BaseTool[ToolArgs, ToolResult, ToolConfig, ToolState]:
         state_class = cls._get_tool_state_class()
         initial_state = state_class()
-        return cls(config=config, state=initial_state)
+        return cls(config_getter=config_getter, state=initial_state)
 
     @classmethod
     def _get_tool_config_class(cls) -> type[ToolConfig]:
@@ -338,16 +352,40 @@ class BaseTool[
         config_class = cls._get_tool_config_class()
         return config_class(permission=permission)
 
-    def resolve_permission(self, args: ToolArgs) -> ToolPermission | None:
+    def resolve_permission(self, args: ToolArgs) -> PermissionContext | None:
         """Per-invocation permission override, checked before config-level permission.
 
         Returns:
-            ALWAYS if auto-approved, NEVER if blocked, ASK to force approval,
-            or None to fall through to config permission.
+            PermissionContext with granular required_permissions and a permission
+            level (ALWAYS/NEVER/ASK), or None to fall through to config permission.
 
         Override in subclasses for domain-specific rules (e.g. workdir checks).
         """
         return None
+
+    def get_file_snapshot(self, args: ToolArgs) -> FileSnapshot | None:
+        """Return a snapshot of the file this tool is about to modify.
+
+        Called before ``run()`` so the checkpoint system can capture
+        the file's state *before* the tool writes to it.
+        Override in tools that modify files on disk.
+        """
+        return None
+
+    @staticmethod
+    def get_file_snapshot_for_path(path: str) -> FileSnapshot:
+        file_path = Path(path).expanduser()
+        if not file_path.is_absolute():
+            file_path = Path.cwd() / file_path
+        file_path = file_path.resolve()
+        try:
+            content: bytes | None = file_path.read_bytes()
+        except FileNotFoundError:
+            content = None
+        except Exception:
+            logger.warning("Failed to read file for tool snapshot: %s", file_path)
+            content = None
+        return FileSnapshot(path=str(file_path), content=content)
 
     def get_result_extra(self, result: ToolResult) -> str | None:
         """Optional extra context appended to the result text sent to the LLM.

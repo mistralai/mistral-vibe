@@ -48,9 +48,10 @@ class ReasoningAdapter(APIAdapter):
                 {
                     "type": "thinking",
                     "thinking": [{"type": "text", "text": msg.reasoning_content}],
-                },
-                {"type": "text", "text": msg.content or ""},
+                }
             ]
+            if msg.content:
+                content.append({"type": "text", "text": msg.content})
             result["content"] = content
         else:
             result["content"] = msg.content or ""
@@ -106,14 +107,7 @@ class ReasoningAdapter(APIAdapter):
 
         return payload
 
-    def _strip_reasoning(self, msg: LLMMessage) -> LLMMessage:
-        if msg.role != Role.assistant or not msg.reasoning_content:
-            return msg
-        return msg.model_copy(
-            update={"reasoning_content": None, "reasoning_signature": None}
-        )
-
-    def prepare_request(  # noqa: PLR0913
+    def prepare_request(
         self,
         *,
         model_name: str,
@@ -128,8 +122,6 @@ class ReasoningAdapter(APIAdapter):
         thinking: str = "off",
     ) -> PreparedRequest:
         merged_messages = merge_consecutive_user_messages(messages)
-        if thinking == "off":
-            merged_messages = [self._strip_reasoning(msg) for msg in merged_messages]
         converted_messages = [self._convert_message(msg) for msg in merged_messages]
 
         payload = self._build_payload(

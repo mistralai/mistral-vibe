@@ -4,18 +4,20 @@ import asyncio
 from collections.abc import Callable
 import os
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urljoin
 
 import httpx
 
 from vibe import __version__
-from vibe.core.config import Backend, VibeConfig
+from vibe.core.config import ProviderConfig, VibeConfig
 from vibe.core.llm.format import ResolvedToolCall
-from vibe.core.utils import get_user_agent
+from vibe.core.utils import get_server_url_from_api_base, get_user_agent
 
 if TYPE_CHECKING:
     from vibe.core.agent_loop import ToolDecision
 
-DATALAKE_EVENTS_URL = "https://codestral.mistral.ai/v1/datalake/events"
+_DEFAULT_TELEMETRY_BASE_URL = "https://api.mistral.ai"
+_DATALAKE_EVENTS_PATH = "/v1/datalake/events"
 
 
 class TelemetryClient:
@@ -28,32 +30,37 @@ class TelemetryClient:
         self._session_id_getter = session_id_getter
         self._client: httpx.AsyncClient | None = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
+        self.last_correlation_id: str | None = None
 
-    def _get_telemetry_user_agent(self) -> str:
-        try:
-            config = self._config_getter()
-            active_model = config.get_active_model()
-            provider = config.get_provider_for_model(active_model)
-            return get_user_agent(provider.backend)
-        except ValueError:
-            return get_user_agent(None)
+    def _get_telemetry_url(self, api_base: str) -> str:
+        base = get_server_url_from_api_base(api_base) or _DEFAULT_TELEMETRY_BASE_URL
+        return urljoin(base.rstrip("/"), _DATALAKE_EVENTS_PATH)
 
     def _get_mistral_api_key(self) -> str | None:
-        """Get the current API key from the active provider.
+        """Get the API key from the active provider if it's Mistral,
+        otherwise the first Mistral provider.
 
         Only returns an API key if the provider is a Mistral provider
         to avoid leaking third-party credentials to the telemetry endpoint.
         """
+        provider_and_api_key = self._get_mistral_provider_and_api_key()
+        if provider_and_api_key is None:
+            return None
+        _, api_key = provider_and_api_key
+        return api_key
+
+    def _get_mistral_provider_and_api_key(self) -> tuple[ProviderConfig, str] | None:
         try:
-            config = self._config_getter()
-            model = config.get_active_model()
-            provider = config.get_provider_for_model(model)
-            if provider.backend != Backend.MISTRAL:
-                return None
-            env_var = provider.api_key_env_var
-            return os.getenv(env_var) if env_var else None
+            provider = self._config_getter().get_mistral_provider()
         except ValueError:
             return None
+        if provider is None:
+            return None
+        env_var = provider.api_key_env_var
+        api_key = os.getenv(env_var) if env_var else None
+        if api_key is None:
+            return None
+        return provider, api_key
 
     def _is_enabled(self) -> bool:
         """Check if telemetry is enabled in the current config."""
@@ -61,6 +68,9 @@ class TelemetryClient:
             return self._config_getter().enable_telemetry
         except ValueError:
             return False
+
+    def is_active(self) -> bool:
+        return self._is_enabled() and self._get_mistral_api_key() is not None
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -71,22 +81,36 @@ class TelemetryClient:
             )
         return self._client
 
-    def send_telemetry_event(self, event_name: str, properties: dict[str, Any]) -> None:
-        mistral_api_key = self._get_mistral_api_key()
-        if mistral_api_key is None or not self._is_enabled():
+    def send_telemetry_event(
+        self,
+        event_name: str,
+        properties: dict[str, Any],
+        *,
+        correlation_id: str | None = None,
+    ) -> None:
+        if not self._is_enabled():
             return
-        user_agent = self._get_telemetry_user_agent()
+        provider_and_api_key = self._get_mistral_provider_and_api_key()
+        if provider_and_api_key is None:
+            return
+        provider, mistral_api_key = provider_and_api_key
+        telemetry_url = self._get_telemetry_url(provider.api_base)
+        user_agent = get_user_agent(provider.backend)
         if (
             self._session_id_getter is not None
             and (session_id := self._session_id_getter()) is not None
         ):
             properties = {**properties, "session_id": session_id}
 
+        payload: dict[str, Any] = {"event": event_name, "properties": properties}
+        if correlation_id:
+            payload["correlation_id"] = correlation_id
+
         async def _send() -> None:
             try:
                 await self.client.post(
-                    DATALAKE_EVENTS_URL,
-                    json={"event": event_name, "properties": properties},
+                    telemetry_url,
+                    json=payload,
                     headers={
                         "Content-Type": "application/json",
                         "Authorization": f"Bearer {mistral_api_key}",
@@ -133,6 +157,7 @@ class TelemetryClient:
         status: Literal["success", "failure", "skipped"],
         decision: ToolDecision | None,
         agent_profile_name: str,
+        model: str,
         result: dict[str, Any] | None = None,
     ) -> None:
         verdict_value = decision.verdict.value if decision else None
@@ -148,6 +173,7 @@ class TelemetryClient:
             "decision": verdict_value,
             "approval_type": approval_type_value,
             "agent_profile_name": agent_profile_name,
+            "model": model,
             "nb_files_created": nb_files_created,
             "nb_files_modified": nb_files_modified,
         }
@@ -178,6 +204,8 @@ class TelemetryClient:
         nb_mcp_servers: int,
         nb_models: int,
         entrypoint: Literal["cli", "acp", "programmatic", "unknown"],
+        client_name: str | None,
+        client_version: str | None,
         terminal_emulator: str | None = None,
     ) -> None:
         payload = {
@@ -187,6 +215,8 @@ class TelemetryClient:
             "nb_models": nb_models,
             "entrypoint": entrypoint,
             "version": __version__,
+            "client_name": client_name,
+            "client_version": client_version,
             "terminal_emulator": terminal_emulator,
         }
         self.send_telemetry_event("vibe.new_session", payload)
@@ -194,4 +224,27 @@ class TelemetryClient:
     def send_onboarding_api_key_added(self) -> None:
         self.send_telemetry_event(
             "vibe.onboarding_api_key_added", {"version": __version__}
+        )
+
+    def send_request_sent(
+        self,
+        *,
+        model: str,
+        nb_context_chars: int,
+        nb_context_messages: int,
+        nb_prompt_chars: int,
+    ) -> None:
+        payload = {
+            "model": model,
+            "nb_context_chars": nb_context_chars,
+            "nb_context_messages": nb_context_messages,
+            "nb_prompt_chars": nb_prompt_chars,
+        }
+        self.send_telemetry_event("vibe.request_sent", payload)
+
+    def send_user_rating_feedback(self, rating: int, model: str) -> None:
+        self.send_telemetry_event(
+            "vibe.user_rating_feedback",
+            {"rating": rating, "version": __version__, "model": model},
+            correlation_id=self.last_correlation_id,
         )

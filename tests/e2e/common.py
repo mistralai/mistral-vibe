@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 import io
 from pathlib import Path
@@ -13,7 +13,7 @@ import pexpect
 
 class SpawnedVibeProcessFixture(Protocol):
     def __call__(
-        self, workdir: Path
+        self, workdir: Path, extra_args: Sequence[str] | None = None
     ) -> AbstractContextManager[tuple[pexpect.spawn, io.StringIO]]: ...
 
 
