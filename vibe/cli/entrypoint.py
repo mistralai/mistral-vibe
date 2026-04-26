@@ -152,9 +152,33 @@ def check_and_resolve_trusted_folder() -> None:
         trusted_folders_manager.add_untrusted(cwd)
 
 
+_GLOBAL_FLAGS_WITH_VALUE = frozenset({"--workdir", "--plugin-dir"})
+
+
+def _find_plugin_subcommand_idx() -> int | None:
+    """Return the sys.argv index of the 'plugin' positional subcommand, or None.
+
+    Skips over known global flags and their values so that invocations like
+    ``vibe --workdir <dir> plugin ...`` are handled correctly.
+    """
+    skip_next = False
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in _GLOBAL_FLAGS_WITH_VALUE:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        return i if arg == "plugin" else None
+    return None
+
+
 def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] == "plugin":
-        _run_plugin_command()
+    plugin_idx = _find_plugin_subcommand_idx()
+    if plugin_idx is not None:
+        _run_plugin_command(plugin_idx)
         return
 
     args = parse_arguments()
@@ -187,7 +211,7 @@ def main() -> None:
     run_cli(args)
 
 
-def _run_plugin_command() -> None:
+def _run_plugin_command(plugin_idx: int = 1) -> None:
     # Process --workdir if present before the "plugin" subcommand
     workdir_idx = None
     for i, arg in enumerate(sys.argv):
@@ -204,7 +228,7 @@ def _run_plugin_command() -> None:
     from vibe.core.plugins.cli import build_plugin_parser, handle_plugin_command
 
     parser = build_plugin_parser()
-    args = parser.parse_args(sys.argv[2:])
+    args = parser.parse_args(sys.argv[plugin_idx + 1 :])
     if not args.plugin_command:
         parser.print_help()
         return

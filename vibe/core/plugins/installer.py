@@ -57,7 +57,9 @@ class PluginInstaller:
                 manifest_dir = tmp_path
             manifest = PluginManifest.from_dir(manifest_dir)
             dest = target_dir / manifest.name
-            if dest.exists():
+            if dest.is_symlink():
+                dest.unlink()
+            elif dest.exists():
                 shutil.rmtree(dest)
             shutil.move(manifest_dir, dest)
 
@@ -88,8 +90,10 @@ class PluginInstaller:
         manifest = PluginManifest.from_dir(resolved)
         link = target_dir / manifest.name
         link.parent.mkdir(parents=True, exist_ok=True)
-        if link.exists() or link.is_symlink():
+        if link.is_symlink() or link.is_file():
             link.unlink()
+        elif link.exists():
+            shutil.rmtree(link)
         link.symlink_to(resolved, target_is_directory=True)
 
         try:
@@ -131,7 +135,9 @@ class PluginInstaller:
             raise ValueError(msg)
         dest = target_dir / plugin_name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
+        if dest.is_symlink():
+            dest.unlink()
+        elif dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(source_dir, dest)
 

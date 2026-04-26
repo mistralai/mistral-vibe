@@ -8,6 +8,19 @@ import yaml
 from vibe.core.plugins.models import PluginManifest
 from vibe.core.plugins.registry import PluginRegistryManager
 
+_MANIFEST_SEARCH_DIRS = (".", ".github/plugin", ".claude-plugin")
+_MANIFEST_FILES = ("plugin.toml", "plugin.json")
+
+
+def _has_explicit_manifest(plugin_dir: Path) -> bool:
+    """Return True only if an explicit manifest file exists (no synthesis fallback)."""
+    return any(
+        (plugin_dir / rel / fn).is_file()
+        for rel in _MANIFEST_SEARCH_DIRS
+        for fn in _MANIFEST_FILES
+    )
+
+
 _FRONTMATTER_PARTS = 3
 
 
@@ -69,9 +82,8 @@ def discover_all_plugin_commands(
     """Return ``{slash_name: PluginCommand}`` for every enabled plugin's commands."""
     commands: dict[str, PluginCommand] = {}
 
-    for plugin_name in registry.get_enabled_plugins():
-        plugin_dir = registry.get_plugin_dir(plugin_name)
-        if plugin_dir is None:
+    for plugin_name, plugin_dir in registry.get_enabled_plugin_dirs().items():
+        if not _has_explicit_manifest(plugin_dir):
             continue
         try:
             manifest = PluginManifest.from_dir(plugin_dir)
@@ -82,7 +94,7 @@ def discover_all_plugin_commands(
 
         for cmd_dir in resolved.command_dirs:
             for md_file in sorted(cmd_dir.glob("*.md")):
-                cmd_name = md_file.stem
+                cmd_name = md_file.stem.lower()
                 slash_name = f"{plugin_name}:{cmd_name}"
                 commands[slash_name] = PluginCommand(
                     name=cmd_name,

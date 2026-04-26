@@ -83,6 +83,17 @@ class PluginRegistryManager:
             raise KeyError(msg)
         return self._scope_dirs[scope]
 
+    def get_enabled_plugin_dirs(self) -> dict[str, Path]:
+        """Return ``{name: path}`` for all enabled plugins, including dev overrides."""
+        dirs: dict[str, Path] = {
+            name: self._scope_dirs[scope] / name
+            for name, (scope, entry) in self._merged_plugins().items()
+            if entry.enabled
+        }
+        # Dev plugins take highest priority; add or override installed entries
+        dirs.update(self._dev_plugins)
+        return dirs
+
     def get_enabled_plugins(self) -> dict[str, PluginEntry]:
         return {
             name: entry

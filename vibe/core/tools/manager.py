@@ -231,7 +231,12 @@ class ToolManager:
 
         mgr = get_harness_files_manager()
         adapter = TypeAdapter(MCPServer)
-        plugin_mcp = [adapter.validate_python(s) for s in mgr.plugin_mcp_servers]
+        plugin_mcp: list[MCPServer] = []
+        for s in mgr.plugin_mcp_servers:
+            try:
+                plugin_mcp.append(adapter.validate_python(s))
+            except Exception as exc:
+                logger.warning("Skipping invalid plugin MCP server config: %s", exc)
         all_mcp = list(self._config.mcp_servers) + plugin_mcp
         if not all_mcp:
             return
