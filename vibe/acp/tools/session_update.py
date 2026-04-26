@@ -20,10 +20,8 @@ from vibe.core.utils import TaggedText, is_user_cancellation_event
 TOOL_KIND: dict[str, ToolKind] = {
     "grep": "search",
     "read_file": "read",
-    # Right now, jetbrains implementation of "edit" tool kind is broken
-    # Leading to the tool not appearing in the chat
-    # "write_file": "edit",
-    # "search_replace": "edit",
+    "write_file": "edit",
+    "search_replace": "edit",
 }
 
 
@@ -55,6 +53,8 @@ def tool_call_session_update(event: ToolCallEvent) -> SessionUpdate | None:
 
 
 def tool_result_session_update(event: ToolResultEvent) -> SessionUpdate | None:
+    kind = TOOL_KIND.get(event.tool_name, "other")
+
     if is_user_cancellation_event(event):
         tool_status = "failed"
         if event.skip_reason:
@@ -78,6 +78,7 @@ def tool_result_session_update(event: ToolResultEvent) -> SessionUpdate | None:
         return ToolCallProgress(
             session_update="tool_call_update",
             tool_call_id=event.tool_call_id,
+            kind=kind,
             status="failed",
             raw_output=raw_output,
             content=[
@@ -115,6 +116,7 @@ def tool_result_session_update(event: ToolResultEvent) -> SessionUpdate | None:
     return ToolCallProgress(
         session_update="tool_call_update",
         tool_call_id=event.tool_call_id,
+        kind=kind,
         status=tool_status,
         raw_output=raw_output,
         content=content,

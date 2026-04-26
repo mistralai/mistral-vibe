@@ -114,6 +114,7 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
             return ToolCallProgress(
                 session_update="tool_call_update",
                 tool_call_id=event.tool_call_id,
+                kind="edit",
                 status="failed",
             )
 
@@ -126,6 +127,7 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
         return ToolCallProgress(
             session_update="tool_call_update",
             tool_call_id=event.tool_call_id,
+            kind="edit",
             status="completed",
             content=[
                 FileEditToolCallContent(
