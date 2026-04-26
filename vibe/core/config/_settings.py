@@ -23,12 +23,12 @@ from pydantic_settings import (
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
-from pydantic_settings.sources.base import deep_update
 import tomli_w
 
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
+from vibe.core.plugins.models import MarketplaceConfig
 from vibe.core.prompts import SystemPrompt
 from vibe.core.types import Backend
 from vibe.core.utils import get_server_url_from_api_base
@@ -459,6 +459,7 @@ class VibeConfig(BaseSettings):
     auto_approve: bool = False
     enable_telemetry: bool = True
     system_prompt_id: str = "cli"
+    custom_system_prompt: str | None = Field(default=None, exclude=True)
     include_commit_signature: bool = True
     include_model_info: bool = True
     include_project_context: bool = True
@@ -582,6 +583,9 @@ class VibeConfig(BaseSettings):
             " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
+    plugin_marketplaces: list[MarketplaceConfig] = Field(
+        default_factory=list, description="List of plugin marketplace repositories."
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"
@@ -635,6 +639,8 @@ class VibeConfig(BaseSettings):
 
     @property
     def system_prompt(self) -> str:
+        if self.custom_system_prompt is not None:
+            return self.custom_system_prompt
         try:
             return SystemPrompt[self.system_prompt_id.upper()].read()
         except KeyError:
@@ -854,8 +860,36 @@ class VibeConfig(BaseSettings):
         if not get_harness_files_manager().persist_allowed:
             return
         current_config = TomlFileSettingsSource(cls).toml_data
-        merged_config = deep_update(current_config, updates)
-        cls.dump_config(merged_config)
+
+        def deep_merge(target: dict, source: dict) -> None:
+            for key, value in source.items():
+                if (
+                    key in target
+                    and isinstance(target.get(key), dict)
+                    and isinstance(value, dict)
+                ):
+                    deep_merge(target[key], value)
+                elif (
+                    key in target
+                    and isinstance(target.get(key), list)
+                    and isinstance(value, list)
+                ):
+                    if key in {
+                        "providers",
+                        "models",
+                        "transcribe_providers",
+                        "transcribe_models",
+                        "installed_agents",
+                        "plugin_marketplaces",
+                    }:
+                        target[key] = value
+                    else:
+                        target[key] = list(set(value + target[key]))
+                else:
+                    target[key] = value
+
+        deep_merge(current_config, updates)
+        cls.dump_config(current_config)
 
     @classmethod
     def dump_config(cls, config: dict[str, Any]) -> None:

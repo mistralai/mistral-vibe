@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from vibe.core.config.harness_files._paths import (
     GLOBAL_AGENTS_DIR,
+    GLOBAL_PLUGINS_DIR,
     GLOBAL_PROMPTS_DIR,
     GLOBAL_SKILLS_DIR,
     GLOBAL_TOOLS_DIR,
@@ -18,6 +19,9 @@ from vibe.core.paths import (
 )
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.utils.io import read_safe
+
+if TYPE_CHECKING:
+    from vibe.core.plugins.registry import PluginRegistryManager
 
 FileSource = Literal["user", "project"]
 
@@ -114,6 +118,26 @@ class HarnessFilesManager:
         d = GLOBAL_PROMPTS_DIR.path
         return [d] if d.is_dir() else []
 
+    @property
+    def plugin_skill_dirs(self) -> list[Path]:
+        return _get_plugin_registry_manager().get_all_skill_dirs()
+
+    @property
+    def plugin_agent_dirs(self) -> list[Path]:
+        return _get_plugin_registry_manager().get_all_agent_dirs()
+
+    @property
+    def plugin_tool_dirs(self) -> list[Path]:
+        return _get_plugin_registry_manager().get_all_tool_dirs()
+
+    @property
+    def plugin_command_dirs(self) -> list[Path]:
+        return _get_plugin_registry_manager().get_all_command_dirs()
+
+    @property
+    def plugin_mcp_servers(self) -> list[dict[str, Any]]:
+        return _get_plugin_registry_manager().get_all_mcp_servers()
+
     def load_user_doc(self) -> str:
         if "user" not in self.sources:
             return ""
@@ -193,11 +217,33 @@ class HarnessFilesManager:
         return self._collect_agents_md(cwd, trust_root, stop_inclusive=True)
 
 
+_plugin_registry_manager: PluginRegistryManager | None = None
+
+
+def _get_plugin_registry_manager() -> PluginRegistryManager:
+    """Lazy singleton for PluginRegistryManager."""
+    global _plugin_registry_manager
+    if _plugin_registry_manager is None:
+        from vibe.core.plugins.registry import PluginRegistryManager
+
+        project_dir: Path | None = None
+        local_dir: Path | None = None
+        if _manager and (workdir := _manager.trusted_workdir):
+            project_dir = workdir / ".vibe" / "plugins"
+            local_dir = workdir / ".vibe" / "local-plugins"
+        _plugin_registry_manager = PluginRegistryManager(
+            plugins_dir=GLOBAL_PLUGINS_DIR.path,
+            project_plugins_dir=project_dir,
+            local_plugins_dir=local_dir,
+        )
+    return _plugin_registry_manager
+
+
 _manager: HarnessFilesManager | None = None
 
 
 def init_harness_files_manager(*sources: FileSource) -> None:
-    global _manager
+    global _manager, _plugin_registry_manager
     if _manager is not None:
         if _manager.sources == sources:
             return
@@ -205,6 +251,7 @@ def init_harness_files_manager(*sources: FileSource) -> None:
             "HarnessFilesManager already initialized with different sources"
         )
     _manager = HarnessFilesManager(sources=sources)
+    _plugin_registry_manager = None
 
 
 def get_harness_files_manager() -> HarnessFilesManager:
@@ -217,5 +264,6 @@ def get_harness_files_manager() -> HarnessFilesManager:
 
 def reset_harness_files_manager() -> None:
     """Reset the singleton. Only intended for use in tests."""
-    global _manager
+    global _manager, _plugin_registry_manager
     _manager = None
+    _plugin_registry_manager = None

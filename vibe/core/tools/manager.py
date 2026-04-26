@@ -104,6 +104,7 @@ class ToolManager:
         mgr = get_harness_files_manager()
         paths.extend(mgr.project_tools_dirs)
         paths.extend(mgr.user_tools_dirs)
+        paths.extend(mgr.plugin_tool_dirs)
 
         unique: list[Path] = []
         seen: set[Path] = set()
@@ -223,13 +224,25 @@ class ToolManager:
         """Async MCP discovery — canonical implementation."""
         if self._mcp_integrated:
             return
-        if not self._config.mcp_servers:
+
+        from pydantic import TypeAdapter
+
+        from vibe.core.config._settings import MCPServer
+
+        mgr = get_harness_files_manager()
+        adapter = TypeAdapter(MCPServer)
+        plugin_mcp: list[MCPServer] = []
+        for s in mgr.plugin_mcp_servers:
+            try:
+                plugin_mcp.append(adapter.validate_python(s))
+            except Exception as exc:
+                logger.warning("Skipping invalid plugin MCP server config: %s", exc)
+        all_mcp = list(self._config.mcp_servers) + plugin_mcp
+        if not all_mcp:
             return
 
         try:
-            mcp_tools = await self._mcp_registry.get_tools_async(
-                self._config.mcp_servers
-            )
+            mcp_tools = await self._mcp_registry.get_tools_async(all_mcp)
         except Exception as exc:
             logger.warning("MCP integration failed: %s", exc)
             if raise_on_failure:

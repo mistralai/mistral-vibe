@@ -83,6 +83,13 @@ def parse_arguments() -> argparse.Namespace:
         metavar="DIR",
         help="Change to this directory before running",
     )
+    parser.add_argument(
+        "--plugin-dir",
+        action="append",
+        type=Path,
+        metavar="DIR",
+        help="Load plugin from local directory (can be specified multiple times)",
+    )
 
     # Feature flag for teleport, not exposed to the user yet
     parser.add_argument("--teleport", action="store_true", help=argparse.SUPPRESS)
@@ -145,7 +152,46 @@ def check_and_resolve_trusted_folder() -> None:
         trusted_folders_manager.add_untrusted(cwd)
 
 
+_GLOBAL_FLAGS_WITH_VALUE = frozenset({
+    "--agent",
+    "--enabled-tools",
+    "--max-price",
+    "--max-turns",
+    "--output",
+    "--plugin-dir",
+    "--prompt",
+    "--resume",
+    "--workdir",
+    "-p",
+})
+
+
+def _find_plugin_subcommand_idx() -> int | None:
+    """Return the sys.argv index of the 'plugin' positional subcommand, or None.
+
+    Skips over known global flags and their values so that invocations like
+    ``vibe --workdir <dir> plugin ...`` are handled correctly.
+    """
+    skip_next = False
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in _GLOBAL_FLAGS_WITH_VALUE:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        return i if arg == "plugin" else None
+    return None
+
+
 def main() -> None:
+    plugin_idx = _find_plugin_subcommand_idx()
+    if plugin_idx is not None:
+        _run_plugin_command(plugin_idx)
+        return
+
     args = parse_arguments()
 
     if args.workdir:
@@ -162,9 +208,42 @@ def main() -> None:
         check_and_resolve_trusted_folder()
     init_harness_files_manager("user", "project")
 
+    if args.plugin_dir:
+        from vibe.core.config.harness_files._harness_manager import (
+            _get_plugin_registry_manager,
+        )
+
+        registry = _get_plugin_registry_manager()
+        for plugin_path in args.plugin_dir:
+            registry.add_dev_plugin(plugin_path.expanduser().resolve())
+
     from vibe.cli.cli import run_cli
 
     run_cli(args)
+
+
+def _run_plugin_command(plugin_idx: int = 1) -> None:
+    # Process --workdir if present before the "plugin" subcommand
+    workdir_idx = None
+    for i, arg in enumerate(sys.argv):
+        if arg == "--workdir" and i + 1 < len(sys.argv):
+            workdir_idx = i
+            break
+    if workdir_idx is not None:
+        workdir = Path(sys.argv[workdir_idx + 1]).expanduser().resolve()
+        if workdir.is_dir():
+            os.chdir(workdir)
+
+    check_and_resolve_trusted_folder()
+    init_harness_files_manager("user", "project")
+    from vibe.core.plugins.cli import build_plugin_parser, handle_plugin_command
+
+    parser = build_plugin_parser()
+    args = parser.parse_args(sys.argv[plugin_idx + 1 :])
+    if not args.plugin_command:
+        parser.print_help()
+        return
+    handle_plugin_command(args)
 
 
 if __name__ == "__main__":

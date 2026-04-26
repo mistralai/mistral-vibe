@@ -7,6 +7,7 @@ import tomllib
 from typing import TYPE_CHECKING, Any
 
 from vibe.core.paths import PLANS_DIR
+from vibe.core.skills.parser import parse_skill_markdown as parse_frontmatter
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
@@ -81,6 +82,31 @@ class AgentProfile:
             safety=AgentSafety(data.pop("safety", AgentSafety.NEUTRAL)),
             agent_type=AgentType(data.pop("agent_type", AgentType.AGENT)),
             overrides=data,
+        )
+
+    @classmethod
+    def from_md(cls, path: Path) -> AgentProfile:
+        """Load an agent from a Markdown file with YAML frontmatter."""
+        content = path.read_text(encoding="utf-8")
+        frontmatter, body = parse_frontmatter(content)
+        overrides: dict[str, Any] = {}
+        if body.strip():
+            overrides["custom_system_prompt"] = body.strip()
+        if tools := frontmatter.get("tools"):
+            match tools:
+                case str():
+                    overrides["enabled_tools"] = [
+                        t.strip() for t in tools.split(",") if t.strip()
+                    ]
+                case list():
+                    overrides["enabled_tools"] = tools
+        return cls(
+            name=path.stem,
+            display_name=frontmatter.get("name", path.stem.replace("-", " ").title()),
+            description=frontmatter.get("description", ""),
+            safety=AgentSafety(frontmatter.get("safety", AgentSafety.NEUTRAL)),
+            agent_type=AgentType(frontmatter.get("agent_type", AgentType.AGENT)),
+            overrides=overrides,
         )
 
 

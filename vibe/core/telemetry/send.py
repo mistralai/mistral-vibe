@@ -192,7 +192,7 @@ class TelemetryClient:
         self.send_telemetry_event("vibe.auto_compact_triggered", payload)
 
     def send_slash_command_used(
-        self, command: str, command_type: Literal["builtin", "skill"]
+        self, command: str, command_type: Literal["builtin", "skill", "plugin_command"]
     ) -> None:
         payload = {"command": command.lstrip("/"), "command_type": command_type}
         self.send_telemetry_event("vibe.slash_command_used", payload)

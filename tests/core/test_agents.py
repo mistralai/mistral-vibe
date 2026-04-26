@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.agents.manager import AgentManager
-from vibe.core.agents.models import BUILTIN_AGENTS, EXPLORE, AgentSafety, AgentType
+from vibe.core.agents.models import (
+    BUILTIN_AGENTS,
+    EXPLORE,
+    AgentProfile,
+    AgentSafety,
+    AgentType,
+)
 
 
 class TestAgentProfile:
@@ -80,7 +88,6 @@ class TestAgentManager:
         assert agent.agent_type == AgentType.AGENT
 
     def test_initial_agent_rejects_subagent(self) -> None:
-        """Test that creating AgentManager with a subagent as initial_agent raises."""
         config = build_test_vibe_config(
             include_project_context=False, include_prompt_detail=False
         )
@@ -88,7 +95,6 @@ class TestAgentManager:
             AgentManager(lambda: config, initial_agent="explore")
 
     def test_initial_agent_accepts_subagent_when_allowed(self) -> None:
-        """Test that allow_subagent=True permits subagent as initial_agent."""
         config = build_test_vibe_config(
             include_project_context=False, include_prompt_detail=False
         )
@@ -98,9 +104,55 @@ class TestAgentManager:
         assert manager.active_profile.name == "explore"
 
     def test_initial_agent_accepts_agent_type(self) -> None:
-        """Test that creating AgentManager with an agent-type agent works."""
         config = build_test_vibe_config(
             include_project_context=False, include_prompt_detail=False
         )
         manager = AgentManager(lambda: config, initial_agent="plan")
         assert manager.active_profile.name == "plan"
+
+
+class TestAgentProfileFromMd:
+    def test_parse_md_agent(self, tmp_path: Path) -> None:
+        md = tmp_path / "my-agent.md"
+        md.write_text(
+            '---\nname: "My Agent"\ndescription: "A test agent"\ntools:\n  - bash\n  - read_file\n---\n\n# Instructions\n\nDo things.',
+            encoding="utf-8",
+        )
+        agent = AgentProfile.from_md(md)
+        assert agent.name == "my-agent"
+        assert agent.display_name == "My Agent"
+        assert agent.description == "A test agent"
+        assert agent.overrides["enabled_tools"] == ["bash", "read_file"]
+        assert "# Instructions" in agent.overrides["custom_system_prompt"]
+
+    def test_parse_md_agent_no_tools(self, tmp_path: Path) -> None:
+        md = tmp_path / "simple.md"
+        md.write_text(
+            '---\ndescription: "Simple"\n---\n\nJust instructions.', encoding="utf-8"
+        )
+        agent = AgentProfile.from_md(md)
+        assert agent.name == "simple"
+        assert "enabled_tools" not in agent.overrides
+        assert agent.overrides["custom_system_prompt"] == "Just instructions."
+
+    def test_parse_md_agent_comma_separated_tools(self, tmp_path: Path) -> None:
+        md = tmp_path / "csv-tools.md"
+        md.write_text("---\ntools: Glob, Grep, Read\n---\n\nBody.", encoding="utf-8")
+        agent = AgentProfile.from_md(md)
+        assert agent.overrides["enabled_tools"] == ["Glob", "Grep", "Read"]
+
+    def test_manager_discovers_md_agents(self, tmp_path: Path) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "review.md").write_text(
+            '---\nname: "Reviewer"\ndescription: "Reviews code"\n---\n\nReview instructions.',
+            encoding="utf-8",
+        )
+        config = build_test_vibe_config(
+            include_project_context=False,
+            include_prompt_detail=False,
+            agent_paths=[agents_dir],
+        )
+        manager = AgentManager(lambda: config)
+        assert "review" in manager.available_agents
+        assert manager.available_agents["review"].display_name == "Reviewer"
