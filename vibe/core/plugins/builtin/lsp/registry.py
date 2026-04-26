@@ -49,15 +49,11 @@ class LspConfig:
 # ── Built-in registry ─────────────────────────────────────────────────────────
 
 LSP_REGISTRY: dict[str, LspConfig] = {
+    # pyright via basedpyright (supports lsprotocol 2025+)
     "python": LspConfig(
         language="python",
         extensions=frozenset({".py", ".pyi"}),
-        command=[
-            "pylsp",
-            "--log-file",
-            GlobalPath(lambda: LOG_DIR.path / "pylsp.log").path.as_posix(),
-            "-vvv",
-        ],
+        command=["basedpyright"],
         language_id="python",
         root_markers=frozenset({
             "pyproject.toml",
@@ -70,11 +66,7 @@ LSP_REGISTRY: dict[str, LspConfig] = {
         language="typescript",
         extensions=frozenset({".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}),
         command=[
-            "powershell",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            "C:\\Users\\herve\\AppData\\Roaming\\npm\\typescript-language-server",
+            "typescript-language-server",
             "--stdio",
         ],
         language_id="typescript",

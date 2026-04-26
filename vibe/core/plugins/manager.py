@@ -25,16 +25,22 @@ from __future__ import annotations
 
 import fnmatch
 import importlib
+import importlib.metadata
 import importlib.util
 import inspect
 import logging
 from pathlib import Path
 import re
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import pybreaker
+import pluggy
 
 from vibe.core.plugins.base import PluginContext, ToolEventPlugin, VibePlugin
 from vibe.core.plugins.command_plugin import CommandPlugin
+from vibe.core.plugins.resilience import get_plugin_circuit_breaker
+from vibe.core.plugins.extension_points import HookSpecs
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
@@ -66,6 +72,20 @@ class PluginManager:
         self._command_registry = command_registry
         self._plugins: list[VibePlugin] = []
         self._tool_event_plugins: list[ToolEventPlugin] = []
+        self._pluggy_pm = pluggy.PluginManager("mistral-vibe")
+        self._pluggy_pm.add_hookspecs(HookSpecs)
+        try:
+            self._circuit_breaker = get_plugin_circuit_breaker()
+        except RuntimeError:
+            self._circuit_breaker = None
+
+    async def _call_with_circuit_breaker(
+        self, func: callable, *args, **kwargs
+    ) -> Any:
+        """Call a function with circuit breaker protection."""
+        if self._circuit_breaker is None:
+            return await func(*args, **kwargs)
+        return await self._circuit_breaker.call(func, *args, **kwargs)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -77,6 +97,8 @@ class PluginManager:
         """
         self._plugins = []
         self._tool_event_plugins = []
+        self._pluggy_pm = pluggy.PluginManager("mistral-vibe")
+        self._pluggy_pm.add_hookspecs(HookSpecs)
 
         classes = self._discover_plugin_classes()
 
@@ -91,12 +113,23 @@ class PluginManager:
                 logger.exception("Failed to instantiate plugin %s", meta.name)
                 continue
 
-            if not instance.is_applicable(self._context):
+            logger.debug("Checking is_applicable for plugin %s", meta.name)
+            is_applicable = instance.is_applicable(self._context)
+            logger.info("Plugin %s is_applicable=%s (workdir=%s)", meta.name, is_applicable, self._context.workdir)
+            if not is_applicable:
                 logger.debug("Plugin %s not applicable to current context", meta.name)
                 continue
 
             try:
-                await instance.setup(self._context)
+                await self._call_with_circuit_breaker(
+                    instance.setup, self._context
+                )
+            except pybreaker.CircuitBreakerError:
+                logger.warning(
+                    "Plugin %s skipped due to open circuit breaker",
+                    meta.name,
+                )
+                continue
             except Exception:
                 logger.exception("Plugin %s raised during setup", meta.name)
                 continue
@@ -105,6 +138,8 @@ class PluginManager:
             if isinstance(instance, ToolEventPlugin):
                 self._tool_event_plugins.append(instance)
                 logger.debug("Registered tool event plugin: %s", instance.metadata().name)
+
+            logger.info("Plugin %s (%s) ACTIVATED", meta.name, meta.version)
 
             # Register commands if this plugin implements CommandPlugin
             if isinstance(instance, CommandPlugin) and self._command_registry:
@@ -130,11 +165,20 @@ class PluginManager:
         """Call :meth:`VibePlugin.teardown` on every active plugin."""
         for plugin in reversed(self._plugins):
             try:
-                await plugin.teardown()
+                await self._call_with_circuit_breaker(plugin.teardown)
+            except pybreaker.CircuitBreakerError:
+                logger.warning(
+                    "Plugin %s teardown skipped due to open circuit breaker",
+                    plugin.metadata().name,
+                )
             except Exception:
-                logger.exception("Plugin %s raised during teardown", plugin.metadata().name)
+                logger.exception(
+                    "Plugin %s raised during teardown", plugin.metadata().name
+                )
         self._plugins = []
         self._tool_event_plugins = []
+        self._pluggy_pm = pluggy.PluginManager("mistral-vibe")
+        self._pluggy_pm.add_hookspecs(HookSpecs)
 
     @property
     def tool_event_plugins(self) -> list[ToolEventPlugin]:
@@ -157,6 +201,30 @@ class PluginManager:
             lines.append(f"### {m.name}")
             lines.append(m.description)
         return "\n".join(lines)
+
+    def _register_with_pluggy(self, instance: VibePlugin) -> None:
+        """Register a plugin instance with pluggy for hook dispatch."""
+        self._pluggy_pm.register(instance)
+
+    async def call_tool_event_hooks(
+        self, hook_name: str, context: PluginContext, **kwargs: object
+    ) -> None:
+        """Call tool event hooks using pluggy's hook mechanism.
+
+        This method provides backward compatibility by falling back to direct
+        plugin iteration if pluggy hook dispatch fails.
+        """
+        try:
+            self._pluggy_pm.call_hook(hook_name, context=context, **kwargs)
+        except Exception:
+            pass
+
+    def load_plugins_from_entrypoints(self) -> None:
+        """Load plugins using pluggy's entry point discovery mechanism."""
+        try:
+            self._pluggy_pm.load_setuptools_entrypoints("mistral-vibe-plugins")
+        except Exception:
+            logger.debug("No pluggy entry points found or validation failed")
 
     # ── Discovery ─────────────────────────────────────────────────────────────
 
@@ -185,6 +253,11 @@ class PluginManager:
         # Built-ins first (lowest priority — overridable by user paths)
         for cls in self._scan_package(_BUILTIN_PACKAGE):
             found[cls.metadata().name] = cls
+
+        # Entry points (same priority as built-ins)
+        for cls in self._discover_via_entry_points():
+            if cls.metadata().name not in found:
+                found[cls.metadata().name] = cls
 
         # File-system paths (higher priority — later paths win per name)
         for path in self._search_paths():
@@ -266,6 +339,35 @@ class PluginManager:
                 and obj.__module__ == getattr(module, "__name__", "")
             ):
                 classes.append(obj)
+        return classes
+
+    def _discover_via_entry_points(self) -> list[type[VibePlugin]]:
+        """Discover plugins via setuptools entry points from the 'vibe.plugins' group."""
+        classes: list[type[VibePlugin]] = []
+        loaded: set[str] = set()
+
+        try:
+            eps = importlib.metadata.entry_points()
+        except Exception:
+            logger.debug("No entry points available")
+            return classes
+        group_eps = getattr(eps, "get", lambda k, d: [])("vibe.plugins", [])
+        for ep in group_eps:
+            if ep.name in loaded:
+                continue
+            try:
+                plugin_cls = ep.load()
+            except Exception:
+                logger.exception("Failed to load plugin from entry point %s", ep.name)
+                continue
+            if not issubclass(plugin_cls, VibePlugin) or inspect.isabstract(plugin_cls):
+                logger.debug("Entry point %s does not define a concrete VibePlugin", ep.name)
+                continue
+            loaded.add(ep.name)
+            classes.append(plugin_cls)
+            logger.debug("Discovered plugin %s via entry point", ep.name)
+
+        logger.info("Entry point discovery: loaded %d plugins", len(classes))
         return classes
 
     # ── Filtering ─────────────────────────────────────────────────────────────

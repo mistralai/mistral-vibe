@@ -127,10 +127,37 @@ class APIToolFormatHandler:
         resolved_calls = []
         failed_calls = []
 
-        active_tools = tool_manager.available_tools
-
         for parsed_call in parsed.tool_calls:
-            tool_class = active_tools.get(parsed_call.tool_name)
+            tool_name = parsed_call.tool_name
+            
+            # First check if there's a pre-registered instance (from plugins)
+            tool_instance = tool_manager.get_instance(tool_name)
+            if tool_instance:
+                tool_class = type(tool_instance)
+                args_model, _ = tool_class._get_tool_args_results()
+                try:
+                    validated_args = args_model.model_validate(parsed_call.raw_args)
+                    resolved_calls.append(
+                        ResolvedToolCall(
+                            tool_name=tool_name,
+                            tool_class=tool_class,
+                            validated_args=validated_args,
+                            call_id=parsed_call.call_id,
+                        )
+                    )
+                except ValidationError as e:
+                    failed_calls.append(
+                        FailedToolCall(
+                            tool_name=tool_name,
+                            call_id=parsed_call.call_id,
+                            error=f"Invalid arguments: {e}",
+                        )
+                    )
+                continue
+
+            # Fall back to available_tools (classes)
+            active_tools = tool_manager.available_tools
+            tool_class = active_tools.get(tool_name)
             if not tool_class:
                 failed_calls.append(
                     FailedToolCall(

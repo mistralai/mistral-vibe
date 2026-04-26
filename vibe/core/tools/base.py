@@ -203,11 +203,17 @@ class BaseTool[
                 type_args = get_args(base)
                 if len(type_args) == ARGS_COUNT:
                     config_model = type_args[2]
-                    if issubclass(config_model, BaseToolConfig):
+                    # Accept any BaseModel subclass as a valid config model
+                    if isinstance(config_model, type) and issubclass(
+                        config_model, BaseModel
+                    ):
                         return cast(type[ToolConfig], config_model)
 
         for base_class in cls.__bases__:
             if base_class is object or base_class is ABC:
+                continue
+            # Skip typing.Generic which doesn't have _get_tool_config_class
+            if getattr(base_class, "__origin__", None) is not None:
                 continue
             try:
                 return base_class._get_tool_config_class()

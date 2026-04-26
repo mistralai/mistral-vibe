@@ -218,7 +218,7 @@ class ToolManager:
         result = {}
         for name, cls in filtered_by_general.items():
             is_plugin_tool = name in self._plugin_tools
-            
+
             if is_plugin_tool:
                 # Plugin tool - apply plugin-specific config
                 if self._config.enabled_plugin_tools:
@@ -233,7 +233,7 @@ class ToolManager:
             else:
                 # Built-in tool - already filtered above
                 result[name] = cls
-        
+
         return result
 
     def integrate_mcp(self, *, raise_on_failure: bool = False) -> None:
@@ -384,7 +384,9 @@ class ToolManager:
         Raises:
             NoSuchToolError: If the requested tool is not available.
         """
+        # Check if we have a pre-registered instance first (from plugins)
         if tool_name in self._instances:
+            logger.debug("get(%s) found pre-registered instance", tool_name)
             return self._instances[tool_name]
 
         with self._lock:
@@ -393,10 +395,37 @@ class ToolManager:
                     f"Unknown tool: {tool_name}. Available: {list(self._available.keys())}"
                 )
             tool_class = self._available[tool_name]
+
         self._instances[tool_name] = tool_class.from_config(
             lambda: self.get_tool_config(tool_name)
         )
+
+        # Try with _tool suffix removed for LSP tools
+        if tool_name.endswith("_tool"):
+            base_name = tool_name[:-5]
+            if base_name in self._instances:
+                logger.debug(
+                    "get(%s) found pre-registered instance (stripped _tool)", tool_name
+                )
+                return self._instances[base_name]
+
+        if tool_name not in self._available:
+            raise NoSuchToolError(
+                f"Unknown tool: {tool_name}. Available: {list(self._available.keys())}"
+            )
+
+        tool_class = self._available[tool_name]
+        tool_config = self.get_tool_config(tool_name)
+        self._instances[tool_name] = tool_class.from_config(tool_config)
         return self._instances[tool_name]
+
+    def get_instance(self, tool_name: str) -> BaseTool | None:
+        """Get a pre-registered tool instance (from plugins), without creating a new one."""
+        if tool_name in self._instances:
+            return self._instances[tool_name]
+        if tool_name.endswith("_tool") and tool_name[:-5] in self._instances:
+            return self._instances[tool_name[:-5]]
+        return None
 
     def reset_all(self) -> None:
         self._instances.clear()
@@ -411,5 +440,15 @@ class ToolManager:
         """
         tool_name = tool_class.get_name()
         self._available[tool_name] = tool_class
-        # Mark this tool as coming from a plugin
+        self._plugin_tools.add(tool_name)
+
+    def register_dynamic_tool_instance(self, tool: BaseTool) -> None:
+        """Register a tool instance dynamically at runtime.
+
+        Used by plugins to inject pre-configured tool instances with
+        all attributes already attached (e.g., LSP tools with _clients).
+        """
+        tool_name = tool.get_name()
+        self._available[tool_name] = type(tool)
+        self._instances[tool_name] = tool
         self._plugin_tools.add(tool_name)

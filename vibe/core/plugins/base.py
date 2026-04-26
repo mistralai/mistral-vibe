@@ -50,14 +50,31 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class PluginMetadata:
-    """Static description of a plugin, used for discovery and display."""
+    """Static description of a plugin, used for discovery and display.
+
+    Attributes
+    ----------
+    priority:
+        Execution order hint for plugins in the middleware pipeline.
+        Lower values run first. Defaults to 100.
+
+        - 0-49:   Critical system plugins (run first)
+        - 50-99:  High-priority middleware
+        - 100:    Default for most plugins
+        - 150-199: Lower priority (run later)
+        - 200+:   Delayed execution (run last)
+    tags:
+        Capability tags for filtering and discovery (e.g., ["code-lint",
+        "telemetry"]). Empty by default.
+    """
 
     name: str
     version: str = "0.1.0"
     description: str = ""
     author: str = ""
-    # Extra capabilities advertised by the plugin
     provides_tools: list[str] = field(default_factory=list)
+    priority: int = field(default=100)
+    tags: list[str] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -76,6 +93,8 @@ class PluginContext:
         ``config.effective_workdir``).
     config:
         The live ``VibeConfig`` instance.
+    tool_manager:
+        Optional reference to Vibe's ToolManager for dynamic tool registration.
     extra:
         Free-form dict that plugins may use to share state across hooks
         within a single agent turn.
@@ -83,6 +102,7 @@ class PluginContext:
 
     workdir: Path
     config: VibeConfig
+    tool_manager: Any | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 

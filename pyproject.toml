@@ -49,6 +49,8 @@ dependencies = [
     "pexpect>=4.9.0",
     "pydantic>=2.12.4",
     "pydantic-settings>=2.12.0",
+    "pluggy>=1.0.0",
+    "pybreaker>=1.4.0",
     "pyperclip>=1.11.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.0",
@@ -64,13 +66,14 @@ dependencies = [
     "websockets>=13.0",
     "zstandard>=0.25.0",
     # ── LSP plugin ────────────────────────────────────────────────────────────
-    # pygls provides the async LSP client (BaseLanguageClient) used by
-    # vibe/core/plugins/builtin/lsp/lsp_client.py to communicate with language
-    # servers (pylsp, typescript-language-server, jdtls, …).
-    # Requires >=1.3 for BaseLanguageClient and *_async request helpers.
-    # mcp>=1.14.0 is already listed above and covers the MCP server transport.
-    "pygls>=1.3.0",
-    "python-lsp-server>=1.14.0",
+    # lsp-client provides async LSP client supporting lsprotocol 2025+.
+    # vibe/core/plugins/builtin/lsp/lsp_client.py uses lsp-client to communicate
+    # with language servers (basedpyright, typescript-language-server, etc.).
+    # Requires python >=3.12.
+    "lsp-client>=0.3.0",
+    # Basedpyright LSP server (supports lsprotocol 2025+)
+    "basedpyright>=1.0.0",
+    "mypy>=1.19.1",
 ]
 
 [project.urls]
@@ -96,6 +99,20 @@ include = ["vibe/"]
 [project.scripts]
 vibe     = "vibe.cli.entrypoint:main"
 vibe-acp = "vibe.acp.entrypoint:main"
+
+# Entry point groups for plugin discovery
+# Third-party plugins can declare a dependency on mistral-vibe and expose
+# VibePlugin subclasses via the 'vibe.plugins' entry point group.
+#
+# Example pyproject.toml for a plugin package:
+#   [project.entry-points."vibe.plugins"]
+#   hello = "my_plugin.plugin:HelloPlugin"
+#     # ^plugin_name  ^full.import.path:ClassName
+#
+# The value must be the full import path to a class that inherits
+# from vibe.core.plugins.base.VibePlugin and is not abstract.
+#
+[project.entry-points."vibe.plugins"]
 
 # ── uv ────────────────────────────────────────────────────────────────────────
 [tool.uv]

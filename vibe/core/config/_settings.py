@@ -623,6 +623,31 @@ class VibeConfig(BaseSettings):
             " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
+    plugin_setup_timeout_sec: float = Field(
+        default=30.0,
+        gt=0,
+        description="Timeout for plugin setup()",
+    )
+    plugin_teardown_timeout_sec: float = Field(
+        default=10.0,
+        gt=0,
+        description="Timeout for plugin teardown()",
+    )
+    plugin_call_timeout_sec: float = Field(
+        default=60.0,
+        gt=0,
+        description="Timeout for plugin hook calls",
+    )
+    plugin_circuit_breaker_failure_threshold: int = Field(
+        default=3,
+        ge=1,
+        description="Failures before opening circuit",
+    )
+    plugin_circuit_breaker_recovery_timeout_sec: float = Field(
+        default=30.0,
+        gt=0,
+        description="Recovery timeout",
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"

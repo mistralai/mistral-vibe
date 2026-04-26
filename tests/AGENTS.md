@@ -15,6 +15,8 @@ tests/
 │   ├── agent_loop/       # Agent orchestration
 │   ├── tools/            # Tool execution tests
 │   └── llm/backend/      # LLM provider tests
+├── plugins/              # Plugin tests (NEW)
+│   └── test_infrastructure.py  # Circuit breaker, priority, timeout tests
 ├── snapshots/            # Snapshot test data
 ├── stubs/                # Test dependency stubs
 ├── tools/                # Standalone tool tests (12 files)
@@ -30,6 +32,7 @@ tests/
 | ACP protocol | `tests/acp/` | Editor integration tests |
 | TUI components | `tests/cli/textual_ui/` | UI widget tests |
 | Tool execution | `tests/core/tools/`, `tests/tools/` | Built-in + MCP tools |
+| Plugin infrastructure | `tests/plugins/` | Circuit breaker, priority, timeouts |
 | Snapshot tests | `tests/snapshots/` | UI state snapshots |
 
 ## TEST PATTERNS

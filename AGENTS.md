@@ -44,37 +44,16 @@ mistral-vibe/
 | `ToolManager` | class | `vibe/core/tools/manager.py` |
 | `LLMBackend` | base | `vibe/core/llm/backend/base.py` |
 | `TextualApp` | class | `vibe/cli/textual_ui/app.py` |
+| `PluginManager` | class | `vibe/core/plugins/manager.py` |
+| `VibePlugin` | class | `vibe/core/plugins/base.py` |
 
-## CONVENTIONS
+## DEPENDENCIES
 
-- **Python 3.12+** - Required version
-- **No `src/`** - Package is `vibe/` at project root
-- **Line length** - 88 chars (ruff default)
-- **Import style** - `from __future__ import annotations` required
-- **Relative imports** - Banned (`ban-relative-imports = "all"`)
-- **Type stubs** - Required for external packages
-
-## ANTI-PATTERNS (THIS PROJECT)
-
-- No `src/` directory - source goes in `vibe/`
-- No bare `except:` - use specific exceptions
-- No `as any` type suppression
-- No relative imports
-- Max 50 statements per function, 15 branches
-
-## COMMANDS
-
-  - title: "Use uv for All Commands"
-    description: >
-      We use uv to manage our python environment. You should never try to run bare python commands.
-      Always run commands using `uv` instead of invoking `python` or `pip` directly.
-      For example, use `uv add package` and `uv run script.py` rather than `pip install package` or `python script.py`.
-      This practice helps avoid environment drift and leverages modern Python packaging best practices.
-      Useful uv commands are:
-      - uv add/remove <package> to manage dependencies
-      - uv sync to install dependencies declared in pyproject.toml and uv.lock
-      - uv run script.py to run a script within the uv environment
-      - uv run pytest (or any other python tool) to run the tool within the uv environment
+Key external libraries:
+- **pybreaker** (>=1.4.0) - Circuit breaker for plugin resilience
+- **pluggy** (>=1.0.0) - Extension point system (like pytest)
+- **pygls** (>=2.1.1) - LSP client integration
+- **mcp** (>=1.14.0) - Model Context Protocol
 
   - title: "Safe File Reading"
     description: >
@@ -127,3 +106,4 @@ mistral-vibe/
 - Uses `textual` for TUI
 - MCP for external tool integrations
 - ACP for IDE editor integration (Zed, VS Code)
+- Plugin resilience via pybreaker circuit breaker

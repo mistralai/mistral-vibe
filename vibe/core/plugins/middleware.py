@@ -37,8 +37,11 @@ import functools
 import logging
 from typing import TYPE_CHECKING, Any
 
+import pybreaker
+
 from vibe.core.middleware import ConversationContext, MiddlewareResult
 from vibe.core.plugins.base import PluginContext
+from vibe.core.plugins.resilience import get_plugin_circuit_breaker
 from vibe.core.tools.base import InvokeContext
 
 if TYPE_CHECKING:
@@ -68,6 +71,18 @@ class PluginMiddleware:
         self._manager = plugin_manager
         self._context = context
         self._patched_loop: AgentLoop | None = None
+        try:
+            self._circuit_breaker = get_plugin_circuit_breaker()
+        except RuntimeError:
+            self._circuit_breaker = None
+
+    async def _call_with_circuit_breaker(
+        self, func: callable, *args, **kwargs
+    ) -> Any:
+        """Call a function with circuit breaker protection."""
+        if self._circuit_breaker is None:
+            return await func(*args, **kwargs)
+        return await self._circuit_breaker.call(func, *args, **kwargs)
 
     # ── MiddlewarePipeline interface ──────────────────────────────────────────
 
@@ -156,12 +171,19 @@ class PluginMiddleware:
     async def _dispatch_on_tool_call(
         self, tool_name: str, arguments: dict[str, Any]
     ) -> None:
-        # Get current list of plugins each time (don't rely on closure)
         plugins = self._manager.tool_event_plugins
         logger.debug("Dispatching on_tool_call to %d plugins", len(plugins))
         for plugin in plugins:
             try:
-                await plugin.on_tool_call(tool_name, arguments, self._context)
+                await self._call_with_circuit_breaker(
+                    plugin.on_tool_call, tool_name, arguments, self._context
+                )
+            except pybreaker.CircuitBreakerError:
+                logger.warning(
+                    "Plugin %s on_tool_call skipped due to open circuit (%s)",
+                    plugin.metadata().name,
+                    tool_name,
+                )
             except Exception:
                 logger.exception(
                     "Plugin %s raised in on_tool_call(%s)",
@@ -172,11 +194,18 @@ class PluginMiddleware:
     async def _dispatch_on_tool_result(
         self, tool_name: str, arguments: dict[str, Any], result: str
     ) -> None:
-        # Get current list of plugins each time (don't rely on closure)
         plugins = self._manager.tool_event_plugins
         for plugin in plugins:
             try:
-                await plugin.on_tool_result(tool_name, arguments, result, self._context)
+                await self._call_with_circuit_breaker(
+                    plugin.on_tool_result, tool_name, arguments, result, self._context
+                )
+            except pybreaker.CircuitBreakerError:
+                logger.warning(
+                    "Plugin %s on_tool_result skipped due to open circuit (%s)",
+                    plugin.metadata().name,
+                    tool_name,
+                )
             except Exception:
                 logger.exception(
                     "Plugin %s raised in on_tool_result(%s)",

@@ -70,6 +70,9 @@ def run_programmatic(
 
             agent_loop.emit_new_session_telemetry()
 
+            # Initialize plugins (calls discover_and_setup) - MUST be called before first act()
+            await agent_loop.start()
+
             if teleport and config.nuage_enabled:
                 gen = agent_loop.teleport_to_vibe_nuage(prompt or None)
                 async for event in gen:

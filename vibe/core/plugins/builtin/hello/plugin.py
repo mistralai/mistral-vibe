@@ -21,6 +21,8 @@ class ExampleCommandPlugin(VibePlugin, CommandPlugin):
             name="example-commands",
             version="1.0.0",
             description="Demonstrates how to add custom slash commands",
+            priority=100,
+            tags=["demo", "example"],
         )
 
     async def register_commands(self, registry: CommandRegistry) -> None:

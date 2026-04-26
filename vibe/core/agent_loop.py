@@ -283,7 +283,9 @@ class AgentLoop:
         from vibe.core.config.harness_files import get_harness_files_manager
 
         workdir = get_harness_files_manager().trusted_workdir or Path.cwd()
-        self._plugin_context = PluginContext(workdir=workdir, config=config)
+        self._plugin_context = PluginContext(
+            workdir=workdir, config=config, tool_manager=self.tool_manager
+        )
         from vibe.cli.commands import CommandRegistry
 
         command_registry = CommandRegistry()
@@ -844,6 +846,7 @@ class AgentLoop:
             tool_instance = self.tool_manager.get(tool_call.tool_name)
         except Exception as exc:
             error_msg = f"Error getting tool '{tool_call.tool_name}': {exc}"
+            logger.exception(error_msg)
             yield self._tool_failure_event(tool_call, error_msg, span=span)
             return
 
