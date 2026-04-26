@@ -49,11 +49,11 @@ class LspConfig:
 # ── Built-in registry ─────────────────────────────────────────────────────────
 
 LSP_REGISTRY: dict[str, LspConfig] = {
-    # pyright via basedpyright (supports lsprotocol 2025+)
+    # Python LSP server using pyright (faster, more modern)
     "python": LspConfig(
         language="python",
         extensions=frozenset({".py", ".pyi"}),
-        command=["basedpyright"],
+        command=["pyright-langserver", "--stdio"],
         language_id="python",
         root_markers=frozenset({
             "pyproject.toml",

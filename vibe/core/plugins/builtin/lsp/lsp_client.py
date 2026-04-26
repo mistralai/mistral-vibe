@@ -34,8 +34,9 @@ logger = logging.getLogger(__name__)
 _REQUEST_TIMEOUT = 10.0
 
 # Map language to lsp-client client class
+# Note: "Client" refers to the base Client class for generic LSP servers
 _LSP_CLIENTS: dict[str, str] = {
-    "python": "BasedpyrightClient",
+    "python": "PyrightClient",  # Use PyrightClient for Python
     "typescript": "TypescriptClient",
     "rust": "RustAnalyzerClient",
     "go": "GoplsClient",

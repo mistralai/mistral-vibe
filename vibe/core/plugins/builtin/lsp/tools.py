@@ -44,6 +44,7 @@ import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 from pydantic import BaseModel, Field
 
@@ -469,9 +470,19 @@ class LspDefinitionTool(
             )
 
         if event.result.locations and len(event.result.locations) > 0:
+            file_path = event.result.locations[0].get("file", "")
+            # URL decode the path first
+            file_path = unquote(file_path)
+            # Convert absolute path to relative path if workspace root is available
+            if _LSP_WORKDIR:
+                try:
+                    file_path = str(Path(file_path).relative_to(_LSP_WORKDIR))
+                except ValueError:
+                    # Path is not under the workspace root, keep as is
+                    pass
             return ToolResultDisplay(
                 success=True,
-                message=f"Found definition in {Path(event.result.locations[0].get('file_path', '')).name}",
+                message=f"Found definition in {file_path}:{event.result.locations[0].get('line', '')}:{event.result.locations[0].get('col', '')}",
             )
         return ToolResultDisplay(success=True, message=event.result.message)
 
@@ -842,7 +853,9 @@ class LspSignatureHelpTool(
         try:
             info = await client.signature_help(file_path, line, col)
         except Exception as exc:
-            result = LspSignatureHelpResult(signatures=None, message=f"LSP error: {exc}")
+            result = LspSignatureHelpResult(
+                signatures=None, message=f"LSP error: {exc}"
+            )
             yield result
             return
 
@@ -850,7 +863,9 @@ class LspSignatureHelpTool(
             signatures=info.get("signatures"),
             active_signature=info.get("active_signature", 0),
             active_parameter=info.get("active_parameter", 0),
-            message=json.dumps(info, indent=2, ensure_ascii=False) if info.get("signatures") else "No signature help available.",
+            message=json.dumps(info, indent=2, ensure_ascii=False)
+            if info.get("signatures")
+            else "No signature help available.",
         )
         yield result
 
@@ -870,8 +885,7 @@ class LspSignatureHelpTool(
         if event.result.signatures and len(event.result.signatures) > 0:
             sig = event.result.signatures[event.result.active_signature]
             return ToolResultDisplay(
-                success=True,
-                message=f"Signature: {sig.get('label', 'Unknown')}",
+                success=True, message=f"Signature: {sig.get('label', 'Unknown')}"
             )
         return ToolResultDisplay(success=True, message=event.result.message)
 
@@ -891,8 +905,12 @@ class LspCodeActionArgs(BaseModel):
     file_path: str = Field(description="Path to the source file.")
     line: int = Field(description=_LINE_DOC)
     col: int = Field(description=_COL_DOC)
-    end_line: int | None = Field(default=None, description="Optional end line for range.")
-    end_col: int | None = Field(default=None, description="Optional end column for range.")
+    end_line: int | None = Field(
+        default=None, description="Optional end line for range."
+    )
+    end_col: int | None = Field(
+        default=None, description="Optional end column for range."
+    )
 
 
 class LspCodeActionResult(BaseModel):
@@ -1116,7 +1134,12 @@ class LspRangeFormattingTool(
             return
         try:
             edits = await client.range_formatting(
-                file_path, args.start_line, args.start_col, args.end_line, args.end_col, args.options
+                file_path,
+                args.start_line,
+                args.start_col,
+                args.end_line,
+                args.end_col,
+                args.options,
             )
         except Exception as exc:
             result = LspRangeFormattingResult(edits=None, message=f"LSP error: {exc}")
@@ -1128,7 +1151,9 @@ class LspRangeFormattingTool(
             if not edits
             else json.dumps(edits, indent=2, ensure_ascii=False)
         )
-        result = LspRangeFormattingResult(edits=edits if edits else None, message=message)
+        result = LspRangeFormattingResult(
+            edits=edits if edits else None, message=message
+        )
         yield result
 
     @classmethod
@@ -1208,7 +1233,9 @@ class LspDocumentHighlightTool(
         try:
             highlights = await client.document_highlight(file_path, line, col)
         except Exception as exc:
-            result = LspDocumentHighlightResult(highlights=None, message=f"LSP error: {exc}")
+            result = LspDocumentHighlightResult(
+                highlights=None, message=f"LSP error: {exc}"
+            )
             yield result
             return
 
@@ -1304,7 +1331,9 @@ class LspFoldingRangesTool(
             if not ranges
             else json.dumps(ranges, indent=2, ensure_ascii=False)
         )
-        result = LspFoldingRangesResult(ranges=ranges if ranges else None, message=message)
+        result = LspFoldingRangesResult(
+            ranges=ranges if ranges else None, message=message
+        )
         yield result
 
     @classmethod
@@ -1474,7 +1503,9 @@ class LspImplementationTool(
         try:
             locations = await client.implementation(file_path, line, col)
         except Exception as exc:
-            result = LspImplementationResult(locations=None, message=f"LSP error: {exc}")
+            result = LspImplementationResult(
+                locations=None, message=f"LSP error: {exc}"
+            )
             yield result
             return
 
@@ -1565,7 +1596,9 @@ class LspTypeDefinitionTool(
         try:
             locations = await client.type_definition(file_path, line, col)
         except Exception as exc:
-            result = LspTypeDefinitionResult(locations=None, message=f"LSP error: {exc}")
+            result = LspTypeDefinitionResult(
+                locations=None, message=f"LSP error: {exc}"
+            )
             yield result
             return
 
@@ -1807,13 +1840,22 @@ def make_lsp_tools(
     tools: list[BaseTool] = []
 
     for cls in [
-        LspDiagnosticsTool, LspCompletionTool, LspHoverTool,
-        LspDefinitionTool, LspReferencesTool,
-        LspDocumentSymbolsTool, LspWorkspaceSymbolsTool,
-        LspSignatureHelpTool, LspCodeActionTool,
-        LspFormattingTool, LspRangeFormattingTool,
-        LspDocumentHighlightTool, LspFoldingRangesTool,
-        LspRenameTool, LspImplementationTool, LspTypeDefinitionTool,
+        LspDiagnosticsTool,
+        LspCompletionTool,
+        LspHoverTool,
+        LspDefinitionTool,
+        LspReferencesTool,
+        LspDocumentSymbolsTool,
+        LspWorkspaceSymbolsTool,
+        LspSignatureHelpTool,
+        LspCodeActionTool,
+        LspFormattingTool,
+        LspRangeFormattingTool,
+        LspDocumentHighlightTool,
+        LspFoldingRangesTool,
+        LspRenameTool,
+        LspImplementationTool,
+        LspTypeDefinitionTool,
     ]:
         tools.append(cls(lsp_config, state))
 
