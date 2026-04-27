@@ -875,6 +875,11 @@ class VibeAcpAgentLoop(AcpAgent):
         session = self._get_session(session_id)
         if session.task and not session.task.done():
             session.task.cancel()
+            try:
+                await session.task
+            except asyncio.CancelledError:
+                pass
+            session.task = None
         del self.sessions[session_id]
         return CloseSessionResponse()
 

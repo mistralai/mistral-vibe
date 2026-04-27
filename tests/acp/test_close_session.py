@@ -42,18 +42,15 @@ class TestACPCloseSession:
         async def dummy_task() -> None:
             await asyncio.sleep(10)
 
-        session.task = asyncio.create_task(dummy_task())
-        assert not session.task.done()
+        task: asyncio.Task[None] = asyncio.create_task(dummy_task())
+        session.task = task
+        assert not task.done()
 
         response = await acp_agent.close_session(session_id=session_id)
         assert isinstance(response, CloseSessionResponse)
 
-        try:
-            await asyncio.wait_for(session.task, timeout=2.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
-
-        assert session.task.cancelled()
+        # Task should be cancelled and session removed
+        assert task.cancelled()
         assert session_id not in acp_agent.sessions
 
     @pytest.mark.asyncio
@@ -81,11 +78,10 @@ class TestACPCloseSession:
         session_id = session_response.session_id
         session = acp_agent.sessions[session_id]
 
-        async def quick_task() -> str:
+        async def quick_task() -> None:
             await asyncio.sleep(0.01)
-            return "done"
 
-        task = asyncio.create_task(quick_task())
+        task: asyncio.Task[None] = asyncio.create_task(quick_task())
         await task
         session.task = task
         assert task.done()
