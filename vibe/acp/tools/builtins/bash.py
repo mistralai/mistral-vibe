@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+import os
 from pathlib import Path
 
 from acp.schema import (
+    EnvVariable,
     TerminalToolCallContent,
     ToolCallProgress,
     ToolCallStart,
@@ -21,6 +23,29 @@ from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 
 class AcpBashState(BaseToolState, AcpToolState):
     pass
+
+
+def _get_sanitized_env() -> list[EnvVariable]:
+    """Get sanitized environment variables for terminal execution.
+
+    Removes library path variables that can cause symbol lookup errors
+    when IDEs (like JetBrains) inject their own library paths.
+    This prevents errors like:
+    "symbol lookup error: /bin/bash: undefined symbol: rl_trim_arg_from_keyseq"
+    """
+    # Variables that can cause library conflicts when inherited from IDE environments
+    vars_to_remove = {
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+    }
+
+    return [
+        EnvVariable(name=k, value=v)
+        for k, v in os.environ.items()
+        if k not in vars_to_remove
+    ]
 
 
 class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
@@ -45,6 +70,7 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
                 command=args.command,
                 cwd=str(Path.cwd()),
                 output_byte_limit=max_bytes,
+                env=_get_sanitized_env(),
             )
         except Exception as e:
             raise ToolError(f"Failed to create terminal: {e!r}") from e
