@@ -33,6 +33,7 @@ SEARCH_REPLACE_BLOCK_WITH_FENCE_RE = re.compile(
     r"```[\s\S]*?\n<{5,} SEARCH\r?\n(.*?)\r?\n?={5,}\r?\n(.*?)\r?\n?>{5,} REPLACE\s*\n```",
     flags=re.DOTALL,
 )
+MAX_AMBIGUOUS_MATCH_SUGGESTIONS = 3
 
 
 class SearchReplaceBlock(NamedTuple):
@@ -52,6 +53,24 @@ class BlockApplyResult(NamedTuple):
     applied: int
     errors: list[str]
     warnings: list[str]
+
+
+class OccurrenceSpan(NamedTuple):
+    start: int
+    end: int
+
+
+class LineRange(NamedTuple):
+    start: int
+    end: int
+
+    def overlaps(self, other: LineRange) -> bool:
+        return self.start <= other.end and other.start <= self.end
+
+    def merge(self, other: LineRange) -> LineRange:
+        return LineRange(
+            start=min(self.start, other.start), end=max(self.end, other.end)
+        )
 
 
 class SearchReplaceArgs(BaseModel):
@@ -269,6 +288,12 @@ class SearchReplace(
         current_content = content
 
         for i, (search, replace) in enumerate(blocks, 1):
+            if not search:
+                errors.append(
+                    f"SEARCH/REPLACE block {i} failed: Search text cannot be empty."
+                )
+                continue
+
             if search not in current_content:
                 context = SearchReplace._find_search_context(current_content, search)
                 fuzzy_context = SearchReplace._find_fuzzy_match_context(
@@ -295,14 +320,19 @@ class SearchReplace(
                 errors.append(error_msg)
                 continue
 
-            occurrences = current_content.count(search)
-            if occurrences > 1:
-                warning_msg = (
-                    f"Search text in block {i} appears {occurrences} times in the file. "
-                    f"Only the first occurrence will be replaced. Consider making your "
-                    f"search pattern more specific to avoid unintended changes."
+            occurrences = SearchReplace._find_occurrences(current_content, search)
+            if len(occurrences) > 1:
+                errors.append(
+                    SearchReplace._format_ambiguous_search_error(
+                        block_index=i,
+                        filepath=filepath,
+                        content=current_content,
+                        search=search,
+                        replace=replace,
+                        occurrences=occurrences,
+                    )
                 )
-                warnings.append(warning_msg)
+                continue
 
             current_content = current_content.replace(search, replace, 1)
             applied += 1
@@ -310,6 +340,152 @@ class SearchReplace(
         return BlockApplyResult(
             content=current_content, applied=applied, errors=errors, warnings=warnings
         )
+
+    @final
+    @staticmethod
+    def _find_occurrences(content: str, search: str) -> list[OccurrenceSpan]:
+        occurrences: list[OccurrenceSpan] = []
+        start = 0
+
+        while True:
+            match_start = content.find(search, start)
+            if match_start == -1:
+                return occurrences
+
+            match_end = match_start + len(search)
+            occurrences.append(OccurrenceSpan(match_start, match_end))
+            start = match_end
+
+    @final
+    @staticmethod
+    def _format_ambiguous_search_error(
+        block_index: int,
+        filepath: Path,
+        content: str,
+        search: str,
+        replace: str,
+        occurrences: list[OccurrenceSpan],
+    ) -> str:
+        count = len(occurrences)
+        message = (
+            f"SEARCH/REPLACE block {block_index} failed: Search text is ambiguous in "
+            f"{filepath}. It appears {count} times. The tool will not guess which "
+            "occurrence to replace."
+        )
+
+        if count > MAX_AMBIGUOUS_MATCH_SUGGESTIONS:
+            return message
+
+        regions = SearchReplace._build_disambiguated_regions(content, occurrences)
+        if not regions:
+            return (
+                f"{message}\nCould not build unique expanded source regions "
+                "from the matching regions. Add more surrounding context manually."
+            )
+
+        return (
+            f"{message}\nExpanded source region"
+            f"{'' if len(regions) == 1 else 's'}:\n\n" + "\n\n".join(regions)
+        )
+
+    @final
+    @staticmethod
+    def _build_disambiguated_regions(
+        content: str, occurrences: list[OccurrenceSpan]
+    ) -> list[str]:
+        lines = content.splitlines(keepends=True)
+        if not lines:
+            return []
+
+        line_starts = SearchReplace._line_starts(lines)
+        ranges: list[LineRange] = []
+
+        for occurrence in occurrences:
+            line_range = SearchReplace._line_range_for_span(occurrence, line_starts)
+            unique = SearchReplace._find_unique_expanded_region(
+                content, lines, line_range
+            )
+            if unique is None:
+                continue
+
+            ranges.append(unique)
+
+        return [
+            SearchReplace._format_source_region(lines, line_range)
+            for line_range in SearchReplace._merge_line_ranges(ranges)
+        ]
+
+    @final
+    @staticmethod
+    def _merge_line_ranges(ranges: list[LineRange]) -> list[LineRange]:
+        if not ranges:
+            return []
+
+        merged: list[LineRange] = []
+        for line_range in sorted(ranges, key=lambda r: r.start):
+            if merged and merged[-1].overlaps(line_range):
+                merged[-1] = merged[-1].merge(line_range)
+                continue
+            merged.append(line_range)
+
+        return merged
+
+    @final
+    @staticmethod
+    def _format_source_region(lines: list[str], line_range: LineRange) -> str:
+        source = "".join(lines[line_range.start : line_range.end + 1]).rstrip("\r\n")
+        return (
+            f"Source region lines {line_range.start + 1}-{line_range.end + 1}:\n"
+            f"```\n{source}\n```"
+        )
+
+    @final
+    @staticmethod
+    def _line_starts(lines: list[str]) -> list[int]:
+        starts: list[int] = []
+        offset = 0
+        for line in lines:
+            starts.append(offset)
+            offset += len(line)
+        return starts
+
+    @final
+    @staticmethod
+    def _line_range_for_span(
+        occurrence: OccurrenceSpan, line_starts: list[int]
+    ) -> LineRange:
+        start_line = 0
+        end_line = len(line_starts) - 1
+
+        for i, line_start in enumerate(line_starts):
+            if line_start <= occurrence.start:
+                start_line = i
+            if line_start < occurrence.end:
+                end_line = i
+                continue
+            break
+
+        return LineRange(start_line, end_line)
+
+    @final
+    @staticmethod
+    def _find_unique_expanded_region(
+        content: str, lines: list[str], line_range: LineRange
+    ) -> LineRange | None:
+        max_radius = max(line_range.start, len(lines) - line_range.end - 1)
+
+        for radius in range(1, max_radius + 1):
+            start = max(0, line_range.start - radius)
+            end = min(len(lines) - 1, line_range.end + radius)
+            candidate = "".join(lines[start : end + 1])
+            if content.count(candidate) == 1:
+                return LineRange(start, end)
+
+        candidate = "".join(lines[line_range.start : line_range.end + 1])
+        if content.count(candidate) == 1:
+            return line_range
+
+        return None
 
     @final
     @staticmethod
