@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 import json
 from typing import Any
 
@@ -14,6 +14,7 @@ from vibe.core.nuage.workflow import (
     SignalWorkflowResponse,
     UpdateWorkflowResponse,
     WorkflowExecutionListResponse,
+    WorkflowExecutionStatus,
 )
 
 
@@ -173,12 +174,16 @@ class WorkflowsClient:
         workflow_identifier: str | None = None,
         page_size: int = 50,
         next_page_token: str | None = None,
+        status: Sequence[WorkflowExecutionStatus] | None = None,
+        user_id: str = "current",
     ) -> WorkflowExecutionListResponse:
-        params: dict[str, Any] = {"page_size": page_size}
+        params: dict[str, Any] = {"page_size": page_size, "user_id": user_id}
         if workflow_identifier:
             params["workflow_identifier"] = workflow_identifier
         if next_page_token:
             params["next_page_token"] = next_page_token
+        if status:
+            params["status"] = status
         endpoint = "/runs"
 
         try:

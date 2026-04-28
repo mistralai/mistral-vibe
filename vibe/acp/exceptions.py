@@ -19,7 +19,10 @@ from typing import Any
 from acp import RequestError
 
 from vibe.core.config import MissingAPIKeyError
-from vibe.core.types import RateLimitError as CoreRateLimitError
+from vibe.core.types import (
+    ContextTooLongError as CoreContextTooLongError,
+    RateLimitError as CoreRateLimitError,
+)
 
 # JSON-RPC 2.0 standard codes
 UNAUTHENTICATED = -32000
@@ -31,6 +34,7 @@ INTERNAL_ERROR = -32603
 RATE_LIMITED = -31001
 CONFIGURATION_ERROR = -31002
 CONVERSATION_LIMIT = -31003
+CONTEXT_TOO_LONG = -31004
 
 
 class VibeRequestError(RequestError):
@@ -97,6 +101,21 @@ class RateLimitError(VibeRequestError):
 
     @classmethod
     def from_core(cls, exc: CoreRateLimitError) -> RateLimitError:
+        return cls(exc.provider, exc.model)
+
+
+class ContextTooLongError(VibeRequestError):
+    code = CONTEXT_TOO_LONG
+
+    def __init__(self, provider: str, model: str) -> None:
+        super().__init__(
+            message=f"Context too long for {provider} (model: {model}). "
+            "Use /rewind to undo recent actions, then /compact to summarize.",
+            data={"provider": provider, "model": model},
+        )
+
+    @classmethod
+    def from_core(cls, exc: CoreContextTooLongError) -> ContextTooLongError:
         return cls(exc.provider, exc.model)
 
 

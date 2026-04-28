@@ -185,6 +185,12 @@ class TestBashGranularPermissions:
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ASK
 
+    def test_sensitive_bypasses_global_always_permission(self):
+        bash = self._bash(permission=ToolPermission.ALWAYS)
+        result = bash.resolve_permission(BashArgs(command="sudo ls"))
+        assert isinstance(result, PermissionContext)
+        assert result.permission is ToolPermission.ASK
+
     def test_allowlisted_outside_dir_still_asks(self):
         bash = self._bash()
         # cat is allowlisted but /etc/passwd is outside workdir

@@ -10,6 +10,7 @@ import httpx
 
 from vibe.core.llm.backend.anthropic import AnthropicAdapter
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
+from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
 from vibe.core.llm.backend.reasoning_adapter import ReasoningAdapter
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.llm.message_utils import merge_consecutive_user_messages
@@ -98,7 +99,12 @@ class OpenAIAdapter(APIAdapter):
             self._reasoning_to_api(
                 msg.model_dump(
                     exclude_none=True,
-                    exclude={"message_id", "reasoning_message_id", "injected"},
+                    exclude={
+                        "message_id",
+                        "reasoning_message_id",
+                        "reasoning_state",
+                        "injected",
+                    },
                 ),
                 field_name,
             )
@@ -167,9 +173,9 @@ _ADAPTERS: dict[str, APIAdapter] = {
 
 
 def _get_adapter(api_style: str) -> APIAdapter:
-    """Loads the appropriate adapter for the given API style,
-    lazily if the adapter is not already loaded.
-    """
+    """Load the adapter for the given API style."""
+    if api_style == "openai-responses":
+        return OpenAIResponsesAdapter()
     if api_style not in _ADAPTERS:
         if api_style == "vertex-anthropic":
             from vibe.core.llm.backend.vertex import VertexAnthropicAdapter

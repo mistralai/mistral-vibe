@@ -45,9 +45,9 @@ class TestTeleportServiceCompressDiff:
         mock_session_logger = MagicMock()
         return TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
 
@@ -75,9 +75,9 @@ class TestTeleportServiceBuildGitHubParams:
         mock_session_logger = MagicMock()
         return TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
 
@@ -116,9 +116,9 @@ class TestTeleportServiceValidateConfig:
         mock_session_logger = MagicMock()
         service = TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="",
             workdir=tmp_path,
         )
         with pytest.raises(ServiceTeleportError, match="MISTRAL_API_KEY not set"):
@@ -128,9 +128,9 @@ class TestTeleportServiceValidateConfig:
         mock_session_logger = MagicMock()
         service = TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="valid-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="valid-key",
             workdir=tmp_path,
         )
         service._validate_config()
@@ -138,12 +138,12 @@ class TestTeleportServiceValidateConfig:
     def test_uses_custom_env_var_name_in_error(self, tmp_path: Path) -> None:
         mock_session_logger = MagicMock()
         mock_config = MagicMock()
-        mock_config.nuage_api_key_env_var = "CUSTOM_API_KEY"
+        mock_config.vibe_code_api_key_env_var = "CUSTOM_API_KEY"
         service = TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="",
             workdir=tmp_path,
             vibe_config=mock_config,
         )
@@ -157,9 +157,9 @@ class TestTeleportServiceCheckSupported:
         mock_session_logger = MagicMock()
         return TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
 
@@ -199,9 +199,9 @@ class TestTeleportServiceIsSupported:
         mock_session_logger = MagicMock()
         return TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
 
@@ -222,9 +222,9 @@ class TestTeleportServiceExecute:
         mock_session_logger = MagicMock()
         service = TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
         service._git.fetch = AsyncMock()
@@ -268,7 +268,7 @@ class TestTeleportServiceExecute:
         mock_nuage.get_chat_assistant_url = AsyncMock(
             return_value="https://chat.example.com/123"
         )
-        service._nuage = mock_nuage
+        service._nuage_client_instance = mock_nuage
 
         session = TeleportSession()
         events = []
@@ -282,6 +282,9 @@ class TestTeleportServiceExecute:
         assert isinstance(events[3], TeleportFetchingUrlEvent)
         assert isinstance(events[4], TeleportCompleteEvent)
         assert events[4].url == "https://chat.example.com/123"
+        workflow_params = mock_nuage.start_workflow.call_args.args[0]
+        assert workflow_params.integrations.chat_assistant is not None
+        assert workflow_params.integrations.chat_assistant.project_name is None
 
     @pytest.mark.asyncio
     async def test_execute_requires_push_and_user_approves(
@@ -303,7 +306,7 @@ class TestTeleportServiceExecute:
         mock_nuage.get_chat_assistant_url = AsyncMock(
             return_value="https://chat.example.com/123"
         )
-        service._nuage = mock_nuage
+        service._nuage_client_instance = mock_nuage
 
         session = TeleportSession()
         events = []
@@ -368,7 +371,7 @@ class TestTeleportServiceExecute:
         mock_nuage.get_chat_assistant_url = AsyncMock(
             return_value="https://chat.example.com/123"
         )
-        service._nuage = mock_nuage
+        service._nuage_client_instance = mock_nuage
 
         session = TeleportSession()
         events = []
@@ -400,7 +403,7 @@ class TestTeleportServiceExecute:
             return_value=mock_github_connected
         )
         mock_nuage.get_chat_assistant_url = AsyncMock(return_value=None)
-        service._nuage = mock_nuage
+        service._nuage_client_instance = mock_nuage
 
         session = TeleportSession()
         gen = service.execute("test prompt", session)
@@ -427,7 +430,7 @@ class TestTeleportServiceExecute:
         mock_nuage.get_chat_assistant_url = AsyncMock(
             return_value="https://chat.example.com/123"
         )
-        service._nuage = mock_nuage
+        service._nuage_client_instance = mock_nuage
 
         session = TeleportSession(
             messages=[{"role": "user", "content": "help me refactor"}]
@@ -446,15 +449,15 @@ class TestTeleportServiceContextManager:
         mock_session_logger = MagicMock()
         service = TeleportService(
             session_logger=mock_session_logger,
-            nuage_base_url="https://api.example.com",
-            nuage_workflow_id="workflow-id",
-            nuage_api_key="api-key",
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
             workdir=tmp_path,
         )
         assert service._client is None
         async with service:
             assert service._client is not None
-            assert service._nuage is not None
+            assert service._nuage_client_instance is not None
         assert service._client is None
 
 

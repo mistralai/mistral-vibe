@@ -188,7 +188,7 @@ class OnboardingContext:
 
     @classmethod
     def from_config(cls, config: VibeConfig) -> OnboardingContext:
-        return cls(provider=config.get_provider_for_model(config.get_active_model()))
+        return cls(provider=config.get_active_provider())
 
     @classmethod
     def load(cls, **overrides: Any) -> OnboardingContext:

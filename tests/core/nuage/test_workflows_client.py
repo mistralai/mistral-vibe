@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from vibe.core.nuage.client import WorkflowsClient
 from vibe.core.nuage.exceptions import ErrorCode, WorkflowsException
 from vibe.core.nuage.streaming import StreamEvent, StreamEventsQueryParams
+from vibe.core.nuage.workflow import WorkflowExecutionStatus
 
 
 def _make_client() -> WorkflowsClient:
@@ -196,6 +197,47 @@ class TestStreamEvents:
             _ = [e async for e in client.stream_events(params)]
         assert exc_info.value.code == ErrorCode.GET_EVENTS_STREAM_ERROR
         assert "Failed to stream events" in exc_info.value.message
+
+
+class TestGetWorkflowRuns:
+    @pytest.mark.asyncio
+    async def test_sends_current_user_filter_by_default(self) -> None:
+        client = _make_client()
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"executions": [], "next_page_token": None}
+
+        mock_http = AsyncMock()
+        mock_http.get.return_value = mock_response
+        client._client = mock_http
+
+        await client.get_workflow_runs(
+            workflow_identifier="workflow-1",
+            page_size=10,
+            status=[WorkflowExecutionStatus.RUNNING],
+        )
+
+        mock_http.get.assert_awaited_once()
+        call_params = mock_http.get.call_args.kwargs["params"]
+        assert call_params["user_id"] == "current"
+        assert call_params["workflow_identifier"] == "workflow-1"
+        assert call_params["page_size"] == 10
+
+    @pytest.mark.asyncio
+    async def test_allows_overriding_user_id(self) -> None:
+        client = _make_client()
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"executions": [], "next_page_token": None}
+
+        mock_http = AsyncMock()
+        mock_http.get.return_value = mock_response
+        client._client = mock_http
+
+        await client.get_workflow_runs(user_id="user-123")
+
+        call_params = mock_http.get.call_args.kwargs["params"]
+        assert call_params["user_id"] == "user-123"
 
 
 def _async_line_iter(lines: list[str]):

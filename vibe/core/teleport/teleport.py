@@ -18,6 +18,7 @@ from vibe.core.teleport.nuage import (
     GitHubParams,
     NuageClient,
     TeleportSession,
+    TextChunk,
     VibeAgent,
     WorkflowConfig,
     WorkflowIntegrations,
@@ -45,39 +46,39 @@ class TeleportService:
     def __init__(
         self,
         session_logger: SessionLogger,
-        nuage_base_url: str,
-        nuage_workflow_id: str,
-        nuage_api_key: str,
+        vibe_code_base_url: str,
+        vibe_code_workflow_id: str,
+        vibe_code_api_key: str,
         workdir: Path | None = None,
         *,
-        nuage_task_queue: str | None = None,
+        vibe_code_task_queue: str | None = None,
         vibe_config: VibeConfig | None = None,
         client: httpx.AsyncClient | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._session_logger = session_logger
-        self._nuage_base_url = nuage_base_url
-        self._nuage_workflow_id = nuage_workflow_id
-        self._nuage_api_key = nuage_api_key
-        self._nuage_task_queue = nuage_task_queue
-        self._nuage_project_name = (
-            vibe_config.nuage_project_name if vibe_config else "Vibe"
+        self._vibe_code_base_url = vibe_code_base_url
+        self._vibe_code_workflow_id = vibe_code_workflow_id
+        self._vibe_code_api_key = vibe_code_api_key
+        self._vibe_code_task_queue = vibe_code_task_queue
+        self._vibe_code_project_name = (
+            vibe_config.vibe_code_project_name if vibe_config else None
         )
         self._vibe_config = vibe_config
         self._git = GitRepository(workdir)
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
-        self._nuage: NuageClient | None = None
+        self._nuage_client_instance: NuageClient | None = None
 
     async def __aenter__(self) -> TeleportService:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=httpx.Timeout(self._timeout))
-        self._nuage = NuageClient(
-            self._nuage_base_url,
-            self._nuage_api_key,
-            self._nuage_workflow_id,
-            task_queue=self._nuage_task_queue,
+        self._nuage_client_instance = NuageClient(
+            self._vibe_code_base_url,
+            self._vibe_code_api_key,
+            self._vibe_code_workflow_id,
+            task_queue=self._vibe_code_task_queue,
             client=self._client,
         )
         await self._git.__aenter__()
@@ -103,15 +104,15 @@ class TeleportService:
 
     @property
     def _nuage_client(self) -> NuageClient:
-        if self._nuage is None:
-            self._nuage = NuageClient(
-                self._nuage_base_url,
-                self._nuage_api_key,
-                self._nuage_workflow_id,
-                task_queue=self._nuage_task_queue,
+        if self._nuage_client_instance is None:
+            self._nuage_client_instance = NuageClient(
+                self._vibe_code_base_url,
+                self._vibe_code_api_key,
+                self._vibe_code_workflow_id,
+                task_queue=self._vibe_code_task_queue,
                 client=self._http_client,
             )
-        return self._nuage
+        return self._nuage_client_instance
 
     async def check_supported(self) -> None:
         await self._git.get_info()
@@ -162,6 +163,7 @@ class TeleportService:
         execution_id = await self._nuage_client.start_workflow(
             WorkflowParams(
                 prompt=prompt,
+                message=[TextChunk(text=lechat_user_message)],
                 config=WorkflowConfig(
                     agent=VibeAgent(
                         vibe_config=self._vibe_config.model_dump()
@@ -175,7 +177,7 @@ class TeleportService:
                     chat_assistant=ChatAssistantParams(
                         create_thread=True,
                         user_message=lechat_user_message,
-                        project_name=self._nuage_project_name,
+                        project_name=self._vibe_code_project_name,
                     ),
                 ),
             )
@@ -203,9 +205,9 @@ class TeleportService:
             raise ServiceTeleportError("Failed to push current branch to remote.")
 
     def _validate_config(self) -> None:
-        if not self._nuage_api_key:
+        if not self._vibe_code_api_key:
             env_var = (
-                self._vibe_config.nuage_api_key_env_var
+                self._vibe_config.vibe_code_api_key_env_var
                 if self._vibe_config
                 else "MISTRAL_API_KEY"
             )

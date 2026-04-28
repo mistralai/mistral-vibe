@@ -6,27 +6,21 @@ from vibe.cli.textual_ui.widgets.feedback_bar import FeedbackBar
 
 
 class TestFeedbackBarState:
-    def test_maybe_show_shows_when_random_below_threshold(self):
+    def test_show_activates(self):
         bar = FeedbackBar()
         bar.display = False
         bar._set_active = MagicMock()
 
-        with patch(
-            "vibe.cli.textual_ui.widgets.feedback_bar.random.random", return_value=0
-        ):
-            bar.maybe_show()
+        bar.show()
 
         bar._set_active.assert_called_once_with(True)
 
-    def test_maybe_show_does_not_show_when_random_above_threshold(self):
+    def test_show_skips_when_already_displayed(self):
         bar = FeedbackBar()
-        bar.display = False
+        bar.display = True
         bar._set_active = MagicMock()
 
-        with patch(
-            "vibe.cli.textual_ui.widgets.feedback_bar.random.random", return_value=1.0
-        ):
-            bar.maybe_show()
+        bar.show()
 
         bar._set_active.assert_not_called()
 

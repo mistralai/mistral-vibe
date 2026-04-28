@@ -150,9 +150,7 @@ class TestMCPAppInit:
         app = MCPApp(mcp_servers=servers, tool_manager=mgr)
         app._viewing_server = "srv"
         render_calls: list[str | None] = []
-        app._refresh_view = lambda server_name, *, kind=None: render_calls.append(
-            server_name
-        )
+        app._refresh_view = lambda server_name, **_kw: render_calls.append(server_name)
         app.action_back()
         assert render_calls == [None]
 
@@ -161,9 +159,7 @@ class TestMCPAppInit:
         app = MCPApp(mcp_servers=[], tool_manager=mgr)
         app._viewing_server = None
         render_calls: list[str | None] = []
-        app._refresh_view = lambda server_name, *, kind=None: render_calls.append(
-            server_name
-        )
+        app._refresh_view = lambda server_name, **_kw: render_calls.append(server_name)
         app.action_back()
         assert render_calls == []
 
@@ -176,17 +172,13 @@ class TestMCPAppInit:
             mcp_servers=servers, tool_manager=mgr, refresh_callback=refresh_callback
         )
         app._viewing_server = "srv"
-        render_calls: list[tuple[str | None, str | None]] = []
-        app._refresh_view = lambda server_name, *, kind=None: render_calls.append((
-            server_name,
-            kind,
-        ))
+        app._set_help_text = MagicMock()
         app.run_worker = MagicMock()
 
         await app.action_refresh()
 
         assert app._status_message == "Refreshing..."
-        assert render_calls == [("srv", None)]
+        assert app._refreshing is True
         app.run_worker.assert_called_once()
 
     def test_on_worker_state_changed_updates_after_refresh(self) -> None:

@@ -40,6 +40,7 @@ def test_snapshot_config_toggle_autocopy(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
         await pilot.pause(0.2)
         await pilot.press("down")
+        await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause(0.1)
 

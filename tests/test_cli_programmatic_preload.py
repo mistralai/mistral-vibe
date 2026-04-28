@@ -163,7 +163,7 @@ def test_run_programmatic_teleport_ignored_when_nuage_disabled(
             include_prompt_detail=False,
             include_model_info=False,
             include_commit_signature=False,
-            nuage_enabled=False,
+            vibe_code_enabled=False,
         )
 
         run_programmatic(

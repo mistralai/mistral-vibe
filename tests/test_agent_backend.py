@@ -19,8 +19,9 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.telemetry.types import EntrypointMetadata
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.types import Backend, EntrypointMetadata, FunctionCall, ToolCall
+from vibe.core.types import Backend, FunctionCall, Role, ToolCall
 
 
 def _two_model_vibe_config(active_model: str) -> VibeConfig:
@@ -128,10 +129,31 @@ async def test_passes_session_id_to_backend(vibe_config: VibeConfig):
     meta = backend.requests_metadata[0]
     assert meta is not None
     assert meta["session_id"] == agent.session_id
+    assert "parent_session_id" not in meta
     assert "message_id" in meta
-    assert meta["is_user_prompt"] == "true"
     assert meta["call_type"] == "main_call"
     assert meta["call_source"] == "vibe_code"
+
+
+@pytest.mark.asyncio
+async def test_passes_parent_session_id_to_backend_after_reset(vibe_config: VibeConfig):
+    backend = FakeBackend([
+        [mock_llm_chunk(content="Response")],
+        [mock_llm_chunk(content="Response after reset")],
+    ])
+    agent = build_test_agent_loop(config=vibe_config, backend=backend)
+
+    [_ async for _ in agent.act("Hello")]
+    first_session_id = agent.session_id
+
+    agent._reset_session()
+    [_ async for _ in agent.act("Hello again")]
+
+    assert len(backend.requests_metadata) >= 2
+    reset_meta = backend.requests_metadata[1]
+    assert reset_meta is not None
+    assert reset_meta["session_id"] == agent.session_id
+    assert reset_meta["parent_session_id"] == first_session_id
 
 
 @pytest.mark.asyncio
@@ -161,7 +183,6 @@ async def test_passes_entrypoint_metadata_to_backend(vibe_config: VibeConfig):
     assert meta["client_version"] == "0.5.0"
     assert meta["session_id"] == agent.session_id
     assert "message_id" in meta
-    assert meta["is_user_prompt"] == "true"
     assert meta["call_type"] == "main_call"
     assert meta["call_source"] == "vibe_code"
 
@@ -215,6 +236,52 @@ async def test_mcp_sampling_handler_uses_updated_config_when_agent_config_change
     assert result2.model == "devstral-small-latest"
 
 
+@pytest.mark.asyncio
+async def test_mcp_sampling_handler_sends_secondary_call_telemetry_metadata():
+    metadata = EntrypointMetadata(
+        agent_entrypoint="acp",
+        agent_version="2.0.0",
+        client_name="vibe_ide",
+        client_version="0.5.0",
+    )
+    backend = FakeBackend([
+        [mock_llm_chunk(content="Response")],
+        [mock_llm_chunk(content="Sampled response")],
+    ])
+    agent = build_test_agent_loop(
+        config=_two_model_vibe_config("devstral-latest"),
+        backend=backend,
+        entrypoint_metadata=metadata,
+    )
+
+    [_ async for _ in agent.act("Hello")]
+
+    agent.parent_session_id = "parent-session-456"
+
+    result = await agent._sampling_handler(MagicMock(), _make_sampling_params())
+
+    assert isinstance(result, CreateMessageResult)
+    assert len(backend.requests_metadata) == 2
+    sampling_metadata = backend.requests_metadata[1]
+    assert sampling_metadata is not None
+    assert sampling_metadata["agent_entrypoint"] == "acp"
+    assert sampling_metadata["agent_version"] == "2.0.0"
+    assert sampling_metadata["client_name"] == "vibe_ide"
+    assert sampling_metadata["client_version"] == "0.5.0"
+    assert sampling_metadata["session_id"] == agent.session_id
+    assert sampling_metadata["parent_session_id"] == "parent-session-456"
+    assert sampling_metadata["message_id"] == next(
+        message.message_id for message in agent.messages if message.role == Role.user
+    )
+    assert sampling_metadata["call_type"] == "secondary_call"
+    assert sampling_metadata["call_source"] == "vibe_code"
+
+    assert len(backend.requests_extra_headers) == 2
+    sampling_headers = backend.requests_extra_headers[1]
+    assert sampling_headers is not None
+    assert sampling_headers["x-affinity"] == agent.session_id
+
+
 def _generic_provider_vibe_config() -> VibeConfig:
     """VibeConfig with generic backend so no metadata header is sent."""
     providers = [
@@ -229,8 +296,8 @@ def _generic_provider_vibe_config() -> VibeConfig:
 
 
 @pytest.mark.asyncio
-async def test_mistral_metadata_header_is_user_prompt_per_turn() -> None:
-    """First LLM call in a turn has is_user_prompt=True; second call (after tools) has is_user_prompt=False."""
+async def test_mistral_metadata_header_call_type_per_turn() -> None:
+    """First LLM call in a turn is main_call; second call (after tools) is secondary_call."""
     tool_call = ToolCall(
         id="call_1",
         index=0,
@@ -261,19 +328,15 @@ async def test_mistral_metadata_header_is_user_prompt_per_turn() -> None:
     assert len(backend.requests_metadata) == 2
     first_metadata = backend.requests_metadata[0]
     second_metadata = backend.requests_metadata[1]
-    assert first_metadata is not None and "is_user_prompt" in first_metadata
-    assert second_metadata is not None and "is_user_prompt" in second_metadata
-    assert first_metadata["is_user_prompt"] == "true"
-    assert second_metadata["is_user_prompt"] == "false"
+    assert first_metadata is not None
+    assert second_metadata is not None
     assert first_metadata["call_type"] == "main_call"
     assert second_metadata["call_type"] == "secondary_call"
 
 
 @pytest.mark.asyncio
-async def test_auto_compact_internal_chat_has_is_user_prompt_false_then_user_turn_true() -> (
-    None
-):
-    """Compact's internal _chat() sends is_user_prompt=False; the following user turn sends is_user_prompt=True."""
+async def test_auto_compact_emits_summary_recount_and_next_turn_metadata() -> None:
+    """Compact emits summary, token-count, then user-turn backend metadata in order."""
     backend = FakeBackend([
         [mock_llm_chunk(content="<summary>")],
         [mock_llm_chunk(content="<final>")],
@@ -291,18 +354,37 @@ async def test_auto_compact_internal_chat_has_is_user_prompt_false_then_user_tur
     )
     agent = build_test_agent_loop(config=config, backend=backend)
     agent.stats.context_tokens = 2
+    original_session_id = agent.session_id
 
     [_ async for _ in agent.act("Hello")]
 
-    assert len(backend.requests_metadata) == 2
+    assert len(backend.requests_metadata) == 3
+    assert len(backend.requests_extra_headers) == 3
     compact_metadata = backend.requests_metadata[0]
-    user_turn_metadata = backend.requests_metadata[1]
-    assert compact_metadata is not None and "is_user_prompt" in compact_metadata
-    assert user_turn_metadata is not None and "is_user_prompt" in user_turn_metadata
-    assert compact_metadata["is_user_prompt"] == "false"
-    assert user_turn_metadata["is_user_prompt"] == "true"
+    recount_metadata = backend.requests_metadata[1]
+    user_turn_metadata = backend.requests_metadata[2]
+    assert compact_metadata is not None
+    assert recount_metadata is not None
+    assert user_turn_metadata is not None
     assert compact_metadata["call_type"] == "secondary_call"
+    assert compact_metadata["session_id"] == original_session_id
+    assert "parent_session_id" not in compact_metadata
+    assert recount_metadata["call_type"] == "secondary_call"
+    assert recount_metadata["session_id"] == agent.session_id
+    assert recount_metadata["parent_session_id"] == original_session_id
     assert user_turn_metadata["call_type"] == "main_call"
+    assert user_turn_metadata["session_id"] == agent.session_id
+    assert user_turn_metadata["parent_session_id"] == original_session_id
+
+    compact_headers = backend.requests_extra_headers[0]
+    recount_headers = backend.requests_extra_headers[1]
+    user_turn_headers = backend.requests_extra_headers[2]
+    assert compact_headers is not None
+    assert recount_headers is not None
+    assert user_turn_headers is not None
+    assert compact_headers["x-affinity"] == original_session_id
+    assert recount_headers["x-affinity"] == agent.session_id
+    assert user_turn_headers["x-affinity"] == agent.session_id
 
 
 @pytest.mark.asyncio

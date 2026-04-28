@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 _LIST_PAGE_SIZE = 100
 _LIST_QUERY_FILTERS: ConnectorsQueryFiltersTypedDict = {"active": True}
-_TOOL_FETCH_TIMEOUT = 5.0
+_TOOL_FETCH_TIMEOUT = 8.0
 
 
 def _normalize_name(name: str) -> str:

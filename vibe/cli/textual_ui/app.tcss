@@ -88,13 +88,18 @@ TextArea > .text-area--cursor {
     constrain: inside inside;
     display: none;
     width: auto;
-    max-width: 80;
     height: auto;
-    max-height: 12;
-    padding: 0 1;
     color: ansi_default;
     background: $surface;
     border: solid ansi_bright_black;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+    /* max-height, max-width and padding set in completion_popup.py */
+}
+
+#completion-popup _CompletionItem {
+    height: auto;
+    width: 1fr;
 }
 
 #input-box {
@@ -250,7 +255,7 @@ Markdown {
         padding: 0;
         margin: 0;
 
-        & > *:last-child {
+        & > MarkdownBlock:last-child {
             margin-bottom: 0;
         }
     }
@@ -305,7 +310,7 @@ Markdown {
         text-style: italic;
     }
 
-    & > *:last-child {
+    & > MarkdownBlock:last-child {
         margin-bottom: 0;
     }
 }
@@ -371,11 +376,11 @@ Markdown {
         margin: 0;
         padding: 0;
 
-        & > *:first-child {
+        & > MarkdownBlock:first-child {
             margin-top: 0;
         }
 
-        & > *:last-child {
+        & > MarkdownBlock:last-child {
             margin-bottom: 0;
         }
     }
@@ -936,7 +941,7 @@ StatusMessage {
     padding: 0;
     margin: 0;
 
-    & > *:last-child {
+    & > MarkdownBlock:last-child {
         margin-bottom: 0;
     }
 }
@@ -1034,11 +1039,11 @@ NarratorStatus {
         padding: 0 0 0 1;
         margin: 0;
 
-        & > *:first-child {
+        & > MarkdownBlock:first-child {
             margin-top: 0;
         }
 
-        & > *:last-child {
+        & > MarkdownBlock:last-child {
             margin-bottom: 0;
         }
 
@@ -1164,6 +1169,45 @@ NarratorStatus {
     margin-top: 1;
 }
 
+#thinkingpicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid ansi_bright_black;
+    padding: 0 1;
+    margin: 0;
+}
+
+#thinkingpicker-content {
+    width: 100%;
+    height: auto;
+}
+
+.thinkingpicker-title {
+    height: auto;
+    text-style: bold;
+    color: ansi_blue;
+}
+
+#thinkingpicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
+}
+
+#thinkingpicker-options:focus {
+    border: none;
+}
+
+.thinkingpicker-help {
+    width: 100%;
+    height: auto;
+    color: ansi_bright_black;
+    margin-top: 1;
+}
+
 FeedbackBar {
     width: auto;
     height: auto;
@@ -1219,4 +1263,54 @@ FeedbackBar {
     width: auto;
     height: auto;
     color: ansi_default;
+}
+
+.hook-system-message {
+    height: auto;
+    width: 100%;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.hook-run-container {
+    height: auto;
+    width: 100%;
+    margin-top: 1;
+}
+
+.hook-run-container:empty {
+    display: none;
+}
+
+.hook-system-container {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+.hook-system-icon {
+    width: auto;
+    height: 1;
+    padding: 0 1 0 0;
+}
+
+.hook-system-content {
+    width: 1fr;
+    height: auto;
+    max-height: 3;
+    overflow: hidden;
+    color: ansi_bright_black;
+}
+
+.hook-severity-ok .hook-system-icon {
+    color: ansi_green;
+}
+
+.hook-severity-warning .hook-system-icon {
+    color: ansi_yellow;
+}
+
+.hook-severity-error .hook-system-icon {
+    color: ansi_red;
 }

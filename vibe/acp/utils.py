@@ -21,6 +21,7 @@ from acp.schema import (
 )
 
 from vibe.core.agents.models import AgentProfile, AgentType
+from vibe.core.config._settings import THINKING_LEVELS, ThinkingLevel
 from vibe.core.proxy_setup import SUPPORTED_PROXY_VARS, get_current_proxy_settings
 from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.types import CompactEndEvent, CompactStartEvent, LLMMessage
@@ -100,7 +101,7 @@ def is_valid_acp_mode(profiles: list[AgentProfile], mode_name: str) -> bool:
     )
 
 
-def make_mode_response(
+def build_mode_state(
     profiles: list[AgentProfile], current_mode_id: str
 ) -> tuple[SessionModeState, SessionConfigOptionSelect]:
     session_modes: list[SessionMode] = []
@@ -138,7 +139,7 @@ def make_mode_response(
     return state, config
 
 
-def make_model_response(
+def build_model_state(
     models: list[ModelConfig], current_model_id: str
 ) -> tuple[SessionModelState, SessionConfigOptionSelect]:
     model_infos: list[ModelInfo] = []
@@ -164,6 +165,22 @@ def make_model_response(
         options=config_options,
     )
     return state, config_option
+
+
+def make_thinking_response(
+    current_thinking: ThinkingLevel,
+) -> SessionConfigOptionSelect:
+    return SessionConfigOptionSelect(
+        id="thinking",
+        name="Thinking",
+        current_value=current_thinking,
+        category="thinking",
+        type="select",
+        options=[
+            SessionConfigSelectOption(value=level, name=level.capitalize())
+            for level in THINKING_LEVELS
+        ],
+    )
 
 
 def create_compact_start_session_update(event: CompactStartEvent) -> ToolCallStart:

@@ -11,6 +11,12 @@ import httpx
 from vibe import __version__
 from vibe.core.config import ProviderConfig, VibeConfig
 from vibe.core.llm.format import ResolvedToolCall
+from vibe.core.telemetry.build_metadata import build_base_metadata
+from vibe.core.telemetry.types import (
+    AgentEntrypoint,
+    EntrypointMetadata,
+    TelemetryCallType,
+)
 from vibe.core.utils import get_server_url_from_api_base, get_user_agent
 
 if TYPE_CHECKING:
@@ -25,9 +31,14 @@ class TelemetryClient:
         self,
         config_getter: Callable[[], VibeConfig],
         session_id_getter: Callable[[], str | None] | None = None,
+        parent_session_id_getter: Callable[[], str | None] | None = None,
+        entrypoint_metadata_getter: Callable[[], EntrypointMetadata | None]
+        | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._session_id_getter = session_id_getter
+        self._parent_session_id_getter = parent_session_id_getter
+        self._entrypoint_metadata_getter = entrypoint_metadata_getter
         self._client: httpx.AsyncClient | None = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self.last_correlation_id: str | None = None
@@ -81,6 +92,29 @@ class TelemetryClient:
             )
         return self._client
 
+    @property
+    def session_id(self) -> str | None:
+        if self._session_id_getter is None:
+            return None
+        return self._session_id_getter()
+
+    @property
+    def parent_session_id(self) -> str | None:
+        if self._parent_session_id_getter is None:
+            return None
+        return self._parent_session_id_getter()
+
+    def build_client_event_metadata(self) -> dict[str, str]:
+        return build_base_metadata(
+            entrypoint_metadata=(
+                self._entrypoint_metadata_getter()
+                if self._entrypoint_metadata_getter is not None
+                else None
+            ),
+            session_id=self.session_id,
+            parent_session_id=self.parent_session_id,
+        )
+
     def send_telemetry_event(
         self,
         event_name: str,
@@ -96,11 +130,7 @@ class TelemetryClient:
         provider, mistral_api_key = provider_and_api_key
         telemetry_url = self._get_telemetry_url(provider.api_base)
         user_agent = get_user_agent(provider.backend)
-        if (
-            self._session_id_getter is not None
-            and (session_id := self._session_id_getter()) is not None
-        ):
-            properties = {**properties, "session_id": session_id}
+        properties = self.build_client_event_metadata() | properties
 
         payload: dict[str, Any] = {"event": event_name, "properties": properties}
         if correlation_id:
@@ -159,6 +189,7 @@ class TelemetryClient:
         agent_profile_name: str,
         model: str,
         result: dict[str, Any] | None = None,
+        message_id: str | None = None,
     ) -> None:
         verdict_value = decision.verdict.value if decision else None
         approval_type_value = decision.approval_type.value if decision else None
@@ -176,6 +207,7 @@ class TelemetryClient:
             "model": model,
             "nb_files_created": nb_files_created,
             "nb_files_modified": nb_files_modified,
+            "message_id": message_id,
         }
         self.send_telemetry_event("vibe.tool_call_finished", payload)
 
@@ -187,8 +219,25 @@ class TelemetryClient:
         payload = {"action": action}
         self.send_telemetry_event("vibe.user_cancelled_action", payload)
 
-    def send_auto_compact_triggered(self) -> None:
-        payload = {}
+    def send_auto_compact_triggered(
+        self,
+        *,
+        nb_context_tokens_before: int,
+        nb_context_tokens_after: int,
+        auto_compact_threshold: int,
+        status: Literal["success", "failure", "cancelled"],
+        session_id: str | None = None,
+        parent_session_id: str | None = None,
+    ) -> None:
+        payload = {
+            "nb_context_tokens_before": nb_context_tokens_before,
+            "nb_context_tokens_after": nb_context_tokens_after,
+            "auto_compact_threshold": auto_compact_threshold,
+            "status": status,
+        }
+        if session_id is not None:
+            payload["session_id"] = session_id
+            payload["parent_session_id"] = parent_session_id
         self.send_telemetry_event("vibe.auto_compact_triggered", payload)
 
     def send_slash_command_used(
@@ -203,7 +252,7 @@ class TelemetryClient:
         nb_skills: int,
         nb_mcp_servers: int,
         nb_models: int,
-        entrypoint: Literal["cli", "acp", "programmatic", "unknown"],
+        entrypoint: AgentEntrypoint,
         client_name: str | None,
         client_version: str | None,
         terminal_emulator: str | None = None,
@@ -233,14 +282,23 @@ class TelemetryClient:
         nb_context_chars: int,
         nb_context_messages: int,
         nb_prompt_chars: int,
+        call_type: TelemetryCallType,
+        message_id: str | None = None,
     ) -> None:
         payload = {
             "model": model,
             "nb_context_chars": nb_context_chars,
             "nb_context_messages": nb_context_messages,
             "nb_prompt_chars": nb_prompt_chars,
+            "call_source": "vibe_code",
+            "call_type": call_type,
+            "message_id": message_id,
         }
         self.send_telemetry_event("vibe.request_sent", payload)
+
+    def send_ready(self, *, init_duration_ms: int) -> None:
+        payload = {"init_duration_ms": init_duration_ms}
+        self.send_telemetry_event("vibe.ready", payload)
 
     def send_user_rating_feedback(self, rating: int, model: str) -> None:
         self.send_telemetry_event(

@@ -47,8 +47,14 @@ class WorkflowConfig(BaseModel):
     agent: VibeAgent = Field(default_factory=VibeAgent)
 
 
+class TextChunk(BaseModel):
+    type: str = "text"
+    text: str
+
+
 class WorkflowParams(BaseModel):
     prompt: str
+    message: list[TextChunk] | None = None
     config: WorkflowConfig = Field(default_factory=WorkflowConfig)
     integrations: WorkflowIntegrations = Field(default_factory=WorkflowIntegrations)
 
@@ -150,7 +156,7 @@ class NuageClient:
             },
         )
         if not response.is_success:
-            error_msg = f"Nuage workflow trigger failed: {response.text}"
+            error_msg = f"Vibe Code workflow trigger failed: {response.text}"
             raise ServiceTeleportError(error_msg)
         result = WorkflowExecuteResponse.model_validate(response.json())
         return result.execution_id

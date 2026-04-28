@@ -30,6 +30,30 @@ class Completer:
         return None
 
 
+def _prioritize_help_config_slash_menu(
+    items: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Place /help then /config at the head whenever they appear in the list."""
+    help_item: tuple[str, str] | None = None
+    config_item: tuple[str, str] | None = None
+    rest: list[tuple[str, str]] = []
+    for item in items:
+        match item[0]:
+            case "/help":
+                help_item = item
+            case "/config":
+                config_item = item
+            case _:
+                rest.append(item)
+    ordered: list[tuple[str, str]] = []
+    if help_item is not None:
+        ordered.append(help_item)
+    if config_item is not None:
+        ordered.append(config_item)
+    ordered.extend(rest)
+    return ordered
+
+
 class CommandCompleter(Completer):
     def __init__(self, entries: Callable[[], list[tuple[str, str]]]) -> None:
         self._get_entries = entries
@@ -56,11 +80,12 @@ class CommandCompleter(Completer):
         aliases, descriptions = self._build_lookup()
         word = text[1:cursor_pos].lower()
         search_str = "/" + word
-        return [
+        items = [
             (alias, descriptions.get(alias, ""))
             for alias in aliases
             if alias.lower().startswith(search_str)
         ]
+        return _prioritize_help_config_slash_menu(items)
 
     def get_replacement_range(
         self, text: str, cursor_pos: int

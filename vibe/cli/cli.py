@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 from rich import print as rprint
+from rich.console import Console
 import tomli_w
 
 from vibe import __version__
@@ -18,14 +19,27 @@ from vibe.core.config import (
     load_dotenv_values,
 )
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.hooks.config import load_hooks_from_fs
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.programmatic import run_programmatic
 from vibe.core.session.session_loader import SessionLoader
+from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
+from vibe.core.telemetry.types import EntrypointMetadata
 from vibe.core.tracing import setup_tracing
-from vibe.core.types import EntrypointMetadata, LLMMessage, OutputFormat, Role
+from vibe.core.trusted_folders import find_trustable_files, trusted_folders_manager
+from vibe.core.types import LLMMessage, OutputFormat, Role
 from vibe.core.utils import ConversationLimitException
 from vibe.setup.onboarding import run_onboarding
+
+
+def _build_cli_entrypoint_metadata() -> EntrypointMetadata:
+    return build_entrypoint_metadata(
+        agent_entrypoint="cli",
+        agent_version=__version__,
+        client_name="vibe_cli",
+        client_version=__version__,
+    )
 
 
 def get_initial_agent_name(args: argparse.Namespace) -> str:
@@ -49,11 +63,18 @@ def get_prompt_from_stdin() -> str | None:
     return None
 
 
-def load_config_or_exit() -> VibeConfig:
+def load_config_or_exit(*, interactive: bool) -> VibeConfig:
     try:
         return VibeConfig.load()
-    except MissingAPIKeyError:
-        run_onboarding()
+    except MissingAPIKeyError as e:
+        if not interactive:
+            print(
+                f"Error: {e}. Set the environment variable (e.g. in ~/.vibe/.env "
+                "or your shell), or run `vibe --setup` once interactively.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        run_onboarding(entrypoint_metadata=_build_cli_entrypoint_metadata())
         return VibeConfig.load()
     except MissingPromptFileError as e:
         rprint(f"[yellow]Invalid system prompt id: {e}[/]")
@@ -61,6 +82,26 @@ def load_config_or_exit() -> VibeConfig:
     except ValueError as e:
         rprint(f"[yellow]{e}[/]")
         sys.exit(1)
+
+
+def warn_if_workdir_trust_is_unset() -> None:
+    try:
+        cwd = Path.cwd()
+    except FileNotFoundError:
+        return
+    if cwd.resolve() == Path.home().resolve():
+        return
+    if trusted_folders_manager.is_trusted(cwd) is not None:
+        return
+    detected = find_trustable_files(cwd)
+    if not detected:
+        return
+    files_str = ", ".join(detected)
+    Console(stderr=True).print(
+        f"[yellow]Warning:[/] {cwd} is not trusted; "
+        f"project configuration ({files_str}) will be ignored. "
+        "Re-run with --trust to trust this folder temporarily."
+    )
 
 
 def bootstrap_config_files() -> None:
@@ -98,11 +139,14 @@ def load_session(
 
     session_to_load = None
     if args.continue_session:
-        session_to_load = SessionLoader.find_latest_session(config.session_logging)
+        cwd = Path.cwd().resolve()
+        session_to_load = SessionLoader.find_latest_session(
+            config.session_logging, working_directory=cwd
+        )
         if not session_to_load:
             rprint(
                 f"[red]No previous sessions found in "
-                f"{config.session_logging.save_dir}[/]"
+                f"{config.session_logging.save_dir} for {cwd=}[/]"
             )
             sys.exit(1)
     elif args.resume is True:
@@ -135,6 +179,7 @@ def _resume_previous_session(
     _, metadata = SessionLoader.load_session(session_path)
     session_id = metadata.get("session_id", agent_loop.session_id)
     agent_loop.session_id = session_id
+    agent_loop.parent_session_id = metadata.get("parent_session_id")
     agent_loop.session_logger.resume_existing_session(session_id, session_path)
 
     logger.info(
@@ -147,12 +192,14 @@ def run_cli(args: argparse.Namespace) -> None:
     bootstrap_config_files()
 
     if args.setup:
-        run_onboarding()
+        run_onboarding(entrypoint_metadata=_build_cli_entrypoint_metadata())
         sys.exit(0)
 
     try:
         initial_agent_name = get_initial_agent_name(args)
-        config = load_config_or_exit()
+        is_interactive = args.prompt is None
+        config = load_config_or_exit(interactive=is_interactive)
+        hook_config_result = load_hooks_from_fs(config)
         setup_tracing(config)
 
         if args.enabled_tools:
@@ -162,6 +209,7 @@ def run_cli(args: argparse.Namespace) -> None:
 
         stdin_prompt = get_prompt_from_stdin()
         if args.prompt is not None:
+            warn_if_workdir_trust_is_unset()
             config.disabled_tools = [*config.disabled_tools, "ask_user_question"]
             programmatic_prompt = args.prompt or stdin_prompt
             if not programmatic_prompt:
@@ -182,7 +230,9 @@ def run_cli(args: argparse.Namespace) -> None:
                     output_format=output_format,
                     previous_messages=loaded_session[0] if loaded_session else None,
                     agent_name=initial_agent_name,
-                    teleport=args.teleport and config.nuage_enabled,
+                    teleport=args.teleport and config.vibe_code_enabled,
+                    headless=True,
+                    hook_config_result=hook_config_result,
                 )
                 if final_response:
                     print(final_response)
@@ -201,13 +251,9 @@ def run_cli(args: argparse.Namespace) -> None:
                 config,
                 agent_name=initial_agent_name,
                 enable_streaming=True,
-                entrypoint_metadata=EntrypointMetadata(
-                    agent_entrypoint="cli",
-                    agent_version=__version__,
-                    client_name="vibe_cli",
-                    client_version=__version__,
-                ),
+                entrypoint_metadata=_build_cli_entrypoint_metadata(),
                 defer_heavy_init=True,
+                hook_config_result=hook_config_result,
             )
 
             if loaded_session:

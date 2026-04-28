@@ -8,6 +8,7 @@ import anyio
 from pydantic import BaseModel, Field
 
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -193,6 +194,7 @@ class ReadFile(
 
     @classmethod
     def format_call_display(cls, args: ReadFileArgs) -> ToolCallDisplay:
+        tag = " (scratchpad)" if is_scratchpad_path(args.path) else ""
         summary = f"Reading {args.path}"
         if args.offset > 0 or args.limit is not None:
             parts = []
@@ -201,7 +203,7 @@ class ReadFile(
             if args.limit is not None:
                 parts.append(f"limit {args.limit} lines")
             summary += f" ({', '.join(parts)})"
-        return ToolCallDisplay(summary=summary)
+        return ToolCallDisplay(summary=f"{summary}{tag}")
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -211,7 +213,8 @@ class ReadFile(
             )
 
         path_obj = Path(event.result.path)
-        message = f"Read {event.result.lines_read} line{'' if event.result.lines_read <= 1 else 's'} from {path_obj.name}"
+        tag = " (scratchpad)" if is_scratchpad_path(event.result.path) else ""
+        message = f"Read {event.result.lines_read} line{'' if event.result.lines_read <= 1 else 's'} from {path_obj.name}{tag}"
         if event.result.was_truncated:
             message += " (truncated)"
 

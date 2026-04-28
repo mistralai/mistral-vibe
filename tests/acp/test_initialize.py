@@ -7,6 +7,8 @@ from acp.schema import (
     Implementation,
     PromptCapabilities,
     SessionCapabilities,
+    SessionCloseCapabilities,
+    SessionForkCapabilities,
     SessionListCapabilities,
 )
 import pytest
@@ -25,10 +27,14 @@ class TestACPInitialize:
             prompt_capabilities=PromptCapabilities(
                 audio=False, embedded_context=True, image=False
             ),
-            session_capabilities=SessionCapabilities(list=SessionListCapabilities()),
+            session_capabilities=SessionCapabilities(
+                close=SessionCloseCapabilities(),
+                list=SessionListCapabilities(),
+                fork=SessionForkCapabilities(),
+            ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.8.1"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.9.0"
         )
 
         assert response.auth_methods == []
@@ -49,10 +55,14 @@ class TestACPInitialize:
             prompt_capabilities=PromptCapabilities(
                 audio=False, embedded_context=True, image=False
             ),
-            session_capabilities=SessionCapabilities(list=SessionListCapabilities()),
+            session_capabilities=SessionCapabilities(
+                close=SessionCloseCapabilities(),
+                list=SessionListCapabilities(),
+                fork=SessionForkCapabilities(),
+            ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.8.1"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.9.0"
         )
 
         assert response.auth_methods is not None

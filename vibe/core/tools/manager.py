@@ -197,19 +197,76 @@ class ToolManager:
                 name: cls for name, cls in self._available.items() if cls.is_available()
             }
 
+        # Per-source filtering first (MCP server/connector disabled flags).
+        result = self._apply_per_source_filtering(runtime_available)
+
+        # Global overrides take precedence.
         if self._config.enabled_tools:
             return {
                 name: cls
-                for name, cls in runtime_available.items()
+                for name, cls in result.items()
                 if name_matches(name, self._config.enabled_tools)
             }
         if self._config.disabled_tools:
             return {
                 name: cls
-                for name, cls in runtime_available.items()
+                for name, cls in result.items()
                 if not name_matches(name, self._config.disabled_tools)
             }
-        return runtime_available
+        return result
+
+    def _apply_per_source_filtering(
+        self, tools: dict[str, type[BaseTool]]
+    ) -> dict[str, type[BaseTool]]:
+        """Filter out MCP/connector tools disabled at the server or connector level."""
+        disabled_sources, per_source_disabled = self._build_source_disable_index()
+        if not disabled_sources and not per_source_disabled:
+            return tools
+
+        return {
+            name: cls
+            for name, cls in tools.items()
+            if not self._is_source_disabled(cls, disabled_sources, per_source_disabled)
+        }
+
+    def _build_source_disable_index(
+        self,
+    ) -> tuple[set[tuple[str, bool]], dict[tuple[str, bool], set[str]]]:
+        """Return (fully_disabled, per_tool_disabled) keyed by (source_name, is_connector)."""
+        disabled_sources: set[tuple[str, bool]] = set()
+        per_source_disabled: dict[tuple[str, bool], set[str]] = {}
+
+        for srv in self._config.mcp_servers:
+            key = (srv.name, False)
+            if srv.disabled:
+                disabled_sources.add(key)
+            elif srv.disabled_tools:
+                per_source_disabled[key] = set(srv.disabled_tools)
+
+        for cfg in self._config.connectors:
+            key = (cfg.name, True)
+            if cfg.disabled:
+                disabled_sources.add(key)
+            elif cfg.disabled_tools:
+                per_source_disabled[key] = set(cfg.disabled_tools)
+
+        return disabled_sources, per_source_disabled
+
+    @staticmethod
+    def _is_source_disabled(
+        cls: type[BaseTool],
+        disabled_sources: set[tuple[str, bool]],
+        per_source_disabled: dict[tuple[str, bool], set[str]],
+    ) -> bool:
+        if not issubclass(cls, MCPTool):
+            return False
+        server_name = cls.get_server_name()
+        if server_name is None:
+            return False
+        key = (server_name, cls.is_connector())
+        if key in disabled_sources:
+            return True
+        return cls.get_remote_name() in per_source_disabled.get(key, set())
 
     def integrate_mcp(self, *, raise_on_failure: bool = False) -> None:
         """Discover and register MCP tools (sync wrapper).

@@ -134,7 +134,9 @@ class TestNuageClientStartWorkflow:
         mock_client.post = AsyncMock(return_value=mock_response)
 
         params = WorkflowParams(prompt="test", integrations=WorkflowIntegrations())
-        with pytest.raises(ServiceTeleportError, match="Nuage workflow trigger failed"):
+        with pytest.raises(
+            ServiceTeleportError, match="Vibe Code workflow trigger failed"
+        ):
             await nuage.start_workflow(params)
 
 

@@ -21,6 +21,7 @@ from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils import kill_async_subprocess
 from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
@@ -242,8 +243,7 @@ class Grep(
                     proc.communicate(), timeout=self.config.default_timeout
                 )
             except TimeoutError:
-                proc.kill()
-                await proc.wait()
+                await kill_async_subprocess(proc, kill_process_group=False)
                 raise ToolError(
                     f"Search timed out after {self.config.default_timeout}s"
                 )

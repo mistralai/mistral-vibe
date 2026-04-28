@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from pydantic import BaseModel, ValidationError
 import pytest
 
 from tests.conftest import build_test_vibe_config
@@ -281,3 +282,20 @@ class TestBrokerSequenceTracking:
 
         assert events == []
         assert source._next_start_seq == 5
+
+
+def test_consume_workflow_event_validation_error_is_logged_and_ignored() -> None:
+    class _InvalidPayload(BaseModel):
+        required: str
+
+    source = _make_source()
+    with pytest.raises(ValidationError) as exc_info:
+        _InvalidPayload.model_validate({})
+
+    source._translator.consume_workflow_event = MagicMock(side_effect=exc_info.value)
+
+    with patch("vibe.core.nuage.remote_events_source.logger.warning") as mock_warning:
+        events = source._consume_workflow_event(MagicMock())
+
+    assert events == []
+    mock_warning.assert_called_once()
