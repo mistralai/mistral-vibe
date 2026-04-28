@@ -409,14 +409,6 @@ class ToolManager:
                 )
                 return self._instances[base_name]
 
-        if tool_name not in self._available:
-            raise NoSuchToolError(
-                f"Unknown tool: {tool_name}. Available: {list(self._available.keys())}"
-            )
-
-        tool_class = self._available[tool_name]
-        tool_config = self.get_tool_config(tool_name)
-        self._instances[tool_name] = tool_class.from_config(tool_config)
         return self._instances[tool_name]
 
     def get_instance(self, tool_name: str) -> BaseTool | None:
