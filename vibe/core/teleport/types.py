@@ -34,7 +34,7 @@ class TeleportPushingEvent(BaseEvent):
 
 
 class TeleportWaitingForGitHubEvent(BaseEvent):
-    pass
+    message: str | None = None
 
 
 class TeleportFetchingUrlEvent(BaseEvent):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from enum import StrEnum, auto
 import time
 import types
@@ -184,12 +185,13 @@ class NuageClient:
 
     async def wait_for_github_connection(
         self, execution_id: str, timeout: float = 600.0, interval: float = 2.0
-    ) -> GitHubPublicData:
+    ) -> AsyncGenerator[GitHubPublicData, None]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             github_data = await self.get_github_integration(execution_id)
+            yield github_data
             if github_data.connected:
-                return github_data
+                return
             if github_data.is_error:
                 raise ServiceTeleportError(
                     github_data.error

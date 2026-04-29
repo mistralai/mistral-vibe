@@ -260,11 +260,12 @@ class TestTeleportServiceExecute:
         service._git.get_info = AsyncMock(return_value=git_info)
         service._git.is_commit_pushed = AsyncMock(return_value=True)
 
+        async def _connected_gen(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+            yield mock_github_connected
+
         mock_nuage = MagicMock()
         mock_nuage.start_workflow = AsyncMock(return_value="exec-123")
-        mock_nuage.get_github_integration = AsyncMock(
-            return_value=mock_github_connected
-        )
+        mock_nuage.wait_for_github_connection = _connected_gen
         mock_nuage.get_chat_assistant_url = AsyncMock(
             return_value="https://chat.example.com/123"
         )
@@ -279,9 +280,10 @@ class TestTeleportServiceExecute:
         assert isinstance(events[0], TeleportCheckingGitEvent)
         assert isinstance(events[1], TeleportStartingWorkflowEvent)
         assert isinstance(events[2], TeleportWaitingForGitHubEvent)
-        assert isinstance(events[3], TeleportFetchingUrlEvent)
-        assert isinstance(events[4], TeleportCompleteEvent)
-        assert events[4].url == "https://chat.example.com/123"
+        assert isinstance(events[3], TeleportAuthCompleteEvent)
+        assert isinstance(events[4], TeleportFetchingUrlEvent)
+        assert isinstance(events[5], TeleportCompleteEvent)
+        assert events[5].url == "https://chat.example.com/123"
         workflow_params = mock_nuage.start_workflow.call_args.args[0]
         assert workflow_params.integrations.chat_assistant is not None
         assert workflow_params.integrations.chat_assistant.project_name is None
@@ -298,11 +300,12 @@ class TestTeleportServiceExecute:
         service._git.get_unpushed_commit_count = AsyncMock(return_value=3)
         service._git.push_current_branch = AsyncMock(return_value=True)
 
+        async def _connected_gen(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+            yield mock_github_connected
+
         mock_nuage = MagicMock()
         mock_nuage.start_workflow = AsyncMock(return_value="exec-123")
-        mock_nuage.get_github_integration = AsyncMock(
-            return_value=mock_github_connected
-        )
+        mock_nuage.wait_for_github_connection = _connected_gen
         mock_nuage.get_chat_assistant_url = AsyncMock(
             return_value="https://chat.example.com/123"
         )
@@ -357,18 +360,22 @@ class TestTeleportServiceExecute:
         github_pending = MagicMock()
         github_pending.connected = False
         github_pending.oauth_url = "https://github.com/login/oauth"
-        github_pending.error = None
+        github_pending.error = "Please connect GitHub"
         github_pending.status = GitHubStatus.WAITING_FOR_OAUTH
 
         github_connected = MagicMock()
         github_connected.connected = True
         github_connected.oauth_url = None
+        github_connected.error = None
         github_connected.status = GitHubStatus.CONNECTED
+
+        async def _oauth_gen(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+            yield github_pending
+            yield github_connected
 
         mock_nuage = MagicMock()
         mock_nuage.start_workflow = AsyncMock(return_value="exec-123")
-        mock_nuage.get_github_integration = AsyncMock(return_value=github_pending)
-        mock_nuage.wait_for_github_connection = AsyncMock(return_value=github_connected)
+        mock_nuage.wait_for_github_connection = _oauth_gen
         mock_nuage.get_chat_assistant_url = AsyncMock(
             return_value="https://chat.example.com/123"
         )
@@ -383,9 +390,12 @@ class TestTeleportServiceExecute:
         assert isinstance(events[0], TeleportCheckingGitEvent)
         assert isinstance(events[1], TeleportStartingWorkflowEvent)
         assert isinstance(events[2], TeleportWaitingForGitHubEvent)
+        assert events[2].message is None
         assert isinstance(events[3], TeleportAuthRequiredEvent)
         assert events[3].oauth_url == "https://github.com/login/oauth"
-        assert isinstance(events[4], TeleportAuthCompleteEvent)
+        assert isinstance(events[4], TeleportWaitingForGitHubEvent)
+        assert events[4].message == "Please connect GitHub"
+        assert isinstance(events[5], TeleportAuthCompleteEvent)
         assert isinstance(events[-1], TeleportCompleteEvent)
 
     @pytest.mark.asyncio
@@ -398,11 +408,12 @@ class TestTeleportServiceExecute:
         service._git.get_info = AsyncMock(return_value=git_info)
         service._git.is_commit_pushed = AsyncMock(return_value=True)
 
+        async def _connected_gen(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+            yield mock_github_connected
+
         mock_nuage = MagicMock()
         mock_nuage.start_workflow = AsyncMock(return_value="exec-123")
-        mock_nuage.get_github_integration = AsyncMock(
-            return_value=mock_github_connected
-        )
+        mock_nuage.wait_for_github_connection = _connected_gen
         mock_nuage.get_chat_assistant_url = AsyncMock(return_value=None)
         service._nuage_client_instance = mock_nuage
 
@@ -423,11 +434,12 @@ class TestTeleportServiceExecute:
         service._git.get_info = AsyncMock(return_value=git_info)
         service._git.is_commit_pushed = AsyncMock(return_value=True)
 
+        async def _connected_gen(*_a: object, **_kw: object):  # type: ignore[no-untyped-def]
+            yield mock_github_connected
+
         mock_nuage = MagicMock()
         mock_nuage.start_workflow = AsyncMock(return_value="exec-123")
-        mock_nuage.get_github_integration = AsyncMock(
-            return_value=mock_github_connected
-        )
+        mock_nuage.wait_for_github_connection = _connected_gen
         mock_nuage.get_chat_assistant_url = AsyncMock(
             return_value="https://chat.example.com/123"
         )

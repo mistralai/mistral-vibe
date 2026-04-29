@@ -49,6 +49,9 @@ from vibe.core.config.patch import (
     SetField,
 )
 from vibe.core.config.schema import (
+    ConfigDefinitionError,
+    ConfigFragment,
+    ConfigSchema,
     DuplicateMergeMetadataError,
     MergeFieldMetadata,
     WithConcatMerge,
@@ -68,8 +71,11 @@ __all__ = [
     "DEFAULT_TTS_PROVIDERS",
     "THINKING_LEVELS",
     "AppendToList",
+    "ConfigDefinitionError",
+    "ConfigFragment",
     "ConfigLayer",
     "ConfigLayerError",
+    "ConfigSchema",
     "ConnectorConfig",
     "DeleteField",
     "DuplicateMergeMetadataError",

@@ -1357,8 +1357,8 @@ class VibeApp(App):  # noqa: PLR0904
                         teleport_msg.set_status("Syncing with remote...")
                     case TeleportStartingWorkflowEvent():
                         teleport_msg.set_status("Teleporting...")
-                    case TeleportWaitingForGitHubEvent():
-                        teleport_msg.set_status("Connecting to GitHub...")
+                    case TeleportWaitingForGitHubEvent(message=msg):
+                        teleport_msg.set_status(msg or "Connecting to GitHub...")
                     case TeleportAuthRequiredEvent(oauth_url=url, message=msg):
                         webbrowser.open(url)
                         teleport_msg.set_status(msg or "Authorizing GitHub...")

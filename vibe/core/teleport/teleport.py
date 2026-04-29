@@ -184,15 +184,22 @@ class TeleportService:
         )
 
         yield TeleportWaitingForGitHubEvent()
-        github_data = await self._nuage_client.get_github_integration(execution_id)
 
-        if not github_data.connected:
-            if github_data.oauth_url:
+        auth_event_sent = False
+        async for github_data in self._nuage_client.wait_for_github_connection(
+            execution_id
+        ):
+            if github_data.connected:
+                break
+            if not auth_event_sent and github_data.oauth_url:
                 yield TeleportAuthRequiredEvent(
                     oauth_url=github_data.oauth_url, message=github_data.error
                 )
-            await self._nuage_client.wait_for_github_connection(execution_id)
-            yield TeleportAuthCompleteEvent()
+                auth_event_sent = True
+            if github_data.error:
+                yield TeleportWaitingForGitHubEvent(message=github_data.error)
+
+        yield TeleportAuthCompleteEvent()
 
         yield TeleportFetchingUrlEvent()
         chat_url = await self._nuage_client.get_chat_assistant_url(execution_id)
