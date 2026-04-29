@@ -400,3 +400,28 @@ async def test_generic_provider_has_no_metadata_header() -> None:
     headers = backend.requests_extra_headers[0]
     assert headers is not None
     assert "metadata" not in headers
+
+
+@pytest.mark.asyncio
+async def test_provider_extra_headers_are_forwarded() -> None:
+    backend = FakeBackend([mock_llm_chunk(content="Response")])
+    providers = [
+        ProviderConfig(
+            name="custom",
+            api_base="https://custom.example.com/v1",
+            extra_headers={"X-Custom-Auth": "token123", "X-Org-Id": "org-456"},
+        )
+    ]
+    models = [ModelConfig(name="test-model", provider="custom", alias="test")]
+    config = build_test_vibe_config(
+        active_model="test", models=models, providers=providers
+    )
+    agent = build_test_agent_loop(config=config, backend=backend)
+
+    [_ async for _ in agent.act("Hello")]
+
+    assert len(backend.requests_extra_headers) == 1
+    headers = backend.requests_extra_headers[0]
+    assert headers is not None
+    assert headers["X-Custom-Auth"] == "token123"
+    assert headers["X-Org-Id"] == "org-456"

@@ -305,6 +305,7 @@ def create_tool_call_replay(
         tool_call_id=tool_call_id,
         kind="other",
         raw_input=arguments,
+        field_meta={"tool_name": tool_name},
     )
 
 

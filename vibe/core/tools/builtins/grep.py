@@ -94,12 +94,57 @@ class GrepArgs(BaseModel):
     )
 
 
+class GrepMatch(BaseModel):
+    path: str
+    line: int | None = None
+
+    @classmethod
+    def from_output_line(cls, raw: str) -> GrepMatch | None:
+        """Parse a single grep/rg output line in `file:line:content` format.
+
+        Handles Windows drive-letter paths like ``C:\\repo\\file.py:10:match``
+        by skipping a single-letter first segment.
+        """
+        parts = raw.split(":", 3)
+        MIN_MATCH_PARTS = 2
+        if len(parts) < MIN_MATCH_PARTS:
+            return None
+
+        # Windows drive letter: first part is a single letter (e.g. "C")
+        MIN_WINDOWS_PARTS = 3
+        is_windows_path = (
+            len(parts[0]) == 1
+            and parts[0].isalpha()
+            and len(parts) >= MIN_WINDOWS_PARTS
+        )
+        if is_windows_path:
+            file_path = f"{parts[0]}:{parts[1]}"
+            line_str = parts[2]
+        else:
+            file_path = parts[0]
+            line_str = parts[1]
+
+        try:
+            line_num = int(line_str) if line_str else None
+        except (ValueError, TypeError):
+            line_num = None
+        return cls(path=str(Path(file_path).resolve()), line=line_num)
+
+
 class GrepResult(BaseModel):
     matches: str
     match_count: int
     was_truncated: bool = Field(
         description="True if output was cut short by max_matches or max_output_bytes."
     )
+
+    @property
+    def parsed_matches(self) -> list[GrepMatch]:
+        results: list[GrepMatch] = []
+        for line in self.matches.splitlines():
+            if match := GrepMatch.from_output_line(line):
+                results.append(match)
+        return results
 
 
 class Grep(

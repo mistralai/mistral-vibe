@@ -57,6 +57,7 @@ from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
+from vibe.cli.textual_ui.widgets.connector_auth_app import ConnectorAuthApp
 from vibe.cli.textual_ui.widgets.context_progress import ContextProgress, TokenState
 from vibe.cli.textual_ui.widgets.debug_console import DebugConsole
 from vibe.cli.textual_ui.widgets.feedback_bar import FeedbackBar
@@ -198,6 +199,7 @@ class BottomApp(StrEnum):
 
     Approval = auto()
     Config = auto()
+    ConnectorAuth = auto()
     Input = auto()
     MCP = auto()
     ModelPicker = auto()
@@ -808,6 +810,27 @@ class VibeApp(App):  # noqa: PLR0904
         self.query_one(MCPApp).refresh_index()
         self._refresh_banner()
 
+    async def on_mcpapp_connector_auth_requested(
+        self, message: MCPApp.ConnectorAuthRequested
+    ) -> None:
+        await self._switch_to_input_app()
+        await self._switch_from_input(
+            ConnectorAuthApp(
+                connector_name=message.connector_name,
+                connector_registry=message.connector_registry,
+                tool_manager=message.tool_manager,
+            )
+        )
+
+    async def on_connector_auth_app_connector_auth_closed(
+        self, message: ConnectorAuthApp.ConnectorAuthClosed
+    ) -> None:
+        if message.refreshed:
+            await self.agent_loop.refresh_system_prompt()
+            self._refresh_banner()
+        await self._switch_to_input_app()
+        await self._show_mcp(cmd_args=message.connector_name)
+
     async def on_proxy_setup_app_proxy_setup_closed(
         self, message: ProxySetupApp.ProxySetupClosed
     ) -> None:
@@ -1336,9 +1359,9 @@ class VibeApp(App):  # noqa: PLR0904
                         teleport_msg.set_status("Teleporting...")
                     case TeleportWaitingForGitHubEvent():
                         teleport_msg.set_status("Connecting to GitHub...")
-                    case TeleportAuthRequiredEvent(oauth_url=url):
+                    case TeleportAuthRequiredEvent(oauth_url=url, message=msg):
                         webbrowser.open(url)
-                        teleport_msg.set_status("Authorizing GitHub...")
+                        teleport_msg.set_status(msg or "Authorizing GitHub...")
                     case TeleportAuthCompleteEvent():
                         teleport_msg.set_status("GitHub authorized")
                     case TeleportFetchingUrlEvent():
@@ -2059,6 +2082,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(SessionPickerApp).focus()
                 case BottomApp.MCP:
                     self.query_one(MCPApp).focus()
+                case BottomApp.ConnectorAuth:
+                    self.query_one(ConnectorAuthApp).focus()
                 case BottomApp.Rewind:
                     self.query_one(RewindApp).focus()
                 case BottomApp.Voice:
@@ -2335,7 +2360,7 @@ class VibeApp(App):  # noqa: PLR0904
         self.run_worker(self._interrupt_agent_loop(), exclusive=False)
 
     def _handle_bottom_app_close_escape(
-        self, widget_type: type[MCPApp] | type[ProxySetupApp]
+        self, widget_type: type[MCPApp] | type[ProxySetupApp] | type[ConnectorAuthApp]
     ) -> None:
         try:
             self.query_one(widget_type).action_close()
@@ -2350,6 +2375,8 @@ class VibeApp(App):  # noqa: PLR0904
             self._handle_voice_app_escape()
         elif self._current_bottom_app == BottomApp.MCP:
             self._handle_bottom_app_close_escape(MCPApp)
+        elif self._current_bottom_app == BottomApp.ConnectorAuth:
+            self._handle_bottom_app_close_escape(ConnectorAuthApp)
         elif self._current_bottom_app == BottomApp.ProxySetup:
             self._handle_bottom_app_close_escape(ProxySetupApp)
         elif self._current_bottom_app == BottomApp.Approval:

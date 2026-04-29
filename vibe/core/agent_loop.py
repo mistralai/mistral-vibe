@@ -727,10 +727,9 @@ class AgentLoop:
         self, provider: ProviderConfig | None = None
     ) -> dict[str, str]:
         provider = self.config.get_active_provider() if provider is None else provider
-        headers: dict[str, str] = {
-            "user-agent": get_user_agent(provider.backend),
-            "x-affinity": self.session_id,
-        }
+        headers: dict[str, str] = {**provider.extra_headers}
+        headers["user-agent"] = get_user_agent(provider.backend)
+        headers["x-affinity"] = self.session_id
         return headers
 
     async def _conversation_loop(
@@ -1423,6 +1422,7 @@ class AgentLoop:
         self.session_logger.reset_session(
             self.session_id, parent_session_id=old_session_id
         )
+        self.emit_new_session_telemetry()
 
     async def fork(self, message_id: str | None = None) -> AgentLoop:
         messages = self._messages_for_fork(message_id)

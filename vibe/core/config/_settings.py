@@ -173,6 +173,7 @@ class ProviderConfig(BaseModel):
     reasoning_field_name: str = "reasoning_content"
     project_id: str = ""
     region: str = ""
+    extra_headers: dict[str, str] = Field(default_factory=dict)
 
     def _is_legacy_mistral_provider_without_backend(self) -> bool:
         return (
@@ -434,9 +435,11 @@ DEFAULT_MODELS = [
     ModelConfig(
         name="mistral-vibe-cli-latest",
         provider="mistral",
-        alias="devstral-2",
-        input_price=0.4,
-        output_price=2.0,
+        alias="mistral-medium-3.5",
+        temperature=1.0,
+        input_price=1.5,
+        output_price=7.5,
+        thinking="high",
     ),
     ModelConfig(
         name="devstral-small-latest",
@@ -973,14 +976,33 @@ class VibeConfig(BaseSettings):
         except (FileNotFoundError, tomllib.TOMLDecodeError, OSError):
             return
 
+        changed = False
+
         bash_tools = data.get("tools", {}).get("bash", {})
         allowlist = bash_tools.get("allowlist")
-        if allowlist is None or "find" in allowlist:
-            return
+        if allowlist is not None and "find" not in allowlist:
+            allowlist.append("find")
+            allowlist.sort()
+            changed = True
 
-        allowlist.append("find")
-        allowlist.sort()
-        cls.dump_config(data)
+        for model in data.get("models", []):
+            if (
+                model.get("name") == "mistral-vibe-cli-latest"
+                and model.get("alias") == "devstral-2"
+            ):
+                model["alias"] = "mistral-medium-3.5"
+                model["temperature"] = 1.0
+                model["input_price"] = 1.5
+                model["output_price"] = 7.5
+                model["thinking"] = "high"
+                changed = True
+
+        if data.get("active_model") == "devstral-2":
+            data["active_model"] = "mistral-medium-3.5"
+            changed = True
+
+        if changed:
+            cls.dump_config(data)
 
     @classmethod
     def load(cls, **overrides: Any) -> VibeConfig:

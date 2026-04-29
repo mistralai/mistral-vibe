@@ -367,7 +367,7 @@ class VibeAcpAgentLoop(AcpAgent):
         )
 
     def _get_acp_tool_overrides(self) -> list[Path]:
-        overrides = ["todo"]
+        overrides = ["todo", "grep", "web_fetch", "web_search", "skill", "task"]
 
         if self.client_capabilities:
             if self.client_capabilities.terminal:
@@ -399,6 +399,9 @@ class VibeAcpAgentLoop(AcpAgent):
                     session.agent_loop.approve_always(tool_name, required_permissions)
                     return (ApprovalResponse.YES, None)
                 case ToolOption.REJECT_ONCE:
+                    session.agent_loop.telemetry_client.send_user_cancelled_action(
+                        "reject_approval"
+                    )
                     return (
                         ApprovalResponse.NO,
                         "User rejected the tool call, provide an alternative plan",
@@ -946,6 +949,9 @@ class VibeAcpAgentLoop(AcpAgent):
     @override
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         session = self._get_session(session_id)
+        session.agent_loop.telemetry_client.send_user_cancelled_action(
+            "interrupt_agent"
+        )
         await session.cancel_prompt()
 
     @override

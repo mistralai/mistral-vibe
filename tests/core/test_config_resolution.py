@@ -293,6 +293,241 @@ class TestMigrateLeavesFindInBashAllowlist:
         assert "tools" not in result
 
 
+class TestMigrateMistralVibeCliLatestDefaults:
+    def test_updates_alias_temperature_and_thinking_for_default_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-2",
+                    "temperature": 0.2,
+                    "thinking": "off",
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["alias"] == "mistral-medium-3.5"
+        assert result["models"][0]["temperature"] == 1.0
+        assert result["models"][0]["input_price"] == 1.5
+        assert result["models"][0]["output_price"] == 7.5
+        assert result["models"][0]["thinking"] == "high"
+
+    def test_updates_active_model_when_devstral_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "active_model": "devstral-2",
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-2",
+                }
+            ],
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["active_model"] == "mistral-medium-3.5"
+
+    def test_adds_temperature_and_thinking_when_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-2",
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["alias"] == "mistral-medium-3.5"
+        assert result["models"][0]["temperature"] == 1.0
+        assert result["models"][0]["input_price"] == 1.5
+        assert result["models"][0]["output_price"] == 7.5
+        assert result["models"][0]["thinking"] == "high"
+
+    def test_skips_model_with_customized_alias(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "my-custom-alias",
+                    "temperature": 0.2,
+                    "thinking": "off",
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["alias"] == "my-custom-alias"
+        assert result["models"][0]["temperature"] == 0.2
+        assert result["models"][0]["thinking"] == "off"
+
+    def test_does_not_touch_other_models(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-2",
+                },
+                {
+                    "name": "other-model",
+                    "provider": "mistral",
+                    "alias": "devstral-2-clone",
+                    "temperature": 0.5,
+                    "thinking": "low",
+                },
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][1]["alias"] == "devstral-2-clone"
+        assert result["models"][1]["temperature"] == 0.5
+        assert result["models"][1]["thinking"] == "low"
+
+    def test_noop_when_no_models_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {"theme": "dark"}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result == {"theme": "dark"}
+
+    def test_idempotent_when_already_migrated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "active_model": "mistral-medium-3.5",
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "mistral-medium-3.5",
+                    "temperature": 1.0,
+                    "input_price": 1.5,
+                    "output_price": 7.5,
+                    "thinking": "high",
+                }
+            ],
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["active_model"] == "mistral-medium-3.5"
+        assert result["models"][0]["alias"] == "mistral-medium-3.5"
+        assert result["models"][0]["temperature"] == 1.0
+        assert result["models"][0]["input_price"] == 1.5
+        assert result["models"][0]["output_price"] == 7.5
+        assert result["models"][0]["thinking"] == "high"
+
+    def test_migrates_model_and_active_model_together(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "active_model": "devstral-2",
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-2",
+                }
+            ],
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["active_model"] == "mistral-medium-3.5"
+        assert result["models"][0]["alias"] == "mistral-medium-3.5"
+        assert result["models"][0]["temperature"] == 1.0
+        assert result["models"][0]["input_price"] == 1.5
+        assert result["models"][0]["output_price"] == 7.5
+        assert result["models"][0]["thinking"] == "high"
+
+
 class TestAutoCompactThresholdFallback:
     def test_model_without_explicit_threshold_inherits_global(self) -> None:
         model = ModelConfig(name="m", provider="p", alias="m")

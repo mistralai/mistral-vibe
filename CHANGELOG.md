@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.1] - 2026-04-29
+
+### Added
+
+- Connector OAuth authentication flow in `/mcp` menu
+- `ConfigPatch` operation types for Vibe Code
+- `extra_headers` field to `ProviderConfig`
+- Structured metadata on ACP tool results
+- `vibe.user_cancelled_action` ACP telemetry coverage
+- `vibe.new_session` telemetry event emitted whenever the session is reset
+
+### Changed
+
+- Migrated default model to `mistral-medium-3.5`
+
+
 ## [2.9.0] - 2026-04-28
 
 ### Added

@@ -48,6 +48,7 @@ class ReadFileArgs(BaseModel):
 class ReadFileResult(BaseModel):
     path: str
     content: str
+    offset: int = 0
     lines_read: int
     was_truncated: bool = Field(
         description="True if the reading was stopped due to the max_read_bytes limit."
@@ -90,6 +91,7 @@ class ReadFile(
         yield ReadFileResult(
             path=str(file_path),
             content="".join(read_result.lines),
+            offset=args.offset,
             lines_read=len(read_result.lines),
             was_truncated=read_result.was_truncated,
         )

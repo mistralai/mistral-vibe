@@ -220,6 +220,7 @@ class ConnectorRegistry:
         self._cache: dict[str, dict[str, type[BaseTool]]] | None = None
         self._connector_names: list[str] = []
         self._connector_connected: dict[str, bool] = {}
+        self._alias_to_id: dict[str, str] = {}
         self._discover_lock = asyncio.Lock()
 
     def _get_client(self) -> Mistral:
@@ -269,6 +270,7 @@ class ConnectorRegistry:
                     self._cache = {}
                     self._connector_names = []
                     self._connector_connected = {}
+                    self._alias_to_id = {}
                     return {}
 
                 # Build results locally to avoid publishing incomplete state.
@@ -324,6 +326,7 @@ class ConnectorRegistry:
                 # lock will see the completed cache.
                 self._connector_names = connector_names
                 self._connector_connected = connector_connected
+                self._alias_to_id = {alias: cid for cid, alias, _ in unique_connectors}
                 self._cache = cache
 
                 return all_tools
@@ -411,7 +414,63 @@ class ConnectorRegistry:
     def is_connected(self, name: str) -> bool:
         return self._connector_connected.get(name, False)
 
+    def get_connector_id(self, alias: str) -> str | None:
+        """Return the API connector ID for a given alias, or None."""
+        return self._alias_to_id.get(alias)
+
+    async def refresh_connector_async(self, alias: str) -> dict[str, type[BaseTool]]:
+        """Re-fetch tools for a single connector by alias.
+
+        Updates the internal cache for that connector only. Returns
+        the new tool map (empty dict on failure).
+        """
+        connector_id = self._alias_to_id.get(alias)
+        if connector_id is None:
+            return {}
+
+        try:
+            async with self._get_client() as client:
+                connector = await client.beta.connectors.get_async(
+                    connector_id_or_name=connector_id
+                )
+                tools_map = await self._fetch_connector_tools(client, connector, alias)
+        except Exception:
+            logger.debug("Failed to refresh connector %s", alias)
+            tools_map = None
+
+        if self._cache is None:
+            self._cache = {}
+
+        if tools_map is None:
+            self._cache.pop(connector_id, None)
+            self._connector_connected[alias] = False
+            return {}
+
+        self._cache[connector_id] = tools_map
+        self._connector_connected[alias] = bool(tools_map)
+        return tools_map
+
+    async def get_auth_url(self, alias: str) -> str | None:
+        """Return the OAuth authorization URL for a connector, or None.
+
+        Returns None when the connector does not support OAuth or the
+        alias is unknown.
+        """
+        connector_id = self._alias_to_id.get(alias)
+        if connector_id is None:
+            return None
+        try:
+            async with self._get_client() as client:
+                result = await client.beta.connectors.get_auth_url_async(
+                    connector_id_or_name=connector_id
+                )
+            return result.auth_url
+        except Exception:
+            logger.debug("Failed to get auth URL for connector %s", alias)
+            return None
+
     def clear(self) -> None:
         self._cache = None
         self._connector_names = []
         self._connector_connected = {}
+        self._alias_to_id = {}

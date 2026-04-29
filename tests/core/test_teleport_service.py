@@ -357,6 +357,7 @@ class TestTeleportServiceExecute:
         github_pending = MagicMock()
         github_pending.connected = False
         github_pending.oauth_url = "https://github.com/login/oauth"
+        github_pending.error = None
         github_pending.status = GitHubStatus.WAITING_FOR_OAUTH
 
         github_connected = MagicMock()

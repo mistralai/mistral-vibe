@@ -5,6 +5,7 @@ from vibe.core.types import BaseEvent
 
 class TeleportAuthRequiredEvent(BaseEvent):
     oauth_url: str
+    message: str | None = None
 
 
 class TeleportAuthCompleteEvent(BaseEvent):

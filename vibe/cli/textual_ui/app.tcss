@@ -691,7 +691,7 @@ StatusMessage {
 
 }
 
-#config-app, #voice-app, #mcp-app {
+#config-app, #voice-app, #mcp-app, #connectorauth-app {
     width: 100%;
     height: auto;
     background: transparent;
@@ -700,7 +700,7 @@ StatusMessage {
     margin: 0;
 }
 
-#config-content, #voice-content, #mcp-content {
+#config-content, #voice-content, #mcp-content, #connectorauth-content {
     width: 100%;
     height: auto;
 }
@@ -711,14 +711,18 @@ StatusMessage {
     color: ansi_blue;
 }
 
-#config-options, #mcp-options {
+#config-options, #mcp-options, #connectorauth-options {
     width: 100%;
     max-height: 50vh;
     border: none;
 }
 
-#config-options:focus, #mcp-options:focus {
+#config-options:focus, #mcp-options:focus, #connectorauth-options:focus {
     border: none;
+}
+
+#connectorauth-detail {
+    margin: 1 0;
 }
 
 .settings-help {

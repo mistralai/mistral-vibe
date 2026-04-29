@@ -57,7 +57,7 @@ environment variables with the `VIBE_` prefix (e.g., `VIBE_ACTIVE_MODEL=local`).
 
 ```toml
 # Model selection
-active_model = "devstral-2"      # Model alias to use (see [[models]])
+active_model = "mistral-medium-3.5"  # Model alias to use (see [[models]])
 
 # UI preferences
 vim_keybindings = false
@@ -103,6 +103,7 @@ backend = "mistral"
 name = "llamacpp"
 api_base = "http://127.0.0.1:8080/v1"
 api_key_env_var = ""
+extra_headers = { "X-Custom-Header" = "value" }  # optional per-provider HTTP headers
 ```
 
 ### Models
@@ -111,11 +112,11 @@ api_key_env_var = ""
 [[models]]
 name = "mistral-vibe-cli-latest"
 provider = "mistral"
-alias = "devstral-2"
-temperature = 0.2
-input_price = 0.4
-output_price = 2.0
-thinking = "off"                  # "off", "low", "medium", "high", "max"
+alias = "mistral-medium-3.5"
+temperature = 1.0
+input_price = 1.5
+output_price = 7.5
+thinking = "high"                 # "off", "low", "medium", "high", "max"
 auto_compact_threshold = 200000
 
 [[models]]

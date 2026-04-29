@@ -1,3 +1,8 @@
+# What's new in v2.9.1
+
+- **Default model**: Migrated to `mistral-medium-3.5`.
+- **Connector OAuth**: Authenticate connectors via OAuth directly from the `/mcp` menu.
+
 # What's new in v2.9.0
 - **Scratchpad directory**: Model's autonomous workspace for temporary files, intermediate results, and drafts shared with subagents
 - **`/copy` command**: New slash command to copy content directly from the conversation

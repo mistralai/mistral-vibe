@@ -188,7 +188,9 @@ class TeleportService:
 
         if not github_data.connected:
             if github_data.oauth_url:
-                yield TeleportAuthRequiredEvent(oauth_url=github_data.oauth_url)
+                yield TeleportAuthRequiredEvent(
+                    oauth_url=github_data.oauth_url, message=github_data.error
+                )
             await self._nuage_client.wait_for_github_connection(execution_id)
             yield TeleportAuthCompleteEvent()
 

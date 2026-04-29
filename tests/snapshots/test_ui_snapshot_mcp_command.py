@@ -253,6 +253,93 @@ def test_snapshot_mcp_with_connectors_overview(snap_compare: SnapCompare) -> Non
         )
 
 
+# ---------------------------------------------------------------------------
+# Connector auth app snapshot tests
+# ---------------------------------------------------------------------------
+
+
+@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
+def test_snapshot_connector_auth_opens_on_disconnected(
+    snap_compare: SnapCompare,
+) -> None:
+    """Clicking a disconnected connector opens the auth app."""
+
+    async def run_before(pilot: Pilot) -> None:
+        await _run_mcp_command(pilot, "/mcp")
+        # In mixed state: alpha (connected) is first, then beta, zeta (disconnected).
+        # Navigate to a disconnected connector and press enter.
+        await pilot.press("down")  # beta
+        await pilot.pause(0.1)
+        await pilot.press("enter")  # opens auth app
+        await pilot.pause(0.5)  # wait for auth URL fetch worker
+
+    assert snap_compare(
+        "test_ui_snapshot_mcp_command.py:SnapshotTestAppConnectorsMixedState",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
+@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
+def test_snapshot_connector_auth_show_url(snap_compare: SnapCompare) -> None:
+    """Selecting 'Manually show the URL' reveals the auth URL."""
+
+    async def run_before(pilot: Pilot) -> None:
+        await _run_mcp_command(pilot, "/mcp")
+        await pilot.press("down")  # beta (disconnected)
+        await pilot.pause(0.1)
+        await pilot.press("enter")  # opens auth app
+        await pilot.pause(0.5)  # wait for auth URL fetch
+        # Navigate to "Manually show the URL" (3rd selectable option)
+        await pilot.press("down", "down")
+        await pilot.pause(0.1)
+        await pilot.press("enter")  # toggle URL display
+        await pilot.pause(0.1)
+
+    assert snap_compare(
+        "test_ui_snapshot_mcp_command.py:SnapshotTestAppConnectorsMixedState",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
+@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
+def test_snapshot_connector_auth_back_to_mcp(snap_compare: SnapCompare) -> None:
+    """Pressing backspace in the auth app returns to the /mcp menu."""
+
+    async def run_before(pilot: Pilot) -> None:
+        await _run_mcp_command(pilot, "/mcp")
+        await pilot.press("down")  # beta (disconnected)
+        await pilot.pause(0.1)
+        await pilot.press("enter")  # opens auth app
+        await pilot.pause(0.5)  # wait for auth URL fetch
+        await pilot.press("backspace")  # back to /mcp
+        await pilot.pause(0.3)
+
+    assert snap_compare(
+        "test_ui_snapshot_mcp_command.py:SnapshotTestAppConnectorsMixedState",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
+@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
+def test_snapshot_mcp_help_bar_shows_authenticate(snap_compare: SnapCompare) -> None:
+    """Help bar shows 'Enter Authenticate' when a disconnected connector is highlighted."""
+
+    async def run_before(pilot: Pilot) -> None:
+        await _run_mcp_command(pilot, "/mcp")
+        # Navigate to a disconnected connector (beta or zeta)
+        await pilot.press("down")  # beta (disconnected)
+        await pilot.pause(0.1)
+
+    assert snap_compare(
+        "test_ui_snapshot_mcp_command.py:SnapshotTestAppConnectorsMixedState",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
 @patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
 def test_snapshot_mcp_connectors_only(snap_compare: SnapCompare) -> None:
 

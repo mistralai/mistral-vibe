@@ -62,8 +62,11 @@ def collect_mcp_tool_index(
     return MCPToolIndex(server_tools, connector_tools, enabled_tools=available)
 
 
-_LIST_VIEW_HELP = (
+_LIST_VIEW_HELP_TOOLS = (
     "↑↓ Navigate  Enter Show tools  D Disable  E Enable  R Refresh  Esc Close"
+)
+_LIST_VIEW_HELP_AUTH = (
+    "↑↓ Navigate  Enter Authenticate  D Disable  E Enable  R Refresh  Esc Close"
 )
 _DETAIL_VIEW_HELP = (
     "↑↓ Navigate  D Disable  E Enable  Backspace Back  R Refresh  Esc Close"
@@ -98,6 +101,20 @@ class MCPApp(Container):
             self.kind = kind
             self.disabled = disabled
             self.tool_name = tool_name
+
+    class ConnectorAuthRequested(Message):
+        """Posted when a disconnected connector needs authentication."""
+
+        def __init__(
+            self,
+            connector_name: str,
+            connector_registry: ConnectorRegistry,
+            tool_manager: ToolManager,
+        ) -> None:
+            super().__init__()
+            self.connector_name = connector_name
+            self.connector_registry = connector_registry
+            self.tool_manager = tool_manager
 
     def __init__(
         self,
@@ -134,7 +151,6 @@ class MCPApp(Container):
             yield NoMarkupStatic("", id="mcp-title", classes="settings-title")
             yield NoMarkupStatic("")
             yield OptionList(id="mcp-options")
-            yield NoMarkupStatic("")
             yield NoMarkupStatic("", id="mcp-help", classes="settings-help")
 
     def on_mount(self) -> None:
@@ -175,6 +191,9 @@ class MCPApp(Container):
         # it are disabled headers, scroll to top so the header stays visible.
         if all(option_list.get_option_at_index(i).disabled for i in range(highlighted)):
             option_list.scroll_to(y=0, animate=False, force=True, immediate=True)
+        # Update help text based on whether highlighted connector needs auth.
+        if self._viewing_server is None:
+            self._set_help_text(self._list_help_for_option(event.option))
 
     def action_back(self) -> None:
         if self._refreshing:
@@ -192,7 +211,7 @@ class MCPApp(Container):
             return
 
         self._status_message = "Refreshing..."
-        help = _DETAIL_VIEW_HELP if self._viewing_server else _LIST_VIEW_HELP
+        help = _DETAIL_VIEW_HELP if self._viewing_server else _LIST_VIEW_HELP_TOOLS
         self._set_help_text(help)
 
         self._refreshing = True
@@ -211,6 +230,15 @@ class MCPApp(Container):
             result = event.worker.result
             self._status_message = result if isinstance(result, str) else "Refreshed."
             self.refresh_index()
+
+    def _list_help_for_option(self, option: Option) -> str:
+        """Return the appropriate list-view help text for the given option."""
+        option_id = option.id or ""
+        if option_id.startswith("connector:") and self._connector_registry:
+            name = option_id.removeprefix("connector:")
+            if not self._connector_registry.is_connected(name):
+                return _LIST_VIEW_HELP_AUTH
+        return _LIST_VIEW_HELP_TOOLS
 
     def _set_help_text(self, text: str) -> None:
         if self._status_message:
@@ -385,7 +413,7 @@ class MCPApp(Container):
         has_connectors = connectors_enabled() and bool(self._connector_names)
         title = "MCP Servers & Connectors" if has_connectors else "MCP Servers"
         self.query_one("#mcp-title", NoMarkupStatic).update(title)
-        self._set_help_text(_LIST_VIEW_HELP)
+        self._set_help_text(_LIST_VIEW_HELP_TOOLS)
 
         has_servers = bool(self._mcp_servers)
 
@@ -495,9 +523,22 @@ class MCPApp(Container):
         tools_source = index.connector_tools if is_connector else index.server_tools
         all_tools = sorted(tools_source.get(server_name, []), key=lambda t: t[0])
         if not all_tools:
-            option_list.add_option(
-                Option("No tools discovered for this server", disabled=True)
-            )
+            if (
+                is_connector
+                and self._connector_registry
+                and not self._connector_registry.is_connected(server_name)
+            ):
+                self.post_message(
+                    self.ConnectorAuthRequested(
+                        connector_name=server_name,
+                        connector_registry=self._connector_registry,
+                        tool_manager=self._tool_manager,
+                    )
+                )
+            else:
+                option_list.add_option(
+                    Option("No tools discovered for this server", disabled=True)
+                )
             return
         for tool_name, cls in all_tools:
             is_tool_enabled = tool_name in index.enabled_tools
