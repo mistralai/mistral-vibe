@@ -905,6 +905,17 @@ class VibeApp(App):  # noqa: PLR0904
         await self._handle_user_message(prompt)
         return True
 
+    @staticmethod
+    def _safe_cwd() -> str:
+        """Return the current working directory as a string.
+
+        Falls back to the home directory if the cwd has been deleted.
+        """
+        try:
+            return str(Path.cwd())
+        except FileNotFoundError:
+            return str(Path.home())
+
     async def _handle_bash_command(self, command: str) -> None:
         if not command:
             await self._mount_and_scroll(
@@ -926,13 +937,14 @@ class VibeApp(App):  # noqa: PLR0904
             )
             output = stdout or stderr or "(no output)"
             exit_code = result.returncode
+            cwd = self._safe_cwd()
             await self._mount_and_scroll(
-                BashOutputMessage(command, str(Path.cwd()), output, exit_code)
+                BashOutputMessage(command, cwd, output, exit_code)
             )
             await self.agent_loop.inject_user_context(
                 self._format_manual_command_context(
                     command=command,
-                    cwd=str(Path.cwd()),
+                    cwd=cwd,
                     exit_code=exit_code,
                     stdout=stdout,
                     stderr=stderr,
@@ -958,7 +970,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self.agent_loop.inject_user_context(
                 self._format_manual_command_context(
                     command=command,
-                    cwd=str(Path.cwd()),
+                    cwd=self._safe_cwd(),
                     stdout=stdout,
                     stderr=stderr,
                     status="timed out after 30 seconds",
@@ -971,7 +983,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self.agent_loop.inject_user_context(
                 self._format_manual_command_context(
                     command=command,
-                    cwd=str(Path.cwd()),
+                    cwd=self._safe_cwd(),
                     status=f"failed before completion: {e}",
                 )
             )
