@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.9.2"
+version = "2.9.3"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -55,7 +55,7 @@ dependencies = [
     "requests>=2.20.0",
     "rich>=14.0.0",
     "sounddevice>=0.5.1",
-    "textual>=8.2.1",
+    "textual==8.2.4",
     "textual-speedups>=0.2.1",
     "tomli-w>=1.2.0",
     "tree-sitter>=0.25.2",

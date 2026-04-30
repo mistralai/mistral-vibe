@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.12"
 
 [options]
-exclude-newer = "2026-04-22T17:04:46.06461Z"
+exclude-newer = "2026-04-23T08:55:32.991304Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -808,7 +808,7 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "2.9.2"
+version = "2.9.3"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -901,7 +901,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.20.0" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "sounddevice", specifier = ">=0.5.1" },
-    { name = "textual", specifier = ">=8.2.1" },
+    { name = "textual", specifier = "==8.2.4" },
     { name = "textual-speedups", specifier = ">=0.2.1" },
     { name = "tomli-w", specifier = ">=1.2.0" },
     { name = "tree-sitter", specifier = ">=0.25.2" },
@@ -1926,7 +1926,7 @@ wheels = [
 
 [[package]]
 name = "textual"
-version = "8.2.1"
+version = "8.2.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "markdown-it-py", extra = ["linkify"] },
@@ -1936,9 +1936,9 @@ dependencies = [
     { name = "rich" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4f/07/766ad19cf2b15cae2d79e0db46a1b783b62316e9ff3e058e7424b2a4398b/textual-8.2.1.tar.gz", hash = "sha256:4176890e9cd5c95dcdd206541b2956b0808e74c8c36381c88db53dcb45237451", size = 1848386, upload-time = "2026-03-29T03:57:32.242Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/89/bec5709fb759f9c784bbcb30b2e3497df3f901691d13c2b864dbf6694a17/textual-8.2.4.tar.gz", hash = "sha256:d4e2b2ddd7157191d00b228592b7c739ea080b7d792fd410f23ca75f05ea76c4", size = 1848933, upload-time = "2026-04-19T04:20:45.845Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/09/c6f000c2e3702036e593803319af02feee58a662528d0d5728a37e1cf81b/textual-8.2.1-py3-none-any.whl", hash = "sha256:746cbf947a8ca875afc09779ef38cadbc7b9f15ac886a5090f7099fef5ade990", size = 723871, upload-time = "2026-03-29T03:57:34.334Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/32/02932f0d597cdbb34e34bf24266ff0f2cf292ccb3aafc37dd9efcb0cc416/textual-8.2.4-py3-none-any.whl", hash = "sha256:a83bd3f0cc7125ca203845af753f9d6b6be030025ecd1b05cc75ebe645b9c4ba", size = 724390, upload-time = "2026-04-19T04:20:49.968Z" },
 ]
 
 [[package]]
