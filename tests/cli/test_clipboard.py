@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -17,6 +18,7 @@ from vibe.cli.clipboard import (
     _copy_to_clipboard,
     _copy_wl_copy,
     _copy_xclip,
+    _detect_image_format,
     _encode_image_data_url,
     _paste_image_osascript,
     _paste_image_wl_paste,
@@ -25,6 +27,15 @@ from vibe.cli.clipboard import (
     _read_clipboard_image,
     copy_selection_to_clipboard,
 )
+
+
+def _real_fd_mkstemp(target: Path) -> tuple[int, str]:
+    """Return (real_fd, path) so production code can os.close(fd) safely.
+
+    The real os.close() in production is what plugs the fd leak, so the
+    fake must hand out a fd that is actually open.
+    """
+    return os.open(os.devnull, os.O_RDONLY), str(target)
 
 
 class MockWidget:
@@ -379,12 +390,12 @@ def test_paste_image_osascript_roundtrips_tempfile(tmp_path: Path) -> None:
     tmpfile = tmp_path / "clipboard.png"
     tmpfile.write_bytes(SAMPLE_PNG)
 
-    def fake_mkstemp(suffix: str = "") -> tuple[int, str]:
-        return 0, str(tmpfile)
-
     completed = SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
     with (
-        patch("vibe.cli.clipboard.tempfile.mkstemp", side_effect=fake_mkstemp),
+        patch(
+            "vibe.cli.clipboard.tempfile.mkstemp",
+            side_effect=lambda suffix="": _real_fd_mkstemp(tmpfile),
+        ),
         patch("subprocess.run", return_value=completed),
     ):
         assert _paste_image_osascript() == SAMPLE_PNG
@@ -395,12 +406,12 @@ def test_paste_image_osascript_returns_none_when_clipboard_has_no_image(
 ) -> None:
     tmpfile = tmp_path / "clipboard.png"
 
-    def fake_mkstemp(suffix: str = "") -> tuple[int, str]:
-        return 0, str(tmpfile)
-
     completed = SimpleNamespace(returncode=0, stdout="no_image\n", stderr="")
     with (
-        patch("vibe.cli.clipboard.tempfile.mkstemp", side_effect=fake_mkstemp),
+        patch(
+            "vibe.cli.clipboard.tempfile.mkstemp",
+            side_effect=lambda suffix="": _real_fd_mkstemp(tmpfile),
+        ),
         patch("subprocess.run", return_value=completed),
     ):
         assert _paste_image_osascript() is None
@@ -410,12 +421,12 @@ def test_paste_image_osascript_returns_none_on_empty_file(tmp_path: Path) -> Non
     tmpfile = tmp_path / "clipboard.png"
     tmpfile.write_bytes(b"")
 
-    def fake_mkstemp(suffix: str = "") -> tuple[int, str]:
-        return 0, str(tmpfile)
-
     completed = SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
     with (
-        patch("vibe.cli.clipboard.tempfile.mkstemp", side_effect=fake_mkstemp),
+        patch(
+            "vibe.cli.clipboard.tempfile.mkstemp",
+            side_effect=lambda suffix="": _real_fd_mkstemp(tmpfile),
+        ),
         patch("subprocess.run", return_value=completed),
     ):
         assert _paste_image_osascript() is None
@@ -425,8 +436,28 @@ def test_paste_image_osascript_cleans_tempfile(tmp_path: Path) -> None:
     tmpfile = tmp_path / "clipboard.png"
     tmpfile.write_bytes(SAMPLE_PNG)
 
+    completed = SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+    with (
+        patch(
+            "vibe.cli.clipboard.tempfile.mkstemp",
+            side_effect=lambda suffix="": _real_fd_mkstemp(tmpfile),
+        ),
+        patch("subprocess.run", return_value=completed),
+    ):
+        _paste_image_osascript()
+    assert not tmpfile.exists()
+
+
+def test_paste_image_osascript_closes_mkstemp_fd(tmp_path: Path) -> None:
+    """Regression: discarding the fd from mkstemp leaks one fd per paste."""
+    tmpfile = tmp_path / "clipboard.png"
+    tmpfile.write_bytes(SAMPLE_PNG)
+    issued: list[int] = []
+
     def fake_mkstemp(suffix: str = "") -> tuple[int, str]:
-        return 0, str(tmpfile)
+        fd, path = _real_fd_mkstemp(tmpfile)
+        issued.append(fd)
+        return fd, path
 
     completed = SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
     with (
@@ -434,7 +465,10 @@ def test_paste_image_osascript_cleans_tempfile(tmp_path: Path) -> None:
         patch("subprocess.run", return_value=completed),
     ):
         _paste_image_osascript()
-    assert not tmpfile.exists()
+
+    assert issued, "mkstemp was never called"
+    with pytest.raises(OSError):
+        os.fstat(issued[0])
 
 
 def test_read_clipboard_image_picks_first_available_tool(
@@ -494,3 +528,48 @@ def test_encode_image_data_url_round_trip() -> None:
     assert url.startswith("data:image/png;base64,")
     decoded = base64.b64decode(url.split(",", 1)[1])
     assert decoded == SAMPLE_PNG
+
+
+SAMPLE_JPEG = b"\xff\xd8\xff\xe0" + b"jpeg-rest"
+SAMPLE_GIF = b"GIF89a" + b"gif-rest"
+SAMPLE_WEBP = b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"webp-rest"
+SAMPLE_TIFF_LE = b"II*\x00" + b"tiff-rest"
+SAMPLE_TIFF_BE = b"MM\x00*" + b"tiff-rest"
+
+
+@pytest.mark.parametrize(
+    "data,expected",
+    [
+        (SAMPLE_PNG, "image/png"),
+        (SAMPLE_JPEG, "image/jpeg"),
+        (SAMPLE_GIF, "image/gif"),
+        (SAMPLE_WEBP, "image/webp"),
+        (SAMPLE_TIFF_LE, None),
+        (SAMPLE_TIFF_BE, None),
+        (b"\x00\x00\x00\x00", None),
+        (b"", None),
+    ],
+)
+def test_detect_image_format(data: bytes, expected: str | None) -> None:
+    assert _detect_image_format(data) == expected
+
+
+def test_read_clipboard_image_returns_jpeg_label_for_jpeg_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """osascript falls back to JPEG when PNG isn't on the clipboard; the helper
+    must report image/jpeg, not image/png — Mistral decodes by media type.
+    """
+    monkeypatch.setattr(clipboard_module, "_has_cmd", lambda cmd: cmd == "xclip")
+    completed = SimpleNamespace(returncode=0, stdout=SAMPLE_JPEG, stderr=b"")
+    with patch("subprocess.run", return_value=completed):
+        result = _read_clipboard_image()
+    assert result == (SAMPLE_JPEG, "image/jpeg")
+
+
+def test_read_clipboard_image_rejects_tiff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TIFF is not in Mistral's supported formats; reject rather than mislabel."""
+    monkeypatch.setattr(clipboard_module, "_has_cmd", lambda cmd: cmd == "xclip")
+    completed = SimpleNamespace(returncode=0, stdout=SAMPLE_TIFF_LE, stderr=b"")
+    with patch("subprocess.run", return_value=completed):
+        assert _read_clipboard_image() is None

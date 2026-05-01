@@ -13,21 +13,22 @@ import pyperclip
 from textual.app import App
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGES_PER_REQUEST = 8
 
 ImageMediaType = Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
 
-_OSASCRIPT_SAVE_PNG = """\
+_PNG_SIG = b"\x89PNG\r\n\x1a\n"
+_JPEG_SIG = b"\xff\xd8\xff"
+_GIF_SIGS = (b"GIF87a", b"GIF89a")
+_WEBP_HEADER_LEN = 12
+
+_OSASCRIPT_SAVE_IMAGE = """\
 on run argv
     set destPath to item 1 of argv
     set imageData to missing value
     try
         set imageData to (the clipboard as «class PNGf»)
     end try
-    if imageData is missing value then
-        try
-            set imageData to (the clipboard as «class TIFF»)
-        end try
-    end if
     if imageData is missing value then
         try
             set imageData to (the clipboard as JPEG picture)
@@ -142,10 +143,12 @@ def _read_clipboard() -> str | None:
 
 
 def _paste_image_osascript() -> bytes | None:
-    tmp = Path(tempfile.mkstemp(suffix=".png")[1])
+    fd, name = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    tmp = Path(name)
     try:
         result = subprocess.run(
-            ["osascript", "-e", _OSASCRIPT_SAVE_PNG, str(tmp)],
+            ["osascript", "-e", _OSASCRIPT_SAVE_IMAGE, str(tmp)],
             capture_output=True,
             text=True,
             check=False,
@@ -193,13 +196,35 @@ _IMAGE_CMD_STRATEGIES: list[tuple[str, Callable[[], bytes | None]]] = [
 ]
 
 
+def _detect_image_format(data: bytes) -> ImageMediaType | None:
+    """Identify a Mistral-supported image format from its magic bytes.
+
+    Returns None for anything outside PNG / JPEG / WEBP / GIF — including TIFF,
+    which the macOS clipboard sometimes serves but the Mistral API rejects.
+    """
+    if data.startswith(_PNG_SIG):
+        return "image/png"
+    if data.startswith(_JPEG_SIG):
+        return "image/jpeg"
+    if data.startswith(_GIF_SIGS):
+        return "image/gif"
+    if (
+        len(data) >= _WEBP_HEADER_LEN
+        and data[:4] == b"RIFF"
+        and data[8:12] == b"WEBP"
+    ):
+        return "image/webp"
+    return None
+
+
 def _read_clipboard_image() -> tuple[bytes, ImageMediaType] | None:
     """Read an image from the system clipboard as raw bytes.
 
     Returns None when the clipboard holds no image, no supported platform
-    tool is installed, or the image exceeds MAX_IMAGE_BYTES. The returned
-    bytes are always PNG-encoded regardless of the source format, since the
-    platform helpers all request PNG.
+    tool is installed, the image exceeds MAX_IMAGE_BYTES, or the bytes are
+    not in a Mistral-supported format (PNG / JPEG / WEBP / GIF). Format is
+    detected from magic bytes rather than trusted from the source helper,
+    since osascript may fall back to JPEG when PNG isn't on the clipboard.
     """
     for cmd, reader in _IMAGE_CMD_STRATEGIES:
         if not _has_cmd(cmd):
@@ -212,7 +237,10 @@ def _read_clipboard_image() -> tuple[bytes, ImageMediaType] | None:
             continue
         if len(data) > MAX_IMAGE_BYTES:
             return None
-        return data, "image/png"
+        media_type = _detect_image_format(data)
+        if media_type is None:
+            return None
+        return data, media_type
     return None
 
 

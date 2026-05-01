@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from vibe.cli.clipboard import MAX_IMAGES_PER_REQUEST
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.body import ChatInputBody
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
@@ -39,6 +40,27 @@ async def test_attach_image_placeholder_inserts_numbered_marker_and_stores_part(
 
         assert text_area.text == "[Image #1][Image #2]"
         assert len(text_area._pending_images) == 2
+
+
+@pytest.mark.asyncio
+async def test_attach_image_placeholder_caps_at_mistral_limit(
+    vibe_app: VibeApp,
+) -> None:
+    """Mistral API rejects requests with more than 8 images; refuse the 9th
+    locally with a notification rather than letting the server 400.
+    """
+    async with vibe_app.run_test():
+        text_area = vibe_app.query_one(ChatTextArea)
+
+        for i in range(1, MAX_IMAGES_PER_REQUEST + 1):
+            text_area._attach_image_placeholder(_make_part(i), size_kb=10)
+        assert len(text_area._pending_images) == MAX_IMAGES_PER_REQUEST
+        text_at_cap = text_area.text
+
+        text_area._attach_image_placeholder(_make_part(99), size_kb=10)
+
+        assert len(text_area._pending_images) == MAX_IMAGES_PER_REQUEST
+        assert text_area.text == text_at_cap
 
 
 @pytest.mark.asyncio

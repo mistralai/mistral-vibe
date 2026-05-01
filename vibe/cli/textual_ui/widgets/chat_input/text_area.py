@@ -12,6 +12,7 @@ from textual.widgets import TextArea
 from vibe.cli.autocompletion.base import CompletionResult
 from vibe.cli.clipboard import (
     MAX_IMAGE_BYTES,
+    MAX_IMAGES_PER_REQUEST,
     _encode_image_data_url,
     _read_clipboard,
     _read_clipboard_image,
@@ -199,6 +200,14 @@ class ChatTextArea(TextArea):
         self._attach_image_placeholder(part, kb)
 
     def _attach_image_placeholder(self, part: ImageContentPart, size_kb: int) -> None:
+        if len(self._pending_images) >= MAX_IMAGES_PER_REQUEST:
+            self.notify(
+                f"Limit reached: {MAX_IMAGES_PER_REQUEST} images per message",
+                severity="warning",
+                timeout=3,
+                markup=False,
+            )
+            return
         self._pending_images.append(part)
         placeholder = f"[Image #{len(self._pending_images)}]"
         self.insert(placeholder)
