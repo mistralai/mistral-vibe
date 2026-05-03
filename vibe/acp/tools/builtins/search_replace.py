@@ -12,6 +12,11 @@ from acp.schema import (
 
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
+from vibe.acp.tools.session_update import (
+    failed_tool_result,
+    fallback_tool_call,
+    resolve_kind,
+)
 from vibe.core.tools.base import BaseToolState, ToolError
 from vibe.core.tools.builtins.search_replace import (
     SearchReplace as CoreSearchReplaceTool,
@@ -75,18 +80,10 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
 
     @classmethod
     def tool_call_session_update(cls, event: ToolCallEvent) -> SessionUpdate | None:
+        if not isinstance(event.args, SearchReplaceArgs):
+            return fallback_tool_call(event, "search_replace")
+
         args = event.args
-        if args is None:
-            return ToolCallStart(
-                session_update="tool_call",
-                title="search_replace",
-                tool_call_id=event.tool_call_id,
-                kind="edit",
-                content=None,
-                raw_input=None,
-            )
-        if not isinstance(args, SearchReplaceArgs):
-            return None
 
         blocks = cls._parse_search_replace_blocks(args.content)
 
@@ -94,7 +91,7 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
             session_update="tool_call",
             title=cls.get_call_display(event).summary,
             tool_call_id=event.tool_call_id,
-            kind="edit",
+            kind=resolve_kind(event.tool_name),
             content=[
                 FileEditToolCallContent(
                     type="diff",
@@ -104,22 +101,18 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
                 )
                 for block in blocks
             ],
-            locations=[ToolCallLocation(path=args.file_path)],
+            locations=[ToolCallLocation(path=str(Path(args.file_path).resolve()))],
             raw_input=args.model_dump_json(),
+            field_meta={"tool_name": event.tool_name},
         )
 
     @classmethod
     def tool_result_session_update(cls, event: ToolResultEvent) -> SessionUpdate | None:
-        if event.error:
-            return ToolCallProgress(
-                session_update="tool_call_update",
-                tool_call_id=event.tool_call_id,
-                status="failed",
-            )
+        if failure := failed_tool_result(event, SearchReplaceResult):
+            return failure
 
         result = event.result
-        if not isinstance(result, SearchReplaceResult):
-            return None
+        assert isinstance(result, SearchReplaceResult)
 
         blocks = cls._parse_search_replace_blocks(result.content)
 
@@ -127,6 +120,7 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
             session_update="tool_call_update",
             tool_call_id=event.tool_call_id,
             status="completed",
+            kind=resolve_kind(event.tool_name),
             content=[
                 FileEditToolCallContent(
                     type="diff",
@@ -136,6 +130,7 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
                 )
                 for block in blocks
             ],
-            locations=[ToolCallLocation(path=result.file)],
+            locations=[ToolCallLocation(path=str(Path(result.file).resolve()))],
             raw_output=result.model_dump_json(),
+            field_meta={"tool_name": event.tool_name},
         )

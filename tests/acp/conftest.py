@@ -67,6 +67,7 @@ def create_test_session():
         messages: list[dict] | None = None,
         title: str | None = None,
         end_time: str | None = None,
+        parent_session_id: str | None = None,
     ) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_folder = session_dir / f"session_{timestamp}_{session_id[:8]}"
@@ -84,9 +85,14 @@ def create_test_session():
             "session_id": session_id,
             "start_time": "2024-01-01T12:00:00Z",
             "end_time": end_time or "2024-01-01T12:05:00Z",
+            "git_commit": None,
+            "git_branch": None,
+            "username": "test-user",
             "environment": {"working_directory": cwd},
             "title": title,
         }
+        if parent_session_id is not None:
+            metadata["parent_session_id"] = parent_session_id
 
         metadata_file = session_folder / "meta.json"
         with metadata_file.open("w", encoding="utf-8") as f:

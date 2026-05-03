@@ -8,7 +8,10 @@ from textual.style import Style
 from textual.widgets import Markdown
 
 from vibe.cli.textual_ui.app import VibeApp
-from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
+from vibe.cli.textual_ui.widgets.chat_input.completion_popup import (
+    CompletionPopup,
+    _CompletionItem,
+)
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
 
 
@@ -20,7 +23,7 @@ async def test_popup_appears_with_matching_suggestions(vibe_app: VibeApp) -> Non
 
         await pilot.press(*"/com")
 
-        popup_content = str(popup.render())
+        popup_content = popup.content_text
         assert popup.styles.display == "block"
         assert "/compact" in popup_content
         assert "Compact conversation history by summarizing" in popup_content
@@ -39,7 +42,7 @@ async def test_popup_hides_when_input_cleared(vibe_app: VibeApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pressing_tab_writes_selected_command_and_keeps_popup_visible(
+async def test_pressing_tab_writes_selected_command_and_hides_popup(
     vibe_app: VibeApp,
 ) -> None:
     async with vibe_app.run_test() as pilot:
@@ -49,22 +52,22 @@ async def test_pressing_tab_writes_selected_command_and_keeps_popup_visible(
         await pilot.press(*"/co")
         await pilot.press("tab")
 
-        assert chat_input.value == "/compact"
-        assert popup.styles.display == "block"
+        assert chat_input.value == "/config"
+        assert popup.styles.display == "none"
 
 
 def ensure_selected_command(popup: CompletionPopup, expected_alias: str) -> None:
-    renderable = popup.render()
-    assert isinstance(renderable, Content)
-    content = str(renderable)
-
     selected_aliases: list[str] = []
-    for span in renderable.spans:
-        style = span.style
-        if isinstance(style, Style) and style.reverse:
-            alias_text = content[span.start : span.end].strip()
-            alias = alias_text.split()[0] if alias_text else ""
-            selected_aliases.append(alias)
+    for item in popup.query(_CompletionItem):
+        renderable = item.render()
+        assert isinstance(renderable, Content)
+        content = str(renderable)
+        for span in renderable.spans:
+            style = span.style
+            if isinstance(style, Style) and style.reverse:
+                alias_text = content[span.start : span.end].strip()
+                alias = alias_text.split()[0] if alias_text else ""
+                selected_aliases.append(alias)
 
     assert len(selected_aliases) == 1
     assert selected_aliases[0] == expected_alias
@@ -77,11 +80,11 @@ async def test_arrow_navigation_updates_selected_suggestion(vibe_app: VibeApp) -
 
         await pilot.press(*"/c")
 
-        ensure_selected_command(popup, "/clear")
+        ensure_selected_command(popup, "/config")
         await pilot.press("down")
-        ensure_selected_command(popup, "/compact")
-        await pilot.press("up")
         ensure_selected_command(popup, "/clear")
+        await pilot.press("up")
+        ensure_selected_command(popup, "/config")
 
 
 @pytest.mark.asyncio
@@ -91,11 +94,11 @@ async def test_arrow_navigation_cycles_through_suggestions(vibe_app: VibeApp) ->
 
         await pilot.press(*"/co")
 
-        ensure_selected_command(popup, "/compact")
-        await pilot.press("down")
         ensure_selected_command(popup, "/config")
-        await pilot.press("up")
+        await pilot.press("down")
         ensure_selected_command(popup, "/compact")
+        await pilot.press("up")
+        ensure_selected_command(popup, "/config")
 
 
 @pytest.mark.asyncio
@@ -155,7 +158,7 @@ async def test_path_completion_popup_lists_files_and_directories(
 
         await pilot.press(*"@s")
 
-        popup_content = str(popup.render())
+        popup_content = popup.content_text
         assert "src/" in popup_content
         assert popup.styles.display == "block"
 
@@ -176,7 +179,7 @@ async def test_path_completion_popup_shows_up_to_ten_results(
 
         await pilot.press(*"@src/core/extra/")
 
-        popup_content = str(popup.render())
+        popup_content = popup.content_text
         assert "src/core/extra/extra_file_1.py" in popup_content
         assert "src/core/extra/extra_file_10.py" in popup_content
         assert "src/core/extra/extra_file_11.py" in popup_content
@@ -188,6 +191,24 @@ async def test_path_completion_popup_shows_up_to_ten_results(
         assert "src/core/extra/extra_file_6.py" in popup_content
         assert "src/core/extra/extra_file_7.py" in popup_content
         assert popup.styles.display == "block"
+
+
+@pytest.mark.asyncio
+async def test_pressing_tab_on_directory_keeps_popup_visible_with_contents(
+    vibe_app: VibeApp, file_tree: Path
+) -> None:
+    async with vibe_app.run_test() as pilot:
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        popup = vibe_app.query_one(CompletionPopup)
+
+        await pilot.press(*"@sr")
+        await pilot.press("tab")
+        await pilot.pause(0.2)
+
+        assert chat_input.value == "@src/"
+        popup_content = popup.content_text
+        assert popup.styles.display == "block"
+        assert "src/main.py" in popup_content
 
 
 @pytest.mark.asyncio
@@ -229,7 +250,7 @@ async def test_fuzzy_matches_subsequence_characters(
 
         await pilot.press(*"@src/utils/handling")
 
-        popup_content = str(popup.render())
+        popup_content = popup.content_text
         assert "src/utils/error_handling.py" in popup_content
         assert popup.styles.display == "block"
 
@@ -243,7 +264,7 @@ async def test_fuzzy_matches_word_boundaries(
 
         await pilot.press(*"@src/utils/eh")
 
-        popup_content = str(popup.render())
+        popup_content = popup.content_text
         assert "src/utils/error_handling.py" in popup_content
         assert popup.styles.display == "block"
 
@@ -257,7 +278,7 @@ async def test_finds_files_recursively_by_filename(
 
         await pilot.press(*"@entryp")
 
-        popup_content = str(popup.render())
+        popup_content = popup.content_text
         assert "vibe/acp/entrypoint.py" in popup_content
         assert popup.styles.display == "block"
 
@@ -271,7 +292,7 @@ async def test_finds_files_recursively_with_partial_path(
 
         await pilot.press(*"@acp/entry")
 
-        popup_content = str(popup.render())
+        popup_content = popup.content_text
         assert "vibe/acp/entrypoint.py" in popup_content
         assert popup.styles.display == "block"
 

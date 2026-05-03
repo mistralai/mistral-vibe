@@ -5,7 +5,9 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from acp.schema import (
+    ContentToolCallContent,
     TerminalToolCallContent,
+    TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
     WaitForTerminalExitResponse,
@@ -13,6 +15,7 @@ from acp.schema import (
 
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
+from vibe.acp.tools.session_update import resolve_kind
 from vibe.core.logger import logger
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.bash import Bash as CoreBashTool, BashArgs, BashResult
@@ -116,9 +119,10 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
                 session_update="tool_call",
                 title="bash",
                 tool_call_id=event.tool_call_id,
-                kind="execute",
+                kind=resolve_kind(event.tool_name),
                 content=None,
                 raw_input=None,
+                field_meta={"tool_name": event.tool_name},
             )
         if not isinstance(event.args, BashArgs):
             raise ValueError(f"Unexpected tool args: {event.args}")
@@ -128,8 +132,9 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
             title=Bash.get_summary(event.args),
             content=None,
             tool_call_id=event.tool_call_id,
-            kind="execute",
+            kind=resolve_kind(event.tool_name),
             raw_input=event.args.model_dump_json(),
+            field_meta={"tool_name": event.tool_name},
         )
 
     @classmethod
@@ -140,4 +145,14 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
             session_update="tool_call_update",
             tool_call_id=event.tool_call_id,
             status="failed" if event.error else "completed",
+            content=[
+                ContentToolCallContent(
+                    type="content",
+                    content=TextContentBlock(
+                        type="text", text=cls.get_result_display(event).message
+                    ),
+                )
+            ],
+            kind=resolve_kind(event.tool_name),
+            field_meta={"tool_name": event.tool_name},
         )

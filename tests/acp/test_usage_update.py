@@ -212,6 +212,9 @@ class TestLoadSessionUsageUpdate:
             "session_id": session_id,
             "start_time": "2024-01-01T12:00:00Z",
             "end_time": "2024-01-01T12:05:00Z",
+            "git_commit": None,
+            "git_branch": None,
+            "username": "test-user",
             "environment": {"working_directory": cwd},
         }
         with (session_folder / "meta.json").open("w") as f:

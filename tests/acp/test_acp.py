@@ -513,12 +513,11 @@ class TestSessionUpdates:
                     ),
                 ),
             )
-            text_responses = await read_multiple_responses(process, max_count=10)
+            text_responses = await read_multiple_responses(
+                process, max_count=15, timeout_per_response=2.0
+            )
             assert len(text_responses) > 0
-            responses = [
-                UpdateJsonRpcNotification.model_validate(json.loads(r))
-                for r in text_responses
-            ]
+            responses = parse_conversation(text_responses)
 
             tool_call = next(
                 (

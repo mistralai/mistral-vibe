@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+from vibe.core.hooks.models import HookMessageSeverity
+
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.app import ChatScroll
 
@@ -138,6 +140,9 @@ class StreamingMessageBase(Static):
 
     def _should_write_content(self) -> bool:
         return True
+
+    def get_content(self) -> str:
+        return self._content
 
     def is_stripped_content_empty(self) -> bool:
         return self._content.strip() == ""
@@ -296,6 +301,48 @@ class ErrorMessage(Static):
 
     def set_collapsed(self, collapsed: bool) -> None:
         pass
+
+
+class HookRunContainer(Vertical):
+    def __init__(self) -> None:
+        super().__init__(classes="hook-run-container")
+        self.display = False
+
+    async def add_message(self, widget: HookSystemMessageLine) -> None:
+        await self.mount(widget)
+        self.display = True
+
+
+_HOOK_SEVERITY_ICONS: dict[HookMessageSeverity, str] = {
+    HookMessageSeverity.OK: "✓",
+    HookMessageSeverity.WARNING: "⚠",
+    HookMessageSeverity.ERROR: "✗",
+}
+
+
+class HookSystemMessageLine(Static):
+    def __init__(
+        self,
+        hook_name: str,
+        content: str,
+        severity: HookMessageSeverity = HookMessageSeverity.WARNING,
+    ) -> None:
+        super().__init__()
+        self.add_class("hook-system-message")
+        self.add_class(f"hook-severity-{severity}")
+        self._hook_name = hook_name
+        self._content = content
+        self._severity = severity
+
+    def compose(self) -> ComposeResult:
+        icon = _HOOK_SEVERITY_ICONS.get(
+            self._severity, _HOOK_SEVERITY_ICONS[HookMessageSeverity.WARNING]
+        )
+        with Horizontal(classes="hook-system-container"):
+            yield NonSelectableStatic(icon, classes="hook-system-icon")
+            yield NoMarkupStatic(
+                f"[{self._hook_name}] {self._content}", classes="hook-system-content"
+            )
 
 
 class WarningMessage(Static):

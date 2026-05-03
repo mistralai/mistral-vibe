@@ -7,6 +7,7 @@ import pytest
 
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
+    send_ctrl_c_until_quit_confirmation,
     wait_for_main_screen,
     wait_for_rendered_text,
     wait_for_request_count,
@@ -83,5 +84,5 @@ def test_spawn_cli_asks_bash_permission_and_shows_tool_output_after_approval(
         child.send("\r")
         wait_for_rendered_text(child, captured, needle=PREDICTABLE_OUTPUT, timeout=10)
 
-        child.sendcontrol("c")
+        send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
         child.expect(pexpect.EOF, timeout=10)

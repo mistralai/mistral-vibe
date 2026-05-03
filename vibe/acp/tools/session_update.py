@@ -8,6 +8,7 @@ from acp.schema import (
     ToolCallStart,
     ToolKind,
 )
+from pydantic import BaseModel
 
 from vibe.acp.tools.base import (
     ToolCallSessionUpdateProtocol,
@@ -17,14 +18,73 @@ from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 from vibe.core.utils import TaggedText, is_user_cancellation_event
 
-TOOL_KIND: dict[str, ToolKind] = {
-    "grep": "search",
+
+def _cancellation_raw_output(event: ToolResultEvent) -> str | None:
+    if event.skip_reason:
+        return TaggedText.from_string(event.skip_reason).message
+    if event.error:
+        return TaggedText.from_string(event.error).message
+    return None
+
+
+TOOL_KIND_MAP: dict[str, ToolKind] = {
     "read_file": "read",
-    # Right now, jetbrains implementation of "edit" tool kind is broken
-    # Leading to the tool not appearing in the chat
-    # "write_file": "edit",
-    # "search_replace": "edit",
+    "grep": "search",
+    "web_search": "search",
+    "web_fetch": "fetch",
+    "write_file": "edit",
+    "search_replace": "edit",
+    "bash": "execute",
+    "skill": "read",
 }
+
+
+def resolve_kind(tool_name: str) -> ToolKind:
+    return TOOL_KIND_MAP.get(tool_name, "other")
+
+
+def failed_tool_result(
+    event: ToolResultEvent, expected_type: type[BaseModel]
+) -> ToolCallProgress | None:
+    """Return a failed ToolCallProgress if event is cancelled or has unexpected result type.
+
+    Returns None when the result is valid (caller handles the success path).
+    """
+    kind = resolve_kind(event.tool_name)
+
+    if is_user_cancellation_event(event):
+        return ToolCallProgress(
+            session_update="tool_call_update",
+            tool_call_id=event.tool_call_id,
+            status="failed",
+            kind=kind,
+            raw_output=_cancellation_raw_output(event),
+            field_meta={"tool_name": event.tool_name},
+        )
+
+    if not isinstance(event.result, expected_type):
+        return ToolCallProgress(
+            session_update="tool_call_update",
+            tool_call_id=event.tool_call_id,
+            status="failed",
+            kind=kind,
+            raw_output=event.error or event.skip_reason,
+            field_meta={"tool_name": event.tool_name},
+        )
+
+    return None
+
+
+def fallback_tool_call(event: ToolCallEvent, title: str) -> ToolCallStart:
+    """Default ToolCallStart when args are None or an unexpected type."""
+    return ToolCallStart(
+        session_update="tool_call",
+        title=title,
+        tool_call_id=event.tool_call_id,
+        kind=resolve_kind(event.tool_name),
+        raw_input=None,
+        field_meta={"tool_name": event.tool_name},
+    )
 
 
 def tool_call_session_update(event: ToolCallEvent) -> SessionUpdate | None:
@@ -49,8 +109,9 @@ def tool_call_session_update(event: ToolCallEvent) -> SessionUpdate | None:
         title=display.summary,
         content=content,
         tool_call_id=event.tool_call_id,
-        kind=TOOL_KIND.get(event.tool_name, "other"),
+        kind=resolve_kind(event.tool_name),
         raw_input=event.args.model_dump_json() if event.args else None,
+        field_meta={"tool_name": event.tool_name},
     )
 
 
@@ -116,6 +177,8 @@ def tool_result_session_update(event: ToolResultEvent) -> SessionUpdate | None:
         session_update="tool_call_update",
         tool_call_id=event.tool_call_id,
         status=tool_status,
+        kind=resolve_kind(event.tool_name),
         raw_output=raw_output,
         content=content,
+        field_meta={"tool_name": event.tool_name},
     )

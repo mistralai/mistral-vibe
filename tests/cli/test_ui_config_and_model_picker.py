@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -8,7 +8,8 @@ from tests.conftest import build_test_vibe_app, build_test_vibe_config
 from vibe.cli.textual_ui.app import BottomApp
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.model_picker import ModelPickerApp
-from vibe.core.config._settings import ModelConfig
+from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
+from vibe.core.config._settings import THINKING_LEVELS, ModelConfig
 
 
 def _make_config_with_models():
@@ -60,7 +61,8 @@ async def test_config_toggle_autocopy() -> None:
         await app._show_config()
         await pilot.pause(0.2)
 
-        # Navigate down to Auto-copy (second item) and toggle
+        # Navigate down to Auto-copy (third item, after Model + Thinking) and toggle
+        await pilot.press("down")
         await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause(0.1)
@@ -80,7 +82,8 @@ async def test_config_escape_saves_changes() -> None:
         await app._show_config()
         await pilot.pause(0.2)
 
-        # Toggle auto-copy
+        # Toggle auto-copy (skip Model + Thinking rows)
+        await pilot.press("down")
         await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause(0.1)
@@ -268,12 +271,14 @@ async def test_config_pending_changes_saved_before_model_picker() -> None:
         await app._show_config()
         await pilot.pause(0.2)
 
-        # Toggle auto-copy (second row)
+        # Toggle auto-copy (third row, after Model + Thinking)
+        await pilot.press("down")
         await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause(0.1)
 
         # Go back up to model row and open model picker
+        await pilot.press("up")
         await pilot.press("up")
         with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates") as mock_save:
             await pilot.press("enter")
@@ -282,3 +287,151 @@ async def test_config_pending_changes_saved_before_model_picker() -> None:
             mock_save.assert_called_once()
             changes = mock_save.call_args[0][0]
             assert changes["autocopy_to_clipboard"] is True
+
+
+# --- /thinking command ---
+
+
+@pytest.mark.asyncio
+async def test_thinking_opens_thinking_picker() -> None:
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_thinking()
+        await pilot.pause(0.2)
+
+        assert app._current_bottom_app == BottomApp.ThinkingPicker
+        assert len(app.query(ThinkingPickerApp)) == 1
+
+
+@pytest.mark.asyncio
+async def test_thinking_picker_shows_all_levels() -> None:
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_thinking()
+        await pilot.pause(0.2)
+
+        picker = app.query_one(ThinkingPickerApp)
+        assert picker._thinking_levels == THINKING_LEVELS
+        assert picker._current_thinking == "off"
+
+
+@pytest.mark.asyncio
+async def test_thinking_picker_escape_returns_to_input() -> None:
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_thinking()
+        await pilot.pause(0.2)
+
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+
+        assert app._current_bottom_app == BottomApp.Input
+        assert len(app.query(ThinkingPickerApp)) == 0
+
+
+@pytest.mark.asyncio
+async def test_thinking_picker_select_level() -> None:
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_thinking()
+        await pilot.pause(0.2)
+
+        # Navigate down to "low" (second item) and select
+        await pilot.press("down")
+        with patch.object(app, "_reload_config", new=AsyncMock()):
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+        assert app._current_bottom_app == BottomApp.Input
+        assert len(app.query(ThinkingPickerApp)) == 0
+        assert app.config.get_active_model().thinking == "low"
+
+
+@pytest.mark.asyncio
+async def test_thinking_picker_select_high() -> None:
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_thinking()
+        await pilot.pause(0.2)
+
+        # Navigate to "high" (4th item = 3 downs from "off")
+        await pilot.press("down")
+        await pilot.press("down")
+        await pilot.press("down")
+        with patch.object(app, "_reload_config", new=AsyncMock()):
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+        assert app.config.get_active_model().thinking == "high"
+
+
+# --- config -> thinking picker flow ---
+
+
+@pytest.mark.asyncio
+async def test_config_thinking_entry_opens_thinking_picker() -> None:
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_config()
+        await pilot.pause(0.2)
+
+        # Thinking row is the second item (after Model). Navigate down and press enter.
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert app._current_bottom_app == BottomApp.ThinkingPicker
+        assert len(app.query(ThinkingPickerApp)) == 1
+        assert len(app.query(ConfigApp)) == 0
+
+
+@pytest.mark.asyncio
+async def test_config_to_thinking_picker_escape_returns_to_input() -> None:
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_config()
+        await pilot.pause(0.2)
+
+        # Open thinking picker from config
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        # Escape thinking picker
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+
+        assert app._current_bottom_app == BottomApp.Input
+        assert len(app.query(ThinkingPickerApp)) == 0
+        assert len(app.query(ConfigApp)) == 0
+
+
+@pytest.mark.asyncio
+async def test_config_to_thinking_picker_select_returns_to_input() -> None:
+    app = build_test_vibe_app(config=_make_config_with_models())
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_config()
+        await pilot.pause(0.2)
+
+        # Open thinking picker from config
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        # Select "medium" (3rd item = 2 downs from "off")
+        await pilot.press("down")
+        await pilot.press("down")
+        with patch.object(app, "_reload_config", new=AsyncMock()):
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+        assert app._current_bottom_app == BottomApp.Input
+        assert app.config.get_active_model().thinking == "medium"

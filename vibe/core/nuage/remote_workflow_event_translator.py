@@ -7,6 +7,7 @@ from typing import Any, cast
 from jsonpatch import JsonPatch, JsonPatchException  # type: ignore[import-untyped]
 from pydantic import BaseModel, ValidationError
 
+from vibe.core.logger import logger
 from vibe.core.nuage.agent_models import AgentCompletionState
 from vibe.core.nuage.events import (
     CustomTaskCanceled,
@@ -193,6 +194,7 @@ class RemoteWorkflowEventTranslator:
         self._pending_question_prompt: str | None = None
         self._pending_ask_user_question_call_id: str | None = None
         self._steer_task_ids: set[str] = set()
+        self._invalid_steer_task_ids: set[str] = set()
         self._last_status: WorkflowExecutionStatus | None = None
 
     @property
@@ -361,19 +363,15 @@ class RemoteWorkflowEventTranslator:
             return None
 
         payload_value = event.attributes.payload.value
-        label: str | None = None
-        if isinstance(payload_value, dict):
-            label = payload_value.get("label")
+        label = self._wait_for_input_label(payload_value)
 
         if label == _STEER_INPUT_LABEL:
-            self._steer_task_ids.add(event.attributes.custom_task_id)
-            return []
+            return self._steer_wait_for_input_started(event, payload_value)
 
         if isinstance(payload_value, dict):
-            self._pending_input_request = PendingInputRequest.model_validate({
-                "task_id": event.attributes.custom_task_id,
-                **payload_value,
-            })
+            self._set_pending_input_request(
+                event.attributes.custom_task_id, payload_value
+            )
 
         events: list[BaseEvent] = []
         if label:
@@ -388,6 +386,59 @@ class RemoteWorkflowEventTranslator:
         )
         return events
 
+    def _steer_wait_for_input_started(
+        self, event: CustomTaskStarted, payload_value: Any
+    ) -> list[BaseEvent]:
+        task_id = event.attributes.custom_task_id
+        self._steer_task_ids.add(task_id)
+        if self._pending_input_request is None and isinstance(payload_value, dict):
+            try:
+                self._set_pending_input_request(task_id, payload_value)
+            except ValidationError:
+                self._invalid_steer_task_ids.add(task_id)
+                raise
+        return []
+
+    def _steer_wait_for_input_terminal(
+        self,
+        event: CustomTaskCompleted
+        | CustomTaskCanceled
+        | CustomTaskFailed
+        | CustomTaskTimedOut,
+        payload_value: Any,
+    ) -> list[BaseEvent]:
+        task_id = event.attributes.custom_task_id
+        self._steer_task_ids.discard(task_id)
+        invalid_steer_task = task_id in self._invalid_steer_task_ids
+        self._invalid_steer_task_ids.discard(task_id)
+        if (
+            self._pending_input_request is not None
+            and self._pending_input_request.task_id == task_id
+        ):
+            self._pending_input_request = None
+        if isinstance(event, CustomTaskCompleted) and not invalid_steer_task:
+            return self._completed_wait_for_input_events(payload_value)
+        return []
+
+    def _set_pending_input_request(
+        self, task_id: str, payload_value: dict[str, Any]
+    ) -> None:
+        self._pending_input_request = PendingInputRequest.model_validate({
+            "task_id": task_id,
+            **payload_value,
+        })
+
+    def _wait_for_input_label(self, payload_value: Any) -> str | None:
+        if not isinstance(payload_value, dict):
+            return None
+        label = payload_value.get("label")
+        return label if isinstance(label, str) else None
+
+    def _is_steer_wait_for_input(self, task_id: str, payload_value: Any) -> bool:
+        if task_id in self._steer_task_ids:
+            return True
+        return self._wait_for_input_label(payload_value) == _STEER_INPUT_LABEL
+
     def _wait_for_input_terminal_events(
         self,
         event: CustomTaskCompleted
@@ -398,9 +449,15 @@ class RemoteWorkflowEventTranslator:
         if event.attributes.custom_task_type != _WAIT_FOR_INPUT_TASK_TYPE:
             return None
 
-        if event.attributes.custom_task_id in self._steer_task_ids:
-            self._steer_task_ids.discard(event.attributes.custom_task_id)
-            return []
+        payload_value = (
+            event.attributes.payload.value
+            if isinstance(event, CustomTaskCompleted)
+            else None
+        )
+        if self._is_steer_wait_for_input(
+            event.attributes.custom_task_id, payload_value
+        ):
+            return self._steer_wait_for_input_terminal(event, payload_value)
 
         self._pending_input_request = None
         self._pending_question_prompt = None
@@ -1222,7 +1279,11 @@ class RemoteWorkflowEventTranslator:
         if tool_name != _ASK_USER_QUESTION_TOOL:
             return []
 
-        parsed = AskUserQuestionArgs.model_validate(tool_args)
+        try:
+            parsed = AskUserQuestionArgs.model_validate(tool_args)
+        except ValidationError:
+            logger.warning("Failed to parse ask_user_question args", exc_info=True)
+            return []
         prompt = "\n\n".join(q.question for q in parsed.questions)
         if not prompt:
             return []

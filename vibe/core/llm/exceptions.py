@@ -13,6 +13,14 @@ from vibe.core.types import AvailableTool, LLMMessage, StrToolChoice
 
 type HttpError = SDKError | httpx.HTTPStatusError
 
+_CONTEXT_TOO_LONG_SUBSTRINGS = (
+    "context too long",
+    "maximum context length",
+    "input too large",
+    "couldn't fit with truncation",
+    "prompt is too long",
+)
+
 
 class ErrorDetail(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -52,6 +60,13 @@ class BackendError(RuntimeError):
         self.model = model
         self.payload_summary = payload_summary
         super().__init__(self._fmt())
+
+    @property
+    def is_context_too_long(self) -> bool:
+        if self.status != HTTPStatus.BAD_REQUEST:
+            return False
+        body = (self.body_text or "").lower()
+        return any(s in body for s in _CONTEXT_TOO_LONG_SUBSTRINGS)
 
     def _fmt(self) -> str:
         if self.status == HTTPStatus.UNAUTHORIZED:

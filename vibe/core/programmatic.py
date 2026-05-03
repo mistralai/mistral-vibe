@@ -7,20 +7,16 @@ from vibe import __version__
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import VibeConfig
+from vibe.core.hooks.models import HookConfigResult
 from vibe.core.logger import logger
 from vibe.core.output_formatters import create_formatter
+from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
+from vibe.core.telemetry.types import ClientMetadata
 from vibe.core.teleport.types import (
     TeleportPushRequiredEvent,
     TeleportPushResponseEvent,
 )
-from vibe.core.types import (
-    AssistantEvent,
-    ClientMetadata,
-    EntrypointMetadata,
-    LLMMessage,
-    OutputFormat,
-    Role,
-)
+from vibe.core.types import AssistantEvent, LLMMessage, OutputFormat, Role
 from vibe.core.utils import ConversationLimitException
 
 __all__ = ["TeleportError", "run_programmatic"]
@@ -28,7 +24,7 @@ __all__ = ["TeleportError", "run_programmatic"]
 _DEFAULT_CLIENT_METADATA = ClientMetadata(name="vibe_programmatic", version=__version__)
 
 
-def run_programmatic(
+def run_programmatic(  # noqa: PLR0913, PLR0917
     config: VibeConfig,
     prompt: str,
     max_turns: int | None = None,
@@ -38,6 +34,8 @@ def run_programmatic(
     agent_name: str = BuiltinAgentName.AUTO_APPROVE,
     client_metadata: ClientMetadata = _DEFAULT_CLIENT_METADATA,
     teleport: bool = False,
+    headless: bool = False,
+    hook_config_result: HookConfigResult | None = None,
 ) -> str | None:
     formatter = create_formatter(output_format)
 
@@ -48,12 +46,14 @@ def run_programmatic(
         max_turns=max_turns,
         max_price=max_price,
         enable_streaming=False,
-        entrypoint_metadata=EntrypointMetadata(
+        headless=headless,
+        entrypoint_metadata=build_entrypoint_metadata(
             agent_entrypoint="programmatic",
             agent_version=__version__,
             client_name=client_metadata.name,
             client_version=client_metadata.version,
         ),
+        hook_config_result=hook_config_result,
     )
     logger.info("USER: %s", prompt)
 
@@ -70,8 +70,8 @@ def run_programmatic(
 
             agent_loop.emit_new_session_telemetry()
 
-            if teleport and config.nuage_enabled:
-                gen = agent_loop.teleport_to_vibe_nuage(prompt or None)
+            if teleport and config.vibe_code_enabled:
+                gen = agent_loop.teleport_to_vibe_code(prompt or None)
                 async for event in gen:
                     formatter.on_event(event)
                     if isinstance(event, TeleportPushRequiredEvent):

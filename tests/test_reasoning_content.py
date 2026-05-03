@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import httpx
@@ -260,13 +261,14 @@ class TestGenericBackendReasoningContent:
 
 
 class TestAPIToolFormatHandlerReasoningContent:
-    def test_process_api_response_message_extracts_reasoning_content(self):
+    def test_process_api_response_message_preserves_reasoning_state_for_history(self):
         handler = APIToolFormatHandler()
 
         mock_message = MagicMock()
         mock_message.role = "assistant"
         mock_message.content = "The answer is 42."
         mock_message.reasoning_content = "Let me think..."
+        mock_message.reasoning_state = ["enc:abc"]
         mock_message.reasoning_signature = None
         mock_message.tool_calls = None
 
@@ -274,6 +276,7 @@ class TestAPIToolFormatHandlerReasoningContent:
 
         assert result.content == "The answer is 42."
         assert result.reasoning_content == "Let me think..."
+        assert result.reasoning_state == ["enc:abc"]
 
     def test_process_api_response_message_handles_missing_reasoning_content(self):
         handler = APIToolFormatHandler()
@@ -287,6 +290,7 @@ class TestAPIToolFormatHandlerReasoningContent:
 
         assert result.content == "Hello"
         assert result.reasoning_content is None
+        assert result.reasoning_state is None
 
 
 class TestAgentLoopStreamingReasoningEvents:
@@ -351,6 +355,15 @@ class TestLLMMessageReasoningContent:
 
         assert dumped["reasoning_content"] == "Thinking..."
 
+    def test_llm_message_model_dump_includes_reasoning_state(self):
+        msg = LLMMessage(
+            role=Role.assistant, content="Answer", reasoning_state=["enc:abc"]
+        )
+
+        dumped = msg.model_dump(exclude_none=True)
+
+        assert dumped["reasoning_state"] == ["enc:abc"]
+
     def test_llm_message_model_dump_excludes_none_reasoning_content(self):
         msg = LLMMessage(role=Role.assistant, content="Answer")
 
@@ -410,6 +423,37 @@ class TestReasoningFieldNameConversion:
         result = adapter._reasoning_from_api(msg_dict, "reasoning_content")
 
         assert result["reasoning_content"] == "Thinking..."
+
+    def test_prepare_request_excludes_reasoning_state_from_completions_payload(self):
+        adapter = OpenAIAdapter()
+        provider = ProviderConfig(
+            name="test",
+            api_base="https://api.example.com/v1",
+            api_key_env_var="API_KEY",
+        )
+
+        request = adapter.prepare_request(
+            model_name="test-model",
+            messages=[
+                LLMMessage(
+                    role=Role.assistant,
+                    content="Answer",
+                    reasoning_content="Thinking...",
+                    reasoning_state=["enc:abc"],
+                )
+            ],
+            temperature=0.2,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            enable_streaming=False,
+            provider=provider,
+        )
+
+        payload = json.loads(request.body)
+
+        assert payload["messages"][0]["reasoning_content"] == "Thinking..."
+        assert "reasoning_state" not in payload["messages"][0]
 
     @pytest.mark.asyncio
     async def test_complete_with_custom_reasoning_field_name(self):

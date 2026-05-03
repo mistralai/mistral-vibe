@@ -3,6 +3,7 @@ from __future__ import annotations
 import fnmatch
 from pathlib import Path, PurePath
 
+from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.permissions import (
     PermissionContext,
@@ -70,9 +71,12 @@ def resolve_file_tool_permission(
 ) -> PermissionContext | None:
     """Resolve permission for a file-based tool invocation.
 
-    Checks allowlist/denylist, then sensitive patterns, then workdir boundary.
+    Checks scratchpad, then allowlist/denylist, then sensitive patterns, then workdir boundary.
     Returns PermissionContext with granular required_permissions when applicable.
     """
+    if is_scratchpad_path(path_str):
+        return PermissionContext(permission=ToolPermission.ALWAYS)
+
     if (
         result := resolve_path_permission(
             path_str, allowlist=allowlist, denylist=denylist

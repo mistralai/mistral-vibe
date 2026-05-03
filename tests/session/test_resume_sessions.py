@@ -39,31 +39,31 @@ class TestShortSessionId:
 
 class TestListRemoteResumeSessions:
     @pytest.mark.asyncio
-    async def test_returns_empty_when_nuage_disabled(self) -> None:
+    async def test_returns_empty_when_vibe_code_disabled(self) -> None:
         config = MagicMock()
-        config.nuage_enabled = False
-        config.nuage_api_key = "key"
+        config.vibe_code_enabled = False
+        config.vibe_code_api_key = "key"
         result = await list_remote_resume_sessions(config)
         assert result == []
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_api_key(self) -> None:
         config = MagicMock()
-        config.nuage_enabled = True
-        config.nuage_api_key = None
+        config.vibe_code_enabled = True
+        config.vibe_code_api_key = None
         result = await list_remote_resume_sessions(config)
         assert result == []
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_both_missing(self) -> None:
         config = MagicMock()
-        config.nuage_enabled = False
-        config.nuage_api_key = None
+        config.vibe_code_enabled = False
+        config.vibe_code_api_key = None
         result = await list_remote_resume_sessions(config)
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_filters_only_active_statuses(self) -> None:
+    async def test_passes_active_statuses_to_api(self) -> None:
         from datetime import datetime
 
         from vibe.core.nuage.workflow import (
@@ -79,13 +79,6 @@ class TestListRemoteResumeSessions:
             start_time=datetime(2026, 1, 1),
             end_time=None,
         )
-        completed = WorkflowExecutionWithoutResultResponse(
-            workflow_name="vibe",
-            execution_id="exec-completed",
-            status=WorkflowExecutionStatus.COMPLETED,
-            start_time=datetime(2026, 1, 1),
-            end_time=datetime(2026, 1, 2),
-        )
         retrying = WorkflowExecutionWithoutResultResponse(
             workflow_name="vibe",
             execution_id="exec-retrying",
@@ -93,17 +86,90 @@ class TestListRemoteResumeSessions:
             start_time=datetime(2026, 1, 1),
             end_time=None,
         )
+        continued = WorkflowExecutionWithoutResultResponse(
+            workflow_name="vibe",
+            execution_id="exec-continued",
+            status=WorkflowExecutionStatus.CONTINUED_AS_NEW,
+            start_time=datetime(2026, 1, 1),
+            end_time=None,
+        )
 
         mock_response = WorkflowExecutionListResponse(
-            executions=[running, completed, retrying]
+            executions=[running, retrying, continued]
         )
 
         config = MagicMock()
-        config.nuage_enabled = True
-        config.nuage_api_key = "test-key"
-        config.nuage_base_url = "https://test.example.com"
+        config.vibe_code_enabled = True
+        config.vibe_code_api_key = "test-key"
+        config.vibe_code_base_url = "https://test.example.com"
         config.api_timeout = 30
-        config.nuage_workflow_id = "workflow-1"
+        config.vibe_code_workflow_id = "workflow-1"
+
+        with patch("vibe.core.session.resume_sessions.WorkflowsClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get_workflow_runs.return_value = mock_response
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await list_remote_resume_sessions(config)
+
+        assert len(result) == 3
+        session_ids = {s.session_id for s in result}
+        assert "exec-running" in session_ids
+        assert "exec-retrying" in session_ids
+        assert "exec-continued" in session_ids
+        assert all(s.source == "remote" for s in result)
+
+        mock_client.get_workflow_runs.assert_called_once_with(
+            workflow_identifier="workflow-1",
+            page_size=50,
+            status=[
+                WorkflowExecutionStatus.RUNNING,
+                WorkflowExecutionStatus.RETRYING_AFTER_ERROR,
+                WorkflowExecutionStatus.CONTINUED_AS_NEW,
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_execution_ids_keeps_latest(self) -> None:
+        from datetime import datetime
+
+        from vibe.core.nuage.workflow import (
+            WorkflowExecutionListResponse,
+            WorkflowExecutionStatus,
+            WorkflowExecutionWithoutResultResponse,
+        )
+
+        older = WorkflowExecutionWithoutResultResponse(
+            workflow_name="vibe",
+            execution_id="exec-1",
+            status=WorkflowExecutionStatus.RUNNING,
+            start_time=datetime(2026, 1, 1),
+            end_time=None,
+        )
+        newer = WorkflowExecutionWithoutResultResponse(
+            workflow_name="vibe",
+            execution_id="exec-1",
+            status=WorkflowExecutionStatus.RUNNING,
+            start_time=datetime(2026, 1, 5),
+            end_time=None,
+        )
+        other = WorkflowExecutionWithoutResultResponse(
+            workflow_name="vibe",
+            execution_id="exec-2",
+            status=WorkflowExecutionStatus.RUNNING,
+            start_time=datetime(2026, 1, 3),
+            end_time=None,
+        )
+
+        mock_response = WorkflowExecutionListResponse(executions=[older, newer, other])
+
+        config = MagicMock()
+        config.vibe_code_enabled = True
+        config.vibe_code_api_key = "test-key"
+        config.vibe_code_base_url = "https://test.example.com"
+        config.api_timeout = 30
+        config.vibe_code_workflow_id = "workflow-1"
 
         with patch("vibe.core.session.resume_sessions.WorkflowsClient") as MockClient:
             mock_client = AsyncMock()
@@ -114,8 +180,54 @@ class TestListRemoteResumeSessions:
             result = await list_remote_resume_sessions(config)
 
         assert len(result) == 2
-        session_ids = {s.session_id for s in result}
-        assert "exec-running" in session_ids
-        assert "exec-retrying" in session_ids
-        assert "exec-completed" not in session_ids
-        assert all(s.source == "remote" for s in result)
+        by_id = {s.session_id: s for s in result}
+        assert by_id["exec-1"].end_time == datetime(2026, 1, 5).isoformat()
+        assert "exec-2" in by_id
+
+    @pytest.mark.asyncio
+    async def test_dedup_keeps_latest_start_time_when_previous_has_end_time(
+        self,
+    ) -> None:
+        from datetime import datetime
+
+        from vibe.core.nuage.workflow import (
+            WorkflowExecutionListResponse,
+            WorkflowExecutionStatus,
+            WorkflowExecutionWithoutResultResponse,
+        )
+
+        previous = WorkflowExecutionWithoutResultResponse(
+            workflow_name="vibe",
+            execution_id="exec-1",
+            status=WorkflowExecutionStatus.RETRYING_AFTER_ERROR,
+            start_time=datetime(2026, 1, 1),
+            end_time=datetime(2026, 1, 10),
+        )
+        newer = WorkflowExecutionWithoutResultResponse(
+            workflow_name="vibe",
+            execution_id="exec-1",
+            status=WorkflowExecutionStatus.RUNNING,
+            start_time=datetime(2026, 1, 5),
+            end_time=None,
+        )
+
+        mock_response = WorkflowExecutionListResponse(executions=[previous, newer])
+
+        config = MagicMock()
+        config.vibe_code_enabled = True
+        config.vibe_code_api_key = "test-key"
+        config.vibe_code_base_url = "https://test.example.com"
+        config.api_timeout = 30
+        config.vibe_code_workflow_id = "workflow-1"
+
+        with patch("vibe.core.session.resume_sessions.WorkflowsClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get_workflow_runs.return_value = mock_response
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await list_remote_resume_sessions(config)
+
+        assert len(result) == 1
+        assert result[0].session_id == "exec-1"
+        assert result[0].status == WorkflowExecutionStatus.RUNNING

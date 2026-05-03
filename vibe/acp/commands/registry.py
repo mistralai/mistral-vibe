@@ -51,8 +51,9 @@ def _build_commands() -> dict[str, AcpCommand]:
         ),
         "compact": AcpCommand(
             name="compact",
-            description="Compact conversation history by summarizing",
+            description="Compact conversation history by summarizing. Optionally pass instructions to guide the summary",
             handler="_handle_compact",
+            input_hint="Optional instructions to guide the compaction summary",
         ),
         "reload": AcpCommand(
             name="reload",

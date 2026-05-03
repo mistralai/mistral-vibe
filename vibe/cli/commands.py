@@ -1,9 +1,30 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import sys
 
+from vibe.cli.plan_offer.decide_plan_offer import PlanInfo
+
 ALT_KEY = "⌥" if sys.platform == "darwin" else "Alt"
+
+
+@dataclass(frozen=True)
+class CommandAvailabilityContext:
+    vibe_code_enabled: bool = False
+    is_active_model_mistral: bool = False
+    plan_info: PlanInfo | None = None
+
+    def is_teleport_available(self) -> bool:
+        return (
+            self.vibe_code_enabled
+            and self.is_active_model_mistral
+            and self.plan_info is not None
+            and self.plan_info.is_teleport_eligible()
+        )
+
+
+CommandAvailability = Callable[[CommandAvailabilityContext], bool]
 
 
 @dataclass
@@ -12,13 +33,24 @@ class Command:
     description: str
     handler: str
     exits: bool = False
+    is_available: CommandAvailability | None = None
 
 
 class CommandRegistry:
-    def __init__(self, excluded_commands: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        excluded_commands: list[str] | None = None,
+        availability_context: CommandAvailabilityContext | None = None,
+    ) -> None:
         if excluded_commands is None:
             excluded_commands = []
-        self.commands = {
+        self._disabled_commands = set(excluded_commands)
+        self._availability_context = CommandAvailabilityContext()
+        self._commands: dict[str, Command] = {}
+        self.refresh(availability_context)
+
+    def _build_commands(self) -> dict[str, Command]:
+        return {
             "help": Command(
                 aliases=frozenset(["/help"]),
                 description="Show help message",
@@ -34,6 +66,11 @@ class CommandRegistry:
                 description="Select active model",
                 handler="_show_model",
             ),
+            "thinking": Command(
+                aliases=frozenset(["/thinking"]),
+                description="Select thinking level",
+                handler="_show_thinking",
+            ),
             "reload": Command(
                 aliases=frozenset(["/reload"]),
                 description="Reload configuration, agent instructions, and skills from disk",
@@ -43,6 +80,11 @@ class CommandRegistry:
                 aliases=frozenset(["/clear"]),
                 description="Clear conversation history",
                 handler="_clear_history",
+            ),
+            "copy": Command(
+                aliases=frozenset(["/copy"]),
+                description="Copy the last agent message to the clipboard",
+                handler="_copy_last_agent_message",
             ),
             "log": Command(
                 aliases=frozenset(["/log"]),
@@ -56,7 +98,7 @@ class CommandRegistry:
             ),
             "compact": Command(
                 aliases=frozenset(["/compact"]),
-                description="Compact conversation history by summarizing",
+                description="Compact conversation history by summarizing. Optionally pass instructions to guide the summary",
                 handler="_compact_history",
             ),
             "exit": Command(
@@ -72,8 +114,9 @@ class CommandRegistry:
             ),
             "teleport": Command(
                 aliases=frozenset(["/teleport"]),
-                description="Teleport session to Vibe Nuage",
+                description="Teleport session to Vibe Code",
                 handler="_teleport_command",
+                is_available=CommandAvailabilityContext.is_teleport_available,
             ),
             "proxy-setup": Command(
                 aliases=frozenset(["/proxy-setup"]),
@@ -120,16 +163,43 @@ class CommandRegistry:
             ),
         }
 
-        for command in excluded_commands:
-            self.commands.pop(command, None)
+    @property
+    def commands(self) -> dict[str, Command]:
+        return self._commands
 
-        self._alias_map = {}
-        for cmd_name, cmd in self.commands.items():
-            for alias in cmd.aliases:
-                self._alias_map[alias] = cmd_name
+    def refresh(
+        self, availability_context: CommandAvailabilityContext | None = None
+    ) -> None:
+        self._availability_context = (
+            availability_context or CommandAvailabilityContext()
+        )
+        self._commands = {
+            name: command
+            for name, command in self._build_commands().items()
+            if name not in self._disabled_commands
+            and self._is_command_available(command)
+        }
+
+    def _is_command_available(self, command: Command) -> bool:
+        if command.is_available is None:
+            return True
+        return command.is_available(self._availability_context)
+
+    def _alias_map(self) -> dict[str, str]:
+        return {
+            alias: cmd_name
+            for cmd_name, cmd in self.commands.items()
+            for alias in cmd.aliases
+        }
+
+    def get(self, name: str) -> Command | None:
+        return self.commands.get(name)
+
+    def has_command(self, name: str) -> bool:
+        return name in self.commands
 
     def get_command_name(self, user_input: str) -> str | None:
-        return self._alias_map.get(user_input.lower().strip())
+        return self._alias_map().get(user_input.lower().strip())
 
     def parse_command(self, user_input: str) -> tuple[str, Command, str] | None:
         parts = user_input.strip().split(None, 1)

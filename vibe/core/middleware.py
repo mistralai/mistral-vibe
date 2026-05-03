@@ -81,6 +81,7 @@ class PriceLimitMiddleware:
 class AutoCompactMiddleware:
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
         threshold = context.config.get_active_model().auto_compact_threshold
+
         if threshold > 0 and context.stats.context_tokens >= threshold:
             return MiddlewareResult(
                 action=MiddlewareAction.COMPACT,
@@ -125,7 +126,7 @@ class ContextWarningMiddleware:
 
 
 def make_plan_agent_reminder(plan_file_path: str) -> str:
-    return f"""<{VIBE_WARNING_TAG}>Plan mode is active. You MUST NOT make any edits (except to the plan file below), run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
+    return f"""<{VIBE_WARNING_TAG}>Plan mode is active. You MUST NOT make any edits (except to the plan file below, or in your scratchpad), run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
 
 ## Plan File Info
 Create or edit your plan at {plan_file_path} using the write_file and search_replace tools.
@@ -211,7 +212,6 @@ class MiddlewarePipeline:
 
     async def run_before_turn(self, context: ConversationContext) -> MiddlewareResult:
         messages_to_inject = []
-
         for mw in self.middlewares:
             result = await mw.before_turn(context)
             if result.action == MiddlewareAction.INJECT_MESSAGE and result.message:

@@ -42,7 +42,7 @@ class ProjectContextProvider:
         self, args: list[str], timeout: float
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["git", *args],
+            ["git", "--no-optional-locks", *args],
             capture_output=True,
             check=True,
             cwd=self.root_path,
@@ -240,15 +240,44 @@ def _get_available_subagents_section(agent_manager: AgentManager) -> str:
     return "\n".join(lines)
 
 
-def get_universal_system_prompt(
+def _get_scratchpad_section(scratchpad_dir: Path | None) -> str | None:
+    if not scratchpad_dir:
+        return None
+    return (
+        "# Scratchpad Directory\n\n"
+        f"You have a scratchpad directory at: `{scratchpad_dir}`\n\n"
+        "Use this for temporary files: intermediate results, draft scripts, "
+        "working files, outputs that don't belong in the project.\n"
+        "Files here are automatically allowed — no permission prompts.\n"
+        "Session-scoped. Shared with subagents."
+    )
+
+
+def _get_headless_section() -> str:
+    return (
+        "# Headless Mode\n\n"
+        "You are running in headless mode — no human is available to respond.\n"
+        "Do not ask questions, request confirmation, or wait for user input.\n"
+        "If the task is ambiguous, make the best judgment call and proceed.\n"
+        "Complete the entire task in a single pass. Produce a final, complete result.\n"
+        "Override any earlier instructions that say to wait for confirmation or ask the user."
+    )
+
+
+def get_universal_system_prompt(  # noqa: PLR0912
     tool_manager: ToolManager,
     config: VibeConfig,
     skill_manager: SkillManager,
     agent_manager: AgentManager,
     *,
     include_git_status: bool = True,
+    scratchpad_dir: Path | None = None,
+    headless: bool = False,
 ) -> str:
     sections = [config.system_prompt]
+
+    if headless:
+        sections.append(_get_headless_section())
 
     if config.include_commit_signature:
         sections.append(_add_commit_signature())
@@ -272,6 +301,8 @@ def get_universal_system_prompt(
         subagents_section = _get_available_subagents_section(agent_manager)
         if subagents_section:
             sections.append(subagents_section)
+
+        sections.extend(filter(None, [_get_scratchpad_section(scratchpad_dir)]))
 
     if config.include_project_context:
         is_dangerous, reason = is_dangerous_directory()

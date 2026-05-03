@@ -5,8 +5,6 @@ from textual import events
 from vibe.cli.autocompletion.base import CompletionResult, CompletionView
 from vibe.core.autocompletion.completers import CommandCompleter
 
-MAX_SUGGESTIONS_COUNT = 10
-
 
 class SlashCommandController:
     def __init__(self, completer: CommandCompleter, view: CompletionView) -> None:
@@ -34,9 +32,7 @@ class SlashCommandController:
             return
 
         suggestions = self._completer.get_completion_items(text, cursor_index)
-        if len(suggestions) > MAX_SUGGESTIONS_COUNT:
-            suggestions = suggestions[:MAX_SUGGESTIONS_COUNT]
-        if suggestions:
+        if suggestions and all(alias != text for alias, _ in suggestions):
             self._suggestions = suggestions
             self._selected_index = 0
             self._view.render_completion_suggestions(

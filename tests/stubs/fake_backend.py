@@ -95,7 +95,7 @@ class FakeBackend:
         if self._exception_to_raise:
             raise self._exception_to_raise
 
-        self._requests_messages.append(messages)
+        self._requests_messages.append(list(messages))
         self._requests_extra_headers.append(extra_headers)
         self._requests_metadata.append(metadata)
 
@@ -123,7 +123,7 @@ class FakeBackend:
         if self._exception_to_raise:
             raise self._exception_to_raise
 
-        self._requests_messages.append(messages)
+        self._requests_messages.append(list(messages))
         self._requests_extra_headers.append(extra_headers)
         self._requests_metadata.append(metadata)
 
@@ -145,5 +145,8 @@ class FakeBackend:
         extra_headers,
         metadata=None,
     ) -> int:
+        self._requests_messages.append(list(messages))
+        self._requests_extra_headers.append(extra_headers)
+        self._requests_metadata.append(metadata)
         self._count_tokens_calls.append(list(messages))
         return self._token_counter(messages)

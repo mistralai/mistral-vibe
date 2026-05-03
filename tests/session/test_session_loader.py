@@ -39,10 +39,11 @@ def create_test_session():
         messages: list[LLMMessage] | None = None,
         metadata: dict | None = None,
         encoding: str = "utf-8",
+        working_directory: Path | None = Path("/test"),
     ) -> Path:
         """Create a test session directory with messages and metadata files."""
         # Create session directory
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         session_folder = session_dir / f"test_{timestamp}_{session_id[:8]}"
         session_folder.mkdir(exist_ok=True)
 
@@ -79,7 +80,7 @@ def create_test_session():
                 },
                 "system_prompt": {"content": "System prompt", "role": "system"},
                 "username": "testuser",
-                "environment": {"working_directory": "/test"},
+                "environment": {"working_directory": str(working_directory)},
                 "git_commit": None,
                 "git_branch": None,
             }
@@ -128,6 +129,93 @@ class TestSessionLoaderFindLatestSession:
         assert result is not None
         assert result.exists()
         assert result == latest
+
+    @pytest.mark.parametrize(
+        ("cwd", "expected_id"),
+        [
+            pytest.param(
+                Path("/home/user/project-a"), "aaaaaaaa", id="get_latest_in_existing_a"
+            ),
+            pytest.param(
+                Path("/home/user/project-b"), "bbbbbbbb", id="get_latest_in_existing_b"
+            ),
+            pytest.param(
+                Path("/home/user/project-c"), None, id="get_latest_in_missing_c"
+            ),
+            pytest.param(None, "aaaaaaaa", id="get_latest_globally"),
+        ],
+    )
+    def test_find_latest_session_cwd_filtering(
+        self,
+        session_config: SessionLoggingConfig,
+        create_test_session,
+        cwd: Path | None,
+        expected_id: str | None,
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        create_test_session(
+            session_dir,
+            "aaaaaaaa-session",
+            working_directory=Path("/home/user/project-a"),
+        )
+        time.sleep(0.01)
+        create_test_session(
+            session_dir,
+            "bbbbbbbb-session",
+            working_directory=Path("/home/user/project-b"),
+        )
+        time.sleep(0.01)
+        second_b = create_test_session(
+            session_dir,
+            "bbbbbbbb-session",
+            working_directory=Path("/home/user/project-b"),
+        )
+        time.sleep(0.01)
+        second_a = create_test_session(
+            session_dir,
+            "aaaaaaaa-session",
+            working_directory=Path("/home/user/project-a"),
+        )
+
+        assert len(list(session_dir.glob("test_*"))) == 4
+
+        expected: Path | None
+        if expected_id == "aaaaaaaa":
+            expected = second_a
+        elif expected_id == "bbbbbbbb":
+            expected = second_b
+        elif expected_id is None:
+            expected = None
+        else:
+            raise NotImplementedError(expected_id)
+
+        result = SessionLoader.find_latest_session(
+            session_config, working_directory=cwd
+        )
+        assert result == expected
+
+    def test_find_latest_session_cwd_filtering_skips_invalid_metadata(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        expected = create_test_session(
+            session_dir,
+            "valid-cwd-session",
+            working_directory=Path("/home/user/project-a"),
+        )
+        time.sleep(0.01)
+        invalid_metadata_session = create_test_session(
+            session_dir,
+            "invalid-metadata",
+            working_directory=Path("/home/user/project-a"),
+        )
+        (invalid_metadata_session / "meta.json").write_text("{}")
+
+        result = SessionLoader.find_latest_session(
+            session_config, working_directory=Path("/home/user/project-a")
+        )
+        assert result == expected
 
     def test_find_latest_session_nonexistent_save_dir(self) -> None:
         """Test finding latest session when save directory doesn't exist."""

@@ -6,6 +6,7 @@ vibe.core.utils.slug when needed to avoid circular imports with config.
 
 from __future__ import annotations
 
+from vibe.core.utils.async_subprocess import kill_async_subprocess
 from vibe.core.utils.concurrency import (
     AsyncExecutor,
     ConversationLimitException,
@@ -52,6 +53,7 @@ __all__ = [
     "is_dangerous_directory",
     "is_user_cancellation_event",
     "is_windows",
+    "kill_async_subprocess",
     "name_matches",
     "run_sync",
     "utc_now",

@@ -211,7 +211,7 @@ class TestAcpWriteFileSessionUpdates:
         assert update.content[0].new_text == "Hello"
         assert update.locations is not None
         assert len(update.locations) == 1
-        assert update.locations[0].path == "/tmp/test.txt"
+        assert update.locations[0].path == str(Path("/tmp/test.txt").resolve())
 
     def test_tool_call_session_update_invalid_args(self) -> None:
         from vibe.core.types import FunctionCall, ToolCall
@@ -232,7 +232,8 @@ class TestAcpWriteFileSessionUpdates:
         )
 
         update = WriteFile.tool_call_session_update(event)
-        assert update is None
+        assert update is not None
+        assert update.title == "write_file"
 
     def test_tool_result_session_update(self) -> None:
         result = WriteFileResult(
@@ -260,7 +261,7 @@ class TestAcpWriteFileSessionUpdates:
         assert update.content[0].new_text == "Hello"
         assert update.locations is not None
         assert len(update.locations) == 1
-        assert update.locations[0].path == "/tmp/test.txt"
+        assert update.locations[0].path == str(Path("/tmp/test.txt").resolve())
 
     def test_tool_result_session_update_invalid_result(self) -> None:
         class InvalidResult:
@@ -274,4 +275,5 @@ class TestAcpWriteFileSessionUpdates:
         )
 
         update = WriteFile.tool_result_session_update(event)
-        assert update is None
+        assert update is not None
+        assert update.status == "failed"

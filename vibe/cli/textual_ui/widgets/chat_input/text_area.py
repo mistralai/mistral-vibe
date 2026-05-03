@@ -17,6 +17,7 @@ from vibe.cli.clipboard import (
     _read_clipboard,
     _read_clipboard_image,
 )
+from vibe.cli.commands import CommandRegistry
 from vibe.cli.textual_ui.external_editor import ExternalEditor
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
@@ -53,7 +54,7 @@ def _image_from_dropped_path(
     file) returns None so the normal text-paste path can take over.
 
     shlex.split handles macOS Terminal's shell-style escaping of dragged
-    paths (backslash-escaped spaces, parens, quotes) uniformly — this is
+    paths (backslash-escaped spaces, parens, quotes) uniformly; this is
     the same approach textual-filedrop uses for cross-terminal file drops.
     """
     candidate = text.strip()
@@ -122,12 +123,12 @@ class ChatTextArea(TextArea):
 
     def __init__(
         self,
-        nuage_enabled: bool = False,
+        command_registry: CommandRegistry,
         voice_manager: VoiceManagerPort | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._nuage_enabled = nuage_enabled
+        self._command_registry = command_registry
         self._input_mode: InputMode = self.DEFAULT_MODE
         self._last_text = ""
         self._navigating_history = False
@@ -502,7 +503,7 @@ class ChatTextArea(TextArea):
     @property
     def mode_characters(self) -> set[InputMode]:
         chars: set[InputMode] = {"!", "/"}
-        if self._nuage_enabled:
+        if self._command_registry.has_command("teleport"):
             chars.add("&")
         return chars
 

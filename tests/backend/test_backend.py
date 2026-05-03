@@ -620,7 +620,7 @@ class TestStripImagePartsIfNeeded:
         )
 
     def test_keeps_image_parts_for_vision_model(self) -> None:
-        model = self._model("devstral-2", supports_vision=True)
+        model = self._model("mistral-medium-3.5", supports_vision=True)
         messages = [
             LLMMessage(
                 role=Role.user,

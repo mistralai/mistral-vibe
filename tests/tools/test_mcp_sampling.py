@@ -157,6 +157,23 @@ class TestMCPSamplingHandler:
         assert sent[0].content == "Hello"
 
     @pytest.mark.asyncio
+    async def test_forwards_metadata_and_headers(self) -> None:
+        chunk = mock_llm_chunk(content="ok")
+        backend = FakeBackend(chunk)
+        config = _make_config()
+        handler = MCPSamplingHandler(
+            backend_getter=lambda: backend,
+            config_getter=lambda: config,
+            metadata_getter=lambda: {"call_type": "secondary_call"},
+            extra_headers_getter=lambda: {"x-affinity": "session-123"},
+        )
+
+        await handler(MagicMock(), _make_params())
+
+        assert backend.requests_metadata == [{"call_type": "secondary_call"}]
+        assert backend.requests_extra_headers == [{"x-affinity": "session-123"}]
+
+    @pytest.mark.asyncio
     async def test_returns_error_on_backend_failure(self) -> None:
         backend = FakeBackend(exception_to_raise=RuntimeError("boom"))
         config = _make_config()

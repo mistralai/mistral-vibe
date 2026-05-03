@@ -5,6 +5,7 @@ from vibe.core.types import BaseEvent
 
 class TeleportAuthRequiredEvent(BaseEvent):
     oauth_url: str
+    message: str | None = None
 
 
 class TeleportAuthCompleteEvent(BaseEvent):
@@ -33,7 +34,7 @@ class TeleportPushingEvent(BaseEvent):
 
 
 class TeleportWaitingForGitHubEvent(BaseEvent):
-    pass
+    message: str | None = None
 
 
 class TeleportFetchingUrlEvent(BaseEvent):

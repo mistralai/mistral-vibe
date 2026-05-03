@@ -8,6 +8,7 @@ import pytest
 
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from vibe.cli.plan_offer.decide_plan_offer import (
+    PlanInfo,
     WhoAmIPlanType,
     decide_plan_offer,
     resolve_api_key_for_plan,
@@ -171,3 +172,52 @@ def test_resolve_api_key_for_plan_with_missing_env_var() -> None:
 
     if previous_api_key is not None:
         environ["MISTRAL_API_KEY"] = previous_api_key
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (
+            WhoAmIResponse(
+                plan_type=WhoAmIPlanType.CHAT,
+                plan_name="INDIVIDUAL",
+                prompt_switching_to_pro_plan=False,
+            ),
+            True,
+        ),
+        (
+            WhoAmIResponse(
+                plan_type=WhoAmIPlanType.CHAT,
+                plan_name="INDIVIDUAL",
+                prompt_switching_to_pro_plan=True,
+            ),
+            False,
+        ),
+        (
+            WhoAmIResponse(
+                plan_type=WhoAmIPlanType.API,
+                plan_name="FREE",
+                prompt_switching_to_pro_plan=False,
+            ),
+            False,
+        ),
+        (
+            WhoAmIResponse(
+                plan_type=WhoAmIPlanType.MISTRAL_CODE,
+                plan_name="E",
+                prompt_switching_to_pro_plan=False,
+            ),
+            False,
+        ),
+    ],
+    ids=[
+        "chat-plan-is-eligible",
+        "chat-plan-requiring-key-switch-is-ineligible",
+        "api-plan-is-ineligible",
+        "mistral-code-enterprise-is-ineligible",
+    ],
+)
+def test_teleport_eligibility_depends_on_chat_plan_and_current_key(
+    response: WhoAmIResponse, expected: bool
+) -> None:
+    assert PlanInfo.from_response(response).is_teleport_eligible() is expected

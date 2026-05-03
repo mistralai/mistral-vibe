@@ -9,6 +9,9 @@ from textual.widgets import Input
 
 from vibe.core.config import ProviderConfig
 from vibe.core.paths import GLOBAL_ENV_FILE
+from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
+from vibe.core.telemetry.send import TelemetryClient
+from vibe.core.types import Backend
 from vibe.setup.onboarding import OnboardingApp
 from vibe.setup.onboarding.screens.api_key import ApiKeyScreen, persist_api_key
 
@@ -118,3 +121,39 @@ def test_persist_api_key_returns_env_var_error_for_empty_env_var_name() -> None:
     result = persist_api_key(provider, "secret")
 
     assert result == "env_var_error:<empty>"
+
+
+def test_persist_api_key_sends_onboarding_telemetry_with_entrypoint_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded_metadata: dict[str, str] = {}
+
+    def capture(self: TelemetryClient) -> None:
+        recorded_metadata.update(self.build_client_event_metadata())
+
+    monkeypatch.setattr(TelemetryClient, "send_onboarding_api_key_added", capture)
+
+    provider = ProviderConfig(
+        name="mistral",
+        api_base="https://api.mistral.ai/v1",
+        api_key_env_var="MISTRAL_API_KEY",
+        backend=Backend.MISTRAL,
+    )
+
+    result = persist_api_key(
+        provider,
+        "secret",
+        entrypoint_metadata=build_entrypoint_metadata(
+            agent_entrypoint="cli",
+            agent_version="1.0.0",
+            client_name="vibe_cli",
+            client_version="1.0.0",
+        ),
+    )
+
+    assert result == "completed"
+    assert recorded_metadata["agent_entrypoint"] == "cli"
+    assert recorded_metadata["agent_version"] == "1.0.0"
+    assert recorded_metadata["client_name"] == "vibe_cli"
+    assert recorded_metadata["client_version"] == "1.0.0"
+    assert "session_id" not in recorded_metadata

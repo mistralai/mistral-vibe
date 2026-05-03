@@ -9,7 +9,7 @@ import pytest
 
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
-from vibe.core.config import VibeConfig
+from vibe.core.config import ConnectorConfig, VibeConfig
 from vibe.core.tools.base import BaseToolConfig, ToolError
 from vibe.core.tools.connectors import CONNECTORS_ENV_VAR
 from vibe.core.tools.connectors.connector_registry import (
@@ -150,7 +150,7 @@ class TestFakeConnectorRegistry:
 
 class TestToolManagerConnectorIntegration:
     @staticmethod
-    def _make_config() -> VibeConfig:
+    def _make_config(connectors: list[ConnectorConfig] | None = None) -> VibeConfig:
         """Minimal VibeConfig-like stub for ToolManager."""
         return cast(
             VibeConfig,
@@ -159,6 +159,7 @@ class TestToolManagerConnectorIntegration:
                 (),
                 {
                     "mcp_servers": [],
+                    "connectors": connectors or [],
                     "enabled_tools": [],
                     "disabled_tools": [],
                     "tools": {},
@@ -399,3 +400,100 @@ class TestConnectorProxyToolRun:
             pytest.raises(ToolError, match="network"),
         ):
             [_ async for _ in tool.invoke(query="hello")]
+
+
+# ---------------------------------------------------------------------------
+# ToolManager: per-connector disabled / disabled_tools filtering
+# ---------------------------------------------------------------------------
+
+
+class TestConnectorDisableFiltering:
+    @staticmethod
+    def _make_config(connectors: list[ConnectorConfig] | None = None) -> VibeConfig:
+        return cast(
+            VibeConfig,
+            type(
+                "_Cfg",
+                (),
+                {
+                    "mcp_servers": [],
+                    "connectors": connectors or [],
+                    "enabled_tools": [],
+                    "disabled_tools": [],
+                    "tools": {},
+                    "tool_paths": [],
+                },
+            )(),
+        )
+
+    def test_disabled_connector_excludes_all_tools(self) -> None:
+        registry = FakeConnectorRegistry(
+            connectors={
+                "wiki": [
+                    RemoteTool(name="search", description="Search"),
+                    RemoteTool(name="read", description="Read"),
+                ]
+            }
+        )
+        config = self._make_config(
+            connectors=[ConnectorConfig(name="wiki", disabled=True)]
+        )
+        tm = ToolManager(
+            config_getter=lambda: config,
+            mcp_registry=FakeMCPRegistry(),
+            connector_registry=registry,
+        )
+        assert "connector_wiki_search" not in tm.available_tools
+        assert "connector_wiki_read" not in tm.available_tools
+        # But still registered (discoverable for UI)
+        assert "connector_wiki_search" in tm.registered_tools
+
+    def test_disabled_tools_filters_specific_tools(self) -> None:
+        registry = FakeConnectorRegistry(
+            connectors={
+                "mail": [
+                    RemoteTool(name="send", description="Send"),
+                    RemoteTool(name="read", description="Read"),
+                ]
+            }
+        )
+        config = self._make_config(
+            connectors=[ConnectorConfig(name="mail", disabled_tools=["send"])]
+        )
+        tm = ToolManager(
+            config_getter=lambda: config,
+            mcp_registry=FakeMCPRegistry(),
+            connector_registry=registry,
+        )
+        assert "connector_mail_send" not in tm.available_tools
+        assert "connector_mail_read" in tm.available_tools
+
+    def test_no_config_means_all_enabled(self) -> None:
+        registry = FakeConnectorRegistry(
+            connectors={"wiki": [RemoteTool(name="search", description="Search")]}
+        )
+        config = self._make_config(connectors=[])
+        tm = ToolManager(
+            config_getter=lambda: config,
+            mcp_registry=FakeMCPRegistry(),
+            connector_registry=registry,
+        )
+        assert "connector_wiki_search" in tm.available_tools
+
+    def test_unrelated_config_does_not_affect_other_connectors(self) -> None:
+        registry = FakeConnectorRegistry(
+            connectors={
+                "wiki": [RemoteTool(name="search", description="Search")],
+                "mail": [RemoteTool(name="send", description="Send")],
+            }
+        )
+        config = self._make_config(
+            connectors=[ConnectorConfig(name="mail", disabled=True)]
+        )
+        tm = ToolManager(
+            config_getter=lambda: config,
+            mcp_registry=FakeMCPRegistry(),
+            connector_registry=registry,
+        )
+        assert "connector_wiki_search" in tm.available_tools
+        assert "connector_mail_send" not in tm.available_tools

@@ -115,9 +115,9 @@ def test_on_text_change_limits_the_number_of_results_and_preserves_insertion_ord
     suggestions, selected_index = view.suggestion_events[-1]
     assert len(suggestions) == 7
     assert [suggestion.alias for suggestion in suggestions] == [
+        "/help",
         "/config",
         "/compact",
-        "/help",
         "/summarize",
         "/logpath",
         "/exit",

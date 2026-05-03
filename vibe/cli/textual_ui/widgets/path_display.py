@@ -23,6 +23,9 @@ class PathDisplay(NoMarkupStatic):
 
         self.update(path_str)
 
+    def refresh_display(self) -> None:
+        self._update_display()
+
     def set_path(self, path: Path | str) -> None:
         self._path = Path(path)
         self._update_display()
