@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import random
-
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.message import Message
@@ -10,7 +8,6 @@ from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 
-FEEDBACK_PROBABILITY = 0.02
 THANK_YOU_DURATION = 2.0
 
 
@@ -38,10 +35,8 @@ class FeedbackBar(Widget):
     def on_mount(self) -> None:
         self.display = False
 
-    def maybe_show(self) -> None:
-        if self.display:
-            return
-        if random.random() <= FEEDBACK_PROBABILITY:
+    def show(self) -> None:
+        if not self.display:
             self._set_active(True)
 
     def hide(self) -> None:

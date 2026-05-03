@@ -83,6 +83,13 @@ def parse_arguments() -> argparse.Namespace:
         metavar="DIR",
         help="Change to this directory before running",
     )
+    parser.add_argument(
+        "--trust",
+        action="store_true",
+        help="Trust the working directory for this invocation only (not "
+        "persisted to trusted_folders.toml). Skips the trust prompt. "
+        "Use this for non-interactive automation.",
+    )
 
     # Feature flag for teleport, not exposed to the user yet
     parser.add_argument("--teleport", action="store_true", help=argparse.SUPPRESS)
@@ -106,18 +113,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def check_and_resolve_trusted_folder() -> None:
-    try:
-        cwd = Path.cwd()
-    except FileNotFoundError:
-        rprint(
-            "[red]Error: Current working directory no longer exists.[/]\n"
-            "[yellow]The directory you started vibe from has been deleted. "
-            "Please change to an existing directory and try again, "
-            "or use --workdir to specify a working directory.[/]"
-        )
-        sys.exit(1)
-
+def check_and_resolve_trusted_folder(cwd: Path) -> None:
     if cwd.resolve() == Path.home().resolve():
         return
 
@@ -157,9 +153,23 @@ def main() -> None:
             sys.exit(1)
         os.chdir(workdir)
 
+    try:
+        cwd = Path.cwd()
+    except FileNotFoundError:
+        rprint(
+            "[red]Error: Current working directory no longer exists.[/]\n"
+            "[yellow]The directory you started vibe from has been deleted. "
+            "Please change to an existing directory and try again, "
+            "or use --workdir to specify a working directory.[/]"
+        )
+        sys.exit(1)
+
+    if args.trust:
+        trusted_folders_manager.trust_for_session(cwd)
+
     is_interactive = args.prompt is None
     if is_interactive:
-        check_and_resolve_trusted_folder()
+        check_and_resolve_trusted_folder(cwd)
     init_harness_files_manager("user", "project")
 
     from vibe.cli.cli import run_cli

@@ -10,6 +10,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
 
+from vibe.cli.commands import CommandRegistry
 from vibe.cli.history_manager import HistoryManager
 from vibe.cli.textual_ui.recording.recording_indicator import RecordingIndicator
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea, InputMode
@@ -44,15 +45,15 @@ class ChatInputBody(VoiceManagerListener, Widget):
 
     def __init__(
         self,
+        command_registry: CommandRegistry,
         history_file: Path | None = None,
-        nuage_enabled: bool = False,
         voice_manager: VoiceManagerPort | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.input_widget: ChatTextArea | None = None
         self.prompt_widget: NoMarkupStatic | None = None
-        self._nuage_enabled = nuage_enabled
+        self._command_registry = command_registry
         self._switching_mode = False
         self._voice_manager = voice_manager
         self._recording_indicator: RecordingIndicator | None = None
@@ -71,7 +72,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
 
             self.input_widget = ChatTextArea(
                 id="input",
-                nuage_enabled=self._nuage_enabled,
+                command_registry=self._command_registry,
                 voice_manager=self._voice_manager,
             )
             yield self.input_widget
@@ -91,7 +92,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
             return "!", text[1:]
         elif text.startswith("/"):
             return "/", text[1:]
-        elif text.startswith("&") and self._nuage_enabled:
+        elif text.startswith("&") and self._command_registry.has_command("teleport"):
             return "&", text[1:]
         else:
             return ">", text

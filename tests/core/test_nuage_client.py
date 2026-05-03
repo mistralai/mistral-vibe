@@ -23,9 +23,10 @@ class TestWaitForGithubConnection:
         connected = GitHubPublicData(status=GitHubStatus.CONNECTED)
         client.get_github_integration = AsyncMock(return_value=connected)
 
-        result = await client.wait_for_github_connection("exec-1")
+        results = [data async for data in client.wait_for_github_connection("exec-1")]
 
-        assert result.connected is True
+        assert len(results) == 1
+        assert results[0].connected is True
         client.get_github_integration.assert_called_once_with("exec-1")
 
     @pytest.mark.asyncio
@@ -40,9 +41,12 @@ class TestWaitForGithubConnection:
         )
 
         with patch("vibe.core.teleport.nuage.asyncio.sleep", new_callable=AsyncMock):
-            result = await client.wait_for_github_connection("exec-1")
+            results = [
+                data async for data in client.wait_for_github_connection("exec-1")
+            ]
 
-        assert result.connected is True
+        assert len(results) == 3
+        assert results[-1].connected is True
         assert client.get_github_integration.call_count == 3
 
     @pytest.mark.asyncio
@@ -53,7 +57,8 @@ class TestWaitForGithubConnection:
         client.get_github_integration = AsyncMock(return_value=error_data)
 
         with pytest.raises(ServiceTeleportError, match="App not installed"):
-            await client.wait_for_github_connection("exec-1")
+            async for _ in client.wait_for_github_connection("exec-1"):
+                pass
 
     @pytest.mark.asyncio
     async def test_raises_on_oauth_timeout(self, client: NuageClient) -> None:
@@ -61,7 +66,8 @@ class TestWaitForGithubConnection:
         client.get_github_integration = AsyncMock(return_value=timeout_data)
 
         with pytest.raises(ServiceTeleportError, match="oauth_timeout"):
-            await client.wait_for_github_connection("exec-1")
+            async for _ in client.wait_for_github_connection("exec-1"):
+                pass
 
     @pytest.mark.asyncio
     async def test_raises_on_timeout(self, client: NuageClient) -> None:
@@ -77,7 +83,8 @@ class TestWaitForGithubConnection:
             patch("vibe.core.teleport.nuage.asyncio.sleep", new_callable=AsyncMock),
             pytest.raises(ServiceTeleportError, match="timed out"),
         ):
-            await client.wait_for_github_connection("exec-1", timeout=600.0)
+            async for _ in client.wait_for_github_connection("exec-1", timeout=600.0):
+                pass
 
     @pytest.mark.asyncio
     async def test_sleeps_with_correct_interval(self, client: NuageClient) -> None:
@@ -88,8 +95,31 @@ class TestWaitForGithubConnection:
         with patch(
             "vibe.core.teleport.nuage.asyncio.sleep", new_callable=AsyncMock
         ) as mock_sleep:
-            await client.wait_for_github_connection("exec-1", interval=5.0)
+            async for _ in client.wait_for_github_connection("exec-1", interval=5.0):
+                pass
 
         mock_sleep.assert_called_once()
         sleep_duration = mock_sleep.call_args[0][0]
         assert sleep_duration <= 5.0
+
+    @pytest.mark.asyncio
+    async def test_yields_each_poll_result(self, client: NuageClient) -> None:
+        pending = GitHubPublicData(
+            status=GitHubStatus.WAITING_FOR_OAUTH,
+            error="Please connect GitHub",
+            oauth_url="https://github.com/auth",
+        )
+        connected = GitHubPublicData(status=GitHubStatus.CONNECTED)
+        client.get_github_integration = AsyncMock(
+            side_effect=[pending, pending, connected]
+        )
+
+        with patch("vibe.core.teleport.nuage.asyncio.sleep", new_callable=AsyncMock):
+            results = [
+                data async for data in client.wait_for_github_connection("exec-1")
+            ]
+
+        assert len(results) == 3
+        assert results[0].error == "Please connect GitHub"
+        assert results[1].error == "Please connect GitHub"
+        assert results[2].connected is True

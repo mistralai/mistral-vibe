@@ -288,7 +288,7 @@ class TestAcpSearchReplaceSessionUpdates:
         assert update.content[0].new_text == "new text"
         assert update.locations is not None
         assert len(update.locations) == 1
-        assert update.locations[0].path == "/tmp/test.txt"
+        assert update.locations[0].path == str(Path("/tmp/test.txt").resolve())
 
     def test_tool_call_session_update_invalid_args(self) -> None:
         class InvalidArgs:
@@ -302,7 +302,8 @@ class TestAcpSearchReplaceSessionUpdates:
         )
 
         update = SearchReplace.tool_call_session_update(event)
-        assert update is None
+        assert update is not None
+        assert update.title == "search_replace"
 
     def test_tool_result_session_update(self) -> None:
         search_replace_content = (
@@ -337,7 +338,7 @@ class TestAcpSearchReplaceSessionUpdates:
         assert update.content[0].new_text == "new text"
         assert update.locations is not None
         assert len(update.locations) == 1
-        assert update.locations[0].path == "/tmp/test.txt"
+        assert update.locations[0].path == str(Path("/tmp/test.txt").resolve())
 
     def test_tool_result_session_update_invalid_result(self) -> None:
         class InvalidResult:
@@ -351,4 +352,5 @@ class TestAcpSearchReplaceSessionUpdates:
         )
 
         update = SearchReplace.tool_result_session_update(event)
-        assert update is None
+        assert update is not None
+        assert update.status == "failed"

@@ -28,7 +28,7 @@ class TestACPSetMode:
 
         assert response is not None
         assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.DEFAULT
-        assert acp_session.agent_loop.auto_approve is False
+        assert acp_session.agent_loop.bypass_tool_permissions is False
 
     @pytest.mark.asyncio
     async def test_set_mode_to_auto_approve(
@@ -44,7 +44,7 @@ class TestACPSetMode:
         assert acp_session is not None
 
         assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.DEFAULT
-        assert acp_session.agent_loop.auto_approve is False
+        assert acp_session.agent_loop.bypass_tool_permissions is False
 
         response = await acp_agent_loop.set_session_mode(
             session_id=session_id, mode_id=BuiltinAgentName.AUTO_APPROVE
@@ -54,7 +54,7 @@ class TestACPSetMode:
         assert (
             acp_session.agent_loop.agent_profile.name == BuiltinAgentName.AUTO_APPROVE
         )
-        assert acp_session.agent_loop.auto_approve is True
+        assert acp_session.agent_loop.bypass_tool_permissions is True
 
     @pytest.mark.asyncio
     async def test_set_mode_to_plan(self, acp_agent_loop: VibeAcpAgentLoop) -> None:
@@ -76,7 +76,7 @@ class TestACPSetMode:
         assert response is not None
         assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.PLAN
         assert (
-            acp_session.agent_loop.auto_approve is False
+            acp_session.agent_loop.bypass_tool_permissions is False
         )  # Plan mode uses per-tool allowlists, not global auto-approve
 
     @pytest.mark.asyncio
@@ -103,7 +103,7 @@ class TestACPSetMode:
             acp_session.agent_loop.agent_profile.name == BuiltinAgentName.ACCEPT_EDITS
         )
         assert (
-            acp_session.agent_loop.auto_approve is False
+            acp_session.agent_loop.bypass_tool_permissions is False
         )  # Accept Edits mode doesn't auto-approve all
 
     @pytest.mark.asyncio
@@ -126,7 +126,7 @@ class TestACPSetMode:
         assert response is not None
         assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.CHAT
         assert (
-            acp_session.agent_loop.auto_approve is True
+            acp_session.agent_loop.bypass_tool_permissions is True
         )  # Chat mode auto-approves read-only tools
 
     @pytest.mark.asyncio
@@ -143,7 +143,7 @@ class TestACPSetMode:
         assert acp_session is not None
 
         initial_agent = acp_session.agent_loop.agent_profile.name
-        initial_auto_approve = acp_session.agent_loop.auto_approve
+        initial_bypass = acp_session.agent_loop.bypass_tool_permissions
 
         response = await acp_agent_loop.set_session_mode(
             session_id=session_id, mode_id="invalid-mode"
@@ -151,7 +151,7 @@ class TestACPSetMode:
 
         assert response is None
         assert acp_session.agent_loop.agent_profile.name == initial_agent
-        assert acp_session.agent_loop.auto_approve == initial_auto_approve
+        assert acp_session.agent_loop.bypass_tool_permissions == initial_bypass
 
     @pytest.mark.asyncio
     async def test_set_mode_to_same_mode(
@@ -174,7 +174,7 @@ class TestACPSetMode:
 
         assert response is not None
         assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.DEFAULT
-        assert acp_session.agent_loop.auto_approve is False
+        assert acp_session.agent_loop.bypass_tool_permissions is False
 
     @pytest.mark.asyncio
     async def test_set_mode_with_empty_string(
@@ -190,7 +190,7 @@ class TestACPSetMode:
         assert acp_session is not None
 
         initial_agent = acp_session.agent_loop.agent_profile.name
-        initial_auto_approve = acp_session.agent_loop.auto_approve
+        initial_bypass = acp_session.agent_loop.bypass_tool_permissions
 
         response = await acp_agent_loop.set_session_mode(
             session_id=session_id, mode_id=""
@@ -198,4 +198,4 @@ class TestACPSetMode:
 
         assert response is None
         assert acp_session.agent_loop.agent_profile.name == initial_agent
-        assert acp_session.agent_loop.auto_approve == initial_auto_approve
+        assert acp_session.agent_loop.bypass_tool_permissions == initial_bypass

@@ -75,11 +75,11 @@ class TestACPSetConfigOptionMode:
 
         assert response is not None
         assert response.config_options is not None
-        assert len(response.config_options) == 2
+        assert len(response.config_options) == 3
         assert (
             acp_session.agent_loop.agent_profile.name == BuiltinAgentName.AUTO_APPROVE
         )
-        assert acp_session.agent_loop.auto_approve is True
+        assert acp_session.agent_loop.bypass_tool_permissions is True
 
         # Verify config_options reflect the new state
         mode_config = response.config_options[0]
@@ -126,10 +126,10 @@ class TestACPSetConfigOptionMode:
 
         assert response is not None
         assert response.config_options is not None
-        assert len(response.config_options) == 2
+        assert len(response.config_options) == 3
         assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.CHAT
         assert (
-            acp_session.agent_loop.auto_approve is True
+            acp_session.agent_loop.bypass_tool_permissions is True
         )  # Chat mode auto-approves read-only tools
 
         mode_config = response.config_options[0]
@@ -200,7 +200,7 @@ class TestACPSetConfigOptionModel:
 
         assert response is not None
         assert response.config_options is not None
-        assert len(response.config_options) == 2
+        assert len(response.config_options) == 3
         assert acp_session.agent_loop.config.active_model == "devstral-small"
 
         # Verify config_options reflect the new state
@@ -312,6 +312,90 @@ class TestACPSetConfigOptionInvalidConfigId:
 
         response = await acp_agent_loop.set_config_option(
             session_id=session_id, config_id="", value="some_value"
+        )
+
+        assert response is None
+
+
+class TestACPSetConfigOptionThinking:
+    @pytest.mark.asyncio
+    async def test_set_config_option_thinking_success(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+        assert acp_session.agent_loop.config.get_active_model().thinking == "off"
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="thinking", value="high"
+        )
+
+        assert response is not None
+        assert response.config_options is not None
+        assert len(response.config_options) == 3
+        assert acp_session.agent_loop.config.get_active_model().thinking == "high"
+
+        thinking_config = response.config_options[2]
+        assert thinking_config.id == "thinking"
+        assert thinking_config.current_value == "high"
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_thinking_all_levels(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+
+        for level in ["low", "medium", "high", "max", "off"]:
+            response = await acp_agent_loop.set_config_option(
+                session_id=session_id, config_id="thinking", value=level
+            )
+            assert response is not None
+            assert acp_session.agent_loop.config.get_active_model().thinking == level
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_thinking_invalid_returns_none(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="thinking", value="ultra"
+        )
+
+        assert response is None
+        assert acp_session.agent_loop.config.get_active_model().thinking == "off"
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_thinking_empty_string_returns_none(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="thinking", value=""
         )
 
         assert response is None

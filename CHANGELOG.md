@@ -5,6 +5,120 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.3] - 2026-04-30
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Fix textual version
+
+### Removed
+
+
+## [2.9.2] - 2026-04-29
+
+### Fixed
+
+- Teleport surfaces the latest GitHub connection status while polling
+
+
+## [2.9.1] - 2026-04-29
+
+### Added
+
+- Connector OAuth authentication flow in `/mcp` menu
+- `ConfigPatch` operation types for Vibe Code
+- `extra_headers` field to `ProviderConfig`
+- Structured metadata on ACP tool results
+- `vibe.user_cancelled_action` ACP telemetry coverage
+- `vibe.new_session` telemetry event emitted whenever the session is reset
+
+### Changed
+
+- Migrated default model to `mistral-medium-3.5`
+
+
+## [2.9.0] - 2026-04-28
+
+### Added
+
+- Scratchpad directory for temporary working files shared with subagents
+- `/copy` slash command
+- Experimental hooks system with post-agent-turn lifecycle
+- OpenAI Responses API adapter
+- ACP session fork and session close support
+- Thinking level picker in ACP CLI
+- `--trust` session-only flag and fail-fast behavior in `-p` mode
+- Opus 4.7 model support
+- `ConfigLayer` for layered configuration resolution
+- `~/.vibe/prompts` overrides for builtin prompts
+- Enable/disable MCP servers and individual tools from `/mcp` menu
+- Custom compaction instructions via `/compact`
+- `vibe.ready` telemetry event
+- Usage updates sent after every LLM turn for ACP
+- Headless section in system prompt to prevent bad model behavior
+
+### Changed
+
+- Renamed `auto_approve` config to `bypass_tool_permissions`
+- Increased feedback bar frequency with cooldown and TOML cache
+- Feedback bar only shown when active model is Mistral
+- Centralized telemetry metadata construction and wired through entrypoints
+- Preserved stable session identity across compact/fork/rewind
+- Filtered remote sessions by current user and deduped continue-as-new
+- `--continue` now only looks for sessions of the current working directory
+- Batched widget mounts and narrowed CSS selectors for UI performance
+
+### Fixed
+
+- Autocomplete popup height calculation for wrapped lines
+- Autocomplete popup dismissed on tab completion and escape
+- Double Ctrl+C/Ctrl+D required to quit instead of killing session immediately
+- Context window overrun now shows a friendly error message
+- `MallocStackLogging` error messages suppressed in CLI input
+- `index.lock` leftover on interrupted deferred init
+- Safe `find` commands allowed by default
+- Session ID preserved when resuming sessions through ACP
+- Usage updates sent after tool results instead of tool streams in ACP
+- KV cache warming via x-affinity in count tokens
+
+
+## [2.8.1] - 2026-04-21
+
+### Fixed
+
+- Fixed changelog and whats_new
+
+
+## [2.8.0] - 2026-04-21
+
+### Added
+
+- Builtin skills system with self-awareness skill
+- `cwd` configuration parameter for MCP stdio servers
+- `/connectors` as alias for `/mcp` and `R` refresh shortcut in MCP browser
+- `MergeFieldMetadata` and annotated merge strategy helpers for config schemas
+- `vibe.request_sent` telemetry event fired before each LLM API call
+- Model alias to `tool_call_finished` telemetry event
+
+### Changed
+
+- Deferred heavy init in subagents and ACP sessions to background thread
+- Renamed `request_sent` telemetry fields and added `nb_prompt_chars`
+- Sorted connectors in `/mcp` menu by connection state then alphabetically
+
+### Fixed
+
+- `/debug` command no longer throws
+- Race condition in banner initialization dropping initial state
+
+### Removed
+
+- `/terminal-setup` command
+
 ## [2.7.6] - 2026-04-16
 
 ### Added
@@ -29,7 +143,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Alt+Left / Alt+Right key bindings from chat input
 
-
 ## [2.7.5] - 2026-04-14
 
 ### Changed
@@ -44,7 +157,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Encoding detection fallback in `read_safe` for non-UTF-8 files
 - Config saving logic cleanup
-
 
 ## [2.7.4] - 2026-04-09
 
@@ -75,13 +187,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use skill in recent commands via the up-arrow navigation
 - Fixed loading order issues in vibe initialization
 
-
 ## [2.7.3] - 2026-04-03
 
 ### Added
 
 - `/data-retention` slash command to view Mistral AI's data retention notice and privacy settings
-
 
 ## [2.7.2] - 2026-04-01
 
@@ -99,7 +209,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Errored MCP servers are now excluded from the banner count
 - Improved bash denylist matching and error messages
 - Command messages are now skipped during rewind navigation
-
 
 ## [2.7.1] - 2026-03-31
 
@@ -121,7 +230,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Text selection errors when copying from unmounting components
 - Excluded "injected" field from user messages in generic backend
 
-
 ## [2.7.0] - 2026-03-24
 
 ### Added
@@ -133,7 +241,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve message_id when aggregating streaming LLM chunks
 - Improved error handling for SDK response errors
 
-
 ## [2.6.2] - 2026-03-23
 
 ### Changed
@@ -144,13 +251,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Context usage updates via ACP
 
-
 ## [2.6.1] - 2026-03-23
 
 ### Changed
 
 - Loosened agent-client-protocol version constraint from pinned to minimum bound
-
 
 ## [2.6.0] - 2026-03-23
 
@@ -188,7 +293,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Context usage updates sent via ACP
 - Include `exit_plan_mode` tool only in plan mode
 
-
 ## [2.5.0] - 2026-03-16
 
 ### Added
@@ -215,7 +319,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved scrolling performance
 - Web search tool now infers server URL from provider config
 
-
 ## [2.4.2] - 2026-03-12
 
 ### Added
@@ -228,7 +331,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auto-compact threshold falls back to global setting when not defined at model level
 - Update notification toast no longer times out, ensuring the user sees the restart prompt
 - Removed `file_content_before` from Vibe Code, reducing payload size
-
 
 ## [2.4.1] - 2026-03-10
 
@@ -245,7 +347,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Space key fix extended to all `Input` widgets (question prompts, proxy setup) in VS Code terminal
 - Ruff isort/formatter config conflict resolved (`split-on-trailing-comma` set to `false`)
-
 
 ## [2.4.0] - 2026-03-09
 
@@ -267,7 +368,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Arrow-key history navigation at wrapped-line boundaries in chat input
 - UTF-8 encoding enforced when reading metadata files
 - Update notifier no longer crashes on unexpected response fields
-
 
 ## [2.3.0] - 2026-02-27
 
@@ -306,7 +406,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-
 ## [2.2.1] - 2026-02-18
 
 ### Added
@@ -328,7 +427,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Context token widget: preserve stats listeners across `/clear` so token percentage updates correctly
 - Vertex AI: cache credentials to avoid blocking the event loop on every LLM request
 - Bash tool: remove `NO_COLOR` from subprocess env to fix snapshot tests and colored output
-
 
 ## [2.2.0] - 2026-02-17
 
@@ -357,7 +455,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Middleware injection: use standalone user messages instead of mutating flushed messages
 - Revert cryptography 46.0.5 bump for compatibility
 - Pin banner version in UI snapshot tests for stability
-
 
 ## [2.1.0] - 2026-02-11
 
@@ -388,7 +485,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Legacy terminal theme module and agent indicator widget
 - Standalone onboarding theme selection screen (replaced by redesign)
 
-
 ## [2.0.2] - 2026-01-30
 
 ### Added
@@ -409,13 +505,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix global agent prompt not being loaded correctly
 - Do not propose to "resume" when there is nothing to resume
 
-
 ## [2.0.1] - 2026-01-28
 
 ### Fixed
 
 - Fix encoding issues in Windows
-
 
 ## [2.0.0] - 2026-01-27
 
@@ -444,7 +538,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped agent-client-protocol to 0.7.1
 - Refactored UI to require AgentLoop at VibeApp construction
 - Updated README with new MCP server config
-- Improved readability of the AskUserQuerstion tool output
+- Improved readability of the AskUserQuestion tool output
 
 ### Fixed
 
@@ -461,7 +555,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - instructions.md support
 - workdir setting in config file
-
 
 ## [1.3.5] - 2026-01-12
 

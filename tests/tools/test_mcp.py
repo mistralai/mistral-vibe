@@ -4,12 +4,14 @@ import logging
 import os
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from pydantic import ValidationError
 import pytest
 
-from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp
+from tests.stubs.fake_mcp_registry import FakeMCPRegistry
+from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp, VibeConfig
 from vibe.core.tools.mcp import (
     MCPRegistry,
     MCPToolResult,
@@ -17,8 +19,10 @@ from vibe.core.tools.mcp import (
     _mcp_stderr_capture,
     _parse_call_result,
     _stderr_logger_thread,
+    call_tool_stdio,
     create_mcp_http_proxy_tool_class,
     create_mcp_stdio_proxy_tool_class,
+    list_tools_stdio,
 )
 
 
@@ -566,3 +570,281 @@ class TestMCPRegistry:
         assert "cached_ct" in tools
         assert "new_nt" in tools
         assert len(registry._cache) == 2
+
+
+class TestMCPStdioCwd:
+    def test_mcp_stdio_cwd_defaults_to_none(self):
+        config = MCPStdio(name="test", transport="stdio", command="python -m srv")
+
+        assert config.cwd is None
+
+    def test_mcp_stdio_cwd_accepts_string(self):
+        config = MCPStdio(
+            name="test",
+            transport="stdio",
+            command="python -m srv",
+            cwd="/tmp/myproject",
+        )
+
+        assert config.cwd == "/tmp/myproject"
+
+    @pytest.mark.asyncio
+    async def test_list_tools_stdio_passes_cwd_to_params(self):
+        with (
+            patch("vibe.core.tools.mcp.tools.stdio_client") as mock_client,
+            patch("vibe.core.tools.mcp.tools.ClientSession") as mock_session_cls,
+            patch("vibe.core.tools.mcp.tools.StdioServerParameters") as mock_params_cls,
+        ):
+            mock_client.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock())
+            )
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session = MagicMock()
+            mock_session.initialize = AsyncMock()
+            mock_session.list_tools = AsyncMock(return_value=MagicMock(tools=[]))
+            mock_session_cls.return_value.__aenter__ = AsyncMock(
+                return_value=mock_session
+            )
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await list_tools_stdio(["python", "-m", "srv"], cwd="/tmp/myproject")
+
+            mock_params_cls.assert_called_once_with(
+                command="python", args=["-m", "srv"], env=None, cwd="/tmp/myproject"
+            )
+
+    @pytest.mark.asyncio
+    async def test_call_tool_stdio_passes_cwd_to_params(self):
+        with (
+            patch("vibe.core.tools.mcp.tools.stdio_client") as mock_client,
+            patch("vibe.core.tools.mcp.tools.ClientSession") as mock_session_cls,
+            patch("vibe.core.tools.mcp.tools.StdioServerParameters") as mock_params_cls,
+            patch("vibe.core.tools.mcp.tools._parse_call_result") as mock_parse,
+        ):
+            mock_client.return_value.__aenter__ = AsyncMock(
+                return_value=(MagicMock(), MagicMock())
+            )
+            mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_session = MagicMock()
+            mock_session.initialize = AsyncMock()
+            mock_session.call_tool = AsyncMock(return_value=MagicMock())
+            mock_session_cls.return_value.__aenter__ = AsyncMock(
+                return_value=mock_session
+            )
+            mock_session_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_parse.return_value = MagicMock(spec=MCPToolResult)
+
+            await call_tool_stdio(
+                ["python", "-m", "srv"], "my_tool", {}, cwd="/tmp/myproject"
+            )
+
+            mock_params_cls.assert_called_once_with(
+                command="python", args=["-m", "srv"], env=None, cwd="/tmp/myproject"
+            )
+
+    @pytest.mark.asyncio
+    async def test_discover_stdio_passes_cwd_to_list_tools(self):
+        registry = MCPRegistry()
+        srv = MCPStdio(
+            name="local",
+            transport="stdio",
+            command="python -m srv",
+            cwd="/tmp/myproject",
+        )
+        remote = RemoteTool(name="run", description="Run it")
+
+        with patch(
+            "vibe.core.tools.mcp.registry.list_tools_stdio", return_value=[remote]
+        ) as mock_list:
+            await registry._discover_stdio(srv)
+
+        mock_list.assert_called_once_with(
+            ["python", "-m", "srv"],
+            env=None,
+            cwd="/tmp/myproject",
+            startup_timeout_sec=srv.startup_timeout_sec,
+        )
+
+    @pytest.mark.asyncio
+    async def test_discover_stdio_passes_cwd_to_proxy_class(self):
+        registry = MCPRegistry()
+        srv = MCPStdio(
+            name="local",
+            transport="stdio",
+            command="python -m srv",
+            cwd="/tmp/myproject",
+        )
+        remote = RemoteTool(name="run", description="Run it")
+
+        with (
+            patch(
+                "vibe.core.tools.mcp.registry.list_tools_stdio", return_value=[remote]
+            ),
+            patch(
+                "vibe.core.tools.mcp.registry.create_mcp_stdio_proxy_tool_class",
+                wraps=create_mcp_stdio_proxy_tool_class,
+            ) as mock_create,
+        ):
+            await registry._discover_stdio(srv)
+
+        _, kwargs = mock_create.call_args
+        assert kwargs["cwd"] == "/tmp/myproject"
+
+    def test_proxy_tool_stores_cwd(self):
+        remote = RemoteTool(name="run")
+        proxy_cls = cast(
+            Any,
+            create_mcp_stdio_proxy_tool_class(
+                command=["python", "-m", "srv"], remote=remote, cwd="/tmp/myproject"
+            ),
+        )
+
+        assert proxy_cls._cwd == "/tmp/myproject"
+
+    def test_proxy_tool_cwd_defaults_to_none(self):
+        remote = RemoteTool(name="run")
+        proxy_cls = cast(
+            Any,
+            create_mcp_stdio_proxy_tool_class(
+                command=["python", "-m", "srv"], remote=remote
+            ),
+        )
+
+        assert proxy_cls._cwd is None
+
+
+# ---------------------------------------------------------------------------
+# _MCPBase disabled / disabled_tools field tests
+# ---------------------------------------------------------------------------
+
+
+class TestMCPBaseDisableFields:
+    def test_disabled_defaults_to_false(self):
+        config = MCPStdio(name="test", transport="stdio", command="python")
+        assert config.disabled is False
+        assert config.disabled_tools == []
+
+    def test_disabled_true(self):
+        config = MCPStdio(
+            name="test", transport="stdio", command="python", disabled=True
+        )
+        assert config.disabled is True
+
+    def test_disabled_tools_list(self):
+        config = MCPHttp(
+            name="test",
+            transport="http",
+            url="http://localhost:8080",
+            disabled_tools=["search", "read"],
+        )
+        assert config.disabled_tools == ["search", "read"]
+
+    def test_disabled_fields_on_streamable_http(self):
+        config = MCPStreamableHttp(
+            name="test",
+            transport="streamable-http",
+            url="http://localhost:8080",
+            disabled=True,
+            disabled_tools=["write"],
+        )
+        assert config.disabled is True
+        assert config.disabled_tools == ["write"]
+
+
+# ---------------------------------------------------------------------------
+# ToolManager: per-MCP-server disabled / disabled_tools filtering
+# ---------------------------------------------------------------------------
+
+from vibe.core.tools.manager import ToolManager
+
+
+class TestMCPDisableFiltering:
+    @staticmethod
+    def _make_config(
+        mcp_servers: list[MCPHttp | MCPStdio | MCPStreamableHttp] | None = None,
+    ) -> VibeConfig:
+        return cast(
+            VibeConfig,
+            type(
+                "_Cfg",
+                (),
+                {
+                    "mcp_servers": mcp_servers or [],
+                    "connectors": [],
+                    "enabled_tools": [],
+                    "disabled_tools": [],
+                    "tools": {},
+                    "tool_paths": [],
+                },
+            )(),
+        )
+
+    def test_disabled_server_excludes_all_tools(self):
+        srv = MCPHttp(
+            name="demo", transport="http", url="http://demo:9090", disabled=True
+        )
+        registry = FakeMCPRegistry()
+        remote_a = RemoteTool(name="tool_a", description="A")
+        remote_b = RemoteTool(name="tool_b", description="B")
+        proxy_a = create_mcp_http_proxy_tool_class(
+            url="http://demo:9090", remote=remote_a, alias="demo"
+        )
+        proxy_b = create_mcp_http_proxy_tool_class(
+            url="http://demo:9090", remote=remote_b, alias="demo"
+        )
+        registry.set_tools(
+            [srv], {proxy_a.get_name(): proxy_a, proxy_b.get_name(): proxy_b}
+        )
+
+        config = self._make_config(mcp_servers=[srv])
+        tm = ToolManager(
+            config_getter=lambda: config, mcp_registry=registry, connector_registry=None
+        )
+        assert "demo_tool_a" not in tm.available_tools
+        assert "demo_tool_b" not in tm.available_tools
+        # Still registered (discoverable for UI)
+        assert "demo_tool_a" in tm.registered_tools
+
+    def test_disabled_tools_filters_specific_tools(self):
+        srv = MCPHttp(
+            name="demo",
+            transport="http",
+            url="http://demo:9090",
+            disabled_tools=["tool_a"],
+        )
+        registry = FakeMCPRegistry()
+        remote_a = RemoteTool(name="tool_a", description="A")
+        remote_b = RemoteTool(name="tool_b", description="B")
+        proxy_a = create_mcp_http_proxy_tool_class(
+            url="http://demo:9090", remote=remote_a, alias="demo"
+        )
+        proxy_b = create_mcp_http_proxy_tool_class(
+            url="http://demo:9090", remote=remote_b, alias="demo"
+        )
+        registry.set_tools(
+            [srv], {proxy_a.get_name(): proxy_a, proxy_b.get_name(): proxy_b}
+        )
+
+        config = self._make_config(mcp_servers=[srv])
+        tm = ToolManager(
+            config_getter=lambda: config, mcp_registry=registry, connector_registry=None
+        )
+        assert "demo_tool_a" not in tm.available_tools
+        assert "demo_tool_b" in tm.available_tools
+
+    def test_disabled_false_is_noop(self):
+        srv = MCPHttp(
+            name="demo", transport="http", url="http://demo:9090", disabled=False
+        )
+        registry = FakeMCPRegistry()
+        remote = RemoteTool(name="tool_a", description="A")
+        proxy = create_mcp_http_proxy_tool_class(
+            url="http://demo:9090", remote=remote, alias="demo"
+        )
+        registry.set_tools([srv], {proxy.get_name(): proxy})
+
+        config = self._make_config(mcp_servers=[srv])
+        tm = ToolManager(
+            config_getter=lambda: config, mcp_registry=registry, connector_registry=None
+        )
+        assert "demo_tool_a" in tm.available_tools

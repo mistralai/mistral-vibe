@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vibe.core.utils.merge import MergeConflictError, MergeStrategy
+from vibe.core.utils.merge import MergeConflictError, MergeKeyError, MergeStrategy
 
 
 class TestMergeStrategyEnum:
@@ -103,6 +103,13 @@ class TestUnion:
         with pytest.raises(TypeError, match="UNION requires list operands"):
             MergeStrategy.UNION.apply("a", [1], key_fn=str)
 
+    def test_raises_merge_key_error_for_missing_key(self) -> None:
+        base = [{"name": "a", "v": 1}]
+        override = [{"v": 2}]  # missing "name"
+        with pytest.raises(MergeKeyError) as exc_info:
+            MergeStrategy.UNION.apply(base, override, key_fn=lambda x: x["name"])
+        assert exc_info.value.key == "name"
+
 
 class TestMerge:
     def test_dicts_merged_one_level(self) -> None:
@@ -161,3 +168,16 @@ class TestMergeConflictError:
         err = MergeConflictError("active_model")
         assert str(err) == "Merge conflict on field 'active_model'"
         assert err.field_name == "active_model"
+
+
+class TestMergeKeyError:
+    def test_message_includes_key_and_item(self) -> None:
+        item = {"v": 2}
+        err = MergeKeyError("name", item)
+        assert "name" in str(err)
+        assert str(item) in str(err)
+        assert err.key == "name"
+        assert err.item == item
+
+    def test_is_key_error(self) -> None:
+        assert issubclass(MergeKeyError, KeyError)

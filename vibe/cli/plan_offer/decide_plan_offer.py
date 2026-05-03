@@ -58,6 +58,9 @@ class PlanInfo:
     def is_chat_pro_plan(self) -> bool:
         return self.plan_type == WhoAmIPlanType.CHAT
 
+    def is_teleport_eligible(self) -> bool:
+        return self.is_chat_pro_plan() and not self.prompt_switching_to_pro_plan
+
     def is_free_mistral_code_plan(self) -> bool:
         return (
             self.plan_type == WhoAmIPlanType.MISTRAL_CODE

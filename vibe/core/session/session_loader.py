@@ -25,7 +25,9 @@ class SessionInfo(TypedDict):
 
 class SessionLoader:
     @staticmethod
-    def _is_valid_session(session_dir: Path) -> bool:
+    def _is_valid_session(  # noqa: PLR0911
+        session_dir: Path, working_directory: Path | None = None
+    ) -> bool:
         """Check if a session directory contains valid metadata and messages."""
         metadata_path = session_dir / METADATA_FILENAME
         messages_path = session_dir / MESSAGES_FILENAME
@@ -37,6 +39,12 @@ class SessionLoader:
             metadata = json.loads(read_safe(metadata_path).text)
             if not isinstance(metadata, dict):
                 return False
+            if working_directory is not None:
+                session_working_directory = (metadata.get("environment") or {}).get(
+                    "working_directory"
+                )
+                if session_working_directory != str(working_directory):
+                    return False
 
             has_messages = False
             for line in read_safe(messages_path).text.splitlines():
@@ -52,7 +60,9 @@ class SessionLoader:
         return True
 
     @staticmethod
-    def latest_session(session_dirs: list[Path]) -> Path | None:
+    def latest_session(
+        session_dirs: list[Path], working_directory: Path | None = None
+    ) -> Path | None:
         sessions_with_mtime: list[tuple[Path, float]] = []
         for session in session_dirs:
             messages_path = session / MESSAGES_FILENAME
@@ -70,13 +80,17 @@ class SessionLoader:
         sessions_with_mtime.sort(key=lambda x: x[1], reverse=True)
 
         for session, _mtime in sessions_with_mtime:
-            if SessionLoader._is_valid_session(session):
+            if SessionLoader._is_valid_session(
+                session, working_directory=working_directory
+            ):
                 return session
 
         return None
 
     @staticmethod
-    def find_latest_session(config: SessionLoggingConfig) -> Path | None:
+    def find_latest_session(
+        config: SessionLoggingConfig, working_directory: Path | None = None
+    ) -> Path | None:
         save_dir = Path(config.save_dir)
         if not save_dir.exists():
             return None
@@ -84,7 +98,9 @@ class SessionLoader:
         pattern = f"{config.session_prefix}_*"
         session_dirs = list(save_dir.glob(pattern))
 
-        return SessionLoader.latest_session(session_dirs)
+        return SessionLoader.latest_session(
+            session_dirs, working_directory=working_directory
+        )
 
     @staticmethod
     def find_session_by_id(

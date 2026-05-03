@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum, auto
 from typing import TYPE_CHECKING, ClassVar
 
 from rich.text import Text
@@ -15,6 +16,23 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
+
+
+class ConfigOptionKind(StrEnum):
+    ACTION_MODEL = auto()
+    ACTION_THINKING = auto()
+
+    @staticmethod
+    def toggle(key: str) -> str:
+        return f"toggle:{key}"
+
+    @staticmethod
+    def is_toggle(option_id: str) -> bool:
+        return option_id.startswith("toggle:")
+
+    @staticmethod
+    def toggle_key(option_id: str) -> str:
+        return option_id.removeprefix("toggle:")
 
 
 class ConfigApp(Container):
@@ -38,6 +56,9 @@ class ConfigApp(Container):
             self.changes = changes
 
     class OpenModelPicker(Message):
+        pass
+
+    class OpenThinkingPicker(Message):
         pass
 
     def __init__(self, config: VibeConfig) -> None:
@@ -69,6 +90,18 @@ class ConfigApp(Container):
         text.append(self._get_current_model(), style="bold")
         return text
 
+    def _get_current_thinking(self) -> str:
+        try:
+            return str(self.config.get_active_model().thinking)
+        except ValueError:
+            return "off"
+
+    def _thinking_prompt(self) -> Text:
+        text = Text(no_wrap=True)
+        text.append("Thinking: ")
+        text.append(self._get_current_thinking().capitalize(), style="bold")
+        return text
+
     def _toggle_prompt(self, key: str, label: str) -> Text:
         value = self._get_toggle_value(key)
         text = Text(no_wrap=True)
@@ -80,9 +113,14 @@ class ConfigApp(Container):
         return text
 
     def compose(self) -> ComposeResult:
-        options: list[Option] = [Option(self._model_prompt(), id="action:active_model")]
+        options: list[Option] = [
+            Option(self._model_prompt(), id=ConfigOptionKind.ACTION_MODEL),
+            Option(self._thinking_prompt(), id=ConfigOptionKind.ACTION_THINKING),
+        ]
         for key, label in self._toggle_settings:
-            options.append(Option(self._toggle_prompt(key, label), id=f"toggle:{key}"))
+            options.append(
+                Option(self._toggle_prompt(key, label), id=ConfigOptionKind.toggle(key))
+            )
 
         with Vertical(id="config-content"):
             yield NoMarkupStatic("Settings", classes="settings-title")
@@ -101,10 +139,15 @@ class ConfigApp(Container):
 
     def _refresh_options(self) -> None:
         option_list = self.query_one(OptionList)
-        option_list.replace_option_prompt("action:active_model", self._model_prompt())
+        option_list.replace_option_prompt(
+            ConfigOptionKind.ACTION_MODEL, self._model_prompt()
+        )
+        option_list.replace_option_prompt(
+            ConfigOptionKind.ACTION_THINKING, self._thinking_prompt()
+        )
         for key, label in self._toggle_settings:
             option_list.replace_option_prompt(
-                f"toggle:{key}", self._toggle_prompt(key, label)
+                ConfigOptionKind.toggle(key), self._toggle_prompt(key, label)
             )
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -112,12 +155,16 @@ class ConfigApp(Container):
         if not option_id:
             return
 
-        if option_id == "action:active_model":
+        if option_id == ConfigOptionKind.ACTION_MODEL:
             self.post_message(self.OpenModelPicker())
             return
 
-        if option_id.startswith("toggle:"):
-            key = option_id.removeprefix("toggle:")
+        if option_id == ConfigOptionKind.ACTION_THINKING:
+            self.post_message(self.OpenThinkingPicker())
+            return
+
+        if ConfigOptionKind.is_toggle(option_id):
+            key = ConfigOptionKind.toggle_key(option_id)
             current = self._get_toggle_value(key)
             new_value = "Off" if current == "On" else "On"
             self.changes[key] = new_value

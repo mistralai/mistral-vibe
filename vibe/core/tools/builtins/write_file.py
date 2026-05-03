@@ -8,6 +8,7 @@ import anyio
 from pydantic import BaseModel, Field
 
 from vibe.core.rewind.manager import FileSnapshot
+from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -57,17 +58,19 @@ class WriteFile(
 
     @classmethod
     def format_call_display(cls, args: WriteFileArgs) -> ToolCallDisplay:
+        tag = " (scratchpad)" if is_scratchpad_path(args.path) else ""
+        overwrite = " (overwrite)" if args.overwrite else ""
         return ToolCallDisplay(
-            summary=f"Writing {args.path}{' (overwrite)' if args.overwrite else ''}",
-            content=args.content,
+            summary=f"Writing {args.path}{overwrite}{tag}", content=args.content
         )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if isinstance(event.result, WriteFileResult):
             action = "Overwritten" if event.result.file_existed else "Created"
+            tag = " (scratchpad)" if is_scratchpad_path(event.result.path) else ""
             return ToolResultDisplay(
-                success=True, message=f"{action} {Path(event.result.path).name}"
+                success=True, message=f"{action} {Path(event.result.path).name}{tag}"
             )
 
         return ToolResultDisplay(success=True, message="File written")

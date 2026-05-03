@@ -8,6 +8,7 @@ from textual.message import Message
 from textual.widgets import TextArea
 
 from vibe.cli.autocompletion.base import CompletionResult
+from vibe.cli.commands import CommandRegistry
 from vibe.cli.textual_ui.external_editor import ExternalEditor
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
@@ -59,12 +60,12 @@ class ChatTextArea(TextArea):
 
     def __init__(
         self,
-        nuage_enabled: bool = False,
+        command_registry: CommandRegistry,
         voice_manager: VoiceManagerPort | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._nuage_enabled = nuage_enabled
+        self._command_registry = command_registry
         self._input_mode: InputMode = self.DEFAULT_MODE
         self._last_text = ""
         self._navigating_history = False
@@ -365,7 +366,7 @@ class ChatTextArea(TextArea):
     @property
     def mode_characters(self) -> set[InputMode]:
         chars: set[InputMode] = {"!", "/"}
-        if self._nuage_enabled:
+        if self._command_registry.has_command("teleport"):
             chars.add("&")
         return chars
 

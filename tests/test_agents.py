@@ -230,15 +230,49 @@ class TestAgentApplyToConfig:
         assert result.system_prompt_id == "cc"
         assert result.system_prompt == "Global custom prompt"
 
+    def test_custom_prompt_overrides_builtin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Custom prompts in .vibe/prompts/ should override built-in prompts.
+
+        A user-provided explore.md (or any built-in prompt name) in the
+        project or user prompts directory must take priority over the
+        bundled SystemPrompt enum.
+        """
+        project_prompts = tmp_path / "project" / ".vibe" / "prompts"
+        project_prompts.mkdir(parents=True)
+        (project_prompts / "explore.md").write_text("My custom explore prompt")
+
+        class _MockManager(HarnessFilesManager):
+            @property
+            def project_prompts_dirs(self) -> list[Path]:
+                return [project_prompts]
+
+            @property
+            def user_prompts_dirs(self) -> list[Path]:
+                return []
+
+        mock_manager = _MockManager(sources=("user",))
+        monkeypatch.setattr(
+            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
+        )
+
+        config = VibeConfig(
+            system_prompt_id="explore",
+            include_project_context=False,
+            include_prompt_detail=False,
+        )
+        assert config.system_prompt == "My custom explore prompt"
+
 
 class TestAgentProfileOverrides:
     def test_default_agent_disables_exit_plan_mode(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.DEFAULT].overrides
         assert "exit_plan_mode" in overrides.get("base_disabled", [])
 
-    def test_auto_approve_agent_sets_auto_approve(self) -> None:
+    def test_auto_approve_agent_sets_bypass_tool_permissions(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].overrides
-        assert overrides.get("auto_approve") is True
+        assert overrides.get("bypass_tool_permissions") is True
 
     def test_plan_agent_restricts_tools(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.PLAN].overrides

@@ -375,9 +375,26 @@ class AnthropicAdapter(APIAdapter):
         if last_block.get("type") in {"text", "image", "tool_result"}:
             last_block["cache_control"] = {"type": "ephemeral"}
 
-    @staticmethod
-    def _is_adaptive_model(model_name: str) -> bool:
-        return "opus-4-6" in model_name
+    # Anthropic models that require the `thinking={"type":"adaptive"}` +
+    # `output_config.effort` shape and reject the older
+    # `thinking={"type":"enabled","budget_tokens":...}` shape. Add new
+    # adaptive-only model families here as Anthropic ships them.
+    ADAPTIVE_MODEL_TAGS: ClassVar[frozenset[str]] = frozenset({"opus-4-6", "opus-4-7"})
+
+    # Anthropic models that have deprecated the `temperature` parameter and
+    # reject any payload containing it. Add new families here as Anthropic
+    # ships them.
+    TEMPERATURE_DEPRECATED_MODEL_TAGS: ClassVar[frozenset[str]] = frozenset({
+        "opus-4-7"
+    })
+
+    @classmethod
+    def _is_adaptive_model(cls, model_name: str) -> bool:
+        return any(tag in model_name for tag in cls.ADAPTIVE_MODEL_TAGS)
+
+    @classmethod
+    def _is_temperature_deprecated_model(cls, model_name: str) -> bool:
+        return any(tag in model_name for tag in cls.TEMPERATURE_DEPRECATED_MODEL_TAGS)
 
     def _apply_thinking_config(
         self,
@@ -391,9 +408,11 @@ class AnthropicAdapter(APIAdapter):
     ) -> None:
         has_thinking = self._has_thinking_content(messages)
         thinking_level = thinking
+        temperature_deprecated = self._is_temperature_deprecated_model(model_name)
 
         if thinking_level == "off" and not has_thinking:
-            payload["temperature"] = temperature
+            if not temperature_deprecated:
+                payload["temperature"] = temperature
             if max_tokens is not None:
                 payload["max_tokens"] = max_tokens
             else:
@@ -405,7 +424,7 @@ class AnthropicAdapter(APIAdapter):
         effective_level = thinking_level if thinking_level != "off" else "medium"
 
         if self._is_adaptive_model(model_name):
-            payload["thinking"] = {"type": "adaptive"}
+            payload["thinking"] = {"type": "adaptive", "display": "summarized"}
             payload["output_config"] = {"effort": effective_level}
             default_max = self.DEFAULT_ADAPTIVE_MAX_TOKENS
         else:
@@ -413,7 +432,8 @@ class AnthropicAdapter(APIAdapter):
             payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
             default_max = budget + self.DEFAULT_MAX_TOKENS
 
-        payload["temperature"] = 1
+        if not temperature_deprecated:
+            payload["temperature"] = 1
         payload["max_tokens"] = max_tokens if max_tokens is not None else default_max
 
     def _build_payload(

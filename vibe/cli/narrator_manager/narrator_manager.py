@@ -41,7 +41,9 @@ class NarratorManager:
         self._audio_player = audio_player
         self._telemetry_client = telemetry_client
         config = config_getter()
-        self._turn_summary: TurnSummaryPort = self._make_turn_summary(config)
+        self._turn_summary: TurnSummaryPort = self._make_turn_summary(
+            config, telemetry_client
+        )
         self._turn_summary.on_summary = self._on_turn_summary
         self._tts_client: TTSClientPort | None = self._make_tts_client(config)
         self._state = NarratorState.IDLE
@@ -124,18 +126,28 @@ class NarratorManager:
     def sync(self) -> None:
         self.cancel()
         config = self._config_getter()
-        self.turn_summary = self._make_turn_summary(config)
+        self.turn_summary = self._make_turn_summary(config, self._telemetry_client)
         self.tts_client = self._make_tts_client(config)
 
     @staticmethod
-    def _make_turn_summary(config: VibeConfig) -> NoopTurnSummary | TurnSummaryTracker:
+    def _make_turn_summary(
+        config: VibeConfig, telemetry_client: TelemetryClient | None = None
+    ) -> NoopTurnSummary | TurnSummaryTracker:
         if not config.narrator_enabled:
             return NoopTurnSummary()
         result = create_narrator_backend(config)
         if result is None:
             return NoopTurnSummary()
         backend, model = result
-        return TurnSummaryTracker(backend=backend, model=model)
+        return TurnSummaryTracker(
+            backend=backend,
+            model=model,
+            session_metadata_getter=(
+                None
+                if telemetry_client is None
+                else telemetry_client.build_client_event_metadata
+            ),
+        )
 
     @staticmethod
     def _make_tts_client(config: VibeConfig) -> TTSClientPort | None:

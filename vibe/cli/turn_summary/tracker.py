@@ -13,7 +13,18 @@ from vibe.core.config import ModelConfig
 from vibe.core.llm.types import BackendLike
 from vibe.core.logger import logger
 from vibe.core.prompts import UtilityPrompt
-from vibe.core.types import AssistantEvent, BaseEvent, LLMMessage, Role
+from vibe.core.telemetry.build_metadata import build_request_metadata
+from vibe.core.types import (
+    AssistantEvent,
+    BaseEvent,
+    LLMMessage,
+    Role,
+    UserMessageEvent,
+)
+
+
+def _empty_session_metadata() -> dict[str, str]:
+    return {}
 
 
 class TurnSummaryTracker(TurnSummaryPort):
@@ -23,11 +34,17 @@ class TurnSummaryTracker(TurnSummaryPort):
         model: ModelConfig,
         on_summary: Callable[[TurnSummaryResult], None] | None = None,
         max_tokens: int = 512,
+        session_metadata_getter: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         self._backend = backend
         self._model = model
         self._on_summary = on_summary
         self._max_tokens = max_tokens
+        self._session_metadata_getter: Callable[[], dict[str, str]] = (
+            _empty_session_metadata
+            if session_metadata_getter is None
+            else session_metadata_getter
+        )
         self._tasks: set[asyncio.Task[Any]] = set()
         self._data: TurnSummaryData | None = None
         self._generation: int = 0
@@ -52,6 +69,8 @@ class TurnSummaryTracker(TurnSummaryPort):
         if self._data is None:
             return
         match event:
+            case UserMessageEvent(message_id=message_id):
+                self._data.message_id = message_id
             case AssistantEvent(content=c) if c:
                 self._data.assistant_fragments.append(c)
 
@@ -77,6 +96,15 @@ class TurnSummaryTracker(TurnSummaryPort):
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+
+    def _build_metadata(self, data: TurnSummaryData) -> dict[str, str]:
+        default_metadata = build_request_metadata(
+            entrypoint_metadata=None,
+            session_id=None,
+            call_type="secondary_call",
+            message_id=data.message_id,
+        ).model_dump(exclude_none=True)
+        return default_metadata | self._session_metadata_getter()
 
     async def _generate_summary(self, data: TurnSummaryData, gen: int) -> None:
         try:
@@ -107,7 +135,7 @@ class TurnSummaryTracker(TurnSummaryPort):
                 tool_choice=None,
                 max_tokens=self._max_tokens,
                 extra_headers={},
-                metadata={},
+                metadata=self._build_metadata(data),
             )
 
             summary = result.message.content or ""

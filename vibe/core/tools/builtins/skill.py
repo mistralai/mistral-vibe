@@ -5,7 +5,6 @@ from typing import ClassVar
 
 from pydantic import BaseModel, Field
 
-from vibe.core.skills.parser import SkillParseError, parse_frontmatter
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -14,14 +13,9 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
-from vibe.core.tools.permissions import (
-    PermissionContext,
-    PermissionScope,
-    RequiredPermission,
-)
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils.io import read_safe
 
 _MAX_LISTED_FILES = 10
 
@@ -33,11 +27,13 @@ class SkillArgs(BaseModel):
 class SkillResult(BaseModel):
     name: str = Field(description="The name of the loaded skill")
     content: str = Field(description="The full skill content block")
-    skill_dir: str = Field(description="Absolute path to the skill directory")
+    skill_dir: str | None = Field(
+        default=None, description="Absolute path to the skill directory when available"
+    )
 
 
 class SkillToolConfig(BaseToolConfig):
-    permission: ToolPermission = ToolPermission.ASK
+    permission: ToolPermission = ToolPermission.ALWAYS
 
 
 class Skill(
@@ -71,17 +67,7 @@ class Skill(
         return "Loading skill"
 
     def resolve_permission(self, args: SkillArgs) -> PermissionContext | None:
-        return PermissionContext(
-            permission=self.config.permission,
-            required_permissions=[
-                RequiredPermission(
-                    scope=PermissionScope.FILE_PATTERN,
-                    invocation_pattern=args.name,
-                    session_pattern=args.name,
-                    label=f"Load skill: {args.name}",
-                )
-            ],
-        )
+        return PermissionContext(permission=ToolPermission.ALWAYS)
 
     async def run(
         self, args: SkillArgs, ctx: InvokeContext | None = None
@@ -98,36 +84,36 @@ class Skill(
                 f'Skill "{args.name}" not found. Available skills: {available or "none"}'
             )
 
-        try:
-            raw = read_safe(skill_info.skill_path).text
-            _, body = parse_frontmatter(raw)
-        except (OSError, SkillParseError) as e:
-            raise ToolError(f"Cannot load skill file: {e}") from e
-
         skill_dir = skill_info.skill_dir
         files: list[str] = []
-        try:
-            for entry in sorted(skill_dir.rglob("*")):
-                if not entry.is_file():
-                    continue
-                if entry.name == "SKILL.md":
-                    continue
-                files.append(str(entry.relative_to(skill_dir)))
-                if len(files) >= _MAX_LISTED_FILES:
-                    break
-        except OSError:
-            pass
+        if skill_dir is not None:
+            try:
+                for entry in sorted(skill_dir.rglob("*")):
+                    if not entry.is_file():
+                        continue
+                    if entry.name == "SKILL.md":
+                        continue
+                    files.append(str(entry.relative_to(skill_dir)))
+                    if len(files) >= _MAX_LISTED_FILES:
+                        break
+            except OSError:
+                pass
 
         file_lines = "\n".join(f"<file>{f}</file>" for f in files)
+        base_dir_lines: list[str] = []
+        if skill_dir is not None:
+            base_dir_lines = [
+                f"Base directory for this skill: {skill_dir}",
+                "Relative paths in this skill are relative to this base directory.",
+            ]
 
         output = "\n".join([
             f'<skill_content name="{args.name}">',
             f"# Skill: {args.name}",
             "",
-            body.strip(),
+            skill_info.prompt.strip(),
             "",
-            f"Base directory for this skill: {skill_dir}",
-            "Relative paths in this skill are relative to this base directory.",
+            *base_dir_lines,
             "Note: file list is sampled.",
             "",
             "<skill_files>",
@@ -136,4 +122,5 @@ class Skill(
             "</skill_content>",
         ])
 
-        yield SkillResult(name=args.name, content=output, skill_dir=str(skill_dir))
+        resolved_skill_dir = None if skill_dir is None else str(skill_dir)
+        yield SkillResult(name=args.name, content=output, skill_dir=resolved_skill_dir)

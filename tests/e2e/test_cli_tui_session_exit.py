@@ -12,6 +12,7 @@ import pytest
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     ansi_tolerant_pattern,
+    send_ctrl_c_until_quit_confirmation,
     strip_ansi,
     wait_for_main_screen,
     wait_for_request_count,
@@ -103,7 +104,7 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
             request_count_getter=lambda: len(streaming_mock_server.requests),
         )
 
-        child.sendcontrol("c")
+        send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
         child.expect(pexpect.EOF, timeout=10)
 
     first_output = strip_ansi(captured.getvalue())
@@ -130,7 +131,7 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
             request_count_getter=lambda: len(streaming_mock_server.requests),
         )
 
-        resumed_child.sendcontrol("c")
+        send_ctrl_c_until_quit_confirmation(resumed_child, resumed_captured, timeout=5)
         resumed_child.expect(pexpect.EOF, timeout=10)
 
         second_output = strip_ansi(resumed_captured.getvalue())

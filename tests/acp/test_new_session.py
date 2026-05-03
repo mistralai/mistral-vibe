@@ -99,7 +99,7 @@ class TestACPNewSession:
 
         # Check config_options
         assert session_response.config_options is not None
-        assert len(session_response.config_options) == 2
+        assert len(session_response.config_options) == 3
 
         # Mode config option
         mode_config = session_response.config_options[0]
@@ -124,6 +124,13 @@ class TestACPNewSession:
         assert len(model_config.options) == 2
         model_option_values = {opt.value for opt in model_config.options}
         assert model_option_values == {"devstral-latest", "devstral-small"}
+
+        # Thinking config option
+        thinking_config = session_response.config_options[2]
+        assert thinking_config.id == "thinking"
+        assert thinking_config.category == "thinking"
+        assert thinking_config.current_value == "off"
+        assert len(thinking_config.options) == 5
 
     @pytest.mark.skip(reason="TODO: Fix this test")
     @pytest.mark.asyncio

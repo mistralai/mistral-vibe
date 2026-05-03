@@ -135,15 +135,24 @@ class Task(
             agent_name=args.agent,
             entrypoint_metadata=ctx.entrypoint_metadata,
             is_subagent=True,
+            defer_heavy_init=True,
         )
 
         if ctx and ctx.approval_callback:
             subagent_loop.set_approval_callback(ctx.approval_callback)
 
+        task_text = args.task
+        if ctx.scratchpad_dir:
+            task_text = (
+                f"Scratchpad directory: {ctx.scratchpad_dir}\n"
+                "You can read and write files here without permission prompts.\n\n"
+                f"{args.task}"
+            )
+
         accumulated_response: list[str] = []
         completed = True
         try:
-            async with aclosing(subagent_loop.act(args.task)) as events:
+            async with aclosing(subagent_loop.act(task_text)) as events:
                 async for event in events:
                     if isinstance(event, AssistantEvent) and event.content:
                         accumulated_response.append(event.content)

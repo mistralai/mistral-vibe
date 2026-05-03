@@ -8,6 +8,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from vibe.core.agent_loop import AgentLoopStateError
 from vibe.core.config import VibeConfig
+from vibe.core.logger import logger
 from vibe.core.nuage.agent_models import (
     _SUBMIT_INPUT_UPDATE_NAME,
     ChatInputModel,
@@ -76,8 +77,8 @@ class RemoteEventsSource:
     def client(self) -> WorkflowsClient:
         if self._client is None:
             self._client = WorkflowsClient(
-                base_url=self._config.nuage_base_url,
-                api_key=self._config.nuage_api_key,
+                base_url=self._config.vibe_code_base_url,
+                api_key=self._config.vibe_code_api_key,
                 timeout=self._config.api_timeout,
             )
         return self._client
@@ -173,7 +174,11 @@ class RemoteEventsSource:
             return None
 
     def _consume_workflow_event(self, event: WorkflowEvent) -> list[BaseEvent]:
-        return self._translator.consume_workflow_event(event)
+        try:
+            return self._translator.consume_workflow_event(event)
+        except ValidationError:
+            logger.warning("Failed to consume remote workflow event", exc_info=True)
+            return []
 
     def _is_retryable_stream_disconnect(self, exc: WorkflowsException) -> bool:
         if exc.code != ErrorCode.GET_EVENTS_STREAM_ERROR:

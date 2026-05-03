@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import subprocess
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, mock_open, patch
@@ -16,6 +17,7 @@ from vibe.cli.clipboard import (
     _copy_xclip,
     _read_clipboard,
     copy_selection_to_clipboard,
+    copy_text_to_clipboard,
 )
 
 
@@ -174,6 +176,44 @@ def test_copy_selection_to_clipboard_multiple_widgets(mock_app: MagicMock) -> No
         )
 
 
+@patch("vibe.cli.clipboard._copy_to_clipboard")
+def test_copy_text_to_clipboard_success(
+    mock_copy_to_clipboard: MagicMock, mock_app: MagicMock
+) -> None:
+    result = copy_text_to_clipboard(
+        mock_app, "assistant text", success_message="Agent message copied"
+    )
+
+    assert result == "assistant text"
+    mock_copy_to_clipboard.assert_called_once_with("assistant text")
+    mock_app.notify.assert_called_once_with(
+        "Agent message copied", severity="information", timeout=2, markup=False
+    )
+
+
+@patch("vibe.cli.clipboard._copy_to_clipboard")
+def test_copy_text_to_clipboard_shows_failure_when_clipboard_unavailable(
+    mock_copy_to_clipboard: MagicMock, mock_app: MagicMock
+) -> None:
+    mock_copy_to_clipboard.side_effect = RuntimeError("All clipboard strategies failed")
+
+    result = copy_text_to_clipboard(mock_app, "assistant text")
+
+    assert result is None
+    mock_copy_to_clipboard.assert_called_once_with("assistant text")
+    mock_app.notify.assert_called_once_with(
+        "Failed to copy - clipboard not available", severity="warning", timeout=3
+    )
+
+
+def test_copy_text_to_clipboard_returns_none_for_empty_text(
+    mock_app: MagicMock,
+) -> None:
+    result = copy_text_to_clipboard(mock_app, "")
+    assert result is None
+    mock_app.notify.assert_not_called()
+
+
 def test_copy_to_clipboard_stops_after_verified_copy() -> None:
     """Stops iterating once _read_clipboard confirms the text landed."""
     mock_first = MagicMock()
@@ -244,21 +284,28 @@ def test_read_clipboard_skips_failing_reader() -> None:
 @patch("subprocess.run")
 def test_copy_pbcopy(mock_run: MagicMock) -> None:
     _copy_pbcopy("hello")
-    mock_run.assert_called_once_with(["pbcopy"], input=b"hello", check=True)
+    mock_run.assert_called_once_with(
+        ["pbcopy"], input=b"hello", check=True, stderr=subprocess.DEVNULL
+    )
 
 
 @patch("subprocess.run")
 def test_copy_xclip(mock_run: MagicMock) -> None:
     _copy_xclip("hello")
     mock_run.assert_called_once_with(
-        ["xclip", "-selection", "clipboard"], input=b"hello", check=True
+        ["xclip", "-selection", "clipboard"],
+        input=b"hello",
+        check=True,
+        stderr=subprocess.DEVNULL,
     )
 
 
 @patch("subprocess.run")
 def test_copy_wl_copy(mock_run: MagicMock) -> None:
     _copy_wl_copy("hello")
-    mock_run.assert_called_once_with(["wl-copy"], input=b"hello", check=True)
+    mock_run.assert_called_once_with(
+        ["wl-copy"], input=b"hello", check=True, stderr=subprocess.DEVNULL
+    )
 
 
 def test_copy_methods_includes_available_commands() -> None:

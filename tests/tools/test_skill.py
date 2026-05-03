@@ -8,14 +8,13 @@ import pytest
 from tests.mock.utils import collect_result
 from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.models import SkillInfo
-from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
+from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError, ToolPermission
 from vibe.core.tools.builtins.skill import (
     Skill,
     SkillArgs,
     SkillResult,
     SkillToolConfig,
 )
-from vibe.core.tools.permissions import PermissionScope
 
 
 def _make_skill_dir(
@@ -37,7 +36,10 @@ def _make_skill_dir(
         file_path.write_text(f"content of {f}", encoding="utf-8")
 
     return SkillInfo(
-        name=name, description=description, skill_path=skill_dir / "SKILL.md"
+        name=name,
+        description=description,
+        skill_path=skill_dir / "SKILL.md",
+        prompt=body,
     )
 
 
@@ -83,11 +85,13 @@ class TestSkillRun:
         ctx = _make_ctx(manager)
 
         result = await collect_result(skill_tool.run(SkillArgs(name="my-skill"), ctx))
+        skill_dir = info.skill_dir
+        assert skill_dir is not None
 
         assert "<skill_files>" in result.content
         assert "<file>scripts/run.sh</file>" in result.content
         assert "<file>references/guide.md</file>" in result.content
-        assert f"<file>{info.skill_dir / 'scripts/run.sh'}</file>" not in result.content
+        assert f"<file>{skill_dir / 'scripts/run.sh'}</file>" not in result.content
 
     @pytest.mark.asyncio
     async def test_excludes_skill_md_from_file_list(
@@ -137,8 +141,10 @@ class TestSkillRun:
         ctx = _make_ctx(manager)
 
         result = await collect_result(skill_tool.run(SkillArgs(name="my-skill"), ctx))
+        skill_dir = info.skill_dir
+        assert skill_dir is not None
 
-        assert result.skill_dir == str(info.skill_dir)
+        assert result.skill_dir == str(skill_dir)
 
     @pytest.mark.asyncio
     async def test_includes_base_directory(
@@ -149,8 +155,30 @@ class TestSkillRun:
         ctx = _make_ctx(manager)
 
         result = await collect_result(skill_tool.run(SkillArgs(name="my-skill"), ctx))
+        skill_dir = info.skill_dir
+        assert skill_dir is not None
 
-        assert f"Base directory for this skill: {info.skill_dir}" in result.content
+        assert f"Base directory for this skill: {skill_dir}" in result.content
+
+    @pytest.mark.asyncio
+    async def test_uses_in_memory_prompt_when_available(
+        self, skill_tool: Skill
+    ) -> None:
+        info = SkillInfo(
+            name="inline-skill",
+            description="Inline prompt skill",
+            prompt="Inline instructions from Python object.",
+        )
+        manager = _make_skill_manager({"inline-skill": info})
+        ctx = _make_ctx(manager)
+
+        result = await collect_result(
+            skill_tool.run(SkillArgs(name="inline-skill"), ctx)
+        )
+
+        assert "Inline instructions from Python object." in result.content
+        assert "Base directory for this skill:" not in result.content
+        assert result.skill_dir is None
 
 
 class TestSkillErrors:
@@ -182,30 +210,35 @@ class TestSkillErrors:
             await collect_result(skill_tool.run(SkillArgs(name="missing"), ctx=ctx))
 
     @pytest.mark.asyncio
-    async def test_unreadable_skill_file(
+    async def test_ignores_unreadable_file_when_prompt_is_available(
         self, tmp_path: Path, skill_tool: Skill
     ) -> None:
         info = SkillInfo(
             name="broken",
             description="Broken skill",
             skill_path=tmp_path / "nonexistent" / "SKILL.md",
+            prompt="Use prompt from state.",
         )
         manager = _make_skill_manager({"broken": info})
         ctx = _make_ctx(manager)
 
-        with pytest.raises(ToolError, match="Cannot load skill file"):
-            await collect_result(skill_tool.run(SkillArgs(name="broken"), ctx=ctx))
+        result = await collect_result(skill_tool.run(SkillArgs(name="broken"), ctx=ctx))
+        assert "Use prompt from state." in result.content
 
 
 class TestSkillPermission:
-    def test_resolve_permission_returns_file_pattern(self, skill_tool: Skill) -> None:
+    def test_resolve_permission_always_allowed(self, skill_tool: Skill) -> None:
         perm = skill_tool.resolve_permission(SkillArgs(name="my-skill"))
 
         assert perm is not None
-        assert len(perm.required_permissions) == 1
-        assert perm.required_permissions[0].scope == PermissionScope.FILE_PATTERN
-        assert perm.required_permissions[0].invocation_pattern == "my-skill"
-        assert perm.required_permissions[0].session_pattern == "my-skill"
+        assert perm.permission == ToolPermission.ALWAYS
+        assert perm.required_permissions == []
+
+    def test_non_builtin_skill_is_still_always_allowed(self, skill_tool: Skill) -> None:
+        perm = skill_tool.resolve_permission(SkillArgs(name="custom-skill"))
+
+        assert perm is not None
+        assert perm.permission == ToolPermission.ALWAYS
 
 
 class TestSkillMeta:
