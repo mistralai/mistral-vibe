@@ -5,8 +5,11 @@ from dataclasses import dataclass
 import sys
 
 from vibe.cli.plan_offer.decide_plan_offer import PlanInfo
+from vibe.core.autocompletion.fuzzy import fuzzy_match
 
 ALT_KEY = "⌥" if sys.platform == "darwin" else "Alt"
+
+MIN_FUZZY_SCORE = 10.0
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,7 @@ class Command:
     handler: str
     exits: bool = False
     is_available: CommandAvailability | None = None
+    subcommands: dict[str, str] | None = None
 
 
 class CommandRegistry:
@@ -52,12 +56,12 @@ class CommandRegistry:
     def _build_commands(self) -> dict[str, Command]:
         return {
             "help": Command(
-                aliases=frozenset(["/help"]),
+                aliases=frozenset(["/help", "/?", "/info"]),
                 description="Show help message",
                 handler="_show_help",
             ),
             "config": Command(
-                aliases=frozenset(["/config"]),
+                aliases=frozenset(["/config", "/settings", "/preferences"]),
                 description="Edit config settings",
                 handler="_show_config",
             ),
@@ -72,12 +76,12 @@ class CommandRegistry:
                 handler="_show_thinking",
             ),
             "reload": Command(
-                aliases=frozenset(["/reload"]),
+                aliases=frozenset(["/reload", "/refresh"]),
                 description="Reload configuration, agent instructions, and skills from disk",
                 handler="_reload_config",
             ),
             "clear": Command(
-                aliases=frozenset(["/clear"]),
+                aliases=frozenset(["/clear", "/reset"]),
                 description="Clear conversation history",
                 handler="_clear_history",
             ),
@@ -87,7 +91,7 @@ class CommandRegistry:
                 handler="_copy_last_agent_message",
             ),
             "log": Command(
-                aliases=frozenset(["/log"]),
+                aliases=frozenset(["/log", "/logpath"]),
                 description="Show path to current interaction log file",
                 handler="_show_log_path",
             ),
@@ -97,18 +101,20 @@ class CommandRegistry:
                 handler="action_toggle_debug_console",
             ),
             "compact": Command(
-                aliases=frozenset(["/compact"]),
+                aliases=frozenset(["/compact", "/summarize"]),
                 description="Compact conversation history by summarizing. Optionally pass instructions to guide the summary",
                 handler="_compact_history",
             ),
             "exit": Command(
-                aliases=frozenset(["/exit", "exit", "quit", ":q", ":quit"]),
+                aliases=frozenset(
+                    ["/exit", "/quit", "/close", "/leave", "exit", "quit", ":q", ":quit"]
+                ),
                 description="Exit the application",
                 handler="_exit_app",
                 exits=True,
             ),
             "status": Command(
-                aliases=frozenset(["/status"]),
+                aliases=frozenset(["/status", "/stats"]),
                 description="Display agent statistics",
                 handler="_show_status",
             ),
@@ -129,7 +135,7 @@ class CommandRegistry:
                 handler="_show_session_picker",
             ),
             "rename": Command(
-                aliases=frozenset(["/rename"]),
+                aliases=frozenset(["/rename", "/title"]),
                 description="Rename the current session",
                 handler="_rename_session",
             ),
@@ -157,7 +163,7 @@ class CommandRegistry:
                 handler="_uninstall_lean",
             ),
             "rewind": Command(
-                aliases=frozenset(["/rewind"]),
+                aliases=frozenset(["/rewind", "/undo"]),
                 description="Rewind to a previous message",
                 handler="_start_rewind_mode",
             ),
@@ -170,9 +176,20 @@ class CommandRegistry:
                 handler="_loop_command",
             ),
             "data-retention": Command(
-                aliases=frozenset(["/data-retention"]),
+                aliases=frozenset(["/data-retention", "/privacy"]),
                 description="Show data retention information",
                 handler="_show_data_retention",
+            ),
+            "skill": Command(
+                aliases=frozenset(["/skill", "/skills"]),
+                description="Manage skills",
+                handler="_manage_skills",
+                subcommands={
+                    "list": "List available skills and their status",
+                    "reload": "Reload skills from disk",
+                    "activate": "Enable a skill",
+                    "deactivate": "Disable a skill",
+                },
             ),
             "theme": Command(
                 aliases=frozenset(["/theme"]),
@@ -219,6 +236,23 @@ class CommandRegistry:
     def get_command_name(self, user_input: str) -> str | None:
         return self._alias_map().get(user_input.lower().strip())
 
+    def fuzzy_resolve(self, user_input: str) -> str | None:
+        normalized = user_input.lower().strip()
+        if exact := self._alias_map().get(normalized):
+            return exact
+
+        if not normalized.startswith("/"):
+            return None
+
+        best_score = MIN_FUZZY_SCORE
+        best_name: str | None = None
+        for alias, cmd_name in self._alias_map().items():
+            result = fuzzy_match(normalized, alias)
+            if result.matched and result.score > best_score:
+                best_score = result.score
+                best_name = cmd_name
+        return best_name
+
     def parse_command(self, user_input: str) -> tuple[str, Command, str] | None:
         parts = user_input.strip().split(None, 1)
         if not parts:
@@ -227,6 +261,8 @@ class CommandRegistry:
         cmd_word = parts[0]
         cmd_args = parts[1] if len(parts) > 1 else ""
         cmd_name = self.get_command_name(cmd_word)
+        if cmd_name is None:
+            cmd_name = self.fuzzy_resolve(cmd_word)
         if cmd_name is None:
             return None
 

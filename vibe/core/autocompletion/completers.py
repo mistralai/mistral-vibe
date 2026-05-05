@@ -40,6 +40,31 @@ class CommandCompleter(Completer):
             descriptions[alias] = description
         return list(descriptions.keys()), descriptions
 
+    def _fuzzy_rank(
+        self, aliases: list[str], search_str: str
+    ) -> list[tuple[str, float]]:
+        scored: list[tuple[str, float]] = []
+        for alias in aliases:
+            result = fuzzy_match(search_str, alias)
+            if result.matched:
+                scored.append((alias, result.score))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+    def _filter_aliases_by_prefix(
+        self, aliases: list[str], search_str: str
+    ) -> list[str]:
+        search_parts = search_str.split(" ")
+        target_len = len(search_parts)
+
+        filtered = []
+        for alias in aliases:
+            alias_parts = alias.split(" ")
+            if len(alias_parts) == target_len and alias_parts[:-1] == search_parts[:-1]:
+                filtered.append(alias)
+
+        return filtered
+
     def _head_word(self, text: str, cursor_pos: int) -> str:
         head = text.split(" ", 1)[0]
         return head[1 : min(cursor_pos, len(head))].lower()
@@ -67,6 +92,12 @@ class CommandCompleter(Completer):
             return []
 
         aliases, _ = self._build_lookup()
+        if " " in text[:cursor_pos]:
+            search_str = text[:cursor_pos].lower()
+            filtered_aliases = self._filter_aliases_by_prefix(aliases, search_str)
+
+            return filtered_aliases
+
         search_str = "/" + self._head_word(text, cursor_pos)
         return self._fuzzy_filter(aliases, search_str)
 
@@ -75,6 +106,11 @@ class CommandCompleter(Completer):
             return []
 
         aliases, descriptions = self._build_lookup()
+        if " " in text[:cursor_pos]:
+            search_str = text[:cursor_pos].lower()
+            filtered_aliases = self._filter_aliases_by_prefix(aliases, search_str)
+            return [(alias, descriptions.get(alias, "")) for alias in filtered_aliases]
+
         search_str = "/" + self._head_word(text, cursor_pos)
         return [
             (alias, descriptions.get(alias, ""))

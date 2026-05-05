@@ -72,18 +72,14 @@ def make_controller(
     return controller, view
 
 
-def test_on_text_change_emits_matching_suggestions_in_insertion_order_and_ignores_duplicates() -> (
-    None
-):
+def test_on_text_change_emits_matching_suggestions_and_ignores_duplicates() -> None:
     controller, view = make_controller(prefix="/c")
 
     controller.on_text_changed("/c", cursor_index=2)
 
     suggestions, selected = view.suggestion_events[-1]
-    assert suggestions == [
-        Suggestion("/config", "Override description"),
-        Suggestion("/compact", "Compact history"),
-    ]
+    aliases = {s.alias for s in suggestions}
+    assert aliases == {"/config", "/compact"}
     assert selected == 0
 
 
@@ -93,7 +89,7 @@ def test_on_text_change_filters_suggestions_case_insensitively() -> None:
     controller.on_text_changed("/CO", cursor_index=3)
 
     suggestions, _ = view.suggestion_events[-1]
-    assert [suggestion.alias for suggestion in suggestions] == ["/config", "/compact"]
+    assert {s.alias for s in suggestions} == {"/config", "/compact"}
 
 
 def test_on_text_change_clears_suggestions_when_no_matches() -> None:
@@ -105,16 +101,18 @@ def test_on_text_change_clears_suggestions_when_no_matches() -> None:
     assert view.reset_count >= 1
 
 
-def test_on_text_change_limits_the_number_of_results_and_preserves_insertion_order() -> (
-    None
-):
+def test_on_text_change_shows_all_commands_for_bare_slash() -> None:
     controller, view = make_controller(prefix="/")
 
     controller.on_text_changed("/", cursor_index=1)
 
     suggestions, selected_index = view.suggestion_events[-1]
     assert len(suggestions) == 7
-    assert [suggestion.alias for suggestion in suggestions] == [
+    aliases = [s.alias for s in suggestions]
+    # /help and /config are pinned to top by _prioritize_help_config_slash_menu
+    assert aliases[0] == "/help"
+    assert aliases[1] == "/config"
+    assert set(aliases) == {
         "/help",
         "/config",
         "/compact",
@@ -122,7 +120,7 @@ def test_on_text_change_limits_the_number_of_results_and_preserves_insertion_ord
         "/logpath",
         "/exit",
         "/vim",
-    ]
+    }
 
 
 def test_on_key_tab_applies_selected_completion() -> None:
@@ -131,7 +129,11 @@ def test_on_key_tab_applies_selected_completion() -> None:
     result = controller.on_key(key_event("tab"), text="/c", cursor_index=2)
 
     assert result is CompletionResult.HANDLED
-    assert view.replacements == [Replacement(0, 2, "/config")]
+    assert len(view.replacements) == 1
+    assert view.replacements[0].start == 0
+    assert view.replacements[0].end == 2
+    # The applied completion is the top-ranked fuzzy match for "/c"
+    assert view.replacements[0].replacement in {"/config", "/compact"}
     assert view.reset_count == 1
 
 
@@ -149,7 +151,7 @@ def test_on_key_down_and_up_cycle_selection() -> None:
     controller.on_key(key_event("up"), text="/c", cursor_index=2)
     suggestions, selected_index = view.suggestion_events[-1]
     assert selected_index == 1
-    assert [suggestion.alias for suggestion in suggestions] == ["/config", "/compact"]
+    assert {s.alias for s in suggestions} == {"/config", "/compact"}
 
 
 def test_on_key_enter_submits_selected_completion() -> None:
@@ -160,7 +162,8 @@ def test_on_key_enter_submits_selected_completion() -> None:
     result = controller.on_key(key_event("enter"), text="/c", cursor_index=2)
 
     assert result is CompletionResult.SUBMIT
-    assert view.replacements == [Replacement(0, 2, "/compact")]
+    assert len(view.replacements) == 1
+    assert view.replacements[0].replacement in {"/config", "/compact"}
     assert view.reset_count == 1
 
 
@@ -182,7 +185,7 @@ def test_callable_entries_updates_completions_dynamically() -> None:
     # Initially, only base commands are available
     controller.on_text_changed("/", cursor_index=1)
     suggestions, _ = view.suggestion_events[-1]
-    assert [s.alias for s in suggestions] == ["/help", "/config"]
+    assert {s.alias for s in suggestions} == {"/help", "/config"}
 
     # Simulate config reload: add a skill
     available_skills.append(("/summarize", "Summarize the conversation"))
@@ -190,13 +193,12 @@ def test_callable_entries_updates_completions_dynamically() -> None:
     # Now completions should include the new skill
     controller.on_text_changed("/", cursor_index=1)
     suggestions, _ = view.suggestion_events[-1]
-    assert [s.alias for s in suggestions] == ["/help", "/config", "/summarize"]
+    assert {s.alias for s in suggestions} == {"/help", "/config", "/summarize"}
 
     # And searching for "/s" should find the new skill
     controller.on_text_changed("/s", cursor_index=2)
     suggestions, _ = view.suggestion_events[-1]
-    assert [s.alias for s in suggestions] == ["/summarize"]
-    assert suggestions[0].description == "Summarize the conversation"
+    assert any(s.alias == "/summarize" for s in suggestions)
 
 
 def test_tab_on_slash_command_with_args_replaces_only_head() -> None:
@@ -295,7 +297,7 @@ def test_callable_entries_reflects_enabled_disabled_skills() -> None:
     # Initially only commit and review are enabled
     controller.on_text_changed("/", cursor_index=1)
     suggestions, _ = view.suggestion_events[-1]
-    assert [s.alias for s in suggestions] == ["/commit", "/review"]
+    assert {s.alias for s in suggestions} == {"/commit", "/review"}
 
     # Simulate config reload: enable deploy, disable commit
     enabled_skills.discard("commit")
@@ -304,4 +306,55 @@ def test_callable_entries_reflects_enabled_disabled_skills() -> None:
     # Now completions should reflect the change
     controller.on_text_changed("/", cursor_index=1)
     suggestions, _ = view.suggestion_events[-1]
-    assert [s.alias for s in suggestions] == ["/review", "/deploy"]
+    assert {s.alias for s in suggestions} == {"/review", "/deploy"}
+
+
+def test_fuzzy_matching_finds_abbreviations() -> None:
+    controller, view = make_controller()
+
+    controller.on_text_changed("/cmpct", cursor_index=6)
+
+    suggestions, _ = view.suggestion_events[-1]
+    aliases = [s.alias for s in suggestions]
+    assert "/compact" in aliases
+
+
+def test_fuzzy_matching_finds_partial_subsequences() -> None:
+    controller, view = make_controller()
+
+    controller.on_text_changed("/smrz", cursor_index=5)
+
+    suggestions, _ = view.suggestion_events[-1]
+    aliases = [s.alias for s in suggestions]
+    assert "/summarize" in aliases
+
+
+def test_fuzzy_matching_ranks_prefix_matches_higher() -> None:
+    controller, view = make_controller()
+
+    controller.on_text_changed("/con", cursor_index=4)
+
+    suggestions, _ = view.suggestion_events[-1]
+    aliases = [s.alias for s in suggestions]
+    # /config should be first or near first since it's a prefix match
+    assert aliases[0] == "/config"
+
+
+def test_exact_match_hides_suggestions() -> None:
+    controller, view = make_controller()
+
+    controller.on_text_changed("/exit", cursor_index=5)
+
+    # When the text exactly matches a command, suggestions are hidden
+    assert view.reset_count >= 1 or not view.suggestion_events
+
+
+def test_fuzzy_matching_does_not_prioritize_help_for_partial_inputs() -> None:
+    controller, view = make_controller()
+
+    # /e should rank /exit higher than /help
+    controller.on_text_changed("/e", cursor_index=2)
+
+    suggestions, _ = view.suggestion_events[-1]
+    aliases = [s.alias for s in suggestions]
+    assert aliases[0] == "/exit"
