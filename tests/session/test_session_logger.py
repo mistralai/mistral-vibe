@@ -139,6 +139,8 @@ class TestSessionLoggerMetadata:
         assert metadata.username == "testuser"
         assert "working_directory" in metadata.environment
         assert metadata.environment["working_directory"] == str(Path.cwd())
+        assert metadata.title is None
+        assert metadata.title_source == "auto"
 
     @patch("vibe.core.session.session_logger.subprocess.run")
     @patch("vibe.core.session.session_logger.getpass.getuser")
@@ -159,6 +161,50 @@ class TestSessionLoggerMetadata:
         assert metadata.git_commit is None
         assert metadata.git_branch is None
         assert metadata.username == "testuser"
+
+
+class TestSessionLoggerTitleManagement:
+    def test_set_title_marks_live_session_title_as_manual(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+
+        logger.set_title("Manual title")
+
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.title == "Manual title"
+        assert logger.session_metadata.title_source == "manual"
+
+    def test_set_title_none_returns_live_session_to_auto_mode(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        logger.set_title("Manual title")
+
+        logger.set_title(None)
+
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.title is None
+        assert logger.session_metadata.title_source == "auto"
+
+    def test_set_title_rejects_empty_title(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+
+        with pytest.raises(ValueError, match="Session title cannot be empty."):
+            logger.set_title("   ")
+
+    def test_set_title_preserves_live_session_end_time(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-123")
+        assert logger.session_metadata is not None
+        logger.session_metadata.end_time = "2026-01-01T10:00:00+00:00"
+
+        logger.set_title("Manual title")
+
+        assert logger.session_metadata.end_time == "2026-01-01T10:00:00+00:00"
 
 
 class TestSessionLoggerSaveInteraction:
@@ -234,6 +280,7 @@ class TestSessionLoggerSaveInteraction:
             assert metadata["stats"]["steps"] == stats.steps
             assert "title" in metadata
             assert metadata["title"] == "Hello"
+            assert metadata["title_source"] == "auto"
             assert "system_prompt" in metadata
 
     @pytest.mark.asyncio
@@ -447,6 +494,7 @@ class TestSessionLoggerSaveInteraction:
             assert metadata["total_messages"] == 1
             assert metadata["stats"]["steps"] == stats.steps
             assert metadata["title"] == "Untitled session"
+            assert metadata["title_source"] == "auto"
 
         messages_file = logger.session_dir / "messages.jsonl"
         assert messages_file.exists()
@@ -496,6 +544,46 @@ class TestSessionLoggerSaveInteraction:
             assert metadata["stats"]["steps"] == stats.steps
             expected_title = long_message[:50] + "…"
             assert metadata["title"] == expected_title
+            assert metadata["title_source"] == "auto"
+
+    @pytest.mark.asyncio
+    async def test_save_interaction_preserves_manual_title(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        session_id = "test-session-123"
+        logger = SessionLogger(session_config, session_id)
+        assert logger.session_metadata is not None
+
+        logger.set_title("Manual title")
+
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="Hello"),
+            LLMMessage(role=Role.assistant, content="Hi there!"),
+        ]
+        stats = AgentStats(
+            steps=1, session_prompt_tokens=10, session_completion_tokens=20
+        )
+
+        await logger.save_interaction(
+            messages=messages,
+            stats=stats,
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_dir is not None
+        metadata_file = logger.session_dir / "meta.json"
+        with open(metadata_file) as f:
+            metadata = json.load(f)
+
+        assert metadata["title"] == "Manual title"
+        assert metadata["title_source"] == "manual"
 
         messages_file = logger.session_dir / "messages.jsonl"
         assert messages_file.exists()

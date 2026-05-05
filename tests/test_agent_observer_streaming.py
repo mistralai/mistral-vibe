@@ -536,6 +536,51 @@ async def test_context_too_long_non_streaming(observer_capture) -> None:
     assert agent.session_logger.save_interaction.await_count == 1
 
 
+class _NonRetryableError(Exception):
+    # Mimics Temporal's ``ApplicationError(non_retryable=True)`` without
+    # pulling temporalio into vibe's test deps. The wrap-site check relies
+    # on the truthy ``non_retryable`` attribute, not the concrete type.
+    non_retryable = True
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_passes_through_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    backend = FakeBackend(exception_to_raise=_NonRetryableError("auth failed"))
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=True,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(_NonRetryableError, match="auth failed"):
+        [_ async for _ in agent.act("Trigger non-retryable failure while streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_passes_through_non_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    backend = FakeBackend(exception_to_raise=_NonRetryableError("auth failed"))
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=False,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(_NonRetryableError, match="auth failed"):
+        [_ async for _ in agent.act("Trigger non-retryable failure without streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
 def _snapshot_events(events: list) -> list[tuple[str, str]]:
     return [
         (type(e).__name__, e.content)

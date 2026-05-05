@@ -1049,6 +1049,36 @@ class TestSessionLoaderGetFirstUserMessage:
 
 
 class TestSessionLoaderUTF8Encoding:
+    def test_load_metadata_defaults_title_source_for_existing_sessions(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = session_dir / "test_20230101_120000_legacyttl"
+        session_folder.mkdir()
+
+        metadata_content = {
+            "session_id": "legacy-title-test",
+            "start_time": "2023-01-01T12:00:00Z",
+            "end_time": "2023-01-01T12:05:00Z",
+            "environment": {"working_directory": "/home/user/project"},
+            "username": "testuser",
+            "git_commit": None,
+            "git_branch": None,
+            "title": "Existing title",
+        }
+
+        metadata_file = session_folder / "meta.json"
+        with metadata_file.open("w", encoding="utf-8") as f:
+            json.dump(metadata_content, f, indent=2, ensure_ascii=False)
+
+        messages_file = session_folder / "messages.jsonl"
+        messages_file.write_text('{"role": "user", "content": "Hello"}\n')
+
+        metadata = SessionLoader.load_metadata(session_folder)
+
+        assert metadata.title == "Existing title"
+        assert metadata.title_source == "auto"
+
     def test_load_metadata_with_utf8_encoding(
         self, session_config: SessionLoggingConfig, create_test_session
     ) -> None:

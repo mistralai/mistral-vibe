@@ -265,6 +265,7 @@ def run_cli(args: argparse.Namespace) -> None:
                     initial_prompt=args.initial_prompt or stdin_prompt,
                     teleport_on_start=args.teleport,
                     show_resume_picker=args.resume is True,
+                    is_resuming_session=loaded_session is not None,
                 ),
             )
 

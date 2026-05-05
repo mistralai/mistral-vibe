@@ -34,6 +34,7 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 - Enums: `StrEnum` / `IntEnum` with `auto()` and UPPERCASE members. For type-mixing, the mix-in type comes before `Enum` in the bases. Add methods or `@property` rather than parallel lookup tables.
 - Write declarative, minimalist code: express intent, drop boilerplate.
 - Never call a private method from outside of it's class
+- Avoid comments and docstrings, except for when there's a hard to spot corner case
 
 ## Typing & imports
 

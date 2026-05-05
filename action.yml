@@ -56,5 +56,4 @@ runs:
       run: |
         cd "${{ github.workspace }}"
         uv run --directory "${{ github.action_path }}" vibe \
-          --auto-approve \
           -p "$PROMPT_INPUT"

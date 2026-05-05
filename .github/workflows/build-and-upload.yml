@@ -20,47 +20,25 @@ jobs:
         id: set-matrix
         run: |
           # Linux: manylinux_2_28 containers → binary works on glibc >= 2.28 (RHEL 8+, Ubuntu 20.04+)
-          if [[ "${{ github.repository }}" == "mistralai/mistral-vibe" ]]; then
-            matrix='{
-              "include": [
-                {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64", "container": "quay.io/pypa/manylinux_2_28_x86_64"},
-                {"runner": "ubuntu-22.04-arm", "os": "linux", "arch": "aarch64", "container": "quay.io/pypa/manylinux_2_28_aarch64"},
-                {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
-                {"runner": "macos-14", "os": "darwin", "arch": "aarch64"},
-                {"runner": "windows-2022", "os": "windows", "arch": "x86_64"},
-                {"runner": "windows-11-arm", "os": "windows", "arch": "aarch64"}
-              ]
-            }'
-            smoke_matrix='{
-              "include": [
-                {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64"},
-                {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64", "tag": "old-glibc", "container": "almalinux:8"},
-                {"runner": "ubuntu-24.04-arm", "os": "linux", "arch": "aarch64"},
-                {"runner": "macos-15", "os": "darwin", "arch": "aarch64"},
-                {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
-                {"runner": "windows-latest", "os": "windows", "arch": "x86_64"},
-                {"runner": "windows-11-arm", "os": "windows", "arch": "aarch64"}
-              ]
-            }'
-          else  # skip ARM Linux/Windows (runners not available on non public repos)
-            matrix='{
-              "include": [
-                {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64", "container": "quay.io/pypa/manylinux_2_28_x86_64"},
-                {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
-                {"runner": "macos-14", "os": "darwin", "arch": "aarch64"},
-                {"runner": "windows-2022", "os": "windows", "arch": "x86_64"}
-              ]
-            }'
-            smoke_matrix='{
-              "include": [
-                {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64"},
-                {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64", "tag": "old-glibc", "container": "almalinux:8"},
-                {"runner": "macos-15", "os": "darwin", "arch": "aarch64"},
-                {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
-                {"runner": "windows-latest", "os": "windows", "arch": "x86_64"}
-              ]
-            }'
-          fi
+          matrix='{
+            "include": [
+              {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64", "container": "quay.io/pypa/manylinux_2_28_x86_64"},
+              {"runner": "ubuntu-22.04-arm", "os": "linux", "arch": "aarch64", "container": "quay.io/pypa/manylinux_2_28_aarch64"},
+              {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
+              {"runner": "macos-14", "os": "darwin", "arch": "aarch64"},
+              {"runner": "windows-2022", "os": "windows", "arch": "x86_64"}
+            ]
+          }'
+          smoke_matrix='{
+            "include": [
+              {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64"},
+              {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64", "tag": "old-glibc", "container": "almalinux:8"},
+              {"runner": "ubuntu-24.04-arm", "os": "linux", "arch": "aarch64"},
+              {"runner": "macos-15", "os": "darwin", "arch": "aarch64"},
+              {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
+              {"runner": "windows-latest", "os": "windows", "arch": "x86_64"}
+            ]
+          }'
           echo "matrix=$(echo $matrix | jq -c .)" >> $GITHUB_OUTPUT
           echo "smoke_matrix=$(echo $smoke_matrix | jq -c .)" >> $GITHUB_OUTPUT
 
@@ -75,8 +53,6 @@ jobs:
     container: ${{ matrix.container || '' }}
 
     steps:
-      - name: echo
-        run: echo github.repository=${{ github.repository }}
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 

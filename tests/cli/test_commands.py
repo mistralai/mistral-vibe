@@ -102,6 +102,16 @@ class TestCommandRegistry:
         _, cmd, _ = result
         assert cmd.handler == "_show_session_picker"
 
+    def test_rename_command_registration(self) -> None:
+        registry = CommandRegistry()
+        assert registry.get_command_name("/rename") == "rename"
+        assert registry.get_command_name("/title") is None
+        result = registry.parse_command("/rename Better title")
+        assert result is not None
+        _, cmd, cmd_args = result
+        assert cmd.handler == "_rename_session"
+        assert cmd_args == "Better title"
+
     def test_parse_command_keeps_args_for_no_arg_commands(self) -> None:
         registry = CommandRegistry()
         result = registry.parse_command("/help extra")

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 from threading import Lock
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from anyio import NamedTemporaryFile, Path as AsyncPath
 
@@ -134,6 +134,8 @@ class SessionLogger:
             git_branch=git_branch,
             username=user_name,
             environment={"working_directory": str(Path.cwd())},
+            title=None,
+            title_source="auto",
         )
 
     def _get_title(self, messages: Sequence[LLMMessage]) -> str:
@@ -152,6 +154,37 @@ class SessionLogger:
             if len(text) > MAX_TITLE_LENGTH:
                 title += "…"
 
+        return title
+
+    def _set_title_state(
+        self, title: str | None, *, source: Literal["auto", "manual"]
+    ) -> None:
+        if self.session_metadata is None:
+            return
+
+        self.session_metadata.title = title
+        self.session_metadata.title_source = source
+
+    def set_title(self, title: str | None) -> None:
+        if title is None:
+            self._set_title_state(None, source="auto")
+            return
+
+        normalized_title = title.strip()
+        if not normalized_title:
+            raise ValueError("Session title cannot be empty.")
+
+        self._set_title_state(normalized_title, source="manual")
+
+    def _resolve_title(self, messages: Sequence[LLMMessage]) -> str | None:
+        if self.session_metadata is None:
+            return self._get_title(messages)
+
+        if self.session_metadata.title_source == "manual":
+            return self.session_metadata.title
+
+        title = self._get_title(messages)
+        self._set_title_state(title, source="auto")
         return title
 
     @staticmethod
@@ -265,7 +298,7 @@ class SessionLogger:
                 for tool_class in tool_manager.available_tools.values()
             ]
 
-            title = self._get_title(messages)
+            title = self._resolve_title(messages)
             system_prompt = (
                 messages[0].model_dump()
                 if len(messages) > 0 and messages[0].role == Role.system

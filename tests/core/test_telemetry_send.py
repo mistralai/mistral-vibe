@@ -249,6 +249,81 @@ class TestTelemetryClient:
         assert telemetry_events[0]["event_name"] == "vibe.user_cancelled_action"
         assert telemetry_events[0]["properties"]["action"] == "interrupt_agent"
 
+    def test_send_at_mention_inserted_payload(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_at_mention_inserted(
+            nb_mentions=2,
+            context_types={"file": 1, "folder": 1},
+            file_extensions={".py": 1},
+            message_id="msg-123",
+        )
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.at_mention_inserted"
+        assert telemetry_events[0]["properties"] == {
+            "nb_mentions": 2,
+            "context_types": {"file": 1, "folder": 1},
+            "file_extensions": {".py": 1},
+            "message_id": "msg-123",
+        }
+
+    def test_send_at_mention_inserted_null_file_extensions(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_at_mention_inserted(
+            nb_mentions=1,
+            context_types={"folder": 1},
+            file_extensions=None,
+            message_id=None,
+        )
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["properties"]["file_extensions"] is None
+        assert telemetry_events[0]["properties"]["message_id"] is None
+
+    def test_send_at_mention_inserted_multiple_files_counts_extensions(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_at_mention_inserted(
+            nb_mentions=4,
+            context_types={"file": 3, "folder": 1},
+            file_extensions={".py": 2, ".ts": 1},
+            message_id="msg-multi",
+        )
+
+        props = telemetry_events[0]["properties"]
+        assert props["nb_mentions"] == 4
+        assert props["context_types"] == {"file": 3, "folder": 1}
+        assert props["file_extensions"] == {".py": 2, ".ts": 1}
+
+    def test_send_at_mention_inserted_duplicate_references_reflected_in_counts(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_at_mention_inserted(
+            nb_mentions=4,
+            context_types={"file": 2, "folder": 2},
+            file_extensions={".py": 2},
+            message_id="msg-dupes",
+        )
+
+        props = telemetry_events[0]["properties"]
+        assert props["nb_mentions"] == 4
+        assert props["context_types"] == {"file": 2, "folder": 2}
+        assert props["file_extensions"] == {".py": 2}
+
     def test_send_auto_compact_triggered_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:

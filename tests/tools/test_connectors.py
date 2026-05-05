@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import os
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+import respx
 
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
@@ -13,6 +14,7 @@ from vibe.core.config import ConnectorConfig, VibeConfig
 from vibe.core.tools.base import BaseToolConfig, ToolError
 from vibe.core.tools.connectors import CONNECTORS_ENV_VAR
 from vibe.core.tools.connectors.connector_registry import (
+    ConnectorRegistry,
     RemoteTool,
     _connector_error_message,
     _normalize_name,
@@ -497,3 +499,206 @@ class TestConnectorDisableFiltering:
         )
         assert "connector_wiki_search" in tm.available_tools
         assert "connector_mail_send" not in tm.available_tools
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap-based discovery (ConnectorRegistry._discover_all via httpx)
+# ---------------------------------------------------------------------------
+
+_BOOTSTRAP_URL = "https://api.mistral.ai/v1/connectors/bootstrap"
+
+
+def _make_bootstrap_response(
+    connectors: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {"connectors": connectors or [], "errors": None}
+
+
+def _make_connector_payload(
+    *,
+    connector_id: str = "conn-1",
+    name: str = "wiki",
+    is_ready: bool = True,
+    tools: list[dict[str, Any]] | None = None,
+    bootstrap_errors: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": connector_id,
+        "name": name,
+        "display_name": name,
+        "description": name,
+        "status": {"is_ready": is_ready},
+        "tools": tools or [],
+        "bootstrap_errors": bootstrap_errors,
+    }
+
+
+def _make_tool_payload(
+    name: str = "search", description: str = "Search docs"
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "description": description,
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}},
+    }
+
+
+class TestBootstrapDiscovery:
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_discovers_tools_from_bootstrap(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                name="wiki",
+                tools=[_make_tool_payload("search"), _make_tool_payload("read")],
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        tools = await registry.get_tools_async()
+
+        assert "connector_wiki_search" in tools
+        assert "connector_wiki_read" in tools
+        assert registry.connector_count == 1
+        assert registry.is_connected("wiki")
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_skips_not_ready_connectors(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                name="broken", is_ready=False, bootstrap_errors=["auth failed"]
+            ),
+            _make_connector_payload(name="healthy", tools=[_make_tool_payload("ping")]),
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        tools = await registry.get_tools_async()
+
+        assert "connector_healthy_ping" in tools
+        assert not any("broken" in name for name in tools)
+        assert not registry.is_connected("broken")
+        assert registry.is_connected("healthy")
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_handles_bootstrap_http_error(self) -> None:
+        respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(500, text="Internal Server Error")
+        )
+
+        registry = ConnectorRegistry(api_key="test-key")
+        tools = await registry.get_tools_async()
+
+        assert tools == {}
+        assert registry.connector_count == 0
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_deduplicates_connector_aliases(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1", name="mcp", tools=[_make_tool_payload("a")]
+            ),
+            _make_connector_payload(
+                connector_id="c-2", name="mcp", tools=[_make_tool_payload("b")]
+            ),
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        tools = await registry.get_tools_async()
+
+        assert "connector_mcp_a" in tools
+        assert "connector_mcp_2_b" in tools
+        assert registry.connector_count == 2
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_skips_connector_without_id(self) -> None:
+        payload = _make_bootstrap_response([
+            {"name": "broken", "status": {"is_ready": True}, "tools": []},
+            _make_connector_payload(name="valid", tools=[_make_tool_payload("ping")]),
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        tools = await registry.get_tools_async()
+
+        assert "connector_valid_ping" in tools
+        assert registry.connector_count == 1
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_empty_connectors_list(self) -> None:
+        payload = _make_bootstrap_response([])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        tools = await registry.get_tools_async()
+
+        assert tools == {}
+        assert registry.connector_count == 0
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_uses_custom_server_url(self) -> None:
+        custom_url = "https://custom.api.example.com/v1/connectors/bootstrap"
+        payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("ping")])
+        ])
+        respx.get(custom_url).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(
+            api_key="test-key", server_url="https://custom.api.example.com"
+        )
+        tools = await registry.get_tools_async()
+
+        assert "connector_wiki_ping" in tools
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_caches_after_first_call(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("search")])
+        ])
+        route = respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+        await registry.get_tools_async()
+
+        assert route.call_count == 1
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_refresh_connector_updates_cache(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1", name="wiki", tools=[_make_tool_payload("search")]
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        # Refresh returns updated tools from a second bootstrap call
+        refresh_payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1",
+                name="wiki",
+                tools=[_make_tool_payload("search"), _make_tool_payload("write")],
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(200, json=refresh_payload)
+        )
+
+        refreshed = await registry.refresh_connector_async("wiki")
+        assert "connector_wiki_search" in refreshed
+        assert "connector_wiki_write" in refreshed

@@ -20,6 +20,8 @@ class ApprovalApp(Container):
     can_focus = True
     can_focus_children = False
 
+    NUM_OPTIONS = 4
+
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "move_up", "Up", show=False),
         Binding("down", "move_down", "Down", show=False),
@@ -27,8 +29,9 @@ class ApprovalApp(Container):
         Binding("1", "select_1", "Yes", show=False),
         Binding("y", "select_1", "Yes", show=False),
         Binding("2", "select_2", "Always Tool Session", show=False),
-        Binding("3", "select_3", "No", show=False),
-        Binding("n", "select_3", "No", show=False),
+        Binding("3", "select_3", "Always Permanent", show=False),
+        Binding("4", "select_4", "No", show=False),
+        Binding("n", "select_4", "No", show=False),
     ]
 
     class ApprovalGranted(Message):
@@ -38,6 +41,18 @@ class ApprovalApp(Container):
             self.tool_args = tool_args
 
     class ApprovalGrantedAlwaysTool(Message):
+        def __init__(
+            self,
+            tool_name: str,
+            tool_args: BaseModel,
+            required_permissions: list[RequiredPermission],
+        ) -> None:
+            super().__init__()
+            self.tool_name = tool_name
+            self.tool_args = tool_args
+            self.required_permissions = required_permissions
+
+    class ApprovalGrantedAlwaysPermanent(Message):
         def __init__(
             self,
             tool_name: str,
@@ -77,20 +92,18 @@ class ApprovalApp(Container):
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-options"):
             yield NoMarkupStatic("")
-            for _ in range(3):
+            for _ in range(self.NUM_OPTIONS):
                 widget = NoMarkupStatic("", classes="approval-option")
                 self.option_widgets.append(widget)
                 yield widget
-            yield NoMarkupStatic("")
             self.help_widget = NoMarkupStatic(
                 "↑↓ navigate  Enter select  ESC reject", classes="approval-help"
             )
             yield self.help_widget
 
         with Vertical(id="approval-content"):
-            self.title_widget = NoMarkupStatic(
-                f"⚠ {self.tool_name} command", classes="approval-title"
-            )
+            title = self._build_title()
+            self.title_widget = NoMarkupStatic(title, classes="approval-title")
             yield self.title_widget
 
             with VerticalScroll(classes="approval-tool-info-scroll"):
@@ -98,6 +111,12 @@ class ApprovalApp(Container):
                     classes="approval-tool-info-container"
                 )
                 yield self.tool_info_container
+
+    def _build_title(self) -> str:
+        if self.required_permissions:
+            labels = ", ".join(rp.label for rp in self.required_permissions)
+            return f"Permission for the {self.tool_name} tool ({labels})"
+        return f"Permission for the {self.tool_name} tool"
 
     async def on_mount(self) -> None:
         await self._update_tool_info()
@@ -113,16 +132,11 @@ class ApprovalApp(Container):
         await self.tool_info_container.mount(approval_widget)
 
     def _update_options(self) -> None:
-        if self.required_permissions:
-            labels = ", ".join(rp.label for rp in self.required_permissions)
-            always_text = f"Yes and always allow for this session: {labels}"
-        else:
-            always_text = f"Yes and always allow {self.tool_name} for this session"
-
         options = [
-            ("Yes", "yes"),
-            (always_text, "yes"),
-            ("No and tell the agent what to do instead", "no"),
+            ("Allow once", "yes"),
+            ("Allow for remainder of this session", "yes"),
+            ("Always allow", "yes"),
+            ("Deny", "no"),
         ]
 
         for idx, ((text, color_type), widget) in enumerate(
@@ -154,11 +168,11 @@ class ApprovalApp(Container):
                     widget.add_class("approval-option-no")
 
     def action_move_up(self) -> None:
-        self.selected_option = (self.selected_option - 1) % 3
+        self.selected_option = (self.selected_option - 1) % self.NUM_OPTIONS
         self._update_options()
 
     def action_move_down(self) -> None:
-        self.selected_option = (self.selected_option + 1) % 3
+        self.selected_option = (self.selected_option + 1) % self.NUM_OPTIONS
         self._update_options()
 
     def action_select(self) -> None:
@@ -176,9 +190,13 @@ class ApprovalApp(Container):
         self.selected_option = 2
         self._handle_selection(2)
 
+    def action_select_4(self) -> None:
+        self.selected_option = 3
+        self._handle_selection(3)
+
     def action_reject(self) -> None:
-        self.selected_option = 2
-        self._handle_selection(2)
+        self.selected_option = 3
+        self._handle_selection(3)
 
     def _handle_selection(self, option: int) -> None:
         match option:
@@ -197,6 +215,14 @@ class ApprovalApp(Container):
                     )
                 )
             case 2:
+                self.post_message(
+                    self.ApprovalGrantedAlwaysPermanent(
+                        tool_name=self.tool_name,
+                        tool_args=self.tool_args,
+                        required_permissions=self.required_permissions,
+                    )
+                )
+            case 3:
                 self.post_message(
                     self.ApprovalRejected(
                         tool_name=self.tool_name, tool_args=self.tool_args

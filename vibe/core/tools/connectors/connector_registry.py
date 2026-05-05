@@ -7,9 +7,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import httpx
 from mistralai.client import Mistral
-from mistralai.client.models.connectorsqueryfilters import (
-    ConnectorsQueryFiltersTypedDict,
-)
 
 from vibe.core.logger import logger
 from vibe.core.tools.base import (
@@ -33,9 +30,7 @@ from vibe.core.utils import run_sync
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
 
-_LIST_PAGE_SIZE = 100
-_LIST_QUERY_FILTERS: ConnectorsQueryFiltersTypedDict = {"active": True}
-_TOOL_FETCH_TIMEOUT = 8.0
+_BOOTSTRAP_TIMEOUT = 30.0
 
 
 def _normalize_name(name: str) -> str:
@@ -44,25 +39,15 @@ def _normalize_name(name: str) -> str:
     return result or "unnamed"
 
 
-def _connector_tool_to_remote(tool: dict[str, Any] | Any) -> RemoteTool | None:
-    """Convert a ConnectorTool (SDK object or raw dict) to a RemoteTool."""
-    if isinstance(tool, dict):
-        name = tool.get("name")
-        description = tool.get("description")
-        schema = tool.get("jsonschema") or tool.get("json_schema")
-    else:
-        name = getattr(tool, "name", None)
-        description = getattr(tool, "description", None)
-        schema = getattr(tool, "jsonschema", None) or getattr(tool, "json_schema", None)
+def _connector_tool_to_remote(tool: dict[str, Any]) -> RemoteTool | None:
+    """Convert a bootstrap tool dict to a RemoteTool."""
+    name = tool.get("name")
     if not name:
         return None
-    if schema is not None and not isinstance(schema, dict):
-        dump = getattr(schema, "model_dump", None)
-        schema = dump() if callable(dump) else None
     return RemoteTool.model_validate({
         "name": name,
-        "description": description,
-        "inputSchema": schema or {"type": "object", "properties": {}},
+        "description": tool.get("description"),
+        "inputSchema": tool.get("inputSchema") or {"type": "object", "properties": {}},
     })
 
 
@@ -208,6 +193,36 @@ def create_connector_proxy_tool_class(
     return ConnectorProxyTool
 
 
+def _deduplicate_connectors(
+    connectors: list[dict[str, Any]],
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """Deduplicate connectors by normalized alias, preserving order.
+
+    When two connectors share the same alias, disambiguate with a
+    numeric suffix rather than silently dropping.
+    """
+    seen_names: set[str] = set()
+    result: list[tuple[str, str, dict[str, Any]]] = []
+    for connector in connectors:
+        connector_id = str(connector.get("id", ""))
+        if not connector_id:
+            continue
+        raw_name = connector.get("name") or connector_id
+        alias = _normalize_name(raw_name)
+        if alias in seen_names:
+            original = alias
+            suffix = 2
+            while f"{original}_{suffix}" in seen_names:
+                suffix += 1
+            alias = f"{original}_{suffix}"
+            logger.warning(
+                "Connector %r alias %r collides, using %r", raw_name, original, alias
+            )
+        seen_names.add(alias)
+        result.append((connector_id, alias, connector))
+    return result
+
+
 class ConnectorRegistry:
     """Discovers connector tools from the Mistral API.
 
@@ -240,6 +255,47 @@ class ConnectorRegistry:
 
         return await self._discover_all()
 
+    async def _fetch_bootstrap(self) -> dict[str, Any]:
+        base_url = self._server_url or _DEFAULT_BASE_URL
+        url = f"{base_url}/v1/connectors/bootstrap"
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        async with httpx.AsyncClient(timeout=_BOOTSTRAP_TIMEOUT) as http:
+            response = await http.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+
+    def _build_tools_for_connector(
+        self,
+        *,
+        connector_id: str,
+        alias: str,
+        name: str,
+        raw_tools: list[dict[str, Any]],
+    ) -> dict[str, type[BaseTool]]:
+        tools_map: dict[str, type[BaseTool]] = {}
+        for tool in raw_tools:
+            remote = _connector_tool_to_remote(tool)
+            if remote is None:
+                continue
+            try:
+                proxy_cls = create_connector_proxy_tool_class(
+                    connector_name=name,
+                    connector_alias=alias,
+                    connector_id=connector_id,
+                    remote=remote,
+                    api_key=self._api_key,
+                    server_url=self._server_url,
+                )
+                tools_map[proxy_cls.get_name()] = proxy_cls
+            except Exception:
+                logger.warning(
+                    "Failed to register connector tool %s for %s",
+                    tool.get("name", "<unknown>"),
+                    name,
+                    exc_info=True,
+                )
+        return tools_map
+
     async def _discover_all(self) -> dict[str, type[BaseTool]]:
         async with self._discover_lock:
             # Re-check under lock — another coroutine may have finished
@@ -250,157 +306,55 @@ class ConnectorRegistry:
                     result.update(tools)
                 return result
 
-            async with self._get_client() as client:
-                connectors: list[Any] = []
+            try:
+                data = await self._fetch_bootstrap()
+            except Exception:
+                logger.warning("Failed to bootstrap connectors", exc_info=True)
+                self._cache = {}
+                self._connector_names = []
+                self._connector_connected = {}
+                self._alias_to_id = {}
+                return {}
 
-                try:
-                    page = await client.beta.connectors.list_async(
-                        page_size=_LIST_PAGE_SIZE, query_filters=_LIST_QUERY_FILTERS
+            unique_connectors = _deduplicate_connectors(data.get("connectors") or [])
+
+            cache: dict[str, dict[str, type[BaseTool]]] = {}
+            all_tools: dict[str, type[BaseTool]] = {}
+            connector_names: list[str] = []
+            connector_connected: dict[str, bool] = {}
+
+            for connector_id, alias, connector in unique_connectors:
+                connector_names.append(alias)
+                name = connector.get("name") or connector_id
+
+                if bootstrap_errors := connector.get("bootstrap_errors"):
+                    logger.warning(
+                        "Connector %r bootstrap errors: %s", name, bootstrap_errors
                     )
-                    connectors.extend(page.items or [])
-                    while page.pagination and page.pagination.next_cursor:
-                        page = await client.beta.connectors.list_async(
-                            page_size=_LIST_PAGE_SIZE,
-                            cursor=page.pagination.next_cursor,
-                            query_filters=_LIST_QUERY_FILTERS,
-                        )
-                        connectors.extend(page.items or [])
-                except Exception as exc:
-                    logger.warning(f"Failed to list connectors: {exc}")
-                    self._cache = {}
-                    self._connector_names = []
-                    self._connector_connected = {}
-                    self._alias_to_id = {}
-                    return {}
 
-                # Build results locally to avoid publishing incomplete state.
-                cache: dict[str, dict[str, type[BaseTool]]] = {}
-                all_tools: dict[str, type[BaseTool]] = {}
-                connector_names: list[str] = []
-                connector_connected: dict[str, bool] = {}
+                status = connector.get("status") or {}
+                if not status.get("is_ready", False):
+                    connector_connected[alias] = False
+                    continue
 
-                # Deduplicate by normalized name, preserving order.
-                # When two connectors share the same alias, disambiguate
-                # with a numeric suffix rather than silently dropping.
-                seen_names: set[str] = set()
-                unique_connectors: list[tuple[str, str, Any]] = []
-                for connector in connectors:
-                    connector_id = str(connector.id)
-                    raw_name = connector.name or connector_id
-                    alias = _normalize_name(raw_name)
-                    if alias in seen_names:
-                        original = alias
-                        suffix = 2
-                        while f"{alias}_{suffix}" in seen_names:
-                            suffix += 1
-                        alias = f"{alias}_{suffix}"
-                        logger.warning(
-                            f"Connector {raw_name!r} alias {original!r} collides, "
-                            f"using {alias!r}"
-                        )
-                    seen_names.add(alias)
-                    unique_connectors.append((connector_id, alias, connector))
-
-                # Fetch tools for all connectors in parallel.
-                tasks = [
-                    self._fetch_connector_tools(client, c, alias)
-                    for _, alias, c in unique_connectors
-                ]
-                results = await asyncio.gather(*tasks)
-
-                for (connector_id, alias, _), tools_map in zip(
-                    unique_connectors, results, strict=True
-                ):
-                    connector_names.append(alias)
-                    if tools_map is None:
-                        # Timeout or error — show in UI but don't cache so
-                        # a refresh will retry discovery for this connector.
-                        connector_connected[alias] = False
-                        continue
-                    cache[connector_id] = tools_map
-                    all_tools.update(tools_map)
-                    # TODO: replace with actual API field when available
-                    connector_connected[alias] = bool(tools_map)
-
-                # Publish atomically — concurrent callers waiting on the
-                # lock will see the completed cache.
-                self._connector_names = connector_names
-                self._connector_connected = connector_connected
-                self._alias_to_id = {alias: cid for cid, alias, _ in unique_connectors}
-                self._cache = cache
-
-                return all_tools
-
-    async def _fetch_connector_tools(
-        self, client: Mistral, connector: Any, connector_alias: str
-    ) -> dict[str, type[BaseTool]] | None:
-        """Fetch tools for a single connector via ``list_tools_async``.
-
-        The list endpoint does not always include tools inline, so we
-        call ``list_tools_async`` per connector to get the full set.
-        """
-        connector_id = str(connector.id)
-        name = connector.name or connector_id
-
-        try:
-            response = await asyncio.wait_for(
-                client.beta.connectors.list_tools_async(
-                    connector_id_or_name=connector_id
-                ),
-                timeout=_TOOL_FETCH_TIMEOUT,
-            )
-        except TimeoutError:
-            logger.warning(
-                f"Timeout fetching tools for connector {name} (>{_TOOL_FETCH_TIMEOUT}s)"
-            )
-            return None
-        except Exception as exc:
-            logger.warning(f"Failed to list tools for connector {name}: {exc}")
-            return None
-
-        # The SDK may return a plain list, an iterable wrapper, or an
-        # object with a `data`/`items` attribute.  Handle all cases.
-        if isinstance(response, list):
-            raw_tools: list[Any] = response
-        elif hasattr(response, "data"):
-            raw_tools = list(response.data or [])
-        elif hasattr(response, "items"):
-            raw_tools = list(response.items or [])
-        else:
-            try:
-                raw_tools = list(response)
-            except TypeError:
-                logger.warning(
-                    f"Unexpected response type from list_tools_async for {name}: "
-                    f"{type(response).__name__}"
-                )
-                raw_tools = []
-
-        result: dict[str, type[BaseTool]] = {}
-        for tool in raw_tools:
-            remote = _connector_tool_to_remote(tool)
-            if remote is None:
-                continue
-            try:
-                proxy_cls = create_connector_proxy_tool_class(
-                    connector_name=name,
-                    connector_alias=connector_alias,
+                tools_map = self._build_tools_for_connector(
                     connector_id=connector_id,
-                    remote=remote,
-                    api_key=self._api_key,
-                    server_url=self._server_url,
+                    alias=alias,
+                    name=name,
+                    raw_tools=connector.get("tools") or [],
                 )
-                result[proxy_cls.get_name()] = proxy_cls
-            except Exception as exc:
-                tool_name = (
-                    tool.get("name")
-                    if isinstance(tool, dict)
-                    else getattr(tool, "name", "<unknown>")
-                )
-                logger.warning(
-                    f"Failed to register connector tool {tool_name} for {name}: {exc}"
-                )
-        return result
+                cache[connector_id] = tools_map
+                all_tools.update(tools_map)
+                connector_connected[alias] = bool(tools_map)
+
+            # Publish atomically — concurrent callers waiting on the
+            # lock will see the completed cache.
+            self._connector_names = connector_names
+            self._connector_connected = connector_connected
+            self._alias_to_id = {alias: cid for cid, alias, _ in unique_connectors}
+            self._cache = cache
+
+            return all_tools
 
     @property
     def connector_count(self) -> int:
@@ -421,6 +375,7 @@ class ConnectorRegistry:
     async def refresh_connector_async(self, alias: str) -> dict[str, type[BaseTool]]:
         """Re-fetch tools for a single connector by alias.
 
+        Calls the bootstrap endpoint and extracts the matching connector.
         Updates the internal cache for that connector only. Returns
         the new tool map (empty dict on failure).
         """
@@ -428,15 +383,27 @@ class ConnectorRegistry:
         if connector_id is None:
             return {}
 
+        tools_map: dict[str, type[BaseTool]] | None = None
         try:
-            async with self._get_client() as client:
-                connector = await client.beta.connectors.get_async(
-                    connector_id_or_name=connector_id
+            data = await self._fetch_bootstrap()
+            for connector in data.get("connectors") or []:
+                if str(connector.get("id")) != connector_id:
+                    continue
+
+                name = connector.get("name") or connector_id
+                status = connector.get("status") or {}
+                if not status.get("is_ready", False):
+                    break
+
+                tools_map = self._build_tools_for_connector(
+                    connector_id=connector_id,
+                    alias=alias,
+                    name=name,
+                    raw_tools=connector.get("tools") or [],
                 )
-                tools_map = await self._fetch_connector_tools(client, connector, alias)
+                break
         except Exception:
             logger.debug("Failed to refresh connector %s", alias)
-            tools_map = None
 
         if self._cache is None:
             self._cache = {}

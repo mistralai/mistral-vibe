@@ -413,6 +413,10 @@ Markdown {
     &.bash-error {
         color: ansi_red;
     }
+
+    &.bash-interrupted {
+        color: ansi_yellow;
+    }
 }
 
 .bash-command {
@@ -786,7 +790,7 @@ StatusMessage {
 .approval-title {
     height: auto;
     text-style: bold;
-    color: ansi_yellow;
+    color: ansi_bright_yellow;
 }
 
 .approval-tool-info-container {
@@ -808,6 +812,11 @@ StatusMessage {
 .approval-option {
     height: auto;
     color: ansi_default;
+    margin-bottom: 1;
+
+    &:last-of-type {
+        margin-bottom: 0;
+    }
 }
 
 .approval-cursor-selected {
@@ -817,14 +826,14 @@ StatusMessage {
     }
 
     &.approval-option-no {
-        color: ansi_red;
+        color: ansi_bright_red;
         text-style: bold;
     }
 }
 
 .approval-option-selected {
     &.approval-option-yes {
-        color: ansi_green;
+        color: ansi_white;
     }
 
     &.approval-option-no {
@@ -839,7 +848,7 @@ StatusMessage {
 
 .approval-description {
     height: auto;
-    color: ansi_default;
+    color: ansi_bright_black;
 }
 
 .code-block {

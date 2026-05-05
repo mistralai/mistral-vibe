@@ -67,8 +67,8 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
                 logger.info(
                     "Loaded %d messages from previous session", len(non_system_messages)
                 )
-
-            agent_loop.emit_new_session_telemetry()
+            else:
+                agent_loop.emit_new_session_telemetry()
 
             if teleport and config.vibe_code_enabled:
                 gen = agent_loop.teleport_to_vibe_code(prompt or None)

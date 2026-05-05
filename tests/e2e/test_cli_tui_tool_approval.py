@@ -79,7 +79,9 @@ def test_spawn_cli_asks_bash_permission_and_shows_tool_output_after_approval(
         wait_for_request_count(
             lambda: len(streaming_mock_server.requests), expected_count=1, timeout=10
         )
-        wait_for_rendered_text(child, captured, needle="bash command", timeout=10)
+        wait_for_rendered_text(
+            child, captured, needle="Permission for the bash tool", timeout=10
+        )
         child.send("y")
         child.send("\r")
         wait_for_rendered_text(child, captured, needle=PREDICTABLE_OUTPUT, timeout=10)

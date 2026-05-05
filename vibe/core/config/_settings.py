@@ -332,8 +332,6 @@ MCPServer = Annotated[
 
 
 class ConnectorConfig(BaseModel):
-    """Per-connector settings persisted in config.toml under ``[[connectors]]``."""
-
     name: str = Field(description="Normalized connector alias to match against.")
     disabled: bool = Field(
         default=False,
@@ -937,9 +935,21 @@ class VibeConfig(BaseSettings):
             ]
         type(self).save_updates({"models": models})
 
+    def add_tool_allowlist_patterns(self, tool_name: str, patterns: list[str]) -> None:
+        current_allowlist: list[str] = list(
+            self.tools.get(tool_name, {}).get("allowlist", [])
+        )
+        new_patterns = [p for p in patterns if p not in current_allowlist]
+        if not new_patterns:
+            return
+        merged = sorted(current_allowlist + new_patterns)
+        self.save_updates({"tools": {tool_name: {"allowlist": merged}}})
+        if tool_name not in self.tools:
+            self.tools[tool_name] = {}
+        self.tools[tool_name]["allowlist"] = merged
+
     @classmethod
     def get_persisted_config(cls) -> dict[str, Any]:
-        """Return the raw config as persisted in the TOML file (no profile merging)."""
         return TomlFileSettingsSource(cls).toml_data
 
     @classmethod

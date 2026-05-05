@@ -219,15 +219,13 @@ Simply run `vibe` to enter the interactive chat loop.
 - **Tool Output Toggle**: Press `Ctrl+O` to toggle the tool output view.
 - **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.
 - **Debug Console**: Press `Ctrl+\` to toggle the debug console.
-- **Auto-Approve Toggle**: Press `Shift+Tab` to toggle auto-approve mode on/off.
+- **Agent Selection**: Press `Shift+Tab` to cycle through agents (default, plan, ...).
 
 You can start Vibe with a prompt using the following command:
 
 ```bash
 vibe "Refactor the main function in cli/main.py to be more modular."
 ```
-
-**Note**: The `--auto-approve` flag automatically approves all tool executions without prompting. In interactive mode, you can also toggle auto-approve on/off using `Shift+Tab`.
 
 ### Trust Folder System
 
@@ -412,7 +410,15 @@ Vibe supports multiple ways to configure your API keys:
 
 ### Custom System Prompts
 
-You can create custom system prompts to replace the default one (`prompts/cli.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
+You can create `AGENTS.md` files to add custom instructions. You can also replace the entire system prompt.
+
+Place `AGENTS.md` files in:
+- `~/.vibe/AGENTS.md` — user-level instructions for all projects
+- Project directories — project-specific instructions, loaded from cwd up to the trust root
+
+Priority: closer directories override more distant ones. Instructions in `AGENTS.md` override the default system prompt. Files are only loaded for trusted folders.
+
+Custom system prompts entirely replace the default one (`prompts/cli.md`). Create a markdown file in the `~/.vibe/prompts/` directory with your custom prompt content.
 
 To use a custom system prompt, set the `system_prompt_id` in your configuration to match the filename (without the `.md` extension):
 

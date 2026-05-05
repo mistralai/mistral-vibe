@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.4] - 2026-05-05
+
+### Added
+
+- `/rename` command to rename the current session
+- `feat: vibe.at_mention_inserted` telemetry event
+- "Always allow" tool permissions persist across sessions
+- Eager agent-loop warmup so `vibe.ready` telemetry fires sooner
+
+### Changed
+
+- `bash` (`!command`) bang commands run via async subprocess for better latency
+- Bumped `mistral` SDK to 2.4.4
+- Bumped `cryptography` to address upstream CVEs
+
+### Fixed
+
+- Preserve `non_retryable` flag on exceptions raised through `_chat` / `_chat_streaming`, so callers driving the agent loop from a Temporal activity can signal "do not retry"
+- `/clear` no longer chains `parent_session_id` to the previous session
+- `vibe.new_session` telemetry no longer fires when resuming a session
+
+### Removed
+
+- Windows ARM build artifacts (no longer published; required to bump `cryptography`)
+
+
 ## [2.9.3] - 2026-04-30
 
 ### Added

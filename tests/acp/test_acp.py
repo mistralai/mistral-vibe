@@ -565,7 +565,7 @@ async def start_session_with_request_permission(
 
     assert isinstance(last_response, RequestPermissionJsonRpcRequest)
     assert last_response.params is not None
-    assert len(last_response.params.options) == 3
+    assert len(last_response.params.options) == 4
     return last_response
 
 
@@ -778,13 +778,15 @@ class TestToolCallStructure:
             )
             assert permission_request.params is not None
 
-            # Verify "Allow always" option includes the pattern label
+            # Verify granular permissions are passed in field_meta
             allow_always = next(
                 o
                 for o in permission_request.params.options
                 if o.option_id == ToolOption.ALLOW_ALWAYS
             )
-            assert "npm install *" in allow_always.name
+            assert allow_always.name == "Allow for remainder of this session"
+            assert allow_always.field_meta is not None
+            assert "required_permissions" in allow_always.field_meta
 
     @pytest.mark.skip(reason="Long running tool call updates are not implemented yet")
     @pytest.mark.asyncio

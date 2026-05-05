@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING
 
 from acp.schema import (
     AgentMessageChunk,
@@ -9,6 +9,7 @@ from acp.schema import (
     ContentToolCallContent,
     ModelInfo,
     PermissionOption,
+    PermissionOptionKind,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
     SessionMode,
@@ -34,25 +35,31 @@ if TYPE_CHECKING:
 class ToolOption(StrEnum):
     ALLOW_ONCE = "allow_once"
     ALLOW_ALWAYS = "allow_always"
+    ALLOW_ALWAYS_PERMANENT = "allow_always_permanent"
     REJECT_ONCE = "reject_once"
     REJECT_ALWAYS = "reject_always"
 
 
+_KIND_ALLOW_ONCE: PermissionOptionKind = "allow_once"
+_KIND_ALLOW_ALWAYS: PermissionOptionKind = "allow_always"
+_KIND_REJECT_ONCE: PermissionOptionKind = "reject_once"
+
 TOOL_OPTIONS = [
     PermissionOption(
-        option_id=ToolOption.ALLOW_ONCE,
-        name="Allow once",
-        kind=cast(Literal["allow_once"], ToolOption.ALLOW_ONCE),
+        option_id=ToolOption.ALLOW_ONCE, name="Allow once", kind=_KIND_ALLOW_ONCE
     ),
     PermissionOption(
         option_id=ToolOption.ALLOW_ALWAYS,
-        name="Allow for this session",
-        kind=cast(Literal["allow_always"], ToolOption.ALLOW_ALWAYS),
+        name="Allow for remainder of this session",
+        kind=_KIND_ALLOW_ALWAYS,
     ),
     PermissionOption(
-        option_id=ToolOption.REJECT_ONCE,
-        name="Reject once",
-        kind=cast(Literal["reject_once"], ToolOption.REJECT_ONCE),
+        option_id=ToolOption.ALLOW_ALWAYS_PERMANENT,
+        name="Always allow",
+        kind=_KIND_ALLOW_ALWAYS,
+    ),
+    PermissionOption(
+        option_id=ToolOption.REJECT_ONCE, name="Deny", kind=_KIND_REJECT_ONCE
     ),
 ]
 
@@ -64,7 +71,6 @@ def build_permission_options(
     if not required_permissions:
         return TOOL_OPTIONS
 
-    labels = ", ".join(rp.label for rp in required_permissions)
     permissions_meta = [
         {
             "scope": rp.scope,
@@ -77,20 +83,22 @@ def build_permission_options(
 
     return [
         PermissionOption(
-            option_id=ToolOption.ALLOW_ONCE,
-            name="Allow once",
-            kind=cast(Literal["allow_once"], ToolOption.ALLOW_ONCE),
+            option_id=ToolOption.ALLOW_ONCE, name="Allow once", kind=_KIND_ALLOW_ONCE
         ),
         PermissionOption(
             option_id=ToolOption.ALLOW_ALWAYS,
-            name=f"Allow for this session: {labels}",
-            kind=cast(Literal["allow_always"], ToolOption.ALLOW_ALWAYS),
+            name="Allow for remainder of this session",
+            kind=_KIND_ALLOW_ALWAYS,
             field_meta={"required_permissions": permissions_meta},
         ),
         PermissionOption(
-            option_id=ToolOption.REJECT_ONCE,
-            name="Reject once",
-            kind=cast(Literal["reject_once"], ToolOption.REJECT_ONCE),
+            option_id=ToolOption.ALLOW_ALWAYS_PERMANENT,
+            name="Always allow",
+            kind=_KIND_ALLOW_ALWAYS,
+            field_meta={"required_permissions": permissions_meta},
+        ),
+        PermissionOption(
+            option_id=ToolOption.REJECT_ONCE, name="Deny", kind=_KIND_REJECT_ONCE
         ),
     ]
 

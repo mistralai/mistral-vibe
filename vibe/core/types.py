@@ -142,6 +142,8 @@ class SessionMetadata(BaseModel):
     git_branch: str | None
     environment: dict[str, str | None]
     username: str
+    title: str | None = None
+    title_source: Literal["auto", "manual"] = "auto"
 
 
 StrToolChoice = Literal["auto", "none", "any", "required"]

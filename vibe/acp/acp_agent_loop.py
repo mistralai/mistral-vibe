@@ -52,6 +52,7 @@ from acp.schema import (
     SessionConfigOptionSelect,
     SessionForkCapabilities,
     SessionInfo,
+    SessionInfoUpdate,
     SessionListCapabilities,
     SetSessionConfigOptionResponse,
     SseMcpServer,
@@ -122,6 +123,10 @@ from vibe.core.proxy_setup import (
     set_proxy_var,
     unset_proxy_var,
 )
+from vibe.core.session.saved_sessions import (
+    update_saved_session_title,
+    update_saved_session_title_at_path,
+)
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.skills.manager import SkillManager
 from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
@@ -159,6 +164,15 @@ class ForkSessionParams(BaseModel):
     message_id: str | None = Field(default=None, alias="messageId")
 
 
+class SessionSetTitleRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    session_id: str = Field(
+        validation_alias=AliasChoices("session_id", "sessionId"), min_length=1
+    )
+    title: str = Field(min_length=1)
+
+
 class TelemetrySendNotification(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -167,7 +181,20 @@ class TelemetrySendNotification(BaseModel):
     session_id: str = Field(validation_alias=AliasChoices("session_id", "sessionId"))
 
 
-_EVENT_DISPATCHERS: dict[str, Callable[[TelemetryClient, dict[str, Any]], None]] = {}
+def _dispatch_at_mention_inserted(
+    client: TelemetryClient, properties: dict[str, Any]
+) -> None:
+    client.send_at_mention_inserted(
+        nb_mentions=properties.get("nb_mentions", 0),
+        context_types=properties.get("context_types", {}),
+        file_extensions=properties.get("file_extensions"),
+        message_id=properties.get("message_id"),
+    )
+
+
+_EVENT_DISPATCHERS: dict[str, Callable[[TelemetryClient, dict[str, Any]], None]] = {
+    "vibe.at_mention_inserted": _dispatch_at_mention_inserted
+}
 
 
 def _resolved_user_message_id(client_message_id: str | None) -> str:
@@ -301,8 +328,19 @@ class VibeAcpAgentLoop(AcpAgent):
             agent_loop.set_approval_callback(self._create_approval_callback(session.id))
 
         session.spawn(self._send_available_commands(session))
+        session.spawn(self._warm_up_agent_loop(agent_loop))
 
         return session
+
+    async def _warm_up_agent_loop(self, agent_loop: AgentLoop) -> None:
+        """Proactively await deferred init so `vibe.ready` telemetry is emitted
+        without waiting for the user's first prompt. Errors are swallowed here
+        and will resurface on the first `act()` call via `requires_init`.
+        """
+        try:
+            await agent_loop.wait_until_ready()
+        except Exception:
+            pass
 
     def _create_agent_loop(
         self, config: VibeConfig, agent_name: str, hook_config_result: Any = None
@@ -398,6 +436,11 @@ class VibeAcpAgentLoop(AcpAgent):
                 case ToolOption.ALLOW_ALWAYS:
                     session.agent_loop.approve_always(tool_name, required_permissions)
                     return (ApprovalResponse.YES, None)
+                case ToolOption.ALLOW_ALWAYS_PERMANENT:
+                    session.agent_loop.approve_always(
+                        tool_name, required_permissions, save_permanently=True
+                    )
+                    return (ApprovalResponse.YES, None)
                 case ToolOption.REJECT_ONCE:
                     session.agent_loop.telemetry_client.send_user_cancelled_action(
                         "reject_approval"
@@ -453,6 +496,29 @@ class VibeAcpAgentLoop(AcpAgent):
         if session_id not in self.sessions:
             raise SessionNotFoundError(session_id)
         return self.sessions[session_id]
+
+    def _find_acp_session_by_vibe_session_id(
+        self, session_id: str
+    ) -> AcpSessionLoop | None:
+        for candidate in self.sessions.values():
+            if candidate.agent_loop.session_id == session_id:
+                return candidate
+
+        return None
+
+    def _load_session_logging_config(self) -> SessionLoggingConfig:
+        try:
+            return VibeConfig.load().session_logging
+        except MissingAPIKeyError:
+            try:
+                persisted_config = VibeConfig.get_persisted_config()
+                return SessionLoggingConfig.model_validate(
+                    persisted_config.get("session_logging", {})
+                )
+            except Exception as e:
+                raise ConfigurationError(str(e)) from e
+        except Exception as e:
+            raise ConfigurationError(str(e)) from e
 
     def _build_usage(self, session: AcpSessionLoop) -> Usage:
         stats = session.agent_loop.stats
@@ -1008,9 +1074,97 @@ class VibeAcpAgentLoop(AcpAgent):
     ) -> ResumeSessionResponse:
         raise NotImplementedMethodError("resume_session")
 
+    async def _emit_session_info_update(
+        self, session_id: str, *, title: str, updated_at: str | None
+    ) -> None:
+        update_kwargs: dict[str, Any] = {
+            "session_update": "session_info_update",
+            "title": title,
+        }
+        if updated_at is not None:
+            update_kwargs["updated_at"] = updated_at
+
+        await self.client.session_update(
+            session_id=session_id, update=SessionInfoUpdate(**update_kwargs)
+        )
+
+    async def _persist_live_session_title(
+        self, session: AcpSessionLoop, title: str
+    ) -> dict[str, Any] | None:
+        logger = session.agent_loop.session_logger
+        if not logger.enabled or logger.session_dir is None:
+            return None
+        if not logger.metadata_filepath.exists():
+            return None
+
+        try:
+            return await update_saved_session_title_at_path(logger.session_dir, title)
+        except ValueError as exc:
+            raise InternalError(
+                f"Failed to persist title update for session {logger.session_id}: {exc}"
+            ) from exc
+
+    def _set_live_session_title(self, session: AcpSessionLoop, title: str) -> None:
+        try:
+            session.agent_loop.session_logger.set_title(title)
+        except ValueError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP session title request: {exc}"
+            ) from exc
+
+    async def _handle_session_set_title(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request = SessionSetTitleRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP session title request: {exc}"
+            ) from exc
+
+        live_session = self.sessions.get(
+            request.session_id
+        ) or self._find_acp_session_by_vibe_session_id(request.session_id)
+        if live_session is None:
+            try:
+                metadata = await update_saved_session_title(
+                    request.session_id,
+                    request.title,
+                    self._load_session_logging_config(),
+                )
+            except ValueError as exc:
+                raise SessionNotFoundError(request.session_id) from exc
+
+            await self._emit_session_info_update(
+                request.session_id,
+                title=request.title,
+                updated_at=metadata.get("end_time"),
+            )
+            return {}
+
+        persisted_metadata = await self._persist_live_session_title(
+            live_session, request.title
+        )
+        self._set_live_session_title(live_session, request.title)
+        updated_at = (
+            persisted_metadata.get("end_time")
+            if persisted_metadata is not None
+            else (
+                live_session.agent_loop.session_logger.session_metadata.end_time
+                if live_session.agent_loop.session_logger.session_metadata is not None
+                else None
+            )
+        )
+
+        await self._emit_session_info_update(
+            live_session.id, title=request.title, updated_at=updated_at
+        )
+        return {}
+
     @override
     async def ext_method(self, method: str, params: dict) -> dict:
-        raise NotImplementedMethodError("ext_method")
+        if method == "session/set_title":
+            return await self._handle_session_set_title(params)
+
+        raise NotImplementedMethodError(method)
 
     @override
     async def ext_notification(self, method: str, params: dict) -> None:

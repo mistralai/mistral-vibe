@@ -20,6 +20,18 @@ async def _wait_for_bash_output_message(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if message := next(iter(vibe_app.query(BashOutputMessage)), None):
+            if not message._pending:
+                return message
+        await pilot.pause(0.05)
+    raise TimeoutError(f"BashOutputMessage did not appear within {timeout}s")
+
+
+async def _wait_for_pending_bash_message(
+    vibe_app: VibeApp, pilot, timeout: float = 1.0
+) -> BashOutputMessage:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if message := next(iter(vibe_app.query(BashOutputMessage)), None):
             return message
         await pilot.pause(0.05)
     raise TimeoutError(f"BashOutputMessage did not appear within {timeout}s")
@@ -157,3 +169,71 @@ async def test_ui_sends_manual_command_output_to_next_agent_turn() -> None:
         assert user_messages[-2].content == injected_message.content
         assert user_messages[-2].injected is True
         assert user_messages[-1].content == "what did the command print?"
+
+
+@pytest.mark.asyncio
+async def test_ui_shows_command_immediately_in_pending_state(vibe_app: VibeApp) -> None:
+    """The command line should appear before the process finishes."""
+    async with vibe_app.run_test() as pilot:
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        chat_input.value = "!sleep 10"
+
+        await pilot.press("enter")
+        message = await _wait_for_pending_bash_message(vibe_app, pilot)
+        assert message._pending is True
+        # command line is rendered
+        cmd_widget = message.query_one(".bash-command", Static)
+        assert str(cmd_widget.render()) == "sleep 10"
+        # no output container yet
+        assert not list(message.query(".bash-output"))
+
+        # clean up: cancel the background task
+        if vibe_app._bash_task and not vibe_app._bash_task.done():
+            vibe_app._bash_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_ui_streams_output_incrementally(vibe_app: VibeApp) -> None:
+    """Output should appear as the command produces it, not all at once."""
+    async with vibe_app.run_test() as pilot:
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        # print lines with a small delay so streaming has a chance to show partial output
+        chat_input.value = "!bash -lc 'echo first; echo second'"
+
+        await pilot.press("enter")
+        message = await _wait_for_bash_output_message(vibe_app, pilot)
+        output_widget = message.query_one(".bash-output", Static)
+        rendered = str(output_widget.render())
+        assert "first" in rendered
+        assert "second" in rendered
+
+
+@pytest.mark.asyncio
+async def test_ui_cancels_running_command_on_new_submit(vibe_app: VibeApp) -> None:
+    """Submitting new input while a bang command is running should cancel it."""
+    async with vibe_app.run_test() as pilot:
+        chat_input = vibe_app.query_one(ChatInputContainer)
+        chat_input.value = "!sleep 30"
+
+        await pilot.press("enter")
+        await _wait_for_pending_bash_message(vibe_app, pilot)
+        assert vibe_app._bash_task is not None
+        assert not vibe_app._bash_task.done()
+
+        # submit a new command which should cancel the first one
+        chat_input.value = "!echo done"
+        await pilot.press("enter")
+
+        # wait until we have two messages and the second is finished
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            all_msgs = list(vibe_app.query(BashOutputMessage))
+            if len(all_msgs) == 2 and not all_msgs[1]._pending:
+                break
+            await pilot.pause(0.05)
+
+        all_msgs = list(vibe_app.query(BashOutputMessage))
+        assert len(all_msgs) == 2
+        second = all_msgs[1]
+        output_widget = second.query_one(".bash-output", Static)
+        assert str(output_widget.render()) == "done"

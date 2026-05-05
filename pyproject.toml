@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.9.3"
+version = "2.9.4"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -31,7 +31,7 @@ dependencies = [
     "anyio>=4.12.0",
     "cachetools>=5.5.0",
     "charset-normalizer>=3.4.4",
-    "cryptography>=44.0.0,<=46.0.3",
+    "cryptography>=44.0.0",
     "gitpython>=3.1.46",
     "giturlparse>=0.14.0",
     "google-auth>=2.0.0",
@@ -40,7 +40,7 @@ dependencies = [
     "keyring>=25.6.0",
     "markdownify>=1.2.2",
     "mcp>=1.14.0",
-    "mistralai==2.3.2",
+    "mistralai==2.4.4",
     "opentelemetry-api>=1.39.1",
     "opentelemetry-exporter-otlp-proto-http>=1.39.1",
     "opentelemetry-sdk>=1.39.1",

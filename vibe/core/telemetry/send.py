@@ -300,6 +300,22 @@ class TelemetryClient:
         payload = {"init_duration_ms": init_duration_ms}
         self.send_telemetry_event("vibe.ready", payload)
 
+    def send_at_mention_inserted(
+        self,
+        *,
+        nb_mentions: int,
+        context_types: dict[str, int],
+        file_extensions: dict[str, int] | None,
+        message_id: str | None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "nb_mentions": nb_mentions,
+            "context_types": context_types,
+            "file_extensions": file_extensions,
+            "message_id": message_id,
+        }
+        self.send_telemetry_event("vibe.at_mention_inserted", payload)
+
     def send_user_rating_feedback(self, rating: int, model: str) -> None:
         self.send_telemetry_event(
             "vibe.user_rating_feedback",
