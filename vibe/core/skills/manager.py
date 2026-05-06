@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
 from vibe.core.skills.builtins import BUILTIN_SKILLS
-from vibe.core.skills.models import ParsedSkillCommand, SkillInfo, SkillMetadata
+from vibe.core.skills.models import (
+    ParsedSkillCommand,
+    SkillInfo,
+    SkillLoadIssue,
+    SkillMetadata,
+)
 from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
 from vibe.core.utils import name_matches
 from vibe.core.utils.io import read_safe
@@ -21,6 +26,7 @@ class SkillManager:
     def __init__(self, config_getter: Callable[[], VibeConfig]) -> None:
         self._config_getter = config_getter
         self._search_paths = self._compute_search_paths(self._config)
+        self.issues: list[SkillLoadIssue] = []
         self.available_skills: Mapping[str, SkillInfo] = MappingProxyType(
             self._apply_filters(self._discover_skills())
         )
@@ -120,6 +126,9 @@ class SkillManager:
         try:
             skill_info = self._parse_skill_file(skill_file)
         except Exception as e:
+            self.issues.append(
+                SkillLoadIssue(file=skill_file, message=f"Failed to parse: {e}")
+            )
             logger.warning("Failed to parse skill at %s: %s", skill_file, e)
             return None
         return skill_info

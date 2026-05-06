@@ -102,3 +102,8 @@ class ParsedSkillCommand(BaseModel):
     name: str
     content: str
     extra_instructions: str | None = None
+
+
+class SkillLoadIssue(BaseModel):
+    file: Path
+    message: str

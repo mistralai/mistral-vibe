@@ -170,6 +170,32 @@ class TestSkillManagerParsing:
         assert "valid-skill" in skills
         assert "invalid-skill" not in skills
 
+    def test_records_issue_for_malformed_yaml_frontmatter(
+        self, skills_dir: Path
+    ) -> None:
+        # Unquoted ': ' inside a YAML scalar is parsed as a nested mapping,
+        # which fails with "mapping values are not allowed here".
+        bad_skill_dir = skills_dir / "bad-skill"
+        bad_skill_dir.mkdir()
+        (bad_skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: bad-skill\n"
+            "description: A description with a colon: followed by space.\n"
+            "---\n"
+        )
+
+        config = build_test_vibe_config(
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+        )
+        manager = SkillManager(lambda: config)
+
+        assert "bad-skill" not in manager.available_skills
+        assert len(manager.issues) == 1
+        assert manager.issues[0].file == bad_skill_dir / "SKILL.md"
+        assert "Failed to parse" in manager.issues[0].message
+
     def test_skips_skill_with_missing_required_fields(self, skills_dir: Path) -> None:
         # Create skill missing description
         missing_desc_dir = skills_dir / "missing-desc"
