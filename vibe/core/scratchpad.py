@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 
 from vibe.core.logger import logger
+from vibe.core.session.session_id import shorten_session_id
 
 _active_scratchpads: dict[str, Path] = {}
 
@@ -17,7 +18,11 @@ def init_scratchpad(session_id: str) -> Path | None:
         return _active_scratchpads[session_id]
 
     try:
-        dir_path = Path(tempfile.mkdtemp(prefix=f"vibe-scratchpad-{session_id[:8]}-"))
+        dir_path = Path(
+            tempfile.mkdtemp(
+                prefix=f"vibe-scratchpad-{shorten_session_id(session_id)}-"
+            )
+        )
         _active_scratchpads[session_id] = dir_path
         logger.debug("Scratchpad initialized at %s", dir_path)
         return dir_path

@@ -194,6 +194,15 @@ disabled_agents = ["auto-approve"]
 
 # Opt-in builtin agents (only affects agents with install_required=True, e.g. lean)
 installed_agents = ["lean"]
+
+# Agent profile to use when --agent is not passed in interactive mode
+# (default: "default"). Valid values: "default", "plan", "accept-edits",
+# "auto-approve", "lean" (only when listed in installed_agents), or any
+# custom agent name from ~/.vibe/agents/ or .vibe/agents/. Subagents
+# (e.g. "explore") are rejected. Ignored in programmatic mode
+# (-p/--prompt), which falls back to "auto-approve" when --agent is not
+# provided.
+default_agent = "plan"
 ```
 
 ### MCP Servers
@@ -321,7 +330,7 @@ Tool, skill, and agent names support three matching modes:
 ```
 vibe [PROMPT]                       # Start interactive session with optional prompt
 vibe -p TEXT / --prompt TEXT         # Programmatic mode (auto-approve, one-shot, exit)
-vibe --agent NAME                   # Select agent profile
+vibe --agent NAME                   # Select agent profile (falls back to `default_agent` config)
 vibe --workdir DIR                  # Change working directory
 vibe --trust                        # Trust cwd for this invocation only (not persisted)
 vibe -c / --continue                # Continue most recent session
@@ -374,6 +383,15 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/mcp` - Display available MCP servers (pass a server name to list its tools)
 - `/resume` (or `/continue`) - Browse and resume past sessions
 - `/rewind` - Rewind to a previous message
+- `/loop <interval> <prompt>` - Schedule a recurring prompt (e.g. `/loop 30s ping`).
+  Intervals: `Ns/Nm/Nh/Nd`, minimum 30s, max 50 loops/session.
+  - `/loop` (or `/loop list` / `/loop ls`) - List current scheduled loops.
+  - `/loop cancel <id|all>` (aliases `rm`, `stop`, `delete`) - Cancel a loop.
+  - Loops fire only when the agent is idle and the input bar is focused. At
+    most one loop fires per poll. Overdue loops fire once on the next poll
+    (no catch-up); `next_fire_at` advances to `now + interval`.
+  - Loops are persisted in the session metadata (`loops` field of `meta.json`)
+    and restored on `--resume`/`--continue`.
 - `/terminal-setup` - Configure Shift+Enter for newlines
 - `/proxy-setup` - Configure proxy and SSL certificate settings
 - `/leanstall` - Install the Lean 4 agent (leanstral)
@@ -415,6 +433,13 @@ Detailed instructions for the model...
 - `MISTRAL_API_KEY` - API key for Mistral provider
 - `VIBE_ACTIVE_MODEL` - Override active model
 - `VIBE_*` - Any config field can be overridden with the `VIBE_` prefix
+- `LOG_LEVEL` - Logging level for `$VIBE_HOME/logs/vibe.log`. One of `DEBUG`,
+  `INFO`, `WARNING` (default), `ERROR`, `CRITICAL`. Invalid values fall back
+  to `WARNING`.
+- `LOG_MAX_BYTES` - Max size in bytes of `vibe.log` before rotation
+  (default: `10485760`, i.e. 10 MiB).
+- `DEBUG_MODE` - When `true`, forces `DEBUG`-level logging. Under `vibe-acp`
+  it also attaches `debugpy` on `localhost:5678`.
 
 ## API Keys (.env file)
 

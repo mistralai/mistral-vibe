@@ -14,7 +14,7 @@ from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 class TestCloseSession:
     @pytest.mark.asyncio
     async def test_close_session_removes_session_and_closes_resources(
-        self, acp_agent_loop: VibeAcpAgentLoop
+        self, acp_agent_loop: VibeAcpAgentLoop, telemetry_events: list[dict[str, Any]]
     ) -> None:
         session_response = await acp_agent_loop.new_session(cwd=".", mcp_servers=[])
         session = acp_agent_loop.sessions[session_response.session_id]
@@ -30,6 +30,17 @@ class TestCloseSession:
         assert session_response.session_id not in acp_agent_loop.sessions
         backend_close.assert_awaited_once()
         telemetry_close.assert_awaited_once()
+        session_closed_events = [
+            event
+            for event in telemetry_events
+            if event["event_name"] == "vibe.session_closed"
+        ]
+        assert len(session_closed_events) == 1
+        assert (
+            session_closed_events[0]["properties"]["session_id"]
+            == session_response.session_id
+        )
+        assert session_closed_events[0]["properties"]["agent_entrypoint"] == "acp"
 
     @pytest.mark.asyncio
     async def test_close_session_cancels_active_prompt(
@@ -68,6 +79,23 @@ class TestCloseSession:
         await acp_agent_loop.close_session(session_response.session_id)
 
         assert bg_task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_emit_session_closed_for_active_sessions(
+        self, acp_agent_loop: VibeAcpAgentLoop, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        session1 = await acp_agent_loop.new_session(cwd=".", mcp_servers=[])
+        session2 = await acp_agent_loop.new_session(cwd=".", mcp_servers=[])
+
+        await acp_agent_loop.emit_session_closed_for_active_sessions()
+
+        session_closed_events = [
+            e for e in telemetry_events if e["event_name"] == "vibe.session_closed"
+        ]
+        emitted_ids = {e["properties"]["session_id"] for e in session_closed_events}
+        assert len(session_closed_events) == 2
+        assert session1.session_id in emitted_ids
+        assert session2.session_id in emitted_ids
 
     @pytest.mark.asyncio
     async def test_close_session_rejects_new_background_tasks(

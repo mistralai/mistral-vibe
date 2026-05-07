@@ -123,6 +123,22 @@ Use the `--agent` flag to select a different agent:
 vibe --agent plan
 ```
 
+To change the default agent used when `--agent` is not passed, set
+`default_agent` in your `config.toml`:
+
+```toml
+default_agent = "plan"
+```
+
+Valid values are `default`, `plan`, `accept-edits`, `auto-approve`,
+`lean` (only when listed in `installed_agents`), or the name of any
+custom agent file in `~/.vibe/agents/` or the project's `.vibe/agents/`
+directory. Subagents such as `explore` are not accepted.
+
+> Note: `default_agent` only applies to interactive sessions. In
+> programmatic mode (`-p` / `--prompt`), Vibe falls back to `auto-approve`
+> when `--agent` is not provided, so `default_agent` is ignored.
+
 ### Subagents and Task Delegation
 
 Vibe supports subagents for delegating tasks. Subagents run independently and can perform specialized work without user interaction, preventing the context from being overloaded.

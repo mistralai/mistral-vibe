@@ -9,6 +9,7 @@ from tests.mock.utils import mock_llm_chunk
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
 from tests.snapshots.snap_compare import SnapCompare
 from tests.stubs.fake_backend import FakeBackend
+from vibe.core.telemetry.send import TelemetryClient
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +21,7 @@ def _enable_feedback_bar(monkeypatch: pytest.MonkeyPatch) -> None:
         "vibe.cli.textual_ui.widgets.feedback_bar_manager.MIN_USER_MESSAGES_FOR_FEEDBACK",
         1,
     )
+    monkeypatch.setattr(TelemetryClient, "is_active", lambda self: True)
 
 
 class FeedbackBarSnapshotApp(BaseSnapshotTestApp):

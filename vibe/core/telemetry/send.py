@@ -16,6 +16,9 @@ from vibe.core.telemetry.types import (
     AgentEntrypoint,
     EntrypointMetadata,
     TelemetryCallType,
+    TeleportCompletedPayload,
+    TeleportFailedPayload,
+    TeleportFailureStage,
 )
 from vibe.core.utils import get_server_url_from_api_base, get_user_agent
 
@@ -63,7 +66,7 @@ class TelemetryClient:
     def _get_mistral_provider_and_api_key(self) -> tuple[ProviderConfig, str] | None:
         try:
             provider = self._config_getter().get_mistral_provider()
-        except ValueError:
+        except Exception:
             return None
         if provider is None:
             return None
@@ -77,7 +80,7 @@ class TelemetryClient:
         """Check if telemetry is enabled in the current config."""
         try:
             return self._config_getter().enable_telemetry
-        except ValueError:
+        except Exception:
             return False
 
     def is_active(self) -> bool:
@@ -270,6 +273,9 @@ class TelemetryClient:
         }
         self.send_telemetry_event("vibe.new_session", payload)
 
+    def send_session_closed(self) -> None:
+        self.send_telemetry_event("vibe.session_closed", {})
+
     def send_onboarding_api_key_added(self) -> None:
         self.send_telemetry_event(
             "vibe.onboarding_api_key_added", {"version": __version__}
@@ -322,3 +328,35 @@ class TelemetryClient:
             {"rating": rating, "version": __version__, "model": model},
             correlation_id=self.last_correlation_id,
         )
+
+    def send_teleport_completed(
+        self,
+        *,
+        push_required: bool,
+        github_auth_required: bool,
+        nb_session_messages: int,
+    ) -> None:
+        payload: TeleportCompletedPayload = {
+            "push_required": push_required,
+            "github_auth_required": github_auth_required,
+            "nb_session_messages": nb_session_messages,
+        }
+        self.send_telemetry_event("vibe.teleport_completed", dict(payload))
+
+    def send_teleport_failed(
+        self,
+        *,
+        stage: TeleportFailureStage,
+        error_class: str,
+        push_required: bool,
+        github_auth_required: bool,
+        nb_session_messages: int,
+    ) -> None:
+        payload: TeleportFailedPayload = {
+            "stage": stage,
+            "error_class": error_class,
+            "push_required": push_required,
+            "github_auth_required": github_auth_required,
+            "nb_session_messages": nb_session_messages,
+        }
+        self.send_telemetry_event("vibe.teleport_failed", dict(payload))

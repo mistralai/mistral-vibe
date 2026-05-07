@@ -161,6 +161,14 @@ class CommandRegistry:
                 description="Rewind to a previous message",
                 handler="_start_rewind_mode",
             ),
+            "loop": Command(
+                aliases=frozenset(["/loop"]),
+                description=(
+                    "Schedule a recurring prompt. "
+                    "Use `/loop <interval> <prompt>`, `/loop list`, or `/loop cancel <id|all>`"
+                ),
+                handler="_loop_command",
+            ),
             "data-retention": Command(
                 aliases=frozenset(["/data-retention"]),
                 description="Show data retention information",

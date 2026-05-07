@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.5] - 2026-05-06
+
+### Added
+
+- `/loop` command to run a prompt or slash command on a recurring interval
+- `default_agent` config setting
+- Telemetry instrumentation for the `teleport` command
+- Logging environment variables documented in `--help`
+
+### Changed
+
+- `enable_telemetry` now takes precedence over `enable_otel`
+
+### Fixed
+
+- Non-retryable errors raised by sub-activities now correctly stop the retry when the agent loop runs inside a Temporal activity (deepens the 2.9.4 fix to walk the exception cause chain)
+- Compacted session IDs displayed correctly
+- Reload the history file before writing so parallel instances don't clobber each other
+- `read_file` flagged as truncated when the limit is reached
+- CLI loader left-alignment
+- Default scroll sensitivity in the TUI restored
+- Loosened the "no git commit" constraint
+- Ensure `enable_telemetry` takes precedence over `enable_otel`
+
+
 ## [2.9.4] - 2026-05-05
 
 ### Added

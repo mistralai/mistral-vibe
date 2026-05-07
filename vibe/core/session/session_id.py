@@ -22,3 +22,13 @@ def generate_session_id(*, suffix: str | None = None) -> str:
 def extract_suffix(session_id: str) -> str:
     """Extract the stable suffix (last segment after the final hyphen)."""
     return session_id.rsplit("-", 1)[-1]
+
+
+_SHORT_LEN = 8
+
+
+def shorten_session_id(session_id: str, *, from_end: bool = False) -> str:
+    """Return a short human-readable slice of a session ID (8 chars)."""
+    if from_end:
+        return session_id[-_SHORT_LEN:]
+    return session_id[:_SHORT_LEN]

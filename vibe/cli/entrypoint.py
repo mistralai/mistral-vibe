@@ -8,7 +8,6 @@ import sys
 from rich import print as rprint
 
 from vibe import __version__
-from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.trusted_folders import find_trustable_files, trusted_folders_manager
 from vibe.setup.trusted_folders.trust_folder_dialog import (
@@ -18,7 +17,18 @@ from vibe.setup.trusted_folders.trust_folder_dialog import (
 
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Mistral Vibe interactive CLI")
+    parser = argparse.ArgumentParser(
+        description="Run the Mistral Vibe interactive CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Environment variables:\n"
+            "  VIBE_HOME       Override the Vibe home directory (default: ~/.vibe)\n"
+            "  LOG_LEVEL       Logging level: DEBUG, INFO, WARNING (default), ERROR, CRITICAL.\n"
+            "                  Logs are written to $VIBE_HOME/logs/vibe.log.\n"
+            "  LOG_MAX_BYTES   Max size of vibe.log before rotation (default: 10485760).\n"
+            "  VIBE_*          Override any config field (e.g. VIBE_ACTIVE_MODEL=local)."
+        ),
+    )
     parser.add_argument(
         "-v", "--version", action="version", version=f"%(prog)s {__version__}"
     )
@@ -72,9 +82,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--agent",
         metavar="NAME",
-        default=BuiltinAgentName.DEFAULT,
+        default=None,
         help="Agent to use (builtin: default, plan, accept-edits, auto-approve, "
-        "or custom from ~/.vibe/agents/NAME.toml)",
+        "or custom from ~/.vibe/agents/NAME.toml). In interactive mode, "
+        "defaults to the 'default_agent' config setting. In programmatic "
+        "mode (-p/--prompt), defaults to auto-approve and 'default_agent' "
+        "is ignored.",
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
     parser.add_argument(

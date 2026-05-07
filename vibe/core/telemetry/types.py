@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, TypedDict
 
 from pydantic import BaseModel
 
@@ -36,3 +36,26 @@ class TelemetryRequestMetadata(TelemetryBaseMetadata):
     call_type: TelemetryCallType
     call_source: str = "vibe_code"
     message_id: str | None = None
+
+
+TeleportFailureStage = Literal[
+    "no_history",
+    "remote_session",
+    "git_check",
+    "push",
+    "workflow_start",
+    "github_auth",
+    "fetch_url",
+    "cancelled",
+]
+
+
+class TeleportCompletedPayload(TypedDict):
+    push_required: bool
+    github_auth_required: bool
+    nb_session_messages: int
+
+
+class TeleportFailedPayload(TeleportCompletedPayload):
+    stage: TeleportFailureStage
+    error_class: str

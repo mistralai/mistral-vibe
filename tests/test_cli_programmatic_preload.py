@@ -80,7 +80,14 @@ def test_run_programmatic_preload_streaming_is_batched(
         new_session = [
             e for e in telemetry_events if e.get("event_name") == "vibe.new_session"
         ]
+
         assert len(new_session) == 0
+
+        session_closed = [
+            e for e in telemetry_events if e.get("event_name") == "vibe.session_closed"
+        ]
+        assert len(session_closed) == 1
+        assert session_closed[0]["properties"]["agent_entrypoint"] == "programmatic"
 
         assert (
             spy.emitted[0][1] == "You are Vibe, a super useful programming assistant."

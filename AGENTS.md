@@ -66,7 +66,7 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 ## Logging & errors
 
 - Use `from vibe.core.logger import logger` — stdlib `logging` with `StructuredLogFormatter`, not `structlog`.
-- Configure via env: `LOG_LEVEL` (default `WARNING`), `DEBUG_MODE`, `LOG_MAX_BYTES`. Logs land in `~/.vibe/logs/vibe.log`.
+- Configure via env: `LOG_LEVEL` (default `WARNING`), `LOG_MAX_BYTES`. Logs land in `~/.vibe/logs/vibe.log`.
 - Pass variables as keyword args, not interpolated into the message: prefer `logger.error("Failed to fetch", url=url)` over `logger.error(f"Failed to fetch {url}")`.
 - Define module-local exception hierarchies. Always chain with `raise NewError(...) from e`. Rich exceptions expose a `_fmt()` helper for human-readable output.
 

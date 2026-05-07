@@ -91,6 +91,7 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
 
             return formatter.finalize()
         finally:
+            agent_loop.emit_session_closed_telemetry()
             await agent_loop.telemetry_client.aclose()
 
     return asyncio.run(_async_run())

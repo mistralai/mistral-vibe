@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import tempfile
 
 from vibe.core.utils.io import read_safe
 
@@ -22,12 +24,10 @@ class HistoryManager:
         try:
             text = read_safe(self.history_file).text
         except OSError:
-            self._entries = []
             return
 
         entries = []
         for raw_line in text.splitlines():
-            raw_line = raw_line.rstrip("\n\r")
             if not raw_line:
                 continue
             try:
@@ -36,13 +36,24 @@ class HistoryManager:
                 entry = raw_line
             entries.append(entry if isinstance(entry, str) else str(entry))
         self._entries = entries[-self.max_entries :]
+        self.reset_navigation()
 
     def _save_history(self) -> None:
         try:
             self.history_file.parent.mkdir(parents=True, exist_ok=True)
-            with self.history_file.open("w", encoding="utf-8") as f:
-                for entry in self._entries:
-                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{self.history_file.name}.",
+                suffix=".tmp",
+                dir=self.history_file.parent,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    for entry in self._entries:
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                os.replace(tmp_path, self.history_file)
+            except OSError:
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
         except OSError:
             pass
 
@@ -50,6 +61,8 @@ class HistoryManager:
         text = text.strip()
         if not text:
             return
+
+        self._load_history()
 
         if self._entries and self._entries[-1] == text:
             return
@@ -60,7 +73,6 @@ class HistoryManager:
             self._entries = self._entries[-self.max_entries :]
 
         self._save_history()
-        self.reset_navigation()
 
     def get_previous(self, current_input: str) -> str | None:
         if not self._entries:

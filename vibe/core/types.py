@@ -26,6 +26,16 @@ from pydantic import (
 )
 
 
+class ScheduledLoop(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    interval_seconds: int
+    prompt: str
+    next_fire_at: float
+    created_at: float
+
+
 class Backend(StrEnum):
     MISTRAL = auto()
     GENERIC = auto()
@@ -142,6 +152,7 @@ class SessionMetadata(BaseModel):
     git_branch: str | None
     environment: dict[str, str | None]
     username: str
+    loops: list[ScheduledLoop] = Field(default_factory=list)
     title: str | None = None
     title_source: Literal["auto", "manual"] = "auto"
 
@@ -418,6 +429,8 @@ class CompactEndEvent(BaseEvent):
     old_context_tokens: int
     new_context_tokens: int
     summary_length: int
+    old_session_id: str | None = None
+    new_session_id: str | None = None
     # WORKAROUND: Using tool_call to communicate compact events to the client.
     # This should be revisited when the ACP protocol defines how compact events
     # should be represented.

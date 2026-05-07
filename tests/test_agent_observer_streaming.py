@@ -581,6 +581,60 @@ async def test_non_retryable_passes_through_non_streaming(observer_capture) -> N
     assert agent.session_logger.save_interaction.await_count == 1
 
 
+def _wrap_with_cause(message: str, cause: BaseException) -> RuntimeError:
+    # Mirrors how Temporal raises ``ActivityError`` on the workflow side with
+    # the original ``ApplicationError`` chained as ``__cause__`` — except we
+    # don't import temporalio. The wrap-site check has to traverse the chain
+    # to find ``non_retryable`` regardless of how deep it is.
+    error = RuntimeError(message)
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_via_cause_chain_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    wrapped = _wrap_with_cause(
+        "Activity task failed", _NonRetryableError("auth failed")
+    )
+    backend = FakeBackend(exception_to_raise=wrapped)
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=True,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(RuntimeError, match="Activity task failed"):
+        [_ async for _ in agent.act("Trigger non-retryable via cause chain")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_via_cause_chain_non_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    wrapped = _wrap_with_cause(
+        "Activity task failed", _NonRetryableError("auth failed")
+    )
+    backend = FakeBackend(exception_to_raise=wrapped)
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=False,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(RuntimeError, match="Activity task failed"):
+        [_ async for _ in agent.act("Trigger non-retryable via cause chain")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
 def _snapshot_events(events: list) -> list[tuple[str, str]]:
     return [
         (type(e).__name__, e.content)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -10,7 +11,7 @@ from tests.conftest import build_test_vibe_app, build_test_vibe_config
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
-from vibe.core.types import Backend
+from vibe.core.types import Backend, LLMMessage, Role
 
 
 def _chat_plan_gateway(*, prompt_switching_to_pro_plan: bool) -> FakeWhoAmIGateway:
@@ -36,6 +37,16 @@ async def _wait_until(pause, predicate, timeout: float = 2.0) -> None:
     raise AssertionError("Condition was not met within the timeout")
 
 
+def _teleport_failed_events(
+    telemetry_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in telemetry_events
+        if event["event_name"] == "vibe.teleport_failed"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_teleport_command_visible_for_paid_chat_users() -> None:
     app = build_test_vibe_app(
@@ -54,6 +65,81 @@ async def test_teleport_command_visible_for_paid_chat_users() -> None:
         input_widget = app.query_one(ChatInputContainer).input_widget
         assert input_widget is not None
         assert "&" in input_widget.mode_characters
+
+
+@pytest.mark.asyncio
+async def test_teleport_command_without_history_sends_early_failure_telemetry(
+    telemetry_events: list[dict[str, Any]],
+) -> None:
+    app = build_test_vibe_app(
+        config=_vibe_code_enabled_config(),
+        plan_offer_gateway=_chat_plan_gateway(prompt_switching_to_pro_plan=False),
+    )
+
+    async with app.run_test() as pilot:
+        await _wait_until(
+            pilot.pause,
+            lambda: app.commands.get_command_name("/teleport") == "teleport",
+        )
+
+        await app.on_chat_input_container_submitted(
+            ChatInputContainer.Submitted("/teleport")
+        )
+
+    assert _teleport_failed_events(telemetry_events) == [
+        {
+            "event_name": "vibe.teleport_failed",
+            "properties": {
+                "stage": "no_history",
+                "error_class": "TeleportNoHistoryError",
+                "push_required": False,
+                "github_auth_required": False,
+                "nb_session_messages": 0,
+                "session_id": app.agent_loop.session_id,
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_teleport_command_in_remote_session_sends_early_failure_telemetry(
+    telemetry_events: list[dict[str, Any]],
+) -> None:
+    app = build_test_vibe_app(
+        config=_vibe_code_enabled_config(),
+        plan_offer_gateway=_chat_plan_gateway(prompt_switching_to_pro_plan=False),
+    )
+    app.agent_loop.messages.append(LLMMessage(role=Role.user, content="hello"))
+    app.agent_loop.messages.append(LLMMessage(role=Role.assistant, content="hi"))
+
+    async with app.run_test() as pilot:
+        await _wait_until(
+            pilot.pause,
+            lambda: app.commands.get_command_name("/teleport") == "teleport",
+        )
+
+        await app._remote_manager.attach(session_id="remote-session", config=app.config)
+        await app.on_chat_input_container_submitted(
+            ChatInputContainer.Submitted("/teleport")
+        )
+        await _wait_until(
+            pilot.pause, lambda: len(_teleport_failed_events(telemetry_events)) == 1
+        )
+        await app._remote_manager.detach()
+
+    assert _teleport_failed_events(telemetry_events) == [
+        {
+            "event_name": "vibe.teleport_failed",
+            "properties": {
+                "stage": "remote_session",
+                "error_class": "TeleportRemoteSessionError",
+                "push_required": False,
+                "github_auth_required": False,
+                "nb_session_messages": 2,
+                "session_id": app.agent_loop.session_id,
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

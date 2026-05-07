@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from vibe.cli.history_manager import HistoryManager
 
 
@@ -72,6 +74,45 @@ def test_history_manager_stores_slash_prefixed_entries(tmp_path: Path) -> None:
     assert reloaded.get_previous(current_input="") == "/tool_call arg1 arg2"
     assert reloaded.get_previous(current_input="") == "first"
     assert reloaded.get_previous(current_input="") is None
+
+
+def test_history_manager_keeps_entries_when_reload_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    history_file = tmp_path / "history.jsonl"
+    manager = HistoryManager(history_file)
+    manager.add("first")
+
+    def raise_os_error(*args: object, **kwargs: object) -> None:
+        raise OSError
+
+    monkeypatch.setattr("vibe.cli.history_manager.read_safe", raise_os_error)
+
+    manager.add("second")
+
+    assert manager.get_previous(current_input="") == "second"
+    assert manager.get_previous(current_input="") == "first"
+
+
+def test_history_manager_resets_navigation_when_add_is_duplicate(
+    tmp_path: Path,
+) -> None:
+    history_file = tmp_path / "history.jsonl"
+    manager = HistoryManager(history_file, max_entries=2)
+    manager.add("a")
+    manager.add("b")
+
+    other = HistoryManager(history_file, max_entries=10)
+    other.add("c")
+    other.add("d")
+    other.add("e")
+
+    assert manager.get_previous(current_input="") == "b"
+    manager.add("e")
+
+    assert manager.get_previous(current_input="") == "e"
+    assert manager.get_previous(current_input="") == "d"
+    assert manager.get_previous(current_input="") is None
 
 
 def test_history_manager_allows_navigation_round_trip(tmp_path: Path) -> None:

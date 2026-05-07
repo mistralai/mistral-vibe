@@ -5,33 +5,41 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from vibe.core.session.resume_sessions import (
-    SHORT_SESSION_ID_LEN,
     list_remote_resume_sessions,
     short_session_id,
 )
+from vibe.core.session.session_id import shorten_session_id
+
+
+class TestShortenSessionId:
+    def test_shortens_to_first_8_chars(self) -> None:
+        sid = "abcdef1234567890"
+        assert shorten_session_id(sid) == "abcdef12"
+
+    def test_from_end_shortens_to_last_8_chars(self) -> None:
+        sid = "abcdef1234567890"
+        assert shorten_session_id(sid, from_end=True) == "34567890"
+
+    def test_returns_full_id_when_shorter_than_limit(self) -> None:
+        sid = "abc"
+        assert shorten_session_id(sid) == "abc"
+        assert shorten_session_id(sid, from_end=True) == "abc"
 
 
 class TestShortSessionId:
-    def test_local_shortens_to_first_chars(self) -> None:
+    def test_local_delegates_to_shorten(self) -> None:
         sid = "abcdef1234567890"
-        result = short_session_id(sid)
-        assert result == sid[:SHORT_SESSION_ID_LEN]
-        assert len(result) == SHORT_SESSION_ID_LEN
+        assert short_session_id(sid) == shorten_session_id(sid)
 
     def test_local_is_default(self) -> None:
         sid = "abcdef1234567890"
         assert short_session_id(sid) == short_session_id(sid, source="local")
 
-    def test_remote_shortens_to_last_chars(self) -> None:
+    def test_remote_delegates_to_shorten_from_end(self) -> None:
         sid = "abcdef1234567890"
-        result = short_session_id(sid, source="remote")
-        assert result == sid[-SHORT_SESSION_ID_LEN:]
-        assert len(result) == SHORT_SESSION_ID_LEN
-
-    def test_returns_full_id_when_shorter_than_limit(self) -> None:
-        sid = "abc"
-        assert short_session_id(sid) == "abc"
-        assert short_session_id(sid, source="remote") == "abc"
+        assert short_session_id(sid, source="remote") == shorten_session_id(
+            sid, from_end=True
+        )
 
     def test_empty_string(self) -> None:
         assert short_session_id("") == ""

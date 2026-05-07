@@ -980,7 +980,7 @@ NarratorStatus {
     height: auto;
     background: transparent;
     padding: 0;
-    margin: 0 0 0 1;
+    margin: 0;
 }
 
 #banner-container {

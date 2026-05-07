@@ -141,7 +141,7 @@ class ReadFile(
         try:
             raw_lines: list[bytes] = []
             bytes_read = 0
-            was_truncated = False
+            was_truncated = True
 
             async with await anyio.Path(file_path).open("rb") as f:
                 line_index = 0
@@ -155,12 +155,13 @@ class ReadFile(
 
                     line_bytes = len(raw_line)
                     if bytes_read + line_bytes > self.config.max_read_bytes:
-                        was_truncated = True
                         break
 
                     raw_lines.append(raw_line)
                     bytes_read += line_bytes
                     line_index += 1
+                else:
+                    was_truncated = False
         except OSError as exc:
             raise ToolError(f"Error reading {file_path}: {exc}") from exc
 

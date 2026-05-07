@@ -217,7 +217,10 @@ class EventHandler:
     async def _handle_compact_end(self, event: CompactEndEvent) -> None:
         if self.current_compact:
             self.current_compact.set_complete(
-                old_tokens=event.old_context_tokens, new_tokens=event.new_context_tokens
+                old_tokens=event.old_context_tokens,
+                new_tokens=event.new_context_tokens,
+                old_session_id=event.old_session_id,
+                new_session_id=event.new_session_id,
             )
             self.current_compact = None
 

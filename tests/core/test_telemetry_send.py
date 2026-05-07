@@ -362,6 +362,48 @@ class TestTelemetryClient:
         assert telemetry_events[1]["properties"]["command"] == "my_skill"
         assert telemetry_events[1]["properties"]["command_type"] == "skill"
 
+    def test_send_teleport_completed_payload(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_teleport_completed(
+            push_required=True, github_auth_required=False, nb_session_messages=4
+        )
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.teleport_completed"
+        assert telemetry_events[0]["properties"] == {
+            "push_required": True,
+            "github_auth_required": False,
+            "nb_session_messages": 4,
+        }
+
+    def test_send_teleport_failed_payload(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_teleport_failed(
+            stage="push",
+            error_class="ServiceTeleportError",
+            push_required=True,
+            github_auth_required=False,
+            nb_session_messages=4,
+        )
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.teleport_failed"
+        assert telemetry_events[0]["properties"] == {
+            "stage": "push",
+            "error_class": "ServiceTeleportError",
+            "push_required": True,
+            "github_auth_required": False,
+            "nb_session_messages": 4,
+        }
+
     def test_send_new_session_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
@@ -392,6 +434,55 @@ class TestTelemetryClient:
         assert properties["client_version"] == "1.96.0"
         assert properties["terminal_emulator"] == "vscode"
         assert "version" in properties
+
+    @pytest.mark.asyncio
+    async def test_send_session_closed_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            TelemetryClient, "send_telemetry_event", _original_send_telemetry_event
+        )
+        config = build_test_vibe_config(enable_telemetry=True)
+        env_key = config.get_active_provider().api_key_env_var
+        monkeypatch.setenv(env_key, "sk-test")
+        client = TelemetryClient(
+            config_getter=lambda: config,
+            session_id_getter=lambda: "current-session",
+            parent_session_id_getter=lambda: "current-parent-session",
+            entrypoint_metadata_getter=lambda: EntrypointMetadata(
+                agent_entrypoint="cli",
+                agent_version="1.0.0",
+                client_name="vibe_cli",
+                client_version="1.0.0",
+            ),
+        )
+        mock_post = AsyncMock(return_value=MagicMock(status_code=204))
+        client._client = MagicMock()
+        client._client.post = mock_post
+        client._client.aclose = AsyncMock()
+
+        client.send_session_closed()
+        await client.aclose()
+
+        mock_post.assert_called_once_with(
+            "https://api.mistral.ai/v1/datalake/events",
+            json={
+                "event": "vibe.session_closed",
+                "properties": {
+                    "agent_entrypoint": "cli",
+                    "agent_version": "1.0.0",
+                    "client_name": "vibe_cli",
+                    "client_version": "1.0.0",
+                    "session_id": "current-session",
+                    "parent_session_id": "current-parent-session",
+                },
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer sk-test",
+                "User-Agent": get_user_agent(Backend.MISTRAL),
+            },
+        )
 
     def test_build_base_metadata_includes_entrypoint_and_session(self) -> None:
         metadata = build_base_metadata(

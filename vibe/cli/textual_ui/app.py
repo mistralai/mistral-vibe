@@ -51,6 +51,7 @@ from vibe.cli.textual_ui.notifications import (
 )
 from vibe.cli.textual_ui.quit_manager import QuitManager
 from vibe.cli.textual_ui.remote import RemoteSessionManager, is_progress_event
+from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopRunner
 from vibe.cli.textual_ui.session_exit import print_session_resume_message
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
@@ -140,6 +141,7 @@ from vibe.core.session.resume_sessions import (
 from vibe.core.session.saved_sessions import update_saved_session_title_at_path
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.skills.manager import SkillManager
+from vibe.core.teleport.telemetry import send_teleport_early_failure_telemetry
 from vibe.core.teleport.types import (
     TeleportAuthCompleteEvent,
     TeleportAuthRequiredEvent,
@@ -339,7 +341,6 @@ class VibeApp(App):  # noqa: PLR0904
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.scroll_sensitivity_y = 1.0
         self.agent_loop = agent_loop
         self._plan_info: PlanInfo | None = None
         self._voice_manager: VoiceManagerPort = (
@@ -397,7 +398,17 @@ class VibeApp(App):  # noqa: PLR0904
         self._rewind_mode = False
         self._rewind_highlighted_widget: UserMessage | None = None
         self._fatal_init_error = False
+        self._force_quit_task: asyncio.Task[None] | None = None
         self.commands = self._build_command_registry()
+        self._loop_runner = ScheduledLoopRunner(
+            self.agent_loop.session_logger,
+            can_fire=lambda: (
+                not self._agent_running and self._current_bottom_app == BottomApp.Input
+            ),
+            fire=self._handle_user_message,
+            mount=self._mount_and_scroll,
+            tools_collapsed=lambda: self._tools_collapsed,
+        )
 
     def _configure_startup_options(self, startup: StartupOptions | None) -> None:
         opts = startup or StartupOptions()
@@ -504,6 +515,8 @@ class VibeApp(App):  # noqa: PLR0904
         await self._resolve_plan()
         await self._show_dangerous_directory_warning()
         await self._resume_history_from_messages()
+        self._loop_runner.restore_from_session()
+        self._loop_runner.start()
         await self._check_and_show_whats_new()
         self._schedule_update_notification()
         if not self._is_resuming_session:
@@ -1407,6 +1420,12 @@ class VibeApp(App):  # noqa: PLR0904
             if show_message:
                 await self._mount_and_scroll(UserMessage("/teleport"))
             if not has_history:
+                send_teleport_early_failure_telemetry(
+                    self.agent_loop.telemetry_client,
+                    stage="no_history",
+                    error_class="TeleportNoHistoryError",
+                    nb_session_messages=len(self.agent_loop.messages[1:]),
+                )
                 await self._mount_and_scroll(
                     ErrorMessage(
                         "No conversation history to teleport.",
@@ -1429,6 +1448,12 @@ class VibeApp(App):  # noqa: PLR0904
         await self._mount_and_scroll(teleport_msg)
 
         if self._remote_manager.is_active:
+            send_teleport_early_failure_telemetry(
+                self.agent_loop.telemetry_client,
+                stage="remote_session",
+                error_class="TeleportRemoteSessionError",
+                nb_session_messages=len(self.agent_loop.messages[1:]),
+            )
             await loading.remove()
             await self._mount_and_scroll(
                 ErrorMessage(
@@ -1818,6 +1843,8 @@ class VibeApp(App):  # noqa: PLR0904
                 f"Session `{short_session_id(session.session_id)}` not found."
             )
 
+        self._emit_session_closed_for_active_session()
+
         loaded_messages, metadata = SessionLoader.load_session(session_path)
         if self._chat_input_container:
             self._chat_input_container.set_custom_border(None)
@@ -1846,6 +1873,7 @@ class VibeApp(App):  # noqa: PLR0904
         if self.event_handler:
             self.event_handler.is_remote = False
         await self._resume_history_from_messages()
+        self._loop_runner.restore_from_session()
         await self._mount_and_scroll(
             UserCommandMessage(
                 f"Resumed session `{short_session_id(session.session_id)}`"
@@ -1856,6 +1884,8 @@ class VibeApp(App):  # noqa: PLR0904
         await self._remote_manager.attach(
             session_id=session.session_id, config=self.config
         )
+        self._emit_session_closed_for_active_session()
+        self.agent_loop.session_id = session.session_id
         self._refresh_profile_widgets()
         if self._chat_input_container:
             self._chat_input_container.set_custom_border(None)
@@ -2018,6 +2048,10 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
 
+    async def _loop_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        widget = await self._loop_runner.handle_command(cmd_args)
+        await self._mount_and_scroll(widget)
+
     async def _compact_history(self, cmd_args: str = "", **kwargs: Any) -> None:
         if self._agent_running:
             await self._mount_and_scroll(
@@ -2041,22 +2075,32 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         old_tokens = self.agent_loop.stats.context_tokens
+        old_session_id = self.agent_loop.session_id
         compact_msg = CompactMessage()
         self.event_handler.current_compact = compact_msg
         await self._mount_and_scroll(compact_msg)
 
         self._agent_task = asyncio.create_task(
-            self._run_compact(compact_msg, old_tokens, cmd_args.strip())
+            self._run_compact(compact_msg, old_tokens, old_session_id, cmd_args.strip())
         )
 
     async def _run_compact(
-        self, compact_msg: CompactMessage, old_tokens: int, extra_instructions: str = ""
+        self,
+        compact_msg: CompactMessage,
+        old_tokens: int,
+        old_session_id: str,
+        extra_instructions: str = "",
     ) -> None:
         self._agent_running = True
         try:
             await self.agent_loop.compact(extra_instructions=extra_instructions)
             new_tokens = self.agent_loop.stats.context_tokens
-            compact_msg.set_complete(old_tokens=old_tokens, new_tokens=new_tokens)
+            compact_msg.set_complete(
+                old_tokens=old_tokens,
+                new_tokens=new_tokens,
+                old_session_id=old_session_id,
+                new_session_id=self.agent_loop.session_id,
+            )
 
         except asyncio.CancelledError:
             compact_msg.set_error("Compaction interrupted")
@@ -2085,9 +2129,16 @@ class VibeApp(App):  # noqa: PLR0904
         return short_session_id(self.agent_loop.session_logger.session_id)
 
     async def _exit_app(self, **kwargs: Any) -> None:
+        self._emit_session_closed_for_active_session()
+        await self._loop_runner.stop()
         self._log_reader.shutdown()
         await self._narrator_manager.close()
-        self.exit(result=self._get_session_resume_info())
+        try:
+            await self.agent_loop.telemetry_client.aclose()
+        except Exception as exc:
+            logger.error("Failed to close telemetry client during exit", exc_info=exc)
+        finally:
+            self.exit(result=self._get_session_resume_info())
 
     def _make_default_voice_manager(self) -> VoiceManager:
         try:
@@ -2746,7 +2797,16 @@ class VibeApp(App):  # noqa: PLR0904
             return
         self._quit_manager.request_confirmation("Ctrl+D")
 
+    def _emit_session_closed_for_active_session(self) -> None:
+        self.agent_loop.emit_session_closed_telemetry()
+
     def _force_quit(self) -> None:
+        if self._force_quit_task is not None and not self._force_quit_task.done():
+            return
+        self._force_quit_task = asyncio.create_task(self._force_quit_async())
+
+    async def _force_quit_async(self) -> None:
+        self._emit_session_closed_for_active_session()
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
         if self._bash_task and not self._bash_task.done():
@@ -2755,7 +2815,14 @@ class VibeApp(App):  # noqa: PLR0904
 
         self._log_reader.shutdown()
         self._narrator_manager.cancel()
-        self.exit(result=self._get_session_resume_info())
+        try:
+            await self.agent_loop.telemetry_client.aclose()
+        except Exception as exc:
+            logger.error(
+                "Failed to close telemetry client during force quit", exc_info=exc
+            )
+        finally:
+            self.exit(result=self._get_session_resume_info())
 
     def action_scroll_chat_up(self) -> None:
         try:

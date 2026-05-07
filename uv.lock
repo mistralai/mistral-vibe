@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.12"
 
 [options]
-exclude-newer = "2026-04-28T08:28:58.401523Z"
+exclude-newer = "2026-04-29T14:28:22.645142Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -820,7 +820,7 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "2.9.4"
+version = "2.9.5"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },

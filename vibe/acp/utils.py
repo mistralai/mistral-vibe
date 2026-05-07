@@ -231,7 +231,10 @@ def create_compact_end_session_update(event: CompactEndEvent) -> ToolCallProgres
                     type="text",
                     text=(
                         compact_reduction_display(
-                            event.old_context_tokens, event.new_context_tokens
+                            event.old_context_tokens,
+                            event.new_context_tokens,
+                            old_session_id=event.old_session_id,
+                            new_session_id=event.new_session_id,
                         )
                     ),
                 ),

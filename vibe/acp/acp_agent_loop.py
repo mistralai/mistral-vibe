@@ -7,6 +7,7 @@ import inspect
 import logging
 import os
 from pathlib import Path
+import signal
 import sys
 from typing import Any, cast, override
 from uuid import uuid4
@@ -994,10 +995,21 @@ class VibeAcpAgentLoop(AcpAgent):
         session = self._get_session(session_id)
         self.sessions.pop(session_id, None)
 
+        session.agent_loop.emit_session_closed_telemetry()
         await session.close()
         await self._close_agent_loop(session.agent_loop)
 
         return CloseSessionResponse()
+
+    async def emit_session_closed_for_active_sessions(self) -> None:
+        agent_loops = [session.agent_loop for session in self.sessions.values()]
+        for agent_loop in agent_loops:
+            agent_loop.telemetry_client._client = None
+            agent_loop.emit_session_closed_telemetry()
+        await asyncio.gather(
+            *(agent_loop.telemetry_client.aclose() for agent_loop in agent_loops),
+            return_exceptions=True,
+        )
 
     async def _close_agent_loop(self, agent_loop: AgentLoop) -> None:
         deferred_init_thread = agent_loop._deferred_init_thread
@@ -1248,6 +1260,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
         tool_call_id = str(uuid4())
         old_tokens = session.agent_loop.stats.context_tokens
+        old_session_id = session.agent_loop.session_id
         parts = text_prompt.strip().split(None, 1)
         cmd_args = parts[1] if len(parts) > 1 else ""
 
@@ -1268,6 +1281,8 @@ class VibeAcpAgentLoop(AcpAgent):
             old_context_tokens=old_tokens or 0,
             new_context_tokens=new_tokens or 0,
             summary_length=0,
+            old_session_id=old_session_id,
+            new_session_id=session.agent_loop.session_id,
             tool_call_id=tool_call_id,
         )
         await self.client.session_update(
@@ -1419,19 +1434,48 @@ class VibeAcpAgentLoop(AcpAgent):
         return await self._command_reply(session, DATA_RETENTION_MESSAGE, message_id)
 
 
+SESSION_CLOSED_FLUSH_TIMEOUT_SECONDS = 1.0
+
+
 def run_acp_server() -> None:
+    agent = VibeAcpAgentLoop()
+    install_sigterm_flush = TelemetryClient(config_getter=VibeConfig.load).is_active()
+    received_sigterm = False
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+    def _handle_sigterm(_signum: int, _frame: Any) -> None:
+        nonlocal received_sigterm
+        received_sigterm = True
+        raise KeyboardInterrupt
+
+    if install_sigterm_flush:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
     try:
         asyncio.run(
             run_agent(
-                agent=VibeAcpAgentLoop(),
+                agent=agent,
                 use_unstable_protocol=True,
                 observers=[acp_message_observer],
             )
         )
     except KeyboardInterrupt:
+        if received_sigterm:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
+            try:
+                asyncio.run(
+                    asyncio.wait_for(
+                        agent.emit_session_closed_for_active_sessions(),
+                        timeout=SESSION_CLOSED_FLUSH_TIMEOUT_SECONDS,
+                    )
+                )
+            except (TimeoutError, Exception):
+                pass
         # This is expected when the server is terminated
         pass
     except Exception as e:
         # Log any unexpected errors
         print(f"ACP Agent Server error: {e}", file=sys.stderr)
         raise
+    finally:
+        if install_sigterm_flush:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)

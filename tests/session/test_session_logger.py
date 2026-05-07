@@ -11,6 +11,7 @@ import pytest
 from tests.conftest import build_test_vibe_config
 from vibe.core.agents.models import AgentProfile, AgentSafety
 from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.loop import ScheduledLoop
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.tools.manager import ToolManager
 from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
@@ -868,3 +869,136 @@ class TestSessionLoggerCleanupTmpFiles:
             logger.maybe_cleanup_tmp_files()
 
         assert cleanup_spy.call_count == 2
+
+
+class TestPersistLoops:
+    @pytest.mark.asyncio
+    async def test_writes_into_existing_metadata(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "test-session-loops")
+        await logger.save_interaction(
+            messages=[
+                LLMMessage(role=Role.system, content="System prompt"),
+                LLMMessage(role=Role.user, content="Hello"),
+                LLMMessage(role=Role.assistant, content="Hi there!"),
+            ],
+            stats=AgentStats(steps=1),
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_metadata is not None
+        logger.session_metadata.loops = [
+            ScheduledLoop(
+                id="aabbccdd",
+                interval_seconds=30,
+                prompt="ping",
+                next_fire_at=12345.0,
+                created_at=12000.0,
+            )
+        ]
+        await logger.persist_loops()
+
+        assert logger.session_dir is not None
+        with open(logger.session_dir / "meta.json") as f:
+            metadata = json.load(f)
+
+        assert metadata["session_id"] == "test-session-loops"
+        assert metadata["total_messages"] == 2
+        assert metadata["loops"] == [
+            {
+                "id": "aabbccdd",
+                "interval_seconds": 30,
+                "prompt": "ping",
+                "next_fire_at": 12345.0,
+                "created_at": 12000.0,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_noop_when_metadata_file_missing(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(session_config, "no-meta-session")
+        assert logger.session_dir is not None
+        # No save_interaction was called -> meta.json does not exist
+        assert not (logger.session_dir / "meta.json").exists()
+
+        assert logger.session_metadata is not None
+        logger.session_metadata.loops = [
+            ScheduledLoop(
+                id="aabbccdd",
+                interval_seconds=30,
+                prompt="ping",
+                next_fire_at=1.0,
+                created_at=0.0,
+            )
+        ]
+        await logger.persist_loops()
+
+        assert not (logger.session_dir / "meta.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_noop_when_logging_disabled(
+        self, disabled_session_config: SessionLoggingConfig
+    ) -> None:
+        logger = SessionLogger(disabled_session_config, "ignored")
+        # Should not raise even though session_metadata is None
+        await logger.persist_loops()
+
+    @pytest.mark.asyncio
+    async def test_subsequent_save_interaction_preserves_loops(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "loops-vs-save")
+        messages = [
+            LLMMessage(role=Role.system, content="System prompt"),
+            LLMMessage(role=Role.user, content="Hello"),
+            LLMMessage(role=Role.assistant, content="Hi there!"),
+        ]
+        await logger.save_interaction(
+            messages=messages,
+            stats=AgentStats(steps=1),
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_metadata is not None
+        logger.session_metadata.loops = [
+            ScheduledLoop(
+                id="aabbccdd",
+                interval_seconds=30,
+                prompt="ping",
+                next_fire_at=12345.0,
+                created_at=12000.0,
+            )
+        ]
+        await logger.persist_loops()
+
+        # A subsequent save (e.g. user sends another message) must not
+        # overwrite the on-disk loops with the stale in-memory value.
+        more_messages = [*messages, LLMMessage(role=Role.user, content="Again")]
+        await logger.save_interaction(
+            messages=more_messages,
+            stats=AgentStats(steps=2),
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        assert logger.session_dir is not None
+        with open(logger.session_dir / "meta.json") as f:
+            metadata = json.load(f)
+        assert len(metadata["loops"]) == 1
+        assert metadata["loops"][0]["id"] == "aabbccdd"

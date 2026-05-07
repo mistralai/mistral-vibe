@@ -32,7 +32,7 @@ class SlashCommandController:
             return
 
         suggestions = self._completer.get_completion_items(text, cursor_index)
-        if suggestions and all(alias != text for alias, _ in suggestions):
+        if suggestions:
             self._suggestions = suggestions
             self._selected_index = 0
             self._view.render_completion_suggestions(

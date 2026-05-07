@@ -42,10 +42,10 @@ def _build_cli_entrypoint_metadata() -> EntrypointMetadata:
     )
 
 
-def get_initial_agent_name(args: argparse.Namespace) -> str:
-    if args.prompt is not None and args.agent == BuiltinAgentName.DEFAULT:
+def get_initial_agent_name(args: argparse.Namespace, config: VibeConfig) -> str:
+    if args.prompt is not None and args.agent is None:
         return BuiltinAgentName.AUTO_APPROVE
-    return args.agent
+    return args.agent or config.default_agent
 
 
 def get_prompt_from_stdin() -> str | None:
@@ -196,9 +196,9 @@ def run_cli(args: argparse.Namespace) -> None:
         sys.exit(0)
 
     try:
-        initial_agent_name = get_initial_agent_name(args)
         is_interactive = args.prompt is None
         config = load_config_or_exit(interactive=is_interactive)
+        initial_agent_name = get_initial_agent_name(args, config)
         hook_config_result = load_hooks_from_fs(config)
         setup_tracing(config)
 
@@ -243,18 +243,22 @@ def run_cli(args: argparse.Namespace) -> None:
             except TeleportError as e:
                 print(f"Teleport error: {e}", file=sys.stderr)
                 sys.exit(1)
-            except RuntimeError as e:
+            except (RuntimeError, ValueError) as e:
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(1)
         else:
-            agent_loop = AgentLoop(
-                config,
-                agent_name=initial_agent_name,
-                enable_streaming=True,
-                entrypoint_metadata=_build_cli_entrypoint_metadata(),
-                defer_heavy_init=True,
-                hook_config_result=hook_config_result,
-            )
+            try:
+                agent_loop = AgentLoop(
+                    config,
+                    agent_name=initial_agent_name,
+                    enable_streaming=True,
+                    entrypoint_metadata=_build_cli_entrypoint_metadata(),
+                    defer_heavy_init=True,
+                    hook_config_result=hook_config_result,
+                )
+            except ValueError as e:
+                rprint(f"[red]Error:[/] {e}")
+                sys.exit(1)
 
             if loaded_session:
                 _resume_previous_session(agent_loop, *loaded_session)

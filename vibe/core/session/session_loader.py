@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from vibe.core.session.session_id import shorten_session_id
 from vibe.core.types import LLMMessage, SessionMetadata
 from vibe.core.utils.io import read_safe
 
@@ -129,7 +130,7 @@ class SessionLoader:
         if not save_dir.exists():
             return []
 
-        short_id = session_id[:8]
+        short_id = shorten_session_id(session_id)
         return list(save_dir.glob(f"{config.session_prefix}_*_{short_id}"))
 
     @staticmethod

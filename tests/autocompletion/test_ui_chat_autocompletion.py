@@ -42,7 +42,7 @@ async def test_popup_hides_when_input_cleared(vibe_app: VibeApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pressing_tab_writes_selected_command_and_hides_popup(
+async def test_pressing_tab_writes_selected_command_and_leaves_popup_visible(
     vibe_app: VibeApp,
 ) -> None:
     async with vibe_app.run_test() as pilot:
@@ -53,7 +53,7 @@ async def test_pressing_tab_writes_selected_command_and_hides_popup(
         await pilot.press("tab")
 
         assert chat_input.value == "/config"
-        assert popup.styles.display == "none"
+        assert popup.styles.display == "block"
 
 
 def ensure_selected_command(popup: CompletionPopup, expected_alias: str) -> None:

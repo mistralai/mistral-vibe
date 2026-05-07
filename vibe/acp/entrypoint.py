@@ -60,6 +60,7 @@ def bootstrap_config_files() -> None:
             raise
 
 
+# When DEBUG_MODE=true, attaches debugpy on localhost:5678.
 def handle_debug_mode() -> None:
     if os.environ.get("DEBUG_MODE") != "true":
         return

@@ -60,7 +60,62 @@ class TestReadFileExecution:
 
         assert result.content == "line 50\nline 51\n"
         assert result.lines_read == 2
+        assert result.was_truncated
+
+    @pytest.mark.asyncio
+    async def test_run_marks_truncated_when_max_read_bytes_exceeded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        test_file = tmp_path / "big.txt"
+        test_file.write_text(
+            "".join(f"line {i}\n" for i in range(100)), encoding="utf-8"
+        )
+        tool = ReadFile(
+            config_getter=lambda: ReadFileToolConfig(max_read_bytes=20),
+            state=ReadFileState(),
+        )
+
+        result = await collect_result(tool.run(ReadFileArgs(path=str(test_file))))
+
+        assert result.was_truncated
+        assert result.lines_read > 0
+
+    @pytest.mark.asyncio
+    async def test_run_not_truncated_when_eof_reached(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        test_file = tmp_path / "small.txt"
+        test_file.write_text("a\nb\nc\n", encoding="utf-8")
+        tool = ReadFile(
+            config_getter=lambda: ReadFileToolConfig(max_read_bytes=1024),
+            state=ReadFileState(),
+        )
+
+        result = await collect_result(tool.run(ReadFileArgs(path=str(test_file))))
+
         assert not result.was_truncated
+        assert result.lines_read == 3
+
+    @pytest.mark.asyncio
+    async def test_run_not_truncated_when_limit_matches_remaining_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        test_file = tmp_path / "exact.txt"
+        test_file.write_text("a\nb\nc\n", encoding="utf-8")
+        tool = ReadFile(
+            config_getter=lambda: ReadFileToolConfig(max_read_bytes=1024),
+            state=ReadFileState(),
+        )
+
+        result = await collect_result(
+            tool.run(ReadFileArgs(path=str(test_file), limit=10))
+        )
+
+        assert not result.was_truncated
+        assert result.lines_read == 3
 
 
 class TestGetResultExtra:

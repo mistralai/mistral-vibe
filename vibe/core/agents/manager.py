@@ -40,18 +40,22 @@ class AgentManager:
                 " ".join(str(p) for p in self._search_paths),
             )
 
-        profile = self._available.get(initial_agent)
-        if (
-            not allow_subagent
-            and profile is not None
-            and profile.agent_type != AgentType.AGENT
-        ):
+        available = self.available_agents
+        profile = available.get(initial_agent)
+        if profile is None:
+            if initial_agent in self._available:
+                raise ValueError(
+                    f"Agent '{initial_agent}' is not available. "
+                    f"It may be disabled, not installed, or excluded by your config."
+                )
+            raise ValueError(f"Agent '{initial_agent}' not found.")
+        if not allow_subagent and profile.agent_type != AgentType.AGENT:
             raise ValueError(
                 f"Agent '{initial_agent}' is a {profile.agent_type} and cannot be used"
                 f" as the primary agent. Only agents of type 'agent' can be selected"
                 f" with --agent."
             )
-        self.active_profile = profile or self._available[BuiltinAgentName.DEFAULT]
+        self.active_profile = profile
         self._cached_config: VibeConfig | None = None
 
     @property
