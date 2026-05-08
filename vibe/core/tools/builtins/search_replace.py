@@ -241,7 +241,7 @@ class SearchReplace(
     async def _write_file(self, file_path: Path, content: str, encoding: str) -> None:
         try:
             async with await anyio.Path(file_path).open(
-                mode="w", encoding=encoding
+                mode="w", encoding=encoding, newline=""
             ) as f:
                 await f.write(content)
         except UnicodeEncodeError as e:
