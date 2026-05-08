@@ -8,6 +8,7 @@ import anyio
 from pydantic import BaseModel, Field
 
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -47,6 +48,7 @@ class ReadFileArgs(BaseModel):
 class ReadFileResult(BaseModel):
     path: str
     content: str
+    offset: int = 0
     lines_read: int
     was_truncated: bool = Field(
         description="True if the reading was stopped due to the max_read_bytes limit."
@@ -89,6 +91,7 @@ class ReadFile(
         yield ReadFileResult(
             path=str(file_path),
             content="".join(read_result.lines),
+            offset=args.offset,
             lines_read=len(read_result.lines),
             was_truncated=read_result.was_truncated,
         )
@@ -138,7 +141,7 @@ class ReadFile(
         try:
             raw_lines: list[bytes] = []
             bytes_read = 0
-            was_truncated = False
+            was_truncated = True
 
             async with await anyio.Path(file_path).open("rb") as f:
                 line_index = 0
@@ -152,12 +155,13 @@ class ReadFile(
 
                     line_bytes = len(raw_line)
                     if bytes_read + line_bytes > self.config.max_read_bytes:
-                        was_truncated = True
                         break
 
                     raw_lines.append(raw_line)
                     bytes_read += line_bytes
                     line_index += 1
+                else:
+                    was_truncated = False
         except OSError as exc:
             raise ToolError(f"Error reading {file_path}: {exc}") from exc
 
@@ -193,6 +197,7 @@ class ReadFile(
 
     @classmethod
     def format_call_display(cls, args: ReadFileArgs) -> ToolCallDisplay:
+        tag = " (scratchpad)" if is_scratchpad_path(args.path) else ""
         summary = f"Reading {args.path}"
         if args.offset > 0 or args.limit is not None:
             parts = []
@@ -201,7 +206,7 @@ class ReadFile(
             if args.limit is not None:
                 parts.append(f"limit {args.limit} lines")
             summary += f" ({', '.join(parts)})"
-        return ToolCallDisplay(summary=summary)
+        return ToolCallDisplay(summary=f"{summary}{tag}")
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -211,7 +216,8 @@ class ReadFile(
             )
 
         path_obj = Path(event.result.path)
-        message = f"Read {event.result.lines_read} line{'' if event.result.lines_read <= 1 else 's'} from {path_obj.name}"
+        tag = " (scratchpad)" if is_scratchpad_path(event.result.path) else ""
+        message = f"Read {event.result.lines_read} line{'' if event.result.lines_read <= 1 else 's'} from {path_obj.name}{tag}"
         if event.result.was_truncated:
             message += " (truncated)"
 

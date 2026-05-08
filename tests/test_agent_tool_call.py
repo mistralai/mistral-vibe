@@ -339,7 +339,7 @@ async def test_approval_always_sets_tool_permission_for_subsequent_calls() -> No
     assert tool_config_todo.permission is ToolPermission.ALWAYS
     tool_config_help = agent_loop.tool_manager.get_tool_config("bash")
     assert tool_config_help.permission is not ToolPermission.ALWAYS
-    assert agent_loop.auto_approve is False
+    assert agent_loop.bypass_tool_permissions is False
     assert len(callback_invocations) == 1
     assert callback_invocations[0] == "todo"
     assert isinstance(events1[0], UserMessageEvent)

@@ -5,7 +5,6 @@ from collections.abc import AsyncGenerator
 from functools import lru_cache
 import os
 from pathlib import Path
-import signal
 import sys
 from typing import ClassVar, Literal, final
 
@@ -13,6 +12,7 @@ from pydantic import BaseModel, Field
 from tree_sitter import Language, Node, Parser
 import tree_sitter_bash as tsbash
 
+from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.arity import build_session_pattern
 from vibe.core.tools.base import (
     BaseTool,
@@ -30,7 +30,7 @@ from vibe.core.tools.permissions import (
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import is_path_within_workdir
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils import is_windows
+from vibe.core.utils import is_windows, kill_async_subprocess
 
 
 @lru_cache(maxsize=1)
@@ -96,33 +96,6 @@ def _get_base_env() -> dict[str, str]:
     return base_env
 
 
-async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is not None:
-        return
-
-    try:
-        if sys.platform == "win32":
-            try:
-                subprocess_proc = await asyncio.create_subprocess_exec(
-                    "taskkill",
-                    "/F",
-                    "/T",
-                    "/PID",
-                    str(proc.pid),
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await subprocess_proc.wait()
-            except (FileNotFoundError, OSError):
-                proc.terminate()
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-
-        await proc.wait()
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-
 def _get_default_allowlist() -> list[str]:
     common = ["cd", "echo", "git diff", "git log", "git status", "tree", "whoami"]
 
@@ -132,6 +105,7 @@ def _get_default_allowlist() -> list[str]:
         return common + [
             "cat",
             "file",
+            "find",
             "head",
             "ls",
             "pwd",
@@ -190,6 +164,8 @@ _PATH_COMMANDS = {
     "wc",
 }
 
+_FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
+
 
 def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
     """Collect parent directories referenced outside the workdir.
@@ -224,6 +200,8 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
                 continue
             if is_path_within_workdir(token):
                 continue
+            if is_scratchpad_path(token):
+                continue
             # Resolve relative / home-relative paths, then collect parent dir
             resolved = Path(token).expanduser()
             if not resolved.is_absolute():
@@ -233,6 +211,10 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
             parent = str(resolved) if resolved.is_dir() else str(resolved.parent)
             dirs.add(parent)
     return dirs
+
+
+def _matches_pattern(command: str, pattern: str) -> bool:
+    return command == pattern or command.startswith(pattern + " ")
 
 
 class BashToolConfig(BaseToolConfig):
@@ -298,70 +280,112 @@ class Bash(
     def get_status_text(cls) -> str:
         return "Running command"
 
-    def resolve_permission(self, args: BashArgs) -> PermissionContext | None:  # noqa: PLR0911, PLR0912
-        if is_windows():
-            return None
-
-        command_parts = _extract_commands(args.command)
-        if not command_parts:
-            return None
-
-        def _matches_pattern(command: str, pattern: str) -> bool:
-            return command == pattern or command.startswith(pattern + " ")
-
-        def find_denylist_match(command: str) -> str | None:
-            return next(
-                (p for p in self.config.denylist if _matches_pattern(command, p)), None
-            )
-
-        def is_standalone_denylisted(command: str) -> bool:
-            parts = command.split()
-            if not parts:
-                return False
-            base_command = parts[0]
-            if len(parts) == 1:
-                command_name = os.path.basename(base_command)
-                if command_name in self.config.denylist_standalone:
-                    return True
-                if base_command in self.config.denylist_standalone:
-                    return True
+    @staticmethod
+    def _has_find_execution_predicate(command: str) -> bool:
+        """Defensive check for find -exec, -execdir, -ok, -okdir predicates."""
+        if not _matches_pattern(command, "find"):
             return False
+        return any(predicate in command for predicate in _FIND_EXECUTION_PREDICATES)
 
-        def is_allowlisted(command: str) -> bool:
-            return any(
-                _matches_pattern(command, pattern) for pattern in self.config.allowlist
-            )
+    @staticmethod
+    def _build_command_required_permission(
+        invocation_pattern: str, session_pattern: str, label: str
+    ) -> RequiredPermission:
+        return RequiredPermission(
+            scope=PermissionScope.COMMAND_PATTERN,
+            invocation_pattern=invocation_pattern,
+            session_pattern=session_pattern,
+            label=label,
+        )
 
-        def is_sensitive(command: str) -> bool:
-            tokens = command.split()
-            if not tokens:
-                return False
-            return tokens[0] in self.config.sensitive_patterns
+    @staticmethod
+    def _build_outside_directory_permission(glob: str) -> RequiredPermission:
+        return RequiredPermission(
+            scope=PermissionScope.OUTSIDE_DIRECTORY,
+            invocation_pattern=glob,
+            session_pattern=glob,
+            label=f"outside workdir ({glob})",
+        )
+
+    def _find_denylist_match(self, command: str) -> str | None:
+        return next(
+            (p for p in self.config.denylist if _matches_pattern(command, p)), None
+        )
+
+    def _is_standalone_denylisted(self, command: str) -> bool:
+        parts = command.split()
+        if not parts:
+            return False
+        base_command = parts[0]
+        if len(parts) == 1:
+            command_name = os.path.basename(base_command)
+            if command_name in self.config.denylist_standalone:
+                return True
+            if base_command in self.config.denylist_standalone:
+                return True
+        return False
+
+    def _is_allowlisted(self, command: str) -> bool:
+        return any(
+            _matches_pattern(command, pattern) for pattern in self.config.allowlist
+        )
+
+    def _is_sensitive(self, command: str) -> bool:
+        tokens = command.split()
+        if not tokens:
+            return False
+        return tokens[0] in self.config.sensitive_patterns
+
+    def _resolve_guardrail_permission(
+        self, command_parts: list[str]
+    ) -> PermissionContext | None:
+        find_execution_required: list[RequiredPermission] = []
+        seen_find_execution: set[str] = set()
 
         for part in command_parts:
-            if matched := find_denylist_match(part):
+            if matched := self._find_denylist_match(part):
                 return PermissionContext(
                     permission=ToolPermission.NEVER,
                     reason=f"Command denied: '{part}' matches denylist pattern '{matched}'. Do not attempt to run this command.",
                 )
-            if is_standalone_denylisted(part):
+            if self._is_standalone_denylisted(part):
                 return PermissionContext(
                     permission=ToolPermission.NEVER,
                     reason=f"Command denied: '{part}' is not allowed as a standalone command. Do not attempt to run this command.",
                 )
+            if not self._has_find_execution_predicate(part):
+                continue
+            if part in seen_find_execution:
+                continue
+            seen_find_execution.add(part)
+            find_execution_required.append(
+                self._build_command_required_permission(
+                    invocation_pattern=part, session_pattern=part, label=part
+                )
+            )
+
+        if not find_execution_required:
+            return None
+        return PermissionContext(
+            permission=ToolPermission.ASK, required_permissions=find_execution_required
+        )
+
+    def _is_unconditionally_allowed(
+        self, command_parts: list[str], outside_dirs: set[str]
+    ) -> bool:
+        if any(self._is_sensitive(part) for part in command_parts):
+            return False
 
         if self.config.permission == ToolPermission.ALWAYS:
-            return PermissionContext(permission=ToolPermission.ALWAYS)
+            return True
 
-        has_sensitive = any(is_sensitive(part) for part in command_parts)
-        all_allowlisted = not has_sensitive and all(
-            is_allowlisted(part) for part in command_parts
+        return all(self._is_allowlisted(part) for part in command_parts) and (
+            not outside_dirs
         )
-        outside_dirs = _collect_outside_dirs(command_parts)
 
-        if all_allowlisted and not outside_dirs:
-            return PermissionContext(permission=ToolPermission.ALWAYS)
-
+    def _build_required_permissions(
+        self, command_parts: list[str], outside_dirs: set[str]
+    ) -> list[RequiredPermission]:
         required: list[RequiredPermission] = []
         seen_session: set[str] = set()
 
@@ -371,43 +395,60 @@ class Bash(
             tokens = part.split()
             if not tokens:
                 continue
-            if not is_sensitive(part) and is_allowlisted(part):
+
+            is_sensitive = self._is_sensitive(part)
+            if not is_sensitive and self._is_allowlisted(part):
                 continue
 
-            if is_sensitive(part):
+            if is_sensitive:
                 required.append(
-                    RequiredPermission(
-                        scope=PermissionScope.COMMAND_PATTERN,
-                        invocation_pattern=part,
-                        session_pattern=part,
-                        label=part,
+                    self._build_command_required_permission(
+                        invocation_pattern=part, session_pattern=part, label=part
                     )
                 )
-            else:
-                session_pat = build_session_pattern(tokens)
-                if session_pat not in seen_session:
-                    seen_session.add(session_pat)
-                    required.append(
-                        RequiredPermission(
-                            scope=PermissionScope.COMMAND_PATTERN,
-                            invocation_pattern=part,
-                            session_pattern=session_pat,
-                            label=session_pat,
-                        )
-                    )
+                continue
 
-        if outside_dirs:
-            globs = sorted(str(Path(d) / "*") for d in outside_dirs)
-            for glob in globs:
-                required.append(
-                    RequiredPermission(
-                        scope=PermissionScope.OUTSIDE_DIRECTORY,
-                        invocation_pattern=glob,
-                        session_pattern=glob,
-                        label=f"outside workdir ({glob})",
-                    )
+            session_pat = build_session_pattern(tokens)
+            if session_pat in seen_session:
+                continue
+            seen_session.add(session_pat)
+            required.append(
+                self._build_command_required_permission(
+                    invocation_pattern=part,
+                    session_pattern=session_pat,
+                    label=session_pat,
                 )
+            )
 
+        for glob in sorted(str(Path(d) / "*") for d in outside_dirs):
+            required.append(self._build_outside_directory_permission(glob))
+
+        return required
+
+    def resolve_permission(self, args: BashArgs) -> PermissionContext | None:
+        if is_windows():
+            return None
+
+        command_parts = _extract_commands(args.command)
+        if not command_parts:
+            return None
+
+        guardrail_permission = self._resolve_guardrail_permission(command_parts)
+        if (
+            guardrail_permission
+            and guardrail_permission.permission == ToolPermission.NEVER
+        ):
+            return guardrail_permission
+        outside_dirs = _collect_outside_dirs(command_parts)
+        if (
+            self._is_unconditionally_allowed(command_parts, outside_dirs)
+            and not guardrail_permission
+        ):
+            return PermissionContext(permission=ToolPermission.ALWAYS)
+
+        required = self._build_required_permissions(command_parts, outside_dirs)
+        if guardrail_permission:
+            required.extend(guardrail_permission.required_permissions)
         if not required:
             return None
 
@@ -464,7 +505,7 @@ class Bash(
                     proc.communicate(), timeout=timeout
                 )
             except TimeoutError:
-                await _kill_process_tree(proc)
+                await kill_async_subprocess(proc)
                 raise self._build_timeout_error(args.command, timeout)
 
             encoding = _get_subprocess_encoding()
@@ -494,4 +535,4 @@ class Bash(
             raise ToolError(f"Error running command {args.command!r}: {exc}") from exc
         finally:
             if proc is not None:
-                await _kill_process_tree(proc)
+                await kill_async_subprocess(proc)

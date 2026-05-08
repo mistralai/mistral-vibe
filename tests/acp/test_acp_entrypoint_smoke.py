@@ -101,6 +101,11 @@ def _build_env(vibe_home_dir: Path, *, include_api_key: bool) -> dict[str, str]:
     env["PYTHONUNBUFFERED"] = "1"
     env["VIBE_HOME"] = str(vibe_home_dir)
 
+    vibe_home_dir.mkdir(parents=True, exist_ok=True)
+    config_file = vibe_home_dir / "config.toml"
+    if not config_file.exists():
+        config_file.write_text("enable_telemetry = false\n")
+
     if include_api_key:
         env["MISTRAL_API_KEY"] = "mock"
     else:

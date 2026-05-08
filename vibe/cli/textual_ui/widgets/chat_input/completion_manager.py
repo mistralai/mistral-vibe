@@ -52,6 +52,10 @@ class MultiCompletionManager:
             return CompletionResult.IGNORED
         return self._active.on_key(event, text, cursor_index)
 
+    @property
+    def is_active(self) -> bool:
+        return self._active is not None
+
     def reset(self) -> None:
         if self._active is not None:
             self._active.reset()

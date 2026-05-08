@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.nuage.events import (
@@ -242,6 +243,28 @@ def test_ask_user_question_tool_emits_assistant_question() -> None:
     )
     assert assistant_event.content == "Which file type should I create?"
     assert tool_call_event.tool_call_id == "call-question"
+
+
+def test_ask_user_question_invalid_args_are_logged_and_ignored() -> None:
+    loop = _make_loop(enabled_tools=["ask_user_question"])
+    started = _started(
+        "tool-task-question",
+        "AgentToolCallState",
+        {
+            "name": "ask_user_question",
+            "tool_call_id": "call-question",
+            "kwargs": {"questions": [{}]},
+        },
+    )
+
+    with patch(
+        "vibe.core.nuage.remote_workflow_event_translator.logger.warning"
+    ) as mock_warning:
+        events = loop._consume_workflow_event(started)
+
+    assert any(isinstance(event, ToolCallEvent) for event in events)
+    assert not any(isinstance(event, AssistantEvent) for event in events)
+    mock_warning.assert_called_once()
 
 
 def test_ask_user_question_wait_for_input_completion_emits_tool_result() -> None:
@@ -765,5 +788,152 @@ def test_steer_input_events_are_suppressed() -> None:
     )
 
     assert loop._consume_workflow_event(steer_started) == []
+    assert loop._translator.pending_input_request is not None
+    assert loop._translator.pending_input_request.task_id == "steer-1"
     assert loop._consume_workflow_event(steer_completed) == []
     assert loop._translator.pending_input_request is None
+
+
+def test_steer_input_allows_user_submission() -> None:
+    loop = _make_loop()
+    steer_started = _started(
+        "steer-1",
+        "wait_for_input",
+        {"input_schema": {"title": "ChatInput"}, "label": "Send a message to steer..."},
+    )
+
+    assert loop._consume_workflow_event(steer_started) == []
+    assert loop.is_waiting_for_input
+
+    loop._translator.pending_input_request = None
+
+    steer_completed = _completed(
+        "steer-1",
+        "wait_for_input",
+        {
+            "input_schema": {"title": "ChatInput"},
+            "label": "Send a message to steer...",
+            "input": {"message": [{"type": "text", "text": "do X instead"}]},
+        },
+    )
+    events = loop._consume_workflow_event(steer_completed)
+    assert any(isinstance(e, UserMessageEvent) for e in events)
+    user_event = next(e for e in events if isinstance(e, UserMessageEvent))
+    assert user_event.content == "do X instead"
+
+
+def test_steer_does_not_overwrite_regular_pending_input() -> None:
+    loop = _make_loop()
+    regular_started = _started(
+        "regular-1",
+        "wait_for_input",
+        {"input_schema": {"title": "ChatInput"}, "label": "Enter your message"},
+    )
+    loop._consume_workflow_event(regular_started)
+    assert loop._translator.pending_input_request is not None
+    assert loop._translator.pending_input_request.task_id == "regular-1"
+
+    steer_started = _started(
+        "steer-1",
+        "wait_for_input",
+        {"input_schema": {"title": "ChatInput"}, "label": "Send a message to steer..."},
+    )
+    loop._consume_workflow_event(steer_started)
+    assert loop._translator.pending_input_request.task_id == "regular-1"
+
+
+def test_invalid_steer_start_registers_task_for_terminal_handling() -> None:
+    loop = _make_loop()
+    steer_started = _started(
+        "steer-1", "wait_for_input", {"label": "Send a message to steer..."}
+    )
+
+    with patch("vibe.core.nuage.remote_events_source.logger.warning") as mock_warning:
+        assert loop._consume_workflow_event(steer_started) == []
+
+    mock_warning.assert_called_once()
+    assert "steer-1" in loop._translator._steer_task_ids
+    assert "steer-1" in loop._translator._invalid_steer_task_ids
+    assert loop._translator.pending_input_request is None
+
+
+def test_invalid_steer_completion_does_not_clear_regular_prompt() -> None:
+    loop = _make_loop()
+    regular_started = _started(
+        "regular-1",
+        "wait_for_input",
+        {"input_schema": {"title": "ChatInput"}, "label": "Pick an option"},
+    )
+    loop._consume_workflow_event(regular_started)
+
+    steer_started = _started(
+        "steer-1", "wait_for_input", {"label": "Send a message to steer..."}
+    )
+    assert loop._consume_workflow_event(steer_started) == []
+    assert loop._translator.pending_input_request is not None
+    assert loop._translator.pending_input_request.task_id == "regular-1"
+
+    steer_completed = _completed(
+        "steer-1",
+        "wait_for_input",
+        {"label": "Send a message to steer...", "input": None},
+    )
+    events = loop._consume_workflow_event(steer_completed)
+    assert events == []
+    assert loop._translator.pending_input_request is not None
+    assert loop._translator.pending_input_request.task_id == "regular-1"
+
+
+def test_invalid_steer_cancellation_does_not_clear_regular_prompt() -> None:
+    loop = _make_loop()
+    regular_started = _started(
+        "regular-1",
+        "wait_for_input",
+        {"input_schema": {"title": "ChatInput"}, "label": "Pick an option"},
+    )
+    loop._consume_workflow_event(regular_started)
+
+    steer_started = _started(
+        "steer-1", "wait_for_input", {"label": "Send a message to steer..."}
+    )
+    assert loop._consume_workflow_event(steer_started) == []
+    assert loop._translator.pending_input_request is not None
+    assert loop._translator.pending_input_request.task_id == "regular-1"
+
+    events = loop._consume_workflow_event(_canceled("steer-1", "wait_for_input"))
+    assert events == []
+    assert loop._translator.pending_input_request is not None
+    assert loop._translator.pending_input_request.task_id == "regular-1"
+
+
+def test_steer_completion_is_preserved_while_regular_prompt_pending() -> None:
+    loop = _make_loop()
+    regular_started = _started(
+        "regular-1",
+        "wait_for_input",
+        {"input_schema": {"title": "ChatInput"}, "label": "Pick an option"},
+    )
+    loop._consume_workflow_event(regular_started)
+
+    steer_started = _started(
+        "steer-1",
+        "wait_for_input",
+        {"input_schema": {"title": "ChatInput"}, "label": "Send a message to steer..."},
+    )
+    loop._consume_workflow_event(steer_started)
+
+    steer_completed = _completed(
+        "steer-1",
+        "wait_for_input",
+        {
+            "input_schema": {"title": "ChatInput"},
+            "label": "Send a message to steer...",
+            "input": {"message": [{"type": "text", "text": "user steer msg"}]},
+        },
+    )
+    events = loop._consume_workflow_event(steer_completed)
+
+    user_event = next(e for e in events if isinstance(e, UserMessageEvent))
+    assert user_event.content == "user steer msg"
+    assert loop._translator.pending_input_request is not None
+    assert loop._translator.pending_input_request.task_id == "regular-1"

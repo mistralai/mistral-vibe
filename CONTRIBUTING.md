@@ -80,7 +80,7 @@ Logs are written to `~/.vibe/logs/vibe.log` by default. Control logging via envi
 |----------|-------------|---------|
 | `LOG_LEVEL` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) | `WARNING` |
 | `LOG_MAX_BYTES` | Max log file size in bytes before rotation | `10485760` (10 MB) |
-| `DEBUG_MODE` | When `true`, forces `DEBUG` level | - |
+| `DEBUG_MODE` | When `true`, forces `DEBUG` logging (and attaches `debugpy` on `localhost:5678` under `vibe-acp`) | - |
 
 Example:
 

@@ -627,6 +627,7 @@ class TestClearHistoryFullReset:
 
         assert agent.session_id != original_session_id
         assert agent.session_id == agent.session_logger.session_id
+        assert agent.parent_session_id is None
 
 
 class TestClearHistoryObserverBugfix:

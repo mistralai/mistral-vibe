@@ -12,6 +12,7 @@ from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
+from vibe.core.session.session_id import shorten_session_id
 
 
 @pytest.fixture
@@ -79,3 +80,10 @@ class TestCompactEventHandling:
         assert compact_end.status == "completed"
 
         assert compact_start.tool_call_id == compact_end.tool_call_id
+        assert compact_end.content is not None
+        compact_end_text = compact_end.content[0].content
+        assert isinstance(compact_end_text, TextContentBlock)
+        assert shorten_session_id(session_response.session_id) in compact_end_text.text
+        assert (
+            shorten_session_id(session.agent_loop.session_id) in compact_end_text.text
+        )

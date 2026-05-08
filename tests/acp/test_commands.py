@@ -259,6 +259,72 @@ class TestAvailableCommandsWithSkills:
         assert "hidden-skill" not in cmd_names
 
 
+class TestSlashCommandTelemetry:
+    @pytest.mark.asyncio
+    async def test_builtin_command_fires_telemetry(
+        self, acp_agent_loop: VibeAcpAgentLoop, telemetry_events: list[dict]
+    ) -> None:
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        telemetry_events.clear()
+
+        await _prompt(acp_agent_loop, session_id, "/help")
+
+        slash_events = [
+            e for e in telemetry_events if e["event_name"] == "vibe.slash_command_used"
+        ]
+        assert len(slash_events) == 1
+        assert slash_events[0]["properties"]["command"] == "help"
+        assert slash_events[0]["properties"]["command_type"] == "builtin"
+
+    @pytest.mark.asyncio
+    async def test_skill_command_fires_telemetry(
+        self,
+        acp_agent_loop_with_skills: VibeAcpAgentLoop,
+        skills_dir: Path,
+        telemetry_events: list[dict],
+    ) -> None:
+        create_skill(skills_dir, "my-skill", "Does something")
+        session_id = await _new_session_and_clear(acp_agent_loop_with_skills)
+        telemetry_events.clear()
+
+        await _prompt(acp_agent_loop_with_skills, session_id, "/my-skill")
+
+        slash_events = [
+            e for e in telemetry_events if e["event_name"] == "vibe.slash_command_used"
+        ]
+        assert len(slash_events) == 1
+        assert slash_events[0]["properties"]["command"] == "my-skill"
+        assert slash_events[0]["properties"]["command_type"] == "skill"
+
+    @pytest.mark.asyncio
+    async def test_unknown_slash_command_does_not_fire_telemetry(
+        self, acp_agent_loop: VibeAcpAgentLoop, telemetry_events: list[dict]
+    ) -> None:
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        telemetry_events.clear()
+
+        await _prompt(acp_agent_loop, session_id, "/nonexistent")
+
+        slash_events = [
+            e for e in telemetry_events if e["event_name"] == "vibe.slash_command_used"
+        ]
+        assert slash_events == []
+
+    @pytest.mark.asyncio
+    async def test_regular_message_does_not_fire_telemetry(
+        self, acp_agent_loop: VibeAcpAgentLoop, telemetry_events: list[dict]
+    ) -> None:
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        telemetry_events.clear()
+
+        await _prompt(acp_agent_loop, session_id, "Hello world")
+
+        slash_events = [
+            e for e in telemetry_events if e["event_name"] == "vibe.slash_command_used"
+        ]
+        assert slash_events == []
+
+
 class TestCommandCaseInsensitivity:
     @pytest.mark.asyncio
     async def test_uppercase_command(self, acp_agent_loop: VibeAcpAgentLoop) -> None:

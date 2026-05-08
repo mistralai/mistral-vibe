@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+from vibe.core.hooks.models import HookMessageSeverity
+
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.app import ChatScroll
 
@@ -139,6 +141,9 @@ class StreamingMessageBase(Static):
     def _should_write_content(self) -> bool:
         return True
 
+    def get_content(self) -> str:
+        return self._content
+
     def is_stripped_content_empty(self) -> bool:
         return self._content.strip() == ""
 
@@ -259,23 +264,92 @@ class InterruptMessage(Static):
 
 
 class BashOutputMessage(Static):
-    def __init__(self, command: str, cwd: str, output: str, exit_code: int) -> None:
+    def __init__(
+        self,
+        command: str,
+        cwd: str,
+        output: str = "",
+        exit_code: int = 0,
+        *,
+        pending: bool = False,
+    ) -> None:
         super().__init__()
         self.add_class("bash-output-message")
         self._command = command
         self._cwd = cwd
         self._output = output.rstrip("\n")
         self._exit_code = exit_code
+        self._pending = pending
+        self._output_widget: NoMarkupStatic | None = None
+        self._output_container: Horizontal | None = None
+        self._prompt_widget: NonSelectableStatic | None = None
 
     def compose(self) -> ComposeResult:
-        status_class = "bash-success" if self._exit_code == 0 else "bash-error"
+        status_class = (
+            "bash-error"
+            if not self._pending and self._exit_code != 0
+            else "bash-success"
+        )
         self.add_class(status_class)
         with Horizontal(classes="bash-command-line"):
-            yield NonSelectableStatic("$ ", classes=f"bash-prompt {status_class}")
+            self._prompt_widget = NonSelectableStatic(
+                "$ ", classes=f"bash-prompt {status_class}"
+            )
+            yield self._prompt_widget
             yield NoMarkupStatic(self._command, classes="bash-command")
-        with Horizontal(classes="bash-output-container"):
-            yield ExpandingBorder(classes="bash-output-border")
-            yield NoMarkupStatic(self._output, classes="bash-output")
+        if not self._pending:
+            self._output_container = Horizontal(classes="bash-output-container")
+            with self._output_container:
+                yield ExpandingBorder(classes="bash-output-border")
+                self._output_widget = NoMarkupStatic(
+                    self._output, classes="bash-output"
+                )
+                yield self._output_widget
+
+    async def _ensure_output_container(self) -> None:
+        if self._output_container is not None:
+            return
+        self._output_widget = NoMarkupStatic("", classes="bash-output")
+        self._output_container = Horizontal(
+            ExpandingBorder(classes="bash-output-border"),
+            self._output_widget,
+            classes="bash-output-container",
+        )
+        await self.mount(self._output_container)
+
+    async def append_output(self, text: str) -> None:
+        await self._ensure_output_container()
+        self._output += text
+        if self._output_widget:
+            self._output_widget.update(self._output.rstrip("\n"))
+
+    async def finish(self, exit_code: int, *, interrupted: bool = False) -> None:
+        self._exit_code = exit_code
+        self._pending = False
+        if interrupted:
+            self.remove_class("bash-success")
+            self.add_class("bash-interrupted")
+            if self._prompt_widget:
+                self._prompt_widget.remove_class("bash-success")
+                self._prompt_widget.add_class("bash-interrupted")
+        elif exit_code != 0:
+            self.remove_class("bash-success")
+            self.add_class("bash-error")
+            if self._prompt_widget:
+                self._prompt_widget.remove_class("bash-success")
+                self._prompt_widget.add_class("bash-error")
+        if interrupted:
+            suffix = (
+                "\n(interrupted)"
+                if self._output and not self._output.endswith("\n")
+                else "(interrupted)"
+            )
+            self._output += suffix
+        if not self._output:
+            self._output = "(no output)"
+        await self._ensure_output_container()
+        if self._output_widget:
+            self._output_widget.update(self._output.rstrip("\n"))
 
 
 class ErrorMessage(Static):
@@ -296,6 +370,48 @@ class ErrorMessage(Static):
 
     def set_collapsed(self, collapsed: bool) -> None:
         pass
+
+
+class HookRunContainer(Vertical):
+    def __init__(self) -> None:
+        super().__init__(classes="hook-run-container")
+        self.display = False
+
+    async def add_message(self, widget: HookSystemMessageLine) -> None:
+        await self.mount(widget)
+        self.display = True
+
+
+_HOOK_SEVERITY_ICONS: dict[HookMessageSeverity, str] = {
+    HookMessageSeverity.OK: "✓",
+    HookMessageSeverity.WARNING: "⚠",
+    HookMessageSeverity.ERROR: "✗",
+}
+
+
+class HookSystemMessageLine(Static):
+    def __init__(
+        self,
+        hook_name: str,
+        content: str,
+        severity: HookMessageSeverity = HookMessageSeverity.WARNING,
+    ) -> None:
+        super().__init__()
+        self.add_class("hook-system-message")
+        self.add_class(f"hook-severity-{severity}")
+        self._hook_name = hook_name
+        self._content = content
+        self._severity = severity
+
+    def compose(self) -> ComposeResult:
+        icon = _HOOK_SEVERITY_ICONS.get(
+            self._severity, _HOOK_SEVERITY_ICONS[HookMessageSeverity.WARNING]
+        )
+        with Horizontal(classes="hook-system-container"):
+            yield NonSelectableStatic(icon, classes="hook-system-icon")
+            yield NoMarkupStatic(
+                f"[{self._hook_name}] {self._content}", classes="hook-system-content"
+            )
 
 
 class WarningMessage(Static):

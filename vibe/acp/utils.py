@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING
 
 from acp.schema import (
     AgentMessageChunk,
@@ -9,6 +9,7 @@ from acp.schema import (
     ContentToolCallContent,
     ModelInfo,
     PermissionOption,
+    PermissionOptionKind,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
     SessionMode,
@@ -21,6 +22,7 @@ from acp.schema import (
 )
 
 from vibe.core.agents.models import AgentProfile, AgentType
+from vibe.core.config._settings import THINKING_LEVELS, ThinkingLevel
 from vibe.core.proxy_setup import SUPPORTED_PROXY_VARS, get_current_proxy_settings
 from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.types import CompactEndEvent, CompactStartEvent, LLMMessage
@@ -33,25 +35,31 @@ if TYPE_CHECKING:
 class ToolOption(StrEnum):
     ALLOW_ONCE = "allow_once"
     ALLOW_ALWAYS = "allow_always"
+    ALLOW_ALWAYS_PERMANENT = "allow_always_permanent"
     REJECT_ONCE = "reject_once"
     REJECT_ALWAYS = "reject_always"
 
 
+_KIND_ALLOW_ONCE: PermissionOptionKind = "allow_once"
+_KIND_ALLOW_ALWAYS: PermissionOptionKind = "allow_always"
+_KIND_REJECT_ONCE: PermissionOptionKind = "reject_once"
+
 TOOL_OPTIONS = [
     PermissionOption(
-        option_id=ToolOption.ALLOW_ONCE,
-        name="Allow once",
-        kind=cast(Literal["allow_once"], ToolOption.ALLOW_ONCE),
+        option_id=ToolOption.ALLOW_ONCE, name="Allow once", kind=_KIND_ALLOW_ONCE
     ),
     PermissionOption(
         option_id=ToolOption.ALLOW_ALWAYS,
-        name="Allow for this session",
-        kind=cast(Literal["allow_always"], ToolOption.ALLOW_ALWAYS),
+        name="Allow for remainder of this session",
+        kind=_KIND_ALLOW_ALWAYS,
     ),
     PermissionOption(
-        option_id=ToolOption.REJECT_ONCE,
-        name="Reject once",
-        kind=cast(Literal["reject_once"], ToolOption.REJECT_ONCE),
+        option_id=ToolOption.ALLOW_ALWAYS_PERMANENT,
+        name="Always allow",
+        kind=_KIND_ALLOW_ALWAYS,
+    ),
+    PermissionOption(
+        option_id=ToolOption.REJECT_ONCE, name="Deny", kind=_KIND_REJECT_ONCE
     ),
 ]
 
@@ -63,7 +71,6 @@ def build_permission_options(
     if not required_permissions:
         return TOOL_OPTIONS
 
-    labels = ", ".join(rp.label for rp in required_permissions)
     permissions_meta = [
         {
             "scope": rp.scope,
@@ -76,20 +83,22 @@ def build_permission_options(
 
     return [
         PermissionOption(
-            option_id=ToolOption.ALLOW_ONCE,
-            name="Allow once",
-            kind=cast(Literal["allow_once"], ToolOption.ALLOW_ONCE),
+            option_id=ToolOption.ALLOW_ONCE, name="Allow once", kind=_KIND_ALLOW_ONCE
         ),
         PermissionOption(
             option_id=ToolOption.ALLOW_ALWAYS,
-            name=f"Allow for this session: {labels}",
-            kind=cast(Literal["allow_always"], ToolOption.ALLOW_ALWAYS),
+            name="Allow for remainder of this session",
+            kind=_KIND_ALLOW_ALWAYS,
             field_meta={"required_permissions": permissions_meta},
         ),
         PermissionOption(
-            option_id=ToolOption.REJECT_ONCE,
-            name="Reject once",
-            kind=cast(Literal["reject_once"], ToolOption.REJECT_ONCE),
+            option_id=ToolOption.ALLOW_ALWAYS_PERMANENT,
+            name="Always allow",
+            kind=_KIND_ALLOW_ALWAYS,
+            field_meta={"required_permissions": permissions_meta},
+        ),
+        PermissionOption(
+            option_id=ToolOption.REJECT_ONCE, name="Deny", kind=_KIND_REJECT_ONCE
         ),
     ]
 
@@ -100,7 +109,7 @@ def is_valid_acp_mode(profiles: list[AgentProfile], mode_name: str) -> bool:
     )
 
 
-def make_mode_response(
+def build_mode_state(
     profiles: list[AgentProfile], current_mode_id: str
 ) -> tuple[SessionModeState, SessionConfigOptionSelect]:
     session_modes: list[SessionMode] = []
@@ -138,7 +147,7 @@ def make_mode_response(
     return state, config
 
 
-def make_model_response(
+def build_model_state(
     models: list[ModelConfig], current_model_id: str
 ) -> tuple[SessionModelState, SessionConfigOptionSelect]:
     model_infos: list[ModelInfo] = []
@@ -164,6 +173,22 @@ def make_model_response(
         options=config_options,
     )
     return state, config_option
+
+
+def make_thinking_response(
+    current_thinking: ThinkingLevel,
+) -> SessionConfigOptionSelect:
+    return SessionConfigOptionSelect(
+        id="thinking",
+        name="Thinking",
+        current_value=current_thinking,
+        category="thinking",
+        type="select",
+        options=[
+            SessionConfigSelectOption(value=level, name=level.capitalize())
+            for level in THINKING_LEVELS
+        ],
+    )
 
 
 def create_compact_start_session_update(event: CompactStartEvent) -> ToolCallStart:
@@ -206,7 +231,10 @@ def create_compact_end_session_update(event: CompactEndEvent) -> ToolCallProgres
                     type="text",
                     text=(
                         compact_reduction_display(
-                            event.old_context_tokens, event.new_context_tokens
+                            event.old_context_tokens,
+                            event.new_context_tokens,
+                            old_session_id=event.old_session_id,
+                            new_session_id=event.new_session_id,
                         )
                     ),
                 ),
@@ -288,6 +316,7 @@ def create_tool_call_replay(
         tool_call_id=tool_call_id,
         kind="other",
         raw_input=arguments,
+        field_meta={"tool_name": tool_name},
     )
 
 

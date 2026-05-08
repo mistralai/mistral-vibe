@@ -44,7 +44,7 @@ def _path_prompt_to_content_blocks(
                         "uri": resource.path.as_uri(),
                         "name": resource.alias,
                     })
-            case "directory":
+            case "folder":
                 blocks.append({
                     "type": "resource_link",
                     "uri": resource.path.as_uri(),

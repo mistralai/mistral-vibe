@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Protocol
 
+from vibe.cli.textual_ui.widgets.loading import DEFAULT_LOADING_STATUS
 from vibe.core.config import VibeConfig
 from vibe.core.nuage.remote_events_source import RemoteEventsSource
 from vibe.core.tools.builtins.ask_user_question import (
@@ -25,16 +26,14 @@ _MAX_QUESTION_OPTIONS = 4
 
 
 class RemoteSessionUI(Protocol):
-    async def on_remote_event(
-        self, event: BaseEvent, loading_active: bool, loading_widget: Any
-    ) -> None: ...
+    async def on_remote_event(self, event: BaseEvent, loading_widget: Any) -> None: ...
     async def on_remote_waiting_input(self, event: WaitingForInputEvent) -> None: ...
     async def on_remote_user_message_cleared_input(self) -> None: ...
     async def on_remote_stream_error(self, error: str) -> None: ...
     async def on_remote_stream_ended(self, msg_type: str, text: str) -> None: ...
     async def on_remote_finalize_streaming(self) -> None: ...
     async def remove_loading(self) -> None: ...
-    async def ensure_loading(self, status: str = "Generating") -> None: ...
+    async def ensure_loading(self, status: str = DEFAULT_LOADING_STATUS) -> None: ...
     @property
     def loading_widget(self) -> Any: ...
 
@@ -182,7 +181,7 @@ class RemoteSessionManager:
         events_source = self._events_source
         if events_source is None:
             return
-        await ui.ensure_loading("Generating")
+        await ui.ensure_loading(DEFAULT_LOADING_STATUS)
         try:
             async for event in events_source.attach():
                 if isinstance(event, WaitingForInputEvent):
@@ -197,11 +196,7 @@ class RemoteSessionManager:
                     await ui.on_remote_user_message_cleared_input()
                 elif ui.loading_widget is None and is_progress_event(event):
                     await ui.ensure_loading()
-                await ui.on_remote_event(
-                    event,
-                    loading_active=ui.loading_widget is not None,
-                    loading_widget=ui.loading_widget,
-                )
+                await ui.on_remote_event(event, loading_widget=ui.loading_widget)
         except asyncio.CancelledError:
             raise
         except Exception as e:

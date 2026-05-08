@@ -15,7 +15,7 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import VibeConfig
-from vibe.core.llm.exceptions import BackendErrorBuilder
+from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
 from vibe.core.middleware import (
     ConversationContext,
     MiddlewareAction,
@@ -26,6 +26,7 @@ from vibe.core.tools.builtins.todo import TodoArgs
 from vibe.core.types import (
     ApprovalResponse,
     AssistantEvent,
+    ContextTooLongError,
     FunctionCall,
     LLMMessage,
     RateLimitError,
@@ -469,6 +470,166 @@ async def test_rate_limit(observer_capture) -> None:
 
     with pytest.raises(RateLimitError):
         [_ async for _ in agent.act("Trigger rate limit failure while streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+def _build_context_too_long_backend_error() -> BackendError:
+    response = httpx.Response(
+        HTTPStatus.BAD_REQUEST,
+        request=httpx.Request("POST", "http://test"),
+        text='{"message": "Context too long"}',
+    )
+    error = httpx.HTTPStatusError(
+        "context too long", request=response.request, response=response
+    )
+    return BackendErrorBuilder.build_http_error(
+        provider="mistral",
+        endpoint="test",
+        error=error,
+        model="test-model",
+        messages=[],
+        temperature=0.0,
+        has_tools=False,
+        tool_choice=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_too_long_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    backend_error = _build_context_too_long_backend_error()
+    backend = FakeBackend(exception_to_raise=backend_error)
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=True,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(ContextTooLongError):
+        [_ async for _ in agent.act("Trigger context too long while streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_context_too_long_non_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    backend_error = _build_context_too_long_backend_error()
+    backend = FakeBackend(exception_to_raise=backend_error)
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=False,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(ContextTooLongError):
+        [_ async for _ in agent.act("Trigger context too long without streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+class _NonRetryableError(Exception):
+    # Mimics Temporal's ``ApplicationError(non_retryable=True)`` without
+    # pulling temporalio into vibe's test deps. The wrap-site check relies
+    # on the truthy ``non_retryable`` attribute, not the concrete type.
+    non_retryable = True
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_passes_through_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    backend = FakeBackend(exception_to_raise=_NonRetryableError("auth failed"))
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=True,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(_NonRetryableError, match="auth failed"):
+        [_ async for _ in agent.act("Trigger non-retryable failure while streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_passes_through_non_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    backend = FakeBackend(exception_to_raise=_NonRetryableError("auth failed"))
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=False,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(_NonRetryableError, match="auth failed"):
+        [_ async for _ in agent.act("Trigger non-retryable failure without streaming")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+def _wrap_with_cause(message: str, cause: BaseException) -> RuntimeError:
+    # Mirrors how Temporal raises ``ActivityError`` on the workflow side with
+    # the original ``ApplicationError`` chained as ``__cause__`` — except we
+    # don't import temporalio. The wrap-site check has to traverse the chain
+    # to find ``non_retryable`` regardless of how deep it is.
+    error = RuntimeError(message)
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_via_cause_chain_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    wrapped = _wrap_with_cause(
+        "Activity task failed", _NonRetryableError("auth failed")
+    )
+    backend = FakeBackend(exception_to_raise=wrapped)
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=True,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(RuntimeError, match="Activity task failed"):
+        [_ async for _ in agent.act("Trigger non-retryable via cause chain")]
+
+    assert [role for role, _ in observed] == [Role.system, Role.user]
+    assert agent.session_logger.save_interaction.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_via_cause_chain_non_streaming(observer_capture) -> None:
+    observed, observer = observer_capture
+    wrapped = _wrap_with_cause(
+        "Activity task failed", _NonRetryableError("auth failed")
+    )
+    backend = FakeBackend(exception_to_raise=wrapped)
+    agent = build_test_agent_loop(
+        config=make_config(),
+        backend=backend,
+        message_observer=observer,
+        enable_streaming=False,
+    )
+    agent.session_logger.save_interaction = AsyncMock(return_value=None)
+
+    with pytest.raises(RuntimeError, match="Activity task failed"):
+        [_ async for _ in agent.act("Trigger non-retryable via cause chain")]
 
     assert [role for role, _ in observed] == [Role.system, Role.user]
     assert agent.session_logger.save_interaction.await_count == 1

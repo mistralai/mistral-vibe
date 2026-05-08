@@ -115,9 +115,9 @@ def test_on_text_change_limits_the_number_of_results_and_preserves_insertion_ord
     suggestions, selected_index = view.suggestion_events[-1]
     assert len(suggestions) == 7
     assert [suggestion.alias for suggestion in suggestions] == [
+        "/help",
         "/config",
         "/compact",
-        "/help",
         "/summarize",
         "/logpath",
         "/exit",
@@ -197,6 +197,28 @@ def test_callable_entries_updates_completions_dynamically() -> None:
     suggestions, _ = view.suggestion_events[-1]
     assert [s.alias for s in suggestions] == ["/summarize"]
     assert suggestions[0].description == "Summarize the conversation"
+
+
+def test_tab_on_slash_command_with_args_replaces_only_head() -> None:
+    controller, view = make_controller()
+    text = "/compact some args"
+    controller.on_text_changed(text, cursor_index=len(text))
+
+    result = controller.on_key(key_event("tab"), text=text, cursor_index=len(text))
+
+    assert result is CompletionResult.HANDLED
+    assert view.replacements == [Replacement(0, 8, "/compact")]
+
+
+def test_enter_on_slash_command_with_args_submits_with_head_only_replacement() -> None:
+    controller, view = make_controller()
+    text = "/compact some args"
+    controller.on_text_changed(text, cursor_index=len(text))
+
+    result = controller.on_key(key_event("enter"), text=text, cursor_index=len(text))
+
+    assert result is CompletionResult.SUBMIT
+    assert view.replacements == [Replacement(0, 8, "/compact")]
 
 
 def test_callable_entries_reflects_enabled_disabled_skills() -> None:

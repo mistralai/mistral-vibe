@@ -5,6 +5,138 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.5] - 2026-05-06
+
+### Added
+
+- `/loop` command to run a prompt or slash command on a recurring interval
+- `default_agent` config setting
+- Telemetry instrumentation for the `teleport` command
+- Logging environment variables documented in `--help`
+
+### Changed
+
+- `enable_telemetry` now takes precedence over `enable_otel`
+
+### Fixed
+
+- Non-retryable errors raised by sub-activities now correctly stop the retry when the agent loop runs inside a Temporal activity (deepens the 2.9.4 fix to walk the exception cause chain)
+- Compacted session IDs displayed correctly
+- Reload the history file before writing so parallel instances don't clobber each other
+- `read_file` flagged as truncated when the limit is reached
+- CLI loader left-alignment
+- Default scroll sensitivity in the TUI restored
+- Loosened the "no git commit" constraint
+- Ensure `enable_telemetry` takes precedence over `enable_otel`
+
+
+## [2.9.4] - 2026-05-05
+
+### Added
+
+- `/rename` command to rename the current session
+- `feat: vibe.at_mention_inserted` telemetry event
+- "Always allow" tool permissions persist across sessions
+- Eager agent-loop warmup so `vibe.ready` telemetry fires sooner
+
+### Changed
+
+- `bash` (`!command`) bang commands run via async subprocess for better latency
+- Bumped `mistral` SDK to 2.4.4
+- Bumped `cryptography` to address upstream CVEs
+
+### Fixed
+
+- Preserve `non_retryable` flag on exceptions raised through `_chat` / `_chat_streaming`, so callers driving the agent loop from a Temporal activity can signal "do not retry"
+- `/clear` no longer chains `parent_session_id` to the previous session
+- `vibe.new_session` telemetry no longer fires when resuming a session
+
+### Removed
+
+- Windows ARM build artifacts (no longer published; required to bump `cryptography`)
+
+
+## [2.9.3] - 2026-04-30
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Fix textual version
+
+### Removed
+
+
+## [2.9.2] - 2026-04-29
+
+### Fixed
+
+- Teleport surfaces the latest GitHub connection status while polling
+
+
+## [2.9.1] - 2026-04-29
+
+### Added
+
+- Connector OAuth authentication flow in `/mcp` menu
+- `ConfigPatch` operation types for Vibe Code
+- `extra_headers` field to `ProviderConfig`
+- Structured metadata on ACP tool results
+- `vibe.user_cancelled_action` ACP telemetry coverage
+- `vibe.new_session` telemetry event emitted whenever the session is reset
+
+### Changed
+
+- Migrated default model to `mistral-medium-3.5`
+
+
+## [2.9.0] - 2026-04-28
+
+### Added
+
+- Scratchpad directory for temporary working files shared with subagents
+- `/copy` slash command
+- Experimental hooks system with post-agent-turn lifecycle
+- OpenAI Responses API adapter
+- ACP session fork and session close support
+- Thinking level picker in ACP CLI
+- `--trust` session-only flag and fail-fast behavior in `-p` mode
+- Opus 4.7 model support
+- `ConfigLayer` for layered configuration resolution
+- `~/.vibe/prompts` overrides for builtin prompts
+- Enable/disable MCP servers and individual tools from `/mcp` menu
+- Custom compaction instructions via `/compact`
+- `vibe.ready` telemetry event
+- Usage updates sent after every LLM turn for ACP
+- Headless section in system prompt to prevent bad model behavior
+
+### Changed
+
+- Renamed `auto_approve` config to `bypass_tool_permissions`
+- Increased feedback bar frequency with cooldown and TOML cache
+- Feedback bar only shown when active model is Mistral
+- Centralized telemetry metadata construction and wired through entrypoints
+- Preserved stable session identity across compact/fork/rewind
+- Filtered remote sessions by current user and deduped continue-as-new
+- `--continue` now only looks for sessions of the current working directory
+- Batched widget mounts and narrowed CSS selectors for UI performance
+
+### Fixed
+
+- Autocomplete popup height calculation for wrapped lines
+- Autocomplete popup dismissed on tab completion and escape
+- Double Ctrl+C/Ctrl+D required to quit instead of killing session immediately
+- Context window overrun now shows a friendly error message
+- `MallocStackLogging` error messages suppressed in CLI input
+- `index.lock` leftover on interrupted deferred init
+- Safe `find` commands allowed by default
+- Session ID preserved when resuming sessions through ACP
+- Usage updates sent after tool results instead of tool streams in ACP
+- KV cache warming via x-affinity in count tokens
+
+
 ## [2.8.1] - 2026-04-21
 
 ### Fixed
@@ -457,7 +589,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped agent-client-protocol to 0.7.1
 - Refactored UI to require AgentLoop at VibeApp construction
 - Updated README with new MCP server config
-- Improved readability of the AskUserQuerstion tool output
+- Improved readability of the AskUserQuestion tool output
 
 ### Fixed
 

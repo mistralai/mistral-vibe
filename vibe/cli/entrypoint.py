@@ -8,7 +8,6 @@ import sys
 from rich import print as rprint
 
 from vibe import __version__
-from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.trusted_folders import find_trustable_files, trusted_folders_manager
 from vibe.setup.trusted_folders.trust_folder_dialog import (
@@ -18,7 +17,18 @@ from vibe.setup.trusted_folders.trust_folder_dialog import (
 
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Mistral Vibe interactive CLI")
+    parser = argparse.ArgumentParser(
+        description="Run the Mistral Vibe interactive CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Environment variables:\n"
+            "  VIBE_HOME       Override the Vibe home directory (default: ~/.vibe)\n"
+            "  LOG_LEVEL       Logging level: DEBUG, INFO, WARNING (default), ERROR, CRITICAL.\n"
+            "                  Logs are written to $VIBE_HOME/logs/vibe.log.\n"
+            "  LOG_MAX_BYTES   Max size of vibe.log before rotation (default: 10485760).\n"
+            "  VIBE_*          Override any config field (e.g. VIBE_ACTIVE_MODEL=local)."
+        ),
+    )
     parser.add_argument(
         "-v", "--version", action="version", version=f"%(prog)s {__version__}"
     )
@@ -72,9 +82,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--agent",
         metavar="NAME",
-        default=BuiltinAgentName.DEFAULT,
+        default=None,
         help="Agent to use (builtin: default, plan, accept-edits, auto-approve, "
-        "or custom from ~/.vibe/agents/NAME.toml)",
+        "or custom from ~/.vibe/agents/NAME.toml). In interactive mode, "
+        "defaults to the 'default_agent' config setting. In programmatic "
+        "mode (-p/--prompt), defaults to auto-approve and 'default_agent' "
+        "is ignored.",
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
     parser.add_argument(
@@ -82,6 +95,13 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         metavar="DIR",
         help="Change to this directory before running",
+    )
+    parser.add_argument(
+        "--trust",
+        action="store_true",
+        help="Trust the working directory for this invocation only (not "
+        "persisted to trusted_folders.toml). Skips the trust prompt. "
+        "Use this for non-interactive automation.",
     )
 
     # Feature flag for teleport, not exposed to the user yet
@@ -106,18 +126,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def check_and_resolve_trusted_folder() -> None:
-    try:
-        cwd = Path.cwd()
-    except FileNotFoundError:
-        rprint(
-            "[red]Error: Current working directory no longer exists.[/]\n"
-            "[yellow]The directory you started vibe from has been deleted. "
-            "Please change to an existing directory and try again, "
-            "or use --workdir to specify a working directory.[/]"
-        )
-        sys.exit(1)
-
+def check_and_resolve_trusted_folder(cwd: Path) -> None:
     if cwd.resolve() == Path.home().resolve():
         return
 
@@ -157,9 +166,23 @@ def main() -> None:
             sys.exit(1)
         os.chdir(workdir)
 
+    try:
+        cwd = Path.cwd()
+    except FileNotFoundError:
+        rprint(
+            "[red]Error: Current working directory no longer exists.[/]\n"
+            "[yellow]The directory you started vibe from has been deleted. "
+            "Please change to an existing directory and try again, "
+            "or use --workdir to specify a working directory.[/]"
+        )
+        sys.exit(1)
+
+    if args.trust:
+        trusted_folders_manager.trust_for_session(cwd)
+
     is_interactive = args.prompt is None
     if is_interactive:
-        check_and_resolve_trusted_folder()
+        check_and_resolve_trusted_folder(cwd)
     init_harness_files_manager("user", "project")
 
     from vibe.cli.cli import run_cli

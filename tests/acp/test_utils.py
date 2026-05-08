@@ -81,10 +81,13 @@ class TestBuildPermissionOptions:
         ]
         result = build_permission_options(permissions)
 
-        assert len(result) == 3
+        assert len(result) == 4
         allow_always = next(o for o in result if o.option_id == ToolOption.ALLOW_ALWAYS)
-        assert "npm install *" in allow_always.name
         assert "session" in allow_always.name.lower()
+        allow_permanent = next(
+            o for o in result if o.option_id == ToolOption.ALLOW_ALWAYS_PERMANENT
+        )
+        assert "Always allow" == allow_permanent.name
 
     def test_allow_always_has_field_meta(self) -> None:
         permissions = [
@@ -118,6 +121,6 @@ class TestBuildPermissionOptions:
         allow_once = next(o for o in result if o.option_id == ToolOption.ALLOW_ONCE)
         reject_once = next(o for o in result if o.option_id == ToolOption.REJECT_ONCE)
         assert allow_once.name == "Allow once"
-        assert reject_once.name == "Reject once"
+        assert reject_once.name == "Deny"
         assert allow_once.field_meta is None
         assert reject_once.field_meta is None

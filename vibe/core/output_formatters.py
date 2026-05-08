@@ -62,10 +62,10 @@ class TextOutputFormatter(OutputFormatter):
                 self._print("Syncing with remote...")
             case TeleportStartingWorkflowEvent():
                 self._print("Teleporting...")
-            case TeleportWaitingForGitHubEvent():
-                self._print("Connecting to GitHub...")
-            case TeleportAuthRequiredEvent(oauth_url=url):
-                self._print(f"Open to authorize GitHub: {url}")
+            case TeleportWaitingForGitHubEvent(message=msg):
+                self._print(msg or "Connecting to GitHub...")
+            case TeleportAuthRequiredEvent(oauth_url=url, message=msg):
+                self._print(msg or f"Open to authorize GitHub: {url}")
             case TeleportAuthCompleteEvent():
                 self._print("GitHub authorized")
             case TeleportFetchingUrlEvent():

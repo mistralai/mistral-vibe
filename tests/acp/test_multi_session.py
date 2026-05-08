@@ -92,20 +92,26 @@ class TestMultiSessionCore:
         )
         assert user_message1 is not None
         assert user_message1.content == "Prompt for session 1"
-        assistant_message1 = next(
-            (msg for msg in session1.agent_loop.messages if msg.role == Role.assistant),
-            None,
-        )
-        assert assistant_message1 is not None
-        assert assistant_message1.content == "Response 1"
         user_message2 = next(
             (msg for msg in session2.agent_loop.messages if msg.role == Role.user), None
         )
         assert user_message2 is not None
         assert user_message2.content == "Prompt for session 2"
+
+        # Backend stream order is non-deterministic under asyncio.gather, so
+        # assert that both sessions received distinct responses from the
+        # expected set rather than pinning a specific assignment.
+        assistant_message1 = next(
+            (msg for msg in session1.agent_loop.messages if msg.role == Role.assistant),
+            None,
+        )
         assistant_message2 = next(
             (msg for msg in session2.agent_loop.messages if msg.role == Role.assistant),
             None,
         )
+        assert assistant_message1 is not None
         assert assistant_message2 is not None
-        assert assistant_message2.content == "Response 2"
+        assert {assistant_message1.content, assistant_message2.content} == {
+            "Response 1",
+            "Response 2",
+        }

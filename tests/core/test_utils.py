@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.utils import get_server_url_from_api_base
+from vibe.core.utils import compact_reduction_display, get_server_url_from_api_base
 import vibe.core.utils.io as io_utils
 from vibe.core.utils.io import decode_safe, read_safe, read_safe_async
 
@@ -21,6 +21,24 @@ from vibe.core.utils.io import decode_safe, read_safe, read_safe_async
 )
 def test_get_server_url_from_api_base(api_base, expected):
     assert get_server_url_from_api_base(api_base) == expected
+
+
+class TestCompactReductionDisplay:
+    def test_includes_session_ids_when_available(self) -> None:
+        assert compact_reduction_display(
+            177_017,
+            23_263,
+            old_session_id="11111111-1111-1111-1111-111111111111",
+            new_session_id="22222222-2222-2222-2222-222222222222",
+        ) == (
+            "Compaction complete: 177,017 → 23,263 tokens (-87.%)\n"
+            "session: 11111111 (before compaction) → 22222222 (after compaction)"
+        )
+
+    def test_returns_base_message_without_session_ids(self) -> None:
+        assert compact_reduction_display(177_017, 23_263) == (
+            "Compaction complete: 177,017 → 23,263 tokens (-87.%)"
+        )
 
 
 class TestReadSafe:

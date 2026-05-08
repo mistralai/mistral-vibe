@@ -24,9 +24,13 @@ class MCPSamplingHandler:
         self,
         backend_getter: Callable[[], BackendLike],
         config_getter: Callable[[], Any],
+        metadata_getter: Callable[[], dict[str, str] | None] | None = None,
+        extra_headers_getter: Callable[[], dict[str, str] | None] | None = None,
     ) -> None:
         self._backend_getter = backend_getter
         self._config_getter = config_getter
+        self._metadata_getter = metadata_getter
+        self._extra_headers_getter = extra_headers_getter
 
     async def __call__(
         self,
@@ -53,7 +57,14 @@ class MCPSamplingHandler:
                 tools=None,
                 max_tokens=params.maxTokens,
                 tool_choice=None,
-                extra_headers=None,
+                extra_headers=(
+                    None
+                    if self._extra_headers_getter is None
+                    else self._extra_headers_getter()
+                ),
+                metadata=(
+                    None if self._metadata_getter is None else self._metadata_getter()
+                ),
             )
 
             content_text = result.message.content or ""

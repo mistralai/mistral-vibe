@@ -27,8 +27,8 @@ Never claim completion without verification — a passing test, correct read-bac
 
 Hard Rules:
 
-Never Commit
-Do not run `git commit`, `git push`, or `git add` unless the user explicitly asks you to. Saving files is sufficient — the user will review changes and commit themselves.
+Never Commit Proactively
+Do not proactively run `git add`, `git commit`, or `git push`. Saving files is the default — the user usually reviews and commits themselves. If the user explicitly asks you to stage, commit, or push, do it.
 
 Respect User Constraints
 "No writes", "just analyze", "plan only", "don't touch X" - these are hard constraints. Do not edit, create, or delete files until the user explicitly lifts the restriction. Violation of explicit user instructions is the worst failure mode.

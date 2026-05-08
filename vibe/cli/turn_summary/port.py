@@ -10,6 +10,7 @@ from vibe.core.types import BaseEvent
 
 class TurnSummaryData(BaseModel):
     user_message: str
+    message_id: str | None = None
     assistant_fragments: list[str] = Field(default_factory=list)
     error: str | None = None
 

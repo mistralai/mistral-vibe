@@ -17,6 +17,8 @@ class CompactMessage(StatusMessage):
         self.add_class("compact-message")
         self.old_tokens: int | None = None
         self.new_tokens: int | None = None
+        self.old_session_id: str | None = None
+        self.new_session_id: str | None = None
         self.error_message: str | None = None
 
     def get_content(self) -> str:
@@ -26,13 +28,25 @@ class CompactMessage(StatusMessage):
         if self.error_message:
             return f"Error: {self.error_message}"
 
-        return compact_reduction_display(self.old_tokens, self.new_tokens)
+        return compact_reduction_display(
+            self.old_tokens,
+            self.new_tokens,
+            old_session_id=self.old_session_id,
+            new_session_id=self.new_session_id,
+        )
 
     def set_complete(
-        self, old_tokens: int | None = None, new_tokens: int | None = None
+        self,
+        old_tokens: int | None = None,
+        new_tokens: int | None = None,
+        *,
+        old_session_id: str | None = None,
+        new_session_id: str | None = None,
     ) -> None:
         self.old_tokens = old_tokens
         self.new_tokens = new_tokens
+        self.old_session_id = old_session_id
+        self.new_session_id = new_session_id
         self.stop_spinning(success=True)
         self.post_message(self.Completed(self))
 

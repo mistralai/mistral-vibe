@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
 import sys
 from typing import Any
@@ -52,6 +53,7 @@ def get_base_config() -> dict[str, Any]:
             }
         ],
         "enable_auto_update": False,
+        "enable_telemetry": False,
     }
 
 
@@ -98,6 +100,7 @@ def _reset_trusted_folders_manager(config_dir: Path) -> None:
     trusted_folders_manager._file_path = config_dir / "trusted_folders.toml"
     trusted_folders_manager._trusted = []
     trusted_folders_manager._untrusted = []
+    trusted_folders_manager._session_trusted = []
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +109,31 @@ def _init_harness_files_manager():
     init_harness_files_manager("user", "project")
     yield
     reset_harness_files_manager()
+
+
+@pytest.fixture(autouse=True)
+def _scratchpad_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> Generator[Path]:
+    import vibe.core.scratchpad as scratchpad_mod
+
+    scratchpad_mod._active_scratchpads.clear()
+
+    scratchpad_root = tmp_path_factory.mktemp("scratchpad")
+    _counter = 0
+
+    def _fake_mkdtemp(prefix: str = "") -> str:
+        nonlocal _counter
+        _counter += 1
+        d = scratchpad_root / f"{prefix}{_counter}"
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+
+    monkeypatch.setattr("vibe.core.scratchpad.tempfile.mkdtemp", _fake_mkdtemp)
+
+    yield scratchpad_root
+
+    scratchpad_mod._active_scratchpads.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -132,7 +160,7 @@ def _mock_update_commands(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _disable_feedback_bar(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "vibe.cli.textual_ui.widgets.feedback_bar.FEEDBACK_PROBABILITY", 0
+        "vibe.cli.textual_ui.widgets.feedback_bar_manager.FEEDBACK_PROBABILITY", 0
     )
 
 
@@ -147,7 +175,8 @@ def telemetry_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         *,
         correlation_id: str | None = None,
     ) -> None:
-        event: dict[str, Any] = {"event_name": event_name, "properties": properties}
+        merged = self.build_client_event_metadata() | properties
+        event: dict[str, Any] = {"event_name": event_name, "properties": merged}
         if correlation_id is not None:
             event["correlation_id"] = correlation_id
         events.append(event)

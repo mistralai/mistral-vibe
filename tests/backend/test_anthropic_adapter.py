@@ -465,11 +465,14 @@ class TestAdapterPrepareRequest:
         assert payload["temperature"] == 1
         assert payload["max_tokens"] == expected_budget + 8192
 
+    @pytest.mark.parametrize(
+        "model_name", ["claude-opus-4-6-20260101", "claude-opus-4-7-20260418"]
+    )
     @pytest.mark.parametrize("level", ["low", "medium", "high"])
-    def test_thinking_levels_adaptive_model(self, adapter, provider, level):
+    def test_thinking_levels_adaptive_model(self, adapter, provider, model_name, level):
         messages = [LLMMessage(role=Role.user, content="Hello")]
         req = adapter.prepare_request(
-            model_name="claude-opus-4-6-20260101",
+            model_name=model_name,
             messages=messages,
             temperature=0.5,
             tools=None,
@@ -480,10 +483,32 @@ class TestAdapterPrepareRequest:
             thinking=level,
         )
         payload = json.loads(req.body)
-        assert payload["thinking"] == {"type": "adaptive"}
+        assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert payload["output_config"] == {"effort": level}
-        assert payload["temperature"] == 1
+        if "opus-4-7" in model_name:
+            assert "temperature" not in payload
+        else:
+            assert payload["temperature"] == 1
         assert payload["max_tokens"] == 32_768
+
+    @pytest.mark.parametrize("thinking_level", ["off", "low", "medium", "high"])
+    def test_temperature_omitted_for_deprecated_model(
+        self, adapter, provider, thinking_level
+    ):
+        messages = [LLMMessage(role=Role.user, content="Hello")]
+        req = adapter.prepare_request(
+            model_name="claude-opus-4-7-20260418",
+            messages=messages,
+            temperature=0.5,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            enable_streaming=False,
+            provider=provider,
+            thinking=thinking_level,
+        )
+        payload = json.loads(req.body)
+        assert "temperature" not in payload
 
     def test_history_forced_thinking_budget_model(self, adapter, provider):
         messages = [
@@ -533,7 +558,7 @@ class TestAdapterPrepareRequest:
             provider=provider,
         )
         payload = json.loads(req.body)
-        assert payload["thinking"] == {"type": "adaptive"}
+        assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert payload["output_config"] == {"effort": "medium"}
         assert payload["max_tokens"] == 32_768
 

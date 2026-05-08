@@ -8,10 +8,11 @@ import os
 from pathlib import Path
 import subprocess
 from threading import Lock
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from anyio import NamedTemporaryFile, Path as AsyncPath
 
+from vibe.core.session.session_id import shorten_session_id
 from vibe.core.session.session_loader import (
     MESSAGES_FILENAME,
     METADATA_FILENAME,
@@ -63,8 +64,19 @@ class SessionLogger:
             )
 
         timestamp = utc_now().strftime("%Y%m%d_%H%M%S")
-        folder_name = f"{self.session_prefix}_{timestamp}_{self.session_id[:8]}"
+        folder_name = (
+            f"{self.session_prefix}_{timestamp}_{shorten_session_id(self.session_id)}"
+        )
         return self.save_dir / folder_name
+
+    def _get_session_info(self) -> tuple[Path, SessionMetadata] | None:
+        if (
+            not self.enabled
+            or self.session_dir is None
+            or self.session_metadata is None
+        ):
+            return None
+        return (self.session_dir, self.session_metadata)
 
     @property
     def metadata_filepath(self) -> Path:
@@ -134,6 +146,8 @@ class SessionLogger:
             git_branch=git_branch,
             username=user_name,
             environment={"working_directory": str(Path.cwd())},
+            title=None,
+            title_source="auto",
         )
 
     def _get_title(self, messages: Sequence[LLMMessage]) -> str:
@@ -152,6 +166,37 @@ class SessionLogger:
             if len(text) > MAX_TITLE_LENGTH:
                 title += "…"
 
+        return title
+
+    def _set_title_state(
+        self, title: str | None, *, source: Literal["auto", "manual"]
+    ) -> None:
+        if self.session_metadata is None:
+            return
+
+        self.session_metadata.title = title
+        self.session_metadata.title_source = source
+
+    def set_title(self, title: str | None) -> None:
+        if title is None:
+            self._set_title_state(None, source="auto")
+            return
+
+        normalized_title = title.strip()
+        if not normalized_title:
+            raise ValueError("Session title cannot be empty.")
+
+        self._set_title_state(normalized_title, source="manual")
+
+    def _resolve_title(self, messages: Sequence[LLMMessage]) -> str | None:
+        if self.session_metadata is None:
+            return self._get_title(messages)
+
+        if self.session_metadata.title_source == "manual":
+            return self.session_metadata.title
+
+        title = self._get_title(messages)
+        self._set_title_state(title, source="auto")
         return title
 
     @staticmethod
@@ -211,34 +256,34 @@ class SessionLogger:
         tool_manager: ToolManager,
         agent_profile: AgentProfile,
     ) -> None:
-        if not self.enabled or self.session_dir is None:
+        session_info = self._get_session_info()
+        if session_info is None:
             return
-
-        if self.session_metadata is None:
-            return
+        session_dir, session_metadata = session_info
+        metadata_path = session_dir / METADATA_FILENAME
 
         if not any(msg.role != Role.system for msg in messages):
             return
 
         # If the session directory does not exist, create it
         try:
-            self.session_dir.mkdir(parents=True, exist_ok=True)
+            session_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             raise RuntimeError(
-                f"Failed to create session directory at {self.session_dir}: {type(e).__name__}: {e}"
+                f"Failed to create session directory at {session_dir}: {type(e).__name__}: {e}"
             ) from e
 
         # Read old metadata and get total_messages
         try:
-            if self.metadata_filepath.exists():
-                raw = (await read_safe_async(self.metadata_filepath)).text
+            if metadata_path.exists():
+                raw = (await read_safe_async(metadata_path)).text
                 old_metadata = json.loads(raw)
                 old_total_messages = old_metadata["total_messages"]
             else:
                 old_total_messages = 0
         except Exception as e:
             raise RuntimeError(
-                f"Failed to read session metadata at {self.metadata_filepath}: {e}"
+                f"Failed to read session metadata at {metadata_path}: {e}"
             ) from e
 
         try:
@@ -250,7 +295,7 @@ class SessionLogger:
                 return
 
             messages_data = [m.model_dump(exclude_none=True) for m in new_messages]
-            await SessionLogger.persist_messages(messages_data, self.session_dir)
+            await SessionLogger.persist_messages(messages_data, session_dir)
 
             # If message update succeeded, write metadata
             tools_available = [
@@ -265,7 +310,7 @@ class SessionLogger:
                 for tool_class in tool_manager.available_tools.values()
             ]
 
-            title = self._get_title(messages)
+            title = self._resolve_title(messages)
             system_prompt = (
                 messages[0].model_dump()
                 if len(messages) > 0 and messages[0].role == Role.system
@@ -274,7 +319,7 @@ class SessionLogger:
             total_messages = len(non_system_messages)
 
             metadata_dump = {
-                **self.session_metadata.model_dump(),
+                **session_metadata.model_dump(),
                 "end_time": utc_now().isoformat(),
                 "stats": stats.model_dump(),
                 "title": title,
@@ -288,16 +333,36 @@ class SessionLogger:
                 "system_prompt": system_prompt,
             }
 
-            await SessionLogger.persist_metadata(metadata_dump, self.session_dir)
+            await SessionLogger.persist_metadata(metadata_dump, session_dir)
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to save session to {self.session_dir}: {e}"
-            ) from e
+            raise RuntimeError(f"Failed to save session to {session_dir}: {e}") from e
         finally:
             self.maybe_cleanup_tmp_files()
 
-    def reset_session(self, session_id: str) -> None:
-        """Clear existing session info and setup a new session"""
+    async def persist_loops(self) -> None:
+        session_info = self._get_session_info()
+        if session_info is None:
+            return
+        session_dir, session_metadata = session_info
+        metadata_path = session_dir / METADATA_FILENAME
+        if not metadata_path.exists():
+            return
+        try:
+            raw = (await read_safe_async(metadata_path)).text
+            metadata = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as e:
+            raise RuntimeError(
+                f"Failed to read session metadata at {metadata_path}: {e}"
+            ) from e
+        metadata["loops"] = [
+            loop.model_dump(mode="json") for loop in session_metadata.loops
+        ]
+        await SessionLogger.persist_metadata(metadata, session_dir)
+
+    def reset_session(
+        self, session_id: str, *, parent_session_id: str | None = None
+    ) -> None:
+        """Clear existing session info and setup a new session."""
         if not self.enabled:
             return
 
@@ -305,6 +370,8 @@ class SessionLogger:
         self.session_start_time = utc_now().isoformat()
         self.session_dir = self.save_folder
         self.session_metadata = self._initialize_session_metadata()
+        if parent_session_id is not None:
+            self.session_metadata.parent_session_id = parent_session_id
 
     def resume_existing_session(self, session_id: str, session_dir: Path) -> None:
         if not self.enabled:

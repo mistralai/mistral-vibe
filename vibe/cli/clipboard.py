@@ -30,17 +30,24 @@ def _has_cmd(cmd: str) -> bool:
 
 
 def _copy_pbcopy(text: str) -> None:
-    subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+    subprocess.run(
+        ["pbcopy"], input=text.encode("utf-8"), check=True, stderr=subprocess.DEVNULL
+    )
 
 
 def _copy_xclip(text: str) -> None:
     subprocess.run(
-        ["xclip", "-selection", "clipboard"], input=text.encode("utf-8"), check=True
+        ["xclip", "-selection", "clipboard"],
+        input=text.encode("utf-8"),
+        check=True,
+        stderr=subprocess.DEVNULL,
     )
 
 
 def _copy_wl_copy(text: str) -> None:
-    subprocess.run(["wl-copy"], input=text.encode("utf-8"), check=True)
+    subprocess.run(
+        ["wl-copy"], input=text.encode("utf-8"), check=True, stderr=subprocess.DEVNULL
+    )
 
 
 _CMD_STRATEGIES: list[tuple[str, Callable[[str], None]]] = [
@@ -137,24 +144,36 @@ def _get_selected_texts(app: App) -> list[str]:
     return selected_texts
 
 
-def copy_selection_to_clipboard(app: App, show_toast: bool = True) -> str | None:
-    selected_texts = _get_selected_texts(app)
-    if not selected_texts:
+def copy_text_to_clipboard(
+    app: App,
+    text: str,
+    *,
+    show_toast: bool = True,
+    success_message: str = "Copied to clipboard",
+) -> str | None:
+    if not text:
         return None
 
-    combined_text = "\n".join(selected_texts)
     try:
-        _copy_to_clipboard(combined_text)
+        _copy_to_clipboard(text)
         if show_toast:
-            app.notify(
-                "Selection copied to clipboard",
-                severity="information",
-                timeout=2,
-                markup=False,
-            )
-        return combined_text
+            app.notify(success_message, severity="information", timeout=2, markup=False)
+        return text
     except Exception:
         app.notify(
             "Failed to copy - clipboard not available", severity="warning", timeout=3
         )
         return None
+
+
+def copy_selection_to_clipboard(app: App, show_toast: bool = True) -> str | None:
+    selected_texts = _get_selected_texts(app)
+    if not selected_texts:
+        return None
+
+    return copy_text_to_clipboard(
+        app,
+        "\n".join(selected_texts),
+        show_toast=show_toast,
+        success_message="Selection copied to clipboard",
+    )

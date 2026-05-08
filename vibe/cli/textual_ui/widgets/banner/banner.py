@@ -13,16 +13,11 @@ from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import VibeConfig
 from vibe.core.skills.manager import SkillManager
-from vibe.core.tools.connectors import ConnectorRegistry
 from vibe.core.tools.mcp.registry import MCPRegistry
 
 
 def _pluralize(count: int, singular: str) -> str:
     return f"{count} {singular}{'s' if count != 1 else ''}"
-
-
-def _connector_count(registry: ConnectorRegistry | None) -> int:
-    return registry.connector_count if registry else 0
 
 
 @dataclass
@@ -43,17 +38,16 @@ class Banner(Static):
         config: VibeConfig,
         skill_manager: SkillManager,
         mcp_registry: MCPRegistry,
-        connector_registry: ConnectorRegistry | None = None,
+        connectors_count: int = 0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.can_focus = False
-        self._initial_state = BannerState(
-            active_model=config.active_model,
-            models_count=len(config.models),
-            mcp_servers_count=mcp_registry.count_loaded(config.mcp_servers),
-            connectors_count=_connector_count(connector_registry),
-            skills_count=skill_manager.custom_skills_count,
+        self._initial_state = self._build_state(
+            config=config,
+            skill_manager=skill_manager,
+            mcp_registry=mcp_registry,
+            connectors_count=connectors_count,
             plan_description=None,
         )
         self._animated = not config.disable_welcome_banner_animation
@@ -97,14 +91,30 @@ class Banner(Static):
         config: VibeConfig,
         skill_manager: SkillManager,
         mcp_registry: MCPRegistry,
-        connector_registry: ConnectorRegistry | None = None,
+        connectors_count: int = 0,
         plan_description: str | None = None,
     ) -> None:
-        self.state = BannerState(
-            active_model=config.active_model,
+        self.state = self._build_state(
+            config, skill_manager, mcp_registry, connectors_count, plan_description
+        )
+
+    @staticmethod
+    def _build_state(
+        config: VibeConfig,
+        skill_manager: SkillManager,
+        mcp_registry: MCPRegistry,
+        connectors_count: int = 0,
+        plan_description: str | None = None,
+    ) -> BannerState:
+        enabled_servers = [s for s in config.mcp_servers if not s.disabled]
+        mcp_count = mcp_registry.count_loaded(enabled_servers)
+
+        active_model = config.get_active_model()
+        return BannerState(
+            active_model=f"{active_model.alias}[{active_model.thinking}]",
             models_count=len(config.models),
-            mcp_servers_count=mcp_registry.count_loaded(config.mcp_servers),
-            connectors_count=_connector_count(connector_registry),
+            mcp_servers_count=mcp_count,
+            connectors_count=connectors_count,
             skills_count=skill_manager.custom_skills_count,
             plan_description=plan_description,
         )

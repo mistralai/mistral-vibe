@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import math
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,12 @@ from vibe.cli.textual_ui.widgets.chat_input.body import ChatInputBody
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
-from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
+from vibe.cli.textual_ui.widgets.chat_input.completion_popup import (
+    COMPLETION_POPUP_MAX_HEIGHT,
+    COMPLETION_POPUP_MAX_WIDTH,
+    COMPLETION_POPUP_PADDING_X,
+    CompletionPopup,
+)
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.voice_manager.voice_manager_port import VoiceManagerPort
 from vibe.core.agents import AgentSafety
@@ -26,6 +32,12 @@ SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
     AgentSafety.DESTRUCTIVE: "border-warning",
     AgentSafety.YOLO: "border-error",
 }
+
+
+COMPLETION_POPUP_MAX_LINES = COMPLETION_POPUP_MAX_HEIGHT - 2
+COMPLETION_POPUP_MAX_CHARS = (
+    COMPLETION_POPUP_MAX_WIDTH - 2 * COMPLETION_POPUP_PADDING_X - 2
+)  # -2 for borders
 
 
 class ChatInputContainer(Vertical):
@@ -39,26 +51,24 @@ class ChatInputContainer(Vertical):
 
     def __init__(
         self,
+        command_registry: CommandRegistry,
         history_file: Path | None = None,
-        command_registry: CommandRegistry | None = None,
         safety: AgentSafety = AgentSafety.NEUTRAL,
         agent_name: str = "",
         skill_entries_getter: Callable[[], list[tuple[str, str]]] | None = None,
         file_watcher_for_autocomplete_getter: Callable[[], bool] | None = None,
-        nuage_enabled: bool = False,
         voice_manager: VoiceManagerPort | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._history_file = history_file
-        self._command_registry = command_registry or CommandRegistry()
+        self._command_registry = command_registry
         self._safety = safety
         self._agent_name = agent_name
         self._skill_entries_getter = skill_entries_getter
         self._file_watcher_for_autocomplete_getter = (
             file_watcher_for_autocomplete_getter
         )
-        self._nuage_enabled = nuage_enabled
         self._voice_manager = voice_manager
         self._custom_border_label: str | None = None
         self._custom_border_class: str | None = None
@@ -92,8 +102,8 @@ class ChatInputContainer(Vertical):
             input_box.border_title = self._get_border_title()
             self._body = ChatInputBody(
                 history_file=self._history_file,
+                command_registry=self._command_registry,
                 id="input-body",
-                nuage_enabled=self._nuage_enabled,
                 voice_manager=self._voice_manager,
             )
 
@@ -129,6 +139,12 @@ class ChatInputContainer(Vertical):
                 widget.get_full_text(), widget._get_full_cursor_offset()
             )
 
+    def dismiss_completion(self) -> bool:
+        if self._completion_manager.is_active:
+            self._completion_manager.reset()
+            return True
+        return False
+
     def focus_input(self) -> None:
         if self._body:
             self._body.focus_input()
@@ -141,7 +157,7 @@ class ChatInputContainer(Vertical):
         except Exception:
             return
         popup.update_suggestions(suggestions, selected_index)
-        self._position_popup(popup, len(suggestions))
+        self._position_popup(popup, suggestions)
 
     def clear_completion_suggestions(self) -> None:
         try:
@@ -150,18 +166,28 @@ class ChatInputContainer(Vertical):
             return
         popup.hide()
 
-    def _position_popup(self, popup: CompletionPopup, line_count: int) -> None:
+    def _compute_line_count(self, suggestions: list[tuple[str, str]]) -> int:
+        line_count_without_scrollbar = sum(
+            math.ceil(
+                CompletionPopup.rendered_text_length(label, description)
+                / COMPLETION_POPUP_MAX_CHARS
+            )
+            for label, description in suggestions
+        )
+        return min(line_count_without_scrollbar, COMPLETION_POPUP_MAX_LINES)
+
+    def _position_popup(
+        self, popup: CompletionPopup, suggestions: list[tuple[str, str]]
+    ) -> None:
         widget = self.input_widget
         if not widget:
             return
         cursor = widget.cursor_screen_offset
         my_region = self.region
         # Place popup bottom edge just above the cursor row
-        popup_height = line_count + 2  # +2 for solid border
-        popup.styles.offset = (
-            cursor.x - my_region.x,
-            cursor.y - popup_height - my_region.y,
-        )
+        popup_height = self._compute_line_count(suggestions) + 2  # +2 for solid border
+        offset = (cursor.x - my_region.x, cursor.y - popup_height - my_region.y)
+        popup.styles.offset = offset
 
     def _format_insertion(self, replacement: str, suffix: str) -> str:
         """Format the insertion text with appropriate spacing.

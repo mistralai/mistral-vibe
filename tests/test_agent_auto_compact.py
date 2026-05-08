@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from typing import cast
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from tests.conftest import (
@@ -20,6 +24,18 @@ from vibe.core.types import (
 )
 
 
+def _get_auto_compact_properties(
+    telemetry_events: list[dict[str, object]],
+) -> dict[str, object]:
+    auto_compact = [
+        event
+        for event in telemetry_events
+        if event.get("event_name") == "vibe.auto_compact_triggered"
+    ]
+    assert len(auto_compact) == 1
+    return cast(dict[str, object], auto_compact[0]["properties"])
+
+
 @pytest.mark.asyncio
 async def test_auto_compact_emits_correct_events(telemetry_events: list[dict]) -> None:
     backend = FakeBackend([
@@ -29,6 +45,7 @@ async def test_auto_compact_emits_correct_events(telemetry_events: list[dict]) -
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
     agent = build_test_agent_loop(config=cfg, backend=backend)
     agent.stats.context_tokens = 2
+    old_session_id = agent.session_id
 
     events = [ev async for ev in agent.act("Hello")]
 
@@ -46,12 +63,66 @@ async def test_auto_compact_emits_correct_events(telemetry_events: list[dict]) -
     assert end.new_context_tokens >= 1
     assert final.content == "<final>"
 
-    auto_compact = [
-        e
-        for e in telemetry_events
-        if e.get("event_name") == "vibe.auto_compact_triggered"
-    ]
-    assert len(auto_compact) == 1
+    properties = _get_auto_compact_properties(telemetry_events)
+    assert properties["nb_context_tokens_before"] == 2
+    assert properties["nb_context_tokens_after"] == end.new_context_tokens
+    assert properties["auto_compact_threshold"] == 1
+    assert properties["status"] == "success"
+    assert properties["session_id"] == old_session_id
+    assert properties["parent_session_id"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("side_effect", "expected_exception", "match", "expected_status"),
+    [
+        pytest.param(
+            RuntimeError("boom"), RuntimeError, "boom", "failure", id="failure"
+        ),
+        pytest.param(
+            asyncio.CancelledError(),
+            asyncio.CancelledError,
+            None,
+            "cancelled",
+            id="cancelled",
+        ),
+    ],
+)
+async def test_auto_compact_emits_terminal_telemetry(
+    side_effect: BaseException,
+    expected_exception: type[BaseException],
+    match: str | None,
+    expected_status: str,
+    telemetry_events: list[dict],
+) -> None:
+    backend = FakeBackend([[mock_llm_chunk(content="<final>")]])
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.stats.context_tokens = 2
+    old_session_id = agent.session_id
+
+    events = []
+    with patch.object(agent, "compact", AsyncMock(side_effect=side_effect)):
+        if match is None:
+            with pytest.raises(expected_exception):
+                async for event in agent.act("Hello"):
+                    events.append(event)
+        else:
+            with pytest.raises(expected_exception, match=match):
+                async for event in agent.act("Hello"):
+                    events.append(event)
+
+    assert len(events) == 2
+    assert isinstance(events[0], UserMessageEvent)
+    assert isinstance(events[1], CompactStartEvent)
+
+    properties = _get_auto_compact_properties(telemetry_events)
+    assert properties["nb_context_tokens_before"] == 2
+    assert properties["nb_context_tokens_after"] == 2
+    assert properties["auto_compact_threshold"] == 1
+    assert properties["status"] == expected_status
+    assert properties["session_id"] == old_session_id
+    assert properties["parent_session_id"] is None
 
 
 @pytest.mark.asyncio
@@ -179,3 +250,34 @@ async def test_compact_uses_active_model_when_no_compaction_model() -> None:
     active = cfg.get_active_model()
     assert backend.requested_models[0].name == active.name
     assert backend.requested_models[1].name == active.name
+
+
+@pytest.mark.asyncio
+async def test_compact_appends_extra_instructions_to_prompt() -> None:
+    backend = FakeBackend([[mock_llm_chunk(content="<summary>")]])
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
+    agent.stats.context_tokens = 100
+
+    await agent.compact(extra_instructions="focus on auth")
+
+    compaction_prompt = backend.requests_messages[0][-1].content
+    assert compaction_prompt is not None
+    assert "## Additional Instructions" in compaction_prompt
+    assert "focus on auth" in compaction_prompt
+
+
+@pytest.mark.asyncio
+async def test_compact_without_extra_instructions_has_no_additional_section() -> None:
+    backend = FakeBackend([[mock_llm_chunk(content="<summary>")]])
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
+    agent.stats.context_tokens = 100
+
+    await agent.compact()
+
+    compaction_prompt = backend.requests_messages[0][-1].content
+    assert compaction_prompt is not None
+    assert "## Additional Instructions" not in compaction_prompt

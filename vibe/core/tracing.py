@@ -21,7 +21,7 @@ VIBE_AGENT_NAME = "mistral-vibe"
 
 
 def setup_tracing(config: VibeConfig) -> None:
-    if not config.enable_otel:
+    if not config.enable_telemetry or not config.enable_otel:
         return
 
     exporter_cfg = config.otel_span_exporter_config

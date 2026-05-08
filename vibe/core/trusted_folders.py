@@ -37,7 +37,11 @@ class TrustedFoldersManager:
         self._file_path = TRUSTED_FOLDERS_FILE.path
         self._trusted: list[str] = []
         self._untrusted: list[str] = []
+        self._session_trusted: list[str] = []
         self._load()
+
+    def trust_for_session(self, path: Path) -> None:
+        self._session_trusted.append(self._normalize_path(path))
 
     def _normalize_path(self, path: Path) -> str:
         return str(path.expanduser().resolve())
@@ -71,13 +75,14 @@ class TrustedFoldersManager:
     def is_trusted(self, path: Path) -> bool | None:
         """Check trust walking up from *path* to filesystem root.
 
-        The first ancestor (or *path* itself) found in either the trusted
-        or untrusted list wins.  Returns ``None`` when no decision exists.
+        The first ancestor (or *path* itself) found in either the trusted,
+        session-trusted, or untrusted list wins.  Returns ``None`` when no
+        decision exists.
         """
         current = Path(self._normalize_path(path))
         while True:
             s = str(current)
-            if s in self._trusted:
+            if s in self._trusted or s in self._session_trusted:
                 return True
             if s in self._untrusted:
                 return False
@@ -88,11 +93,11 @@ class TrustedFoldersManager:
         return None
 
     def find_trust_root(self, path: Path) -> Path | None:
-        """Return the closest ancestor (or *path* itself) explicitly in the trusted list."""
+        """Return the closest ancestor (or *path* itself) explicitly trusted."""
         current = Path(self._normalize_path(path))
         while True:
             s = str(current)
-            if s in self._trusted:
+            if s in self._trusted or s in self._session_trusted:
                 return current
             parent = current.parent
             if parent == current:

@@ -45,6 +45,8 @@ def apply_logging_config(target_logger: logging.Logger) -> None:
 
     max_bytes = int(os.environ.get("LOG_MAX_BYTES", 10 * 1024 * 1024))
 
+    # DEBUG_MODE is the debugpy switch (see vibe/acp/entrypoint.py);
+    # it also forces DEBUG-level logging here.
     if os.environ.get("DEBUG_MODE") == "true":
         log_level_str = "DEBUG"
     else:

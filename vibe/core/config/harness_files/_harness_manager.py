@@ -53,6 +53,16 @@ class HarnessFilesManager:
         return None
 
     @property
+    def hook_files(self) -> list[Path]:
+        hook_files: list[Path] = []
+        if "user" in self.sources:
+            hook_files.append(VIBE_HOME.path / "hooks.toml")
+        workdir = self.trusted_workdir
+        if workdir is not None:
+            hook_files.append(workdir / ".vibe" / "hooks.toml")
+        return hook_files
+
+    @property
     def persist_allowed(self) -> bool:
         return "user" in self.sources
 

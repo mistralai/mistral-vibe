@@ -21,9 +21,11 @@ class FakeConnectorRegistry(ConnectorRegistry):
         self._cache = {}
         self._connector_names = []
         self._connector_connected = {}
+        self._alias_to_id = {}
         for connector_name, tools in self._fake_connectors.items():
             alias = _normalize_name(connector_name)
             connector_id = f"fake-id-{connector_name}"
+            self._alias_to_id[alias] = connector_id
             tool_map: dict[str, type[BaseTool]] = {}
             for remote in tools:
                 proxy_cls = create_connector_proxy_tool_class(
@@ -50,3 +52,13 @@ class FakeConnectorRegistry(ConnectorRegistry):
 
     async def get_tools_async(self) -> dict[str, type[BaseTool]]:
         return self.get_tools()
+
+    async def get_auth_url(self, alias: str) -> str | None:
+        """Return a fake auth URL for connectors that have no tools (not connected)."""
+        if not self.is_connected(alias):
+            return f"https://fake-auth.example.com/{alias}"
+        return None
+
+    async def refresh_connector_async(self, alias: str) -> dict[str, type[BaseTool]]:
+        """No-op refresh for tests."""
+        return {}

@@ -8,6 +8,7 @@ import pytest
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     ansi_tolerant_pattern,
+    send_ctrl_c_until_quit_confirmation,
     wait_for_main_screen,
     wait_for_request_count,
 )
@@ -31,7 +32,7 @@ def test_spawn_cli_to_send_and_receive_message(
         )
         child.expect(ansi_tolerant_pattern("Hello from mock server"), timeout=10)
 
-        child.sendcontrol("c")
+        send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
         child.expect(pexpect.EOF, timeout=10)
 
     output = captured.getvalue()

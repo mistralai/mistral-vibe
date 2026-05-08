@@ -30,6 +30,30 @@ class Completer:
         return None
 
 
+def _prioritize_help_config_slash_menu(
+    items: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Place /help then /config at the head whenever they appear in the list."""
+    help_item: tuple[str, str] | None = None
+    config_item: tuple[str, str] | None = None
+    rest: list[tuple[str, str]] = []
+    for item in items:
+        match item[0]:
+            case "/help":
+                help_item = item
+            case "/config":
+                config_item = item
+            case _:
+                rest.append(item)
+    ordered: list[tuple[str, str]] = []
+    if help_item is not None:
+        ordered.append(help_item)
+    if config_item is not None:
+        ordered.append(config_item)
+    ordered.extend(rest)
+    return ordered
+
+
 class CommandCompleter(Completer):
     def __init__(self, entries: Callable[[], list[tuple[str, str]]]) -> None:
         self._get_entries = entries
@@ -40,13 +64,16 @@ class CommandCompleter(Completer):
             descriptions[alias] = description
         return list(descriptions.keys()), descriptions
 
+    def _head_word(self, text: str, cursor_pos: int) -> str:
+        head = text.split(" ", 1)[0]
+        return head[1 : min(cursor_pos, len(head))].lower()
+
     def get_completions(self, text: str, cursor_pos: int) -> list[str]:
         if not text.startswith("/"):
             return []
 
         aliases, _ = self._build_lookup()
-        word = text[1:cursor_pos].lower()
-        search_str = "/" + word
+        search_str = "/" + self._head_word(text, cursor_pos)
         return [alias for alias in aliases if alias.lower().startswith(search_str)]
 
     def get_completion_items(self, text: str, cursor_pos: int) -> list[tuple[str, str]]:
@@ -54,20 +81,22 @@ class CommandCompleter(Completer):
             return []
 
         aliases, descriptions = self._build_lookup()
-        word = text[1:cursor_pos].lower()
-        search_str = "/" + word
-        return [
+        search_str = "/" + self._head_word(text, cursor_pos)
+        items = [
             (alias, descriptions.get(alias, ""))
             for alias in aliases
             if alias.lower().startswith(search_str)
         ]
+        return _prioritize_help_config_slash_menu(items)
 
     def get_replacement_range(
         self, text: str, cursor_pos: int
     ) -> tuple[int, int] | None:
-        if text.startswith("/"):
-            return (0, cursor_pos)
-        return None
+        if not text.startswith("/"):
+            return None
+        first_space = text.find(" ")
+        end = cursor_pos if first_space == -1 else min(cursor_pos, first_space)
+        return (0, end)
 
 
 class PathCompleter(Completer):

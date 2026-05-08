@@ -198,26 +198,50 @@ class TestSaveUpdates:
         assert result == {"tools": {"bash": {"default_timeout": 600}}}
 
 
-class TestMigrateRemovesFindFromBashAllowlist:
-    def test_removes_find_from_config_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        config_file = tmp_path / "config.toml"
-        data = {"tools": {"bash": {"allowlist": ["echo", "find", "ls"]}}}
+class TestSetThinking:
+    def test_persists_thinking_to_toml(self, config_dir: Path) -> None:
+        config_file = config_dir / "config.toml"
+        data = {
+            "active_model": "my-model",
+            "models": [
+                {"name": "my-model", "provider": "mistral", "alias": "my-model"}
+            ],
+        }
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
 
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-        VibeConfig._migrate()
+        cfg = VibeConfig.load()
+        cfg.set_thinking("high")
+
+        reloaded = VibeConfig.load()
+        assert reloaded.get_active_model().thinking == "high"
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["thinking"] == "high"
+
+    def test_persists_thinking_for_correct_model(self, config_dir: Path) -> None:
+        config_file = config_dir / "config.toml"
+        data = {
+            "active_model": "model-b",
+            "models": [
+                {"name": "model-a", "provider": "mistral", "alias": "model-a"},
+                {"name": "model-b", "provider": "mistral", "alias": "model-b"},
+            ],
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        cfg = VibeConfig.load()
+        cfg.set_thinking("max")
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
-        assert "find" not in result["tools"]["bash"]["allowlist"]
-        assert result["tools"]["bash"]["allowlist"] == ["echo", "ls"]
+        assert result["models"][0].get("thinking") is None
+        assert result["models"][1]["thinking"] == "max"
 
-    def test_noop_when_find_not_present(
+
+class TestMigrateLeavesFindInBashAllowlist:
+    def test_keeps_find_in_config_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
@@ -232,7 +256,24 @@ class TestMigrateRemovesFindFromBashAllowlist:
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
-        assert result["tools"]["bash"]["allowlist"] == ["echo", "ls"]
+        assert result["tools"]["bash"]["allowlist"] == ["echo", "find", "ls"]
+
+    def test_noop_when_find_already_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {"tools": {"bash": {"allowlist": ["echo", "find", "ls"]}}}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["tools"]["bash"]["allowlist"] == ["echo", "find", "ls"]
 
     def test_noop_when_no_bash_tools_section(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -250,6 +291,241 @@ class TestMigrateRemovesFindFromBashAllowlist:
         with config_file.open("rb") as f:
             result = tomllib.load(f)
         assert "tools" not in result
+
+
+class TestMigrateMistralVibeCliLatestDefaults:
+    def test_updates_alias_temperature_and_thinking_for_default_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-2",
+                    "temperature": 0.2,
+                    "thinking": "off",
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["alias"] == "mistral-medium-3.5"
+        assert result["models"][0]["temperature"] == 1.0
+        assert result["models"][0]["input_price"] == 1.5
+        assert result["models"][0]["output_price"] == 7.5
+        assert result["models"][0]["thinking"] == "high"
+
+    def test_updates_active_model_when_devstral_2(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "active_model": "devstral-2",
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-2",
+                }
+            ],
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["active_model"] == "mistral-medium-3.5"
+
+    def test_adds_temperature_and_thinking_when_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-2",
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["alias"] == "mistral-medium-3.5"
+        assert result["models"][0]["temperature"] == 1.0
+        assert result["models"][0]["input_price"] == 1.5
+        assert result["models"][0]["output_price"] == 7.5
+        assert result["models"][0]["thinking"] == "high"
+
+    def test_skips_model_with_customized_alias(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "my-custom-alias",
+                    "temperature": 0.2,
+                    "thinking": "off",
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["alias"] == "my-custom-alias"
+        assert result["models"][0]["temperature"] == 0.2
+        assert result["models"][0]["thinking"] == "off"
+
+    def test_does_not_touch_other_models(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-2",
+                },
+                {
+                    "name": "other-model",
+                    "provider": "mistral",
+                    "alias": "devstral-2-clone",
+                    "temperature": 0.5,
+                    "thinking": "low",
+                },
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][1]["alias"] == "devstral-2-clone"
+        assert result["models"][1]["temperature"] == 0.5
+        assert result["models"][1]["thinking"] == "low"
+
+    def test_noop_when_no_models_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {"theme": "dark"}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result == {"theme": "dark"}
+
+    def test_idempotent_when_already_migrated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "active_model": "mistral-medium-3.5",
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "mistral-medium-3.5",
+                    "temperature": 1.0,
+                    "input_price": 1.5,
+                    "output_price": 7.5,
+                    "thinking": "high",
+                }
+            ],
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["active_model"] == "mistral-medium-3.5"
+        assert result["models"][0]["alias"] == "mistral-medium-3.5"
+        assert result["models"][0]["temperature"] == 1.0
+        assert result["models"][0]["input_price"] == 1.5
+        assert result["models"][0]["output_price"] == 7.5
+        assert result["models"][0]["thinking"] == "high"
+
+    def test_migrates_model_and_active_model_together(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "active_model": "devstral-2",
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "devstral-2",
+                }
+            ],
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["active_model"] == "mistral-medium-3.5"
+        assert result["models"][0]["alias"] == "mistral-medium-3.5"
+        assert result["models"][0]["temperature"] == 1.0
+        assert result["models"][0]["input_price"] == 1.5
+        assert result["models"][0]["output_price"] == 7.5
+        assert result["models"][0]["thinking"] == "high"
 
 
 class TestAutoCompactThresholdFallback:
@@ -313,7 +589,7 @@ class TestDefaultProviderConfig:
 class TestMistralBrowserAuthConfig:
     def test_provider_browser_auth_urls_are_dumped_when_set(self) -> None:
         cfg = build_test_vibe_config()
-        provider = cfg.get_provider_for_model(cfg.get_active_model())
+        provider = cfg.get_active_provider()
         dumped = cfg.model_dump(mode="json")
 
         assert provider.browser_auth_base_url == DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL
@@ -808,7 +1084,7 @@ class TestGetMistralProvider:
     def test_returns_active_provider_when_it_is_mistral(self) -> None:
         cfg = build_test_vibe_config()
         provider = cfg.get_mistral_provider()
-        active = cfg.get_provider_for_model(cfg.get_active_model())
+        active = cfg.get_active_provider()
         assert provider is active
         assert provider is not None
         assert provider.backend == Backend.MISTRAL
@@ -867,3 +1143,46 @@ class TestGetMistralProvider:
         )
         provider = cfg.get_mistral_provider()
         assert provider is mistral_provider
+
+
+class TestIsActiveModelMistral:
+    def test_returns_true_when_active_provider_is_mistral(self) -> None:
+        cfg = build_test_vibe_config()
+        assert cfg.is_active_model_mistral() is True
+
+    def test_returns_false_when_active_provider_is_not_mistral(self) -> None:
+        cfg = build_test_vibe_config(
+            providers=[
+                ProviderConfig(
+                    name="llamacpp",
+                    api_base="http://127.0.0.1:8080/v1",
+                    api_key_env_var="",
+                )
+            ],
+            models=[
+                ModelConfig(
+                    name="llama-local", provider="llamacpp", alias="llama-local"
+                )
+            ],
+            active_model="llama-local",
+        )
+        assert cfg.is_active_model_mistral() is False
+
+    def test_returns_false_when_active_model_resolution_fails(self) -> None:
+        cfg = build_test_vibe_config(
+            providers=[
+                ProviderConfig(
+                    name="mistral",
+                    api_base="https://api.mistral.ai/v1",
+                    api_key_env_var="MISTRAL_API_KEY",
+                    backend=Backend.MISTRAL,
+                )
+            ],
+            models=[
+                ModelConfig(
+                    name="llama-local", provider="llamacpp", alias="llama-local"
+                )
+            ],
+            active_model="llama-local",
+        )
+        assert cfg.is_active_model_mistral() is False

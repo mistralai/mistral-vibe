@@ -4,7 +4,10 @@ from textual.app import App, ComposeResult
 from textual.containers import Container
 from textual.pilot import Pilot
 
+from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
+from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
+from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.core.tools.builtins.ask_user_question import (
@@ -59,7 +62,7 @@ class TeleportMessageAuthCompleteApp(TeleportMessageTestApp):
 class TeleportMessageStartingWorkflowApp(TeleportMessageTestApp):
     def on_mount(self) -> None:
         widget = self.query_one(TeleportMessage)
-        widget.set_status("Starting Nuage workflow...")
+        widget.set_status("Starting Vibe Code session...")
         if widget._spinner_timer:
             widget._spinner_timer.stop()
 
@@ -118,6 +121,45 @@ class TeleportPushConfirmationSingleCommitApp(TeleportPushConfirmationTestApp):
 class TeleportPushConfirmationMultipleCommitsApp(TeleportPushConfirmationTestApp):
     def __init__(self):
         super().__init__(count=5)
+
+
+def _teleport_snapshot_config():
+    return default_config().model_copy(update={"vibe_code_enabled": True})
+
+
+class TeleportCommandHelpSnapshotApp(BaseSnapshotTestApp):
+    def __init__(self, gateway: FakeWhoAmIGateway):
+        super().__init__(config=_teleport_snapshot_config(), plan_offer_gateway=gateway)
+
+    async def on_mount(self) -> None:
+        await super().on_mount()
+        await self._show_help()
+
+
+class TeleportCommandHelpProApp(TeleportCommandHelpSnapshotApp):
+    def __init__(self):
+        super().__init__(
+            FakeWhoAmIGateway(
+                WhoAmIResponse(
+                    plan_type=WhoAmIPlanType.CHAT,
+                    plan_name="INDIVIDUAL",
+                    prompt_switching_to_pro_plan=False,
+                )
+            )
+        )
+
+
+class TeleportCommandHelpFreeApp(TeleportCommandHelpSnapshotApp):
+    def __init__(self):
+        super().__init__(
+            FakeWhoAmIGateway(
+                WhoAmIResponse(
+                    plan_type=WhoAmIPlanType.API,
+                    plan_name="FREE",
+                    prompt_switching_to_pro_plan=False,
+                )
+            )
+        )
 
 
 def test_snapshot_teleport_status_checking_git(snap_compare: SnapCompare) -> None:
@@ -245,5 +287,31 @@ def test_snapshot_teleport_push_confirmation_cancel_selected(
     assert snap_compare(
         "test_ui_snapshot_teleport.py:TeleportPushConfirmationMultipleCommitsApp",
         terminal_size=(80, 12),
+        run_before=run_before,
+    )
+
+
+def test_snapshot_teleport_command_visible_for_pro_account(
+    snap_compare: SnapCompare,
+) -> None:
+    async def run_before(pilot: Pilot) -> None:
+        await pilot.pause(0.2)
+
+    assert snap_compare(
+        "test_ui_snapshot_teleport.py:TeleportCommandHelpProApp",
+        terminal_size=(120, 48),
+        run_before=run_before,
+    )
+
+
+def test_snapshot_teleport_command_hidden_for_non_pro_account(
+    snap_compare: SnapCompare,
+) -> None:
+    async def run_before(pilot: Pilot) -> None:
+        await pilot.pause(0.2)
+
+    assert snap_compare(
+        "test_ui_snapshot_teleport.py:TeleportCommandHelpFreeApp",
+        terminal_size=(120, 48),
         run_before=run_before,
     )

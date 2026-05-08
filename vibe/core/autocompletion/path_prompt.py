@@ -9,7 +9,7 @@ from typing import Literal
 class PathResource:
     path: Path
     alias: str
-    kind: Literal["file", "directory"]
+    kind: Literal["file", "folder"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,13 +17,14 @@ class PathPromptPayload:
     display_text: str
     prompt_text: str
     resources: list[PathResource]
+    all_resources: list[PathResource]
 
 
 def build_path_prompt_payload(
     message: str, *, base_dir: Path | None = None
 ) -> PathPromptPayload:
     if not message:
-        return PathPromptPayload(message, message, [])
+        return PathPromptPayload(message, message, [], [])
 
     resolved_base = (base_dir or Path.cwd()).resolve()
     prompt_parts: list[str] = []
@@ -44,7 +45,7 @@ def build_path_prompt_payload(
 
     prompt_text = "".join(prompt_parts)
     unique_resources = _dedupe_resources(resources)
-    return PathPromptPayload(message, prompt_text, unique_resources)
+    return PathPromptPayload(message, prompt_text, unique_resources, resources)
 
 
 def _is_path_anchor(message: str, pos: int) -> bool:
@@ -93,7 +94,7 @@ def _to_resource(candidate: str, base_dir: Path) -> PathResource | None:
     if not resolved.exists():
         return None
 
-    kind = "directory" if resolved.is_dir() else "file"
+    kind = "folder" if resolved.is_dir() else "file"
     return PathResource(path=resolved, alias=candidate, kind=kind)
 
 

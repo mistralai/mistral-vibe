@@ -80,6 +80,7 @@ class APIToolFormatHandler:
             "role": message.role,
             "content": message.content,
             "reasoning_content": getattr(message, "reasoning_content", None),
+            "reasoning_state": getattr(message, "reasoning_state", None),
             "reasoning_signature": getattr(message, "reasoning_signature", None),
         }
 
