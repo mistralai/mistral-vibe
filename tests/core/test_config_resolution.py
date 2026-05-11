@@ -293,6 +293,68 @@ class TestMigrateLeavesFindInBashAllowlist:
         assert "tools" not in result
 
 
+class TestMigrateStripsBashAllowlistWildcardSuffix:
+    def test_strips_trailing_wildcard_from_bash_allowlist_entries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "tools": {"bash": {"allowlist": ["git commit *", "npm install *", "echo"]}}
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["tools"]["bash"]["allowlist"] == [
+            "echo",
+            "find",
+            "git commit",
+            "npm install",
+        ]
+
+    def test_dedupes_when_stripping_collides_with_existing_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "tools": {"bash": {"allowlist": ["git commit *", "git commit", "find"]}}
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["tools"]["bash"]["allowlist"] == ["find", "git commit"]
+
+    def test_noop_when_no_wildcard_suffix_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {"tools": {"bash": {"allowlist": ["echo", "find", "ls"]}}}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["tools"]["bash"]["allowlist"] == ["echo", "find", "ls"]
+
+
 class TestMigrateMistralVibeCliLatestDefaults:
     def test_updates_alias_temperature_and_thinking_for_default_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

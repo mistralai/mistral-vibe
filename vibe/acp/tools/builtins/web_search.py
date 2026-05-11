@@ -10,11 +10,9 @@ from acp.schema import (
 )
 
 from vibe import VIBE_ROOT
-from vibe.acp.tools.base import (
+from vibe.acp.tools.session_update import (
     ToolCallSessionUpdateProtocol,
     ToolResultSessionUpdateProtocol,
-)
-from vibe.acp.tools.session_update import (
     failed_tool_result,
     fallback_tool_call,
     resolve_kind,

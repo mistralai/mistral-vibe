@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Protocol, runtime_checkable
+
 from acp.helpers import SessionUpdate, ToolCallContentVariant
 from acp.schema import (
     ContentToolCallContent,
@@ -10,13 +12,23 @@ from acp.schema import (
 )
 from pydantic import BaseModel
 
-from vibe.acp.tools.base import (
-    ToolCallSessionUpdateProtocol,
-    ToolResultSessionUpdateProtocol,
-)
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 from vibe.core.utils import TaggedText, is_user_cancellation_event
+
+
+@runtime_checkable
+class ToolCallSessionUpdateProtocol(Protocol):
+    @classmethod
+    def tool_call_session_update(cls, event: ToolCallEvent) -> SessionUpdate | None: ...
+
+
+@runtime_checkable
+class ToolResultSessionUpdateProtocol(Protocol):
+    @classmethod
+    def tool_result_session_update(
+        cls, event: ToolResultEvent
+    ) -> SessionUpdate | None: ...
 
 
 def _cancellation_raw_output(event: ToolResultEvent) -> str | None:

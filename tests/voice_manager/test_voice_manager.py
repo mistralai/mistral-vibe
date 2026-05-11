@@ -159,6 +159,9 @@ class TestStopRecording:
                 return
                 yield  # makes this an async generator
 
+            async def close(self) -> None:
+                pass
+
         recorder = FakeAudioRecorder()
         config = build_test_vibe_config(voice_mode_enabled=True)
         manager = VoiceManager(
@@ -217,6 +220,9 @@ class TestCancelRecording:
                 await asyncio.Event().wait()
                 return
                 yield
+
+            async def close(self) -> None:
+                pass
 
         recorder = FakeAudioRecorder()
         config = build_test_vibe_config(voice_mode_enabled=True)
@@ -388,6 +394,9 @@ class TestTranscription:
                 raise RuntimeError("network error")
                 yield  # makes this an async generator
 
+            async def close(self) -> None:
+                pass
+
         recorder = FakeAudioRecorder()
         config = build_test_vibe_config(voice_mode_enabled=True)
         manager = VoiceManager(
@@ -488,6 +497,9 @@ class TestTelemetryTracking:
                 raise RuntimeError("network error")
                 yield
 
+            async def close(self) -> None:
+                pass
+
         recorder = FakeAudioRecorder()
         config = build_test_vibe_config(voice_mode_enabled=True)
         mock_telemetry = MagicMock()
@@ -555,6 +567,9 @@ class TestTelemetryTracking:
                 await asyncio.Event().wait()
                 return
                 yield
+
+            async def close(self) -> None:
+                pass
 
         recorder = FakeAudioRecorder()
         config = build_test_vibe_config(voice_mode_enabled=True)

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.6] - 2026-05-11
+
+### Added
+
+- Syntax-highlighted file diffs for `write_file` and `search_replace` in the IDE agent webview
+- Spinner and loader for `!` (bang) command output
+- `prepare release` script can resume after resolving merge conflicts
+
+### Fixed
+
+- Strip wildcard suffix when persisting bash allowlist patterns
+- Build a combined SSL context for all outbound HTTPS requests
+- Hide non-interactive tools from the LLM in ACP and programmatic mode
+
+
 ## [2.9.5] - 2026-05-06
 
 ### Added

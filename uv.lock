@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.12"
 
 [options]
-exclude-newer = "2026-04-29T14:28:22.645142Z"
+exclude-newer = "2026-05-04T08:14:44.283731Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -820,12 +820,13 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "2.9.5"
+version = "2.9.6"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "anyio" },
     { name = "cachetools" },
+    { name = "certifi" },
     { name = "charset-normalizer" },
     { name = "cryptography" },
     { name = "gitpython" },
@@ -888,6 +889,7 @@ requires-dist = [
     { name = "agent-client-protocol", specifier = "==0.9.0" },
     { name = "anyio", specifier = ">=4.12.0" },
     { name = "cachetools", specifier = ">=5.5.0" },
+    { name = "certifi", specifier = ">=2026.4.22" },
     { name = "charset-normalizer", specifier = ">=3.4.4" },
     { name = "cryptography", specifier = ">=44.0.0" },
     { name = "gitpython", specifier = ">=3.1.46" },

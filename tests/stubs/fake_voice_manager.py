@@ -66,6 +66,9 @@ class FakeVoiceManager:
         except ValueError:
             pass
 
+    async def close(self) -> None:
+        pass
+
     def _set_state(self, state: TranscribeState) -> None:
         if self._transcribe_state == state:
             return

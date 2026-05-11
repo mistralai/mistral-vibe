@@ -254,19 +254,19 @@ class ToolManager:
 
     @staticmethod
     def _is_source_disabled(
-        cls: type[BaseTool],
+        tool_cls: type[BaseTool],
         disabled_sources: set[tuple[str, bool]],
         per_source_disabled: dict[tuple[str, bool], set[str]],
     ) -> bool:
-        if not issubclass(cls, MCPTool):
+        if not issubclass(tool_cls, MCPTool):
             return False
-        server_name = cls.get_server_name()
+        server_name = tool_cls.get_server_name()
         if server_name is None:
             return False
-        key = (server_name, cls.is_connector())
+        key = (server_name, tool_cls.is_connector())
         if key in disabled_sources:
             return True
-        return cls.get_remote_name() in per_source_disabled.get(key, set())
+        return tool_cls.get_remote_name() in per_source_disabled.get(key, set())
 
     def integrate_mcp(self, *, raise_on_failure: bool = False) -> None:
         """Discover and register MCP tools (sync wrapper).

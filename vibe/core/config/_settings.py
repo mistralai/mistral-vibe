@@ -35,6 +35,12 @@ from vibe.core.utils import get_server_url_from_api_base
 from vibe.core.utils.io import read_safe
 
 
+def _strip_bash_pattern_wildcard(pattern: str) -> str:
+    if pattern.endswith(" *"):
+        return pattern[:-2]
+    return pattern
+
+
 def deep_update(
     mapping: dict[str, Any], updating_mapping: dict[str, Any]
 ) -> dict[str, Any]:
@@ -946,6 +952,8 @@ class VibeConfig(BaseSettings):
         type(self).save_updates({"models": models})
 
     def add_tool_allowlist_patterns(self, tool_name: str, patterns: list[str]) -> None:
+        if tool_name == "bash":
+            patterns = [_strip_bash_pattern_wildcard(p) for p in patterns]
         current_allowlist: list[str] = list(
             self.tools.get(tool_name, {}).get("allowlist", [])
         )
@@ -1003,6 +1011,12 @@ class VibeConfig(BaseSettings):
         if allowlist is not None and "find" not in allowlist:
             allowlist.append("find")
             allowlist.sort()
+            changed = True
+
+        if allowlist is not None and any(p.endswith(" *") for p in allowlist):
+            stripped = [_strip_bash_pattern_wildcard(p) for p in allowlist]
+            deduped = sorted(set(stripped))
+            bash_tools["allowlist"] = deduped
             changed = True
 
         for model in data.get("models", []):

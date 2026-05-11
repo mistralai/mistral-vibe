@@ -20,3 +20,6 @@ class FakeTranscribeClient:
     ) -> AsyncIterator[TranscribeEvent]:
         for event in self._events:
             yield event
+
+    async def close(self) -> None:
+        pass

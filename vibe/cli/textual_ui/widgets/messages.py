@@ -263,7 +263,9 @@ class InterruptMessage(Static):
             )
 
 
-class BashOutputMessage(Static):
+class BashOutputMessage(SpinnerMixin, Static):
+    SPINNER_TYPE = SpinnerType.PULSE
+
     def __init__(
         self,
         command: str,
@@ -274,6 +276,7 @@ class BashOutputMessage(Static):
         pending: bool = False,
     ) -> None:
         super().__init__()
+        self.init_spinner()
         self.add_class("bash-output-message")
         self._command = command
         self._cwd = cwd
@@ -283,17 +286,29 @@ class BashOutputMessage(Static):
         self._output_widget: NoMarkupStatic | None = None
         self._output_container: Horizontal | None = None
         self._prompt_widget: NonSelectableStatic | None = None
+        self._indicator_widget: Static | None = None
+
+    def _update_spinner_frame(self) -> None:
+        if not self._is_spinning or not self._prompt_widget:
+            return
+        self._prompt_widget.update(f"{self._spinner.next_frame()} ")
+
+    def on_mount(self) -> None:
+        if self._pending:
+            self.start_spinner_timer()
 
     def compose(self) -> ComposeResult:
-        status_class = (
-            "bash-error"
-            if not self._pending and self._exit_code != 0
-            else "bash-success"
-        )
+        if self._pending:
+            status_class = "bash-pending"
+        elif self._exit_code != 0:
+            status_class = "bash-error"
+        else:
+            status_class = "bash-success"
         self.add_class(status_class)
+        prompt_text = f"{self._spinner.current_frame()} " if self._pending else "$ "
         with Horizontal(classes="bash-command-line"):
             self._prompt_widget = NonSelectableStatic(
-                "$ ", classes=f"bash-prompt {status_class}"
+                prompt_text, classes=f"bash-prompt {status_class}"
             )
             yield self._prompt_widget
             yield NoMarkupStatic(self._command, classes="bash-command")
@@ -326,18 +341,20 @@ class BashOutputMessage(Static):
     async def finish(self, exit_code: int, *, interrupted: bool = False) -> None:
         self._exit_code = exit_code
         self._pending = False
+        self.stop_spinning()
+        if self._prompt_widget:
+            self._prompt_widget.update("$ ")
         if interrupted:
-            self.remove_class("bash-success")
-            self.add_class("bash-interrupted")
-            if self._prompt_widget:
-                self._prompt_widget.remove_class("bash-success")
-                self._prompt_widget.add_class("bash-interrupted")
+            new_class = "bash-interrupted"
         elif exit_code != 0:
-            self.remove_class("bash-success")
-            self.add_class("bash-error")
-            if self._prompt_widget:
-                self._prompt_widget.remove_class("bash-success")
-                self._prompt_widget.add_class("bash-error")
+            new_class = "bash-error"
+        else:
+            new_class = "bash-success"
+        self.remove_class("bash-pending")
+        self.add_class(new_class)
+        if self._prompt_widget:
+            self._prompt_widget.remove_class("bash-pending")
+            self._prompt_widget.add_class(new_class)
         if interrupted:
             suffix = (
                 "\n(interrupted)"

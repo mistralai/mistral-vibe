@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from asyncio import CancelledError, create_task, wait_for
+import contextlib
 from typing import TYPE_CHECKING
 
 from vibe.cli.voice_manager.telemetry import TranscriptionTrackingState
@@ -153,6 +154,15 @@ class VoiceManager:
             self._listeners.remove(listener)
         except ValueError:
             pass
+
+    async def close(self) -> None:
+        transcribe_task = self._transcribe_task
+        self.cancel_recording()
+        if transcribe_task is not None:
+            with contextlib.suppress(CancelledError):
+                await transcribe_task
+        if self._transcribe_client is not None:
+            await self._transcribe_client.close()
 
     async def _run_transcription(self) -> None:
         if self._transcribe_client is None:

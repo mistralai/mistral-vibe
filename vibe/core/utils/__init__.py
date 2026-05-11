@@ -13,7 +13,11 @@ from vibe.core.utils.concurrency import (
     run_sync,
 )
 from vibe.core.utils.display import compact_reduction_display
-from vibe.core.utils.http import get_server_url_from_api_base, get_user_agent
+from vibe.core.utils.http import (
+    build_ssl_context,
+    get_server_url_from_api_base,
+    get_user_agent,
+)
 from vibe.core.utils.matching import name_matches
 from vibe.core.utils.merge import MergeConflictError, MergeStrategy
 from vibe.core.utils.paths import is_dangerous_directory
@@ -46,6 +50,7 @@ __all__ = [
     "TaggedText",
     "async_generator_retry",
     "async_retry",
+    "build_ssl_context",
     "compact_reduction_display",
     "get_server_url_from_api_base",
     "get_user_agent",

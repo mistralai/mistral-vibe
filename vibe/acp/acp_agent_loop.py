@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
-import inspect
 import logging
 import os
 from pathlib import Path
@@ -86,6 +85,7 @@ from vibe.acp.exceptions import (
 from vibe.acp.session import AcpSessionLoop
 from vibe.acp.tools.base import BaseAcpTool
 from vibe.acp.tools.session_update import (
+    resolve_kind,
     tool_call_session_update,
     tool_result_session_update,
 )
@@ -157,6 +157,8 @@ from vibe.core.utils import (
 )
 
 logger = logging.getLogger("vibe")
+
+NON_INTERACTIVE_DISABLED_TOOLS = ["ask_user_question", "exit_plan_mode"]
 
 
 class ForkSessionParams(BaseModel):
@@ -303,7 +305,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
     def _load_config(self) -> VibeConfig:
         try:
-            config = VibeConfig.load(disabled_tools=["ask_user_question"])
+            config = VibeConfig.load(disabled_tools=NON_INTERACTIVE_DISABLED_TOOLS)
             config.tool_paths.extend(self._get_acp_tool_overrides())
             return config
         except MissingAPIKeyError as e:
@@ -695,7 +697,7 @@ class VibeAcpAgentLoop(AcpAgent):
     async def _reload_config(self, session: AcpSessionLoop) -> None:
         new_config = VibeConfig.load(
             tool_paths=session.agent_loop.config.tool_paths,
-            disabled_tools=["ask_user_question"],
+            disabled_tools=NON_INTERACTIVE_DISABLED_TOOLS,
         )
         await session.agent_loop.reload_with_initial_messages(base_config=new_config)
 
@@ -969,6 +971,7 @@ class VibeAcpAgentLoop(AcpAgent):
                     yield ToolCallProgress(
                         session_update="tool_call_update",
                         tool_call_id=event.tool_call_id,
+                        kind=resolve_kind(event.tool_name),
                         content=[
                             ContentToolCallContent(
                                 type="content",
@@ -977,6 +980,7 @@ class VibeAcpAgentLoop(AcpAgent):
                                 ),
                             )
                         ],
+                        field_meta={"tool_name": event.tool_name},
                     )
 
                 elif isinstance(event, CompactStartEvent):
@@ -1016,12 +1020,7 @@ class VibeAcpAgentLoop(AcpAgent):
         if deferred_init_thread is not None and deferred_init_thread.is_alive():
             await asyncio.to_thread(deferred_init_thread.join)
 
-        backend_close = getattr(agent_loop.backend, "close", None)
-        if callable(backend_close):
-            close_result = backend_close()
-            if inspect.isawaitable(close_result):
-                await close_result
-
+        await agent_loop.aclose()
         await agent_loop.telemetry_client.aclose()
 
     @override
@@ -1295,7 +1294,7 @@ class VibeAcpAgentLoop(AcpAgent):
         """Reload config from disk and reinitialize the agent loop."""
         new_config = VibeConfig.load(
             tool_paths=session.agent_loop.config.tool_paths,
-            disabled_tools=["ask_user_question"],
+            disabled_tools=NON_INTERACTIVE_DISABLED_TOOLS,
         )
         await session.agent_loop.reload_with_initial_messages(base_config=new_config)
 

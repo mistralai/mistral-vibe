@@ -10,6 +10,7 @@ from urllib.parse import SplitResult, unquote, urlsplit
 import httpx
 
 from vibe.core.logger import logger
+from vibe.core.utils.http import build_ssl_context
 from vibe.setup.auth.browser_sign_in_gateway import (
     BrowserSignInError,
     BrowserSignInErrorCode,
@@ -203,7 +204,7 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
 
     def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient()
+            self._client = httpx.AsyncClient(verify=build_ssl_context())
             self._should_manage_client = True
         return self._client
 

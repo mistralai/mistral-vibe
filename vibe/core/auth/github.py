@@ -9,6 +9,8 @@ import httpx
 import keyring
 import keyring.errors
 
+from vibe.core.utils.http import build_ssl_context
+
 GITHUB_CLIENT_ID = "Ov23liJ7sk5kFDMEyvDT"
 
 _SERVICE_NAME = "vibe"
@@ -51,7 +53,9 @@ class GitHubAuthProvider:
 
     async def __aenter__(self) -> GitHubAuthProvider:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(self._timeout))
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+            )
         return self
 
     async def __aexit__(
@@ -66,7 +70,9 @@ class GitHubAuthProvider:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(self._timeout))
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+            )
             self._owns_client = True
         return self._client
 

@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.9.5"
+version = "2.9.6"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -30,6 +30,7 @@ dependencies = [
     "agent-client-protocol==0.9.0",
     "anyio>=4.12.0",
     "cachetools>=5.5.0",
+    "certifi>=2026.4.22",
     "charset-normalizer>=3.4.4",
     "cryptography>=44.0.0",
     "gitpython>=3.1.46",
@@ -173,7 +174,7 @@ order-by-type = true
 required-imports = ["from __future__ import annotations"]
 
 [tool.ruff.lint.pylint]
-max-public-methods = 25
+max-public-methods = 26
 max-positional-args = 10
 max-statements = 50
 max-branches = 15

@@ -23,6 +23,7 @@ from vibe.core.tools.permissions import (
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils.http import build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -198,7 +199,9 @@ class WebFetch(
         self, url: str, timeout: int, headers: dict[str, str]
     ) -> httpx.Response:
         async with httpx.AsyncClient(
-            follow_redirects=True, timeout=httpx.Timeout(timeout)
+            follow_redirects=True,
+            timeout=httpx.Timeout(timeout),
+            verify=build_ssl_context(),
         ) as client:
             response = await client.get(url, headers=headers)
 

@@ -26,6 +26,7 @@ from vibe.core.tools.mcp.tools import (
 from vibe.core.tools.ui import ToolResultDisplay
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import run_sync
+from vibe.core.utils.http import build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -238,9 +239,6 @@ class ConnectorRegistry:
         self._alias_to_id: dict[str, str] = {}
         self._discover_lock = asyncio.Lock()
 
-    def _get_client(self) -> Mistral:
-        return Mistral(api_key=self._api_key, server_url=self._server_url)
-
     def get_tools(self) -> dict[str, type[BaseTool]]:
         """Return proxy tool classes for all connectors, using cache when possible."""
         return run_sync(self.get_tools_async())
@@ -259,7 +257,9 @@ class ConnectorRegistry:
         base_url = self._server_url or _DEFAULT_BASE_URL
         url = f"{base_url}/v1/connectors/bootstrap"
         headers = {"Authorization": f"Bearer {self._api_key}"}
-        async with httpx.AsyncClient(timeout=_BOOTSTRAP_TIMEOUT) as http:
+        async with httpx.AsyncClient(
+            timeout=_BOOTSTRAP_TIMEOUT, verify=build_ssl_context()
+        ) as http:
             response = await http.get(url, headers=headers)
             response.raise_for_status()
             return response.json()
@@ -427,11 +427,22 @@ class ConnectorRegistry:
         if connector_id is None:
             return None
         try:
-            async with self._get_client() as client:
-                result = await client.beta.connectors.get_auth_url_async(
-                    connector_id_or_name=connector_id
+            http_client = httpx.AsyncClient(
+                verify=build_ssl_context(), follow_redirects=True
+            )
+            try:
+                sdk_client = Mistral(
+                    api_key=self._api_key,
+                    server_url=self._server_url,
+                    async_client=http_client,
                 )
-            return result.auth_url
+                async with sdk_client as client:
+                    result = await client.beta.connectors.get_auth_url_async(
+                        connector_id_or_name=connector_id
+                    )
+                return result.auth_url
+            finally:
+                await http_client.aclose()
         except Exception:
             logger.debug("Failed to get auth URL for connector %s", alias)
             return None

@@ -329,6 +329,35 @@ class TestReadOnlyAgentMiddleware:
 PLAN_REMINDER_SNIPPET = "Plan mode is active"
 
 
+class TestMakePlanAgentReminder:
+    def test_default_includes_both_interactive_tool_instructions(self) -> None:
+        reminder = make_plan_agent_reminder("/tmp/test-plan.md")
+        assert "ask_user_question" in reminder
+        assert "exit_plan_mode" in reminder
+
+    def test_omits_ask_user_question_when_tool_unavailable(self) -> None:
+        reminder = make_plan_agent_reminder(
+            "/tmp/test-plan.md", has_ask_user_question=False
+        )
+        assert "ask_user_question" not in reminder
+        assert "exit_plan_mode" in reminder
+
+    def test_omits_exit_plan_mode_when_tool_unavailable(self) -> None:
+        reminder = make_plan_agent_reminder(
+            "/tmp/test-plan.md", has_exit_plan_mode=False
+        )
+        assert "exit_plan_mode" not in reminder
+        assert "tell them to switch modes" in reminder
+
+    def test_omits_both_when_neither_available(self) -> None:
+        reminder = make_plan_agent_reminder(
+            "/tmp/test-plan.md", has_ask_user_question=False, has_exit_plan_mode=False
+        )
+        assert "ask_user_question" not in reminder
+        assert "exit_plan_mode" not in reminder
+        assert "Plan mode is active" in reminder
+
+
 class TestMiddlewarePipelineWithReadOnlyAgent:
     @pytest.mark.asyncio
     async def test_pipeline_includes_injection(self, ctx: ConversationContext) -> None:

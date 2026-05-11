@@ -519,6 +519,10 @@ class AgentLoop:
     def emit_session_closed_telemetry(self) -> None:
         self.telemetry_client.send_session_closed()
 
+    async def aclose(self) -> None:
+        with contextlib.suppress(Exception):
+            await self.backend.__aexit__(None, None, None)
+
     def _create_connector_registry(self) -> ConnectorRegistry | None:
         if not connectors_enabled():
             return None
@@ -671,7 +675,13 @@ class AgentLoop:
             ReadOnlyAgentMiddleware(
                 lambda: self.agent_profile,
                 BuiltinAgentName.PLAN,
-                lambda: make_plan_agent_reminder(self._plan_session.plan_file_path_str),
+                lambda: make_plan_agent_reminder(
+                    self._plan_session.plan_file_path_str,
+                    has_ask_user_question="ask_user_question"
+                    in self.tool_manager.available_tools,
+                    has_exit_plan_mode="exit_plan_mode"
+                    in self.tool_manager.available_tools,
+                ),
                 PLAN_AGENT_EXIT,
             )
         )
@@ -1661,7 +1671,12 @@ class AgentLoop:
             self._base_config = base_config
             self.agent_manager.invalidate_config()
 
-        self.backend = self.backend_factory()
+        old_backend = self.backend
+        new_backend = self.backend_factory()
+        self.backend = new_backend
+        if new_backend is not old_backend:
+            with contextlib.suppress(Exception):
+                await old_backend.__aexit__(None, None, None)
 
         if max_turns is not None:
             self._max_turns = max_turns

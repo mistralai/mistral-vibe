@@ -19,16 +19,16 @@ class TestCloseSession:
         session_response = await acp_agent_loop.new_session(cwd=".", mcp_servers=[])
         session = acp_agent_loop.sessions[session_response.session_id]
 
-        backend_close = AsyncMock()
+        backend_aexit = AsyncMock()
         telemetry_close = AsyncMock()
-        cast(Any, session.agent_loop.backend).close = backend_close
+        cast(Any, session.agent_loop.backend).__aexit__ = backend_aexit
         session.agent_loop.telemetry_client.aclose = telemetry_close
 
         response = await acp_agent_loop.close_session(session_response.session_id)
 
         assert response is not None
         assert session_response.session_id not in acp_agent_loop.sessions
-        backend_close.assert_awaited_once()
+        backend_aexit.assert_awaited_once_with(None, None, None)
         telemetry_close.assert_awaited_once()
         session_closed_events = [
             event

@@ -406,6 +406,10 @@ Markdown {
     width: auto;
     height: auto;
 
+    &.bash-pending {
+        color: $foreground;
+    }
+
     &.bash-success {
         color: ansi_green;
     }

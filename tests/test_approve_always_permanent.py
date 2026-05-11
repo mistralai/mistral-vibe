@@ -50,7 +50,7 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         agent.approve_always("bash", perms, save_permanently=True)
 
         persisted = _read_persisted_config(config_dir)
-        assert persisted["tools"]["bash"]["allowlist"] == ["npm install *"]
+        assert persisted["tools"]["bash"]["allowlist"] == ["npm install"]
 
     def test_also_adds_session_rules(self, config_dir: Path):
         agent = build_test_agent_loop()
@@ -75,9 +75,7 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         assert "bash" not in persisted.get("tools", {})
 
     def test_does_not_duplicate_existing_allowlist_entries(self, config_dir: Path):
-        config = build_test_vibe_config(
-            tools={"bash": {"allowlist": ["npm install *"]}}
-        )
+        config = build_test_vibe_config(tools={"bash": {"allowlist": ["npm install"]}})
         agent = build_test_agent_loop(config=config)
         perms = self._make_permissions()
 
@@ -88,14 +86,14 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         assert persisted.get("tools", {}).get("bash", {}).get("allowlist") is None
 
     def test_appends_new_patterns_to_existing_allowlist(self, config_dir: Path):
-        config = build_test_vibe_config(tools={"bash": {"allowlist": ["git *"]}})
+        config = build_test_vibe_config(tools={"bash": {"allowlist": ["git"]}})
         agent = build_test_agent_loop(config=config)
         perms = self._make_permissions()
 
         agent.approve_always("bash", perms, save_permanently=True)
 
         persisted = _read_persisted_config(config_dir)
-        assert persisted["tools"]["bash"]["allowlist"] == ["git *", "npm install *"]
+        assert persisted["tools"]["bash"]["allowlist"] == ["git", "npm install"]
 
     def test_multiple_permissions_persisted(self, config_dir: Path):
         agent = build_test_agent_loop()
@@ -117,4 +115,4 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
         agent.approve_always("bash", perms, save_permanently=True)
 
         persisted = _read_persisted_config(config_dir)
-        assert persisted["tools"]["bash"]["allowlist"] == ["/tmp/*", "npm install *"]
+        assert persisted["tools"]["bash"]["allowlist"] == ["/tmp/*", "npm install"]

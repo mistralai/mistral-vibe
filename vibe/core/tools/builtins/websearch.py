@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 import os
 from typing import TYPE_CHECKING, ClassVar, final
 
+import httpx
 from mistralai.client import Mistral
 from mistralai.client.errors import SDKError
 from mistralai.client.models import (
@@ -24,7 +25,7 @@ from vibe.core.tools.base import (
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import Backend, ToolStreamEvent
-from vibe.core.utils import get_server_url_from_api_base
+from vibe.core.utils.http import build_ssl_context, get_server_url_from_api_base
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -73,14 +74,17 @@ class WebSearch(
         if not api_key:
             raise ToolError("MISTRAL_API_KEY environment variable not set.")
 
-        client = Mistral(
-            api_key=api_key,
-            server_url=self._resolve_server_url(ctx),
-            timeout_ms=self.config.timeout * 1000,
-        )
+        ssl_context = build_ssl_context()
+        async_http_client = httpx.AsyncClient(follow_redirects=True, verify=ssl_context)
 
         try:
-            async with client:
+            client = Mistral(
+                api_key=api_key,
+                server_url=self._resolve_server_url(ctx),
+                timeout_ms=self.config.timeout * 1000,
+                async_client=async_http_client,
+            )
+            async with async_http_client, client:
                 response = await client.beta.conversations.start_async(
                     model=self.config.model,
                     instructions="Always use the web_search tool to answer queries. Never answer from memory alone.",
@@ -93,6 +97,8 @@ class WebSearch(
 
         except SDKError as exc:
             raise ToolError(f"Mistral API error: {exc}") from exc
+        finally:
+            await async_http_client.aclose()
 
     def _resolve_server_url(self, ctx: InvokeContext | None) -> str | None:
         if not ctx or not ctx.agent_manager:

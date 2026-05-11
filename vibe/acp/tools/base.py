@@ -1,31 +1,17 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Annotated, Protocol, cast, runtime_checkable
+from typing import Annotated, cast
 
 from acp import Client
-from acp.helpers import SessionUpdate, ToolCallContentVariant
+from acp.helpers import ToolCallContentVariant
 from acp.schema import ToolCallProgress
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
+from vibe.acp.tools.session_update import resolve_kind
 from vibe.core.logger import logger
 from vibe.core.tools.base import BaseTool, ToolError
 from vibe.core.tools.manager import ToolManager
-from vibe.core.types import ToolCallEvent, ToolResultEvent
-
-
-@runtime_checkable
-class ToolCallSessionUpdateProtocol(Protocol):
-    @classmethod
-    def tool_call_session_update(cls, event: ToolCallEvent) -> SessionUpdate | None: ...
-
-
-@runtime_checkable
-class ToolResultSessionUpdateProtocol(Protocol):
-    @classmethod
-    def tool_result_session_update(
-        cls, event: ToolResultEvent
-    ) -> SessionUpdate | None: ...
 
 
 class AcpToolState(BaseModel):
@@ -86,6 +72,7 @@ class BaseAcpTool[ToolState: AcpToolState](BaseTool):
         if tool_call_id is None:
             return
 
+        tool_name = self.get_name()
         try:
             await client.session_update(
                 session_id=session_id,
@@ -93,7 +80,9 @@ class BaseAcpTool[ToolState: AcpToolState](BaseTool):
                     session_update="tool_call_update",
                     tool_call_id=tool_call_id,
                     status="in_progress",
+                    kind=resolve_kind(tool_name),
                     content=content,
+                    field_meta={"tool_name": tool_name},
                 ),
             )
         except Exception as e:

@@ -21,6 +21,7 @@ from vibe.core.telemetry.types import (
     TeleportFailureStage,
 )
 from vibe.core.utils import get_server_url_from_api_base, get_user_agent
+from vibe.core.utils.http import build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.agent_loop import ToolDecision
@@ -92,6 +93,7 @@ class TelemetryClient:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(5.0),
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                verify=build_ssl_context(),
             )
         return self._client
 
