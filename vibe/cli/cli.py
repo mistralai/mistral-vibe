@@ -53,7 +53,10 @@ def get_prompt_from_stdin() -> str | None:
         return None
     try:
         if content := sys.stdin.read().strip():
-            sys.stdin = sys.__stdin__ = open("/dev/tty")
+            try:
+                sys.stdin = sys.__stdin__ = open("/dev/tty")
+            except OSError:
+                pass  # Headless environment, no TTY available
             return content
     except KeyboardInterrupt:
         pass
