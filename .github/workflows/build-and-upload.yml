@@ -83,6 +83,11 @@ jobs:
           # which is rejected by hardened Linux kernels — clear it with patchelf
           find "$(uv python dir)" -name 'libpython*.so*' -exec patchelf --clear-execstack {} \;
 
+      - name: Install OpenSSL (Windows aarch64)
+        if: ${{ matrix.runner == 'windows-11-arm' }}
+        run: |
+          vcpkg install openssl:arm64-windows-static-md
+  
       - name: Sync dependencies
         run: uv sync --no-dev --group build
 
