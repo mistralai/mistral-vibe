@@ -89,7 +89,7 @@ jobs:
         run: |
           echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
           vcpkg install openssl:arm64-windows-static-md
-  
+
       - name: Sync dependencies
         run: uv sync --no-dev --group build
 
