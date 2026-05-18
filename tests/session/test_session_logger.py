@@ -114,16 +114,12 @@ class TestSessionLoggerMetadata:
         self, mock_getuser, mock_subprocess, session_config: SessionLoggingConfig
     ) -> None:
         """Test that session metadata is correctly initialized."""
-        # Mock git commands
-        git_commit_mock = MagicMock()
-        git_commit_mock.returncode = 0
-        git_commit_mock.stdout = "abc123\n"
+        # Mock combined git command
+        git_mock = MagicMock()
+        git_mock.returncode = 0
+        git_mock.stdout = "abc123\nmain\n"
 
-        git_branch_mock = MagicMock()
-        git_branch_mock.returncode = 0
-        git_branch_mock.stdout = "main\n"
-
-        mock_subprocess.side_effect = [git_commit_mock, git_branch_mock]
+        mock_subprocess.return_value = git_mock
         mock_getuser.return_value = "testuser"
 
         session_id = "test-session-123"
@@ -149,7 +145,7 @@ class TestSessionLoggerMetadata:
         self, mock_getuser, mock_subprocess, session_config: SessionLoggingConfig
     ) -> None:
         """Test that session metadata handles git command errors gracefully."""
-        # Mock git commands to fail
+        # Mock combined git command to fail
         mock_subprocess.side_effect = FileNotFoundError("git not found")
         mock_getuser.return_value = "testuser"
 

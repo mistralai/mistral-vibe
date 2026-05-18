@@ -94,37 +94,32 @@ class SessionLogger:
             )
         return self.session_dir / MESSAGES_FILENAME
 
-    @property
-    def git_commit(self) -> str | None:
+    def _fetch_git_metadata(self) -> tuple[str | None, str | None]:
+        """Fetch git commit and branch in a single subprocess call."""
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
+                ["git", "rev-parse", "HEAD", "--abbrev-ref", "HEAD"],
                 capture_output=True,
                 stdin=subprocess.DEVNULL if is_windows() else None,
                 text=True,
                 timeout=5.0,
             )
             if result.returncode == 0 and result.stdout:
-                return result.stdout.strip()
+                lines = result.stdout.strip().splitlines()
+                commit = lines[0] if len(lines) > 0 else None
+                branch = lines[1] if len(lines) > 1 else None
+                return commit, branch
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
             pass
-        return None
+        return None, None
+
+    @property
+    def git_commit(self) -> str | None:
+        return self._fetch_git_metadata()[0]
 
     @property
     def git_branch(self) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=5.0,
-            )
-            if result.returncode == 0 and result.stdout:
-                return result.stdout.strip()
-        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-            pass
-        return None
+        return self._fetch_git_metadata()[1]
 
     @property
     def username(self) -> str:
@@ -134,8 +129,7 @@ class SessionLogger:
             return "unknown"
 
     def _initialize_session_metadata(self) -> SessionMetadata:
-        git_commit = self.git_commit
-        git_branch = self.git_branch
+        git_commit, git_branch = self._fetch_git_metadata()
         user_name = self.username
 
         return SessionMetadata(
