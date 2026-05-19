@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
 from vibe.setup.auth import (
@@ -11,6 +12,7 @@ from vibe.setup.auth import (
     BrowserSignInPollResult,
     BrowserSignInProcess,
 )
+from vibe.setup.auth.browser_sign_in import BrowserSignInService
 
 
 @dataclass
@@ -42,6 +44,7 @@ class StubBrowserSignInGateway(BrowserSignInGateway):
         self.polled_urls: list[str] = []
         self.exchange_requests: list[ExchangeRequestPayload] = []
         self.closed = False
+        self.poll_calls = 0
         self.process_number = 0
 
     async def create_process(self, code_challenge: str) -> BrowserSignInProcess:
@@ -55,10 +58,10 @@ class StubBrowserSignInGateway(BrowserSignInGateway):
 
     async def poll(self, poll_url: str) -> BrowserSignInPollResult:
         self.polled_urls.append(poll_url)
+        self.poll_calls += 1
         if not self._poll_results:
             msg = "StubBrowserSignInGateway requires scripted poll results."
             raise AssertionError(msg)
-
         result = self._poll_results.pop(0)
         if isinstance(result, BrowserSignInError):
             raise result
@@ -109,5 +112,80 @@ def build_poll_failed_error() -> BrowserSignInError:
     )
 
 
+def build_poll_results_from_outcomes(
+    outcomes: list[str],
+) -> tuple[
+    list[BrowserSignInProcess], list[BrowserSignInPollResult | BrowserSignInError]
+]:
+    processes: list[BrowserSignInProcess] = []
+    poll_results: list[BrowserSignInPollResult | BrowserSignInError] = []
+    now = datetime(2026, 3, 16, tzinfo=UTC)
+
+    for process_index, outcome in enumerate(outcomes, start=1):
+        process_id = f"process-{process_index}"
+        processes.append(build_sign_in_process(now, process_id=process_id))
+
+        match outcome:
+            case "completed":
+                poll_results.extend([
+                    BrowserSignInPollResult(status="pending"),
+                    BrowserSignInPollResult(
+                        status="completed", exchange_token=f"exchange-{process_id}"
+                    ),
+                ])
+            case "expired":
+                poll_results.append(BrowserSignInPollResult(status="expired"))
+            case "poll_failed":
+                poll_results.extend([
+                    BrowserSignInPollResult(status="pending"),
+                    build_poll_failed_error(),
+                    build_poll_failed_error(),
+                    build_poll_failed_error(),
+                ])
+            case _:
+                msg = f"Unsupported browser sign-in outcome: {outcome}"
+                raise AssertionError(msg)
+
+    return processes, poll_results
+
+
 async def noop_sleep(_: float) -> None:
     return None
+
+
+def build_browser_sign_in_service_factory(
+    outcomes: list[str],
+    *,
+    exchange_result: str = "sk-browser-onboarding-test-key",
+    open_browser: Callable[[str], bool] | None = None,
+    sleep: Callable[[float], Awaitable[None]] = noop_sleep,
+    now: Callable[[], datetime] | None = None,
+) -> tuple[
+    StubBrowserSignInGateway,
+    Callable[[], BrowserSignInService],
+    list[BrowserSignInService],
+]:
+    processes, poll_results = build_poll_results_from_outcomes(outcomes)
+    gateway = StubBrowserSignInGateway(
+        processes=processes, poll_results=poll_results, exchange_result=exchange_result
+    )
+    created_services: list[BrowserSignInService] = []
+
+    def build_service() -> BrowserSignInService:
+        service = BrowserSignInService(
+            gateway,
+            open_browser=open_browser or (lambda _: True),
+            sleep=sleep,
+            now=now
+            or (
+                lambda: (
+                    datetime(2026, 3, 16, tzinfo=UTC)
+                    + timedelta(seconds=gateway.poll_calls)
+                )
+            ),
+            poll_interval=0,
+        )
+        created_services.append(service)
+        return service
+
+    return gateway, build_service, created_services

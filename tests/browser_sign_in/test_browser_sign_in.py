@@ -23,6 +23,7 @@ from vibe.setup.auth import (
     BrowserSignInPollResult,
     BrowserSignInProcess,
     BrowserSignInService,
+    BrowserSignInStatus,
 )
 
 TEST_NOW = datetime(2026, 3, 16, tzinfo=UTC)
@@ -68,7 +69,7 @@ def build_test_service(
 @pytest.mark.asyncio
 async def test_authenticate_returns_api_key_after_pending_poll() -> None:
     opened_urls: list[str] = []
-    statuses: list[str] = []
+    statuses: list[BrowserSignInStatus] = []
     gateway, service = build_test_service(
         poll_results=[
             BrowserSignInPollResult(status="pending"),
@@ -84,10 +85,10 @@ async def test_authenticate_returns_api_key_after_pending_poll() -> None:
     assert api_key == "sk-browser-key"
     assert opened_urls == [TEST_SIGN_IN_URL]
     assert statuses == [
-        "opening_browser",
-        "waiting_for_browser_sign_in",
-        "exchanging",
-        "completed",
+        BrowserSignInStatus.OPENING_BROWSER,
+        BrowserSignInStatus.WAITING_FOR_BROWSER_SIGN_IN,
+        BrowserSignInStatus.EXCHANGING,
+        BrowserSignInStatus.COMPLETED,
     ]
     assert gateway.polled_urls == [TEST_POLL_URL, TEST_POLL_URL]
     assert gateway.exchange_requests[0].exchange_token == "exchange-1"

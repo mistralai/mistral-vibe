@@ -1,7 +1,45 @@
 from __future__ import annotations
 
 import sys
+from typing import Final
+
+_PLATFORM_IDS: Final[dict[str, str]] = {
+    "win32": "windows",
+    "darwin": "darwin",
+    "linux": "linux",
+    "freebsd": "freebsd",
+    "openbsd": "openbsd",
+    "netbsd": "netbsd",
+}
+
+_PLATFORM_DISPLAY_NAMES: Final[dict[str, str]] = {
+    "windows": "Windows",
+    "darwin": "macOS",
+    "linux": "Linux",
+    "freebsd": "FreeBSD",
+    "openbsd": "OpenBSD",
+    "netbsd": "NetBSD",
+}
 
 
 def is_windows() -> bool:
     return sys.platform == "win32"
+
+
+def get_platform_id() -> str:
+    """Canonical lowercase platform identifier (e.g. ``windows``, ``darwin``, ``linux``).
+
+    Matches the values expected by ``ExperimentAttributes.os`` and is suitable for
+    machine-readable contexts (telemetry, experiment targeting). Falls back to the
+    raw ``sys.platform`` value for unknown platforms.
+    """
+    return _PLATFORM_IDS.get(sys.platform, sys.platform)
+
+
+def get_platform_display_name() -> str:
+    """Human-readable platform name (e.g. ``Windows``, ``macOS``, ``Linux``).
+
+    Suitable for surfacing in system prompts. Falls back to ``Unix-like`` for
+    unknown platforms.
+    """
+    return _PLATFORM_DISPLAY_NAMES.get(get_platform_id(), "Unix-like")

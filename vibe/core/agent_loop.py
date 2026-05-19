@@ -23,6 +23,12 @@ from vibe.cli.terminal_detect import detect_terminal
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.experiments import ExperimentManager
+from vibe.core.experiments.client import RemoteEvalClient
+from vibe.core.experiments.session import (
+    hydrate_experiments_from_session as session_hydrate_experiments_from_session,
+    initialize_experiments as session_initialize_experiments,
+)
 from vibe.core.hooks.manager import HooksManager
 from vibe.core.hooks.models import HookConfigResult, HookType, HookUserMessage
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
@@ -76,16 +82,16 @@ from vibe.core.tools.base import (
     ToolPermission,
     ToolPermissionError,
 )
-from vibe.core.tools.connectors import ConnectorRegistry, connectors_enabled
+from vibe.core.tools.connectors import ConnectorRegistry
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.mcp import MCPRegistry
 from vibe.core.tools.mcp_sampling import MCPSamplingHandler
 from vibe.core.tools.permissions import (
     ApprovedRule,
     PermissionContext,
+    PermissionStore,
     RequiredPermission,
 )
-from vibe.core.tools.utils import wildcard_match
 from vibe.core.tracing import agent_span, set_tool_result, tool_span
 from vibe.core.trusted_folders import has_agents_md_file
 from vibe.core.types import (
@@ -102,6 +108,8 @@ from vibe.core.types import (
     LLMMessage,
     LLMUsage,
     MessageList,
+    PlanReviewEndedEvent,
+    PlanReviewRequestedEvent,
     RateLimitError,
     ReasoningEvent,
     Role,
@@ -116,6 +124,7 @@ from vibe.core.utils import (
     CANCELLATION_TAG,
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
+    VIBE_WARNING_TAG,
     CancellationReason,
     get_server_url_from_api_base,
     get_user_agent,
@@ -218,7 +227,7 @@ def requires_init(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-class AgentLoop:
+class AgentLoop:  # noqa: PLR0904
     def __init__(  # noqa: PLR0913, PLR0915
         self,
         config: VibeConfig,
@@ -234,6 +243,7 @@ class AgentLoop:
         defer_heavy_init: bool = False,
         headless: bool = False,
         hook_config_result: HookConfigResult | None = None,
+        permission_store: PermissionStore | None = None,
     ) -> None:
         self._base_config = config
         self._headless = headless
@@ -243,7 +253,11 @@ class AgentLoop:
         self._deferred_init_lock = threading.Lock()
         self._init_error: Exception | None = None
         self._init_start_time = time.monotonic()
-        self._init_duration_ms: int | None = None
+        self._experiments_task: asyncio.Task[None] | None = None
+        self._pending_new_session_telemetry: bool = False
+        self._ready_telemetry_pending: bool = defer_heavy_init
+
+        self._permission_store = permission_store or PermissionStore()
 
         self.mcp_registry = MCPRegistry()
         self.connector_registry = self._create_connector_registry()
@@ -257,6 +271,7 @@ class AgentLoop:
             mcp_registry=self.mcp_registry,
             connector_registry=self.connector_registry,
             defer_mcp=defer_heavy_init,
+            permission_getter=self._permission_store.get_tool_permission,
         )
         self.skill_manager = SkillManager(lambda: self.config)
         self.message_observer = message_observer
@@ -313,15 +328,21 @@ class AgentLoop:
 
         self._current_user_message_id: str | None = None
         self._is_user_prompt_call: bool = False
+        self._pending_injected_messages: list[LLMMessage] = []
 
-        self._session_rules: list[ApprovedRule] = []
-        self._approval_lock = asyncio.Lock()
-
+        self.experiment_manager = ExperimentManager(
+            client=RemoteEvalClient.from_settings(
+                api_host=config.experiments.api_host,
+                client_key=config.experiments.client_key,
+            ),
+            overrides=dict(config.experiment_overrides),
+        )
         self.telemetry_client = TelemetryClient(
             config_getter=lambda: self.config,
             session_id_getter=lambda: self.session_id,
             parent_session_id_getter=lambda: self.parent_session_id,
             entrypoint_metadata_getter=lambda: self.entrypoint_metadata,
+            experiments_getter=lambda: self.experiment_manager.assignments(),
         )
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
         self._hook_config_result = hook_config_result
@@ -384,25 +405,31 @@ class AgentLoop:
                 self.agent_manager,
                 scratchpad_dir=self.scratchpad_dir,
                 headless=self._headless,
+                experiment_manager=self.experiment_manager,
             )
             self.messages.update_system_prompt(system_prompt)
-            self._init_duration_ms = int(
-                (time.monotonic() - self._init_start_time) * 1000
-            )
         except Exception as exc:
             self._init_error = exc
 
     async def wait_until_ready(self) -> None:
-        """Await deferred initialization from an async context."""
-        if not self._defer_heavy_init:
-            return
-        thread = self._start_deferred_init()
-        await asyncio.to_thread(thread.join)
-        if err := self._init_error:
-            raise copy.copy(err).with_traceback(err.__traceback__)
-        if self._init_duration_ms is not None:
-            duration, self._init_duration_ms = self._init_duration_ms, None
+        """Await deferred initialization (MCP + experiments) from an async context."""
+        if self._defer_heavy_init:
+            thread = self._start_deferred_init()
+            await asyncio.to_thread(thread.join)
+            if err := self._init_error:
+                raise copy.copy(err).with_traceback(err.__traceback__)
+        if (task := self._experiments_task) is not None:
+            if task is asyncio.current_task():
+                return
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if self._ready_telemetry_pending:
+            self._ready_telemetry_pending = False
+            duration = int((time.monotonic() - self._init_start_time) * 1000)
             self.emit_ready_telemetry(duration)
+        if self._pending_new_session_telemetry:
+            self._pending_new_session_telemetry = False
+            self.emit_new_session_telemetry()
 
     @property
     def agent_profile(self) -> AgentProfile:
@@ -424,6 +451,14 @@ class AgentLoop:
         self._base_config = VibeConfig.load()
         self.agent_manager.invalidate_config()
 
+    def _drain_pending_injections(self) -> bool:
+        if not self._pending_injected_messages:
+            return False
+        for injected in self._pending_injected_messages:
+            self.messages.append(injected)
+        self._pending_injected_messages.clear()
+        return True
+
     def set_approval_callback(self, callback: ApprovalCallback) -> None:
         self.approval_callback = callback
 
@@ -438,21 +473,7 @@ class AgentLoop:
                 "tools": {tool_name: {"permission": permission.value}}
             })
 
-        if tool_name not in self.config.tools:
-            self.config.tools[tool_name] = {}
-
-        self.config.tools[tool_name]["permission"] = permission.value
-
-    def _add_session_rule(self, rule: ApprovedRule) -> None:
-        self._session_rules.append(rule)
-
-    def _is_permission_covered(self, tool_name: str, rp: RequiredPermission) -> bool:
-        return any(
-            rule.tool_name == tool_name
-            and rule.scope == rp.scope
-            and wildcard_match(rp.invocation_pattern, rule.session_pattern)
-            for rule in self._session_rules
-        )
+        self._permission_store.set_tool_permission(tool_name, permission)
 
     def approve_always(
         self,
@@ -463,7 +484,7 @@ class AgentLoop:
         """Handle 'Allow Always' approval: add session rules or set tool-level permission."""
         if required_permissions:
             for rp in required_permissions:
-                self._add_session_rule(
+                self._permission_store.add_rule(
                     ApprovedRule(
                         tool_name=tool_name,
                         scope=rp.scope,
@@ -478,6 +499,34 @@ class AgentLoop:
             self.set_tool_permission(
                 tool_name, ToolPermission.ALWAYS, save_permanently=save_permanently
             )
+
+    def start_initialize_experiments(self) -> None:
+        if self._experiments_task is not None:
+            return
+        self._pending_new_session_telemetry = True
+        self._ready_telemetry_pending = True
+        self._experiments_task = asyncio.create_task(self.initialize_experiments())
+
+    async def initialize_experiments(self) -> None:
+        updated = await session_initialize_experiments(
+            config=self.config,
+            manager=self.experiment_manager,
+            session_logger=self.session_logger,
+            entrypoint_metadata=self.entrypoint_metadata,
+        )
+        if updated:
+            with contextlib.suppress(Exception):
+                await self.refresh_system_prompt()
+
+    async def hydrate_experiments_from_session(self) -> None:
+        hydrated = await session_hydrate_experiments_from_session(
+            config=self.config,
+            manager=self.experiment_manager,
+            session_logger=self.session_logger,
+        )
+        if hydrated:
+            with contextlib.suppress(Exception):
+                await self.refresh_system_prompt()
 
     def emit_new_session_telemetry(self) -> None:
         entrypoint = (
@@ -520,11 +569,17 @@ class AgentLoop:
         self.telemetry_client.send_session_closed()
 
     async def aclose(self) -> None:
+        if (task := self._experiments_task) is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
         with contextlib.suppress(Exception):
             await self.backend.__aexit__(None, None, None)
+        with contextlib.suppress(Exception):
+            await self.experiment_manager.aclose()
 
     def _create_connector_registry(self) -> ConnectorRegistry | None:
-        if not connectors_enabled():
+        if not self._base_config.enable_connectors:
             return None
 
         provider = self._base_config.get_mistral_provider()
@@ -547,7 +602,9 @@ class AgentLoop:
             self.config,
             self.skill_manager,
             self.agent_manager,
+            scratchpad_dir=self.scratchpad_dir,
             headless=self._headless,
+            experiment_manager=self.experiment_manager,
         )
         self.messages.update_system_prompt(system_prompt)
 
@@ -790,7 +847,7 @@ class AgentLoop:
         headers["x-affinity"] = self.session_id
         return headers
 
-    async def _conversation_loop(
+    async def _conversation_loop(  # noqa: PLR0912
         self, user_msg: str, client_message_id: str | None = None
     ) -> AsyncGenerator[BaseEvent]:
         user_message = LLMMessage(
@@ -837,6 +894,9 @@ class AgentLoop:
                 last_message = self.messages[-1]
                 should_break_loop = last_message.role != Role.tool
 
+                if self._drain_pending_injections():
+                    should_break_loop = False
+
                 if user_cancelled:
                     return
 
@@ -862,6 +922,36 @@ class AgentLoop:
         finally:
             await self._save_messages()
 
+    def _handle_plan_review_ended(self) -> None:
+        if not self._plan_session.has_content_changed():
+            return None
+
+        content = self._plan_session.read()
+        if content is None:
+            return None
+
+        msg = LLMMessage(
+            role=Role.user,
+            content=(
+                f"<{VIBE_WARNING_TAG}>The user has manually updated the plan file. "
+                f"Here is the updated version -- use this as the source of truth "
+                f"for implementation:\n\n{content}</{VIBE_WARNING_TAG}>"
+            ),
+            injected=True,
+        )
+        self._pending_injected_messages.append(msg)
+
+    def _handle_session_plan_events(self, event: BaseEvent) -> BaseEvent | None:
+        if isinstance(event, ToolCallEvent) and event.tool_name == "exit_plan_mode":
+            self._plan_session.snapshot_content_hash()
+            return PlanReviewRequestedEvent(file_path=self._plan_session.plan_file_path)
+
+        if isinstance(event, ToolResultEvent) and event.tool_name == "exit_plan_mode":
+            self._handle_plan_review_ended()
+            return PlanReviewEndedEvent()
+
+        return None
+
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
         if self.enable_streaming:
             async for event in self._stream_assistant_events():
@@ -882,6 +972,10 @@ class AgentLoop:
         profile_before = self.agent_profile.name
         async for event in self._handle_tool_calls(resolved):
             yield event
+
+            if session_plan_event := self._handle_session_plan_events(event):
+                yield session_plan_event
+
         if self.agent_profile.name != profile_before:
             yield AgentProfileChangedEvent(agent_name=self.agent_profile.name)
 
@@ -1028,6 +1122,7 @@ class AgentLoop:
                     switch_agent_callback=self.switch_agent,
                     skill_manager=self.skill_manager,
                     scratchpad_dir=self.scratchpad_dir,
+                    permission_store=self._permission_store,
                 ),
                 **tool_call.args_dict,
             ):
@@ -1361,7 +1456,7 @@ class AgentLoop:
                 approval_type=ToolPermission.ALWAYS,
             )
 
-        async with self._approval_lock:
+        async with self._permission_store.lock:
             tool_name = tool.get_name()
             ctx = tool.resolve_permission(args)
 
@@ -1386,7 +1481,7 @@ class AgentLoop:
                     uncovered = [
                         rp
                         for rp in ctx.required_permissions
-                        if not self._is_permission_covered(tool_name, rp)
+                        if not self._permission_store.covers(tool_name, rp)
                     ]
                     if ctx.required_permissions and not uncovered:
                         return ToolDecision(
@@ -1477,7 +1572,7 @@ class AgentLoop:
 
             i += 1
 
-    def _reset_session(self, keep_parent: bool = True) -> None:
+    async def _reset_session(self, keep_parent: bool = True) -> None:
         old_session_id = self.session_id
         self.emit_session_closed_telemetry()
         suffix = extract_suffix(self.session_id)
@@ -1487,6 +1582,7 @@ class AgentLoop:
         self.session_logger.reset_session(
             self.session_id, parent_session_id=parent_session_id
         )
+        await self.initialize_experiments()
         self.emit_new_session_telemetry()
 
     async def fork(self, message_id: str | None = None) -> AgentLoop:
@@ -1565,7 +1661,7 @@ class AgentLoop:
 
         self.middleware_pipeline.reset()
         self.tool_manager.reset_all()
-        self._reset_session(keep_parent=False)
+        await self._reset_session(keep_parent=False)
 
     @requires_init
     async def compact(self, extra_instructions: str = "") -> str:
@@ -1605,7 +1701,7 @@ class AgentLoop:
             self.messages.reset([system_message, summary_message])
 
             active_model = self.config.get_active_model()
-            self._reset_session()
+            await self._reset_session()
 
             actual_context_tokens = await self.backend.count_tokens(
                 model=active_model,
@@ -1671,12 +1767,7 @@ class AgentLoop:
             self._base_config = base_config
             self.agent_manager.invalidate_config()
 
-        old_backend = self.backend
-        new_backend = self.backend_factory()
-        self.backend = new_backend
-        if new_backend is not old_backend:
-            with contextlib.suppress(Exception):
-                await old_backend.__aexit__(None, None, None)
+        self.backend = self.backend_factory()
 
         if max_turns is not None:
             self._max_turns = max_turns
@@ -1687,6 +1778,7 @@ class AgentLoop:
             lambda: self.config,
             mcp_registry=self.mcp_registry,
             connector_registry=self.connector_registry,
+            permission_getter=self._permission_store.get_tool_permission,
         )
         self.skill_manager = SkillManager(lambda: self.config)
 
@@ -1697,6 +1789,7 @@ class AgentLoop:
             self.agent_manager,
             scratchpad_dir=self.scratchpad_dir,
             headless=self._headless,
+            experiment_manager=self.experiment_manager,
         )
 
         self.messages.update_system_prompt(new_system_prompt)

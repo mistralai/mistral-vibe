@@ -32,7 +32,6 @@ from mistralai.client.models import (
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 
 from vibe.core.llm.exceptions import BackendErrorBuilder
-from vibe.core.llm.message_utils import merge_consecutive_user_messages
 from vibe.core.types import (
     AvailableTool,
     Content,
@@ -279,14 +278,13 @@ class MistralBackend:
         metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
         try:
-            merged_messages = merge_consecutive_user_messages(messages)
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
             if reasoning_effort is not None:
                 temperature = 1.0
 
             response = await self._get_client().chat.complete_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
+                messages=[self._mapper.prepare_message(msg) for msg in messages],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools
@@ -358,14 +356,13 @@ class MistralBackend:
         metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
-            merged_messages = merge_consecutive_user_messages(messages)
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
             if reasoning_effort is not None:
                 temperature = 1.0
 
             stream = await self._get_client().chat.stream_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
+                messages=[self._mapper.prepare_message(msg) for msg in messages],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools

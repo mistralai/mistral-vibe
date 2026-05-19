@@ -54,7 +54,12 @@
       "program": "vibe/cli/entrypoint.py",
       "args": [],
       "console": "integratedTerminal",
-      "justMyCode": false
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
     },
     {
       "name": "Attach using PID",

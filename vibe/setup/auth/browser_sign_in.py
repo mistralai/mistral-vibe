@@ -4,6 +4,7 @@ import asyncio
 import base64
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from enum import StrEnum
 import hashlib
 import secrets
 import webbrowser
@@ -15,7 +16,15 @@ from vibe.setup.auth.browser_sign_in_gateway import (
     BrowserSignInProcess,
 )
 
-StatusCallback = Callable[[str], None]
+
+class BrowserSignInStatus(StrEnum):
+    OPENING_BROWSER = "opening_browser"
+    WAITING_FOR_BROWSER_SIGN_IN = "waiting_for_browser_sign_in"
+    EXCHANGING = "exchanging"
+    COMPLETED = "completed"
+
+
+StatusCallback = Callable[[BrowserSignInStatus], None]
 BrowserOpener = Callable[[str], bool]
 SleepFn = Callable[[float], Awaitable[None]]
 NowFn = Callable[[], datetime]
@@ -45,15 +54,15 @@ class BrowserSignInService:
     async def authenticate(self, status_callback: StatusCallback | None = None) -> str:
         verifier, challenge = _generate_pkce_pair()
         process = await self._gateway.create_process(challenge)
-        self._emit(status_callback, "opening_browser")
+        self._emit(status_callback, BrowserSignInStatus.OPENING_BROWSER)
         self._open_browser_or_raise(process.sign_in_url)
-        self._emit(status_callback, "waiting_for_browser_sign_in")
+        self._emit(status_callback, BrowserSignInStatus.WAITING_FOR_BROWSER_SIGN_IN)
         exchange_token = await self._wait_for_completion(process)
-        self._emit(status_callback, "exchanging")
+        self._emit(status_callback, BrowserSignInStatus.EXCHANGING)
         api_key = await self._gateway.exchange(
             process.process_id, exchange_token, verifier
         )
-        self._emit(status_callback, "completed")
+        self._emit(status_callback, BrowserSignInStatus.COMPLETED)
         return api_key
 
     async def _wait_for_completion(self, process: BrowserSignInProcess) -> str:
@@ -113,7 +122,9 @@ class BrowserSignInService:
             )
         await self._sleep(min(self._poll_interval, remaining_seconds))
 
-    def _emit(self, callback: StatusCallback | None, status: str) -> None:
+    def _emit(
+        self, callback: StatusCallback | None, status: BrowserSignInStatus
+    ) -> None:
         if callback is not None:
             callback(status)
 

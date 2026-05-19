@@ -165,6 +165,18 @@ def _disable_feedback_bar(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _disable_input_grace_periods(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "vibe.cli.textual_ui.widgets.approval_app._INPUT_GRACE_PERIOD_S", 0
+    )
+    monkeypatch.setattr(
+        "vibe.cli.textual_ui.widgets.question_app._INPUT_GRACE_PERIOD_S", 0
+    )
+    monkeypatch.setattr("vibe.cli.textual_ui.app._DEFAULT_TYPING_DEBOUNCE_MS", 0)
+    monkeypatch.delenv("VIBE_TYPING_GRACE_PERIOD_MS", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def telemetry_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
 

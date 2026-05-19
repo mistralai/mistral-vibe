@@ -2,10 +2,7 @@
    Onboarding App Styles
    ============================================================================= */
 
-Screen {
-    align: center middle;
-}
-
+Screen,
 OnboardingScreen {
     align: center middle;
 }
@@ -34,6 +31,102 @@ WelcomeScreen #enter-hint {
 
 WelcomeScreen #enter-hint.hidden {
     visibility: hidden;
+}
+
+/* =============================================================================
+   Auth Method Screen
+   ============================================================================= */
+
+#auth-method-content,
+#browser-sign-in-content {
+    width: 100%;
+    height: auto;
+}
+
+#auth-method-card,
+#browser-sign-in-card {
+    border: round #555555;
+    padding: 1 2;
+    width: 72;
+    max-width: 90w;
+    height: auto;
+}
+
+#auth-method-title,
+#browser-sign-in-title {
+    margin-bottom: 1;
+    text-align: center;
+    text-style: bold;
+}
+
+#auth-method-subtitle,
+#browser-sign-in-subtitle {
+    color: ansi_bright_black;
+    text-align: center;
+    margin-bottom: 2;
+}
+
+.auth-method-option {
+    border: round #444444;
+    padding: 1 2;
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+}
+
+.auth-method-option.selected {
+    border: round ansi_bright_yellow;
+    background: #2b2400;
+}
+
+#auth-method-help,
+#browser-sign-in-hint {
+    color: ansi_bright_black;
+    text-align: center;
+    margin-top: 2;
+}
+
+/* =============================================================================
+   Browser Sign-In Screen
+   ============================================================================= */
+
+.browser-sign-in-step {
+    border-left: wide #444444;
+    padding-left: 1;
+    margin-bottom: 1;
+    color: ansi_bright_black;
+}
+
+.browser-sign-in-step.active {
+    border-left: wide ansi_bright_yellow;
+    color: $text;
+}
+
+.browser-sign-in-step.done {
+    border-left: wide ansi_green;
+    color: ansi_green;
+}
+
+#browser-sign-in-status {
+    border: round #444444;
+    padding: 1 2;
+    width: 100%;
+    height: auto;
+    margin-top: 2;
+}
+
+#browser-sign-in-status.pending {
+    border: round ansi_bright_yellow;
+}
+
+#browser-sign-in-status.error {
+    border: round ansi_red;
+    color: ansi_red;
+}
+
+#browser-sign-in-status.success {
+    border: round ansi_green;
+    color: ansi_green;
 }
 
 /* =============================================================================

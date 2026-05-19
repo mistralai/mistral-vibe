@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0] - 2026-05-19
+
+### Added
+
+- GrowthBook A/B testing layer with first system prompt experiment
+- `--add-dir` flag to pull additional repository roots into a session
+- `--no-autofill` flag for bump_version.py script
+- TTY-keyed `--continue` scoping to current terminal
+- Improved plan mode readability with live-editable plan display (Ctrl+G to edit)
+- ACP dispatch user rating telemetry
+- `enable_connectors` config flag to control connector availability
+- Connectors migrated to public GA endpoints
+
+### Changed
+
+- Combine git subprocess calls in SessionLogger for improved performance by [@MichisGitIsKing](https://github.com/MichisGitIsKing)
+- Indent assistant message content to align with other messages
+- Deprecate retrying workflow status and expose retry source
+- Drop consecutive user-message merging in LLM backends
+
+### Fixed
+
+- Share session permissions with subagents
+- Bump pydantic-settings to >=2.13.0
+- Avoid closing in-use backend on agent reload
+- Slash commands broken when automatic IDE context is enabled
+- Debounce tool approvals to avoid interrupting user typing
+- Preserve newline style in search_replace
+- Reset cursor position on up-arrow
+- Remove hardcoded API key env var in websearch
+- Fix whoami hardcoded url
+- Pin dependencies in published wheel
+
+
 ## [2.9.6] - 2026-05-11
 
 ### Added

@@ -21,7 +21,11 @@ from vibe.core.utils.http import (
 from vibe.core.utils.matching import name_matches
 from vibe.core.utils.merge import MergeConflictError, MergeStrategy
 from vibe.core.utils.paths import is_dangerous_directory
-from vibe.core.utils.platform import is_windows
+from vibe.core.utils.platform import (
+    get_platform_display_name,
+    get_platform_id,
+    is_windows,
+)
 from vibe.core.utils.retry import async_generator_retry, async_retry
 from vibe.core.utils.tags import (
     CANCELLATION_TAG,
@@ -52,6 +56,8 @@ __all__ = [
     "async_retry",
     "build_ssl_context",
     "compact_reduction_display",
+    "get_platform_display_name",
+    "get_platform_id",
     "get_server_url_from_api_base",
     "get_user_agent",
     "get_user_cancellation_message",

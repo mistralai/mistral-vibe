@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 import copy
 from enum import StrEnum, auto
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, overload
 from uuid import uuid4
 
@@ -24,6 +25,8 @@ from pydantic import (
     computed_field,
     model_validator,
 )
+
+from vibe.core.experiments.models import EvalResponse
 
 
 class ScheduledLoop(BaseModel):
@@ -155,6 +158,7 @@ class SessionMetadata(BaseModel):
     loops: list[ScheduledLoop] = Field(default_factory=list)
     title: str | None = None
     title_source: Literal["auto", "manual"] = "auto"
+    experiments: EvalResponse | None = None
 
 
 StrToolChoice = Literal["auto", "none", "any", "required"]
@@ -436,6 +440,14 @@ class CompactEndEvent(BaseEvent):
     # should be represented.
     # [RFD](https://agentclientprotocol.com/rfds/session-usage)
     tool_call_id: str
+
+
+class PlanReviewRequestedEvent(BaseEvent):
+    file_path: Path
+
+
+class PlanReviewEndedEvent(BaseEvent):
+    pass
 
 
 class AgentProfileChangedEvent(BaseEvent):

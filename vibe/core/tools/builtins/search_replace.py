@@ -170,7 +170,9 @@ class SearchReplace(
             except Exception:
                 pass
 
-            await self._write_file(file_path, modified_content, decoded.encoding)
+            await self._write_file(
+                file_path, modified_content, decoded.encoding, decoded.newline
+            )
 
         yield SearchReplaceResult(
             file=str(file_path),
@@ -238,10 +240,12 @@ class SearchReplace(
     async def _backup_file(self, file_path: Path) -> None:
         shutil.copy2(file_path, file_path.with_suffix(file_path.suffix + ".bak"))
 
-    async def _write_file(self, file_path: Path, content: str, encoding: str) -> None:
+    async def _write_file(
+        self, file_path: Path, content: str, encoding: str, newline: str
+    ) -> None:
         try:
             async with await anyio.Path(file_path).open(
-                mode="w", encoding=encoding
+                mode="w", encoding=encoding, newline=newline
             ) as f:
                 await f.write(content)
         except UnicodeEncodeError as e:

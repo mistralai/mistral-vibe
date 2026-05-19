@@ -864,3 +864,34 @@ async def test_parallel_conversation_history_has_all_tool_messages() -> None:
         "call_h3",
     }
     assert agent_loop.stats.tool_calls_succeeded == 4
+
+
+@pytest.mark.asyncio
+async def test_pending_injected_message_continues_loop_after_tool_result() -> None:
+    tool_call = make_todo_tool_call("call_inject")
+    backend = FakeBackend([
+        [mock_llm_chunk(content="Let me check.", tool_calls=[tool_call])],
+        [mock_llm_chunk(content="Acting on the injected guidance.")],
+    ])
+    agent_loop = make_agent_loop(auto_approve=True, backend=backend)
+
+    events: list[BaseEvent] = []
+    async for event in agent_loop.act("Go"):
+        events.append(event)
+        if isinstance(event, ToolResultEvent):
+            agent_loop._pending_injected_messages.append(
+                LLMMessage(role=Role.user, content="updated context", injected=True)
+            )
+
+    assistant_events = [e for e in events if isinstance(e, AssistantEvent)]
+    assert len(assistant_events) == 2
+
+    injected_msgs = [
+        m for m in agent_loop.messages if m.role == Role.user and m.injected
+    ]
+    assert any("updated context" in (m.content or "") for m in injected_msgs)
+
+    last_assistant = next(
+        m for m in reversed(agent_loop.messages) if m.role == Role.assistant
+    )
+    assert "Acting on the injected guidance" in (last_assistant.content or "")

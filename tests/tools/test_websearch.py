@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, patch
 
 from mistralai.client import Mistral
 from mistralai.client.errors import SDKError
@@ -13,11 +14,46 @@ from mistralai.client.models import (
 )
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from tests.mock.utils import collect_result
-from vibe.core.config import ProviderConfig
+from vibe.core.config import ProviderConfig, VibeConfig
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.websearch import WebSearch, WebSearchArgs, WebSearchConfig
+from vibe.core.tools.manager import ToolManager
 from vibe.core.types import Backend
+
+if TYPE_CHECKING:
+    from vibe.core.agents.manager import AgentManager
+
+
+class InMemoryAgentManager:
+    def __init__(self, config: VibeConfig) -> None:
+        self.config = config
+
+
+def _ctx_with_config(config: VibeConfig) -> InvokeContext:
+    return InvokeContext(
+        tool_call_id="t1",
+        agent_manager=cast("AgentManager", InMemoryAgentManager(config)),
+    )
+
+
+def _mistral_provider(
+    api_key_env_var: str = "MISTRAL_API_KEY",
+    api_base: str = "https://on-prem.example.com/v1",
+) -> ProviderConfig:
+    return ProviderConfig(
+        name="mistral",
+        api_base=api_base,
+        api_key_env_var=api_key_env_var,
+        backend=Backend.MISTRAL,
+    )
+
+
+def _llamacpp_provider() -> ProviderConfig:
+    return ProviderConfig(
+        name="llamacpp", api_base="http://127.0.0.1:8080/v1", backend=Backend.GENERIC
+    )
 
 
 def _make_response(
@@ -110,6 +146,68 @@ async def test_run_missing_api_key(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_uses_mistral_provider_api_key_env_var(monkeypatch):
+    monkeypatch.setenv("MISTRAL_API_KEY", "wrong-key")
+    monkeypatch.setenv("TEST_API_KEY", "provider-key")
+    config = WebSearchConfig()
+    ws = WebSearch(config_getter=lambda: config, state=BaseToolState())
+    ctx = _ctx_with_config(
+        build_test_vibe_config(providers=[_mistral_provider("TEST_API_KEY")])
+    )
+    response = _make_response(content=[TextChunk(text="The answer")])
+
+    with patch("vibe.core.tools.builtins.websearch.Mistral") as mistral_cls:
+        client = mistral_cls.return_value
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.beta.conversations.start_async = AsyncMock(return_value=response)
+
+        result = await collect_result(ws.run(WebSearchArgs(query="test query"), ctx))
+
+    assert result.answer == "The answer"
+    assert mistral_cls.call_args.kwargs["api_key"] == "provider-key"
+    assert mistral_cls.call_args.kwargs["server_url"] == "https://on-prem.example.com"
+    assert mistral_cls.call_args.kwargs["timeout_ms"] == 120000
+
+
+@pytest.mark.asyncio
+async def test_run_falls_back_to_default_api_key_env_var_when_provider_env_var_empty(
+    monkeypatch,
+):
+    monkeypatch.setenv("MISTRAL_API_KEY", "fallback-key")
+    config = WebSearchConfig()
+    ws = WebSearch(config_getter=lambda: config, state=BaseToolState())
+    ctx = _ctx_with_config(build_test_vibe_config(providers=[_mistral_provider("")]))
+    response = _make_response(content=[TextChunk(text="The answer")])
+
+    with patch("vibe.core.tools.builtins.websearch.Mistral") as mistral_cls:
+        client = mistral_cls.return_value
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.beta.conversations.start_async = AsyncMock(return_value=response)
+
+        result = await collect_result(ws.run(WebSearchArgs(query="test query"), ctx))
+
+    assert result.answer == "The answer"
+    assert mistral_cls.call_args.kwargs["api_key"] == "fallback-key"
+
+
+@pytest.mark.asyncio
+async def test_run_reports_configured_api_key_env_var_when_missing(monkeypatch):
+    monkeypatch.setenv("MISTRAL_API_KEY", "fallback-key")
+    monkeypatch.setenv("TEST_API_KEY", "provider-key")
+    ctx = _ctx_with_config(
+        build_test_vibe_config(providers=[_mistral_provider("TEST_API_KEY")])
+    )
+    monkeypatch.delenv("TEST_API_KEY", raising=False)
+    config = WebSearchConfig()
+    ws = WebSearch(config_getter=lambda: config, state=BaseToolState())
+
+    with pytest.raises(ToolError, match="TEST_API_KEY"):
+        await collect_result(ws.run(WebSearchArgs(query="test"), ctx))
+
+
+@pytest.mark.asyncio
 async def test_run_returns_parsed_result(websearch):
     response = _make_response(
         content=[
@@ -165,48 +263,23 @@ def test_resolve_server_url_no_agent_manager(websearch):
 
 
 def test_resolve_server_url_with_mistral_provider(websearch):
-    config = MagicMock()
-    config.providers = [
-        ProviderConfig(
-            name="mistral",
-            api_base="https://on-prem.example.com/v1",
-            api_key_env_var="MISTRAL_API_KEY",
-            backend=Backend.MISTRAL,
-        )
-    ]
-    agent_manager = MagicMock()
-    agent_manager.config = config
-
-    ctx = InvokeContext(tool_call_id="t1", agent_manager=agent_manager)
+    ctx = _ctx_with_config(build_test_vibe_config(providers=[_mistral_provider()]))
     assert websearch._resolve_server_url(ctx) == "https://on-prem.example.com"
 
 
 def test_resolve_server_url_with_default_provider(websearch):
-    config = MagicMock()
-    config.providers = [
-        ProviderConfig(
-            name="mistral",
-            api_base="https://api.mistral.ai/v1",
-            api_key_env_var="MISTRAL_API_KEY",
-            backend=Backend.MISTRAL,
+    ctx = _ctx_with_config(
+        build_test_vibe_config(
+            providers=[_mistral_provider(api_base="https://api.mistral.ai/v1")]
         )
-    ]
-    agent_manager = MagicMock()
-    agent_manager.config = config
-
-    ctx = InvokeContext(tool_call_id="t1", agent_manager=agent_manager)
+    )
     assert websearch._resolve_server_url(ctx) == "https://api.mistral.ai"
 
 
 def test_resolve_server_url_no_mistral_provider(websearch):
-    config = MagicMock()
-    config.providers = [
-        ProviderConfig(name="llamacpp", api_base="http://127.0.0.1:8080/v1")
-    ]
-    agent_manager = MagicMock()
-    agent_manager.config = config
-
-    ctx = InvokeContext(tool_call_id="t1", agent_manager=agent_manager)
+    ctx = _ctx_with_config(
+        build_test_vibe_config(active_model="local", providers=[_llamacpp_provider()])
+    )
     assert websearch._resolve_server_url(ctx) is None
 
 
@@ -218,6 +291,87 @@ def test_is_available_with_key(monkeypatch):
 def test_is_available_without_key(monkeypatch):
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     assert WebSearch.is_available() is False
+
+
+def test_is_available_uses_mistral_provider_api_key_env_var(monkeypatch):
+    monkeypatch.setenv("MISTRAL_API_KEY", "fallback-key")
+    monkeypatch.setenv("TEST_API_KEY", "provider-key")
+    config = build_test_vibe_config(providers=[_mistral_provider("TEST_API_KEY")])
+    monkeypatch.delenv("TEST_API_KEY", raising=False)
+
+    assert WebSearch.is_available(config) is False
+
+    monkeypatch.setenv("TEST_API_KEY", "provider-key")
+    assert WebSearch.is_available(config) is True
+
+
+def test_is_available_uses_non_active_mistral_provider(monkeypatch):
+    monkeypatch.setenv("TEST_API_KEY", "provider-key")
+    config = build_test_vibe_config(
+        active_model="local",
+        providers=[_llamacpp_provider(), _mistral_provider("TEST_API_KEY")],
+    )
+    monkeypatch.delenv("TEST_API_KEY", raising=False)
+
+    assert WebSearch.is_available(config) is False
+
+    monkeypatch.setenv("TEST_API_KEY", "provider-key")
+    assert WebSearch.is_available(config) is True
+
+
+def test_is_available_falls_back_to_default_api_key_env_var_without_mistral_provider(
+    monkeypatch,
+):
+    monkeypatch.setenv("MISTRAL_API_KEY", "fallback-key")
+    config = build_test_vibe_config(
+        active_model="local", providers=[_llamacpp_provider()]
+    )
+
+    assert WebSearch.is_available(config) is True
+
+    monkeypatch.delenv("MISTRAL_API_KEY")
+
+    assert WebSearch.is_available(config) is False
+
+
+def test_is_available_falls_back_to_default_api_key_env_var_when_provider_env_var_empty(
+    monkeypatch,
+):
+    monkeypatch.setenv("MISTRAL_API_KEY", "fallback-key")
+    config = build_test_vibe_config(providers=[_mistral_provider("")])
+
+    assert WebSearch.is_available(config) is True
+
+    monkeypatch.delenv("MISTRAL_API_KEY")
+
+    assert WebSearch.is_available(config) is False
+
+
+def test_tool_manager_websearch_availability_uses_provider_api_key_env_var(monkeypatch):
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.setenv("TEST_API_KEY", "provider-key")
+    config = build_test_vibe_config(providers=[_mistral_provider("TEST_API_KEY")])
+    manager = ToolManager(lambda: config)
+
+    assert "web_search" in manager.available_tools
+
+    monkeypatch.delenv("TEST_API_KEY")
+    assert "web_search" not in manager.available_tools
+
+
+def test_tool_manager_websearch_availability_falls_back_without_mistral_provider(
+    monkeypatch,
+):
+    monkeypatch.setenv("MISTRAL_API_KEY", "fallback-key")
+    config = build_test_vibe_config(
+        active_model="local", providers=[_llamacpp_provider()]
+    )
+    manager = ToolManager(lambda: config)
+
+    assert "web_search" in manager.available_tools
+
+    monkeypatch.delenv("MISTRAL_API_KEY")
+    assert "web_search" not in manager.available_tools
 
 
 def test_get_status_text():

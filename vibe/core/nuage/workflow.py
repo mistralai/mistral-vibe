@@ -15,7 +15,6 @@ class WorkflowExecutionStatus(StrEnum):
     TERMINATED = "TERMINATED"
     CONTINUED_AS_NEW = "CONTINUED_AS_NEW"
     TIMED_OUT = "TIMED_OUT"
-    RETRYING_AFTER_ERROR = "RETRYING_AFTER_ERROR"
 
 
 class WorkflowExecutionWithoutResultResponse(BaseModel):

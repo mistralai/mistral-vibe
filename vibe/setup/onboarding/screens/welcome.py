@@ -52,8 +52,9 @@ class WelcomeScreen(OnboardingScreen):
 
     NEXT_SCREEN = "api_key"
 
-    def __init__(self) -> None:
+    def __init__(self, next_screen: str = "api_key") -> None:
         super().__init__()
+        self.NEXT_SCREEN = next_screen
         self._char_index = 0
         self._gradient_offset = 0
         self._typing_done = False

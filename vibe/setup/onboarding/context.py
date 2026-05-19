@@ -29,6 +29,7 @@ def _default_model_payloads() -> list[dict[str, Any]]:
 
 class _OnboardingSnapshot(BaseModel):
     active_model: str = DEFAULT_ACTIVE_MODEL
+    enable_experimental_browser_sign_in: bool = False
     providers: list[Any] = Field(default_factory=_default_provider_payloads)
     models: list[Any] = Field(default_factory=_default_model_payloads)
 
@@ -97,6 +98,18 @@ def _load_onboarding_env_payload_for_fields(
         and (models := _find_env_value("VIBE_MODELS")) is not None
     ):
         payload["models"] = _ONBOARDING_LIST_ADAPTER.validate_json(models)
+    # Onboarding uses this lightweight snapshot before full VibeConfig loading,
+    # so env-backed config fields must be mirrored here when onboarding needs them.
+    if (
+        "enable_experimental_browser_sign_in" in field_names
+        and (
+            enable_browser_sign_in := _find_env_value(
+                "VIBE_ENABLE_EXPERIMENTAL_BROWSER_SIGN_IN"
+            )
+        )
+        is not None
+    ):
+        payload["enable_experimental_browser_sign_in"] = enable_browser_sign_in
 
     return payload
 
@@ -181,14 +194,27 @@ def _resolve_provider(
 @dataclass(frozen=True)
 class OnboardingContext:
     provider: ProviderConfig
+    enable_experimental_browser_sign_in: bool = False
 
     @property
     def supports_browser_sign_in(self) -> bool:
         return self.provider.supports_browser_sign_in
 
+    @property
+    def browser_sign_in_enabled(self) -> bool:
+        return (
+            self.enable_experimental_browser_sign_in
+            and self.provider.supports_browser_sign_in
+        )
+
     @classmethod
     def from_config(cls, config: VibeConfig) -> OnboardingContext:
-        return cls(provider=config.get_active_provider())
+        return cls(
+            provider=config.get_active_provider(),
+            enable_experimental_browser_sign_in=(
+                config.enable_experimental_browser_sign_in
+            ),
+        )
 
     @classmethod
     def load(cls, **overrides: Any) -> OnboardingContext:
@@ -199,7 +225,10 @@ class OnboardingContext:
             return cls(
                 provider=_resolve_provider(
                     active_model=snapshot.active_model, snapshot=snapshot
-                )
+                ),
+                enable_experimental_browser_sign_in=(
+                    snapshot.enable_experimental_browser_sign_in
+                ),
             )
         except (RuntimeError, ValidationError, ValueError):
             logger.warning(

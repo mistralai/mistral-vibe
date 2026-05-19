@@ -23,6 +23,7 @@ from vibe.core.hooks.config import load_hooks_from_fs
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.programmatic import run_programmatic
+from vibe.core.session import last_session_pointer
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
 from vibe.core.telemetry.types import EntrypointMetadata
@@ -140,9 +141,15 @@ def load_session(
     session_to_load = None
     if args.continue_session:
         cwd = Path.cwd().resolve()
-        session_to_load = SessionLoader.find_latest_session(
-            config.session_logging, working_directory=cwd
-        )
+        pointer_session_id = last_session_pointer.load(config.session_logging)
+        if pointer_session_id:
+            session_to_load = SessionLoader.find_session_by_id(
+                pointer_session_id, config.session_logging, working_directory=cwd
+            )
+        if not session_to_load:
+            session_to_load = SessionLoader.find_latest_session(
+                config.session_logging, working_directory=cwd
+            )
         if not session_to_load:
             rprint(
                 f"[red]No previous sessions found in "

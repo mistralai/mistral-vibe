@@ -87,13 +87,6 @@ class TestListRemoteResumeSessions:
             start_time=datetime(2026, 1, 1),
             end_time=None,
         )
-        retrying = WorkflowExecutionWithoutResultResponse(
-            workflow_name="vibe",
-            execution_id="exec-retrying",
-            status=WorkflowExecutionStatus.RETRYING_AFTER_ERROR,
-            start_time=datetime(2026, 1, 1),
-            end_time=None,
-        )
         continued = WorkflowExecutionWithoutResultResponse(
             workflow_name="vibe",
             execution_id="exec-continued",
@@ -102,9 +95,7 @@ class TestListRemoteResumeSessions:
             end_time=None,
         )
 
-        mock_response = WorkflowExecutionListResponse(
-            executions=[running, retrying, continued]
-        )
+        mock_response = WorkflowExecutionListResponse(executions=[running, continued])
 
         config = MagicMock()
         config.vibe_code_enabled = True
@@ -121,10 +112,9 @@ class TestListRemoteResumeSessions:
 
             result = await list_remote_resume_sessions(config)
 
-        assert len(result) == 3
+        assert len(result) == 2
         session_ids = {s.session_id for s in result}
         assert "exec-running" in session_ids
-        assert "exec-retrying" in session_ids
         assert "exec-continued" in session_ids
         assert all(s.source == "remote" for s in result)
 
@@ -133,7 +123,6 @@ class TestListRemoteResumeSessions:
             page_size=50,
             status=[
                 WorkflowExecutionStatus.RUNNING,
-                WorkflowExecutionStatus.RETRYING_AFTER_ERROR,
                 WorkflowExecutionStatus.CONTINUED_AS_NEW,
             ],
         )
@@ -207,7 +196,7 @@ class TestListRemoteResumeSessions:
         previous = WorkflowExecutionWithoutResultResponse(
             workflow_name="vibe",
             execution_id="exec-1",
-            status=WorkflowExecutionStatus.RETRYING_AFTER_ERROR,
+            status=WorkflowExecutionStatus.FAILED,
             start_time=datetime(2026, 1, 1),
             end_time=datetime(2026, 1, 10),
         )

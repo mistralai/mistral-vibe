@@ -25,6 +25,7 @@ from vibe.core.utils.io import read_safe_async
 if TYPE_CHECKING:
     from vibe.core.agents.models import AgentProfile
     from vibe.core.config import SessionLoggingConfig, VibeConfig
+    from vibe.core.experiments.models import EvalResponse
     from vibe.core.tools.manager import ToolManager
 
 
@@ -94,37 +95,32 @@ class SessionLogger:
             )
         return self.session_dir / MESSAGES_FILENAME
 
-    @property
-    def git_commit(self) -> str | None:
+    def _fetch_git_metadata(self) -> tuple[str | None, str | None]:
+        """Fetch git commit and branch in a single subprocess call."""
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
+                ["git", "rev-parse", "HEAD", "--abbrev-ref", "HEAD"],
                 capture_output=True,
                 stdin=subprocess.DEVNULL if is_windows() else None,
                 text=True,
                 timeout=5.0,
             )
             if result.returncode == 0 and result.stdout:
-                return result.stdout.strip()
+                lines = result.stdout.strip().splitlines()
+                commit = lines[0] if len(lines) > 0 else None
+                branch = lines[1] if len(lines) > 1 else None
+                return commit, branch
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
             pass
-        return None
+        return None, None
+
+    @property
+    def git_commit(self) -> str | None:
+        return self._fetch_git_metadata()[0]
 
     @property
     def git_branch(self) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=5.0,
-            )
-            if result.returncode == 0 and result.stdout:
-                return result.stdout.strip()
-        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-            pass
-        return None
+        return self._fetch_git_metadata()[1]
 
     @property
     def username(self) -> str:
@@ -134,8 +130,7 @@ class SessionLogger:
             return "unknown"
 
     def _initialize_session_metadata(self) -> SessionMetadata:
-        git_commit = self.git_commit
-        git_branch = self.git_branch
+        git_commit, git_branch = self._fetch_git_metadata()
         user_name = self.username
 
         return SessionMetadata(
@@ -357,6 +352,27 @@ class SessionLogger:
         metadata["loops"] = [
             loop.model_dump(mode="json") for loop in session_metadata.loops
         ]
+        await SessionLogger.persist_metadata(metadata, session_dir)
+
+    async def persist_experiments(self, response: EvalResponse | None) -> None:
+        session_info = self._get_session_info()
+        if session_info is None:
+            return
+        session_dir, session_metadata = session_info
+        session_metadata.experiments = response
+        metadata_path = session_dir / METADATA_FILENAME
+        if not metadata_path.exists():
+            return
+        try:
+            raw = (await read_safe_async(metadata_path)).text
+            metadata = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as e:
+            raise RuntimeError(
+                f"Failed to read session metadata at {metadata_path}: {e}"
+            ) from e
+        metadata["experiments"] = (
+            response.model_dump(mode="json") if response is not None else None
+        )
         await SessionLogger.persist_metadata(metadata, session_dir)
 
     def reset_session(

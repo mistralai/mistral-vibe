@@ -97,6 +97,15 @@ def parse_arguments() -> argparse.Namespace:
         help="Change to this directory before running",
     )
     parser.add_argument(
+        "--add-dir",
+        action="append",
+        metavar="DIR",
+        default=[],
+        help="Additional working directory for file access and context. "
+        "Implicitly trusted for the session (same semantics as --trust). "
+        "Can be specified multiple times.",
+    )
+    parser.add_argument(
         "--trust",
         action="store_true",
         help="Trust the working directory for this invocation only (not "
@@ -180,10 +189,22 @@ def main() -> None:
     if args.trust:
         trusted_folders_manager.trust_for_session(cwd)
 
+    additional_dirs: list[Path] = []
+    for d in args.add_dir:
+        resolved = Path(d).expanduser().resolve()
+        if not resolved.is_dir():
+            rprint(
+                f"[red]Error: --add-dir path does not exist "
+                f"or is not a directory: {d}[/]"
+            )
+            sys.exit(1)
+        additional_dirs.append(resolved)
+        trusted_folders_manager.trust_for_session(resolved)
+
     is_interactive = args.prompt is None
     if is_interactive:
         check_and_resolve_trusted_folder(cwd)
-    init_harness_files_manager("user", "project")
+    init_harness_files_manager("user", "project", additional_dirs=additional_dirs)
 
     from vibe.cli.cli import run_cli
 

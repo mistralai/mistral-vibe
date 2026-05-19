@@ -37,7 +37,7 @@ def _make_manager(
     async def save_messages() -> None:
         save_calls.append(True)
 
-    def reset_session() -> None:
+    async def reset_session() -> None:
         reset_calls.append(True)
 
     mgr = RewindManager(

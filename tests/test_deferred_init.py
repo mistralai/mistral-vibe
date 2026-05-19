@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +13,7 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
+from vibe.core import agent_loop as agent_loop_module
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.config import MCPStdio
 from vibe.core.tools.manager import ToolManager
@@ -256,3 +258,252 @@ class TestDeferredInitPublicMethods:
 
         assert loop.is_initialized
         assert loop.messages[-1].content == "context"
+
+
+# ---------------------------------------------------------------------------
+# start_initialize_experiments / wait_until_ready experiment gating
+# ---------------------------------------------------------------------------
+
+
+class TestStartInitializeExperiments:
+    @pytest.mark.asyncio
+    async def test_does_not_block_caller(self) -> None:
+        loop = build_test_agent_loop()
+        gate = asyncio.Event()
+
+        async def slow_init() -> None:
+            await gate.wait()
+
+        with patch.object(loop, "initialize_experiments", side_effect=slow_init):
+            loop.start_initialize_experiments()
+
+            task = loop._experiments_task
+            assert task is not None
+            assert not task.done()
+
+            gate.set()
+            await task
+
+    @pytest.mark.asyncio
+    async def test_is_idempotent(self) -> None:
+        loop = build_test_agent_loop()
+        init_mock = AsyncMock()
+
+        with patch.object(loop, "initialize_experiments", new=init_mock):
+            loop.start_initialize_experiments()
+            first_task = loop._experiments_task
+            loop.start_initialize_experiments()
+            second_task = loop._experiments_task
+
+            assert first_task is second_task
+            assert first_task is not None
+            await first_task
+
+        assert init_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_sets_pending_telemetry_flags(self) -> None:
+        loop = build_test_agent_loop()
+
+        with patch.object(loop, "initialize_experiments", new=AsyncMock()):
+            loop.start_initialize_experiments()
+
+            assert loop._pending_new_session_telemetry is True
+            assert loop._ready_telemetry_pending is True
+
+            task = loop._experiments_task
+            assert task is not None
+            await task
+
+    @pytest.mark.asyncio
+    async def test_refreshes_system_prompt_when_experiments_update(self) -> None:
+        loop = build_test_agent_loop()
+        refresh_mock = AsyncMock()
+
+        with (
+            patch.object(
+                agent_loop_module,
+                "session_initialize_experiments",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(loop, "refresh_system_prompt", new=refresh_mock),
+        ):
+            await loop.initialize_experiments()
+
+        refresh_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_does_not_refresh_system_prompt_when_experiments_unchanged(
+        self,
+    ) -> None:
+        loop = build_test_agent_loop()
+        refresh_mock = AsyncMock()
+
+        with (
+            patch.object(
+                agent_loop_module,
+                "session_initialize_experiments",
+                new=AsyncMock(return_value=False),
+            ),
+            patch.object(loop, "refresh_system_prompt", new=refresh_mock),
+        ):
+            await loop.initialize_experiments()
+
+        refresh_mock.assert_not_awaited()
+
+
+class TestWaitUntilReadyJoinsExperiments:
+    @pytest.mark.asyncio
+    async def test_joins_in_flight_task(self) -> None:
+        loop = build_test_agent_loop()
+        gate = asyncio.Event()
+        completed = False
+
+        async def slow_init() -> None:
+            nonlocal completed
+            await gate.wait()
+            completed = True
+
+        with patch.object(loop, "initialize_experiments", side_effect=slow_init):
+            loop.start_initialize_experiments()
+
+            async def release() -> None:
+                await asyncio.sleep(0.01)
+                gate.set()
+
+            asyncio.create_task(release())
+            await loop.wait_until_ready()
+
+            assert completed is True
+            task = loop._experiments_task
+            assert task is not None
+            assert task.done()
+
+    @pytest.mark.asyncio
+    async def test_emits_new_session_telemetry_once(self) -> None:
+        loop = build_test_agent_loop()
+        emit_new_session = MagicMock()
+
+        with (
+            patch.object(loop, "initialize_experiments", new=AsyncMock()),
+            patch.object(loop, "emit_new_session_telemetry", new=emit_new_session),
+        ):
+            loop.start_initialize_experiments()
+            await loop.wait_until_ready()
+            await loop.wait_until_ready()
+
+        emit_new_session.assert_called_once()
+        assert loop._pending_new_session_telemetry is False
+
+    @pytest.mark.asyncio
+    async def test_emits_ready_telemetry_when_only_experiments_deferred(self) -> None:
+        loop = build_test_agent_loop()
+        emit_ready = MagicMock()
+
+        with (
+            patch.object(loop, "initialize_experiments", new=AsyncMock()),
+            patch.object(loop, "emit_ready_telemetry", new=emit_ready),
+        ):
+            loop.start_initialize_experiments()
+            await loop.wait_until_ready()
+            await loop.wait_until_ready()
+
+        emit_ready.assert_called_once()
+        ((duration,), _) = emit_ready.call_args
+        assert isinstance(duration, int)
+        assert duration >= 0
+        assert loop._ready_telemetry_pending is False
+
+    @pytest.mark.asyncio
+    async def test_does_not_emit_new_session_when_only_hydrating(self) -> None:
+        loop = build_test_agent_loop()
+        emit_new_session = MagicMock()
+
+        with (
+            patch.object(loop, "hydrate_experiments_from_session", new=AsyncMock()),
+            patch.object(loop, "emit_new_session_telemetry", new=emit_new_session),
+        ):
+            await loop.hydrate_experiments_from_session()
+            await loop.wait_until_ready()
+
+        emit_new_session.assert_not_called()
+        assert loop._pending_new_session_telemetry is False
+
+    @pytest.mark.asyncio
+    async def test_no_op_when_nothing_deferred(self) -> None:
+        loop = build_test_agent_loop()
+        emit_ready = MagicMock()
+        emit_new_session = MagicMock()
+
+        with (
+            patch.object(loop, "emit_ready_telemetry", new=emit_ready),
+            patch.object(loop, "emit_new_session_telemetry", new=emit_new_session),
+        ):
+            await loop.wait_until_ready()
+
+        emit_ready.assert_not_called()
+        emit_new_session.assert_not_called()
+
+
+class TestACloseCancelsExperimentsTask:
+    @pytest.mark.asyncio
+    async def test_cancels_in_flight_task(self) -> None:
+        loop = build_test_agent_loop()
+        gate = asyncio.Event()
+
+        async def never_completing() -> None:
+            await gate.wait()
+
+        with patch.object(loop, "initialize_experiments", side_effect=never_completing):
+            loop.start_initialize_experiments()
+            task = loop._experiments_task
+            assert task is not None
+            assert not task.done()
+
+            await loop.aclose()
+
+            assert task.done()
+            assert task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_does_not_cancel_completed_task(self) -> None:
+        loop = build_test_agent_loop()
+
+        with patch.object(loop, "initialize_experiments", new=AsyncMock()):
+            loop.start_initialize_experiments()
+            task = loop._experiments_task
+            assert task is not None
+            await task
+
+            await loop.aclose()
+
+            assert task.done()
+            assert not task.cancelled()
+
+
+class TestActGatesOnExperiments:
+    @pytest.mark.asyncio
+    async def test_act_awaits_experiments_before_llm_call(self) -> None:
+        loop = build_test_agent_loop(
+            backend=FakeBackend(mock_llm_chunk(content="hello"))
+        )
+        gate = asyncio.Event()
+        finished_init = False
+
+        async def slow_init() -> None:
+            nonlocal finished_init
+            await gate.wait()
+            finished_init = True
+
+        with patch.object(loop, "initialize_experiments", side_effect=slow_init):
+            loop.start_initialize_experiments()
+
+            async def release() -> None:
+                await asyncio.sleep(0.01)
+                gate.set()
+
+            asyncio.create_task(release())
+            events = [event async for event in loop.act("Hello")]
+
+            assert finished_init is True
+            assert any(getattr(event, "content", None) == "hello" for event in events)

@@ -102,6 +102,79 @@ class TestReadSafe:
             read_safe(tmp_path / "nope.txt")
 
 
+class TestReadSafeNewlines:
+    def test_lf(self, tmp_path: Path) -> None:
+        f = tmp_path / "lf.txt"
+        f.write_bytes(b"a\nb\nc\n")
+        got = read_safe(f)
+        assert got.text == "a\nb\nc\n"
+        assert got.newline == "\n"
+
+    def test_crlf(self, tmp_path: Path) -> None:
+        f = tmp_path / "crlf.txt"
+        f.write_bytes(b"a\r\nb\r\nc\r\n")
+        got = read_safe(f)
+        assert got.text == "a\nb\nc\n"
+        assert got.newline == "\r\n"
+
+    def test_cr(self, tmp_path: Path) -> None:
+        f = tmp_path / "cr.txt"
+        f.write_bytes(b"a\rb\rc\r")
+        got = read_safe(f)
+        assert got.text == "a\nb\nc\n"
+        assert got.newline == "\r"
+
+    def test_mixed_picks_most_frequent(self, tmp_path: Path) -> None:
+        f = tmp_path / "mixed.txt"
+        f.write_bytes(b"a\r\nb\r\nc\rd\n")
+        got = read_safe(f)
+        assert got.text == "a\nb\nc\nd\n"
+        assert got.newline == "\r\n"
+
+    @pytest.mark.parametrize(("linesep", "expected"), [("\n", "\n"), ("\r\n", "\r\n")])
+    def test_no_newline_defaults_to_os_linesep(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        linesep: str,
+        expected: str,
+    ) -> None:
+        monkeypatch.setattr(io_utils.os, "linesep", linesep)
+        f = tmp_path / "single.txt"
+        f.write_bytes(b"hello")
+        got = read_safe(f)
+        assert got.text == "hello"
+        assert got.newline == expected
+
+    @pytest.mark.parametrize(("linesep", "expected"), [("\n", "\n"), ("\r\n", "\r\n")])
+    def test_empty_defaults_to_os_linesep(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        linesep: str,
+        expected: str,
+    ) -> None:
+        monkeypatch.setattr(io_utils.os, "linesep", linesep)
+        f = tmp_path / "empty.txt"
+        f.write_bytes(b"")
+        got = read_safe(f)
+        assert got.text == ""
+        assert got.newline == expected
+
+    def test_decode_safe_reports_newline(self) -> None:
+        got = decode_safe(b"a\r\nb\r\n")
+        assert got.text == "a\nb\n"
+        assert got.newline == "\r\n"
+
+    @pytest.mark.asyncio
+    async def test_async_reports_newline(self, tmp_path: Path) -> None:
+        f = tmp_path / "crlf.txt"
+        f.write_bytes(b"a\r\nb\r\n")
+        got = await read_safe_async(f)
+        assert got.text == "a\nb\n"
+        assert got.newline == "\r\n"
+
+
 class TestReadSafeResultEncoding:
     def test_reports_utf8_for_plain_utf8_file(self, tmp_path: Path) -> None:
         f = tmp_path / "x.txt"

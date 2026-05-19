@@ -259,7 +259,7 @@ class TestAgentApplyToConfig:
 
         mock_manager = _MockManager(sources=("user",))
         monkeypatch.setattr(
-            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
+            "vibe.core.prompts.get_harness_files_manager", lambda: mock_manager
         )
 
         base = VibeConfig(include_project_context=False, include_prompt_detail=False)
@@ -298,7 +298,7 @@ class TestAgentApplyToConfig:
 
         mock_manager = _MockManager(sources=("user",))
         monkeypatch.setattr(
-            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
+            "vibe.core.prompts.get_harness_files_manager", lambda: mock_manager
         )
 
         config = VibeConfig(
@@ -700,7 +700,7 @@ class TestAgentLoopInitialization:
 
         mock_manager = _MockManager(sources=("user",))
         monkeypatch.setattr(
-            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
+            "vibe.core.prompts.get_harness_files_manager", lambda: mock_manager
         )
 
         custom_agent = AgentProfile(

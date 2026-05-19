@@ -30,10 +30,11 @@ from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
+    from vibe.core.config import VibeConfig
     from vibe.core.skills.manager import SkillManager
     from vibe.core.telemetry.types import EntrypointMetadata
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
-    from vibe.core.tools.permissions import PermissionContext
+    from vibe.core.tools.permissions import PermissionContext, PermissionStore
     from vibe.core.types import ApprovalCallback, SwitchAgentCallback, UserInputCallback
 
 ARGS_COUNT = 4
@@ -54,6 +55,7 @@ class InvokeContext:
     switch_agent_callback: SwitchAgentCallback | None = field(default=None)
     skill_manager: SkillManager | None = field(default=None)
     scratchpad_dir: Path | None = field(default=None)
+    permission_store: PermissionStore | None = field(default=None)
 
 
 class ToolError(Exception):
@@ -339,7 +341,7 @@ class BaseTool[
         return snake_case
 
     @classmethod
-    def is_available(cls) -> bool:
+    def is_available(cls, config: VibeConfig | None = None) -> bool:
         return True
 
     @classmethod

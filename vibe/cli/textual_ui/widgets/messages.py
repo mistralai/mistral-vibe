@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from vibe.core.hooks.models import HookMessageSeverity
+from vibe.core.logger import logger
+from vibe.core.utils.io import read_safe_async
 
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.app import ChatScroll
 
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
+from textual.reactive import reactive
+from textual.widget import Widget
 from textual.widgets import Static
 from textual.widgets._markdown import MarkdownStream
+from watchfiles import awatch
 
 from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown as Markdown
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
@@ -443,3 +452,60 @@ class WarningMessage(Static):
             if self._show_border:
                 yield ExpandingBorder(classes="warning-border")
             yield NoMarkupStatic(self._message, classes="warning-content")
+
+
+class PlanFileMessage(Widget):
+    content: reactive[str] = reactive("")
+
+    def __init__(self, file_path: Path) -> None:
+        super().__init__()
+        self.add_class("plan-file-message")
+        self._file_path = file_path
+        self._watch_task: asyncio.Task | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="plan-file-wrapper"):
+            yield Markdown(self.content, classes="plan-file-content")
+
+    def watch_content(self, new_content: str) -> None:
+        try:
+            self.query_one(Markdown).update(new_content)
+        except NoMatches:
+            pass
+
+    async def on_mount(self) -> None:
+        self.content = (await read_safe_async(self._file_path)).text
+        self._watch_task = asyncio.create_task(self._watch_file())
+
+    async def _watch_file(self) -> None:
+        try:
+            async for _ in awatch(self._file_path):
+                self.content = (await read_safe_async(self._file_path)).text
+        except (asyncio.CancelledError, FileNotFoundError):
+            pass
+
+    def open_in_editor(self) -> None:
+        from vibe.cli.textual_ui.external_editor import ExternalEditor
+
+        try:
+            self._file_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.app.suspend():
+                ExternalEditor.edit_file(self._file_path)
+        except OSError:
+            logger.warning(
+                "Failed to open plan file in editor: %s", self._file_path, exc_info=True
+            )
+            self.app.notify(
+                f"Could not open plan in editor: {self._file_path}",
+                severity="error",
+                timeout=6,
+            )
+
+    def stop_watching(self) -> None:
+        if self._watch_task is None:
+            return
+
+        if not self._watch_task.done():
+            self._watch_task.cancel()
+
+        self._watch_task = None

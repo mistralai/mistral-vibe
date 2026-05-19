@@ -1,33 +1,100 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import sys
 from typing import Any
 
 from rich import print as rprint
 from textual.app import App
 
+from vibe.core.config import VibeConfig
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.telemetry.types import EntrypointMetadata
-from vibe.setup.onboarding.screens import ApiKeyScreen, WelcomeScreen
+from vibe.setup.auth import BrowserSignInService, HttpBrowserSignInGateway
+from vibe.setup.onboarding.context import OnboardingContext
+from vibe.setup.onboarding.screens import (
+    ApiKeyScreen,
+    AuthMethodScreen,
+    BrowserSignInScreen,
+    WelcomeScreen,
+)
 
 
 class OnboardingApp(App[str | None]):
     CSS_PATH = "onboarding.tcss"
 
     def __init__(
-        self, entrypoint_metadata: EntrypointMetadata | None = None, **kwargs: Any
+        self,
+        config: OnboardingContext | VibeConfig | None = None,
+        browser_sign_in_service_factory: Callable[[], BrowserSignInService]
+        | None = None,
+        entrypoint_metadata: EntrypointMetadata | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        if config is None:
+            config = OnboardingContext.load()
+        elif isinstance(config, VibeConfig):
+            config = OnboardingContext.from_config(config)
+
+        self._config = config
+        self._provider = config.provider
         self._entrypoint_metadata = entrypoint_metadata
+        self._browser_sign_in_service_factory = self._resolve_browser_sign_in_factory(
+            browser_sign_in_service_factory
+        )
 
     def on_mount(self) -> None:
         self.theme = "textual-ansi"
 
-        self.install_screen(WelcomeScreen(), "welcome")
+        welcome_next = "auth_method" if self.supports_browser_sign_in else "api_key"
+        welcome_screen = WelcomeScreen(next_screen=welcome_next)
+        self.install_screen(welcome_screen, "welcome")
         self.install_screen(
-            ApiKeyScreen(entrypoint_metadata=self._entrypoint_metadata), "api_key"
+            ApiKeyScreen(self._provider, entrypoint_metadata=self._entrypoint_metadata),
+            "api_key",
         )
+        if self._browser_sign_in_service_factory is not None:
+            self.install_screen(AuthMethodScreen(self._provider), "auth_method")
+            self.install_screen(
+                BrowserSignInScreen(
+                    self._provider,
+                    self._browser_sign_in_service_factory,
+                    entrypoint_metadata=self._entrypoint_metadata,
+                ),
+                "browser_sign_in",
+            )
         self.push_screen("welcome")
+
+    @property
+    def supports_browser_sign_in(self) -> bool:
+        return self._browser_sign_in_service_factory is not None
+
+    def _build_browser_sign_in_service_factory(
+        self,
+    ) -> Callable[[], BrowserSignInService]:
+        browser_base_url = self._provider.browser_auth_base_url
+        api_base_url = self._provider.browser_auth_api_base_url
+        if not browser_base_url or not api_base_url:
+            msg = "Browser sign-in requires both browser auth URLs."
+            raise AssertionError(msg)
+
+        return lambda: BrowserSignInService(
+            HttpBrowserSignInGateway(
+                browser_base_url=browser_base_url, api_base_url=api_base_url
+            )
+        )
+
+    def _resolve_browser_sign_in_factory(
+        self, browser_sign_in_service_factory: Callable[[], BrowserSignInService] | None
+    ) -> Callable[[], BrowserSignInService] | None:
+        if not self._config.browser_sign_in_enabled:
+            return None
+
+        return (
+            browser_sign_in_service_factory
+            or self._build_browser_sign_in_service_factory()
+        )
 
 
 def run_onboarding(

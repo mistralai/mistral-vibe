@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import ClassVar
 
 from pydantic import BaseModel
@@ -14,6 +15,8 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.core.config import VibeConfig
 from vibe.core.tools.permissions import RequiredPermission
+
+_INPUT_GRACE_PERIOD_S = 0.5
 
 
 class ApprovalApp(Container):
@@ -88,6 +91,7 @@ class ApprovalApp(Container):
         self.tool_info_container: Vertical | None = None
         self.option_widgets: list[Static] = []
         self.help_widget: Static | None = None
+        self._mount_time: float = 0.0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-options"):
@@ -119,9 +123,13 @@ class ApprovalApp(Container):
         return f"Permission for the {self.tool_name} tool"
 
     async def on_mount(self) -> None:
+        self._mount_time = time.monotonic()
         await self._update_tool_info()
         self._update_options()
         self.focus()
+
+    def is_within_grace_period(self) -> bool:
+        return (time.monotonic() - self._mount_time) < _INPUT_GRACE_PERIOD_S
 
     async def _update_tool_info(self) -> None:
         if not self.tool_info_container:
@@ -175,28 +183,29 @@ class ApprovalApp(Container):
         self.selected_option = (self.selected_option + 1) % self.NUM_OPTIONS
         self._update_options()
 
+    def _select_if_unguarded(self, option: int) -> None:
+        if self.is_within_grace_period():
+            return
+        self.selected_option = option
+        self._handle_selection(option)
+
     def action_select(self) -> None:
-        self._handle_selection(self.selected_option)
+        self._select_if_unguarded(self.selected_option)
 
     def action_select_1(self) -> None:
-        self.selected_option = 0
-        self._handle_selection(0)
+        self._select_if_unguarded(0)
 
     def action_select_2(self) -> None:
-        self.selected_option = 1
-        self._handle_selection(1)
+        self._select_if_unguarded(1)
 
     def action_select_3(self) -> None:
-        self.selected_option = 2
-        self._handle_selection(2)
+        self._select_if_unguarded(2)
 
     def action_select_4(self) -> None:
-        self.selected_option = 3
-        self._handle_selection(3)
+        self._select_if_unguarded(3)
 
     def action_reject(self) -> None:
-        self.selected_option = 3
-        self._handle_selection(3)
+        self._select_if_unguarded(3)
 
     def _handle_selection(self, option: int) -> None:
         match option:

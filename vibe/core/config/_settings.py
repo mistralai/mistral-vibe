@@ -29,10 +29,9 @@ from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
-from vibe.core.prompts import SystemPrompt
+from vibe.core.prompts import load_system_prompt
 from vibe.core.types import Backend
 from vibe.core.utils import get_server_url_from_api_base
-from vibe.core.utils.io import read_safe
 
 
 def _strip_bash_pattern_wildcard(pattern: str) -> str:
@@ -75,17 +74,6 @@ class MissingAPIKeyError(RuntimeError):
         )
         self.env_key = env_key
         self.provider_name = provider_name
-
-
-class MissingPromptFileError(RuntimeError):
-    def __init__(self, system_prompt_id: str, *prompt_dirs: str) -> None:
-        dirs_str = " or ".join(prompt_dirs) if prompt_dirs else "<no prompt dirs>"
-        super().__init__(
-            f"Invalid system_prompt_id value: '{system_prompt_id}'. "
-            f"Must be one of the available prompts ({', '.join(f'{p.name.lower()}' for p in SystemPrompt)}), "
-            f"or correspond to a .md file in {dirs_str}"
-        )
-        self.system_prompt_id = system_prompt_id
 
 
 class TomlFileSettingsSource(PydanticBaseSettingsSource):
@@ -146,6 +134,14 @@ class ProjectContextConfig(BaseSettings):
     timeout_seconds: float = 2.0
 
 
+class ExperimentsConfig(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
+
+    enable: bool = True
+    api_host: str = "https://experiments.mistral.services/"
+    client_key: str = "sdk-OE8yJgTXZY6tj"
+
+
 class SessionLoggingConfig(BaseSettings):
     save_dir: str = ""
     session_prefix: str = "session"
@@ -167,6 +163,7 @@ class SessionLoggingConfig(BaseSettings):
 DEFAULT_MISTRAL_API_ENV_KEY = "MISTRAL_API_KEY"
 DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL = "https://console.mistral.ai"
 DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL = "https://console.mistral.ai/api"
+DEFAULT_CONSOLE_BASE_URL = "https://console.mistral.ai"
 
 
 class ProviderConfig(BaseModel):
@@ -509,6 +506,7 @@ class VibeConfig(BaseSettings):
     active_tts_model: str = "voxtral-tts"
     bypass_tool_permissions: bool = False
     enable_telemetry: bool = True
+    experiment_overrides: dict[str, str] = Field(default_factory=dict)
     system_prompt_id: str = "cli"
     include_commit_signature: bool = True
     include_model_info: bool = True
@@ -531,7 +529,10 @@ class VibeConfig(BaseSettings):
     enable_otel: bool = Field(default=False, exclude=True)
     otel_endpoint: str = Field(default="", exclude=True)
 
+    console_base_url: str = Field(default=DEFAULT_CONSOLE_BASE_URL, exclude=True)
+
     enable_experimental_hooks: bool = Field(default=False, exclude=True)
+    enable_experimental_browser_sign_in: bool = Field(default=False, exclude=True)
 
     providers: list[ProviderConfig] = Field(
         default_factory=lambda: list(DEFAULT_PROVIDERS)
@@ -554,6 +555,7 @@ class VibeConfig(BaseSettings):
     )
 
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
+    experiments: ExperimentsConfig = Field(default_factory=ExperimentsConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
     tools: dict[str, dict[str, Any]] = Field(default_factory=dict)
     tool_paths: list[Path] = Field(
@@ -568,6 +570,13 @@ class VibeConfig(BaseSettings):
 
     mcp_servers: list[MCPServer] = Field(
         default_factory=list, description="Preferred MCP server configuration entries."
+    )
+    enable_connectors: bool = Field(
+        default=True,
+        description=(
+            "Master switch for Mistral connectors. When False, no connector "
+            "tools are discovered or registered, regardless of provider/API key."
+        ),
     )
     connectors: list[ConnectorConfig] = Field(
         default_factory=list,
@@ -701,23 +710,7 @@ class VibeConfig(BaseSettings):
 
     @property
     def system_prompt(self) -> str:
-        mgr = get_harness_files_manager()
-        prompt_dirs = mgr.project_prompts_dirs + mgr.user_prompts_dirs
-        for current_prompt_dir in prompt_dirs:
-            custom_sp_path = (current_prompt_dir / self.system_prompt_id).with_suffix(
-                ".md"
-            )
-            if custom_sp_path.is_file():
-                return read_safe(custom_sp_path).text
-
-        try:
-            return SystemPrompt[self.system_prompt_id.upper()].read()
-        except KeyError:
-            pass
-
-        raise MissingPromptFileError(
-            self.system_prompt_id, *(str(d) for d in prompt_dirs)
-        )
+        return load_system_prompt(self.system_prompt_id)
 
     def get_active_model(self) -> ModelConfig:
         for model in self.models:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.setup.auth.browser_sign_in import BrowserSignInService
+from vibe.setup.auth.browser_sign_in import BrowserSignInService, BrowserSignInStatus
 from vibe.setup.auth.browser_sign_in_gateway import (
     BrowserSignInError,
     BrowserSignInErrorCode,
@@ -17,5 +17,6 @@ __all__ = [
     "BrowserSignInPollResult",
     "BrowserSignInProcess",
     "BrowserSignInService",
+    "BrowserSignInStatus",
     "HttpBrowserSignInGateway",
 ]

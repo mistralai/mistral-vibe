@@ -4,6 +4,7 @@ from pathlib import Path
 import tomllib
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.permissions import PermissionScope, RequiredPermission
 
 
@@ -27,7 +28,10 @@ class TestApproveAlwaysPermanentNoGranularPermissions:
 
         agent.approve_always("bash", None, save_permanently=False)
 
-        assert agent.config.tools["bash"]["permission"] == "always"
+        assert (
+            agent.tool_manager.get_tool_config("bash").permission
+            == ToolPermission.ALWAYS
+        )
         persisted = _read_persisted_config(config_dir)
         assert "bash" not in persisted.get("tools", {})
 
@@ -58,8 +62,8 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
 
         agent.approve_always("bash", perms, save_permanently=True)
 
-        assert len(agent._session_rules) == 1
-        rule = agent._session_rules[0]
+        assert len(agent._permission_store._rules) == 1
+        rule = agent._permission_store._rules[0]
         assert rule.tool_name == "bash"
         assert rule.scope == PermissionScope.COMMAND_PATTERN
         assert rule.session_pattern == "npm install *"
@@ -70,7 +74,7 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
 
         agent.approve_always("bash", perms, save_permanently=False)
 
-        assert len(agent._session_rules) == 1
+        assert len(agent._permission_store._rules) == 1
         persisted = _read_persisted_config(config_dir)
         assert "bash" not in persisted.get("tools", {})
 

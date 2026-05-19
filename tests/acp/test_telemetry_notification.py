@@ -75,6 +75,31 @@ class TestTelemetryNotification:
         assert props["message_id"] == "msg-abc"
 
     @pytest.mark.asyncio
+    async def test_user_rating_feedback_dispatches_telemetry(
+        self, acp_agent_loop: VibeAcpAgentLoop, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        session = await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+        telemetry_events.clear()
+
+        await acp_agent_loop.ext_notification(
+            "telemetry/send",
+            {
+                "event": "vibe.user_rating_feedback",
+                "session_id": session.session_id,
+                "properties": {"rating": 1},
+            },
+        )
+
+        rating_events = [
+            e
+            for e in telemetry_events
+            if e["event_name"] == "vibe.user_rating_feedback"
+        ]
+        assert len(rating_events) == 1
+        props = rating_events[0]["properties"]
+        assert props["rating"] == 1
+
+    @pytest.mark.asyncio
     async def test_raises_on_invalid_params(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:

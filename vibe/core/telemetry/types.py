@@ -30,6 +30,7 @@ class TelemetryBaseMetadata(BaseModel):
     client_version: str | None = None
     session_id: str | None = None
     parent_session_id: str | None = None
+    experiments: dict[str, str] | None = None
 
 
 class TelemetryRequestMetadata(TelemetryBaseMetadata):

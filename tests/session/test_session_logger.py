@@ -11,6 +11,7 @@ import pytest
 from tests.conftest import build_test_vibe_config
 from vibe.core.agents.models import AgentProfile, AgentSafety
 from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.experiments.models import EvalResponse
 from vibe.core.loop import ScheduledLoop
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.tools.manager import ToolManager
@@ -114,16 +115,12 @@ class TestSessionLoggerMetadata:
         self, mock_getuser, mock_subprocess, session_config: SessionLoggingConfig
     ) -> None:
         """Test that session metadata is correctly initialized."""
-        # Mock git commands
-        git_commit_mock = MagicMock()
-        git_commit_mock.returncode = 0
-        git_commit_mock.stdout = "abc123\n"
+        # Mock combined git command
+        git_mock = MagicMock()
+        git_mock.returncode = 0
+        git_mock.stdout = "abc123\nmain\n"
 
-        git_branch_mock = MagicMock()
-        git_branch_mock.returncode = 0
-        git_branch_mock.stdout = "main\n"
-
-        mock_subprocess.side_effect = [git_commit_mock, git_branch_mock]
+        mock_subprocess.return_value = git_mock
         mock_getuser.return_value = "testuser"
 
         session_id = "test-session-123"
@@ -149,7 +146,7 @@ class TestSessionLoggerMetadata:
         self, mock_getuser, mock_subprocess, session_config: SessionLoggingConfig
     ) -> None:
         """Test that session metadata handles git command errors gracefully."""
-        # Mock git commands to fail
+        # Mock combined git command to fail
         mock_subprocess.side_effect = FileNotFoundError("git not found")
         mock_getuser.return_value = "testuser"
 
@@ -1002,3 +999,153 @@ class TestPersistLoops:
             metadata = json.load(f)
         assert len(metadata["loops"]) == 1
         assert metadata["loops"][0]["id"] == "aabbccdd"
+
+
+class TestPersistExperiments:
+    @pytest.fixture
+    def sample_response(self) -> EvalResponse:
+        return EvalResponse.model_validate({
+            "features": {
+                "vibe_code_cli_test_ab": {
+                    "defaultValue": "cli",
+                    "rules": [
+                        {
+                            "force": "cli_v2",
+                            "tracks": [
+                                {
+                                    "experiment": {"key": "vibe_code_cli_test_ab"},
+                                    "result": {
+                                        "key": "1",
+                                        "variationId": 1,
+                                        "inExperiment": True,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        })
+
+    @pytest.mark.asyncio
+    async def test_writes_field_into_existing_metadata(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+        sample_response: EvalResponse,
+    ) -> None:
+        logger = SessionLogger(session_config, "exp-session")
+        await logger.save_interaction(
+            messages=[
+                LLMMessage(role=Role.system, content="System prompt"),
+                LLMMessage(role=Role.user, content="Hello"),
+            ],
+            stats=AgentStats(steps=1),
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        await logger.persist_experiments(sample_response)
+
+        assert logger.session_dir is not None
+        with open(logger.session_dir / "meta.json") as f:
+            metadata = json.load(f)
+        assert "experiments" in metadata
+        assert (
+            metadata["experiments"]["features"]["vibe_code_cli_test_ab"]["defaultValue"]
+            == "cli"
+        )
+
+    @pytest.mark.asyncio
+    async def test_persists_none_as_null(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+    ) -> None:
+        logger = SessionLogger(session_config, "exp-none")
+        await logger.save_interaction(
+            messages=[
+                LLMMessage(role=Role.system, content="x"),
+                LLMMessage(role=Role.user, content="y"),
+            ],
+            stats=AgentStats(steps=1),
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        await logger.persist_experiments(None)
+
+        assert logger.session_dir is not None
+        with open(logger.session_dir / "meta.json") as f:
+            metadata = json.load(f)
+        assert metadata.get("experiments") is None
+
+    @pytest.mark.asyncio
+    async def test_does_not_create_metadata_file_when_missing(
+        self, session_config: SessionLoggingConfig, sample_response: EvalResponse
+    ) -> None:
+        # Sessions without any message must not be persisted at all —
+        # persist_experiments updates only in-memory state when meta.json is
+        # absent, and lets the eventual save_interaction write it.
+        logger = SessionLogger(session_config, "fresh-session")
+        assert logger.session_dir is not None
+        assert not (logger.session_dir / "meta.json").exists()
+
+        await logger.persist_experiments(sample_response)
+
+        assert not (logger.session_dir / "meta.json").exists()
+        assert logger.session_metadata is not None
+        assert logger.session_metadata.experiments == sample_response
+
+    @pytest.mark.asyncio
+    async def test_noop_when_logging_disabled(
+        self,
+        disabled_session_config: SessionLoggingConfig,
+        sample_response: EvalResponse,
+    ) -> None:
+        logger = SessionLogger(disabled_session_config, "ignored")
+        await logger.persist_experiments(sample_response)
+
+    @pytest.mark.asyncio
+    async def test_first_save_interaction_includes_in_memory_experiments(
+        self,
+        session_config: SessionLoggingConfig,
+        mock_vibe_config: VibeConfig,
+        mock_tool_manager: ToolManager,
+        mock_agent_profile: AgentProfile,
+        sample_response: EvalResponse,
+    ) -> None:
+        # Real flow: persist_experiments at session start (no meta.json yet,
+        # in-memory only). The first save_interaction must succeed AND
+        # include the experiments snapshot in the eventual meta.json.
+        logger = SessionLogger(session_config, "first-save-after-experiments")
+        await logger.persist_experiments(sample_response)
+
+        assert logger.session_dir is not None
+        assert not (logger.session_dir / "meta.json").exists()
+
+        await logger.save_interaction(
+            messages=[
+                LLMMessage(role=Role.system, content="System prompt"),
+                LLMMessage(role=Role.user, content="Hello"),
+                LLMMessage(role=Role.assistant, content="Hi"),
+            ],
+            stats=AgentStats(steps=1),
+            base_config=mock_vibe_config,
+            tool_manager=mock_tool_manager,
+            agent_profile=mock_agent_profile,
+        )
+
+        with open(logger.session_dir / "meta.json") as f:
+            metadata = json.load(f)
+        assert metadata["total_messages"] == 2
+        assert (
+            metadata["experiments"]["features"]["vibe_code_cli_test_ab"]["defaultValue"]
+            == "cli"
+        )

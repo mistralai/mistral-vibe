@@ -232,7 +232,7 @@ class TestAnswerHandling:
 
 class TestPlanFile:
     @pytest.mark.asyncio
-    async def test_content_passed_as_preview(
+    async def test_keybinding_hint_shown_as_preview(
         self, tool: ExitPlanMode, plan_manager: MockAgentManager, tmp_path: Path
     ) -> None:
         plan_file = tmp_path / "plan.md"
@@ -247,21 +247,36 @@ class TestPlanFile:
         )
         await collect_result(tool.run(ExitPlanModeArgs(), ctx))
         assert isinstance(cb.received_args, AskUserQuestionArgs)
-        assert cb.received_args.content_preview == "# My Plan\n\n- Step 1\n- Step 2\n"
+        assert cb.received_args.footer_note is not None
+        assert "Ctrl+G" in cb.received_args.footer_note
+        assert str(plan_file) in cb.received_args.footer_note
 
     @pytest.mark.asyncio
-    async def test_missing_file_means_none_preview(
+    async def test_result_does_not_include_plan_content(
         self, tool: ExitPlanMode, plan_manager: MockAgentManager, tmp_path: Path
     ) -> None:
-        plan_file = tmp_path / "nonexistent.md"
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("# My Plan\n\n- Step 1\n- Step 2\n")
 
-        cb = MockCallback(AskUserQuestionResult(answers=[], cancelled=True))
+        cb = MockCallback(
+            AskUserQuestionResult(
+                answers=[
+                    Answer(
+                        question="q",
+                        answer="Yes, and auto approve edits",
+                        is_other=False,
+                    )
+                ],
+                cancelled=False,
+            )
+        )
         ctx = InvokeContext(
             tool_call_id="t1",
             agent_manager=plan_manager,  # type: ignore[arg-type]
             user_input_callback=cb,
             plan_file_path=plan_file,
         )
-        await collect_result(tool.run(ExitPlanModeArgs(), ctx))
-        assert isinstance(cb.received_args, AskUserQuestionArgs)
-        assert cb.received_args.content_preview is None
+        result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
+        assert result.switched is True
+        assert "# My Plan" not in result.message
+        assert "source of truth" not in result.message

@@ -23,7 +23,7 @@ from vibe.core.types import (
 )
 
 
-def _empty_session_metadata() -> dict[str, str]:
+def _empty_session_metadata() -> dict[str, Any]:
     return {}
 
 
@@ -34,13 +34,13 @@ class TurnSummaryTracker(TurnSummaryPort):
         model: ModelConfig,
         on_summary: Callable[[TurnSummaryResult], None] | None = None,
         max_tokens: int = 512,
-        session_metadata_getter: Callable[[], dict[str, str]] | None = None,
+        session_metadata_getter: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._backend = backend
         self._model = model
         self._on_summary = on_summary
         self._max_tokens = max_tokens
-        self._session_metadata_getter: Callable[[], dict[str, str]] = (
+        self._session_metadata_getter: Callable[[], dict[str, Any]] = (
             _empty_session_metadata
             if session_metadata_getter is None
             else session_metadata_getter

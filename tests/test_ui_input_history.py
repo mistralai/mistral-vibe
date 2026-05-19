@@ -61,10 +61,15 @@ async def test_ui_navigation_restores_partially_typed_draft_after_round_trip(
     async with vibe_app.run_test() as pilot:
         inject_history_file(vibe_app, history_file)
         chat_input = vibe_app.query_one(ChatInputContainer)
+        textarea = chat_input.input_widget
+        assert textarea is not None
 
         await pilot.press(*"he")
         assert chat_input.value == "he"
 
+        await pilot.press("up")
+        assert chat_input.value == "he"
+        assert textarea.cursor_location == (0, 0)
         await pilot.press("up")
         assert chat_input.value == "how are you?"
         await pilot.press("down")
@@ -207,6 +212,7 @@ async def test_ui_intercepts_arrow_up_only_on_first_wrapped_row(
         while textarea.get_cursor_up_location() != textarea.cursor_location:
             textarea.action_cursor_up()
 
+        assert textarea.cursor_location == (0, 0)
         await pilot.press("up")
         assert chat_input.value == "how are you?"
 

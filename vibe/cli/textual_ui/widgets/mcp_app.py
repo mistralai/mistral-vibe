@@ -16,7 +16,7 @@ from textual.worker import Worker
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ConnectorConfig
-from vibe.core.tools.connectors import ConnectorRegistry, connectors_enabled
+from vibe.core.tools.connectors import ConnectorRegistry
 from vibe.core.tools.mcp.tools import MCPTool
 from vibe.core.tools.mcp_settings import updated_tool_list
 
@@ -44,7 +44,7 @@ def collect_mcp_tool_index(
     registered = tool_manager.registered_tools
     available = tool_manager.available_tools
     configured_servers = {server.name for server in mcp_servers}
-    connector_set = set(connector_names) if connectors_enabled() else set()
+    connector_set = set(connector_names)
     server_tools: dict[str, list[tuple[str, type[MCPTool]]]] = {}
     connector_tools: dict[str, list[tuple[str, type[MCPTool]]]] = {}
 
@@ -410,7 +410,7 @@ class MCPApp(Container):
     def _show_list_view(self, option_list: OptionList, index: MCPToolIndex) -> None:
         self._viewing_server = None
         self._viewing_kind = None
-        has_connectors = connectors_enabled() and bool(self._connector_names)
+        has_connectors = bool(self._connector_names)
         title = "MCP Servers & Connectors" if has_connectors else "MCP Servers"
         self.query_one("#mcp-title", NoMarkupStatic).update(title)
         self._set_help_text(_LIST_VIEW_HELP_TOOLS)
@@ -424,12 +424,9 @@ class MCPApp(Container):
                 option_list.add_option(Option(Text("", no_wrap=True), disabled=True))
             self._list_connectors(option_list=option_list, index=index)
         if not has_servers and not has_connectors:
-            empty_msg = (
-                "No MCP servers or connectors configured"
-                if connectors_enabled()
-                else "No MCP servers configured"
+            option_list.add_option(
+                Option("No MCP servers or connectors configured", disabled=True)
             )
-            option_list.add_option(Option(empty_msg, disabled=True))
 
         if has_servers or has_connectors:
             # Skip disabled header options (e.g. section labels).

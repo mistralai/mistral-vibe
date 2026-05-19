@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import itertools
+import time
 from typing import TYPE_CHECKING, ClassVar
 
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Input
 
-from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
+
+_INPUT_GRACE_PERIOD_S = 0.5
 
 if TYPE_CHECKING:
     from vibe.core.tools.builtins.ask_user_question import (
@@ -66,6 +68,7 @@ class QuestionApp(Container):
         self.submit_widget: NoMarkupStatic | None = None
         self.help_widget: NoMarkupStatic | None = None
         self.tabs_widget: NoMarkupStatic | None = None
+        self._mount_time: float = 0.0
 
     @property
     def _current_question(self) -> Question:
@@ -110,16 +113,7 @@ class QuestionApp(Container):
         )
 
     def compose(self) -> ComposeResult:
-        if self.args.content_preview:
-            with VerticalScroll(classes="question-content-preview"):
-                yield AnsiMarkdown(
-                    self.args.content_preview, classes="question-content-preview-text"
-                )
-
-        question_content_classes = (
-            "question-content-docked" if self.args.content_preview else ""
-        )
-        with Vertical(id="question-content", classes=question_content_classes):
+        with Vertical(id="question-content"):
             if len(self.questions) > 1:
                 self.tabs_widget = NoMarkupStatic("", classes="question-tabs")
                 yield self.tabs_widget
@@ -147,12 +141,21 @@ class QuestionApp(Container):
             self.submit_widget = NoMarkupStatic("", classes="question-submit")
             yield self.submit_widget
 
+            if self.args.footer_note:
+                yield NoMarkupStatic(
+                    self.args.footer_note, classes="question-footer-note"
+                )
+
             self.help_widget = NoMarkupStatic("", classes="question-help")
             yield self.help_widget
 
     async def on_mount(self) -> None:
+        self._mount_time = time.monotonic()
         self._update_display()
         self.focus()
+
+    def is_within_grace_period(self) -> bool:
+        return (time.monotonic() - self._mount_time) < _INPUT_GRACE_PERIOD_S
 
     def _watch_current_question_idx(self) -> None:
         self._update_display()
@@ -361,6 +364,8 @@ class QuestionApp(Container):
         self._switch_question(new_idx)
 
     def action_select(self) -> None:
+        if self.is_within_grace_period():
+            return
         if self._current_question.multi_select:
             self._handle_multi_select_action()
         else:
@@ -415,6 +420,8 @@ class QuestionApp(Container):
             self._switch_question(new_idx)
 
     def action_cancel(self) -> None:
+        if self.is_within_grace_period():
+            return
         self.post_message(self.Cancelled())
 
     def on_input_submitted(self, _event: Input.Submitted) -> None:
@@ -463,8 +470,11 @@ class QuestionApp(Container):
 
         event.stop()
         event.prevent_default()
-        self.selected_option = option_idx
 
+        if self.is_within_grace_period():
+            return True
+
+        self.selected_option = option_idx
         if not (self._has_other and option_idx == self._other_option_idx):
             self.action_select()
         return True

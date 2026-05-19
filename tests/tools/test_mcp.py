@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from pydantic import ValidationError
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp, VibeConfig
 from vibe.core.tools.mcp import (
@@ -763,21 +764,7 @@ class TestMCPDisableFiltering:
     def _make_config(
         mcp_servers: list[MCPHttp | MCPStdio | MCPStreamableHttp] | None = None,
     ) -> VibeConfig:
-        return cast(
-            VibeConfig,
-            type(
-                "_Cfg",
-                (),
-                {
-                    "mcp_servers": mcp_servers or [],
-                    "connectors": [],
-                    "enabled_tools": [],
-                    "disabled_tools": [],
-                    "tools": {},
-                    "tool_paths": [],
-                },
-            )(),
-        )
+        return build_test_vibe_config(mcp_servers=mcp_servers or [])
 
     def test_disabled_server_excludes_all_tools(self):
         srv = MCPHttp(

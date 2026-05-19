@@ -21,7 +21,6 @@ from vibe.core.tools.builtins.ask_user_question import (
     Question,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.utils.io import read_safe
 
 
 class ExitPlanModeArgs(BaseModel):
@@ -72,16 +71,9 @@ class ExitPlanMode(
         if ctx.user_input_callback is None:
             raise ToolError("ExitPlanMode requires an interactive UI.")
 
-        plan_content: str | None = None
-        if ctx.plan_file_path and ctx.plan_file_path.is_file():
-            try:
-                plan_content = read_safe(ctx.plan_file_path).text
-            except OSError as e:
-                raise ToolError(
-                    f"Failed to read plan file at {ctx.plan_file_path}: {e}"
-                ) from e
-
+        plan_path = str(ctx.plan_file_path) if ctx.plan_file_path else ""
         confirmation = AskUserQuestionArgs(
+            footer_note=f"Plan: {plan_path} (Ctrl+G to edit)",
             questions=[
                 Question(
                     question="Plan is complete. Switch to accept-edits mode and start implementing?",
@@ -102,7 +94,6 @@ class ExitPlanMode(
                     ],
                 )
             ],
-            content_preview=plan_content,
         )
 
         result = await ctx.user_input_callback(confirmation)

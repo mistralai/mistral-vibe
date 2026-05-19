@@ -146,7 +146,7 @@ async def test_passes_parent_session_id_to_backend_after_reset(vibe_config: Vibe
     [_ async for _ in agent.act("Hello")]
     first_session_id = agent.session_id
 
-    agent._reset_session()
+    await agent._reset_session()
     [_ async for _ in agent.act("Hello again")]
 
     assert len(backend.requests_metadata) >= 2

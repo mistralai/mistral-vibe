@@ -195,8 +195,17 @@ def _dispatch_at_mention_inserted(
     )
 
 
+def _dispatch_user_rating_feedback(
+    client: TelemetryClient, properties: dict[str, Any]
+) -> None:
+    client.send_user_rating_feedback(
+        rating=properties.get("rating", 0), model=properties.get("model", "")
+    )
+
+
 _EVENT_DISPATCHERS: dict[str, Callable[[TelemetryClient, dict[str, Any]], None]] = {
-    "vibe.at_mention_inserted": _dispatch_at_mention_inserted
+    "vibe.at_mention_inserted": _dispatch_at_mention_inserted,
+    "vibe.user_rating_feedback": _dispatch_user_rating_feedback,
 }
 
 
@@ -396,7 +405,7 @@ class VibeAcpAgentLoop(AcpAgent):
         except Exception as e:
             raise ConfigurationError(str(e)) from e
 
-        agent_loop.emit_new_session_telemetry()
+        agent_loop.start_initialize_experiments()
 
         modes_state, _, models_state, _ = self._build_session_state(session)
 
@@ -660,6 +669,7 @@ class VibeAcpAgentLoop(AcpAgent):
         agent_loop.session_logger.resume_existing_session(
             loaded_session_id, session_dir
         )
+        await agent_loop.hydrate_experiments_from_session()
 
         non_system_messages = [
             msg for msg in loaded_messages if msg.role != Role.system
@@ -862,8 +872,17 @@ class VibeAcpAgentLoop(AcpAgent):
         )
 
     def _build_text_prompt(self, acp_prompt: list[ContentBlock]) -> str:
+        def _is_automatic_resource(block: ContentBlock) -> bool:
+            return block.type == "resource" and bool(
+                block.field_meta and block.field_meta.get("automatic")
+            )
+
+        ordered = [b for b in acp_prompt if not _is_automatic_resource(b)] + [
+            b for b in acp_prompt if _is_automatic_resource(b)
+        ]
+
         text_prompt = ""
-        for block in acp_prompt:
+        for block in ordered:
             separator = "\n\n" if text_prompt else ""
             match block.type:
                 # NOTE: ACP supports annotations, but we don't use them here yet.
@@ -1206,7 +1225,11 @@ class VibeAcpAgentLoop(AcpAgent):
             )
             return
 
-        dispatcher(session.agent_loop.telemetry_client, notification.properties)
+        properties = {
+            "model": session.agent_loop.config.active_model,
+            **notification.properties,
+        }
+        dispatcher(session.agent_loop.telemetry_client, properties)
 
     @override
     def on_connect(self, conn: Client) -> None:

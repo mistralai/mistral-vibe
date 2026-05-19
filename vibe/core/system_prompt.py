@@ -6,17 +6,24 @@ import os
 from pathlib import Path
 from string import Template
 import subprocess
-import sys
 from typing import TYPE_CHECKING
 
+from vibe.core.config import VibeConfig
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.experiments import ExperimentName
+from vibe.core.logger import logger
 from vibe.core.paths import VIBE_HOME
-from vibe.core.prompts import UtilityPrompt
-from vibe.core.utils import is_dangerous_directory, is_windows
+from vibe.core.prompts import MissingPromptFileError, UtilityPrompt, load_system_prompt
+from vibe.core.utils import (
+    get_platform_display_name,
+    is_dangerous_directory,
+    is_windows,
+)
 
 if TYPE_CHECKING:
     from vibe.core.agents import AgentManager
-    from vibe.core.config import ProjectContextConfig, VibeConfig
+    from vibe.core.config import ProjectContextConfig
+    from vibe.core.experiments import ExperimentManager
     from vibe.core.skills.manager import SkillManager
     from vibe.core.tools.manager import ToolManager
 
@@ -140,18 +147,6 @@ class ProjectContextProvider:
         )
 
 
-def _get_platform_name() -> str:
-    platform_names = {
-        "win32": "Windows",
-        "darwin": "macOS",
-        "linux": "Linux",
-        "freebsd": "FreeBSD",
-        "openbsd": "OpenBSD",
-        "netbsd": "NetBSD",
-    }
-    return platform_names.get(sys.platform, "Unix-like")
-
-
 def _get_default_shell() -> str:
     """Get the default shell used by asyncio.create_subprocess_shell.
 
@@ -165,7 +160,7 @@ def _get_default_shell() -> str:
 
 def _get_os_system_prompt() -> str:
     shell = _get_default_shell()
-    platform_name = _get_platform_name()
+    platform_name = get_platform_display_name()
     prompt = f"The operating system is {platform_name} with shell `{shell}`"
 
     if is_windows():
@@ -253,6 +248,42 @@ def _get_scratchpad_section(scratchpad_dir: Path | None) -> str | None:
     )
 
 
+def _resolve_system_prompt(
+    config: VibeConfig, experiment_manager: ExperimentManager | None
+) -> str:
+    default_prompt_id = VibeConfig.model_fields["system_prompt_id"].default
+    if config.system_prompt_id != default_prompt_id:
+        logger.info(
+            "System prompt loaded: id=%s (user config overrides experiments)",
+            config.system_prompt_id,
+        )
+        return config.system_prompt
+
+    prompt_id = (
+        experiment_manager.get_variant_or_none(ExperimentName.SYSTEM_PROMPT)
+        if experiment_manager is not None
+        else None
+    )
+
+    if prompt_id is None:
+        logger.info(
+            "System prompt loaded: id=%s (user config)", config.system_prompt_id
+        )
+        return config.system_prompt
+
+    try:
+        prompt = load_system_prompt(prompt_id)
+    except MissingPromptFileError:
+        logger.warning(
+            "System prompt loaded: id=%s (variant '%s' missing, fell back)",
+            config.system_prompt_id,
+            prompt_id,
+        )
+        return config.system_prompt
+    logger.info("System prompt loaded: id=%s (experiment variant)", prompt_id)
+    return prompt
+
+
 def _get_headless_section() -> str:
     return (
         "# Headless Mode\n\n"
@@ -273,8 +304,9 @@ def get_universal_system_prompt(  # noqa: PLR0912
     include_git_status: bool = True,
     scratchpad_dir: Path | None = None,
     headless: bool = False,
+    experiment_manager: ExperimentManager | None = None,
 ) -> str:
-    sections = [config.system_prompt]
+    sections = [_resolve_system_prompt(config, experiment_manager)]
 
     if headless:
         sections.append(_get_headless_section())
@@ -319,6 +351,16 @@ def get_universal_system_prompt(  # noqa: PLR0912
         sections.append(context)
 
         mgr = get_harness_files_manager()
+        cwd_resolved = Path.cwd().resolve()
+        extra_roots = [r for r in mgr.project_roots if r.resolve() != cwd_resolved]
+        if extra_roots:
+            dirs_lines = "\n".join(f" - {d}" for d in extra_roots)
+            sections.append(
+                "Additional working directories (treated with the same "
+                "file-access permissions as the primary working directory):\n"
+                + dirs_lines
+            )
+
         user_doc = mgr.load_user_doc()
         project_docs = mgr.load_project_docs()
 

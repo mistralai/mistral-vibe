@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
@@ -9,6 +10,7 @@ from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     HookRunContainer,
     HookSystemMessageLine,
+    PlanFileMessage,
     ReasoningMessage,
     UserMessage,
 )
@@ -28,6 +30,8 @@ from vibe.core.types import (
     BaseEvent,
     CompactEndEvent,
     CompactStartEvent,
+    PlanReviewEndedEvent,
+    PlanReviewRequestedEvent,
     ReasoningEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -57,6 +61,7 @@ class EventHandler:
         self.current_compact: CompactMessage | None = None
         self.current_streaming_message: AssistantMessage | None = None
         self.current_streaming_reasoning: ReasoningMessage | None = None
+        self.plan_file_message: PlanFileMessage | None = None
         self._hook_run_container: HookRunContainer | None = None
 
     async def _handle_hook_event(
@@ -85,7 +90,7 @@ class EventHandler:
                 if loading_widget:
                     loading_widget.set_status(DEFAULT_LOADING_STATUS)
 
-    async def handle_event(
+    async def handle_event(  # noqa: PLR0912
         self, event: BaseEvent, loading_widget: LoadingWidget | None = None
     ) -> ToolCallMessage | None:
         match event:
@@ -117,6 +122,10 @@ class EventHandler:
                     await self.mount_callback(UserMessage(event.content))
             case HookEvent():
                 await self._handle_hook_event(event, loading_widget)
+            case PlanReviewRequestedEvent():
+                await self._handle_start_plan_review(file_path=event.file_path)
+            case PlanReviewEndedEvent():
+                self._handle_stop_plan_review()
             case WaitingForInputEvent():
                 await self.finalize_streaming()
             case _:
@@ -245,3 +254,16 @@ class EventHandler:
         if self.current_compact:
             self.current_compact.stop_spinning(success=False)
             self.current_compact = None
+
+    async def _handle_start_plan_review(self, file_path: Path) -> None:
+        file_path.touch()
+        msg = PlanFileMessage(file_path=file_path)
+        self.plan_file_message = msg
+        await self.mount_callback(msg)
+
+    def _handle_stop_plan_review(self) -> None:
+        if self.plan_file_message is None:
+            return
+
+        self.plan_file_message.stop_watching()
+        self.plan_file_message = None

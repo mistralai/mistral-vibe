@@ -14,6 +14,7 @@ from vibe.core.paths import (
     AGENTS_MD_FILENAME,
     VIBE_HOME,
     ConfigWalkResult,
+    dedup_paths,
     walk_local_config_dirs,
 )
 from vibe.core.trusted_folders import trusted_folders_manager
@@ -26,13 +27,14 @@ FileSource = Literal["user", "project"]
 class HarnessFilesManager:
     sources: tuple[FileSource, ...] = ("user",)
     cwd: Path | None = field(default=None)
+    _additional_dirs: tuple[Path, ...] = ()
 
     @property
     def _effective_cwd(self) -> Path:
         return self.cwd or Path.cwd()
 
     @property
-    def trusted_workdir(self) -> Path | None:
+    def _trusted_workdir(self) -> Path | None:
         """Return cwd if project source is enabled and trusted, else None."""
         if "project" not in self.sources:
             return None
@@ -43,7 +45,7 @@ class HarnessFilesManager:
 
     @property
     def config_file(self) -> Path | None:
-        workdir = self.trusted_workdir
+        workdir = self._trusted_workdir
         if workdir is not None:
             candidate = workdir / ".vibe" / "config.toml"
             if candidate.is_file():
@@ -53,14 +55,31 @@ class HarnessFilesManager:
         return None
 
     @property
+    def project_roots(self) -> list[Path]:
+        """Open project directories: trusted cwd (if any) plus ``--add-dir``
+        paths.
+
+        ``--add-dir`` entries are coalesced (resolved + nested-collapse: adding
+        ``/x`` and ``/x/y`` is the same as just ``/x``). Add-dirs equal to or
+        nested inside the cwd are dropped — cwd already covers them. The cwd
+        itself, if trusted, is always kept as a starting point: when an add-dir
+        contains it, both survive (the add-dir contributes its own root-level
+        discovery; cwd preserves its walk-up semantics for AGENTS.md).
+        """
+        add_dirs = dedup_paths(self._additional_dirs, drop_nested=True)
+        workdir = self._trusted_workdir
+        if workdir is None:
+            return add_dirs
+        w = workdir.resolve()
+        return [w, *(p for p in add_dirs if p != w and not p.is_relative_to(w))]
+
+    @property
     def hook_files(self) -> list[Path]:
-        hook_files: list[Path] = []
+        files: list[Path] = []
         if "user" in self.sources:
-            hook_files.append(VIBE_HOME.path / "hooks.toml")
-        workdir = self.trusted_workdir
-        if workdir is not None:
-            hook_files.append(workdir / ".vibe" / "hooks.toml")
-        return hook_files
+            files.append(VIBE_HOME.path / "hooks.toml")
+        files.extend(root / ".vibe" / "hooks.toml" for root in self.project_roots)
+        return files
 
     @property
     def persist_allowed(self) -> bool:
@@ -87,23 +106,23 @@ class HarnessFilesManager:
         d = GLOBAL_AGENTS_DIR.path
         return [d] if d.is_dir() else []
 
-    def _walk_project_dirs(self) -> ConfigWalkResult:
-        workdir = self.trusted_workdir
-        if workdir is None:
-            return ConfigWalkResult()
-        return walk_local_config_dirs(workdir)
+    def _walk_project_roots(self) -> ConfigWalkResult:
+        result = ConfigWalkResult()
+        for root in self.project_roots:
+            result |= walk_local_config_dirs(root)
+        return result
 
     @property
     def project_tools_dirs(self) -> list[Path]:
-        return list(self._walk_project_dirs().tools)
+        return list(self._walk_project_roots().tools)
 
     @property
     def project_skills_dirs(self) -> list[Path]:
-        return list(self._walk_project_dirs().skills)
+        return list(self._walk_project_roots().skills)
 
     @property
     def project_agents_dirs(self) -> list[Path]:
-        return list(self._walk_project_dirs().agents)
+        return list(self._walk_project_roots().agents)
 
     @property
     def user_config_file(self) -> Path:
@@ -111,11 +130,11 @@ class HarnessFilesManager:
 
     @property
     def project_prompts_dirs(self) -> list[Path]:
-        workdir = self.trusted_workdir
-        if workdir is None:
-            return []
-        candidate = workdir / ".vibe" / "prompts"
-        return [candidate] if candidate.is_dir() else []
+        return [
+            candidate
+            for root in self.project_roots
+            if (candidate := root / ".vibe" / "prompts").is_dir()
+        ]
 
     @property
     def user_prompts_dirs(self) -> list[Path]:
@@ -168,53 +187,66 @@ class HarnessFilesManager:
         return docs
 
     def find_subdirectory_agents_md(self, file_path: Path) -> list[tuple[Path, str]]:
-        """Find AGENTS.md files between file_path's parent and cwd (exclusive of cwd).
+        """Find AGENTS.md files between file_path's parent and its containing
+        open dir (exclusive of the open dir itself).
 
-        For lazy injection when reading files in subdirectories below cwd.
-        Returns (directory, content) pairs, outermost first.
-        Does not overlap with load_project_docs() which covers cwd and above.
+        For lazy injection when reading files below any open project root.
+        Does not overlap with load_project_docs() which covers the open dir
+        and above.
         """
-        workdir = self.trusted_workdir
-        if workdir is None:
-            return []
-        cwd = workdir.resolve()
         try:
             resolved = file_path.resolve()
         except (ValueError, OSError):
             return []
-        if not resolved.is_relative_to(cwd):
-            return []
-        start = resolved if resolved.is_dir() else resolved.parent
-        return self._collect_agents_md(start, cwd, stop_inclusive=False)
+        for root in self.project_roots:
+            if resolved.is_relative_to(root):
+                start = resolved if resolved.is_dir() else resolved.parent
+                return self._collect_agents_md(start, root, stop_inclusive=False)
+        return []
 
     def load_project_docs(self) -> list[tuple[Path, str]]:
-        """Walk up from cwd to the trust root, collecting AGENTS.md files.
+        """Collect AGENTS.md files from each open project root up to its trust
+        root.
 
-        Returns ``(directory, content)`` pairs ordered outermost-first
-        (trust root first, cwd last).  Later entries take priority.
+        For the trusted cwd entry the trust root is found via
+        ``trusted_folders_manager`` (and may sit above cwd). ``--add-dir``
+        entries that aren't registered there fall back to the root itself.
+
+        Returns ``(directory, content)`` pairs ordered outermost-first; later
+        entries take priority. The same resolved directory is only emitted
+        once across all roots.
         """
-        workdir = self.trusted_workdir
-        if workdir is None:
-            return []
-        cwd = workdir.resolve()
-        trust_root = trusted_folders_manager.find_trust_root(cwd)
-        if trust_root is None:
-            return []
-        return self._collect_agents_md(cwd, trust_root, stop_inclusive=True)
+        by_dir: dict[Path, tuple[Path, str]] = {}
+        for root in self.project_roots:
+            stop = trusted_folders_manager.find_trust_root(root) or root
+            for d, content in self._collect_agents_md(root, stop, stop_inclusive=True):
+                by_dir.setdefault(d.resolve(), (d, content))
+        return list(by_dir.values())
 
 
 _manager: HarnessFilesManager | None = None
 
 
-def init_harness_files_manager(*sources: FileSource) -> None:
+def init_harness_files_manager(
+    *sources: FileSource, additional_dirs: list[Path] | None = None
+) -> None:
+    """Initialize the global HarnessFilesManager singleton.
+
+    *additional_dirs* are extra working directories supplied via ``--add-dir``.
+    They are implicitly trusted (the user opted in via the CLI flag, same
+    semantics as ``--trust``) and do not require a trust-folder check.
+    """
     global _manager
+    candidate = HarnessFilesManager(
+        sources=sources, _additional_dirs=tuple(dedup_paths(additional_dirs or []))
+    )
     if _manager is not None:
-        if _manager.sources == sources:
+        if _manager == candidate:
             return
         raise RuntimeError(
-            "HarnessFilesManager already initialized with different sources"
+            "HarnessFilesManager already initialized with different configuration"
         )
-    _manager = HarnessFilesManager(sources=sources)
+    _manager = candidate
 
 
 def get_harness_files_manager() -> HarnessFilesManager:
