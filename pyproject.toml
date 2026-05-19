@@ -272,15 +272,3 @@ infer-with-first-use = false
 
 [tool.pyrefly.errors]
 untyped-import = "ignore"
-missing-argument = "ignore"
-bad-argument-type = "ignore"
-missing-attribute = "ignore"
-bad-override-mutable-attribute = "ignore"
-bad-override = "ignore"
-bad-typed-dict-key = "ignore"
-bad-return = "ignore"
-bad-assignment = "ignore"
-invalid-annotation = "ignore"
-read-only = "ignore"
-bad-function-definition = "ignore"
-no-matching-overload = "ignore"

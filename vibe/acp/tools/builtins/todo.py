@@ -25,7 +25,7 @@ class AcpTodoState(TodoState, AcpToolState):
 
 
 class Todo(CoreTodoTool, BaseAcpTool[AcpTodoState]):
-    state: AcpTodoState
+    state: AcpTodoState  # type: ignore[override]
     prompt_path = VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "todo.md"
 
     @classmethod
@@ -52,7 +52,7 @@ class Todo(CoreTodoTool, BaseAcpTool[AcpTodoState]):
         }
 
         update = AgentPlanUpdate(
-            session_update="plan",
+            sessionUpdate="plan",
             entries=[
                 PlanEntry(
                     content=todo.content,

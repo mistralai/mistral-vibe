@@ -31,11 +31,11 @@ class Task(
             return fallback_tool_call(event, "task")
 
         return ToolCallStart(
-            session_update="tool_call",
+            sessionUpdate="tool_call",
             title=cls.get_call_display(event).summary,
-            tool_call_id=event.tool_call_id,
+            toolCallId=event.tool_call_id,
             kind=resolve_kind(event.tool_name),
-            raw_input=event.args.model_dump_json(),
+            rawInput=event.args.model_dump_json(),
             field_meta={
                 "tool_name": event.tool_name,
                 "agent": event.args.agent,
@@ -52,8 +52,8 @@ class Task(
         assert isinstance(result, TaskResult)
 
         return ToolCallProgress(
-            session_update="tool_call_update",
-            tool_call_id=event.tool_call_id,
+            sessionUpdate="tool_call_update",
+            toolCallId=event.tool_call_id,
             status="completed" if result.completed else "failed",
             content=[
                 ContentToolCallContent(

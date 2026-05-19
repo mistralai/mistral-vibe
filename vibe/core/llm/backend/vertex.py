@@ -58,7 +58,7 @@ class VertexAnthropicAdapter(AnthropicAdapter):
     """Vertex AI adapter — inherits all streaming/parsing from AnthropicAdapter."""
 
     endpoint: ClassVar[str] = ""
-    BETA_FEATURES: ClassVar[str] = ""
+    BETA_FEATURES: ClassVar[str] = ""  # type: ignore[override]
 
     def __init__(self) -> None:
         super().__init__()

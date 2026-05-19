@@ -66,21 +66,21 @@ def failed_tool_result(
 
     if is_user_cancellation_event(event):
         return ToolCallProgress(
-            session_update="tool_call_update",
-            tool_call_id=event.tool_call_id,
+            sessionUpdate="tool_call_update",
+            toolCallId=event.tool_call_id,
             status="failed",
             kind=kind,
-            raw_output=_cancellation_raw_output(event),
+            rawOutput=_cancellation_raw_output(event),
             field_meta={"tool_name": event.tool_name},
         )
 
     if not isinstance(event.result, expected_type):
         return ToolCallProgress(
-            session_update="tool_call_update",
-            tool_call_id=event.tool_call_id,
+            sessionUpdate="tool_call_update",
+            toolCallId=event.tool_call_id,
             status="failed",
             kind=kind,
-            raw_output=event.error or event.skip_reason,
+            rawOutput=event.error or event.skip_reason,
             field_meta={"tool_name": event.tool_name},
         )
 
@@ -90,11 +90,11 @@ def failed_tool_result(
 def fallback_tool_call(event: ToolCallEvent, title: str) -> ToolCallStart:
     """Default ToolCallStart when args are None or an unexpected type."""
     return ToolCallStart(
-        session_update="tool_call",
+        sessionUpdate="tool_call",
         title=title,
-        tool_call_id=event.tool_call_id,
+        toolCallId=event.tool_call_id,
         kind=resolve_kind(event.tool_name),
-        raw_input=None,
+        rawInput=None,
         field_meta={"tool_name": event.tool_name},
     )
 
@@ -117,12 +117,12 @@ def tool_call_session_update(event: ToolCallEvent) -> SessionUpdate | None:
     )
 
     return ToolCallStart(
-        session_update="tool_call",
+        sessionUpdate="tool_call",
         title=display.summary,
         content=content,
-        tool_call_id=event.tool_call_id,
+        toolCallId=event.tool_call_id,
         kind=resolve_kind(event.tool_name),
-        raw_input=event.args.model_dump_json() if event.args else None,
+        rawInput=event.args.model_dump_json() if event.args else None,
         field_meta={"tool_name": event.tool_name},
     )
 
@@ -149,10 +149,10 @@ def tool_result_session_update(event: ToolResultEvent) -> SessionUpdate | None:
 
     if event.tool_class is None:
         return ToolCallProgress(
-            session_update="tool_call_update",
-            tool_call_id=event.tool_call_id,
+            sessionUpdate="tool_call_update",
+            toolCallId=event.tool_call_id,
             status="failed",
-            raw_output=raw_output,
+            rawOutput=raw_output,
             content=[
                 ContentToolCallContent(
                     type="content",
@@ -186,11 +186,11 @@ def tool_result_session_update(event: ToolResultEvent) -> SessionUpdate | None:
         )
 
     return ToolCallProgress(
-        session_update="tool_call_update",
-        tool_call_id=event.tool_call_id,
+        sessionUpdate="tool_call_update",
+        toolCallId=event.tool_call_id,
         status=tool_status,
         kind=resolve_kind(event.tool_name),
-        raw_output=raw_output,
+        rawOutput=raw_output,
         content=content,
         field_meta={"tool_name": event.tool_name},
     )

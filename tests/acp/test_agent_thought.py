@@ -43,7 +43,7 @@ def acp_agent_loop_with_reasoning(
 
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **{**kwargs, "backend": backend_with_reasoning})
+            super().__init__(*args, backend=backend_with_reasoning, **kwargs)
             self._base_config = config
             self.agent_manager.invalidate_config()
 

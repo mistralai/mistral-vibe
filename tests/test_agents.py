@@ -403,7 +403,7 @@ class TestAgentProfileConfig:
             safety=AgentSafety.NEUTRAL,
         )
         with pytest.raises(AttributeError):
-            profile.name = "changed"  # pyright: ignore[reportAttributeAccessIssue]
+            profile.name = "changed"  # pyright: ignore[reportAttributeAccessIssue]  # type: ignore[read-only]
 
 
 class TestAgentSwitchAgent:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import asyncio
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -90,7 +90,9 @@ class ConfigLayer[S: BaseModel](ABC):
     dictionary of configuration values.
     """
 
-    def __init__(self, *, name: str, output_schema: type[S] = RawConfig) -> None:
+    def __init__(
+        self, *, name: str, output_schema: type[S] = cast(type[Any], RawConfig)
+    ) -> None:
         self.name = name
         self.output_schema = output_schema
 

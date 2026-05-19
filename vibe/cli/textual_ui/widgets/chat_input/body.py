@@ -57,11 +57,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
         self._switching_mode = False
         self._voice_manager = voice_manager
         self._recording_indicator: RecordingIndicator | None = None
-
-        if history_file:
-            self.history = HistoryManager(history_file)
-        else:
-            self.history = None
+        self.history: HistoryManager | None = HistoryManager(history_file) if history_file else None
 
         self._completion_reset: Callable[[], None] | None = None
 

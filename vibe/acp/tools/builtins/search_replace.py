@@ -34,7 +34,7 @@ class AcpSearchReplaceState(BaseToolState, AcpToolState):
 
 
 class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
-    state: AcpSearchReplaceState
+    state: AcpSearchReplaceState  # type: ignore[override]
     prompt_path = (
         VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "search_replace.md"
     )
@@ -93,21 +93,21 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
         blocks = cls._parse_search_replace_blocks(args.content)
 
         return ToolCallStart(
-            session_update="tool_call",
+            sessionUpdate="tool_call",
             title=cls.get_call_display(event).summary,
-            tool_call_id=event.tool_call_id,
+            toolCallId=event.tool_call_id,
             kind=resolve_kind(event.tool_name),
             content=[
                 FileEditToolCallContent(
                     type="diff",
                     path=args.file_path,
-                    old_text=block.search,
-                    new_text=block.replace,
+                    oldText=block.search,
+                    newText=block.replace,
                 )
                 for block in blocks
             ],
             locations=[ToolCallLocation(path=str(Path(args.file_path).resolve()))],
-            raw_input=args.model_dump_json(),
+            rawInput=args.model_dump_json(),
             field_meta={"tool_name": event.tool_name},
         )
 
@@ -122,16 +122,16 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
         blocks = cls._parse_search_replace_blocks(result.content)
 
         return ToolCallProgress(
-            session_update="tool_call_update",
-            tool_call_id=event.tool_call_id,
+            sessionUpdate="tool_call_update",
+            toolCallId=event.tool_call_id,
             status="completed",
             kind=resolve_kind(event.tool_name),
             content=[
                 FileEditToolCallContent(
                     type="diff",
                     path=result.file,
-                    old_text=block.search,
-                    new_text=block.replace,
+                    oldText=block.search,
+                    newText=block.replace,
                 )
                 for block in blocks
             ],

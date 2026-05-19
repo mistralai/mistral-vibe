@@ -329,7 +329,7 @@ class TestMCPConfigModels:
     def test_mcp_base_rejects_non_positive_timeout(self):
         with pytest.raises(ValidationError):
             MCPStdio(
-                name="test", transport="stdio", command="python", startup_timeout_sec=0
+                name="test", transport="stdio", command="python", startup_timeout_sec=0  # type: ignore[arg-type]
             )
 
     def test_mcp_stdio_with_env(self):

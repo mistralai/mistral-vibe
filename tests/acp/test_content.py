@@ -22,11 +22,11 @@ class TestACPContent:
         self, acp_agent_loop: VibeAcpAgentLoop, backend: FakeBackend
     ) -> None:
         session_response = await acp_agent_loop.new_session(
-            cwd=str(Path.cwd()), mcp_servers=[]
+            cwd=str(Path.cwd()), mcpServers=[]
         )
         prompt_request = PromptRequest(
             prompt=[TextContentBlock(type="text", text="Say hi")],
-            session_id=session_response.session_id,
+            sessionId=session_response.session_id,
         )
 
         response = await acp_agent_loop.prompt(
@@ -46,7 +46,7 @@ class TestACPContent:
         self, acp_agent_loop: VibeAcpAgentLoop, backend: FakeBackend
     ) -> None:
         session_response = await acp_agent_loop.new_session(
-            cwd=str(Path.cwd()), mcp_servers=[]
+            cwd=str(Path.cwd()), mcpServers=[]
         )
 
         response = await acp_agent_loop.prompt(
@@ -82,7 +82,7 @@ class TestACPContent:
         self, acp_agent_loop: VibeAcpAgentLoop, backend: FakeBackend
     ) -> None:
         session_response = await acp_agent_loop.new_session(
-            cwd=str(Path.cwd()), mcp_servers=[]
+            cwd=str(Path.cwd()), mcpServers=[]
         )
 
         response = await acp_agent_loop.prompt(
@@ -123,7 +123,7 @@ class TestACPContent:
         self, acp_agent_loop: VibeAcpAgentLoop, backend: FakeBackend
     ) -> None:
         session_response = await acp_agent_loop.new_session(
-            cwd=str(Path.cwd()), mcp_servers=[]
+            cwd=str(Path.cwd()), mcpServers=[]
         )
 
         response = await acp_agent_loop.prompt(

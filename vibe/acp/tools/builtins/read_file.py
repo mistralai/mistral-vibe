@@ -43,7 +43,7 @@ class ReadFile(
     ToolCallSessionUpdateProtocol,
     ToolResultSessionUpdateProtocol,
 ):
-    state: AcpReadFileState
+    state: AcpReadFileState  # type: ignore[override]
     prompt_path = VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "read_file.md"
 
     @classmethod
@@ -58,11 +58,11 @@ class ReadFile(
         resolved = str(Path(event.args.path).resolve())
 
         return ToolCallStart(
-            session_update="tool_call",
+            sessionUpdate="tool_call",
             title=cls.format_call_display(event.args).summary,
-            tool_call_id=event.tool_call_id,
+            toolCallId=event.tool_call_id,
             kind=resolve_kind(event.tool_name),
-            raw_input=event.args.model_dump_json(),
+            rawInput=event.args.model_dump_json(),
             locations=[
                 ToolCallLocation(
                     path=resolved,
@@ -96,8 +96,8 @@ class ReadFile(
         ]
 
         return ToolCallProgress(
-            session_update="tool_call_update",
-            tool_call_id=event.tool_call_id,
+            sessionUpdate="tool_call_update",
+            toolCallId=event.tool_call_id,
             status="completed",
             content=[
                 ContentToolCallContent(

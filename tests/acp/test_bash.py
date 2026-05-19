@@ -71,7 +71,7 @@ class MockClient:
         }
         if self._create_terminal_error:
             raise self._create_terminal_error
-        return CreateTerminalResponse(terminal_id=self._terminal_handle.id)
+        return CreateTerminalResponse(terminalId=self._terminal_handle.id)
 
     async def terminal_output(
         self, session_id: str, terminal_id: str, **kwargs

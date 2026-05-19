@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, cast
 
 from textual import events
 from textual.binding import Binding
@@ -25,7 +25,7 @@ InputMode = Literal["!", "/", ">", "&"]
 
 
 class ChatTextArea(TextArea):
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[Binding]] = [  # type: ignore[override]
         Binding(
             "shift+enter,ctrl+j",
             "insert_newline",
@@ -263,7 +263,7 @@ class ChatTextArea(TextArea):
             and not self.text
             and self._input_mode == self.DEFAULT_MODE
         ):
-            self._set_mode(event.character)
+            self._set_mode(cast(InputMode, event.character))
             event.prevent_default()
             event.stop()
             return

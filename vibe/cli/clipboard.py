@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 
-import pyperclip
+import pyperclip  # type: ignore[import-untyped]
 from textual.app import App
 
 
