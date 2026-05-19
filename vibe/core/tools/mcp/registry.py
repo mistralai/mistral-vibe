@@ -82,11 +82,9 @@ class MCPRegistry:
     ) -> dict[str, type[BaseTool]] | None:
         match srv.transport:
             case "http" | "streamable-http":
-                return await self._discover_http(
-                    cast("MCPHttp | MCPStreamableHttp", srv)
-                )
+                return await self._discover_http(srv)
             case "stdio":
-                return await self._discover_stdio(cast("MCPStdio", srv))
+                return await self._discover_stdio(srv)
             case _:
                 logger.warning("Unsupported MCP transport: %r", srv.transport)
                 return {}

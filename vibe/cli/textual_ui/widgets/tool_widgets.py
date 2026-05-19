@@ -74,8 +74,7 @@ class ToolApprovalWidget[TArgs: BaseModel](Vertical):
 
     def compose(self) -> ComposeResult:
         MAX_MSG_SIZE = 150
-        model_cls = type(self.args)
-        field_names = model_cls.model_fields or self.args.model_extra or {}
+        field_names = self.args.model_fields or self.args.model_extra or {}
         for field_name in field_names:
             value = getattr(self.args, field_name, None)
             if value is None or value in ("", []):
@@ -116,7 +115,7 @@ class ToolResultWidget[TResult: BaseModel](Static):
     def compose(self) -> ComposeResult:
         """Default: show result fields."""
         if not self.collapsed and self.result:
-            for field_name in type(self.result).model_fields:
+            for field_name in self.result.model_fields:
                 value = getattr(self.result, field_name)
                 if value is not None and value not in ("", []):
                     yield NoMarkupStatic(

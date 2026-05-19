@@ -59,7 +59,7 @@ class SkillMetadata(BaseModel):
     def normalize_metadata(cls, v: dict[str, Any] | None) -> dict[str, str]:
         if v is None:
             return {}
-        return {str(k): str(val) for k, val in v.items()}
+        return {k: str(val) for k, val in v.items()}
 
 
 class SkillInfo(BaseModel):

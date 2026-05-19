@@ -138,7 +138,7 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
             logger.warning(
                 "Browser sign-in start payload parsing failed for api_base_url=%s payload_keys=%s sign_in_url=%s poll_url=%s",
                 self._api_base_url,
-                sorted(str(key) for key in payload),
+                sorted(payload),
                 sign_in_url_details,
                 poll_url_details,
                 exc_info=True,

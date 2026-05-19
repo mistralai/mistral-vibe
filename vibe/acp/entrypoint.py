@@ -18,9 +18,9 @@ from vibe.core.paths import HISTORY_FILE
 from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
 
 # Configure line buffering for subprocess communication
-sys.stdout.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
-sys.stderr.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
-sys.stdin.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
+sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+sys.stdin.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
 
 
 @dataclass

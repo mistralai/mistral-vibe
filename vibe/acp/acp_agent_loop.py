@@ -488,9 +488,8 @@ class VibeAcpAgentLoop(AcpAgent):
             )
 
             if response.outcome.outcome == "selected":
-                outcome = cast(AllowedOutcome, response.outcome)
                 return _handle_permission_selection(
-                    outcome.option_id, tool_name, typed_permissions
+                    response.outcome.option_id, tool_name, typed_permissions
                 )
             else:
                 return (

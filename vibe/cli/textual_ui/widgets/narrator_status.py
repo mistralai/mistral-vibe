@@ -47,6 +47,8 @@ class NarratorStatus(NarratorManagerListener, Static):
 
     def _tick(self) -> None:
         match self.state:
+            case NarratorState.IDLE:
+                self.update("")
             case NarratorState.SUMMARIZING:
                 char = SHRINK_FRAMES[self._frame % len(SHRINK_FRAMES)]
                 self.update(

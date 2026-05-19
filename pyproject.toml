@@ -188,7 +188,6 @@ build = [
 pythonVersion = "3.12"
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
-pydanticVersion = 2
 
 include = ["vibe/**/*.py", "tests/**/*.py"]
 exclude = ["pyinstaller/"]
@@ -284,3 +283,4 @@ bad-assignment = "ignore"
 invalid-annotation = "ignore"
 read-only = "ignore"
 bad-function-definition = "ignore"
+no-matching-overload = "ignore"

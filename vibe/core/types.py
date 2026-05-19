@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 import copy
 from enum import StrEnum, auto
@@ -523,7 +523,7 @@ class MessageList(Sequence[LLMMessage]):
         self._data[0] = LLMMessage(role=Role.system, content=new)
 
     @contextmanager
-    def silent(self) -> Iterator[None]:
+    def silent(self) -> Generator[None, None, None]:
         """Context manager that suppresses notifications."""
         prev = self._silent
         self._silent = True
