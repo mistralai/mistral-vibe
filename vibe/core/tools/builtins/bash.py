@@ -486,9 +486,7 @@ class Bash(
         proc = None
         try:
             # start_new_session is Unix-only, on Windows it's ignored
-            kwargs: dict[Literal["start_new_session"], bool] = (
-                {} if is_windows() else {"start_new_session": True}
-            )
+            kwargs: dict[str, object] = {} if is_windows() else {"start_new_session": True}
 
             proc = await asyncio.create_subprocess_shell(
                 args.command,
