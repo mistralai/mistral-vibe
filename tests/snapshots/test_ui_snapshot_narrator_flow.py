@@ -17,7 +17,7 @@ import vibe.cli.textual_ui.widgets.narrator_status as narrator_status_mod
 from vibe.cli.textual_ui.widgets.narrator_status import NarratorStatus
 from vibe.cli.turn_summary import TurnSummaryTracker
 
-narrator_status_mod.SHRINK_FRAMES = "█"
+narrator_status_mod.SHRINK_FRAMES = "█"  # type: ignore[assignment]
 narrator_status_mod.BAR_FRAMES = ["▂▅▇"]
 from vibe.core.config import ModelConfig
 from vibe.core.tts.tts_client_port import TTSResult

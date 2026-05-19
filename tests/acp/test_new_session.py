@@ -29,7 +29,7 @@ def acp_agent_loop(backend) -> VibeAcpAgentLoop:
 
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **{**kwargs, "backend": backend})
+            super().__init__(*args, backend=backend, **kwargs)
             self._base_config = config
             self.agent_manager.invalidate_config()
 

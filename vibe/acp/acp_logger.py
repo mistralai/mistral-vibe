@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from typing import TYPE_CHECKING
 
-from cachetools import TTLCache
+from cachetools import TTLCache  # type: ignore[import-untyped]
 
 if TYPE_CHECKING:
     from acp.connection import StreamEvent

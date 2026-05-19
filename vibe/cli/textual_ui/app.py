@@ -7,6 +7,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from enum import StrEnum, auto
 import gc
+import inspect
 import os
 from pathlib import Path
 import signal
@@ -930,7 +931,7 @@ class VibeApp(App):  # noqa: PLR0904
             )
             await self._mount_and_scroll(UserMessage(user_input))
             handler = getattr(self, command.handler)
-            if asyncio.iscoroutinefunction(handler):
+            if inspect.iscoroutinefunction(handler):
                 await handler(cmd_args=cmd_args)
             else:
                 handler(cmd_args=cmd_args)
@@ -1793,7 +1794,7 @@ class VibeApp(App):  # noqa: PLR0904
             if self.config.session_logging.enabled
             else []
         )
-        remote_list_timeout = max(float(self.config.api_timeout), 10.0)
+        remote_list_timeout = max(self.config.api_timeout, 10.0)
         remote_error: str | None = None
         await self._ensure_loading_widget("Loading sessions")
         try:
@@ -2249,7 +2250,7 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         model_aliases = [m.alias for m in self.config.models]
-        current_model = str(self.config.active_model)
+        current_model = self.config.active_model
         await self._switch_from_input(
             ModelPickerApp(model_aliases=model_aliases, current_model=current_model)
         )

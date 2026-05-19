@@ -157,6 +157,7 @@ dev = [
     "debugpy>=1.8.19",
     "pre-commit>=4.2.0",
     "pyinstrument>=5.1.2",
+    "pyrefly>=1.0.0",
     "pyright>=1.1.403",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.2.0",
@@ -260,3 +261,14 @@ filterwarnings = [
     # (e2e) streaming mock server is started in a thread; and the cli is spawn in a fork
     "ignore:This process \\(pid=.*\\) is multi-threaded, use of forkpty\\(\\) may lead to deadlocks in the child\\.:DeprecationWarning",
 ]
+
+[tool.pyrefly]
+project-includes = [
+    "vibe/**/*.py",
+]
+project-excludes = ["pyinstaller/", "tests/"]
+python-version = "3.12.0"
+infer-with-first-use = false
+
+[tool.pyrefly.errors]
+untyped-import = "ignore"

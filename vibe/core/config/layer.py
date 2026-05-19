@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import asyncio
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -90,7 +90,9 @@ class ConfigLayer[S: BaseModel](ABC):
     dictionary of configuration values.
     """
 
-    def __init__(self, *, name: str, output_schema: type[S] = RawConfig) -> None:
+    def __init__(
+        self, *, name: str, output_schema: type[S] = cast(type[Any], RawConfig)
+    ) -> None:
         self.name = name
         self.output_schema = output_schema
 
@@ -148,9 +150,7 @@ class ConfigLayer[S: BaseModel](ABC):
     async def _dispatch(self, action: Any) -> _LayerState[S]:
         """Serialize all state mutations through a single lock."""
         async with self._lock:
-            state = _LayerState(
-                is_trusted=self._state.is_trusted, data=self._state.data
-            )
+            state = replace(self._state)
 
             match action:
                 case _GrantTrust():
@@ -176,7 +176,7 @@ class ConfigLayer[S: BaseModel](ABC):
 
         await self._notify_trust_change(state.is_trusted, True)
 
-        return _LayerState(is_trusted=True, data=state.data)
+        return replace(state, is_trusted=True)
 
     async def _handle_revoke_trust(self, state: _LayerState[S]) -> _LayerState[S]:
         if state.is_trusted is False:
@@ -184,15 +184,15 @@ class ConfigLayer[S: BaseModel](ABC):
 
         await self._notify_trust_change(state.is_trusted, False)
 
-        return _LayerState(is_trusted=False, data=None)
+        return replace(state, is_trusted=False, data=None)
 
     async def _handle_resolve_trust(self, state: _LayerState[S]) -> _LayerState[S]:
         is_trusted = await self._resolve_check_trust()
 
         await self._notify_trust_change(state.is_trusted, is_trusted)
 
-        return _LayerState(
-            is_trusted=is_trusted, data=state.data if is_trusted else None
+        return replace(
+            state, is_trusted=is_trusted, data=state.data if is_trusted else None
         )
 
     async def _handle_load(self, state: _LayerState[S], force: bool) -> _LayerState[S]:
@@ -204,23 +204,21 @@ class ConfigLayer[S: BaseModel](ABC):
         await self._notify_trust_change(state.is_trusted, is_trusted)
 
         if not is_trusted:
-            return _LayerState(is_trusted=is_trusted, data=None)
+            return replace(state, is_trusted=is_trusted, data=None)
 
-        next_state = _LayerState(is_trusted=is_trusted, data=state.data)
+        next_state = replace(state, is_trusted=is_trusted)
 
         if next_state.data is None or force:
             try:
                 raw = await self._read_config()
             except Exception as e:
                 raise LayerImplementationError(self.name, "_read_config") from e
-            next_state = _LayerState(
-                is_trusted=next_state.is_trusted, data=self.validate_output(raw)
-            )
+            next_state = replace(next_state, data=self.validate_output(raw))
 
         return next_state
 
     async def _handle_invalidate_cache(self, state: _LayerState[S]) -> _LayerState[S]:
-        return _LayerState(is_trusted=state.is_trusted, data=None)
+        return replace(state, data=None)
 
     # --- Public ---
 

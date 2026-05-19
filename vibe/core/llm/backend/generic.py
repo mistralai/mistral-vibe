@@ -49,11 +49,9 @@ class OpenAIAdapter(APIAdapter):
         if tools:
             payload["tools"] = [tool.model_dump(exclude_none=True) for tool in tools]
         if tool_choice:
-            payload["tool_choice"] = (
-                tool_choice
-                if isinstance(tool_choice, str)
-                else tool_choice.model_dump()
-            )
+            payload["tool_choice"] = tool_choice  # type: ignore[typeddict-unknown-key]
+            if not isinstance(tool_choice, str):
+                payload["tool_choice"] = tool_choice.model_dump()  # type: ignore[typeddict-unknown-key]
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
 

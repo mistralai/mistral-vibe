@@ -321,9 +321,7 @@ class _OpenAIResponsesStreamParser:
                         name_emitted=bool(item.get("name")),
                         arguments_emitted=False,
                     )
-                tool_call = self._tool_call_from_item(
-                    cast(_ResponsesFunctionCallItem, item), index=index
-                )
+                tool_call = self._tool_call_from_item(item, index=index)
                 return self._tool_call_chunk(
                     call_id=tool_call.id,
                     name=tool_call.function.name,
@@ -356,7 +354,7 @@ class _OpenAIResponsesStreamParser:
         return self._empty_chunk()
 
     def _on_response_terminal(self, data: _ResponsesStreamEvent) -> LLMChunk:
-        response_obj = cast(_ResponsesObject, data.get("response") or {})
+        response_obj = data.get("response") or {}
         self.reset()
         output = response_obj.get("output") or []
         return LLMChunk(

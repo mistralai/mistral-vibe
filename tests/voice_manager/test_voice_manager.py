@@ -167,7 +167,7 @@ class TestStopRecording:
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
-            transcribe_client=HangingTranscribeClient(),
+            transcribe_client=HangingTranscribeClient(),  # type: ignore[arg-type]  # type: ignore[arg-type]
         )
         manager.start_recording()
 
@@ -229,7 +229,7 @@ class TestCancelRecording:
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
-            transcribe_client=HangingTranscribeClient(),
+            transcribe_client=HangingTranscribeClient(),  # type: ignore[arg-type]
         )
 
         manager.start_recording()
@@ -402,7 +402,7 @@ class TestTranscription:
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
-            transcribe_client=CrashingTranscribeClient(),
+            transcribe_client=CrashingTranscribeClient(),  # type: ignore[arg-type]
         )
         manager.start_recording()
         assert recorder.is_recording
@@ -506,7 +506,7 @@ class TestTelemetryTracking:
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
-            transcribe_client=CrashingTranscribeClient(),
+            transcribe_client=CrashingTranscribeClient(),  # type: ignore[arg-type]
             telemetry_client=mock_telemetry,
         )
 
@@ -577,7 +577,7 @@ class TestTelemetryTracking:
         manager = VoiceManager(
             config_getter=lambda: config,
             audio_recorder=recorder,
-            transcribe_client=HangingTranscribeClient(),
+            transcribe_client=HangingTranscribeClient(),  # type: ignore[arg-type]
             telemetry_client=mock_telemetry,
         )
         manager.start_recording()

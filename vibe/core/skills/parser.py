@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 
 class SkillParseError(Exception):

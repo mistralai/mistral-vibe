@@ -361,7 +361,7 @@ def parse_conversation(message_texts: list[str]) -> list[JsonRpcMessage]:
 async def initialize_session(acp_agent_loop_process: asyncio.subprocess.Process) -> str:
     await send_json_rpc(
         acp_agent_loop_process,
-        InitializeJsonRpcRequest(id=1, params=InitializeRequest(protocol_version=1)),
+        InitializeJsonRpcRequest(id=1, params=InitializeRequest(protocolVersion=1)),
     )
     initialize_response = await read_response_for_id(
         acp_agent_loop_process, expected_id=1, timeout=5.0
@@ -371,7 +371,7 @@ async def initialize_session(acp_agent_loop_process: asyncio.subprocess.Process)
     await send_json_rpc(
         acp_agent_loop_process,
         NewSessionJsonRpcRequest(
-            id=2, params=NewSessionRequest(cwd=str(PLAYGROUND_DIR), mcp_servers=[])
+            id=2, params=NewSessionRequest(cwd=str(PLAYGROUND_DIR), mcpServers=[])
         ),
     )
     session_response = await read_response_for_id(acp_agent_loop_process, expected_id=2)
@@ -394,7 +394,7 @@ class TestSessionManagement:
             await send_json_rpc(
                 process,
                 InitializeJsonRpcRequest(
-                    id=1, params=InitializeRequest(protocol_version=1)
+                    id=1, params=InitializeRequest(protocolVersion=1)
                 ),
             )
             await read_response_for_id(process, expected_id=1, timeout=5.0)
@@ -406,7 +406,7 @@ class TestSessionManagement:
                     NewSessionJsonRpcRequest(
                         id=i + 2,
                         params=NewSessionRequest(
-                            cwd=str(PLAYGROUND_DIR), mcp_servers=[]
+                            cwd=str(PLAYGROUND_DIR), mcpServers=[]
                         ),
                     ),
                 )
@@ -446,7 +446,7 @@ class TestSessionUpdates:
                 PromptJsonRpcRequest(
                     id=3,
                     params=PromptRequest(
-                        session_id=session_id,
+                        sessionId=session_id,
                         prompt=[TextContentBlock(type="text", text="Just say hi")],
                     ),
                 ),
@@ -503,7 +503,7 @@ class TestSessionUpdates:
                 PromptJsonRpcRequest(
                     id=3,
                     params=PromptRequest(
-                        session_id=session_id,
+                        sessionId=session_id,
                         prompt=[
                             TextContentBlock(
                                 type="text",
@@ -551,7 +551,7 @@ async def start_session_with_request_permission(
         PromptJsonRpcRequest(
             id=3,
             params=PromptRequest(
-                session_id=session_id,
+                sessionId=session_id,
                 prompt=[TextContentBlock(type="text", text=prompt)],
             ),
         ),
@@ -598,7 +598,7 @@ class TestToolCallStructure:
                 PromptJsonRpcRequest(
                     id=3,
                     params=PromptRequest(
-                        session_id=session_id,
+                        sessionId=session_id,
                         prompt=[
                             TextContentBlock(
                                 type="text",
@@ -663,7 +663,7 @@ class TestToolCallStructure:
                     id=permission_request.id,
                     result=RequestPermissionResponse(
                         outcome=AllowedOutcome(
-                            outcome="selected", option_id=selected_option_id
+                            outcome="selected", optionId=selected_option_id
                         )
                     ),
                 ),
@@ -726,7 +726,7 @@ class TestToolCallStructure:
                     id=permission_request.id,
                     result=RequestPermissionResponse(
                         outcome=AllowedOutcome(
-                            outcome="selected", option_id=selected_option_id
+                            outcome="selected", optionId=selected_option_id
                         )
                     ),
                 ),
@@ -819,7 +819,7 @@ class TestToolCallStructure:
                 PromptJsonRpcRequest(
                     id=3,
                     params=PromptRequest(
-                        session_id=session_id,
+                        sessionId=session_id,
                         prompt=[
                             TextContentBlock(
                                 type="text",
@@ -884,7 +884,7 @@ class TestToolCallStructure:
                     id=permission_request.id,
                     result=RequestPermissionResponse(
                         outcome=AllowedOutcome(
-                            outcome="selected", option_id=selected_option_id
+                            outcome="selected", optionId=selected_option_id
                         )
                     ),
                 ),

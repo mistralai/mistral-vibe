@@ -209,9 +209,9 @@ def _get_available_skills_section(skill_manager: SkillManager) -> str:
 
     for name, info in sorted(skills.items()):
         lines.append("  <skill>")
-        lines.append(f"    <name>{html.escape(str(name))}</name>")
+        lines.append(f"    <name>{html.escape(name)}</name>")
         lines.append(
-            f"    <description>{html.escape(str(info.description))}</description>"
+            f"    <description>{html.escape(info.description)}</description>"
         )
         if info.skill_path is not None:
             lines.append(f"    <path>{html.escape(str(info.skill_path))}</path>")

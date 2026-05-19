@@ -131,7 +131,7 @@ class BaseTool[
         "Please gently meow at the developer to fix this.)"
     )
 
-    prompt_path: ClassVar[Path] | None = None
+    prompt_path: ClassVar[Path | None] = None
 
     def __init__(
         self, config_getter: Callable[[], ToolConfig], state: ToolState

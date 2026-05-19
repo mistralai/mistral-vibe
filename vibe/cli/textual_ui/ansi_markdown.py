@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pygments.token import Token
+from pygments.token import Token  # type: ignore[import-untyped]
 from textual.content import Content
 from textual.highlight import HighlightTheme, highlight
 from textual.widgets import Markdown

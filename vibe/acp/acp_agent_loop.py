@@ -288,13 +288,13 @@ class VibeAcpAgentLoop(AcpAgent):
                     fork=SessionForkCapabilities(),
                 ),
             ),
-            protocol_version=PROTOCOL_VERSION,
-            agent_info=Implementation(
+            protocolVersion=PROTOCOL_VERSION,
+            agentInfo=Implementation(
                 name="@mistralai/mistral-vibe",
                 title="Mistral Vibe",
                 version=__version__,
             ),
-            auth_methods=auth_methods,
+            authMethods=auth_methods,
         )
         return response
 
@@ -410,10 +410,10 @@ class VibeAcpAgentLoop(AcpAgent):
         modes_state, _, models_state, _ = self._build_session_state(session)
 
         return NewSessionResponse(
-            session_id=session.id,
+            sessionId=session.id,
             models=models_state,
             modes=modes_state,
-            config_options=self._build_config_options(session),
+            configOptions=self._build_config_options(session),
         )
 
     def _get_acp_tool_overrides(self) -> list[Path]:
@@ -480,7 +480,7 @@ class VibeAcpAgentLoop(AcpAgent):
                 else None
             )
 
-            tool_call = ToolCallUpdate(tool_call_id=tool_call_id)
+            tool_call = ToolCallUpdate(toolCallId=tool_call_id)
             options = build_permission_options(typed_permissions)
 
             response = await self.client.request_permission(
@@ -488,9 +488,8 @@ class VibeAcpAgentLoop(AcpAgent):
             )
 
             if response.outcome.outcome == "selected":
-                outcome = cast(AllowedOutcome, response.outcome)
                 return _handle_permission_selection(
-                    outcome.option_id, tool_name, typed_permissions
+                    response.outcome.option_id, tool_name, typed_permissions
                 )
             else:
                 return (
@@ -535,9 +534,9 @@ class VibeAcpAgentLoop(AcpAgent):
     def _build_usage(self, session: AcpSessionLoop) -> Usage:
         stats = session.agent_loop.stats
         return Usage(
-            input_tokens=stats.session_prompt_tokens,
-            output_tokens=stats.session_completion_tokens,
-            total_tokens=stats.session_total_llm_tokens,
+            inputTokens=stats.session_prompt_tokens,
+            outputTokens=stats.session_completion_tokens,
+            totalTokens=stats.session_total_llm_tokens,
         )
 
     def _build_usage_update(self, session: AcpSessionLoop) -> UsageUpdate:
@@ -549,7 +548,7 @@ class VibeAcpAgentLoop(AcpAgent):
             else None
         )
         return UsageUpdate(
-            session_update="usage_update",
+            sessionUpdate="usage_update",
             used=stats.context_tokens,
             size=active_model.auto_compact_threshold,
             cost=cost,
@@ -771,7 +770,7 @@ class VibeAcpAgentLoop(AcpAgent):
             return None
 
         return SetSessionConfigOptionResponse(
-            config_options=self._build_config_options(session)
+            configOptions=self._build_config_options(session)
         )
 
     @override
@@ -788,10 +787,10 @@ class VibeAcpAgentLoop(AcpAgent):
 
         sessions = [
             SessionInfo(
-                session_id=s["session_id"],
+                sessionId=s["session_id"],
                 cwd=s["cwd"],
                 title=s.get("title"),
-                updated_at=s.get("end_time"),
+                updatedAt=s.get("end_time"),
             )
             for s in sorted(
                 session_data, key=lambda s: s.get("end_time") or "", reverse=True
@@ -847,9 +846,9 @@ class VibeAcpAgentLoop(AcpAgent):
         except asyncio.CancelledError:
             self._send_usage_update(session)
             return PromptResponse(
-                stop_reason="cancelled",
+                stopReason="cancelled",
                 usage=self._build_usage(session),
-                user_message_id=resolved_message_id,
+                userMessageId=resolved_message_id,
             )
 
         except CoreRateLimitError as e:
@@ -866,9 +865,9 @@ class VibeAcpAgentLoop(AcpAgent):
 
         self._send_usage_update(session)
         return PromptResponse(
-            stop_reason="end_turn",
+            stopReason="end_turn",
             usage=self._build_usage(session),
-            user_message_id=resolved_message_id,
+            userMessageId=resolved_message_id,
         )
 
     def _build_text_prompt(self, acp_prompt: list[ContentBlock]) -> str:
@@ -955,16 +954,16 @@ class VibeAcpAgentLoop(AcpAgent):
             async for event in events:
                 if isinstance(event, AssistantEvent):
                     yield AgentMessageChunk(
-                        session_update="agent_message_chunk",
+                        sessionUpdate="agent_message_chunk",
                         content=TextContentBlock(type="text", text=event.content),
-                        message_id=event.message_id,
+                        messageId=event.message_id,
                     )
 
                 elif isinstance(event, ReasoningEvent):
                     yield AgentThoughtChunk(
-                        session_update="agent_thought_chunk",
+                        sessionUpdate="agent_thought_chunk",
                         content=TextContentBlock(type="text", text=event.content),
-                        message_id=event.message_id,
+                        messageId=event.message_id,
                     )
 
                 elif isinstance(event, ToolCallEvent):
@@ -988,8 +987,8 @@ class VibeAcpAgentLoop(AcpAgent):
 
                 elif isinstance(event, ToolStreamEvent):
                     yield ToolCallProgress(
-                        session_update="tool_call_update",
-                        tool_call_id=event.tool_call_id,
+                        sessionUpdate="tool_call_update",
+                        toolCallId=event.tool_call_id,
                         kind=resolve_kind(event.tool_name),
                         content=[
                             ContentToolCallContent(
@@ -1088,10 +1087,10 @@ class VibeAcpAgentLoop(AcpAgent):
         modes_state, _, models_state, _ = self._build_session_state(session)
 
         return ForkSessionResponse(
-            session_id=session.id,
+            sessionId=session.id,
             models=models_state,
             modes=modes_state,
-            config_options=self._build_config_options(session),
+            configOptions=self._build_config_options(session),
         )
 
     @override
@@ -1108,11 +1107,11 @@ class VibeAcpAgentLoop(AcpAgent):
         self, session_id: str, *, title: str, updated_at: str | None
     ) -> None:
         update_kwargs: dict[str, Any] = {
-            "session_update": "session_info_update",
+            "sessionUpdate": "session_info_update",
             "title": title,
         }
         if updated_at is not None:
-            update_kwargs["updated_at"] = updated_at
+            update_kwargs["updatedAt"] = updated_at
 
         await self.client.session_update(
             session_id=session_id, update=SessionInfoUpdate(**update_kwargs)
@@ -1244,12 +1243,12 @@ class VibeAcpAgentLoop(AcpAgent):
         await self.client.session_update(
             session_id=session.id,
             update=AgentMessageChunk(
-                session_update="agent_message_chunk",
+                sessionUpdate="agent_message_chunk",
                 content=TextContentBlock(type="text", text=text),
-                message_id=str(uuid4()),
+                messageId=str(uuid4()),
             ),
         )
-        return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
+        return PromptResponse(stopReason="end_turn", userMessageId=message_id)
 
     async def _handle_help(
         self, session: AcpSessionLoop, text_prompt: str, message_id: str
@@ -1311,7 +1310,7 @@ class VibeAcpAgentLoop(AcpAgent):
             session_id=session.id, update=create_compact_end_session_update(end_event)
         )
 
-        return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
+        return PromptResponse(stopReason="end_turn", userMessageId=message_id)
 
     async def _reload_session_config(self, session: AcpSessionLoop) -> None:
         """Reload config from disk and reinitialize the agent loop."""
@@ -1411,8 +1410,8 @@ class VibeAcpAgentLoop(AcpAgent):
         await self.client.session_update(
             session_id=session.id,
             update=ConfigOptionUpdate(
-                session_update="config_option_update",
-                config_options=self._build_config_options(session),
+                sessionUpdate="config_option_update",
+                configOptions=self._build_config_options(session),
             ),
         )
 

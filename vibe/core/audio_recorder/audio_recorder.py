@@ -202,7 +202,7 @@ class AudioRecorder:
         if status:
             logger.warning("Audio callback status: %s", status)
 
-        raw = bytes(indata)
+        raw = indata
 
         n_samples = frames * self._channels
         if n_samples > 0:

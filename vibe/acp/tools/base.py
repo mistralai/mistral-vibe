@@ -77,8 +77,8 @@ class BaseAcpTool[ToolState: AcpToolState](BaseTool):
             await client.session_update(
                 session_id=session_id,
                 update=ToolCallProgress(
-                    session_update="tool_call_update",
-                    tool_call_id=tool_call_id,
+                    sessionUpdate="tool_call_update",
+                    toolCallId=tool_call_id,
                     status="in_progress",
                     kind=resolve_kind(tool_name),
                     content=content,

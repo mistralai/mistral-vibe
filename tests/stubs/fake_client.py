@@ -56,7 +56,7 @@ class FakeClient(Client):
         **kwargs: Any,
     ) -> None:
         self._session_updates.append(
-            SessionNotification(session_id=session_id, update=update)
+            SessionNotification(sessionId=session_id, update=update)
         )
 
     async def request_permission(

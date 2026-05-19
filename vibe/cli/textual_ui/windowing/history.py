@@ -45,6 +45,8 @@ def build_history_widgets(
         if msg.injected:
             continue
         match msg.role:
+            case Role.system:
+                continue
             case Role.user:
                 if msg.content:
                     # history_index is 0-based in non-system messages;

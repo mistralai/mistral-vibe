@@ -346,6 +346,8 @@ class RemoteWorkflowEventTranslator:
         match task_type:
             case "AgentCompletionState":
                 events = self._completion_events(task_id, previous_state, state)
+            case "AgentStepState":
+                pass
             case "assistant_message":
                 events = self._assistant_message_events(task_id, previous_state, state)
             case "working":
@@ -521,7 +523,7 @@ class RemoteWorkflowEventTranslator:
             new_state = self._normalize_state(event.attributes.payload.value)
         else:
             new_state = self._apply_json_patch(
-                previous_state, cast(JSONPatchPayload, event.attributes.payload)
+                previous_state, event.attributes.payload
             )
         self._task_state[task_id] = new_state
         return previous_state, new_state

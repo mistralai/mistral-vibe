@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamablehttp_client  # type: ignore[deprecated]
 from vibe.core.logger import logger
 from vibe.core.tools.base import (
     BaseTool,
@@ -174,7 +174,7 @@ async def list_tools_http(
     startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
     timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
+    async with streamablehttp_client(url, headers=headers) as (read, write, _):  # type: ignore[deprecated]
         async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
             await session.initialize()
             tools_resp = await session.list_tools()
@@ -195,7 +195,7 @@ async def call_tool_http(
         timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     )
     call_timeout = timedelta(seconds=tool_timeout_sec) if tool_timeout_sec else None
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
+    async with streamablehttp_client(url, headers=headers) as (read, write, _):  # type: ignore[deprecated]
         async with ClientSession(
             read,
             write,

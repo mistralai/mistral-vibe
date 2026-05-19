@@ -251,7 +251,7 @@ class TelemetryClient:
         session_id: str | None = None,
         parent_session_id: str | None = None,
     ) -> None:
-        payload = {
+        payload: dict[str, Any] = {
             "nb_context_tokens_before": nb_context_tokens_before,
             "nb_context_tokens_after": nb_context_tokens_after,
             "auto_compact_threshold": auto_compact_threshold,

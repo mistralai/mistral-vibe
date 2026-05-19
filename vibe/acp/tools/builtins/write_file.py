@@ -31,7 +31,7 @@ class AcpWriteFileState(BaseToolState, AcpToolState):
 
 
 class WriteFile(CoreWriteFileTool, BaseAcpTool[AcpWriteFileState]):
-    state: AcpWriteFileState
+    state: AcpWriteFileState  # type: ignore[override]
     prompt_path = (
         VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "write_file.md"
     )
@@ -58,20 +58,20 @@ class WriteFile(CoreWriteFileTool, BaseAcpTool[AcpWriteFileState]):
             return fallback_tool_call(event, "write_file")
 
         return ToolCallStart(
-            session_update="tool_call",
+            sessionUpdate="tool_call",
             title=cls.format_call_display(event.args).summary,
-            tool_call_id=event.tool_call_id,
+            toolCallId=event.tool_call_id,
             kind=resolve_kind(event.tool_name),
             content=[
                 FileEditToolCallContent(
                     type="diff",
                     path=event.args.path,
-                    old_text=None,
-                    new_text=event.args.content,
+                    oldText=None,
+                    newText=event.args.content,
                 )
             ],
             locations=[ToolCallLocation(path=str(Path(event.args.path).resolve()))],
-            raw_input=event.args.model_dump_json(),
+            rawInput=event.args.model_dump_json(),
             field_meta={"tool_name": event.tool_name},
         )
 
@@ -84,16 +84,16 @@ class WriteFile(CoreWriteFileTool, BaseAcpTool[AcpWriteFileState]):
         assert isinstance(result, WriteFileResult)
 
         return ToolCallProgress(
-            session_update="tool_call_update",
-            tool_call_id=event.tool_call_id,
+            sessionUpdate="tool_call_update",
+            toolCallId=event.tool_call_id,
             status="completed",
             kind=resolve_kind(event.tool_name),
             content=[
                 FileEditToolCallContent(
                     type="diff",
                     path=result.path,
-                    old_text=None,
-                    new_text=result.content,
+                    oldText=None,
+                    newText=result.content,
                 )
             ],
             locations=[ToolCallLocation(path=str(Path(result.path).resolve()))],

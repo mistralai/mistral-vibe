@@ -16,7 +16,7 @@ from vibe.core.agent_loop import AgentLoop
 def acp_agent_loop(backend) -> VibeAcpAgentLoop:
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **{**kwargs, "backend": backend})
+            super().__init__(*args, backend=backend, **kwargs)
 
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()
     return _create_acp_agent()

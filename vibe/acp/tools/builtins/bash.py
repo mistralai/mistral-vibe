@@ -28,7 +28,7 @@ class AcpBashState(BaseToolState, AcpToolState):
 
 class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
     prompt_path = VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "bash.md"
-    state: AcpBashState
+    state: AcpBashState  # type: ignore[override]
 
     @classmethod
     def _get_tool_state_class(cls) -> type[AcpBashState]:
@@ -55,7 +55,7 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
         terminal_id = terminal.terminal_id
 
         await self._send_in_progress_session_update([
-            TerminalToolCallContent(type="terminal", terminal_id=terminal_id)
+            TerminalToolCallContent(type="terminal", terminalId=terminal_id)
         ])
 
         try:
@@ -116,24 +116,24 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
     def tool_call_session_update(cls, event: ToolCallEvent) -> ToolCallStart | None:
         if event.args is None:
             return ToolCallStart(
-                session_update="tool_call",
+                sessionUpdate="tool_call",
                 title="bash",
-                tool_call_id=event.tool_call_id,
+                toolCallId=event.tool_call_id,
                 kind=resolve_kind(event.tool_name),
                 content=None,
-                raw_input=None,
+                rawInput=None,
                 field_meta={"tool_name": event.tool_name},
             )
         if not isinstance(event.args, BashArgs):
             raise ValueError(f"Unexpected tool args: {event.args}")
 
         return ToolCallStart(
-            session_update="tool_call",
+            sessionUpdate="tool_call",
             title=Bash.get_summary(event.args),
             content=None,
-            tool_call_id=event.tool_call_id,
+            toolCallId=event.tool_call_id,
             kind=resolve_kind(event.tool_name),
-            raw_input=event.args.model_dump_json(),
+            rawInput=event.args.model_dump_json(),
             field_meta={"tool_name": event.tool_name},
         )
 
@@ -142,8 +142,8 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
         cls, event: ToolResultEvent
     ) -> ToolCallProgress | None:
         return ToolCallProgress(
-            session_update="tool_call_update",
-            tool_call_id=event.tool_call_id,
+            sessionUpdate="tool_call_update",
+            toolCallId=event.tool_call_id,
             status="failed" if event.error else "completed",
             content=[
                 ContentToolCallContent(

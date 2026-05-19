@@ -46,20 +46,20 @@ _KIND_REJECT_ONCE: PermissionOptionKind = "reject_once"
 
 TOOL_OPTIONS = [
     PermissionOption(
-        option_id=ToolOption.ALLOW_ONCE, name="Allow once", kind=_KIND_ALLOW_ONCE
+        optionId=ToolOption.ALLOW_ONCE, name="Allow once", kind=_KIND_ALLOW_ONCE
     ),
     PermissionOption(
-        option_id=ToolOption.ALLOW_ALWAYS,
+        optionId=ToolOption.ALLOW_ALWAYS,
         name="Allow for remainder of this session",
         kind=_KIND_ALLOW_ALWAYS,
     ),
     PermissionOption(
-        option_id=ToolOption.ALLOW_ALWAYS_PERMANENT,
+        optionId=ToolOption.ALLOW_ALWAYS_PERMANENT,
         name="Always allow",
         kind=_KIND_ALLOW_ALWAYS,
     ),
     PermissionOption(
-        option_id=ToolOption.REJECT_ONCE, name="Deny", kind=_KIND_REJECT_ONCE
+        optionId=ToolOption.REJECT_ONCE, name="Deny", kind=_KIND_REJECT_ONCE
     ),
 ]
 
@@ -83,22 +83,22 @@ def build_permission_options(
 
     return [
         PermissionOption(
-            option_id=ToolOption.ALLOW_ONCE, name="Allow once", kind=_KIND_ALLOW_ONCE
+            optionId=ToolOption.ALLOW_ONCE, name="Allow once", kind=_KIND_ALLOW_ONCE
         ),
         PermissionOption(
-            option_id=ToolOption.ALLOW_ALWAYS,
+            optionId=ToolOption.ALLOW_ALWAYS,
             name="Allow for remainder of this session",
             kind=_KIND_ALLOW_ALWAYS,
             field_meta={"required_permissions": permissions_meta},
         ),
         PermissionOption(
-            option_id=ToolOption.ALLOW_ALWAYS_PERMANENT,
+            optionId=ToolOption.ALLOW_ALWAYS_PERMANENT,
             name="Always allow",
             kind=_KIND_ALLOW_ALWAYS,
             field_meta={"required_permissions": permissions_meta},
         ),
         PermissionOption(
-            option_id=ToolOption.REJECT_ONCE, name="Deny", kind=_KIND_REJECT_ONCE
+            optionId=ToolOption.REJECT_ONCE, name="Deny", kind=_KIND_REJECT_ONCE
         ),
     ]
 
@@ -134,12 +134,12 @@ def build_mode_state(
         )
 
     state = SessionModeState(
-        current_mode_id=current_mode_id, available_modes=session_modes
+        currentModeId=current_mode_id, availableModes=session_modes
     )
     config = SessionConfigOptionSelect(
         id="mode",
         name="Session Mode",
-        current_value=current_mode_id,
+        currentValue=current_mode_id,
         category="mode",
         type="select",
         options=config_options,
@@ -154,7 +154,7 @@ def build_model_state(
     config_options: list[SessionConfigSelectOption] = []
 
     for model in models:
-        model_infos.append(ModelInfo(model_id=model.alias, name=model.alias))
+        model_infos.append(ModelInfo(modelId=model.alias, name=model.alias))
         config_options.append(
             SessionConfigSelectOption(
                 value=model.alias, name=model.alias, description=model.name
@@ -162,12 +162,12 @@ def build_model_state(
         )
 
     state = SessionModelState(
-        current_model_id=current_model_id, available_models=model_infos
+        currentModelId=current_model_id, availableModels=model_infos
     )
     config_option = SessionConfigOptionSelect(
         id="model",
         name="Model",
-        current_value=current_model_id,
+        currentValue=current_model_id,
         category="model",
         type="select",
         options=config_options,
@@ -181,7 +181,7 @@ def make_thinking_response(
     return SessionConfigOptionSelect(
         id="thinking",
         name="Thinking",
-        current_value=current_thinking,
+        currentValue=current_thinking,
         category="thinking",
         type="select",
         options=[
@@ -197,8 +197,8 @@ def create_compact_start_session_update(event: CompactStartEvent) -> ToolCallSta
     # should be represented.
     # [RFD](https://agentclientprotocol.com/rfds/session-usage)
     return ToolCallStart(
-        session_update="tool_call",
-        tool_call_id=event.tool_call_id,
+        sessionUpdate="tool_call",
+        toolCallId=event.tool_call_id,
         title="Compacting conversation history...",
         kind="other",
         status="in_progress",
@@ -220,8 +220,8 @@ def create_compact_end_session_update(event: CompactEndEvent) -> ToolCallProgres
     # should be represented.
     # [RFD](https://agentclientprotocol.com/rfds/session-usage)
     return ToolCallProgress(
-        session_update="tool_call_update",
-        tool_call_id=event.tool_call_id,
+        sessionUpdate="tool_call_update",
+        toolCallId=event.tool_call_id,
         title="Compacted conversation history",
         status="completed",
         content=[
@@ -278,9 +278,9 @@ def get_proxy_help_text() -> str:
 def create_user_message_replay(msg: LLMMessage) -> UserMessageChunk:
     content = msg.content if isinstance(msg.content, str) else ""
     return UserMessageChunk(
-        session_update="user_message_chunk",
+        sessionUpdate="user_message_chunk",
         content=TextContentBlock(type="text", text=content),
-        message_id=msg.message_id,
+        messageId=msg.message_id,
     )
 
 
@@ -290,9 +290,9 @@ def create_assistant_message_replay(msg: LLMMessage) -> AgentMessageChunk | None
         return None
 
     return AgentMessageChunk(
-        session_update="agent_message_chunk",
+        sessionUpdate="agent_message_chunk",
         content=TextContentBlock(type="text", text=content),
-        message_id=msg.message_id,
+        messageId=msg.message_id,
     )
 
 
@@ -301,9 +301,9 @@ def create_reasoning_replay(msg: LLMMessage) -> AgentThoughtChunk | None:
         return None
 
     return AgentThoughtChunk(
-        session_update="agent_thought_chunk",
+        sessionUpdate="agent_thought_chunk",
         content=TextContentBlock(type="text", text=msg.reasoning_content),
-        message_id=msg.reasoning_message_id,
+        messageId=msg.reasoning_message_id,
     )
 
 
@@ -311,11 +311,11 @@ def create_tool_call_replay(
     tool_call_id: str, tool_name: str, arguments: str | None
 ) -> ToolCallStart:
     return ToolCallStart(
-        session_update="tool_call",
+        sessionUpdate="tool_call",
         title=tool_name,
-        tool_call_id=tool_call_id,
+        toolCallId=tool_call_id,
         kind="other",
-        raw_input=arguments,
+        rawInput=arguments,
         field_meta={"tool_name": tool_name},
     )
 
@@ -326,10 +326,10 @@ def create_tool_result_replay(msg: LLMMessage) -> ToolCallProgress | None:
 
     content = msg.content if isinstance(msg.content, str) else ""
     return ToolCallProgress(
-        session_update="tool_call_update",
-        tool_call_id=msg.tool_call_id,
+        sessionUpdate="tool_call_update",
+        toolCallId=msg.tool_call_id,
         status="completed",
-        raw_output=content,
+        rawOutput=content,
         content=[
             ContentToolCallContent(
                 type="content", content=TextContentBlock(type="text", text=content)

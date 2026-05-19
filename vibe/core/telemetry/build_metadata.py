@@ -21,15 +21,12 @@ def build_base_metadata(
     entrypoint_payload = (
         entrypoint_metadata.model_dump() if entrypoint_metadata is not None else {}
     )
-    return cast(
-        dict[str, Any],
-        TelemetryBaseMetadata(
-            session_id=session_id,
-            parent_session_id=parent_session_id,
-            experiments=experiments or None,
-            **entrypoint_payload,
-        ).model_dump(exclude_none=True),
-    )
+    return TelemetryBaseMetadata(
+        session_id=session_id,
+        parent_session_id=parent_session_id,
+        experiments=experiments or None,
+        **entrypoint_payload,
+    ).model_dump(exclude_none=True)
 
 
 def build_request_metadata(

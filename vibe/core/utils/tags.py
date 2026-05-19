@@ -30,20 +30,20 @@ class TaggedText:
 
     @staticmethod
     def from_string(text: str) -> TaggedText:
-        found_tag = ""
+        found_tag: str | None = None
         result = text
 
         def replace_tag(match: re.Match[str]) -> str:
             nonlocal found_tag
             tag_name = match.group(1)
             content = match.group(2)
-            if not found_tag:
+            if found_tag is None:
                 found_tag = tag_name
             return content
 
         result = TaggedText._TAG_PATTERN.sub(replace_tag, text)
 
-        if found_tag:
+        if found_tag is not None:
             return TaggedText(result, found_tag)
 
         return TaggedText(text, "")
