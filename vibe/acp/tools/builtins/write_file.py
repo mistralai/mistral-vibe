@@ -41,9 +41,7 @@ class WriteFile(CoreWriteFileTool, BaseAcpTool[AcpWriteFileState]):
         return AcpWriteFileState
 
     async def _write_file(self, args: WriteFileArgs, file_path: Path) -> None:
-        client, session_id, _ = self._load_state()
-
-        await self._send_in_progress_session_update()
+        client, session_id = self._load_state()
 
         try:
             await client.write_text_file(

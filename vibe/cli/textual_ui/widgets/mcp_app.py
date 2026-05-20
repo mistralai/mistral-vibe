@@ -71,6 +71,7 @@ _LIST_VIEW_HELP_AUTH = (
 _DETAIL_VIEW_HELP = (
     "↑↓ Navigate  D Disable  E Enable  Backspace Back  R Refresh  Esc Close"
 )
+_DETAIL_VIEW_HELP_NO_TOOLS = "↑↓ Navigate  Backspace Back  R Refresh  Esc Close"
 
 
 class MCPApp(Container):
@@ -211,7 +212,16 @@ class MCPApp(Container):
             return
 
         self._status_message = "Refreshing..."
-        help = _DETAIL_VIEW_HELP if self._viewing_server else _LIST_VIEW_HELP_TOOLS
+        if self._viewing_server:
+            tools_source = (
+                self._index.connector_tools
+                if self._viewing_kind == MCPSourceKind.CONNECTOR
+                else self._index.server_tools
+            )
+            all_tools = tools_source.get(self._viewing_server, [])
+            help = _DETAIL_VIEW_HELP if all_tools else _DETAIL_VIEW_HELP_NO_TOOLS
+        else:
+            help = _LIST_VIEW_HELP_TOOLS
         self._set_help_text(help)
 
         self._refreshing = True
@@ -516,9 +526,11 @@ class MCPApp(Container):
         self.query_one("#mcp-title", NoMarkupStatic).update(
             f"{title_prefix}: {server_name}"
         )
-        self._set_help_text(_DETAIL_VIEW_HELP)
         tools_source = index.connector_tools if is_connector else index.server_tools
         all_tools = sorted(tools_source.get(server_name, []), key=lambda t: t[0])
+        self._set_help_text(
+            _DETAIL_VIEW_HELP if all_tools else _DETAIL_VIEW_HELP_NO_TOOLS
+        )
         if not all_tools:
             if (
                 is_connector

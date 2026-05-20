@@ -4,12 +4,8 @@ from abc import abstractmethod
 from typing import Annotated, cast
 
 from acp import Client
-from acp.helpers import ToolCallContentVariant
-from acp.schema import ToolCallProgress
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
-from vibe.acp.tools.session_update import resolve_kind
-from vibe.core.logger import logger
 from vibe.core.tools.base import BaseTool, ToolError
 from vibe.core.tools.manager import ToolManager
 
@@ -21,9 +17,6 @@ class AcpToolState(BaseModel):
         default=None, description="ACP Client"
     )
     session_id: str | None = Field(default=None, description="Current ACP session ID")
-    tool_call_id: str | None = Field(
-        default=None, description="Current ACP tool call ID"
-    )
 
 
 class BaseAcpTool[ToolState: AcpToolState](BaseTool):
@@ -37,23 +30,17 @@ class BaseAcpTool[ToolState: AcpToolState](BaseTool):
 
     @classmethod
     def update_tool_state(
-        cls,
-        *,
-        tool_manager: ToolManager,
-        client: Client | None,
-        session_id: str | None,
-        tool_call_id: str | None,
+        cls, *, tool_manager: ToolManager, client: Client | None, session_id: str | None
     ) -> None:
         tool_instance = cls.get_tool_instance(cls.get_name(), tool_manager)
         tool_instance.state.client = client
         tool_instance.state.session_id = session_id
-        tool_instance.state.tool_call_id = tool_call_id
 
     @classmethod
     @abstractmethod
     def _get_tool_state_class(cls) -> type[ToolState]: ...
 
-    def _load_state(self) -> tuple[Client, str, str | None]:
+    def _load_state(self) -> tuple[Client, str]:
         if self.state.client is None:
             raise ToolError(
                 "Client not available in tool state. This tool can only be used within an ACP session."
@@ -63,27 +50,4 @@ class BaseAcpTool[ToolState: AcpToolState](BaseTool):
                 "Session ID not available in tool state. This tool can only be used within an ACP session."
             )
 
-        return self.state.client, self.state.session_id, self.state.tool_call_id
-
-    async def _send_in_progress_session_update(
-        self, content: list[ToolCallContentVariant] | None = None
-    ) -> None:
-        client, session_id, tool_call_id = self._load_state()
-        if tool_call_id is None:
-            return
-
-        tool_name = self.get_name()
-        try:
-            await client.session_update(
-                session_id=session_id,
-                update=ToolCallProgress(
-                    session_update="tool_call_update",
-                    tool_call_id=tool_call_id,
-                    status="in_progress",
-                    kind=resolve_kind(tool_name),
-                    content=content,
-                    field_meta={"tool_name": tool_name},
-                ),
-            )
-        except Exception as e:
-            logger.error(f"Failed to update session: {e!r}")
+        return self.state.client, self.state.session_id

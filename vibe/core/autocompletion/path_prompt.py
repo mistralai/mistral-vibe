@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from vibe.core.session.title_format import MentionSegment, TextSegment, TitleSegment
+
 
 @dataclass(frozen=True, slots=True)
 class PathResource:
@@ -107,3 +109,35 @@ def _dedupe_resources(resources: list[PathResource]) -> list[PathResource]:
         seen.add(resource.path)
         unique.append(resource)
     return unique
+
+
+def build_title_segments(
+    message: str, *, base_dir: Path | None = None
+) -> list[TitleSegment]:
+    if not message:
+        return []
+
+    resolved_base = (base_dir or Path.cwd()).resolve()
+    segments: list[TitleSegment] = []
+    text_buf: list[str] = []
+    pos = 0
+
+    def flush_text() -> None:
+        if text_buf:
+            segments.append(TextSegment(text="".join(text_buf)))
+            text_buf.clear()
+
+    while pos < len(message):
+        if _is_path_anchor(message, pos):
+            candidate, new_pos = _extract_candidate(message, pos + 1)
+            if candidate and (resource := _to_resource(candidate, resolved_base)):
+                flush_text()
+                segments.append(MentionSegment(name=resource.path.name))
+                pos = new_pos
+                continue
+
+        text_buf.append(message[pos])
+        pos += 1
+
+    flush_text()
+    return segments

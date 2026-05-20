@@ -74,7 +74,6 @@ def acp_read_file_tool(
     state = AcpReadFileState.model_construct(
         client=mock_client,  # type: ignore[arg-type]
         session_id="test_session_123",
-        tool_call_id="test_tool_call_456",
     )
     return ReadFile(config_getter=lambda: config, state=state)
 
@@ -99,7 +98,6 @@ class TestAcpReadFileExecution:
         assert result.content == "line 1\nline 2\nline 3"
         assert result.lines_read == 3
         assert mock_client._read_text_file_called
-        assert mock_client._session_update_called
 
         # Verify read_text_file was called correctly
         params = mock_client._last_read_params
@@ -118,7 +116,7 @@ class TestAcpReadFileExecution:
         tool = ReadFile(
             config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -141,7 +139,7 @@ class TestAcpReadFileExecution:
         tool = ReadFile(
             config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -164,7 +162,7 @@ class TestAcpReadFileExecution:
         tool = ReadFile(
             config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -189,7 +187,7 @@ class TestAcpReadFileExecution:
         tool = ReadFile(
             config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -209,7 +207,7 @@ class TestAcpReadFileExecution:
         tool = ReadFile(
             config_getter=lambda: ReadFileToolConfig(),
             state=AcpReadFileState.model_construct(
-                client=None, session_id="test_session", tool_call_id="test_call"
+                client=None, session_id="test_session"
             ),
         )
 
@@ -232,9 +230,7 @@ class TestAcpReadFileExecution:
         mock_client = MockClient()
         tool = ReadFile(
             config_getter=lambda: ReadFileToolConfig(),
-            state=AcpReadFileState.model_construct(
-                client=mock_client, session_id=None, tool_call_id="test_call"
-            ),
+            state=AcpReadFileState.model_construct(client=mock_client, session_id=None),
         )
 
         args = ReadFileArgs(path=str(test_file))

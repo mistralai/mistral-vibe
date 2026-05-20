@@ -6,7 +6,6 @@ from pathlib import Path
 
 from acp.schema import (
     ContentToolCallContent,
-    TerminalToolCallContent,
     TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
@@ -15,6 +14,7 @@ from acp.schema import (
 
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
+from vibe.acp.tools.events import ToolTerminalOpenedEvent
 from vibe.acp.tools.session_update import resolve_kind
 from vibe.core.logger import logger
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
@@ -37,7 +37,7 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
     async def run(
         self, args: BashArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
-        client, session_id, _ = self._load_state()
+        client, session_id = self._load_state()
 
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
@@ -54,11 +54,14 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
 
         terminal_id = terminal.terminal_id
 
-        await self._send_in_progress_session_update([
-            TerminalToolCallContent(type="terminal", terminal_id=terminal_id)
-        ])
-
         try:
+            if ctx is not None:
+                yield ToolTerminalOpenedEvent(
+                    tool_name=self.get_name(),
+                    tool_call_id=ctx.tool_call_id,
+                    terminal_id=terminal_id,
+                )
+
             exit_response = await self._wait_for_terminal_exit(
                 terminal_id=terminal_id, timeout=timeout, command=args.command
             )
@@ -93,7 +96,7 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
     async def _wait_for_terminal_exit(
         self, terminal_id: str, timeout: int, command: str
     ) -> WaitForTerminalExitResponse:
-        client, session_id, _ = self._load_state()
+        client, session_id = self._load_state()
 
         try:
             return await asyncio.wait_for(

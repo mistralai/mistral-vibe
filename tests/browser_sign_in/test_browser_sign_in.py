@@ -34,7 +34,7 @@ TEST_SIGN_IN_URL = "https://console.mistral.ai/codestral/cli/authenticate#" + ur
     "complete_token": f"complete-token-{TEST_PROCESS_ID}",
     "state": f"state-{TEST_PROCESS_ID}",
 })
-TEST_POLL_URL = "https://api.mistral.ai/api/vibe/sign-in/poll/poll-token-process-1"
+TEST_POLL_URL = "https://console.mistral.ai/api/vibe/sign-in/poll/poll-token-process-1"
 
 
 def build_code_challenge(verifier: str) -> str:
@@ -86,6 +86,50 @@ async def test_authenticate_returns_api_key_after_pending_poll() -> None:
     assert opened_urls == [TEST_SIGN_IN_URL]
     assert statuses == [
         BrowserSignInStatus.OPENING_BROWSER,
+        BrowserSignInStatus.WAITING_FOR_BROWSER_SIGN_IN,
+        BrowserSignInStatus.EXCHANGING,
+        BrowserSignInStatus.COMPLETED,
+    ]
+    assert gateway.polled_urls == [TEST_POLL_URL, TEST_POLL_URL]
+    assert gateway.exchange_requests[0].exchange_token == "exchange-1"
+
+
+@pytest.mark.asyncio
+async def test_start_attempt_returns_attempt_without_opening_browser() -> None:
+    opened_urls: list[str] = []
+    gateway, service = build_test_service(
+        poll_results=[], open_browser=lambda url: opened_urls.append(url) or True
+    )
+
+    attempt = await service.start_attempt()
+
+    assert opened_urls == []
+    assert attempt.process_id == TEST_PROCESS_ID
+    assert attempt.sign_in_url == TEST_SIGN_IN_URL
+    assert attempt.poll_url == TEST_POLL_URL
+    assert attempt.expires_at == build_sign_in_process(TEST_NOW).expires_at
+    assert gateway.exchange_requests == []
+    assert gateway.code_challenges == [build_code_challenge(attempt.code_verifier)]
+
+
+@pytest.mark.asyncio
+async def test_complete_attempt_returns_api_key_without_opening_browser() -> None:
+    opened_urls: list[str] = []
+    statuses: list[BrowserSignInStatus] = []
+    gateway, service = build_test_service(
+        poll_results=[
+            BrowserSignInPollResult(status="pending"),
+            BrowserSignInPollResult(status="completed", exchange_token="exchange-1"),
+        ],
+        open_browser=lambda url: opened_urls.append(url) or True,
+    )
+    attempt = await service.start_attempt()
+
+    api_key = await service.complete_attempt(attempt, status_callback=statuses.append)
+
+    assert api_key == "sk-browser-key"
+    assert opened_urls == []
+    assert statuses == [
         BrowserSignInStatus.WAITING_FOR_BROWSER_SIGN_IN,
         BrowserSignInStatus.EXCHANGING,
         BrowserSignInStatus.COMPLETED,

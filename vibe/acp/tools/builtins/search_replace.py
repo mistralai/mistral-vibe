@@ -44,9 +44,7 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
         return AcpSearchReplaceState
 
     async def _read_file(self, file_path: Path) -> ReadSafeResult:
-        client, session_id, _ = self._load_state()
-
-        await self._send_in_progress_session_update()
+        client, session_id = self._load_state()
 
         try:
             response = await client.read_text_file(
@@ -74,7 +72,7 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
     async def _write_file(
         self, file_path: Path, content: str, encoding: str, newline: str
     ) -> None:
-        client, session_id, _ = self._load_state()
+        client, session_id = self._load_state()
 
         try:
             await client.write_text_file(

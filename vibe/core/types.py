@@ -456,6 +456,10 @@ class AgentProfileChangedEvent(BaseEvent):
     agent_name: str
 
 
+class SessionTitleUpdatedEvent(BaseEvent):
+    title: str
+
+
 class OutputFormat(StrEnum):
     TEXT = auto()
     JSON = auto()

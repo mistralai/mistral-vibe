@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import os
 from typing import ClassVar
 
-from dotenv import set_key
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Center, Horizontal, Vertical
@@ -13,13 +11,13 @@ from textual.widgets import Input, Link, Static
 
 from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig, VibeConfig
-from vibe.core.paths import GLOBAL_ENV_FILE
-from vibe.core.telemetry.send import TelemetryClient
+from vibe.core.config import ProviderConfig
 from vibe.core.telemetry.types import EntrypointMetadata
-from vibe.core.types import Backend
+from vibe.setup.auth.api_key_persistence import (
+    persist_api_key,
+    resolve_api_key_provider,
+)
 from vibe.setup.onboarding.base import OnboardingScreen
-from vibe.setup.onboarding.context import OnboardingContext
 
 PROVIDER_HELP = {
     "mistral": ("https://console.mistral.ai/codestral/cli", "Mistral AI Studio")
@@ -27,55 +25,6 @@ PROVIDER_HELP = {
 CONFIG_DOCS_URL = (
     "https://github.com/mistralai/mistral-vibe?tab=readme-ov-file#configuration"
 )
-
-
-def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
-    GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
-    set_key(GLOBAL_ENV_FILE.path, env_key, api_key)
-
-
-def persist_api_key(
-    provider: ProviderConfig,
-    api_key: str,
-    *,
-    entrypoint_metadata: EntrypointMetadata | None = None,
-) -> str:
-    env_key = provider.api_key_env_var
-    if not env_key:
-        return "env_var_error:<empty>"
-    try:
-        os.environ[env_key] = api_key
-    except ValueError:
-        return f"env_var_error:{env_key}"
-    try:
-        _save_api_key_to_env_file(env_key, api_key)
-    except (OSError, ValueError) as err:
-        return f"save_error:{err}"
-    if provider.backend == Backend.MISTRAL:
-        try:
-            telemetry = TelemetryClient(
-                config_getter=VibeConfig,
-                entrypoint_metadata_getter=lambda: entrypoint_metadata,
-            )
-            telemetry.send_onboarding_api_key_added()
-        except Exception:
-            pass
-    return "completed"
-
-
-def _get_mistral_provider() -> ProviderConfig:
-    return next(
-        provider for provider in DEFAULT_PROVIDERS if provider.name == "mistral"
-    )
-
-
-def _resolve_onboarding_provider(
-    provider: ProviderConfig | None = None,
-) -> ProviderConfig:
-    resolved_provider = provider or OnboardingContext.load().provider
-    if resolved_provider.api_key_env_var:
-        return resolved_provider
-    return _get_mistral_provider()
 
 
 class ApiKeyScreen(OnboardingScreen):
@@ -93,7 +42,7 @@ class ApiKeyScreen(OnboardingScreen):
         entrypoint_metadata: EntrypointMetadata | None = None,
     ) -> None:
         super().__init__()
-        self.provider = _resolve_onboarding_provider(provider)
+        self.provider = resolve_api_key_provider(provider)
         self._entrypoint_metadata = entrypoint_metadata
 
     def _compose_provider_link(self, provider_name: str) -> ComposeResult:

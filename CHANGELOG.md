@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.1] - 2026-05-20
+
+### Added
+
+- Pretty session titles that format `@mention` syntax for human-readable display
+- Auto-emit `SessionInfoUpdate` on the first prompt so IDE session pickers reflect the title immediately
+- End-to-end layered config read path with `TomlFileLayer`, `ConfigBuilder`, and `ConfigOrchestrator`
+
+### Fixed
+
+- MCP menu no longer shows `D`/`E` shortcuts in the detail view when there are no tools to enable or disable
+- Parallel `bash` tool calls in ACP each render their own live terminal instead of racing on shared state
+
+
 ## [2.10.0] - 2026-05-19
 
 ### Added

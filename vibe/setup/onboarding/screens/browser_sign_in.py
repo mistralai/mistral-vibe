@@ -22,11 +22,11 @@ from vibe.setup.auth import (
     BrowserSignInService,
     BrowserSignInStatus,
 )
-from vibe.setup.onboarding.base import OnboardingScreen
-from vibe.setup.onboarding.screens.api_key import (
-    _resolve_onboarding_provider,
+from vibe.setup.auth.api_key_persistence import (
     persist_api_key,
+    resolve_api_key_provider,
 )
+from vibe.setup.onboarding.base import OnboardingScreen
 
 PENDING_HINT = "Press M to enter API key manually · Esc to cancel"
 ERROR_HINT = "Press R to retry · Press M to enter API key manually · Esc to cancel"
@@ -215,7 +215,7 @@ class BrowserSignInScreen(OnboardingScreen):
         self._worker = None
         self.app.exit(
             persist_api_key(
-                _resolve_onboarding_provider(self.provider),
+                resolve_api_key_provider(self.provider),
                 api_key,
                 entrypoint_metadata=self._entrypoint_metadata,
             )

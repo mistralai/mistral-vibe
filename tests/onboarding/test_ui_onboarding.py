@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -31,9 +30,10 @@ from vibe.setup.auth import (
     BrowserSignInService,
     BrowserSignInStatus,
 )
+from vibe.setup.auth.api_key_persistence import persist_api_key
 import vibe.setup.onboarding as onboarding_module
 from vibe.setup.onboarding import OnboardingApp
-from vibe.setup.onboarding.screens.api_key import ApiKeyScreen, persist_api_key
+from vibe.setup.onboarding.screens.api_key import ApiKeyScreen
 from vibe.setup.onboarding.screens.auth_method import AuthMethodScreen
 from vibe.setup.onboarding.screens.browser_sign_in import (
     ERROR_HINT,
@@ -43,7 +43,7 @@ from vibe.setup.onboarding.screens.browser_sign_in import (
 )
 
 CONSOLE_URL = "https://console.mistral.ai"
-API_URL = "https://api.mistral.ai"
+BROWSER_AUTH_API_URL = "https://console.mistral.ai/api"
 
 
 async def _wait_for(
@@ -95,7 +95,7 @@ def _build_browser_onboarding_app(
     return OnboardingApp(
         config=_build_onboarding_config(
             browser_auth_base_url=CONSOLE_URL,
-            browser_auth_api_base_url=API_URL,
+            browser_auth_api_base_url=BROWSER_AUTH_API_URL,
             enable_experimental_browser_sign_in=True,
         ),
         browser_sign_in_service_factory=browser_sign_in_service_factory,
@@ -237,7 +237,8 @@ async def test_ui_hides_browser_sign_in_when_experimental_flag_is_disabled() -> 
     )
     app = OnboardingApp(
         config=_build_onboarding_config(
-            browser_auth_base_url=CONSOLE_URL, browser_auth_api_base_url=API_URL
+            browser_auth_base_url=CONSOLE_URL,
+            browser_auth_api_base_url=BROWSER_AUTH_API_URL,
         ),
         browser_sign_in_service_factory=browser_sign_in_service_factory,
     )
@@ -257,7 +258,7 @@ async def test_ui_supports_browser_sign_in_when_experimental_flag_is_enabled() -
     app = OnboardingApp(
         config=_build_onboarding_config(
             browser_auth_base_url=CONSOLE_URL,
-            browser_auth_api_base_url=API_URL,
+            browser_auth_api_base_url=BROWSER_AUTH_API_URL,
             enable_experimental_browser_sign_in=True,
         ),
         browser_sign_in_service_factory=browser_sign_in_service_factory,
@@ -276,7 +277,7 @@ async def test_ui_offers_browser_sign_in_for_renamed_mistral_provider() -> None:
             provider_name="customer-mistral",
             backend=Backend.MISTRAL,
             browser_auth_base_url=CONSOLE_URL,
-            browser_auth_api_base_url=API_URL,
+            browser_auth_api_base_url=BROWSER_AUTH_API_URL,
             enable_experimental_browser_sign_in=True,
         )
     )
@@ -344,7 +345,7 @@ async def test_ui_browser_sign_in_falls_back_to_mistral_env_var_when_missing() -
             provider_name="custom-mistral",
             api_key_env_var="",
             browser_auth_base_url=CONSOLE_URL,
-            browser_auth_api_base_url=API_URL,
+            browser_auth_api_base_url=BROWSER_AUTH_API_URL,
             enable_experimental_browser_sign_in=True,
         ),
         browser_sign_in_service_factory=browser_sign_in_service_factory,
@@ -683,7 +684,7 @@ async def test_ui_falls_back_to_default_onboarding_context_with_invalid_active_m
             'api_base = "https://api.mistral.ai/v1"',
             'api_key_env_var = "MISTRAL_API_KEY"',
             'browser_auth_base_url = "https://console.mistral.ai"',
-            'browser_auth_api_base_url = "https://api.mistral.ai"',
+            'browser_auth_api_base_url = "https://console.mistral.ai/api"',
             'backend = "mistral"',
             "",
             "[[models]]",
@@ -732,11 +733,9 @@ def test_api_key_screen_uses_mistral_fallback_for_context_without_env_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "vibe.setup.onboarding.screens.api_key.OnboardingContext.load",
-        lambda: SimpleNamespace(
-            provider=ProviderConfig(
-                name="llamacpp", api_base="http://127.0.0.1:8080/v1", api_key_env_var=""
-            )
+        "vibe.setup.auth.api_key_persistence._load_onboarding_provider",
+        lambda: ProviderConfig(
+            name="llamacpp", api_base="http://127.0.0.1:8080/v1", api_key_env_var=""
         ),
     )
 
@@ -778,7 +777,7 @@ def test_persist_api_key_sends_onboarding_telemetry_with_entrypoint_metadata(
 
     provider = ProviderConfig(
         name="mistral",
-        api_base="https://api.mistral.ai/v1",
+        api_base="https://inference.mistral.test/v1",
         api_key_env_var="MISTRAL_API_KEY",
         backend=Backend.MISTRAL,
     )

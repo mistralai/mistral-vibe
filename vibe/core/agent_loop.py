@@ -113,6 +113,7 @@ from vibe.core.types import (
     RateLimitError,
     ReasoningEvent,
     Role,
+    SessionTitleUpdatedEvent,
     ToolCall,
     ToolCallEvent,
     ToolResultEvent,
@@ -629,7 +630,11 @@ class AgentLoop:  # noqa: PLR0904
 
     @requires_init
     async def act(
-        self, msg: str, client_message_id: str | None = None
+        self,
+        msg: str,
+        client_message_id: str | None = None,
+        *,
+        auto_title: str | None = None,
     ) -> AsyncGenerator[BaseEvent, None]:
         self._clean_message_history()
         self.rewind_manager.create_checkpoint()
@@ -639,7 +644,7 @@ class AgentLoop:  # noqa: PLR0904
             model_name = None
         async with agent_span(model=model_name, session_id=self.session_id):
             async for event in self._conversation_loop(
-                msg, client_message_id=client_message_id
+                msg, client_message_id=client_message_id, auto_title=auto_title
             ):
                 yield event
 
@@ -848,7 +853,11 @@ class AgentLoop:  # noqa: PLR0904
         return headers
 
     async def _conversation_loop(  # noqa: PLR0912
-        self, user_msg: str, client_message_id: str | None = None
+        self,
+        user_msg: str,
+        client_message_id: str | None = None,
+        *,
+        auto_title: str | None = None,
     ) -> AsyncGenerator[BaseEvent]:
         user_message = LLMMessage(
             role=Role.user, content=user_msg, message_id=client_message_id
@@ -861,6 +870,11 @@ class AgentLoop:  # noqa: PLR0904
             raise AgentLoopError("User message must have a message_id")
 
         yield UserMessageEvent(content=user_msg, message_id=user_message.message_id)
+
+        if auto_title is not None and self.session_logger.set_initial_auto_title(
+            auto_title
+        ):
+            yield SessionTitleUpdatedEvent(title=auto_title)
 
         if self._hooks_manager:
             self._hooks_manager.reset_retry_count()

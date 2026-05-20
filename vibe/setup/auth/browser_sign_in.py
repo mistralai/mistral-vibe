@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 import hashlib
@@ -13,7 +14,6 @@ from vibe.setup.auth.browser_sign_in_gateway import (
     BrowserSignInError,
     BrowserSignInErrorCode,
     BrowserSignInGateway,
-    BrowserSignInProcess,
 )
 
 
@@ -28,6 +28,15 @@ StatusCallback = Callable[[BrowserSignInStatus], None]
 BrowserOpener = Callable[[str], bool]
 SleepFn = Callable[[float], Awaitable[None]]
 NowFn = Callable[[], datetime]
+
+
+@dataclass(frozen=True)
+class BrowserSignInAttempt:
+    process_id: str
+    sign_in_url: str
+    poll_url: str
+    expires_at: datetime
+    code_verifier: str
 
 
 class BrowserSignInService:
@@ -51,38 +60,55 @@ class BrowserSignInService:
     async def aclose(self) -> None:
         await self._gateway.aclose()
 
-    async def authenticate(self, status_callback: StatusCallback | None = None) -> str:
+    async def start_attempt(self) -> BrowserSignInAttempt:
         verifier, challenge = _generate_pkce_pair()
         process = await self._gateway.create_process(challenge)
-        self._emit(status_callback, BrowserSignInStatus.OPENING_BROWSER)
-        self._open_browser_or_raise(process.sign_in_url)
+        return BrowserSignInAttempt(
+            process_id=process.process_id,
+            sign_in_url=process.sign_in_url,
+            poll_url=process.poll_url,
+            expires_at=process.expires_at,
+            code_verifier=verifier,
+        )
+
+    async def complete_attempt(
+        self,
+        attempt: BrowserSignInAttempt,
+        status_callback: StatusCallback | None = None,
+    ) -> str:
         self._emit(status_callback, BrowserSignInStatus.WAITING_FOR_BROWSER_SIGN_IN)
-        exchange_token = await self._wait_for_completion(process)
+        exchange_token = await self._wait_for_completion(attempt)
         self._emit(status_callback, BrowserSignInStatus.EXCHANGING)
         api_key = await self._gateway.exchange(
-            process.process_id, exchange_token, verifier
+            attempt.process_id, exchange_token, attempt.code_verifier
         )
         self._emit(status_callback, BrowserSignInStatus.COMPLETED)
         return api_key
 
-    async def _wait_for_completion(self, process: BrowserSignInProcess) -> str:
+    async def authenticate(self, status_callback: StatusCallback | None = None) -> str:
+        attempt = await self.start_attempt()
+        self._emit(status_callback, BrowserSignInStatus.OPENING_BROWSER)
+        self._open_browser_or_raise(attempt.sign_in_url)
+        return await self.complete_attempt(attempt, status_callback=status_callback)
+
+    async def _wait_for_completion(self, attempt: BrowserSignInAttempt) -> str:
         consecutive_poll_failures = 0
-        while self._now() < process.expires_at:
+        while self._now() < attempt.expires_at:
             try:
-                payload = await self._gateway.poll(process.poll_url)
+                payload = await self._gateway.poll(attempt.poll_url)
             except BrowserSignInError as err:
                 if err.code is not BrowserSignInErrorCode.POLL_FAILED:
                     raise
                 consecutive_poll_failures += 1
                 if consecutive_poll_failures >= self._max_consecutive_poll_failures:
                     raise
-                await self._sleep_until_next_poll_or_timeout(process.expires_at)
+                await self._sleep_until_next_poll_or_timeout(attempt.expires_at)
                 continue
 
             consecutive_poll_failures = 0
             match payload.status:
                 case "pending":
-                    await self._sleep_until_next_poll_or_timeout(process.expires_at)
+                    await self._sleep_until_next_poll_or_timeout(attempt.expires_at)
                 case "completed":
                     if payload.exchange_token:
                         return payload.exchange_token

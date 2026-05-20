@@ -18,6 +18,7 @@ from vibe.core.session.session_loader import (
     METADATA_FILENAME,
     SessionLoader,
 )
+from vibe.core.session.title_format import MAX_TITLE_LENGTH
 from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
 from vibe.core.utils import is_windows, utc_now
 from vibe.core.utils.io import read_safe_async
@@ -145,7 +146,7 @@ class SessionLogger:
             title_source="auto",
         )
 
-    def _get_title(self, messages: Sequence[LLMMessage]) -> str:
+    def _fallback_title_from_messages(self, messages: Sequence[LLMMessage]) -> str:
         first_user_message = None
         for message in messages:
             if message.role == Role.user:
@@ -153,14 +154,12 @@ class SessionLogger:
                 break
 
         if first_user_message is None:
-            title = "Untitled session"
-        else:
-            MAX_TITLE_LENGTH = 50
-            text = str(first_user_message.content)
-            title = text[:MAX_TITLE_LENGTH]
-            if len(text) > MAX_TITLE_LENGTH:
-                title += "…"
+            return "Untitled session"
 
+        text = str(first_user_message.content)
+        title = text[:MAX_TITLE_LENGTH]
+        if len(text) > MAX_TITLE_LENGTH:
+            title += "…"
         return title
 
     def _set_title_state(
@@ -183,14 +182,28 @@ class SessionLogger:
 
         self._set_title_state(normalized_title, source="manual")
 
+    def needs_initial_auto_title(self) -> bool:
+        return self.session_metadata is not None and self.session_metadata.title is None
+
+    def set_initial_auto_title(self, title: str) -> bool:
+        if not self.needs_initial_auto_title():
+            return False
+
+        normalized_title = title.strip()
+        if not normalized_title:
+            return False
+
+        self._set_title_state(normalized_title, source="auto")
+        return True
+
     def _resolve_title(self, messages: Sequence[LLMMessage]) -> str | None:
         if self.session_metadata is None:
-            return self._get_title(messages)
+            return self._fallback_title_from_messages(messages)
 
-        if self.session_metadata.title_source == "manual":
+        if self.session_metadata.title is not None:
             return self.session_metadata.title
 
-        title = self._get_title(messages)
+        title = self._fallback_title_from_messages(messages)
         self._set_title_state(title, source="auto")
         return title
 

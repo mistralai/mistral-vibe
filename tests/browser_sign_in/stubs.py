@@ -99,7 +99,7 @@ def build_sign_in_process(
             f"https://console.mistral.ai/codestral/cli/authenticate#{fragment}"
         ),
         poll_url=(
-            f"https://api.mistral.ai/api/vibe/sign-in/poll/poll-token-{process_id}"
+            f"https://console.mistral.ai/api/vibe/sign-in/poll/poll-token-{process_id}"
         ),
         expires_at=now + timedelta(minutes=5),
     )

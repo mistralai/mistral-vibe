@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
+from dataclasses import dataclass
+from datetime import UTC
 import logging
 import os
 from pathlib import Path
 import signal
 import sys
-from typing import Any, cast, override
+from typing import Any, Protocol, cast, override
 from uuid import uuid4
 
 from acp import (
@@ -57,6 +59,7 @@ from acp.schema import (
     SetSessionConfigOptionResponse,
     SseMcpServer,
     TerminalAuthMethod,
+    TerminalToolCallContent,
     TextContentBlock,
     TextResourceContents,
     ToolCallProgress,
@@ -83,7 +86,9 @@ from vibe.acp.exceptions import (
     UnauthenticatedError,
 )
 from vibe.acp.session import AcpSessionLoop
+from vibe.acp.title import acp_blocks_to_title_segments
 from vibe.acp.tools.base import BaseAcpTool
+from vibe.acp.tools.events import ToolTerminalOpenedEvent
 from vibe.acp.tools.session_update import (
     resolve_kind,
     tool_call_session_update,
@@ -112,6 +117,7 @@ from vibe.core.agents.models import CHAT as CHAT_AGENT, BuiltinAgentName
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import (
     MissingAPIKeyError,
+    ProviderConfig,
     SessionLoggingConfig,
     VibeConfig,
     load_dotenv_values,
@@ -129,6 +135,7 @@ from vibe.core.session.saved_sessions import (
     update_saved_session_title_at_path,
 )
 from vibe.core.session.session_loader import SessionLoader
+from vibe.core.session.title_format import format_session_title
 from vibe.core.skills.manager import SkillManager
 from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
 from vibe.core.telemetry.send import TelemetryClient
@@ -146,6 +153,7 @@ from vibe.core.types import (
     RateLimitError as CoreRateLimitError,
     ReasoningEvent,
     Role,
+    SessionTitleUpdatedEvent,
     ToolCallEvent,
     ToolResultEvent,
     ToolStreamEvent,
@@ -155,6 +163,18 @@ from vibe.core.utils import (
     ConversationLimitException,
     get_user_cancellation_message,
 )
+from vibe.setup.auth import (
+    BrowserSignInAttempt,
+    BrowserSignInError,
+    BrowserSignInErrorCode,
+    BrowserSignInService,
+    HttpBrowserSignInGateway,
+)
+from vibe.setup.auth.api_key_persistence import (
+    persist_api_key,
+    resolve_api_key_provider,
+)
+from vibe.setup.onboarding.context import OnboardingContext
 
 logger = logging.getLogger("vibe")
 
@@ -215,13 +235,123 @@ def _resolved_user_message_id(client_message_id: str | None) -> str:
     return str(uuid4())
 
 
+@dataclass(frozen=True)
+class PendingBrowserSignInAttempt:
+    attempt: BrowserSignInAttempt
+    provider: ProviderConfig
+
+
+RETRYABLE_BROWSER_SIGN_IN_COMPLETION_ERRORS = {
+    BrowserSignInErrorCode.EXCHANGE_FAILED,
+    BrowserSignInErrorCode.POLL_FAILED,
+}
+
+
+OnboardingContextLoader = Callable[[], OnboardingContext]
+ApiKeyPersister = Callable[[ProviderConfig, str], str]
+
+
+class BrowserSignInServiceAdapter(Protocol):
+    async def authenticate(self) -> str: ...
+
+    async def start_attempt(self) -> BrowserSignInAttempt: ...
+
+    async def complete_attempt(self, attempt: BrowserSignInAttempt) -> str: ...
+
+    async def aclose(self) -> None: ...
+
+
+BrowserSignInServiceFactory = Callable[[ProviderConfig], BrowserSignInServiceAdapter]
+
+
 class VibeAcpAgentLoop(AcpAgent):
     client: Client
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        onboarding_context_loader: OnboardingContextLoader | None = None,
+        browser_sign_in_service_factory: BrowserSignInServiceFactory | None = None,
+        api_key_persister: ApiKeyPersister = persist_api_key,
+    ) -> None:
         self.sessions: dict[str, AcpSessionLoop] = {}
         self.client_capabilities: ClientCapabilities | None = None
         self.client_info: Implementation | None = None
+        self._pending_browser_sign_in_attempts: dict[
+            str, PendingBrowserSignInAttempt
+        ] = {}
+        self._load_onboarding_context = (
+            onboarding_context_loader or OnboardingContext.load
+        )
+        self._browser_sign_in_service_factory = (
+            browser_sign_in_service_factory or self._build_browser_sign_in_service
+        )
+        self._persist_api_key = api_key_persister
+
+    def _build_browser_auth_method(
+        self, context: OnboardingContext, method_id: str
+    ) -> AuthMethodAgent | None:
+        if not context.browser_sign_in_enabled:
+            return None
+
+        return AuthMethodAgent(
+            id=method_id,
+            name="Sign in through Mistral AI Studio",
+            description="Sign into Mistral Vibe through your Mistral AI Studio account.",
+        )
+
+    def _build_terminal_auth_method(
+        self, command: str, args: list[str]
+    ) -> TerminalAuthMethod:
+        return TerminalAuthMethod(
+            type="terminal",
+            id="vibe-setup",
+            name="Register your API Key",
+            description="Register your API Key inside Mistral Vibe",
+            field_meta={
+                "terminal-auth": {
+                    "command": command,
+                    "args": args,
+                    "label": "Mistral Vibe Setup",
+                }
+            },
+        )
+
+    def _build_browser_sign_in_service(
+        self, provider: ProviderConfig | None = None
+    ) -> BrowserSignInService:
+        provider = provider or self._load_onboarding_context().provider
+        if not provider.supports_browser_sign_in:
+            raise InvalidRequestError(
+                "Browser sign-in is not available for the configured provider."
+            )
+
+        browser_base_url = provider.browser_auth_base_url
+        api_base_url = provider.browser_auth_api_base_url
+        if browser_base_url is None or api_base_url is None:
+            raise ConfigurationError("Browser sign-in requires both browser auth URLs.")
+
+        return BrowserSignInService(
+            HttpBrowserSignInGateway(
+                browser_base_url=browser_base_url, api_base_url=api_base_url
+            )
+        )
+
+    def _load_enabled_browser_sign_in_context(self) -> OnboardingContext:
+        context = self._load_onboarding_context()
+        if not context.browser_sign_in_enabled:
+            raise InvalidRequestError(
+                "Browser sign-in is not available for the configured provider."
+            )
+        return context
+
+    def _supports_delegated_browser_auth(self) -> bool:
+        return bool(
+            self.client_capabilities
+            and self.client_capabilities.field_meta
+            and self.client_capabilities.field_meta.get("browser-auth-delegated")
+            is True
+        )
 
     @override
     async def initialize(
@@ -256,25 +386,21 @@ class VibeAcpAgentLoop(AcpAgent):
             and self.client_capabilities.field_meta.get("terminal-auth") is True
         )
 
-        auth_methods: list[EnvVarAuthMethod | TerminalAuthMethod | AuthMethodAgent] = (
-            [
-                TerminalAuthMethod(
-                    type="terminal",
-                    id="vibe-setup",
-                    name="Register your API Key",
-                    description="Register your API Key inside Mistral Vibe",
-                    field_meta={
-                        "terminal-auth": {
-                            "command": command,
-                            "args": args,
-                            "label": "Mistral Vibe Setup",
-                        }
-                    },
-                )
-            ]
-            if supports_terminal_auth
-            else []
-        )
+        context = self._load_onboarding_context()
+
+        auth_methods: list[EnvVarAuthMethod | TerminalAuthMethod | AuthMethodAgent] = []
+        if browser_auth_method := self._build_browser_auth_method(
+            context, "browser-auth"
+        ):
+            auth_methods.append(browser_auth_method)
+        if self._supports_delegated_browser_auth():
+            delegated_browser_auth_method = self._build_browser_auth_method(
+                context, "browser-auth-delegated"
+            )
+            if delegated_browser_auth_method is not None:
+                auth_methods.append(delegated_browser_auth_method)
+        if supports_terminal_auth:
+            auth_methods.append(self._build_terminal_auth_method(command, args))
 
         response = InitializeResponse(
             agent_capabilities=AgentCapabilities(
@@ -298,11 +424,116 @@ class VibeAcpAgentLoop(AcpAgent):
         )
         return response
 
+    async def _authenticate_browser_auth(self, **kwargs: Any) -> AuthenticateResponse:
+        action = kwargs.get("action")
+        if action not in {None, "start"}:
+            raise InvalidRequestError(f"Unsupported browser auth action: {action}")
+
+        provider = self._load_enabled_browser_sign_in_context().provider
+        browser_sign_in = self._browser_sign_in_service_factory(provider)
+        try:
+            api_key = await browser_sign_in.authenticate()
+        except BrowserSignInError as e:
+            raise InternalError(str(e)) from e
+        finally:
+            await browser_sign_in.aclose()
+
+        persist_result = self._persist_api_key(
+            resolve_api_key_provider(provider), api_key
+        )
+        return AuthenticateResponse(
+            field_meta={
+                "browser-auth": {"persistResult": persist_result, "status": "completed"}
+            }
+        )
+
+    async def _start_delegated_browser_auth(self) -> AuthenticateResponse:
+        provider = self._load_enabled_browser_sign_in_context().provider
+        browser_sign_in = self._browser_sign_in_service_factory(provider)
+        try:
+            attempt = await browser_sign_in.start_attempt()
+        except BrowserSignInError as e:
+            raise InternalError(str(e)) from e
+        finally:
+            await browser_sign_in.aclose()
+
+        self._pending_browser_sign_in_attempts[attempt.process_id] = (
+            PendingBrowserSignInAttempt(attempt=attempt, provider=provider)
+        )
+        return AuthenticateResponse(
+            field_meta={
+                "browser-auth-delegated": {
+                    "attemptId": attempt.process_id,
+                    "expiresAt": attempt.expires_at.astimezone(UTC)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "signInUrl": attempt.sign_in_url,
+                }
+            }
+        )
+
+    async def _complete_delegated_browser_auth(
+        self, **kwargs: Any
+    ) -> AuthenticateResponse:
+        attempt_id = kwargs.get("attemptId") or kwargs.get("attempt_id")
+        if not isinstance(attempt_id, str) or not attempt_id:
+            raise InvalidRequestError("Missing browser sign-in attempt ID.")
+
+        pending_attempt = self._pending_browser_sign_in_attempts.get(attempt_id)
+        if pending_attempt is None:
+            raise InvalidRequestError(f"Unknown browser sign-in attempt: {attempt_id}")
+
+        browser_sign_in = self._browser_sign_in_service_factory(
+            pending_attempt.provider
+        )
+        try:
+            api_key = await browser_sign_in.complete_attempt(pending_attempt.attempt)
+        except BrowserSignInError as e:
+            if e.code not in RETRYABLE_BROWSER_SIGN_IN_COMPLETION_ERRORS:
+                self._pending_browser_sign_in_attempts.pop(attempt_id, None)
+            raise InvalidRequestError(str(e)) from e
+        finally:
+            await browser_sign_in.aclose()
+
+        self._pending_browser_sign_in_attempts.pop(attempt_id, None)
+        persist_result = self._persist_api_key(
+            resolve_api_key_provider(pending_attempt.provider), api_key
+        )
+        return AuthenticateResponse(
+            field_meta={
+                "browser-auth-delegated": {
+                    "attemptId": attempt_id,
+                    "persistResult": persist_result,
+                    "status": "completed",
+                }
+            }
+        )
+
+    async def _authenticate_delegated_browser_auth(
+        self, **kwargs: Any
+    ) -> AuthenticateResponse:
+        action = kwargs.get("action", "start")
+        if action not in {"start", "complete"}:
+            raise InvalidRequestError(
+                f"Unsupported delegated browser auth action: {action}"
+            )
+
+        if action == "start":
+            return await self._start_delegated_browser_auth()
+
+        return await self._complete_delegated_browser_auth(**kwargs)
+
     @override
     async def authenticate(
         self, method_id: str, **kwargs: Any
     ) -> AuthenticateResponse | None:
-        raise NotImplementedMethodError("authenticate")
+        if method_id == "browser-auth":
+            return await self._authenticate_browser_auth(**kwargs)
+
+        if method_id == "browser-auth-delegated":
+            return await self._authenticate_delegated_browser_auth(**kwargs)
+
+        raise InvalidRequestError(f"Unsupported auth method: {method_id}")
 
     def _build_entrypoint_metadata(self) -> EntrypointMetadata:
         return build_entrypoint_metadata(
@@ -834,9 +1065,15 @@ class VibeAcpAgentLoop(AcpAgent):
             )
             text_prompt = SkillManager.build_skill_prompt(text_prompt, skill)
 
+        auto_title: str | None = None
+        if session.agent_loop.session_logger.needs_initial_auto_title():
+            auto_title = (
+                format_session_title(acp_blocks_to_title_segments(prompt)) or None
+            )
+
         async def agent_loop_task() -> None:
             async for update in self._run_agent_loop(
-                session, text_prompt, resolved_message_id
+                session, text_prompt, resolved_message_id, auto_title=auto_title
             ):
                 await self.client.session_update(session_id=session.id, update=update)
 
@@ -945,15 +1182,29 @@ class VibeAcpAgentLoop(AcpAgent):
         return await handler(session, text_prompt, message_id)
 
     async def _run_agent_loop(
-        self, session: AcpSessionLoop, prompt: str, client_message_id: str | None = None
+        self,
+        session: AcpSessionLoop,
+        prompt: str,
+        client_message_id: str | None = None,
+        *,
+        auto_title: str | None = None,
     ) -> AsyncGenerator[SessionUpdate | UsageUpdate]:
         rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
 
         async with aclosing(
-            session.agent_loop.act(rendered_prompt, client_message_id=client_message_id)
+            session.agent_loop.act(
+                rendered_prompt,
+                client_message_id=client_message_id,
+                auto_title=auto_title,
+            )
         ) as events:
             async for event in events:
-                if isinstance(event, AssistantEvent):
+                if isinstance(event, SessionTitleUpdatedEvent):
+                    await self._emit_session_info_update(
+                        session.id, title=event.title, updated_at=None
+                    )
+
+                elif isinstance(event, AssistantEvent):
                     yield AgentMessageChunk(
                         session_update="agent_message_chunk",
                         content=TextContentBlock(type="text", text=event.content),
@@ -973,7 +1224,6 @@ class VibeAcpAgentLoop(AcpAgent):
                             tool_manager=session.agent_loop.tool_manager,
                             client=self.client,
                             session_id=session.id,
-                            tool_call_id=event.tool_call_id,
                         )
 
                     session_update = tool_call_session_update(event)
@@ -985,6 +1235,22 @@ class VibeAcpAgentLoop(AcpAgent):
                     if session_update:
                         yield session_update
                     self._send_usage_update(session)
+
+                elif isinstance(event, ToolTerminalOpenedEvent):
+                    # bash yielded the terminal id; surface it as an
+                    # in_progress update carrying the terminal block.
+                    yield ToolCallProgress(
+                        session_update="tool_call_update",
+                        tool_call_id=event.tool_call_id,
+                        status="in_progress",
+                        kind=resolve_kind(event.tool_name),
+                        content=[
+                            TerminalToolCallContent(
+                                type="terminal", terminal_id=event.terminal_id
+                            )
+                        ],
+                        field_meta={"tool_name": event.tool_name},
+                    )
 
                 elif isinstance(event, ToolStreamEvent):
                     yield ToolCallProgress(
