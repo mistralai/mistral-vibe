@@ -39,19 +39,14 @@ async def test_switch_from_reasoning_to_non_reasoning_clears_history() -> None:
     """Test that switching from a reasoning model to non-reasoning clears history."""
     model_off, model_low, _ = _make_config_with_mixed_thinking()
     config = build_test_vibe_config(
-        models=[model_low, model_off],
-        active_model="low-thinking",
+        models=[model_low, model_off], active_model="low-thinking"
     )
 
     app = build_test_vibe_app(config=config)
 
     # Add some messages to simulate history (more than 1, since index 0 is system message)
-    app.agent_loop.messages.append(
-        LLMMessage(role=Role.user, content="Hello there")
-    )
-    app.agent_loop.messages.append(
-        LLMMessage(role=Role.assistant, content="Hi back!")
-    )
+    app.agent_loop.messages.append(LLMMessage(role=Role.user, content="Hello there"))
+    app.agent_loop.messages.append(LLMMessage(role=Role.assistant, content="Hi back!"))
 
     # Verify we have history
     assert len(app.agent_loop.messages) > 1
@@ -62,12 +57,16 @@ async def test_switch_from_reasoning_to_non_reasoning_clears_history() -> None:
         with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates"):
             with patch.object(app, "_reload_config", new_callable=AsyncMock):
                 with patch.object(app, "_switch_to_input_app", new_callable=AsyncMock):
-                    with patch.object(app, "_clear_history", new_callable=AsyncMock) as mock_clear:
+                    with patch.object(
+                        app, "_clear_history", new_callable=AsyncMock
+                    ) as mock_clear:
                         with patch.object(
                             app, "_mount_and_scroll", new_callable=AsyncMock
                         ) as mock_mount:
                             # Post message to switch to non-reasoning model
-                            app.post_message(ModelPickerApp.ModelSelected("no-thinking"))
+                            app.post_message(
+                                ModelPickerApp.ModelSelected("no-thinking")
+                            )
                             await pilot.pause(0.2)
 
                             # Verify _clear_history was called
@@ -81,12 +80,13 @@ async def test_switch_from_reasoning_to_non_reasoning_clears_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_switch_from_reasoning_to_non_reasoning_with_no_history_does_not_clear() -> None:
+async def test_switch_from_reasoning_to_non_reasoning_with_no_history_does_not_clear() -> (
+    None
+):
     """Test that switching to non-reasoning with no history doesn't clear."""
     model_off, model_low, _ = _make_config_with_mixed_thinking()
     config = build_test_vibe_config(
-        models=[model_low, model_off],
-        active_model="low-thinking",
+        models=[model_low, model_off], active_model="low-thinking"
     )
 
     app = build_test_vibe_app(config=config)
@@ -100,12 +100,16 @@ async def test_switch_from_reasoning_to_non_reasoning_with_no_history_does_not_c
         with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates"):
             with patch.object(app, "_reload_config", new_callable=AsyncMock):
                 with patch.object(app, "_switch_to_input_app", new_callable=AsyncMock):
-                    with patch.object(app, "_clear_history", new_callable=AsyncMock) as mock_clear:
+                    with patch.object(
+                        app, "_clear_history", new_callable=AsyncMock
+                    ) as mock_clear:
                         with patch.object(
                             app, "_mount_and_scroll", new_callable=AsyncMock
                         ) as mock_mount:
                             # Post message to switch to non-reasoning model
-                            app.post_message(ModelPickerApp.ModelSelected("no-thinking"))
+                            app.post_message(
+                                ModelPickerApp.ModelSelected("no-thinking")
+                            )
                             await pilot.pause(0.2)
 
                             # Verify _clear_history was NOT called (only 1 message = system message)
@@ -118,19 +122,14 @@ async def test_switch_from_non_reasoning_to_reasoning_does_not_clear() -> None:
     """Test that switching from non-reasoning to reasoning doesn't clear history."""
     model_off, model_low, _ = _make_config_with_mixed_thinking()
     config = build_test_vibe_config(
-        models=[model_off, model_low],
-        active_model="no-thinking",
+        models=[model_off, model_low], active_model="no-thinking"
     )
 
     app = build_test_vibe_app(config=config)
 
     # Add some messages
-    app.agent_loop.messages.append(
-        LLMMessage(role=Role.user, content="Hello there")
-    )
-    app.agent_loop.messages.append(
-        LLMMessage(role=Role.assistant, content="Hi back!")
-    )
+    app.agent_loop.messages.append(LLMMessage(role=Role.user, content="Hello there"))
+    app.agent_loop.messages.append(LLMMessage(role=Role.assistant, content="Hi back!"))
 
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
@@ -138,7 +137,9 @@ async def test_switch_from_non_reasoning_to_reasoning_does_not_clear() -> None:
         with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates"):
             with patch.object(app, "_reload_config", new_callable=AsyncMock):
                 with patch.object(app, "_switch_to_input_app", new_callable=AsyncMock):
-                    with patch.object(app, "_clear_history", new_callable=AsyncMock) as mock_clear:
+                    with patch.object(
+                        app, "_clear_history", new_callable=AsyncMock
+                    ) as mock_clear:
                         # Post message to switch to reasoning model
                         app.post_message(ModelPickerApp.ModelSelected("low-thinking"))
                         await pilot.pause(0.2)
@@ -152,19 +153,14 @@ async def test_switch_between_reasoning_models_does_not_clear() -> None:
     """Test that switching between two reasoning models doesn't clear history."""
     _, model_low, model_high = _make_config_with_mixed_thinking()
     config = build_test_vibe_config(
-        models=[model_low, model_high],
-        active_model="low-thinking",
+        models=[model_low, model_high], active_model="low-thinking"
     )
 
     app = build_test_vibe_app(config=config)
 
     # Add some messages
-    app.agent_loop.messages.append(
-        LLMMessage(role=Role.user, content="Hello there")
-    )
-    app.agent_loop.messages.append(
-        LLMMessage(role=Role.assistant, content="Hi back!")
-    )
+    app.agent_loop.messages.append(LLMMessage(role=Role.user, content="Hello there"))
+    app.agent_loop.messages.append(LLMMessage(role=Role.assistant, content="Hi back!"))
 
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
@@ -172,7 +168,9 @@ async def test_switch_between_reasoning_models_does_not_clear() -> None:
         with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates"):
             with patch.object(app, "_reload_config", new_callable=AsyncMock):
                 with patch.object(app, "_switch_to_input_app", new_callable=AsyncMock):
-                    with patch.object(app, "_clear_history", new_callable=AsyncMock) as mock_clear:
+                    with patch.object(
+                        app, "_clear_history", new_callable=AsyncMock
+                    ) as mock_clear:
                         # Post message to switch between reasoning models
                         app.post_message(ModelPickerApp.ModelSelected("high-thinking"))
                         await pilot.pause(0.2)
@@ -186,18 +184,13 @@ async def test_switch_from_reasoning_to_non_reasoning_shows_correct_warning() ->
     """Test that switching from reasoning to non-reasoning shows the correct warning message."""
     model_off, model_low, _ = _make_config_with_mixed_thinking()
     config = build_test_vibe_config(
-        models=[model_low, model_off],
-        active_model="low-thinking",
+        models=[model_low, model_off], active_model="low-thinking"
     )
 
     app = build_test_vibe_app(config=config)
 
-    app.agent_loop.messages.append(
-        LLMMessage(role=Role.user, content="Hello there")
-    )
-    app.agent_loop.messages.append(
-        LLMMessage(role=Role.assistant, content="Hi back!")
-    )
+    app.agent_loop.messages.append(LLMMessage(role=Role.user, content="Hello there"))
+    app.agent_loop.messages.append(LLMMessage(role=Role.assistant, content="Hi back!"))
 
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
@@ -209,12 +202,17 @@ async def test_switch_from_reasoning_to_non_reasoning_shows_correct_warning() ->
                         with patch.object(
                             app, "_mount_and_scroll", new_callable=AsyncMock
                         ) as mock_mount:
-                            app.post_message(ModelPickerApp.ModelSelected("no-thinking"))
+                            app.post_message(
+                                ModelPickerApp.ModelSelected("no-thinking")
+                            )
                             await pilot.pause(0.2)
 
                             call_args = mock_mount.call_args[0]
                             assert isinstance(call_args[0], WarningMessage)
-                            assert "History cleared: selected model doesn't support reasoning" in str(call_args[0]._message)
+                            assert (
+                                "History cleared: selected model doesn't support reasoning"
+                                in str(call_args[0]._message)
+                            )
 
 
 @pytest.mark.asyncio
@@ -229,19 +227,14 @@ async def test_switch_between_non_reasoning_models_does_not_clear() -> None:
         thinking="off",
     )
     config = build_test_vibe_config(
-        models=[model_off, model_off_2],
-        active_model="no-thinking",
+        models=[model_off, model_off_2], active_model="no-thinking"
     )
 
     app = build_test_vibe_app(config=config)
 
     # Add some messages
-    app.agent_loop.messages.append(
-        LLMMessage(role=Role.user, content="Hello there")
-    )
-    app.agent_loop.messages.append(
-        LLMMessage(role=Role.assistant, content="Hi back!")
-    )
+    app.agent_loop.messages.append(LLMMessage(role=Role.user, content="Hello there"))
+    app.agent_loop.messages.append(LLMMessage(role=Role.assistant, content="Hi back!"))
 
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
@@ -249,14 +242,124 @@ async def test_switch_between_non_reasoning_models_does_not_clear() -> None:
         with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates"):
             with patch.object(app, "_reload_config", new_callable=AsyncMock):
                 with patch.object(app, "_switch_to_input_app", new_callable=AsyncMock):
-                    with patch.object(app, "_clear_history", new_callable=AsyncMock) as mock_clear:
+                    with patch.object(
+                        app, "_clear_history", new_callable=AsyncMock
+                    ) as mock_clear:
                         with patch.object(
                             app, "_mount_and_scroll", new_callable=AsyncMock
                         ) as mock_mount:
                             # Post message to switch between non-reasoning models
-                            app.post_message(ModelPickerApp.ModelSelected("no-thinking-2"))
+                            app.post_message(
+                                ModelPickerApp.ModelSelected("no-thinking-2")
+                            )
                             await pilot.pause(0.2)
 
                             # Verify _clear_history was NOT called (both have thinking="off")
+                            mock_clear.assert_not_called()
+                            mock_mount.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_switch_from_non_reasoning_to_reasoning_with_no_history_does_not_clear() -> (
+    None
+):
+    """Test that switching from non-reasoning to reasoning with no history doesn't clear."""
+    model_off, model_low, _ = _make_config_with_mixed_thinking()
+    config = build_test_vibe_config(
+        models=[model_off, model_low], active_model="no-thinking"
+    )
+
+    app = build_test_vibe_app(config=config)
+
+    # Only system message exists (no user messages)
+    assert len(app.agent_loop.messages) == 1
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+
+        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates"):
+            with patch.object(app, "_reload_config", new_callable=AsyncMock):
+                with patch.object(app, "_switch_to_input_app", new_callable=AsyncMock):
+                    with patch.object(
+                        app, "_clear_history", new_callable=AsyncMock
+                    ) as mock_clear:
+                        # Post message to switch to reasoning model
+                        app.post_message(ModelPickerApp.ModelSelected("low-thinking"))
+                        await pilot.pause(0.2)
+
+                        # Verify _clear_history was NOT called (switching to reasoning, not from)
+                        mock_clear.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_switch_between_reasoning_models_with_no_history_does_not_clear() -> None:
+    """Test that switching between reasoning models with no history doesn't clear."""
+    _, model_low, model_high = _make_config_with_mixed_thinking()
+    config = build_test_vibe_config(
+        models=[model_low, model_high], active_model="low-thinking"
+    )
+
+    app = build_test_vibe_app(config=config)
+
+    # Only system message exists (no user messages)
+    assert len(app.agent_loop.messages) == 1
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+
+        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates"):
+            with patch.object(app, "_reload_config", new_callable=AsyncMock):
+                with patch.object(app, "_switch_to_input_app", new_callable=AsyncMock):
+                    with patch.object(
+                        app, "_clear_history", new_callable=AsyncMock
+                    ) as mock_clear:
+                        # Post message to switch between reasoning models
+                        app.post_message(ModelPickerApp.ModelSelected("high-thinking"))
+                        await pilot.pause(0.2)
+
+                        # Verify _clear_history was NOT called (both have reasoning, no history)
+                        mock_clear.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_switch_between_non_reasoning_models_with_no_history_does_not_clear() -> (
+    None
+):
+    """Test that switching between non-reasoning models with no history doesn't clear."""
+    model_off, model_low, _ = _make_config_with_mixed_thinking()
+    model_off_2 = ModelConfig(
+        name="model-no-reasoning-2",
+        provider="mistral",
+        alias="no-thinking-2",
+        thinking="off",
+    )
+    config = build_test_vibe_config(
+        models=[model_off, model_off_2], active_model="no-thinking"
+    )
+
+    app = build_test_vibe_app(config=config)
+
+    # Only system message exists (no user messages)
+    assert len(app.agent_loop.messages) == 1
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+
+        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates"):
+            with patch.object(app, "_reload_config", new_callable=AsyncMock):
+                with patch.object(app, "_switch_to_input_app", new_callable=AsyncMock):
+                    with patch.object(
+                        app, "_clear_history", new_callable=AsyncMock
+                    ) as mock_clear:
+                        with patch.object(
+                            app, "_mount_and_scroll", new_callable=AsyncMock
+                        ) as mock_mount:
+                            # Post message to switch between non-reasoning models
+                            app.post_message(
+                                ModelPickerApp.ModelSelected("no-thinking-2")
+                            )
+                            await pilot.pause(0.2)
+
+                            # Verify _clear_history was NOT called (both non-reasoning, no history)
                             mock_clear.assert_not_called()
                             mock_mount.assert_not_called()
