@@ -1,0 +1,690 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright 2022 - 2023, Ralf D. Müller and the docToolchain contributors
+
+set -e
+set -u
+set -o pipefail
+
+# The main purpose of the wrapper script is to make 'docToolchain' easy to use.
+# - it helps to install 'docToolchain' if not installed
+# - you may manage different 'docToolchain' environments
+
+# See https://github.com/docToolchain/docToolchain/releases for available versions.
+# Set DTC_VERSION to "latest" to get the latest, yet unreleased version.
+: "${DTC_VERSION:=3.5.0}"
+
+# if not set, public docker hub is used
+: "${DTC_DOCKER_PREFIX:=}"
+
+# The 'generateSite' and 'copyThemes' tasks support DTC_SITETHEME, an URL of a theme.
+# export DTC_SITETHEME=https://....zip
+
+# The 'downloadTemplate' tasks uses DTC_TEMPLATE1, DTC_TEMPLATE2, ...
+# with which you can specify the location of additional templates
+# export DTC_TEMPLATE1=https://....zip
+# export DTC_TEMPLATE2=https://....zip
+
+# docToolchain configuration file may be overruled by the user
+: "${DTC_CONFIG_FILE:=docToolchainConfig.groovy}"
+
+# Contains the current project git branch, "-" if not available
+: "${DTC_PROJECT_BRANCH:=$(git branch --show-current 2> /dev/null || echo -)}"
+export DTC_PROJECT_BRANCH
+
+# DTC_HEADLESS is true if no STDIN is open (i.e. we have an non-interactive shell).
+: "${DTC_HEADLESS:=$([ -t 0 ] && echo false || echo true)}"
+export DTC_HEADLESS
+
+# Options passed to docToolchain
+DTC_OPTS="${DTC_OPTS:-} --warning-mode=none --no-daemon -Dfile.encoding=UTF-8 "
+if [ -n "${DTC_CONFIG_FILE}" ]; then
+    DTC_OPTS="${DTC_OPTS} -PmainConfigFile=${DTC_CONFIG_FILE}"
+fi
+
+# Here you find the project
+GITHUB_PROJECT_URL=https://github.com/docToolchain/docToolchain
+GITHUB_PROJECT_URL_SSH=git@github.com:docToolchain/docToolchain
+
+# Bump this version up if something is changed in the wrapper script
+DTCW_VERSION=0.51
+# Template replaced by the GitHub value upon releasing dtcw
+DTCW_GIT_HASH=##DTCW_GIT_HASH##
+
+# Exit codes
+ERR_DTCW=1
+ERR_ARG=2
+ERR_CODING=3
+
+main() {
+    # For debugging purpose at the top of the script
+    arch=$(uname -m)
+    os=$(uname -s)
+    bash=bash
+
+    print_version_info
+
+    assert_argument_exists "$@"
+
+    [ "${1}" = "--version" ] && exit 0
+
+    available_environments=$(get_available_environments)
+    echo "Available docToolchain environments:${available_environments}"
+
+    dtc_installations=$(get_dtc_installations "${available_environments}" "${DTC_VERSION}")
+    echo "Environments with docToolchain [${DTC_VERSION}]:${dtc_installations}"
+
+    if is_supported_environment "${1}" && assert_environment_available "${1}" "${DTC_VERSION}"; then
+        # User enforced environment
+        environment=${1}
+        shift 1
+        assert_argument_exists "$@"
+    else
+        environment=$(get_environment "$@")
+    fi
+    echo "Using environment: ${environment}"
+
+    if [ "${1}" = "install" ]; then
+        install_component_and_exit "${environment}" "${2-}"
+    elif [ "${1}" = "getJava" ]; then
+        # TODO: remove getJava in the next major release
+        echo "Warning: 'getJava' is deprecated and will be removed. Use './dtcw install java' instead."
+        install_component_and_exit "${environment}" "java"
+    fi
+
+    # No install command, so forward call to docToolchain but first we check if
+    # everything is there.
+    docker_image_name=""
+    docker_extra_arguments=""
+    if [[ ${environment} != docker ]]; then
+        assert_doctoolchain_installed "${environment}" "${DTC_VERSION}"
+        assert_java_version_supported
+
+        # TODO: what if 'doctoolchain' found by $PATH does not match the one from the local environment?
+        # The version provided by $DTC_VERSION could be a different one.
+    else
+        docker_image_name="doctoolchain/doctoolchain"
+        if [ "${1}" = "image" ]; then
+            docker_image_name="${2-}"
+            shift 2
+            assert_argument_exists "$@"
+        fi
+        echo "Using docker image: ${docker_image_name}"
+        if [ "${1}" = "extra_arguments" ]; then
+            docker_extra_arguments="${2-}"
+            shift 2
+            assert_argument_exists "$@"
+            echo "Extra arguments passed to 'docker run' ${docker_extra_arguments}"
+        fi
+    fi
+
+    command=$(build_command "${environment}" "${DTC_VERSION}" "${docker_image_name}" "${docker_extra_arguments}" "$@")
+
+    [[ "${DTC_HEADLESS}" = true ]] && echo "Using headless mode since there is no (terminal) interaction possible"
+
+    show_os_related_info
+
+    emu=""
+    if [ "${os}" = "Darwin" ] && [ "${arch}" = "arm64" ]; then
+      echo "Apple silicon detected, using x86_64 mode and os native bash"
+      emu="/usr/bin/arch -x86_64"
+      bash="/bin/bash"
+    fi
+
+    # echo "Command to invoke: ${command}"
+    # shellcheck disable=SC2086
+    # as we hope to know what we are doing here ;-)
+    exec ${emu} ${bash} ${DTC_SHELL_DEBUG:-} -c "${command}"
+}
+
+assert_argument_exists() {
+    if [[ $# -lt 1 ]]; then
+        error "argument missing"
+        usage
+        exit ${ERR_ARG}
+    fi
+}
+
+error() {
+    printf "\nError: %s\n\n" "${1}" >&2
+}
+
+usage() {
+    cat <<EOF
+dtcw - Create awesome documentation the easy way with docToolchain.
+
+Usage: ./dtcw [environment] [option...] [task...]
+       ./dtcw [local] install {doctoolchain | java }
+
+Use 'local', 'sdk' or 'docker' as first argument to force the use of a specific
+docToolchain environment:
+    - local: installation in '$HOME/.doctoolchain'
+    - sdk: installation with SDKMAN! (https://sdkman.io/)
+    - docker: use docToolchain container image
+
+Examples:
+
+  Download and install docToolchain in '${DTC_ROOT}':
+    ./dtcw local install doctoolchain
+
+  Download and install project documentation template from https://arc42.org/ :
+    ./dtcw downloadTemplate
+
+  Generate PDF:
+    ./dtcw generatePDF
+
+  Generate HTML:
+    ./dtcw generateHTML
+
+  Publish HTML to Confluence:
+    ./dtcw publishToConfluence
+
+  Multiple tasks may be provided at once:
+    ./dtcw generatePDF generateHTML
+
+Detailed documentation how to use docToolchain may be found at https://doctoolchain.org/
+
+Use './dtcw tasks --group doctoolchain' to see docToolchain related tasks.
+Use './dtcw tasks' to see all tasks.
+EOF
+}
+
+print_version_info() {
+    echo "dtcw ${DTCW_VERSION} - ${DTCW_GIT_HASH}"
+    if is_doctoolchain_development_version "${DTC_VERSION}"; then
+        local dtc_git_hash=unknown
+        dtc_git_hash=$(git -C "${DTC_HOME}" rev-parse --short=8 HEAD 2> /dev/null || echo "unknown")
+        echo "docToolchain ${DTC_VERSION} - ${dtc_git_hash}"
+    else
+        echo "docToolchain ${DTC_VERSION}"
+    fi
+    echo "OS/arch: ${os}/${arch}"
+}
+
+get_available_environments() {
+    # The local environment is alway available - even if docToolchain is not installed
+    local envs=" local"
+
+    # 'sdk' is provided a bash founction - thus command doesn't work
+    if [ -n "${SDKMAN_DIR:-}" ] && [ -s "${SDKMAN_DIR}/bin/sdkman-init.sh" ]; then
+        envs+=" sdk"
+    fi
+
+    if has docker; then
+        envs+=" docker"
+    fi
+    echo "${envs}"
+}
+
+has() {
+  command -v "$1" 1>/dev/null 2>&1
+}
+
+get_dtc_installations() {
+    local envs=${1}
+    local version=${2}
+    local installations=""
+
+    if [ -x "${DTC_HOME}/bin/doctoolchain" ]; then
+        installations+=" local"
+    else
+        # maybe it is just available in the path
+        if command -v doctoolchain >/dev/null 2>&1; then
+            installations+=" local"
+        fi
+    fi
+
+    if [[ "${envs}" =~ sdk ]] && sdk_home_doctoolchain "${version}" &> /dev/null ; then
+        installations+=" sdk"
+    fi
+
+    if [[ "${envs}" =~ docker ]]; then
+        # Having docker installed means docToolchain is available
+        installations+=" docker"
+    fi
+    [ -z "${installations}" ] && installations=" none"
+
+    echo "${installations}"
+}
+
+sdk_home_doctoolchain() {
+    local version=${1}
+    local sdk_doctoolchain="${SDKMAN_DIR}/candidates/doctoolchain/${version}"
+
+    # Don't use `sdk home doctoolchain ${version}` - see https://github.com/sdkman/sdkman-cli/issues/1196
+    if [[ -x "${sdk_doctoolchain}/bin/doctoolchain" ]]; then
+        printf "%s" "${sdk_doctoolchain}"
+        return 0
+    fi
+    printf "doctoolchain %s is not installed on your system" "${version}" 1>&2
+    return 1
+}
+
+is_supported_environment() {
+    local supported_environments=("local" "sdk" "docker")
+    [[ "${supported_environments[*]}" =~ ${1} ]]
+}
+
+assert_environment_available() {
+    local env=${1}
+    local version=${2}
+    # If environment not available, exit with error
+    if ! is_environment_available "${env}" ; then
+        error "argument error - environment '${env}' not available"
+        if [[ "${env}" == "sdk" ]]; then
+            printf "%s\n" \
+                "Install SDKMAN! (https://sdkman.io) with" \
+                "" \
+                "    $ curl -s \"https://get.sdkman.io\" | bash" \
+                "" \
+                "Then open a new shell and install 'docToolchain' with" \
+                "    $ sdk install doctoolchain ${version}"
+        else
+            echo "Install 'docker' on your host to execute docToolchain in a container."
+        fi
+        echo
+        exit ${ERR_ARG}
+    fi
+    if is_doctoolchain_development_version "${version}" && [ "${env}" != local ] ; then
+        error "argument error - invalid environment '${env}'."
+        echo "Development version '${version}' can only be used in a local environment."
+        echo
+        exit ${ERR_ARG}
+    fi
+}
+
+is_environment_available() {
+    [[ "${available_environments}" =~ ${1} ]]
+}
+
+is_doctoolchain_development_version() {
+    local version=${1}
+    # Is 'latest' a good name? It maybe interpreted as latest stable release.
+    # Alternatives: 'testing', 'dev' (used for development)
+   [ "${version}" == "latest" ] || [ "${version}" == "latestdev" ]
+}
+
+# No environment provided - try to pick the right one
+get_environment() {
+    # 'install' works only with 'local' environment
+    if [[ "${1}" == install ]] || [[ "${dtc_installations}" =~ none ]]; then
+        echo local
+        return
+    fi
+
+    # Pick the first one which has an installed docToolchain.
+    # Note: the preference is defined by the order we searched for available environments.
+    for e in ${available_environments}; do
+        if is_doctoolchain_installed "${e}"; then
+            echo "${e}"
+            return
+        fi
+    done
+}
+
+is_doctoolchain_installed() {
+    [[ "${dtc_installations}" =~ ${1} ]]
+}
+
+install_component_and_exit() {
+    local env=${1}
+    local component=${2}
+    if [ -z "${component}" ] ; then
+        error_install_component_and_die "component missing"
+    fi
+    exit_code=1
+    case ${env} in
+        local)
+            case ${component} in
+                doctoolchain)
+                    local_install_doctoolchain "${DTC_VERSION}"
+                    assert_java_version_supported
+                    ;;
+                java)
+                    local_install_java
+                    ;;
+                *)
+                    error_install_component_and_die "unknown component '${component}'"
+                    ;;
+            esac
+            if ! is_doctoolchain_installed "${environment}"; then
+                how_to_install_doctoolchain "${DTC_VERSION}"
+            else
+                printf "%s\n" \
+                    "" \
+                    "Use './dtcw tasks --group doctoolchain' to see docToolchain related tasks." \
+                    ""
+            fi
+            exit_code=0
+            ;;
+        sdk)
+            error "argument error - '${env} install' not supported."
+            printf "%s\n" \
+                "To install docToolchain with SDKMAN! execute" \
+                "" \
+                "    $ sdk install doctoolchain ${DTC_VERSION}" \
+                ""
+            exit_code=${ERR_ARG}
+            ;;
+        docker)
+            error "argument error - '${env} install' not supported."
+            echo "Executing a task in the 'docker' environment will pull the docToolchain container image."
+            echo
+            exit_code=${ERR_ARG}
+            ;;
+        *)
+            echo "Coding error - not reachable"
+            exit ${ERR_CODING}
+            ;;
+    esac
+    exit ${exit_code}
+}
+
+error_install_component_and_die() {
+    error  "${1} - available components are 'doctoolchain', or 'java'"
+    printf "%s\n" \
+        "Use './dtcw local install doctoolchain' to install docToolchain ${DTC_VERSION}." \
+        "Use './dtcw local install java' to install a Java version supported by docToolchain." \
+        ""
+    exit ${ERR_ARG}
+}
+
+local_install_doctoolchain() {
+    local version=${1}
+    if is_doctoolchain_development_version "${version}"; then
+        # User decided to pick a floating version - which means a git clone into the local environment.
+        assert_git_installed "Please install 'git' for working with a 'doctToolchain' development version"
+
+        if [ -d "${DTC_HOME}/.git" ]; then
+            git -C "${DTC_HOME}" pull
+            echo "Updated docToolchain in local environment to latest version"
+        else
+            local project_url
+            if [ "${version}" == "latest" ]; then
+                project_url="${GITHUB_PROJECT_URL}"
+            else
+                project_url="${GITHUB_PROJECT_URL_SSH}"
+            fi
+            git clone "${project_url}.git" "${DTC_HOME}"
+            echo "Cloned docToolchain in local environment to latest version"
+        fi
+    else
+        if [ -x "${DTC_HOME}/bin/doctoolchain" ]; then
+            echo "Skipped installation of docToolchain: already installed in '${DTC_HOME}'"
+            return
+        fi
+        if ! has unzip; then
+            error "no unzip program installed, exiting…"
+            echo "Install 'unzip' and try to install docToolchain again."
+            return ${ERR_DTCW}
+        fi
+        mkdir -p "${DTC_ROOT}"
+        local distribution_url=${GITHUB_PROJECT_URL}/releases/download/v${version}/docToolchain-${version}.zip
+        download_file "${distribution_url}" "${DTC_ROOT}/source.zip"
+        unzip -q "${DTC_ROOT}/source.zip" -d "${DTC_ROOT}"
+        rm -f "${DTC_ROOT}/source.zip"
+        echo "Installed docToolchain successfully in '${DTC_HOME}'."
+    fi
+
+    # Add it to the existing installations so the output to guide the user can adjust accordingly.
+    dtc_installations+=" local"
+}
+
+assert_git_installed() {
+    has git && return
+
+    error "git - command not found"
+    echo "${1}"
+    echo
+    exit ${ERR_DTCW}
+}
+
+download_file() {
+    local url=${1}
+    local file=${2}
+
+    if has curl; then
+        cmd="curl --fail --location --output $file $url"
+    elif has wget; then
+        # '--show-progress' is not supported in all wget versions (busybox)
+        cmd="wget --quiet --show-progress --output-document=$file $url"
+    elif has fetch; then
+        cmd="fetch --quiet --output=$file $url"
+    else
+        error "no HTTP download program (curl, wget, fetch) found, exiting…"
+        echo "Install either 'curl', 'wget', or 'fetch' and try to install docToolchain again."
+        return ${ERR_DTCW}
+    fi
+
+    $cmd && return 0 || rc=$?
+
+    error "Command failed (exit code $rc): ${cmd}"
+    return "${rc}"
+}
+
+assert_java_version_supported() {
+    # Defines the order in which Java is searched.
+    if [ -d "${DTC_JAVA_HOME}" ]; then
+            echo "Caution: Your JAVA_HOME setting is overriden by DTCs own JDK install (for this execution)"
+            if [ -d "${DTC_JAVA_HOME}/Contents" ]; then
+                # JDK for MacOS have a different structure
+                JAVA_HOME="${DTC_JAVA_HOME}/Contents/Home"
+            else
+                JAVA_HOME="${DTC_JAVA_HOME}"
+            fi
+            export JAVA_HOME
+            DTC_OPTS="${DTC_OPTS} '-Dorg.gradle.java.home=${JAVA_HOME}'"
+            JAVA_CMD="${JAVA_HOME}/bin/java"
+    elif [ -n "${JAVA_HOME-}" ]; then
+        JAVA_CMD="${JAVA_HOME}/bin/java"
+    else
+        # Don't provide JAVA_HOME if java is used by PATH.
+        JAVA_CMD=$(command -v java 2>/dev/null) || true
+    fi
+    if [ -z "${JAVA_CMD-}" ] || ! java_version=$("${JAVA_CMD}" -version 2>&1) ; then
+        error "unable to locate a Java Runtime"
+        java_help_and_die
+    fi
+
+    # We got a Java version
+    java_version=$(echo "$java_version" | awk -F '"' '/version/ {print $0}' | head -1 | cut -d'"' -f2)
+    major_version=$(echo "$java_version" | sed '/^1\./s///' | cut -d'.' -f1)
+
+    if [ "${major_version}" -eq 17 ]; then
+        echo "Using Java ${java_version} [${JAVA_CMD}]"
+        return
+    fi
+
+    error "unsupported Java version ${major_version} [${JAVA_CMD}]"
+    java_help_and_die
+}
+
+java_help_and_die() {
+    printf "%s\n" \
+        "docToolchain supports Java version 17 only. In case that" \
+        "Java version is installed make sure 'java' is found with your PATH environment" \
+        "variable. As alternative you may provide the location of your Java installation" \
+        "with JAVA_HOME." \
+        "" \
+        "Apart from installing Java with the package manager provided by your operating" \
+        "system, dtcw facilitates the Java installation into a local environment:" \
+        "" \
+        "    # Install Java in '${DTC_JAVA_HOME}'" \
+        "    $ ./dtcw local install java" \
+        "" \
+        "Alternatively you can use SDKMAN! (https://sdkman.io) to manage your Java installations" \
+        ""
+    if ! is_environment_available sdk; then
+        how_to_install_sdkman "Java 17"
+    fi
+    # TODO: This will break when we change Java version
+    printf "%s\n" \
+        "    $ sdk install java 17.0.14-tem" \
+        "" \
+        "If you prefer not to install Java on your host, you can run docToolchain in a" \
+        "docker container. For this case dtcw provides the 'docker' execution environment." \
+        "" \
+        "Example: ./dtcw docker generateSite"\
+        ""
+    exit ${ERR_DTCW}
+}
+
+how_to_install_sdkman() {
+    printf "%s\n" \
+        "    # First install SDKMAN!" \
+        "    $ curl -s \"https://get.sdkman.io\" | bash" \
+        "    # Then open a new shell and install ${1} with"
+}
+
+local_install_java() {
+    version=17
+    implementation=hotspot
+    heapsize=normal
+    imagetype=jdk
+    releasetype=ga
+
+    case "${arch}" in
+        x86_64) arch=x64 ;;
+        arm64) arch=aarch64 ;;
+    esac
+    if [[ ${os} == MINGW* ]]; then
+        error "MINGW64 is not supported"
+        echo "Please use powershell or WSL"
+        exit 1
+    fi
+    case "${os}" in
+        Linux) os=linux ;;
+        Darwin) os=mac
+            # Enforce usage of Intel Java as long as jbake does not work on Apple Silicon
+            arch=x64 ;;
+        Cygwin) os=linux ;;
+    esac
+    mkdir -p "${DTC_JAVA_HOME}"
+    echo "Downloading JDK Temurin ${version} [${os}/${arch}] from Adoptium to ${DTC_JAVA_HOME}/jdk.tar.gz"
+    local adoptium_java_url="https://api.adoptium.net/v3/binary/latest/${version}/${releasetype}/${os}/${arch}/${imagetype}/${implementation}/${heapsize}/eclipse?project=jdk"
+    download_file "${adoptium_java_url}" "${DTC_JAVA_HOME}/jdk.tar.gz"
+    echo "Extracting JDK from archive file."
+    # TODO: should we not delete a previsouly installed on?
+    # Otherwise we may get a mix of different Java versions.
+    tar -zxf "${DTC_JAVA_HOME}/jdk.tar.gz" --strip 1 -C "${DTC_JAVA_HOME}/."
+    rm -f "${DTC_JAVA_HOME}/jdk/jdk.tar.gz"
+
+    echo "Successfully installed Java in '${DTC_JAVA_HOME}'."
+    echo
+}
+
+assert_doctoolchain_installed() {
+    local env=${1}
+    local version=${2}
+    if ! is_doctoolchain_installed "${env}"; then
+        # We reach this point if the user executes a command in an
+        # environment where docToolchain is not installed.
+        # Note that 'docker' always has a command (no instalation required)
+        error "doctoolchain - command not found [environment '${env}']"
+        how_to_install_doctoolchain "${version}"
+        exit ${ERR_DTCW}
+    fi
+}
+
+how_to_install_doctoolchain() {
+    local version=${1}
+    printf "%s\n" \
+        "It seems docToolchain ${version} is not installed. dtcw supports the" \
+        "following docToolchain environments:" \
+        "" \
+        "1. 'local': to install docToolchain in [${DTC_ROOT}] use" \
+        "" \
+        "    $ ./dtcw local install doctoolchain" \
+        "" \
+        "2. 'sdk': to install docToolchain with SDKMAN! (https://sdkman.io)" \
+        ""
+    if ! is_environment_available sdk; then
+        how_to_install_sdkman docToolchain
+    fi
+    printf "%s\n" \
+        "    \$ sdk install doctoolchain ${version}" \
+        "" \
+        "Note that running docToolchain in 'local' or 'sdk' environment needs a" \
+        "Java runtime major version 17 installed on your host." \
+        "" \
+        "3. 'docker': pull the docToolchain image and execute docToolchain in a container environment." \
+        "" \
+        "    \$ ./dtcw docker tasks --group doctoolchain" \
+        ""
+}
+
+build_command() {
+    local env=${1}
+    local version=${2}
+    local docker_image=${3}
+    local docker_extra_arguments=${4}
+    shift 4
+    local cmd
+    if [ "${env}" = docker ]; then
+        # TODO: DTC_PROJECT_BRANCH is  not passed into the docker environment
+        # See https://github.com/docToolchain/docToolchain/issues/1087
+
+        local container_name=doctoolchain-${version}
+        container_name+="-$(date '+%Y%m%d_%H%M%S')"
+        pwd=$(has cygpath && cygpath -w "${PWD}" || echo "${PWD}")
+
+        docker_env_file=dtcw_docker.env
+        env_file_option=""
+        if [ -f "$docker_env_file" ]; then
+            env_file_option="--env-file ${docker_env_file}"
+        fi
+
+        docker_args="run --rm -i --platform linux/amd64 -u $(id -u):$(id -g) --name ${container_name} \
+            -e DTC_HEADLESS=true -e DTC_SITETHEME -e DTC_PROJECT_BRANCH=${DTC_PROJECT_BRANCH} \
+            ${docker_extra_arguments} ${env_file_option} \
+            --entrypoint /bin/bash -v '${pwd}:/project' ${DTC_DOCKER_PREFIX}${docker_image}:v${version}"
+
+        cmd="docker ${docker_args} -c \"doctoolchain . ${*} ${DTC_OPTS} && exit\""
+    else
+        # TODO: What is this good for? Has probably to do with Docker image creation.
+        if [[ "${DTC_HEADLESS}" = false ]]; then
+            # important for the docker file to find dependencies
+            DTC_OPTS="${DTC_OPTS} '-Dgradle.user.home=${DTC_ROOT}/.gradle'"
+        fi
+        if [ "${env}" = local ]; then
+            if [ -x "${DTC_HOME}/bin/doctoolchain" ]; then
+                cmd="${DTC_HOME}/bin/doctoolchain"
+            # is doctoolchain available on the path?
+            elif command -v doctoolchain >/dev/null 2>&1; then
+                cmd="doctoolchain"
+            else
+                echo "Could not find doctoolchain executable, neither in '${DTC_HOME}' nor on PATH ('${PATH}')" >&2
+                exit 1
+            fi
+            cmd="${cmd} . ${*} ${DTC_OPTS}"
+        else
+            cmd="$(sdk_home_doctoolchain "${version}")/bin/doctoolchain . ${*} ${DTC_OPTS}"
+        fi
+    fi
+    echo "${cmd}"
+}
+
+show_os_related_info() {
+
+    # check if we are running on WSL
+    if grep -qsi 'microsoft' /proc/version &> /dev/null ; then
+        # TODO: bug - This URL leads to now-where!
+        printf "%s\n" \
+            "" \
+            "Bash is running on WSL which might cause problems with plantUML." \
+            "See https://doctoolchain.org/docToolchain/v2.0.x/010_manual/50_Frequently_asked_Questions.html#wsl for more details." \
+            ""
+    fi
+}
+
+# Location where local installations are placed.
+DTC_ROOT="${HOME}/.doctoolchain"
+
+# More than one docToolchain version may be installed locally.
+# This is the directory for the specific version.
+DTC_HOME="${DTC_ROOT}/docToolchain-${DTC_VERSION}"
+
+# Directory for local Java installation
+DTC_JAVA_HOME="${DTC_ROOT}/jdk"
+
+main "$@"

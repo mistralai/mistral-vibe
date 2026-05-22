@@ -1,0 +1,59 @@
+= ADR-003: Conversation Middleware Pipeline
+:jbake-title: ADR-003 Conversation Middleware Pipeline
+:jbake-type: page
+:jbake-status: published
+ifndef::imagesdir[:imagesdir: ../images]
+
+== Status
+
+*Accepted (inferred).* Evident in code; rationale deferred to the
+Architect.
+
+== Context
+
+The agent loop must enforce several orthogonal turn-level policies: a
+turn limit, a price ceiling, auto-compaction near the context limit, a
+context warning, and read-only behaviour for the `plan` and `chat`
+agents. The code expresses each as a `ConversationMiddleware` with a
+`before_turn` method; a `MiddlewarePipeline` runs them ahead of every
+LLM turn and returns an action — `CONTINUE`, `STOP`, `COMPACT` or
+`INJECT_MESSAGE` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/middleware.py#L43-L247[vibe/core/middleware.py:43-247]]. The loop assembles
+the pipeline from constructor flags [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L722-L757[vibe/core/agent_loop.py:722-757]].
+
+== Decision
+
+Enforce all turn-level policies through a composable `before_turn`
+middleware pipeline, rather than inline conditionals in the loop or
+provider-SDK callbacks.
+
+== Consequences
+
+* Positive: each policy is one small, independently testable class; the
+  loop body stays focused on the LLM-call/tool-call cycle.
+* Positive: directly realises the Reliability and Security mechanisms in
+  <<../arc42/chapters/08_concepts.adoc#,Chapter 8>> (limits, compaction,
+  read-only modes).
+* Negative: control flow is indirect — a `COMPACT` result is handled far
+  from the middleware that raised it.
+* Risk: the price ceiling depends on `session_cost`, which is a rough
+  estimate — this is technical debt *TD-001* in Chapter 11; the
+  `--max-price` guarantee is therefore approximate.
+
+== Pugh Matrix
+
+Baseline (score 0): *Inline policy checks in the agent loop.*
+
+[options="header",cols="2,1,1,1"]
+|===
+|Criterion |Inline checks (baseline) |Middleware pipeline (chosen) |Provider-SDK callbacks
+
+|Maintainability |0 |+1 |0
+|Testability |0 |+1 |-1
+|Reliability |0 |+1 |?
+|Compatibility (provider-agnostic) |0 |+1 |-1
+|Usability (code readability) |0 |0 |0
+|*Sum* |*0* |*+4* |*?*
+|===
+
+The `?` cell needs the team's judgment — whether provider-SDK callbacks
+would be reliable enough depends on each SDK's guarantees.

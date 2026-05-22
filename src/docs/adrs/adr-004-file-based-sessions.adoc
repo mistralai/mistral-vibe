@@ -1,0 +1,62 @@
+= ADR-004: File-based Session Persistence
+:jbake-title: ADR-004 File-based Session Persistence
+:jbake-type: page
+:jbake-status: published
+ifndef::imagesdir[:imagesdir: ../images]
+
+== Status
+
+*Accepted (inferred).* Evident in code; rationale deferred to the
+Architect.
+
+== Context
+
+Vibe persists conversations so they can be continued, resumed and
+rewound. The code stores each session as a folder named
+`{prefix}_{YYYYMMDD_HHMMSS}_{short-id}` containing `meta.json`
+(metadata, title, working directory, parent session id) and
+`messages.jsonl` (the conversation, one message per line)
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_loader.py#L16-L17[vibe/core/session/session_loader.py:16-17], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_logger.py#L62-L97[vibe/core/session/session_logger.py:62-97]].
+A migration converts a pre-2.0 single-JSON format to this folder layout
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_migration.py#L16-L41[vibe/core/session/session_migration.py:16-41]]. Sessions live under
+`~/.vibe/logs/session/` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/paths/_vibe_home.py#L30[vibe/core/paths/_vibe_home.py:30]].
+
+== Decision
+
+Persist each session as a plain-file folder — `meta.json` plus an
+append-friendly `messages.jsonl` — on the local filesystem, rather than
+in an embedded database or a single JSON document.
+
+== Consequences
+
+* Positive: append-only `messages.jsonl` is cheap to write per message
+  and human-inspectable; no database dependency is added.
+* Positive: rewind and compaction fork a session simply by writing a new
+  folder with a `parent_session_id`.
+* Negative: a format change requires an in-code migration — the v1→v2
+  migration is technical debt *TD-003* in Chapter 11.
+* Negative: there is no index; locating sessions scans and sorts the
+  directory by mtime [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_loader.py#L64-L104[vibe/core/session/session_loader.py:64-104]].
+* Risk: no Chapter 11 risk is created; the scaling concern of long
+  sessions is bounded by auto-compaction and is recorded as the low
+  risk *R-010*.
+
+== Pugh Matrix
+
+Baseline (score 0): *Single JSON file per session.*
+
+[options="header",cols="2,1,1,1"]
+|===
+|Criterion |Single JSON file (baseline) |Folder + JSONL (chosen) |Embedded SQLite database
+
+|Performance (per-message write) |0 |+1 |+1
+|Maintainability |0 |0 |-1
+|Reliability (crash safety) |0 |+1 |+1
+|Usability (inspectability) |0 |+1 |-1
+|Portability (no extra dependency) |0 |0 |0
+|*Sum* |*0* |*+3* |*0*
+|===
+
+No `?` cells: the comparison is decidable from the recorded behaviour.
+The remaining open point is *why* a database was not chosen, which is
+the deferred rationale, not a Pugh score.

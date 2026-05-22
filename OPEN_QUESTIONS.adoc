@@ -1,0 +1,230 @@
+= Open Questions — Vibe
+:doctype: book
+:toc: left
+
+// Socratic Code-Theory Recovery — Phase 1 handoff
+// These are the [OPEN] leaves of QUESTION_TREE.adoc — the questions the
+// code cannot answer. Answer them inline under each *Your answer:* block.
+// Mark a deliberate non-answer as: (deferred — <reason>).
+// Phase 2 runs only after every question has an answer or a deferral.
+
+== For Product Owner
+
+=== Q1.2.2: Which user segment is the priority?
+Category: business-context
+
+Code treats the interactive developer, the programmatic scripter and the
+ACP/IDE integrator as peer entry points. Which segment drives the roadmap?
+
+*Your answer:*
+_(write here)_
+
+=== Q1.4: Why was Vibe built?
+Category: business-context
+
+The code shows what Vibe does, not why Mistral built an open-source CLI
+agent — the strategic goal and its relation to the paid Mistral Code /
+Vibe Code offering.
+
+*Your answer:*
+_(write here)_
+
+=== Q1.5.2: What business KPI defines success?
+Category: business-context
+
+Telemetry collects usage events, but the code does not say which metric
+is the target (adoption, retention, task-completion rate, conversion to
+paid plans).
+
+*Your answer:*
+_(write here)_
+
+=== Q1.6: How are user segments prioritised for features?
+Category: business-context
+
+The plan-offer subsystem distinguishes free vs. paid users, but no
+feature-prioritisation order across segments is derivable from code.
+
+*Your answer:*
+_(write here)_
+
+=== Q2.2.UC.completeness: Is the recovered use-case catalog complete?
+Category: business-context
+
+The catalog was recovered from entrypoints and tools. Is it the intended
+complete set of user goals, and which use cases are core vs. experimental?
+
+*Your answer:*
+_(write here)_
+
+=== Q2.5.2: What are the acceptance criteria per use case?
+Category: business-context
+
+No Given/When/Then criteria exist in code; tests are not traced to use
+cases. What defines "done" for each user goal?
+
+*Your answer:*
+_(write here)_
+
+=== Q2.6.BR.intent: Are the cross-cutting rules requirements or choices?
+Category: business-context
+
+Trust gate, tool approval, agent-safety tiers and telemetry gating are
+recovered as mechanisms. Which are hard product requirements vs.
+implementation choices (e.g. is the workdir boundary a security
+guarantee)?
+
+*Your answer:*
+_(write here)_
+
+=== Q4.9: Which quality characteristic has priority?
+Category: quality-goals
+
+The "Safety first" theme suggests Security/Usability lead, but the code
+cannot rank the eight ISO 25010 characteristics. Please order them.
+
+*Your answer:*
+_(write here)_
+
+== For Architect
+
+=== Q3.4.2: Why were the core architectural strategies chosen?
+Category: design-rationale
+
+Hexagonal ports, an LLM backend factory, a middleware pipeline and a
+layered config merge are visible — but not the rationale or the
+alternatives weighed.
+
+*Your answer:*
+_(write here)_
+
+=== Q3.8.1: What is the STRIDE threat model?
+Category: design-rationale
+
+No threat model or threat IDs exist. Security mechanisms are present but
+not mapped to enumerated threats. Please supply (or commission) a STRIDE
+model so mitigations can reference it.
+
+*Your answer:*
+_(write here)_
+
+=== Q3.9.ADR.HexagonalPorts: Why hexagonal architecture?
+Category: design-rationale
+
+`*_port.py` ports/adapters are used pervasively, with no ADR recording
+why or what alternatives were considered.
+
+*Your answer:*
+_(write here)_
+
+=== Q3.9.ADR.LLMBackendAbstraction: Why support non-Mistral providers?
+Category: design-rationale
+
+The backend factory supports Mistral, OpenAI-compatible, Anthropic and
+Vertex. Why support non-Mistral providers in a Mistral-branded tool, and
+what are the trade-offs?
+
+*Your answer:*
+_(write here)_
+
+=== Q3.9.ADR.MiddlewarePipeline: Why a bespoke middleware pipeline?
+Category: design-rationale
+
+A custom pipeline enforces turn/price limits, auto-compaction and
+read-only modes. Why a bespoke pipeline rather than SDK callbacks or
+inline checks?
+
+*Your answer:*
+_(write here)_
+
+=== Q3.9.ADR.SessionsAsFiles: Why folder + JSONL session storage?
+Category: design-rationale
+
+Sessions persist as a folder with `meta.json` + `messages.jsonl`, with a
+v1→v2 migration. Why flat files over a database, and what triggered the
+format change?
+
+*Your answer:*
+_(write here)_
+
+=== Q4.9: Which quality characteristic has priority?
+Category: quality-goals
+
+(Also routed to Product Owner.) Please rank the eight ISO 25010
+characteristics from the architecture's standpoint.
+
+*Your answer:*
+_(write here)_
+
+=== Q5.1: How should the technical-debt items be ranked?
+Category: design-rationale
+
+Code-visible debt: rough `session_cost` estimate, `acp/tools/` duplicating
+`core/tools/` builtins, the v1→v2 session migration, the large untiered
+TUI widget layer, experimental voice mode. Which are urgent?
+
+*Your answer:*
+_(write here)_
+
+== For Developer
+
+=== Q2.5.2: What are the acceptance criteria per use case?
+Category: business-context
+
+(Also routed to Product Owner.) Tests exist but are not traced to use
+cases or business rules. Should they be, and what is the canonical
+"done" definition per user goal?
+
+*Your answer:*
+_(write here)_
+
+=== Q5.1: How should the technical-debt items be ranked?
+Category: design-rationale
+
+(Also routed to Architect.) From a maintenance standpoint, which debt
+items most slow down day-to-day work?
+
+*Your answer:*
+_(write here)_
+
+== For Domain Expert
+
+=== Q2.2.UC.completeness: Is the recovered use-case catalog complete?
+Category: business-context
+
+(Also routed to Product Owner.) Does the catalog match the real user
+workflows, and is any user goal missing?
+
+*Your answer:*
+_(write here)_
+
+=== Q2.6.BR.intent: Are the cross-cutting rules requirements or choices?
+Category: business-context
+
+(Also routed to Product Owner.) From the domain's standpoint, which of
+the trust / approval / safety rules are non-negotiable invariants?
+
+*Your answer:*
+_(write here)_
+
+== For Operations
+
+=== Q3.8.1: What is the STRIDE threat model?
+Category: design-rationale
+
+(Also routed to Architect.) From an operations standpoint, what threats
+matter for a tool that runs shell commands and fetches URLs on a
+developer's machine?
+
+*Your answer:*
+_(write here)_
+
+=== Q5.3: How should LLM / service outages behave?
+Category: design-rationale
+
+The LLM backend retries with backoff and the experiments client fails
+open, but the intended behaviour on a sustained Mistral API outage
+(beyond retry exhaustion) is not specified in code.
+
+*Your answer:*
+_(write here)_

@@ -1,0 +1,76 @@
+:jbake-title: Architecture Constraints
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 2
+:filename: /chapters/02_architecture_constraints.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-architecture-constraints]]
+== Architecture Constraints
+
+=== Technical Constraints
+
+[options="header",cols="1,3"]
+|===
+|Constraint |Evidence / Rationale
+
+|Python >= 3.12
+|`requires-python = ">=3.12"` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/pyproject.toml#L6[pyproject.toml:6]]; pinned in
+link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/.python-version[.python-version].
+
+|`uv` is the package and run manager
+|All commands go through `uv`; bare `python`/`pip` are forbidden
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L7-L12[AGENTS.md:7-12]].
+
+|Strict static typing
+|Pyright runs in strict mode and gates CI; no inline `# type: ignore`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L24-L46[AGENTS.md:24-46]].
+
+|Ruff lint and format gate every change
+|`ruff check` and `ruff format` run after every code change
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L9-L10[AGENTS.md:9-10]].
+
+|No relative imports
+|`ban-relative-imports = "all"`; always `from vibe.core.x import …`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L48-L50[AGENTS.md:48-50]].
+
+|`asyncio` is the orchestration runtime
+|The agent loop and tool execution are async; streaming surfaces return
+`AsyncGenerator` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L62-L69[AGENTS.md:62-69]].
+
+|UNIX is the supported target
+|Vibe runs on Windows but UNIX environments are the officially supported
+and targeted platform [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/README.md#L24-L26[README.md:24-26]].
+|===
+
+=== Organisational and Convention Constraints
+
+[options="header",cols="1,3"]
+|===
+|Constraint |Evidence / Rationale
+
+|Hexagonal module conventions
+|Abstract interfaces use the `_port.py` suffix; private modules are
+`_`-prefixed; Pydantic models live in `models.py` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L13-L23[AGENTS.md:13-23]].
+
+|Pydantic for all external data
+|External data is parsed via `model_validate` / validators, never ad-hoc
+`getattr`/`hasattr` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L53-L61[AGENTS.md:53-61]].
+
+|Conventional Commits, no force-push
+|`git commit --amend`, `git push --force` and force-with-lease are
+forbidden; rebase, never merge, on rejected push [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L81-L86[AGENTS.md:81-86]].
+
+|Apache-2.0 licence
+|The project is licensed Apache-2.0 [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/pyproject.toml#L7[pyproject.toml:7], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/LICENSE[LICENSE]].
+|===
+
+=== Conventions
+
+Documentation follows Docs-as-Code with AsciiDoc built by docToolchain;
+this architecture document is the arc42 template filled in place. Code
+conventions are recorded in link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md[AGENTS.md] at the repository root and are
+binding for both human and AI contributors [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L1-L12[AGENTS.md:1-12]].

@@ -1,0 +1,59 @@
+= ADR-002: Pluggable LLM Backend Abstraction
+:jbake-title: ADR-002 Pluggable LLM Backend Abstraction
+:jbake-type: page
+:jbake-status: published
+ifndef::imagesdir[:imagesdir: ../images]
+
+== Status
+
+*Accepted (inferred).* Evident in code; rationale deferred to the
+Architect.
+
+== Context
+
+Vibe is a Mistral-branded tool, but the code supports more than the
+Mistral API. `BACKEND_FACTORY` maps a provider enum to a backend class —
+`MistralBackend` or the OpenAI-compatible `GenericBackend`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/factory.py#L7[vibe/core/llm/backend/factory.py:7]]. The generic backend loads an
+API-style adapter so the same HTTP path serves OpenAI, Anthropic and
+Vertex request/response shapes, including reasoning-effort handling
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/generic.py#L188-L447[vibe/core/llm/backend/generic.py:188-447], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/format.py#L58-L185[vibe/core/llm/format.py:58-185]].
+All backends satisfy one `BackendLike` protocol — `complete`,
+`complete_streaming`, `count_tokens` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/base.py#L13-L126[vibe/core/llm/backend/base.py:13-126]].
+
+== Decision
+
+Define a single `BackendLike` port and select a provider-specific
+backend through a factory; cover non-Mistral request shapes with
+pluggable API-style adapters rather than separate backend classes.
+
+== Consequences
+
+* Positive: the agent loop is provider-agnostic; a new provider is a new
+  adapter, not a loop change.
+* Positive: supports the Compatibility quality goal
+  (<<../arc42/chapters/04_solution_strategy.adoc#,Chapter 4>>).
+* Negative: provider-specific quirks (reasoning effort, tool-choice
+  encoding, token counting) spread across adapters.
+* Risk: a sustained outage of the configured provider has unspecified
+  end-state behaviour — this is *R-009* in Chapter 11.
+
+== Pugh Matrix
+
+Baseline (score 0): *Single-provider (Mistral SDK only).*
+
+[options="header",cols="2,1,1,1"]
+|===
+|Criterion |Single-provider (baseline) |Backend factory + adapters (chosen) |Third-party multi-LLM library
+
+|Compatibility |0 |+1 |+1
+|Maintainability |0 |0 |?
+|Reliability |0 |0 |?
+|Security (dependency surface) |0 |0 |-1
+|Usability (config simplicity) |0 |-1 |-1
+|*Sum* |*0* |*0* |*?*
+|===
+
+`?` cells need the team's view — whether a third-party library would be
+easier to maintain or more reliable than hand-rolled adapters depends on
+that library's track record, which the code cannot tell us.

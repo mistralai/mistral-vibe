@@ -1,0 +1,184 @@
+:jbake-title: Building Block View
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 5
+:filename: /chapters/05_building_block_view.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-building-block-view]]
+== Building Block View
+
+=== Whitebox Overall System
+
+[plantuml,bbv-level1,svg]
+----
+@startuml
+!include <C4/C4_Container>
+
+Person(dev, "Developer / Scripter")
+Person(integrator, "Editor / IDE")
+
+System_Boundary(vibe, "Vibe") {
+  Container(cli, "CLI / Textual UI", "Python, Textual", "Interactive TUI + non-interactive runner")
+  Container(acp, "ACP Bridge", "Python", "Agent Client Protocol server")
+  Container(setup, "Setup / Onboarding", "Python, Textual", "First-run wizard")
+  Container(loop, "Agent Loop", "Python, asyncio", "Orchestrates a conversation turn")
+  Container(tools, "Tool Subsystem", "Python", "Discovers, permissions, runs tools")
+  Container(backend, "LLM Backend Layer", "Python, httpx", "Uniform interface over LLM providers")
+  Container(config, "Config Subsystem", "Python, Pydantic", "Layered merge-aware configuration")
+  Container(sessions, "Session Persistence", "Python", "Persist, resume, rewind sessions")
+  Container(remote, "Remote (Teleport + Nuage)", "Python", "Hand a session to the cloud")
+}
+
+System_Ext(llm, "LLM Provider API")
+System_Ext(mcp, "MCP Servers")
+System_Ext(vibecode, "Vibe Code / Nuage")
+
+Rel(dev, cli, "Runs vibe")
+Rel(integrator, acp, "ACP over stdio")
+Rel(cli, setup, "Launches on first run")
+Rel(cli, loop, "Drives")
+Rel(acp, loop, "Drives")
+Rel(loop, tools, "Executes tool calls")
+Rel(loop, backend, "Requests completions")
+Rel(loop, config, "Reads")
+Rel(loop, sessions, "Logs / restores")
+Rel(loop, remote, "Teleports")
+Rel(backend, llm, "HTTPS")
+Rel(tools, mcp, "http / stdio")
+Rel(remote, vibecode, "HTTPS + SSE")
+@enduml
+----
+
+Motivation::
+The system separates the two front ends (CLI, ACP) and the first-run
+wizard (Setup) from a shared `core` engine. Inside the engine the Agent
+Loop is the orchestrator; the Tool Subsystem, LLM Backend Layer, Config
+Subsystem and Session Persistence are the capabilities it composes. The
+Remote block is an optional path that hands a session off to the cloud.
+
+Contained Building Blocks::
+The nine blocks below. The external systems are the same set named in
+<<section-context-and-scope>>.
+
+Important Interfaces::
+`AgentLoop.act()` is the engine's entry point; `BackendLike` is the LLM
+port; `BaseTool.run()` is the tool contract; `ConfigOrchestrator` builds
+configuration.
+
+==== Agent Loop
+_Responsibility:_ Orchestrate one conversation turn — run middleware,
+call the LLM, parse and execute tool calls concurrently, update stats,
+repeat until the assistant emits no tool call. +
+_Interface:_ `AgentLoop.act()` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L632-L649[vibe/core/agent_loop.py:632-649]]. +
+_Source:_ link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py[vibe/core/agent_loop.py], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/loop.py[vibe/core/loop.py],
+link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/middleware.py[vibe/core/middleware.py]. +
+_Runtime scenarios:_ all of <<section-runtime-view>>.
+
+==== LLM Backend Layer
+_Responsibility:_ Present a uniform `BackendLike` protocol —
+`complete`, `complete_streaming`, `count_tokens` — over Mistral and
+OpenAI-compatible providers, with API-style adapters for OpenAI,
+Anthropic and Vertex. +
+_Interface:_ `BackendLike` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/base.py#L13-L126[vibe/core/llm/backend/base.py:13-126]],
+selected by `BACKEND_FACTORY` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/factory.py#L7[vibe/core/llm/backend/factory.py:7]]. +
+_Source:_ link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm[vibe/core/llm/]. +
+_Runtime scenarios:_ Conversation Turn, LLM Rate-Limit.
+
+==== Tool Subsystem
+_Responsibility:_ Discover, filter, instantiate and permission-check
+tools — builtin, MCP and connector — and expose them to the loop. +
+_Interface:_ `ToolManager.available_tools` / `.get()`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/manager.py#L72-L447[vibe/core/tools/manager.py:72-447]]; `BaseTool.run()`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/base.py#L122-L152[vibe/core/tools/base.py:122-152]]. +
+_Source:_ link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools[vibe/core/tools/]. +
+_Runtime scenarios:_ Conversation Turn, Tool Approval.
+
+==== Config Subsystem
+_Responsibility:_ Discover config layers (project `.vibe/` then
+`~/.vibe/`), merge them field-by-field into a validated `VibeConfig`. +
+_Interface:_ `ConfigOrchestrator`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/config/orchestrator.py#L10-L46[vibe/core/config/orchestrator.py:10-46]]. +
+_Source:_ link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/config[vibe/core/config/], link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/paths[vibe/core/paths/]. +
+_Runtime scenarios:_ Startup & Resume.
+
+==== Session Persistence
+_Responsibility:_ Persist a session as `meta.json` + `messages.jsonl`,
+load and migrate past sessions, support `--continue`/`--resume` and
+rewind-to-message. +
+_Interface:_ `SessionLogger`, `SessionLoader`, `RewindManager`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_logger.py#L36-L97[vibe/core/session/session_logger.py:36-97], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/rewind/manager.py#L35-L165[vibe/core/rewind/manager.py:35-165]]. +
+_Source:_ link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session[vibe/core/session/], link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/rewind[vibe/core/rewind/]. +
+_Runtime scenarios:_ Startup & Resume, Context Auto-Compaction.
+
+==== CLI / Textual UI
+_Responsibility:_ Render the interactive chat TUI, route key bindings,
+dispatch the 23 slash commands; also host the non-interactive runner. +
+_Interface:_ `VibeApp` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/textual_ui/app.py#L322-L558[vibe/cli/textual_ui/app.py:322-558]];
+`run_programmatic()` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/programmatic.py#L27[vibe/core/programmatic.py:27]]. +
+_Source:_ link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli[vibe/cli/]. +
+_Runtime scenarios:_ Conversation Turn, Tool Approval, User Interruption.
+
+==== ACP Bridge
+_Responsibility:_ Expose the engine over the Agent Client Protocol, with
+ACP-specific tools that delegate file and terminal operations to the ACP
+client. +
+_Interface:_ `VibeAcpAgentLoop` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/acp_agent_loop.py#L267-L289[vibe/acp/acp_agent_loop.py:267-289]]. +
+_Source:_ link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp[vibe/acp/]. +
+_Runtime scenarios:_ ACP Session.
+
+==== Remote (Teleport + Nuage)
+_Responsibility:_ Validate the git repo, ensure the commit is pushed,
+start a remote Vibe Code workflow, and stream its events back. +
+_Interface:_ `TeleportService`, `WorkflowsClient`, `RemoteEventsSource`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/teleport/teleport.py#L46-L150[vibe/core/teleport/teleport.py:46-150], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/nuage/remote_events_source.py#L33-L120[vibe/core/nuage/remote_events_source.py:33-120]]. +
+_Source:_ link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/teleport[vibe/core/teleport/], link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/nuage[vibe/core/nuage/]. +
+_Runtime scenarios:_ Teleport to Cloud.
+
+==== Setup / Onboarding
+_Responsibility:_ Walk a first-run user through Welcome → auth-method →
+(browser sign-in or manual API key) and persist the key. +
+_Interface:_ `OnboardingScreen` flow
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/setup/onboarding/base.py#L6-L14[vibe/setup/onboarding/base.py:6-14]]. +
+_Source:_ link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/setup[vibe/setup/]. +
+_Runtime scenarios:_ First-Run Onboarding.
+
+=== Level 2 — White Box: Tool Subsystem
+
+[plantuml,bbv-tools,svg]
+----
+@startuml
+!include <C4/C4_Component>
+
+Container_Boundary(tools, "Tool Subsystem") {
+  Component(mgr, "ToolManager", "Discovery + filtering + instantiation")
+  Component(base, "BaseTool + BaseToolConfig", "Tool contract: args, result, run()")
+  Component(perm, "PermissionStore + resolvers", "ALWAYS / ASK / NEVER decisions")
+  Component(builtins, "Builtin Tools", "bash, read/write, grep, task, ...")
+  Component(mcpreg, "MCP Registry", "Proxy tools for MCP servers")
+  Component(conn, "Connector Registry", "Proxy tools for connectors")
+}
+
+System_Ext(mcp, "MCP Servers")
+
+Rel(mgr, base, "Instantiates")
+Rel(mgr, builtins, "Discovers")
+Rel(mgr, mcpreg, "Integrates")
+Rel(mgr, conn, "Integrates")
+Rel(base, perm, "Resolves a PermissionContext")
+Rel(mcpreg, mcp, "Lists / calls tools")
+@enduml
+----
+
+The `ToolManager` scans search paths for `BaseTool` subclasses and merges
+in MCP and connector proxy tools [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/manager.py#L120-L383[vibe/core/tools/manager.py:120-383]].
+Each tool declares a `BaseToolConfig` permission tier; before execution
+the loop resolves a `PermissionContext` and consults the `PermissionStore`
+for session-remembered approvals
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/base.py#L83-L113[vibe/core/tools/base.py:83-113], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/permissions.py#L47-L68[vibe/core/tools/permissions.py:47-68]].
+The numeric limits each builtin tool enforces are listed as system use
+cases in `../../use-cases-vibe.adoc` and as quality scenarios in
+<<section-quality-scenarios>>.

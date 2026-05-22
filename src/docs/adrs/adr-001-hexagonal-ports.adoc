@@ -1,0 +1,60 @@
+= ADR-001: Hexagonal Ports and Adapters
+:jbake-title: ADR-001 Hexagonal Ports and Adapters
+:jbake-type: page
+:jbake-status: published
+ifndef::imagesdir[:imagesdir: ../images]
+
+== Status
+
+*Accepted (inferred).* The decision is evident in code; the rationale was
+not recoverable and is deferred to the Architect.
+
+== Context
+
+The Vibe engine integrates many external concerns: LLM providers, audio
+capture and playback, text-to-speech, transcription, HTTP gateways and
+the experiments service. The code base consistently expresses each as an
+abstract interface with a `_port.py` suffix, with concrete adapters at
+the edges [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L13-L23[AGENTS.md:13-23]]. Examples in code:
+link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/base.py#L13-L126[vibe/core/llm/backend/base.py:13-126] (the `BackendLike` port),
+link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/audio_recorder/audio_recorder_port.py[vibe/core/audio_recorder/audio_recorder_port.py],
+link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tts/tts_client_port.py[vibe/core/tts/tts_client_port.py],
+link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/plan_offer/ports/whoami_gateway.py[vibe/cli/plan_offer/ports/whoami_gateway.py]. The dependency direction
+points inward toward the domain.
+
+== Decision
+
+Structure the engine as a hexagonal (ports-and-adapters) architecture:
+the domain depends only on `_port.py` interfaces; concrete adapters
+(SDK clients, HTTP gateways, OS audio) implement those ports and are
+wired in at the boundary.
+
+== Consequences
+
+* Positive: adapters are swappable and the domain is unit-testable with
+  `Fake*` doubles [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L88-L92[AGENTS.md:88-92]].
+* Positive: the front ends (CLI, ACP) reuse one engine.
+* Negative: more indirection — a reader must follow a port to its
+  adapter. This is a contributor to *TD-004* where the UI layer adds
+  many widget modules on top of the ports.
+* Risk: none specific to this decision beyond the general maintenance
+  cost; no Chapter 11 risk is created. Accepted without a tracked risk.
+
+== Pugh Matrix
+
+Baseline (score 0): *Direct coupling to concrete classes.*
+
+[options="header",cols="2,1,1,1"]
+|===
+|Criterion |Direct coupling (baseline) |Hexagonal ports (chosen) |Framework DI container
+
+|Maintainability |0 |+1 |+1
+|Testability |0 |+1 |+1
+|Usability (contributor onboarding) |0 |-1 |?
+|Compatibility (swap providers) |0 |+1 |+1
+|Reliability |0 |0 |0
+|*Sum* |*0* |*+2* |*?*
+|===
+
+`?` cells need the team's weighting — whether a DI container would help
+or hurt onboarding is a judgment the code cannot settle.

@@ -1,0 +1,65 @@
+name: Publish documentation site
+
+# Builds the docToolchain microsite (./dtcw generateSite) and deploys it
+# to GitHub Pages. Requires repository Settings -> Pages -> Source set to
+# "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/docs/**'
+      - 'src/site/**'
+      - 'docToolchainConfig.groovy'
+      - 'dtcw'
+      - '.github/workflows/publish-docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment; let an in-progress run finish.
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Used by the microsite for "edit on GitHub" links.
+      DTC_PROJECT_BRANCH: ${{ github.ref_name }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # docToolchain reads git history for page metadata.
+          fetch-depth: 0
+
+      - name: Generate microsite with docToolchain
+        # dtcw auto-detects Docker on the runner and uses the
+        # doctoolchain/doctoolchain image — no local JDK needed.
+        run: |
+          chmod +x ./dtcw
+          ./dtcw generateSite
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/microsite/output
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

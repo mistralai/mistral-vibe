@@ -1,0 +1,146 @@
+:jbake-title: Quality Requirements
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 10
+:filename: /chapters/10_quality_requirements.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-quality-scenarios]]
+== Quality Requirements
+
+=== Quality Requirements Overview
+
+The quality tree covers all eight ISO/IEC 25010 characteristics. Each is
+marked either as *concretising* a Chapter 1.2 top goal or as *derived*
+(a quality requirement visible in code but not among the top goals).
+
+[options="header",cols="1,1,2"]
+|===
+|Characteristic |Relation to Chapter 1.2 |Note
+
+|Security
+|Concretises *Security / Safety*
+|Permission tiers, trust gate, secret storage.
+
+|Usability
+|Concretises *Usability*
+|TUI, onboarding, autocompletion.
+
+|Maintainability
+|Concretises *Maintainability*
+|Hexagonal ports, strict static analysis.
+
+|Compatibility
+|Concretises *Compatibility*
+|Multi-provider, MCP, ACP.
+
+|Reliability
+|Concretises *Reliability*
+|Retry, limits, recovery.
+
+|Functional Suitability
+|Derived
+|Tool suite + agent loop deliver the stated function.
+
+|Performance Efficiency
+|Derived
+|Concurrent tools, streaming, bounded I/O.
+
+|Portability
+|Derived
+|Cross-platform; UNIX is the supported target.
+|===
+
+[WARNING]
+====
+The *priority ranking* of the quality goals is **deferred** to the
+Product Owner and Architect. The scenarios below are testable on their
+own, but which to favour when they conflict is an unresolved decision.
+====
+
+=== Quality Scenarios
+
+Each scenario is in the six-part form. Every response measure carries a
+literal figure recovered from code, so the requirement is testable.
+
+[options="header",cols="1,1,1,1,1,1"]
+|===
+|Source |Stimulus |Artifact |Environment |Response |Response Measure
+
+|LLM
+|Emits a shell command
+|`bash` tool
+|Interactive session, `default` agent
+|Tool prompts for approval, then runs the command with a timeout
+|Default timeout *300 s* (overridable); stdout+stderr captured to a
+*16 000-byte* cap [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/builtins/bash.py#L222-L226[vibe/core/tools/builtins/bash.py:222-226]] — *Security*.
+
+|LLM
+|Requests a code search
+|`grep` tool
+|Large repository
+|Search returns within the timeout, capped
+|Timeout *60 s*; at most *100 matches* and *64 000 output bytes*
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/builtins/grep.py#L43-L51[vibe/core/tools/builtins/grep.py:43-51]] — *Performance Efficiency*.
+
+|LLM
+|Reads a large file
+|`read_file` tool
+|Any session
+|File content is returned truncated, with `was_truncated` set
+|Read cap *64 000 bytes* per call
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/builtins/read_file.py#L65-L66[vibe/core/tools/builtins/read_file.py:65-66]] — *Performance Efficiency*.
+
+|Conversation
+|Context tokens approach the model limit
+|Agent Loop + compaction
+|Long interactive session
+|History is summarised and the session forks
+|Triggered at the model's `auto_compact_threshold`; a warning is injected
+at *50 %* of that threshold
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/middleware.py#L81-L126[vibe/core/middleware.py:81-126]] — *Reliability*.
+
+|LLM Provider
+|Returns a transient error
+|Mistral backend
+|Network instability
+|The request is retried with exponential backoff
+|*500 ms* initial delay, *1.5x* exponent, *300 s* cap
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/mistral.py#L212-L222[vibe/core/llm/backend/mistral.py:212-222]] — *Reliability*.
+
+|MCP Server
+|Is slow to start or respond
+|MCP registry
+|External tool provider configured
+|Startup and per-call are bounded by timeouts
+|Startup *10 s*, tool call *60 s* (defaults)
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/config/_settings.py#L231-L237[vibe/core/config/_settings.py:231-237]] — *Compatibility*.
+
+|Developer
+|Presses Escape mid-turn
+|Agent Loop
+|Tool tasks running
+|In-flight tool tasks are cancelled and the turn ends cleanly
+|All running tasks receive `CancelledError`; no partial message is
+persisted [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1244-L1259[vibe/core/agent_loop.py:1244-1259]] — *Reliability*.
+
+|Hook author
+|Configures a slow hook
+|Hooks manager
+|`POST_AGENT_TURN` event
+|The hook is killed on timeout and retried a bounded number of times
+|Default timeout *30 s*; at most *3* retries
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/hooks/models.py#L30[vibe/core/hooks/models.py:30], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/hooks/manager.py#L28[vibe/core/hooks/manager.py:28]] —
+*Reliability*.
+
+|Maintainer
+|Submits a code change
+|CI pipeline
+|Pull request
+|Pyright (strict) and ruff must pass before merge
+|Zero type errors, zero lint errors [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L24-L46[AGENTS.md:24-46]] —
+*Maintainability*.
+|===

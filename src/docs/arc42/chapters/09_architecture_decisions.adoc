@@ -1,0 +1,69 @@
+:jbake-title: Architecture Decisions
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 9
+:filename: /chapters/09_architecture_decisions.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-design-decisions]]
+== Architecture Decisions
+
+The decisions below are recovered from code. The *rationale* — why each
+was chosen over alternatives — could not be recovered, so each ADR has
+status *Accepted (inferred)* and its Pugh Matrix marks team-judgment
+cells with `?`. The full ADRs are in the register at `../../adrs/`.
+
+=== ADR Index
+
+[options="header",cols="1,2,1"]
+|===
+|ADR |Title |Status
+
+|<<../../adrs/adr-001-hexagonal-ports.adoc#,ADR-001>>
+|Hexagonal Ports and Adapters
+|Accepted (inferred)
+
+|<<../../adrs/adr-002-llm-backend-abstraction.adoc#,ADR-002>>
+|Pluggable LLM Backend Abstraction
+|Accepted (inferred)
+
+|<<../../adrs/adr-003-middleware-pipeline.adoc#,ADR-003>>
+|Conversation Middleware Pipeline
+|Accepted (inferred)
+
+|<<../../adrs/adr-004-file-based-sessions.adoc#,ADR-004>>
+|File-based Session Persistence
+|Accepted (inferred)
+|===
+
+=== Summary
+
+ADR-001 — *Hexagonal Ports and Adapters.* The engine isolates the domain
+behind `*_port.py` interfaces with adapters at the edges
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L13-L23[AGENTS.md:13-23]]. Concretised in <<section-concepts>> (Configuration,
+Observability).
+
+ADR-002 — *Pluggable LLM Backend Abstraction.* `BACKEND_FACTORY` maps a
+provider enum to a backend, and API-style adapters cover OpenAI,
+Anthropic and Vertex shapes
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/factory.py#L7[vibe/core/llm/backend/factory.py:7], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/format.py#L58-L185[vibe/core/llm/format.py:58-185]].
+Concretised by the Compatibility goal in <<section-solution-strategy>>.
+
+ADR-003 — *Conversation Middleware Pipeline.* A `before_turn` pipeline
+enforces turn/price limits, auto-compaction and read-only agent modes
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/middleware.py#L218-L247[vibe/core/middleware.py:218-247]]. Concretised by the Security and
+Reliability mechanisms in <<section-concepts>>.
+
+ADR-004 — *File-based Session Persistence.* Sessions persist as a folder
+of `meta.json` + `messages.jsonl`, with a v1→v2 migration in code
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_logger.py#L62-L97[vibe/core/session/session_logger.py:62-97], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_migration.py#L16-L41[vibe/core/session/session_migration.py:16-41]].
+
+[NOTE]
+====
+The "why" behind all four decisions is **deferred** to the Architect
+(see `OPEN_QUESTIONS.adoc`). Until answered, the inferred status and the
+`?` cells in each Pugh Matrix must not be read as confirmed rationale.
+====

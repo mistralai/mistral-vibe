@@ -1,0 +1,108 @@
+:jbake-title: Context and Scope
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 3
+:filename: /chapters/03_context_and_scope.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-context-and-scope]]
+== Context and Scope
+
+Vibe is a client-side tool that runs on the developer's machine. The
+system boundary in this chapter is the same one used in
+<<section-building-block-view>>: the building blocks there are internal
+to this boundary, the systems below sit outside it.
+
+=== Business Context
+
+[plantuml,context-business,svg]
+----
+@startuml
+!include <C4/C4_Context>
+
+Person(dev, "Interactive Developer", "Explores and edits a codebase conversationally")
+Person(scripter, "Scripter / CI", "Runs the agent non-interactively")
+Person(integrator, "Editor / IDE Integrator", "Embeds the agent via ACP")
+
+System(vibe, "Vibe", "Minimal CLI coding agent")
+
+System_Ext(llm, "LLM Provider", "Mistral API or an OpenAI-compatible / Anthropic / Vertex endpoint")
+System_Ext(vibecode, "Vibe Code / Nuage", "Remote cloud workflow backend")
+
+Rel(dev, vibe, "Asks to explore / modify code")
+Rel(scripter, vibe, "Runs vibe -p with a prompt")
+Rel(integrator, vibe, "Drives vibe-acp over ACP")
+Rel(vibe, llm, "Sends conversation, receives tool calls")
+Rel(vibe, vibecode, "Teleports a session to the cloud")
+@enduml
+----
+
+The developer states a coding goal; Vibe turns it into LLM calls and tool
+executions and reports the result. A scripter drives the same engine
+non-interactively. An integrator embeds the agent in an editor through
+the ACP server. The LLM Provider supplies the agent's reasoning; Vibe
+Code / Nuage optionally continues a session in the cloud
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/programmatic.py#L27[vibe/core/programmatic.py:27], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/entrypoint.py#L78-L108[vibe/acp/entrypoint.py:78-108], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/teleport/teleport.py#L46-L150[vibe/core/teleport/teleport.py:46-150]].
+
+=== Technical Context
+
+[plantuml,context-technical,svg]
+----
+@startuml
+!include <C4/C4_Context>
+
+System(vibe, "Vibe", "Minimal CLI coding agent")
+
+System_Ext(llm, "LLM Provider API", "Chat completions, streaming, token counting")
+System_Ext(datalake, "Mistral Datalake", "Usage telemetry sink")
+System_Ext(growthbook, "GrowthBook", "Feature-flag / experiment evaluation")
+System_Ext(mcp, "MCP Servers", "External tool providers (http / stdio)")
+System_Ext(vibecode, "Vibe Code / Nuage", "Remote workflow backend")
+System_Ext(github, "GitHub", "Device-flow auth, update checks")
+System_Ext(pypi, "PyPI", "Package distribution, update checks")
+
+Rel(vibe, llm, "HTTPS — chat / stream / count_tokens")
+Rel(vibe, datalake, "HTTPS — usage events", "gated by enable_telemetry")
+Rel(vibe, growthbook, "HTTPS — experiment eval", "fail-open")
+Rel(vibe, mcp, "http / streamable-http / stdio")
+Rel(vibe, vibecode, "HTTPS + SSE — workflow events")
+Rel(vibe, github, "HTTPS — OAuth device flow, releases")
+Rel(vibe, pypi, "HTTPS — latest version")
+@enduml
+----
+
+[options="header",cols="1,1,2"]
+|===
+|External System |Channel |Code Evidence
+
+|LLM Provider API
+|HTTPS (Mistral SDK or generic HTTP)
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/factory.py#L1-L7[vibe/core/llm/backend/factory.py:1-7], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/mistral.py#L268-L335[vibe/core/llm/backend/mistral.py:268-335]
+
+|Mistral Datalake
+|HTTPS POST to `api.mistral.ai/v1/datalake/events`
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/telemetry/send.py#L30-L31[vibe/core/telemetry/send.py:30-31]
+
+|GrowthBook
+|HTTPS POST to the eval endpoint; fails open on error
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/experiments/client.py#L17-L81[vibe/core/experiments/client.py:17-81]
+
+|MCP Servers
+|`http`, `streamable-http` or `stdio`
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/mcp/registry.py#L80-L150[vibe/core/tools/mcp/registry.py:80-150]
+
+|Vibe Code / Nuage
+|HTTPS + Server-Sent Events
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/nuage/client.py#L22-L100[vibe/core/nuage/client.py:22-100], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/nuage/remote_events_source.py#L33-L120[vibe/core/nuage/remote_events_source.py:33-120]
+
+|GitHub
+|OAuth device flow; release lookups
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/auth/github.py#L117-L184[vibe/core/auth/github.py:117-184], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/update_notifier/adapters/github_update_gateway.py[vibe/cli/update_notifier/adapters/github_update_gateway.py]
+
+|PyPI
+|HTTPS version lookup, cached 24 h
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/update_notifier/adapters/pypi_update_gateway.py[vibe/cli/update_notifier/adapters/pypi_update_gateway.py], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/update_notifier/update.py#L82[vibe/cli/update_notifier/update.py:82]
+|===

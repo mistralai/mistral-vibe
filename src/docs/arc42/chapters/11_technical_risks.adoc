@@ -1,0 +1,132 @@
+:jbake-title: Risks and Technical Debts
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 11
+:filename: /chapters/11_technical_risks.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-technical-risks]]
+== Risks and Technical Debts
+
+=== Risks
+
+Risks are ordered by priority (highest first). Priority is derived from
+probability × impact. The probability and impact values are *inferred*
+in Phase 2 and must be confirmed by a security review — see ADR review
+and `OPEN_QUESTIONS.adoc` (Q3.8.1).
+
+[options="header",cols="0.6,2.4,0.8,0.8,0.8,2.6"]
+|===
+|ID |Risk |Prob. |Impact |Priority |Mitigation
+
+|R-007
+|No STRIDE threat model backs the security mechanisms, so threat
+*completeness* is unverified (no code evidence — deferred).
+|High |Medium |*High*
+|Author a STRIDE threat model (deferred — Architect, Operations). The
+candidate threats T-001..T-007 in <<section-concepts>> are the starting
+point.
+
+|R-001
+|The LLM emits a destructive shell command and `bash` executes it
+(threat T-001).
+|Medium |High |*High*
+|Tiered tool permissions + command allow/deny lists
+(<<section-concepts>> Security); `bash` timeout scenario in
+<<section-quality-scenarios>>.
+
+|R-004
+|An untrusted project's `.vibe/` config (tools, hooks, agents) executes
+on first entry (threat T-005).
+|Medium |High |*High*
+|Trust-folder gate (<<section-concepts>> Security).
+
+|R-002
+|A secret file is read, or `webfetch` is used for SSRF (threats T-002,
+T-004).
+|Medium |Medium |*Medium*
+|Sensitive-pattern gating and `ASK` permission on `webfetch`
+(<<section-concepts>> Security).
+
+|R-003
+|A file write or patch lands outside the working directory (threat
+T-003).
+|Low |High |*Medium*
+|Working-directory boundary (<<section-concepts>> Security).
+
+|R-005
+|The Mistral API key leaks from disk (threat T-006).
+|Low |High |*Medium*
+|Keyring storage and RSA+AES payload encryption (<<section-concepts>>
+Security).
+
+|R-006
+|A malicious hook command runs as a shell subprocess (threat T-007).
+|Low |High |*Medium*
+|Hooks are gated by `enable_experimental_hooks`; bounded 30 s timeout
+and 3 retries (<<section-quality-scenarios>>).
+
+|R-008
+|A large pinned dependency surface (~80 direct dependencies) carries
+supply-chain exposure; no SBOM or scanning config is in the bounded
+context [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/pyproject.toml#L30-L141[pyproject.toml:30-141]].
+|Medium |Medium |*Medium*
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/uv.lock[uv.lock] pins every transitive dependency; `exclude-newer` constrains
+new releases. Adding an SBOM / scan is unmitigated — deferred.
+
+|R-009
+|Behaviour on a sustained LLM-provider outage (beyond retry exhaustion)
+is not specified in code (deferred).
+|Medium |Low |*Low*
+|Retry/backoff scenario in <<section-quality-scenarios>>; the intended
+end-state is deferred to Operations.
+
+|R-010
+|No performance budget exists in code for very large repositories
+(deferred).
+|Low |Low |*Low*
+|Byte-capped file reads and auto-compaction bound growth; an explicit
+budget is deferred.
+|===
+
+=== Technical Debt
+
+Each item names the Chapter 5 building block it burdens.
+
+[options="header",cols="0.6,1.4,2.4,1.4"]
+|===
+|ID |Burdened Building Block |Debt |Evidence
+
+|TD-001
+|Agent Loop
+|`session_cost` is a self-described rough estimate that ignores prompt
+caching, so the `--max-price` ceiling is approximate.
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/types.py#L102-L115[vibe/core/types.py:102-115]
+
+|TD-002
+|ACP Bridge
+|`acp/tools/` re-implements several builtins (`bash`, `read_file`,
+`write_file`, `search_replace`, `grep`, …) that already exist in
+`core/tools/`, duplicating maintenance.
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/acp_agent_loop.py#L650-L666[vibe/acp/acp_agent_loop.py:650-666]
+
+|TD-003
+|Session Persistence
+|A v1→v2 session-format migration is carried in code; it can be removed
+once all users have migrated.
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_migration.py#L16-L41[vibe/core/session/session_migration.py:16-41]
+
+|TD-004
+|CLI / Textual UI
+|The TUI widget layer is large (~70 widget modules) and untiered, which
+makes the front end the least diffable part of a recovery run.
+|link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/textual_ui/widgets[vibe/cli/textual_ui/widgets/]
+
+|TD-005
+|CLI / Textual UI
+|Voice mode is shipped but marked experimental and "may change".
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/README.md#L284-L285[README.md:284-285]
+|===

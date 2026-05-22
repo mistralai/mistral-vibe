@@ -1,0 +1,128 @@
+:jbake-title: Introduction and Goals
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 1
+:filename: /chapters/01_introduction_and_goals.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-introduction-and-goals]]
+== Introduction and Goals
+
+Vibe is Mistral's minimal CLI coding agent: a terminal coding assistant
+that gives a conversational interface to a codebase, powered by Mistral's
+models [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/pyproject.toml#L5[pyproject.toml:5], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/README.md#L20-L22[README.md:20-22]]. It ships two entry points —
+link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe[vibe/] (an interactive Textual TUI, also runnable non-interactively) and
+`vibe-acp` (an Agent Client Protocol server for editors and IDEs)
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/pyproject.toml#L143-L144[pyproject.toml:143-144]].
+
+=== Requirements Overview
+
+The system lets a developer explore, modify and run a project through
+natural language, backed by a safe tool suite [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/README.md#L92-L109[README.md:92-109]]. Its
+core capabilities:
+
+* Run an interactive coding session driven by an agent loop that calls
+  the LLM, then executes tool calls, until the assistant produces no
+  further tool call [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L855-L937[vibe/core/agent_loop.py:855-937]].
+* Run non-interactively (link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe[vibe/] -p) for scripting and CI, with turn and
+  cost limits and machine-readable output
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/programmatic.py#L27-L91[vibe/core/programmatic.py:27-91], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/output_formatters.py#L46-L119[vibe/core/output_formatters.py:46-119]].
+* Provide a built-in tool suite: shell, file read/write/patch, code
+  search, todo, subagent delegation, interactive questions, web fetch
+  and search [link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/builtins[vibe/core/tools/builtins/]].
+* Extend the agent through MCP servers, skills, custom agent profiles
+  and hooks [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/README.md#L340-L579[README.md:340-579]].
+* Persist, resume and rewind sessions
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_logger.py#L36-L97[vibe/core/session/session_logger.py:36-97]].
+
+The full functional specification — persona use cases and per-interface
+system use cases — is in `../../use-cases-vibe.adoc`; the product framing
+is in `../../prd-vibe.adoc`.
+
+=== Quality Goals
+
+The five quality goals below are derived from the emphasis the code and
+README place on them. Their *priority ranking* could not be recovered
+from code and is **deferred** — the Product Owner and Architect must
+supply it before it can drive trade-off decisions.
+
+[options="header",cols="1,3,2"]
+|===
+|Quality Goal |Motivation |Chapter 4 Approach
+
+|Security / Safety
+|"Safety first" is an explicit README theme; tool execution is gated by
+a tiered permission system and a trust-folder gate
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/README.md#L108[README.md:108], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/base.py#L83-L113[vibe/core/tools/base.py:83-113], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/trusted_folders.py#L75-L122[vibe/core/trusted_folders.py:75-122]].
+|Tiered tool permissions, trust gate, workdir boundary
+(see <<section-solution-strategy>>).
+
+|Usability
+|A rich Textual TUI, a first-run onboarding wizard and autocompletion
+target a low-friction developer experience
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/textual_ui/app.py#L327-L348[vibe/cli/textual_ui/app.py:327-348], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/setup/onboarding/screens/welcome.py#L46-L80[vibe/setup/onboarding/screens/welcome.py:46-80]].
+|Textual TUI, onboarding wizard, slash-command and path autocompletion.
+
+|Maintainability
+|Strict pyright and ruff gate CI; hexagonal ports decouple the engine
+from adapters [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L24-L69[AGENTS.md:24-69], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/base.py#L13-L126[vibe/core/llm/backend/base.py:13-126]].
+|Hexagonal ports/adapters, strict static analysis, test doubles.
+
+|Compatibility
+|The agent works against multiple LLM providers and integrates the MCP
+and ACP protocols and the agentskills.io standard
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/factory.py#L7[vibe/core/llm/backend/factory.py:7], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/entrypoint.py#L78[vibe/acp/entrypoint.py:78]].
+|LLM backend factory, MCP registry, ACP bridge.
+
+|Reliability
+|The LLM call retries with backoff and the loop recovers from context
+overflow and user interruption
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/mistral.py#L212-L222[vibe/core/llm/backend/mistral.py:212-222], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1681-L1749[vibe/core/agent_loop.py:1681-1749]].
+|Retry/backoff, middleware limits, auto-compaction recovery.
+|===
+
+NOTE: Chapter 10 elaborates all eight ISO/IEC 25010 characteristics with
+measurable scenarios; this section names only the top goals that drive
+architecture decisions.
+
+=== Stakeholders
+
+[options="header",cols="1,2,2"]
+|===
+|Role |Contact |Expectations
+
+|Interactive developer
+|_(team to supply)_
+|A trustworthy conversational agent that explores and edits the codebase
+with explicit approval [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/textual_ui/app.py#L322[vibe/cli/textual_ui/app.py:322]].
+
+|Scripter / CI automation
+|_(team to supply)_
+|Deterministic non-interactive runs with turn and cost ceilings and
+machine-readable output [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/programmatic.py#L27[vibe/core/programmatic.py:27]].
+
+|Editor / IDE integrator
+|_(team to supply)_
+|A stable ACP server to embed the agent in an editor
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/entrypoint.py#L78-L108[vibe/acp/entrypoint.py:78-108]].
+
+|Product Owner
+|_(team to supply)_
+|Owns the deferred business questions: why Vibe was built, success KPIs,
+and segment priority.
+|===
+
+[NOTE]
+.Open issues — deferred to the team
+====
+The following could not be recovered from code and are **deferred**:
+
+* The business rationale for building an open-source CLI agent and its
+  relation to the paid Mistral Code / Vibe Code offering.
+* The success KPI (adoption, retention, task-completion, conversion).
+* Which user segment — interactive, programmatic or ACP — is the priority.
+* The priority ranking of the quality goals above.
+====

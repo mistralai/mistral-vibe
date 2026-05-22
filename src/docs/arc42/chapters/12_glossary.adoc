@@ -1,0 +1,91 @@
+:jbake-title: Glossary
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 12
+:filename: /chapters/12_glossary.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-glossary]]
+== Glossary
+
+[cols="e,3e" options="header"]
+|===
+|Term |Definition
+
+|Agent
+|A configured run profile of the engine; built-in profiles are
+`default`, `plan`, `chat`, `accept-edits`, `auto-approve`, `explore`,
+`lean` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agents/models.py#L38-L45[vibe/core/agents/models.py:38-45]].
+
+|Subagent
+|An agent of type `SUBAGENT` (e.g. `explore`) spawned by the `task` tool
+to do isolated work [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agents/models.py#L152[vibe/core/agents/models.py:152]].
+
+|Agent Profile
+|The data record for an agent: name, safety tier, agent type and config
+overrides [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agents/models.py#L48-L94[vibe/core/agents/models.py:48-94]].
+
+|Agent Loop
+|The orchestrator that runs a conversation turn — LLM call plus tool
+execution — until no tool call remains [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L855-L937[vibe/core/agent_loop.py:855-937]].
+
+|Tool
+|A `BaseTool` subclass with a Pydantic args model, a result model and an
+async `run()` generator [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/base.py#L122-L152[vibe/core/tools/base.py:122-152]].
+
+|Tool Permission
+|The tier — `ALWAYS`, `ASK` or `NEVER` — that decides whether a tool
+runs without asking [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/base.py#L83-L96[vibe/core/tools/base.py:83-96]].
+
+|Skill
+|A reusable component declared by a `SKILL.md` file; can add slash
+commands and behaviours [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/skills/manager.py#L91-L117[vibe/core/skills/manager.py:91-117]].
+
+|MCP Server
+|An external tool provider reached over the Model Context Protocol
+(`http`, `streamable-http` or `stdio`)
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/mcp/registry.py#L80-L150[vibe/core/tools/mcp/registry.py:80-150]].
+
+|Connector
+|A remote tool source registered through the connector registry
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/connectors/connector_registry.py[vibe/core/tools/connectors/connector_registry.py]].
+
+|Hook
+|A TOML-declared shell command run on a lifecycle event such as
+`POST_AGENT_TURN` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/hooks/models.py#L19-L38[vibe/core/hooks/models.py:19-38]].
+
+|Session
+|A persisted conversation: a folder of `meta.json` + `messages.jsonl`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_loader.py#L16-L17[vibe/core/session/session_loader.py:16-17]].
+
+|Compaction
+|Summarising the conversation history when the context nears the model's
+token threshold [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1681-L1749[vibe/core/agent_loop.py:1681-1749]].
+
+|Plan Mode
+|The read-only `plan` agent that drafts a markdown plan before execution
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/plan_session.py#L11-L42[vibe/core/plan_session.py:11-42]].
+
+|Teleport
+|Handing a local session to a remote Vibe Code workflow
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/teleport/teleport.py#L46-L150[vibe/core/teleport/teleport.py:46-150]].
+
+|Nuage
+|The remote cloud workflow backend (French for "cloud")
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/nuage/client.py#L22-L100[vibe/core/nuage/client.py:22-100]].
+
+|Trust Folder
+|A directory the user has explicitly trusted; only trusted folders load
+project `.vibe/` config [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/trusted_folders.py#L75-L122[vibe/core/trusted_folders.py:75-122]].
+
+|ACP
+|Agent Client Protocol — the JSON-RPC-style protocol the `vibe-acp`
+server speaks to editors [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/entrypoint.py#L78-L108[vibe/acp/entrypoint.py:78-108]].
+
+|VIBE_HOME
+|The user-state directory, `~/.vibe` by default, relocatable via the
+`VIBE_HOME` env var [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/paths/_vibe_home.py#L19-L25[vibe/core/paths/_vibe_home.py:19-25]].
+|===

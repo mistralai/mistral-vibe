@@ -1,0 +1,88 @@
+:jbake-title: Deployment View
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 7
+:filename: /chapters/07_deployment_view.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-deployment-view]]
+== Deployment View
+
+=== Infrastructure Level 1
+
+[plantuml,deploy-level1,svg]
+----
+@startuml
+node "Developer Machine" {
+  artifact "vibe / vibe-acp" as app
+  folder "~/.vibe" as home {
+    artifact "config.toml"
+    artifact ".env"
+    artifact "logs/session/"
+    artifact "trusted_folders.toml"
+  }
+  database "Project working dir" as proj
+}
+cloud "Mistral Cloud" {
+  artifact "LLM API"
+  artifact "Datalake telemetry"
+}
+cloud "Vibe Code / Nuage" as vibecode
+cloud "GrowthBook" as gb
+cloud "PyPI / GitHub" as dist
+
+app --> home : reads config, writes logs
+app --> proj : reads / edits files
+app --> "LLM API" : HTTPS
+app --> "Datalake telemetry" : HTTPS
+app --> vibecode : HTTPS + SSE
+app --> gb : HTTPS
+app --> dist : update check
+@enduml
+----
+
+Motivation::
+Vibe is a *client-side* tool. The only "deployment" is the package
+installed on the developer's machine; there is no server component owned
+by this bounded context. All server-side systems are external
+(<<section-context-and-scope>>).
+
+Quality and/or Performance Features::
+The process is single-user and single-process. State lives under
+`~/.vibe/` (overridable with `VIBE_HOME`): `config.toml`, `.env`, session
+logs, the trust list, plans and the update cache
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/paths/_vibe_home.py#L19-L36[vibe/core/paths/_vibe_home.py:19-36]].
+
+Mapping of Building Blocks to Infrastructure::
+All nine building blocks run inside the single link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe[vibe/] (or `vibe-acp`)
+process on the developer machine. The Remote block additionally talks to
+the Vibe Code / Nuage cloud.
+
+=== Infrastructure Level 2 — Distribution channels
+
+[options="header",cols="1,2"]
+|===
+|Channel |Evidence
+
+|PyPI package `mistral-vibe`, installed via `uv tool install` or `pip`
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/README.md#L45-L55[README.md:45-55], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/pyproject.toml#L143-L144[pyproject.toml:143-144]
+
+|One-line link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/scripts/install.sh[scripts/install.sh] (Linux / macOS)
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/README.md#L27-L33[README.md:27-33]
+
+|Standalone binary built with PyInstaller
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe-acp.spec[vibe-acp.spec], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/pyinstaller/runtime_hook_truststore.py[pyinstaller/runtime_hook_truststore.py],
+link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/.github/workflows/build-and-upload.yml[.github/workflows/build-and-upload.yml]
+
+|Packaged GitHub Action (`uv sync` + uv run link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe[vibe/] -p)
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/action.yml#L1-L60[action.yml:1-60]
+
+|Zed editor extension
+|link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/distribution/zed/extension.toml[distribution/zed/extension.toml]
+|===
+
+Releases are cut by the link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/.github/workflows/release.yml[.github/workflows/release.yml] workflow; CI runs in link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/.github/workflows/ci.yml[.github/workflows/ci.yml]
+[link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/.github/workflows[.github/workflows/]].

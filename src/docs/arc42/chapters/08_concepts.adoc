@@ -1,0 +1,172 @@
+:jbake-title: Cross-cutting Concepts
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 8
+:filename: /chapters/08_concepts.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-concepts]]
+== Cross-cutting Concepts
+
+=== Threat Model (STRIDE)
+
+[WARNING]
+====
+No STRIDE threat model exists in the code base. The threats below are
+**candidate threats**, derived in Phase 2 from the code-visible risk
+surfaces (see <<section-technical-risks>>). The *completeness* of this
+catalogue and the validation of each threat are **deferred** to the
+Architect and Operations — see ADR review and `OPEN_QUESTIONS.adoc`.
+====
+
+[options="header",cols="1,1,3,1"]
+|===
+|T-ID |STRIDE |Candidate Threat |Risk
+
+|T-001 |Tampering, Elevation
+|The LLM emits a destructive shell command and `bash` runs it
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/builtins/bash.py#L480-L530[vibe/core/tools/builtins/bash.py:480-530]].
+|R-001
+
+|T-002 |Information Disclosure
+|A file tool reads a secret file such as `.env`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/builtins/read_file.py#L60-L66[vibe/core/tools/builtins/read_file.py:60-66]].
+|R-002
+
+|T-003 |Tampering
+|A file write or patch lands outside the working directory
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/utils.py#L64-L125[vibe/core/tools/utils.py:64-125]].
+|R-003
+
+|T-004 |Information Disclosure
+|`webfetch` is pointed at an internal/loopback URL (SSRF)
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/builtins/webfetch.py#L62-L119[vibe/core/tools/builtins/webfetch.py:62-119]].
+|R-002
+
+|T-005 |Elevation of Privilege
+|An untrusted project's `.vibe/` config (tools, hooks, agents) executes
+on first entry [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/trusted_folders.py#L19-L32[vibe/core/trusted_folders.py:19-32]].
+|R-004
+
+|T-006 |Spoofing, Information Disclosure
+|The Mistral API key leaks from disk
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/setup/auth/api_key_persistence.py#L14-L16[vibe/setup/auth/api_key_persistence.py:14-16]].
+|R-005
+
+|T-007 |Tampering
+|A malicious hook command runs as a shell subprocess
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/hooks/executor.py#L11-L55[vibe/core/hooks/executor.py:11-55]].
+|R-006
+|===
+
+=== Security
+
+Every mitigation references the T-IDs it closes.
+
+[options="header",cols="2,3,1"]
+|===
+|Mechanism |Description |Closes
+
+|Tiered tool permissions
+|Each tool resolves to `ALWAYS` / `ASK` / `NEVER`; `ASK` prompts the
+user before executing
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/base.py#L83-L113[vibe/core/tools/base.py:83-113]].
+|T-001, T-004, T-007
+
+|Command allow/deny lists + arity
+|`bash` matches command prefixes against allow/deny lists; `sudo` always
+asks [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/builtins/bash.py#L228-L243[vibe/core/tools/builtins/bash.py:228-243], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/arity.py#L145-L158[vibe/core/tools/arity.py:145-158]].
+|T-001
+
+|Sensitive-pattern gating
+|File and search tools treat `**/.env*` as sensitive and force an
+approval prompt [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/builtins/read_file.py#L60-L63[vibe/core/tools/builtins/read_file.py:60-63]].
+|T-002
+
+|Working-directory boundary
+|File tools require paths inside the working directory (or an
+`--add-dir` root); otherwise an extra approval is required
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/utils.py#L64-L125[vibe/core/tools/utils.py:64-125]].
+|T-003
+
+|Trust-folder gate
+|A folder containing `.vibe/`/link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md[AGENTS.md] triggers a trust prompt;
+untrusted folders do not load project config
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/trusted_folders.py#L75-L122[vibe/core/trusted_folders.py:75-122]].
+|T-005
+
+|Secret storage
+|API keys are stored in `~/.vibe/.env` or the OS keyring; encrypted
+payloads use RSA-OAEP-SHA256 + AES-256-GCM; browser sign-in uses PKCE
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/auth/crypto.py#L13-L137[vibe/core/auth/crypto.py:13-137], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/setup/auth/browser_sign_in.py#L173-L184[vibe/setup/auth/browser_sign_in.py:173-184]].
+|T-006
+
+|Read-only agent profiles
+|The `plan` and `chat` profiles are read-only, enforced by
+`ReadOnlyAgentMiddleware` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/middleware.py#L174-L216[vibe/core/middleware.py:174-216]] — see
+ADR-003.
+|T-001, T-003
+|===
+
+=== Test
+
+The test concept is a pytest suite (`pytest` + `pytest-asyncio` +
+`respx` + `pytest-textual-snapshot`) with test doubles named `Fake*` in
+link:https://github.com/mistralai/mistral-vibe/tree/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/tests/stubs[tests/stubs/] [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L84-L92[AGENTS.md:84-92]]. CI runs the suite plus strict pyright
+and ruff [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/.github/workflows/ci.yml[.github/workflows/ci.yml]].
+
+[WARNING]
+====
+Tests are not traced to use cases or business rules, and the pyramid
+shape (unit / integration / end-to-end proportions) is not declared.
+Establishing per-use-case traceability — each test naming the
+`../use-cases-vibe.adoc` use case it covers — is **deferred** to the
+Developer.
+====
+
+=== Observability
+
+* *Tracing.* OpenTelemetry spans wrap the agent invocation and each tool
+  execution, with the conversation id propagated as OTEL baggage; the
+  OTLP exporter is enabled only when telemetry and OTEL config are
+  present [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tracing.py#L23-L137[vibe/core/tracing.py:23-137]].
+* *Logging.* Structured stdlib logging writes to `~/.vibe/logs/vibe.log`;
+  level and rotation size are env-configurable [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L71-L79[AGENTS.md:71-79]].
+* *Usage telemetry.* Usage events go to the Mistral datalake, gated by
+  `enable_telemetry` and the presence of an API key
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/telemetry/send.py#L58-L95[vibe/core/telemetry/send.py:58-95]].
+* *ACP message log.* When `VIBE_ACP_LOGGING_ENABLED` is set, every ACP
+  protocol message is recorded [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/acp_logger.py#L17-L59[vibe/acp/acp_logger.py:17-59]].
+
+=== Error Handling
+
+* *Retry and backoff.* The Mistral backend retries transient failures —
+  500 ms initial delay, 1.5x exponent, 300 s cap
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/mistral.py#L212-L222[vibe/core/llm/backend/mistral.py:212-222]].
+* *Distinct LLM failures.* Rate-limit and context-too-long errors are
+  caught and surfaced distinctly rather than as generic failures
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1365-L1374[vibe/core/agent_loop.py:1365-1374]].
+* *Hook retry limit.* Hooks retry at most three times before being
+  reported as failed [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/hooks/manager.py#L28-L53[vibe/core/hooks/manager.py:28-53]].
+* *Fail-open experiments.* The GrowthBook client returns defaults on any
+  error so a flag-service outage never blocks a session
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/experiments/client.py#L43-L76[vibe/core/experiments/client.py:43-76]].
+* *Cancellation.* `asyncio.CancelledError` is handled explicitly so user
+  interruption ends a turn cleanly [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1170-L1178[vibe/core/agent_loop.py:1170-1178]].
+* *Exception discipline.* Module-local exception hierarchies are chained
+  with `raise … from e` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L71-L79[AGENTS.md:71-79]].
+
+=== Configuration
+
+Configuration is layered and merge-aware: project `.vibe/config.toml`
+directories are walked breadth-first (up to four levels) and then the
+user `~/.vibe/config.toml` layer is applied; layers merge field-by-field
+with declared strategies (replace, concat, union, shallow, conflict)
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/config/builder.py#L24-L122[vibe/core/config/builder.py:24-122], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/paths/_local_config_walk.py#L132-L168[vibe/core/paths/_local_config_walk.py:132-168]].
+`VIBE_HOME` relocates the entire user state directory
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/paths/_vibe_home.py#L19-L25[vibe/core/paths/_vibe_home.py:19-25]]. This concept is listed because
+the system genuinely has a configuration concern that crosses every
+building block.

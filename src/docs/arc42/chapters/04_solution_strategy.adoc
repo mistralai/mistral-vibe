@@ -1,0 +1,72 @@
+:jbake-title: Solution Strategy
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 4
+:filename: /chapters/04_solution_strategy.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-solution-strategy]]
+== Solution Strategy
+
+The table maps each Chapter 1 quality goal to the concrete approach the
+code uses to reach it. The approaches themselves are visible in code;
+the *reason each was chosen over alternatives* is **deferred** — recorded
+as Architecture Decisions in <<section-design-decisions>> with status
+"Accepted (inferred)".
+
+[options="header",cols="1,3"]
+|===
+|Quality Goal |Approach in the code
+
+|Security / Safety
+|Every tool call resolves to a permission tier — `ALWAYS` / `ASK` /
+`NEVER` — before it runs; file tools enforce a working-directory
+boundary; a folder must be trusted before its project config loads
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/base.py#L83-L113[vibe/core/tools/base.py:83-113], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/utils.py#L64-L125[vibe/core/tools/utils.py:64-125], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/trusted_folders.py#L75-L122[vibe/core/trusted_folders.py:75-122]].
+The active agent profile (`plan`, `accept-edits`, `auto-approve`) bounds
+how much the agent may do without asking
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agents/models.py#L110-L199[vibe/core/agents/models.py:110-199]].
+
+|Usability
+|A Textual TUI renders the conversation with key bindings, slash
+commands and `@`-path / `/`-command autocompletion; a first-run wizard
+handles API-key setup [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/textual_ui/app.py#L327-L348[vibe/cli/textual_ui/app.py:327-348], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/commands.py#L39[vibe/cli/commands.py:39], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/setup/onboarding/screens/welcome.py#L46-L80[vibe/setup/onboarding/screens/welcome.py:46-80]].
+
+|Maintainability
+|The engine is structured as hexagonal ports (`*_port.py`) with adapters
+at the edges, so LLM providers, audio, TTS and gateways are swappable;
+strict pyright and ruff gate every change
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/base.py#L13-L126[vibe/core/llm/backend/base.py:13-126], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L24-L69[AGENTS.md:24-69]].
+
+|Compatibility
+|An LLM backend factory selects a provider-specific backend, and
+API-style adapters cover OpenAI, Anthropic and Vertex shapes; an MCP
+registry and the `vibe-acp` server integrate the MCP and ACP protocols
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/factory.py#L7[vibe/core/llm/backend/factory.py:7], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/format.py#L58-L185[vibe/core/llm/format.py:58-185], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/mcp/registry.py#L21[vibe/core/tools/mcp/registry.py:21]].
+
+|Reliability
+|The Mistral backend retries with exponential backoff; a middleware
+pipeline enforces turn and price limits and triggers auto-compaction
+when the context nears the model threshold; user interruption cancels
+in-flight tool tasks cleanly
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/mistral.py#L212-L222[vibe/core/llm/backend/mistral.py:212-222], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/middleware.py#L49-L96[vibe/core/middleware.py:49-96], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1244-L1259[vibe/core/agent_loop.py:1244-1259]].
+|===
+
+=== Key architectural patterns
+
+* *Agent loop with a middleware pipeline.* `before_turn` middlewares run
+  ahead of every LLM turn and can stop, inject or compact
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/middleware.py#L218-L247[vibe/core/middleware.py:218-247]] — see ADR-003.
+* *Ports and adapters (hexagonal).* `*_port.py` interfaces isolate the
+  domain from I/O [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/AGENTS.md#L13-L23[AGENTS.md:13-23]] — see ADR-001.
+* *Backend factory.* `BACKEND_FACTORY` maps a provider enum to a backend
+  class [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/factory.py#L7[vibe/core/llm/backend/factory.py:7]] — see ADR-002.
+* *Layered, merge-aware configuration.* Config layers (project then
+  user) merge field-by-field with declared merge strategies
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/config/builder.py#L24-L122[vibe/core/config/builder.py:24-122]].
+* *File-based session persistence.* Sessions are folders of `meta.json`
+  plus `messages.jsonl` [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_logger.py#L62-L97[vibe/core/session/session_logger.py:62-97]] —
+  see ADR-004.

@@ -1,0 +1,160 @@
+:jbake-title: Runtime View
+:jbake-type: page_toc
+:jbake-status: published
+:jbake-menu: arc42
+:jbake-order: 6
+:filename: /chapters/06_runtime_view.adoc
+ifndef::imagesdir[:imagesdir: ../../images]
+
+:toc:
+
+[[section-runtime-view]]
+== Runtime View
+
+Nine scenarios cover the system at runtime. Three are error or recovery
+scenarios: Context Auto-Compaction, User Interruption and LLM Rate-Limit.
+Together the scenarios exercise every building block from
+<<section-building-block-view>>.
+
+=== Startup and Session Resume
+
+On launch the front end resolves the working directory and trust, builds
+configuration, then either starts fresh or restores a past session.
+
+* The Config Subsystem walks project `.vibe/` directories (BFS, up to
+  four levels) then the user `~/.vibe/` layer and merges them
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/paths/_local_config_walk.py#L132-L168[vibe/core/paths/_local_config_walk.py:132-168], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/config/builder.py#L24-L122[vibe/core/config/builder.py:24-122]].
+* `--continue` resolves the latest session for the current TTY/working
+  directory; `--resume [ID]` loads a specific session or opens a picker.
+  Both require `session_logging.enabled`
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/cli.py#L128-L190[vibe/cli/cli.py:128-190], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/session/session_loader.py#L64-L116[vibe/core/session/session_loader.py:64-116]].
+* Restored non-system messages are replayed into the Agent Loop and the
+  session id / parent id are reattached
+  [link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/cli/cli.py#L180-L190[vibe/cli/cli.py:180-190]].
+
+=== Conversation Turn (happy path)
+
+[plantuml,rt-turn,svg]
+----
+@startuml
+actor Developer
+participant "CLI / TUI" as UI
+participant "Agent Loop" as Loop
+participant "Middleware" as MW
+participant "LLM Backend" as BE
+participant "Tool Subsystem" as Tools
+
+Developer -> UI : submit message
+UI -> Loop : act(message)
+loop until no tool call
+  Loop -> MW : run_before_turn()
+  MW --> Loop : CONTINUE
+  Loop -> BE : complete / complete_streaming
+  BE --> Loop : assistant message (+ tool calls)
+  alt message has tool calls
+    Loop -> Tools : run tools concurrently
+    Tools --> Loop : tool results
+  else no tool calls
+    Loop --> UI : final assistant message
+  end
+end
+@enduml
+----
+
+`_conversation_loop` appends the user message, runs the middleware
+pipeline, performs the LLM turn, and executes any tool calls as
+concurrent `asyncio` tasks before looping again
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L855-L937[vibe/core/agent_loop.py:855-937], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1217-L1259[vibe/core/agent_loop.py:1217-1259]].
+
+=== Tool Approval Interception
+
+Before a tool runs, `_execute_tool_call` resolves its permission. An
+`ASK` tier invokes the approval callback into the UI; a rejection
+increments `tool_calls_rejected` and feeds a rejection result back to the
+LLM so the conversation continues
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1071-L1167[vibe/core/agent_loop.py:1071-1167], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/tools/permissions.py#L47-L68[vibe/core/tools/permissions.py:47-68]].
+Approved patterns are remembered in the `PermissionStore` for the rest of
+the session.
+
+=== Context Auto-Compaction (recovery scenario)
+
+[plantuml,rt-compact,svg]
+----
+@startuml
+participant "Agent Loop" as Loop
+participant "AutoCompactMiddleware" as MW
+participant "LLM Backend" as BE
+participant "Session Persistence" as SP
+
+Loop -> MW : run_before_turn()
+MW -> MW : context_tokens >= auto_compact_threshold ?
+MW --> Loop : COMPACT
+Loop -> BE : summarise history (compaction model)
+BE --> Loop : summary
+Loop -> Loop : reset messages to [system, summary]
+Loop -> SP : new session id, parent = old session
+Loop -> BE : count_tokens(new context)
+@enduml
+----
+
+When `context_tokens` crosses the model's `auto_compact_threshold`,
+`AutoCompactMiddleware` returns `COMPACT`; the loop summarises the
+history into `[system, summary]`, forks to a new session id linked to its
+parent, and recounts tokens
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/middleware.py#L81-L96[vibe/core/middleware.py:81-96], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1681-L1749[vibe/core/agent_loop.py:1681-1749]].
+
+=== User Interruption (error / recovery scenario)
+
+[plantuml,rt-interrupt,svg]
+----
+@startuml
+actor Developer
+participant "CLI / TUI" as UI
+participant "Agent Loop" as Loop
+participant "Tool Subsystem" as Tools
+
+Developer -> UI : press Escape
+UI -> Loop : user-cancellation event
+Loop -> Tools : cancel in-flight tasks
+Tools --> Loop : CancelledError per task
+Loop -> Loop : record cancellation as tool result
+Loop --> UI : turn ends cleanly
+@enduml
+----
+
+Escape raises a user-cancellation event; in-flight tool tasks receive
+`asyncio.CancelledError`, the cancellation is recorded as a tool result,
+and the loop breaks without corrupting the message history
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L897-L906[vibe/core/agent_loop.py:897-906], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1170-L1178[vibe/core/agent_loop.py:1170-1178], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1244-L1259[vibe/core/agent_loop.py:1244-1259]].
+
+=== LLM Rate-Limit / Context-Too-Long (error scenario)
+
+`_chat` catches rate-limit and context-too-long errors raised by the LLM
+Backend Layer and surfaces them distinctly; the Mistral backend retries
+transient failures with exponential backoff before the error propagates;
+the ACP Bridge maps a context-too-long failure to a JSON-RPC
+`ContextTooLongError`
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/agent_loop.py#L1365-L1374[vibe/core/agent_loop.py:1365-1374], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/llm/backend/mistral.py#L212-L222[vibe/core/llm/backend/mistral.py:212-222], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/exceptions.py#L107[vibe/acp/exceptions.py:107]].
+
+=== Teleport to Cloud
+
+`/teleport` (gated by plan eligibility) validates the git repository,
+confirms the working commit is pushed, then starts a remote Vibe Code
+workflow; `RemoteEventsSource` attaches and streams the cloud workflow's
+events back into the UI
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/teleport/teleport.py#L46-L150[vibe/core/teleport/teleport.py:46-150], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/teleport/git.py#L27-L100[vibe/core/teleport/git.py:27-100], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/core/nuage/remote_events_source.py#L33-L120[vibe/core/nuage/remote_events_source.py:33-120]].
+
+=== ACP Session
+
+`vibe-acp` runs an ACP agent over stdio. `new_session` creates a fresh
+`AcpSessionLoop` with the default agent; `load_session` replays a past
+conversation. ACP-specific tools delegate file and terminal operations to
+the connected ACP client
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/acp_agent_loop.py#L614-L648[vibe/acp/acp_agent_loop.py:614-648], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/acp_agent_loop.py#L869-L920[vibe/acp/acp_agent_loop.py:869-920], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/acp/tools/base.py#L13-L54[vibe/acp/tools/base.py:13-54]].
+
+=== First-Run Onboarding
+
+When no API key is configured, the Setup block walks the user through
+Welcome → auth-method → browser sign-in or manual API key, then persists
+the key to `~/.vibe/.env` (or keyring)
+[link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/setup/onboarding/screens/welcome.py#L46-L80[vibe/setup/onboarding/screens/welcome.py:46-80], link:https://github.com/mistralai/mistral-vibe/blob/f71bfd3b8cdddbb4369c843da9c48d5f6c637ef7/vibe/setup/auth/api_key_persistence.py#L38-L64[vibe/setup/auth/api_key_persistence.py:38-64]].
