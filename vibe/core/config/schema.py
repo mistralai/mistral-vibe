@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 from pydantic.fields import FieldInfo
 
 from vibe.core.utils.merge import MergeStrategy
@@ -19,11 +19,25 @@ class ConfigDefinitionError(TypeError):
 class ConfigSchema(BaseModel):
     """Base for composite config schemas composed of fragments and merge-aware fields."""
 
+    model_config = ConfigDict(frozen=True)
+
+    _origins: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    def __init__(
+        self, *, origins: dict[str, str] | None = None, **data: object
+    ) -> None:
+        super().__init__(**data)
+        if origins:
+            self._origins = origins
+
+    def origin_of(self, key: str) -> str | None:
+        return self._origins.get(key)
+
     @classmethod
     def __pydantic_on_complete__(cls) -> None:
         super().__pydantic_on_complete__()
 
-        if cls.__name__ == "ConfigSchema" and cls.__module__ == __name__:
+        if not cls.model_fields:
             return
 
         for field_name, field_info in cls.model_fields.items():
@@ -49,6 +63,8 @@ class ConfigSchema(BaseModel):
 
 class ConfigFragment(BaseModel):
     """Base for domain config groups with merge-aware top-level fields."""
+
+    model_config = ConfigDict(frozen=True)
 
     @classmethod
     def __pydantic_on_complete__(cls) -> None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -8,11 +7,11 @@ import httpx
 import pytest
 import respx
 
+from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.config import ConnectorConfig, VibeConfig
 from vibe.core.tools.base import BaseToolConfig, ToolError
-from vibe.core.tools.connectors import CONNECTORS_ENV_VAR
 from vibe.core.tools.connectors.connector_registry import (
     ConnectorRegistry,
     RemoteTool,
@@ -153,22 +152,7 @@ class TestFakeConnectorRegistry:
 class TestToolManagerConnectorIntegration:
     @staticmethod
     def _make_config(connectors: list[ConnectorConfig] | None = None) -> VibeConfig:
-        """Minimal VibeConfig-like stub for ToolManager."""
-        return cast(
-            VibeConfig,
-            type(
-                "_Cfg",
-                (),
-                {
-                    "mcp_servers": [],
-                    "connectors": connectors or [],
-                    "enabled_tools": [],
-                    "disabled_tools": [],
-                    "tools": {},
-                    "tool_paths": [],
-                },
-            )(),
-        )
+        return build_test_vibe_config(connectors=connectors or [])
 
     def test_connector_tools_registered(self) -> None:
         registry = FakeConnectorRegistry(
@@ -196,22 +180,6 @@ class TestToolManagerConnectorIntegration:
             if issubclass(cls, MCPTool) and cls.is_connector()
         ]
         assert connector_tools == []
-
-
-# ---------------------------------------------------------------------------
-# ConnectorRegistry env var gating (tested via agent_loop helper logic)
-# ---------------------------------------------------------------------------
-
-
-class TestConnectorRegistryEnvGating:
-    def test_disabled_without_env_var(self) -> None:
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop(CONNECTORS_ENV_VAR, None)
-            assert os.getenv(CONNECTORS_ENV_VAR) != "1"
-
-    def test_enabled_with_env_var(self) -> None:
-        with patch.dict(os.environ, {CONNECTORS_ENV_VAR: "1"}):
-            assert os.getenv(CONNECTORS_ENV_VAR) == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +307,7 @@ class TestConnectorProxyToolRun:
 
         mock_call.assert_awaited_once()
         call_args = mock_call.call_args
-        assert "/v1/experimental/connectors/conn-123/mcp" in call_args.args[0]
+        assert "/v1/connectors-gateway/conn-123/mcp" in call_args.args[0]
         assert call_args.args[1] == "search"
         assert call_args.kwargs["headers"]["Authorization"] == "Bearer test-key"
 
@@ -412,21 +380,7 @@ class TestConnectorProxyToolRun:
 class TestConnectorDisableFiltering:
     @staticmethod
     def _make_config(connectors: list[ConnectorConfig] | None = None) -> VibeConfig:
-        return cast(
-            VibeConfig,
-            type(
-                "_Cfg",
-                (),
-                {
-                    "mcp_servers": [],
-                    "connectors": connectors or [],
-                    "enabled_tools": [],
-                    "disabled_tools": [],
-                    "tools": {},
-                    "tool_paths": [],
-                },
-            )(),
-        )
+        return build_test_vibe_config(connectors=connectors or [])
 
     def test_disabled_connector_excludes_all_tools(self) -> None:
         registry = FakeConnectorRegistry(

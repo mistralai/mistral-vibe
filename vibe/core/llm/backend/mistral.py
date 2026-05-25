@@ -32,7 +32,6 @@ from mistralai.client.models import (
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 
 from vibe.core.llm.exceptions import BackendErrorBuilder
-from vibe.core.llm.message_utils import merge_consecutive_user_messages
 from vibe.core.types import (
     AvailableTool,
     Content,
@@ -45,6 +44,7 @@ from vibe.core.types import (
     ToolCall,
 )
 from vibe.core.utils import get_server_url_from_api_base
+from vibe.core.utils.http import build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
@@ -182,6 +182,7 @@ _THINKING_TO_REASONING_EFFORT: dict[str, ReasoningEffortValue] = {
 class MistralBackend:
     def __init__(self, provider: ProviderConfig, timeout: float = 720.0) -> None:
         self._client: Mistral | None = None
+        self._http_client: httpx.AsyncClient | None = None
         self._provider = provider
         self._mapper = MistralMapper()
         self._api_key = (
@@ -231,17 +232,32 @@ class MistralBackend:
         exc_val: BaseException | None,
         exc_tb: types.TracebackType | None,
     ) -> None:
-        if self._client is not None:
-            await self._client.__aexit__(
-                exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb
-            )
+        client = self._client
+        http_client = self._http_client
+        self._client = None
+        self._http_client = None
+        try:
+            if client is not None:
+                await client.__aexit__(
+                    exc_type=exc_type, exc_val=exc_val, exc_tb=exc_tb
+                )
+        finally:
+            if http_client is not None:
+                await http_client.aclose()
+
+    async def aclose(self) -> None:
+        await self.__aexit__(None, None, None)
 
     def _create_mistral_client(self) -> Mistral:
+        self._http_client = httpx.AsyncClient(
+            verify=build_ssl_context(), follow_redirects=True
+        )
         return Mistral(
             api_key=self._api_key,
             server_url=self._server_url,
             timeout_ms=int(self._timeout * 1000),
             retry_config=self._retry_config,
+            async_client=self._http_client,
         )
 
     def _get_client(self) -> Mistral:
@@ -262,14 +278,13 @@ class MistralBackend:
         metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
         try:
-            merged_messages = merge_consecutive_user_messages(messages)
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
             if reasoning_effort is not None:
                 temperature = 1.0
 
             response = await self._get_client().chat.complete_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
+                messages=[self._mapper.prepare_message(msg) for msg in messages],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools
@@ -341,14 +356,13 @@ class MistralBackend:
         metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
         try:
-            merged_messages = merge_consecutive_user_messages(messages)
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
             if reasoning_effort is not None:
                 temperature = 1.0
 
             stream = await self._get_client().chat.stream_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in merged_messages],
+                messages=[self._mapper.prepare_message(msg) for msg in messages],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools

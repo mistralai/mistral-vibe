@@ -3,13 +3,14 @@ from __future__ import annotations
 import pytest
 
 from vibe.cli.textual_ui.session_exit import print_session_resume_message
+from vibe.core.config import SessionLoggingConfig
 from vibe.core.types import AgentStats
 
 
 def test_print_session_resume_message_skips_output_without_session_id(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    print_session_resume_message(None, AgentStats())
+    print_session_resume_message(None, AgentStats(), SessionLoggingConfig())
 
     assert capsys.readouterr().out == ""
 
@@ -20,6 +21,7 @@ def test_print_session_resume_message_prints_resume_commands_and_usage(
     print_session_resume_message(
         "12345678-1234-1234-1234-123456789abc",
         AgentStats(session_prompt_tokens=14_867, session_completion_tokens=6),
+        SessionLoggingConfig(),
     )
 
     assert capsys.readouterr().out == (
@@ -34,7 +36,7 @@ def test_print_session_resume_message_prints_resume_commands_and_usage(
 def test_print_session_resume_message_prints_zero_usage_for_resumed_run_without_llm_activity(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    print_session_resume_message("12345678", AgentStats())
+    print_session_resume_message("12345678", AgentStats(), SessionLoggingConfig())
 
     assert capsys.readouterr().out == (
         "\n"

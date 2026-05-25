@@ -39,7 +39,7 @@ class RewindManager:
         self,
         messages: MessageList,
         save_messages: Callable[[], Awaitable[None]],
-        reset_session: Callable[[], None],
+        reset_session: Callable[[], Awaitable[None]],
     ) -> None:
         self._checkpoints: list[Checkpoint] = []
         self._messages = messages
@@ -129,7 +129,7 @@ class RewindManager:
             self._messages.reset(list(messages[:message_index]))
         finally:
             self._is_rewinding = False
-        self._reset_session()
+        await self._reset_session()
 
         return message_content, restore_errors
 

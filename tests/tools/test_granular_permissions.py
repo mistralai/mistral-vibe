@@ -34,8 +34,8 @@ from vibe.core.tools.permissions import (
     PermissionContext,
     PermissionScope,
     RequiredPermission,
+    wildcard_match,
 )
-from vibe.core.tools.utils import wildcard_match
 
 
 class TestBashGranularPermissions:

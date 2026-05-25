@@ -21,6 +21,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "agent": "default",
         "setup": False,
         "workdir": None,
+        "add_dir": [],
         "trust": False,
         "teleport": False,
         "continue_session": False,

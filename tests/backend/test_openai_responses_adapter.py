@@ -139,7 +139,7 @@ class TestPrepareRequest:
             {"role": "user", "content": "Hi"},
         ]
 
-    def test_consecutive_user_messages_are_merged(self, adapter, provider):
+    def test_consecutive_user_messages_are_preserved(self, adapter, provider):
         payload = _prepare(
             adapter,
             provider,
@@ -148,7 +148,10 @@ class TestPrepareRequest:
                 LLMMessage(role=Role.user, content="Again"),
             ],
         )
-        assert payload["input"] == [{"role": "user", "content": "Hi\n\nAgain"}]
+        assert payload["input"] == [
+            {"role": "user", "content": "Hi"},
+            {"role": "user", "content": "Again"},
+        ]
 
     def test_multiple_system_messages_are_preserved(self, adapter, provider):
         payload = _prepare(

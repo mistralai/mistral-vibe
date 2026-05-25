@@ -81,9 +81,7 @@ def acp_search_replace_tool(
     monkeypatch.chdir(tmp_path)
     config = SearchReplaceConfig()
     state = AcpSearchReplaceState.model_construct(
-        client=mock_client,
-        session_id="test_session_123",
-        tool_call_id="test_tool_call_456",
+        client=mock_client, session_id="test_session_123"
     )
     return SearchReplace(config_getter=lambda: config, state=state)
 
@@ -116,7 +114,6 @@ class TestAcpSearchReplaceExecution:
         assert result.blocks_applied == 1
         assert mock_client._read_text_file_called
         assert mock_client._write_text_file_called
-        assert mock_client._session_update_called
 
         # Verify read_text_file was called correctly
         read_params = mock_client._last_read_params
@@ -141,7 +138,7 @@ class TestAcpSearchReplaceExecution:
         tool = SearchReplace(
             config_getter=lambda: config,
             state=AcpSearchReplaceState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -171,7 +168,7 @@ class TestAcpSearchReplaceExecution:
         tool = SearchReplace(
             config_getter=lambda: SearchReplaceConfig(),
             state=AcpSearchReplaceState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -202,7 +199,7 @@ class TestAcpSearchReplaceExecution:
         tool = SearchReplace(
             config_getter=lambda: SearchReplaceConfig(),
             state=AcpSearchReplaceState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -245,7 +242,7 @@ class TestAcpSearchReplaceExecution:
         tool = SearchReplace(
             config_getter=lambda: SearchReplaceConfig(),
             state=AcpSearchReplaceState.model_construct(
-                client=client, session_id=session_id, tool_call_id="test_call"
+                client=client, session_id=session_id
             ),
         )
 

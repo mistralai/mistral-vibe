@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 import locale
+import os
 from pathlib import Path
 from typing import NamedTuple
 
@@ -10,10 +11,27 @@ from charset_normalizer import from_bytes
 
 
 class ReadSafeResult(NamedTuple):
-    """Text decoded from a file and the codec name that successfully decoded it."""
+    r"""Text decoded from a file, the codec used, and the detected newline style.
+
+    ``text`` is always normalized to use ``\n`` line endings regardless of the
+    original file. ``newline`` records the original style (``"\n"``, ``"\r\n"``,
+    or ``"\r"``) so callers can round-trip writes via ``open(..., newline=...)``.
+    When no newline is present, defaults to ``os.linesep`` to match Python's
+    default text-mode write behavior.
+    """
 
     text: str
     encoding: str
+    newline: str = os.linesep
+
+
+def _detect_newline(text: str) -> str:
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    cr = text.count("\r") - crlf
+    counts = {"\r\n": crlf, "\n": lf, "\r": cr}
+    best = max(counts, key=lambda nl: counts[nl])
+    return best if counts[best] > 0 else os.linesep
 
 
 def _encodings_from_bom(raw: bytes) -> str | None:
@@ -59,11 +77,17 @@ def decode_safe(raw: bytes, *, raise_on_error: bool = False) -> ReadSafeResult:
     """
     for encoding in _get_candidate_encodings(raw):
         try:
-            return ReadSafeResult(raw.decode(encoding), encoding)
+            text = raw.decode(encoding)
+            break
         except (LookupError, UnicodeDecodeError, ValueError):
             pass
-    errors = "strict" if raise_on_error else "replace"
-    return ReadSafeResult(raw.decode("utf-8", errors=errors), "utf-8")
+    else:
+        errors = "strict" if raise_on_error else "replace"
+        encoding = "utf-8"
+        text = raw.decode(encoding, errors=errors)
+    newline = _detect_newline(text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return ReadSafeResult(text, encoding, newline)
 
 
 def read_safe(path: Path, *, raise_on_error: bool = False) -> ReadSafeResult:

@@ -221,6 +221,24 @@ url = "https://mcp.example.com"
 api_key_env = "MCP_API_KEY"
 ```
 
+### Connectors
+
+Mistral connectors are auto-discovered when the active provider is Mistral
+and the API key env var is set. Toggle the master switch or hide individual
+connectors / tools:
+
+```toml
+enable_connectors = true          # Master switch (default: true)
+
+[[connectors]]
+name = "github"
+disabled = true                   # Hide all tools from this connector
+
+[[connectors]]
+name = "linear"
+disabled_tools = ["delete_issue"] # Hide selected tools only
+```
+
 ### Session Logging
 
 ```toml
@@ -228,6 +246,27 @@ api_key_env = "MCP_API_KEY"
 enabled = true
 save_dir = ""                     # Defaults to ~/.vibe/logs/session
 session_prefix = "session"
+```
+
+### Browser Sign-In (Experimental)
+
+Browser sign-in lets users authenticate through the browser during onboarding.
+The feature is **experimental** and must be enabled first:
+
+```toml
+# In config.toml
+enable_experimental_browser_sign_in = true
+```
+
+Or via the environment variable `VIBE_ENABLE_EXPERIMENTAL_BROWSER_SIGN_IN=true`.
+
+Mistral providers use default browser sign-in URLs. Custom or renamed providers
+must configure both URLs:
+
+```toml
+[[providers]]
+browser_auth_base_url = "https://console.mistral.ai"
+browser_auth_api_base_url = "https://console.mistral.ai/api"
 ```
 
 ### Hooks (Experimental)
@@ -332,8 +371,9 @@ vibe [PROMPT]                       # Start interactive session with optional pr
 vibe -p TEXT / --prompt TEXT         # Programmatic mode (auto-approve, one-shot, exit)
 vibe --agent NAME                   # Select agent profile (falls back to `default_agent` config)
 vibe --workdir DIR                  # Change working directory
+vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
 vibe --trust                        # Trust cwd for this invocation only (not persisted)
-vibe -c / --continue                # Continue most recent session
+vibe -c / --continue                # Continue most recent session in this terminal (TTY-scoped, falls back to latest in cwd)
 vibe --resume [SESSION_ID]          # Resume a specific session
 vibe -v / --version                 # Show version
 vibe --setup                        # Run onboarding/setup
@@ -440,6 +480,10 @@ Detailed instructions for the model...
   (default: `10485760`, i.e. 10 MiB).
 - `DEBUG_MODE` - When `true`, forces `DEBUG`-level logging. Under `vibe-acp`
   it also attaches `debugpy` on `localhost:5678`.
+- `VIBE_TYPING_GRACE_PERIOD_MS` - Milliseconds the agent waits for a typing
+  pause before showing tool-approval / ask-user-question dialogs (default:
+  `1000`). Set to `0` to disable. Negative or non-numeric values fall back
+  to the default.
 
 ## API Keys (.env file)
 

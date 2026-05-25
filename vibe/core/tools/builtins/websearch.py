@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 import os
 from typing import TYPE_CHECKING, ClassVar, final
 
+import httpx
 from mistralai.client import Mistral
 from mistralai.client.errors import SDKError
 from mistralai.client.models import (
@@ -14,6 +15,7 @@ from mistralai.client.models import (
 )
 from pydantic import BaseModel, Field
 
+from vibe.core.config import DEFAULT_MISTRAL_API_ENV_KEY, VibeConfig
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -23,8 +25,8 @@ from vibe.core.tools.base import (
     ToolPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.types import Backend, ToolStreamEvent
-from vibe.core.utils import get_server_url_from_api_base
+from vibe.core.types import ToolStreamEvent
+from vibe.core.utils.http import build_ssl_context, get_server_url_from_api_base
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -62,25 +64,37 @@ class WebSearch(
     )
 
     @classmethod
-    def is_available(cls) -> bool:
-        return bool(os.getenv("MISTRAL_API_KEY"))
+    def is_available(cls, config: VibeConfig | None = None) -> bool:
+        if config is None:
+            return bool(os.getenv(DEFAULT_MISTRAL_API_ENV_KEY))
+
+        provider = config.get_mistral_provider()
+        if provider is None:
+            return bool(os.getenv(DEFAULT_MISTRAL_API_ENV_KEY))
+
+        return bool(os.getenv(cls._api_key_env_var(config)))
 
     @final
     async def run(
         self, args: WebSearchArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | WebSearchResult, None]:
-        api_key = os.getenv("MISTRAL_API_KEY")
+        config = self._resolve_config(ctx)
+        api_key_env_var = self._api_key_env_var(config)
+        api_key = os.getenv(api_key_env_var)
         if not api_key:
-            raise ToolError("MISTRAL_API_KEY environment variable not set.")
+            raise ToolError(f"{api_key_env_var} environment variable not set.")
 
-        client = Mistral(
-            api_key=api_key,
-            server_url=self._resolve_server_url(ctx),
-            timeout_ms=self.config.timeout * 1000,
-        )
+        ssl_context = build_ssl_context()
+        async_http_client = httpx.AsyncClient(follow_redirects=True, verify=ssl_context)
 
         try:
-            async with client:
+            client = Mistral(
+                api_key=api_key,
+                server_url=self._resolve_server_url(ctx),
+                timeout_ms=self.config.timeout * 1000,
+                async_client=async_http_client,
+            )
+            async with async_http_client, client:
                 response = await client.beta.conversations.start_async(
                     model=self.config.model,
                     instructions="Always use the web_search tool to answer queries. Never answer from memory alone.",
@@ -93,14 +107,31 @@ class WebSearch(
 
         except SDKError as exc:
             raise ToolError(f"Mistral API error: {exc}") from exc
+        finally:
+            await async_http_client.aclose()
 
     def _resolve_server_url(self, ctx: InvokeContext | None) -> str | None:
+        config = self._resolve_config(ctx)
+        if config is None:
+            return None
+        provider = config.get_mistral_provider()
+        if provider is None:
+            return None
+        return get_server_url_from_api_base(provider.api_base)
+
+    def _resolve_config(self, ctx: InvokeContext | None) -> VibeConfig | None:
         if not ctx or not ctx.agent_manager:
             return None
-        for provider in ctx.agent_manager.config.providers:
-            if provider.backend == Backend.MISTRAL:
-                return get_server_url_from_api_base(provider.api_base)
-        return None
+        return ctx.agent_manager.config
+
+    @classmethod
+    def _api_key_env_var(cls, config: VibeConfig | None) -> str:
+        if config is None:
+            return DEFAULT_MISTRAL_API_ENV_KEY
+        provider = config.get_mistral_provider()
+        if provider is None:
+            return DEFAULT_MISTRAL_API_ENV_KEY
+        return provider.api_key_env_var or DEFAULT_MISTRAL_API_ENV_KEY
 
     def _parse_response(self, response: ConversationResponse) -> WebSearchResult:
         text_parts: list[str] = []

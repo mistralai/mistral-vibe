@@ -346,7 +346,10 @@ class TestSessionLoaderFindLatestSession:
         assert result == valid_session
 
     def test_find_latest_session_skips_unreadable_messages_file(
-        self, session_config: SessionLoggingConfig, create_test_session
+        self,
+        session_config: SessionLoggingConfig,
+        create_test_session,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         session_dir = Path(session_config.save_dir)
 
@@ -355,14 +358,28 @@ class TestSessionLoaderFindLatestSession:
 
         unreadable_session = create_test_session(session_dir, "unreadab-session")
         unreadable_messages = unreadable_session / "messages.jsonl"
-        unreadable_messages.chmod(0)
+
+        # chmod doesn't restrict root, so simulate an unreadable file by
+        # patching Path.read_bytes (used under the hood by read_safe). This
+        # keeps the test working in CI environments running as root.
+        original_read_bytes = Path.read_bytes
+
+        def fake_read_bytes(self: Path) -> bytes:
+            if self == unreadable_messages:
+                raise PermissionError(f"Permission denied: {self}")
+            return original_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
 
         result = SessionLoader.find_latest_session(session_config)
         assert result is not None
         assert result == valid_session
 
     def test_find_latest_session_skips_unreadable_metadata_file(
-        self, session_config: SessionLoggingConfig, create_test_session
+        self,
+        session_config: SessionLoggingConfig,
+        create_test_session,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         session_dir = Path(session_config.save_dir)
 
@@ -371,7 +388,15 @@ class TestSessionLoaderFindLatestSession:
 
         unreadable_session = create_test_session(session_dir, "unreadab-session")
         unreadable_metadata = unreadable_session / "meta.json"
-        unreadable_metadata.chmod(0)
+
+        original_read_bytes = Path.read_bytes
+
+        def fake_read_bytes(self: Path) -> bytes:
+            if self == unreadable_metadata:
+                raise PermissionError(f"Permission denied: {self}")
+            return original_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
 
         result = SessionLoader.find_latest_session(session_config)
         assert result is not None
@@ -435,6 +460,41 @@ class TestSessionLoaderFindSessionById:
         result = SessionLoader.find_session_by_id("abcd1234", session_config)
         assert result is not None
         assert result == session_2
+
+    def test_find_session_by_id_filters_by_working_directory(
+        self, session_config: SessionLoggingConfig, create_test_session
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+
+        session_a = create_test_session(
+            session_dir,
+            "abcd1234-session",
+            working_directory=Path("/home/user/project-a"),
+        )
+        time.sleep(0.01)
+        session_b = create_test_session(
+            session_dir,
+            "abcd1234-session",
+            working_directory=Path("/home/user/project-b"),
+        )
+
+        assert (
+            SessionLoader.find_session_by_id(
+                "abcd1234",
+                session_config,
+                working_directory=Path("/home/user/project-a"),
+            )
+            == session_a
+        )
+        assert (
+            SessionLoader.find_session_by_id(
+                "abcd1234",
+                session_config,
+                working_directory=Path("/home/user/project-c"),
+            )
+            is None
+        )
+        assert SessionLoader.find_session_by_id("abcd1234", session_config) == session_b
 
     def test_find_session_by_id_no_match(
         self, session_config: SessionLoggingConfig, create_test_session

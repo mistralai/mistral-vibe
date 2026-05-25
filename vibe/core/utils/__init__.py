@@ -13,11 +13,19 @@ from vibe.core.utils.concurrency import (
     run_sync,
 )
 from vibe.core.utils.display import compact_reduction_display
-from vibe.core.utils.http import get_server_url_from_api_base, get_user_agent
+from vibe.core.utils.http import (
+    build_ssl_context,
+    get_server_url_from_api_base,
+    get_user_agent,
+)
 from vibe.core.utils.matching import name_matches
 from vibe.core.utils.merge import MergeConflictError, MergeStrategy
 from vibe.core.utils.paths import is_dangerous_directory
-from vibe.core.utils.platform import is_windows
+from vibe.core.utils.platform import (
+    get_platform_display_name,
+    get_platform_id,
+    is_windows,
+)
 from vibe.core.utils.retry import async_generator_retry, async_retry
 from vibe.core.utils.tags import (
     CANCELLATION_TAG,
@@ -46,7 +54,10 @@ __all__ = [
     "TaggedText",
     "async_generator_retry",
     "async_retry",
+    "build_ssl_context",
     "compact_reduction_display",
+    "get_platform_display_name",
+    "get_platform_id",
     "get_server_url_from_api_base",
     "get_user_agent",
     "get_user_cancellation_message",

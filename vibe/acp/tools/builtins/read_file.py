@@ -12,13 +12,10 @@ from acp.schema import (
 )
 
 from vibe import VIBE_ROOT
-from vibe.acp.tools.base import (
-    AcpToolState,
-    BaseAcpTool,
+from vibe.acp.tools.base import AcpToolState, BaseAcpTool
+from vibe.acp.tools.session_update import (
     ToolCallSessionUpdateProtocol,
     ToolResultSessionUpdateProtocol,
-)
-from vibe.acp.tools.session_update import (
     failed_tool_result,
     fallback_tool_call,
     resolve_kind,
@@ -117,12 +114,10 @@ class ReadFile(
         )
 
     async def _read_file(self, args: ReadFileArgs, file_path: Path) -> _ReadResult:
-        client, session_id, _ = self._load_state()
+        client, session_id = self._load_state()
 
         line = args.offset + 1 if args.offset > 0 else None
         limit = args.limit
-
-        await self._send_in_progress_session_update()
 
         try:
             response = await client.read_text_file(

@@ -18,6 +18,7 @@ from vibe.core.session.session_loader import (
     METADATA_FILENAME,
     SessionLoader,
 )
+from vibe.core.session.title_format import MAX_TITLE_LENGTH
 from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
 from vibe.core.utils import is_windows, utc_now
 from vibe.core.utils.io import read_safe_async
@@ -25,6 +26,7 @@ from vibe.core.utils.io import read_safe_async
 if TYPE_CHECKING:
     from vibe.core.agents.models import AgentProfile
     from vibe.core.config import SessionLoggingConfig, VibeConfig
+    from vibe.core.experiments.models import EvalResponse
     from vibe.core.tools.manager import ToolManager
 
 
@@ -94,37 +96,32 @@ class SessionLogger:
             )
         return self.session_dir / MESSAGES_FILENAME
 
-    @property
-    def git_commit(self) -> str | None:
+    def _fetch_git_metadata(self) -> tuple[str | None, str | None]:
+        """Fetch git commit and branch in a single subprocess call."""
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
+                ["git", "rev-parse", "HEAD", "--abbrev-ref", "HEAD"],
                 capture_output=True,
                 stdin=subprocess.DEVNULL if is_windows() else None,
                 text=True,
                 timeout=5.0,
             )
             if result.returncode == 0 and result.stdout:
-                return result.stdout.strip()
+                lines = result.stdout.strip().splitlines()
+                commit = lines[0] if len(lines) > 0 else None
+                branch = lines[1] if len(lines) > 1 else None
+                return commit, branch
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
             pass
-        return None
+        return None, None
+
+    @property
+    def git_commit(self) -> str | None:
+        return self._fetch_git_metadata()[0]
 
     @property
     def git_branch(self) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True,
-                stdin=subprocess.DEVNULL if is_windows() else None,
-                text=True,
-                timeout=5.0,
-            )
-            if result.returncode == 0 and result.stdout:
-                return result.stdout.strip()
-        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-            pass
-        return None
+        return self._fetch_git_metadata()[1]
 
     @property
     def username(self) -> str:
@@ -134,8 +131,7 @@ class SessionLogger:
             return "unknown"
 
     def _initialize_session_metadata(self) -> SessionMetadata:
-        git_commit = self.git_commit
-        git_branch = self.git_branch
+        git_commit, git_branch = self._fetch_git_metadata()
         user_name = self.username
 
         return SessionMetadata(
@@ -150,7 +146,7 @@ class SessionLogger:
             title_source="auto",
         )
 
-    def _get_title(self, messages: Sequence[LLMMessage]) -> str:
+    def _fallback_title_from_messages(self, messages: Sequence[LLMMessage]) -> str:
         first_user_message = None
         for message in messages:
             if message.role == Role.user:
@@ -158,14 +154,12 @@ class SessionLogger:
                 break
 
         if first_user_message is None:
-            title = "Untitled session"
-        else:
-            MAX_TITLE_LENGTH = 50
-            text = str(first_user_message.content)
-            title = text[:MAX_TITLE_LENGTH]
-            if len(text) > MAX_TITLE_LENGTH:
-                title += "…"
+            return "Untitled session"
 
+        text = str(first_user_message.content)
+        title = text[:MAX_TITLE_LENGTH]
+        if len(text) > MAX_TITLE_LENGTH:
+            title += "…"
         return title
 
     def _set_title_state(
@@ -188,14 +182,28 @@ class SessionLogger:
 
         self._set_title_state(normalized_title, source="manual")
 
+    def needs_initial_auto_title(self) -> bool:
+        return self.session_metadata is not None and self.session_metadata.title is None
+
+    def set_initial_auto_title(self, title: str) -> bool:
+        if not self.needs_initial_auto_title():
+            return False
+
+        normalized_title = title.strip()
+        if not normalized_title:
+            return False
+
+        self._set_title_state(normalized_title, source="auto")
+        return True
+
     def _resolve_title(self, messages: Sequence[LLMMessage]) -> str | None:
         if self.session_metadata is None:
-            return self._get_title(messages)
+            return self._fallback_title_from_messages(messages)
 
-        if self.session_metadata.title_source == "manual":
+        if self.session_metadata.title is not None:
             return self.session_metadata.title
 
-        title = self._get_title(messages)
+        title = self._fallback_title_from_messages(messages)
         self._set_title_state(title, source="auto")
         return title
 
@@ -357,6 +365,27 @@ class SessionLogger:
         metadata["loops"] = [
             loop.model_dump(mode="json") for loop in session_metadata.loops
         ]
+        await SessionLogger.persist_metadata(metadata, session_dir)
+
+    async def persist_experiments(self, response: EvalResponse | None) -> None:
+        session_info = self._get_session_info()
+        if session_info is None:
+            return
+        session_dir, session_metadata = session_info
+        session_metadata.experiments = response
+        metadata_path = session_dir / METADATA_FILENAME
+        if not metadata_path.exists():
+            return
+        try:
+            raw = (await read_safe_async(metadata_path)).text
+            metadata = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as e:
+            raise RuntimeError(
+                f"Failed to read session metadata at {metadata_path}: {e}"
+            ) from e
+        metadata["experiments"] = (
+            response.model_dump(mode="json") if response is not None else None
+        )
         await SessionLogger.persist_metadata(metadata, session_dir)
 
     def reset_session(

@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from vibe.core.hooks.models import HookMessageSeverity
+from vibe.core.logger import logger
+from vibe.core.utils.io import read_safe_async
 
 if TYPE_CHECKING:
     from vibe.cli.textual_ui.app import ChatScroll
 
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
+from textual.reactive import reactive
+from textual.widget import Widget
 from textual.widgets import Static
 from textual.widgets._markdown import MarkdownStream
+from watchfiles import awatch
 
 from vibe.cli.textual_ui.ansi_markdown import AnsiMarkdown as Markdown
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
@@ -263,7 +272,9 @@ class InterruptMessage(Static):
             )
 
 
-class BashOutputMessage(Static):
+class BashOutputMessage(SpinnerMixin, Static):
+    SPINNER_TYPE = SpinnerType.PULSE
+
     def __init__(
         self,
         command: str,
@@ -274,6 +285,7 @@ class BashOutputMessage(Static):
         pending: bool = False,
     ) -> None:
         super().__init__()
+        self.init_spinner()
         self.add_class("bash-output-message")
         self._command = command
         self._cwd = cwd
@@ -283,17 +295,29 @@ class BashOutputMessage(Static):
         self._output_widget: NoMarkupStatic | None = None
         self._output_container: Horizontal | None = None
         self._prompt_widget: NonSelectableStatic | None = None
+        self._indicator_widget: Static | None = None
+
+    def _update_spinner_frame(self) -> None:
+        if not self._is_spinning or not self._prompt_widget:
+            return
+        self._prompt_widget.update(f"{self._spinner.next_frame()} ")
+
+    def on_mount(self) -> None:
+        if self._pending:
+            self.start_spinner_timer()
 
     def compose(self) -> ComposeResult:
-        status_class = (
-            "bash-error"
-            if not self._pending and self._exit_code != 0
-            else "bash-success"
-        )
+        if self._pending:
+            status_class = "bash-pending"
+        elif self._exit_code != 0:
+            status_class = "bash-error"
+        else:
+            status_class = "bash-success"
         self.add_class(status_class)
+        prompt_text = f"{self._spinner.current_frame()} " if self._pending else "$ "
         with Horizontal(classes="bash-command-line"):
             self._prompt_widget = NonSelectableStatic(
-                "$ ", classes=f"bash-prompt {status_class}"
+                prompt_text, classes=f"bash-prompt {status_class}"
             )
             yield self._prompt_widget
             yield NoMarkupStatic(self._command, classes="bash-command")
@@ -326,18 +350,20 @@ class BashOutputMessage(Static):
     async def finish(self, exit_code: int, *, interrupted: bool = False) -> None:
         self._exit_code = exit_code
         self._pending = False
+        self.stop_spinning()
+        if self._prompt_widget:
+            self._prompt_widget.update("$ ")
         if interrupted:
-            self.remove_class("bash-success")
-            self.add_class("bash-interrupted")
-            if self._prompt_widget:
-                self._prompt_widget.remove_class("bash-success")
-                self._prompt_widget.add_class("bash-interrupted")
+            new_class = "bash-interrupted"
         elif exit_code != 0:
-            self.remove_class("bash-success")
-            self.add_class("bash-error")
-            if self._prompt_widget:
-                self._prompt_widget.remove_class("bash-success")
-                self._prompt_widget.add_class("bash-error")
+            new_class = "bash-error"
+        else:
+            new_class = "bash-success"
+        self.remove_class("bash-pending")
+        self.add_class(new_class)
+        if self._prompt_widget:
+            self._prompt_widget.remove_class("bash-pending")
+            self._prompt_widget.add_class(new_class)
         if interrupted:
             suffix = (
                 "\n(interrupted)"
@@ -426,3 +452,60 @@ class WarningMessage(Static):
             if self._show_border:
                 yield ExpandingBorder(classes="warning-border")
             yield NoMarkupStatic(self._message, classes="warning-content")
+
+
+class PlanFileMessage(Widget):
+    content: reactive[str] = reactive("")
+
+    def __init__(self, file_path: Path) -> None:
+        super().__init__()
+        self.add_class("plan-file-message")
+        self._file_path = file_path
+        self._watch_task: asyncio.Task | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="plan-file-wrapper"):
+            yield Markdown(self.content, classes="plan-file-content")
+
+    def watch_content(self, new_content: str) -> None:
+        try:
+            self.query_one(Markdown).update(new_content)
+        except NoMatches:
+            pass
+
+    async def on_mount(self) -> None:
+        self.content = (await read_safe_async(self._file_path)).text
+        self._watch_task = asyncio.create_task(self._watch_file())
+
+    async def _watch_file(self) -> None:
+        try:
+            async for _ in awatch(self._file_path):
+                self.content = (await read_safe_async(self._file_path)).text
+        except (asyncio.CancelledError, FileNotFoundError):
+            pass
+
+    def open_in_editor(self) -> None:
+        from vibe.cli.textual_ui.external_editor import ExternalEditor
+
+        try:
+            self._file_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.app.suspend():
+                ExternalEditor.edit_file(self._file_path)
+        except OSError:
+            logger.warning(
+                "Failed to open plan file in editor: %s", self._file_path, exc_info=True
+            )
+            self.app.notify(
+                f"Could not open plan in editor: {self._file_path}",
+                severity="error",
+                timeout=6,
+            )
+
+    def stop_watching(self) -> None:
+        if self._watch_task is None:
+            return
+
+        if not self._watch_task.done():
+            self._watch_task.cancel()
+
+        self._watch_task = None

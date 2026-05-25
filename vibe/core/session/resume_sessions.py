@@ -20,7 +20,6 @@ def short_session_id(session_id: str, source: ResumeSessionSource = "local") -> 
 
 _ACTIVE_STATUSES = [
     WorkflowExecutionStatus.RUNNING,
-    WorkflowExecutionStatus.RETRYING_AFTER_ERROR,
     WorkflowExecutionStatus.CONTINUED_AS_NEW,
 ]
 

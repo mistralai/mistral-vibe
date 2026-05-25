@@ -16,15 +16,19 @@ class ExternalEditor:
     def get_editor() -> str:
         return os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
 
+    @classmethod
+    def edit_file(cls, file_path: Path, *, check: bool = False) -> None:
+        editor = cls.get_editor()
+        parts = shlex.split(editor)
+        subprocess.run([*parts, str(file_path)], check=check)
+
     def edit(self, initial_content: str = "") -> str | None:
-        editor = self.get_editor()
         fd, filepath = tempfile.mkstemp(suffix=".md", prefix="vibe_")
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(initial_content)
 
-            parts = shlex.split(editor)
-            subprocess.run([*parts, filepath], check=True)
+            self.edit_file(Path(filepath), check=True)
 
             content = read_safe(Path(filepath)).text.rstrip()
             return content if content != initial_content else None

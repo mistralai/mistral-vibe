@@ -50,9 +50,9 @@ class AskUserQuestionArgs(BaseModel):
         min_length=1,
         max_length=4,
     )
-    content_preview: str | None = Field(
+    footer_note: str | None = Field(
         default=None,
-        description="Optional text content to display in a scrollable area above the questions.",
+        description="Optional subtle note displayed at the bottom of the question widget.",
     )
 
 

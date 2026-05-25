@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run python
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from typing import Any, cast
+
+import tomlkit
+from tomlkit.items import Array
 
 
 def run_git_command(
@@ -102,6 +106,26 @@ def get_latest_version() -> str:
     return max(versions)[3]
 
 
+def get_base_version_from_current_branch() -> str:
+    result = run_git_command(
+        "describe",
+        "--tags",
+        "--match",
+        "v[0-9]*.[0-9]*.[0-9]*",
+        "--exclude",
+        "*-private",
+        "--abbrev=0",
+        "HEAD",
+        capture_output=True,
+    )
+    tag = result.stdout.strip()
+    match = re.match(r"^v(\d+\.\d+\.\d+)$", tag)
+    if not match:
+        raise ValueError(f"Invalid base version tag found: {tag}")
+
+    return match.group(1)
+
+
 def parse_version(version_str: str) -> tuple[int, int, int]:
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)$", version_str.strip())
     if not match:
@@ -130,34 +154,31 @@ def create_release_branch(version: str) -> None:
     print(f"Created and switched to branch {branch_name}")
 
 
-def cherry_pick_commits(
-    previous_version: str, current_version: str, squash: bool
-) -> None:
-    previous_tag = f"v{previous_version}-private"
-    current_tag = f"v{current_version}-private"
-
+def cherry_pick_commits(previous_private_tag: str, current_private_tag: str) -> None:
     result = run_git_command(
-        "rev-parse", "--verify", previous_tag, capture_output=True, check=False
+        "rev-parse", "--verify", previous_private_tag, capture_output=True, check=False
     )
     if result.returncode != 0:
-        raise ValueError(f"Tag {previous_tag} does not exist")
+        raise ValueError(f"Tag {previous_private_tag} does not exist")
 
     result = run_git_command(
-        "rev-parse", "--verify", current_tag, capture_output=True, check=False
+        "rev-parse", "--verify", current_private_tag, capture_output=True, check=False
     )
     if result.returncode != 0:
-        raise ValueError(f"Tag {current_tag} does not exist")
+        raise ValueError(f"Tag {current_private_tag} does not exist")
 
-    print(f"Cherry-picking commits from {previous_tag}..{current_tag}...")
-    run_git_command("cherry-pick", f"{previous_tag}..{current_tag}")
+    print(
+        f"Cherry-picking commits from {previous_private_tag}..{current_private_tag}..."
+    )
+    run_git_command("cherry-pick", f"{previous_private_tag}..{current_private_tag}")
     print("Successfully cherry-picked all commits")
-
-    if squash:
-        squash_commits(previous_version, current_version, previous_tag, current_tag)
 
 
 def squash_commits(
-    previous_version: str, current_version: str, previous_tag: str, current_tag: str
+    previous_version: str,
+    current_version: str,
+    previous_private_tag: str,
+    current_private_tag: str,
 ) -> None:
     print("Squashing commits into a single release commit...")
     run_git_command("reset", "--soft", f"v{previous_version}")
@@ -165,7 +186,7 @@ def squash_commits(
     # Get all contributors between previous and current private tags
     result = run_git_command(
         "log",
-        f"{previous_tag}..{current_tag}",
+        f"{previous_private_tag}..{current_private_tag}",
         "--format=%aN <%aE>",
         capture_output=True,
     )
@@ -198,6 +219,79 @@ def squash_commits(
     # Create the commit
     run_git_command("commit", "-m", commit_message)
     print("Successfully created release commit with co-authors")
+
+
+def get_pinned_dependencies(group: str | None = None) -> list[str]:
+    cmd = [
+        "uv",
+        "export",
+        "--no-hashes",
+        "--no-emit-project",
+        "--frozen",
+        "--format",
+        "requirements.txt",
+        "--no-annotate",
+        "--no-header",
+    ]
+    if group is None:
+        cmd.append("--no-dev")
+    else:
+        cmd += ["--only-group", group]
+
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+    pins: list[str] = []
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        pins.append(line)
+
+    if not pins:
+        target = group or "[project].dependencies"
+        raise ValueError(f"uv export returned no dependencies for {target}")
+
+    return pins
+
+
+def make_multiline_array(pins: list[str]) -> Array:
+    arr = tomlkit.array()
+    arr.extend(pins)
+    arr.multiline(True)
+    return arr
+
+
+def pin_dependencies(version: str) -> None:
+    print("Pinning dependencies for release...")
+
+    pyproject_path = Path("pyproject.toml")
+    if not pyproject_path.exists():
+        raise FileNotFoundError("pyproject.toml not found in current directory")
+
+    project_pins = get_pinned_dependencies()
+    build_pins = get_pinned_dependencies(group="build")
+
+    doc = tomlkit.parse(pyproject_path.read_text())
+    cast(dict[str, Any], doc["project"])["dependencies"] = make_multiline_array(
+        project_pins
+    )
+    cast(dict[str, Any], doc["dependency-groups"])["build"] = make_multiline_array(
+        build_pins
+    )
+    pyproject_path.write_text(tomlkit.dumps(doc))
+    print(
+        f"Pinned {len(project_pins)} project deps and "
+        f"{len(build_pins)} build-group deps in pyproject.toml"
+    )
+
+    print("Refreshing uv.lock...")
+    subprocess.run(["uv", "lock"], check=True)
+
+    run_git_command("add", "pyproject.toml", "uv.lock")
+    run_git_command(
+        "commit", "--allow-empty", "-m", f"chore: pin dependencies for v{version}"
+    )
+    print(f"Committed pinned dependencies for v{version}")
 
 
 def get_commits_summary(previous_version: str, current_version: str) -> str:
@@ -289,6 +383,9 @@ def main() -> None:
         default=True,
         help="Disable squashing of commits into a single release commit",
     )
+    parser.add_argument(
+        "--resume", action="store_true", help="Resume after cherry-picking commits"
+    )
 
     args = parser.parse_args()
     current_version = args.version
@@ -298,13 +395,16 @@ def main() -> None:
         # Step 1: Ensure public remote exists
         ensure_public_remote()
 
-        # Step 2: Fetch all remotes
-        print("Fetching all remotes...")
-        run_git_command("fetch", "--all")
-        print("Successfully fetched all remotes")
+        if args.resume:
+            previous_version = get_base_version_from_current_branch()
+        else:
+            # Step 2: Fetch all remotes
+            print("Fetching all remotes...")
+            run_git_command("fetch", "--all")
+            print("Successfully fetched all remotes")
 
-        # Step 3: Find latest version
-        previous_version = get_latest_version()
+            # Step 3: Find latest version
+            previous_version = get_latest_version()
         print(f"Previous version: {previous_version}")
 
         # Step 4: Verify version matches pyproject.toml
@@ -316,16 +416,35 @@ def main() -> None:
             )
         print(f"Version verified: {current_version}")
 
-        # Step 5: Switch to previous version tag
-        switch_to_tag(previous_version)
+        previous_private_tag = f"v{previous_version}-private"
+        current_private_tag = f"v{current_version}-private"
 
-        # Step 6: Create release branch
-        create_release_branch(current_version)
+        if not args.resume:
+            # Step 5: Switch to previous version tag
+            switch_to_tag(previous_version)
 
-        # Step 7: Cherry-pick commits
-        cherry_pick_commits(previous_version, current_version, squash)
+            # Step 6: Create release branch
+            create_release_branch(current_version)
 
-        # Step 8: Get summary information
+            # Step 7: Cherry-pick commits
+            cherry_pick_commits(previous_private_tag, current_private_tag)
+
+        # Step 8: Pin dependencies from uv.lock so the published wheel
+        # has frozen Requires-Dist metadata. When squashing, this commit
+        # is folded into the release commit; otherwise it stays as the
+        # final commit on the release branch.
+        pin_dependencies(current_version)
+
+        # Step 9: Squash commits
+        if squash:
+            squash_commits(
+                previous_version,
+                current_version,
+                previous_private_tag,
+                current_private_tag,
+            )
+
+        # Step 10: Get summary information
         commits_summary = get_commits_summary(previous_version, current_version)
         changelog_entry = get_changelog_entry(current_version)
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from vibe.core.paths._local_config_walk import (
     _MAX_DIRS,
     WALK_MAX_DEPTH,
+    ConfigWalkResult,
     walk_local_config_dirs,
 )
 
@@ -166,3 +167,29 @@ class TestWalkConfigDirs:
         assert resolved / ".vibe" in result.config_dirs
         assert resolved / ".agents" in result.config_dirs
         assert resolved / "sub" / ".vibe" in result.config_dirs
+
+
+class TestConfigWalkResultOr:
+    def test_or_concatenates_each_field(self) -> None:
+        a = ConfigWalkResult(
+            config_dirs=(Path("/a/.vibe"),),
+            tools=(Path("/a/.vibe/tools"),),
+            skills=(Path("/a/.vibe/skills"),),
+            agents=(Path("/a/.vibe/agents"),),
+        )
+        b = ConfigWalkResult(
+            config_dirs=(Path("/b/.vibe"),),
+            tools=(Path("/b/.vibe/tools"),),
+            skills=(Path("/b/.vibe/skills"),),
+            agents=(Path("/b/.vibe/agents"),),
+        )
+        merged = a | b
+        assert merged.config_dirs == (Path("/a/.vibe"), Path("/b/.vibe"))
+        assert merged.tools == (Path("/a/.vibe/tools"), Path("/b/.vibe/tools"))
+        assert merged.skills == (Path("/a/.vibe/skills"), Path("/b/.vibe/skills"))
+        assert merged.agents == (Path("/a/.vibe/agents"), Path("/b/.vibe/agents"))
+
+    def test_or_with_empty_is_identity(self) -> None:
+        a = ConfigWalkResult(tools=(Path("/a/.vibe/tools"),))
+        assert (a | ConfigWalkResult()) == a
+        assert (ConfigWalkResult() | a) == a

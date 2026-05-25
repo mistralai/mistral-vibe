@@ -7,10 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
+from vibe.core.config import ModelConfig, SessionLoggingConfig
 from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
 
 
@@ -43,6 +45,43 @@ def acp_agent_loop(backend: FakeBackend) -> VibeAcpAgentLoop:
 
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgent).start()
     return _create_acp_agent()
+
+
+@pytest.fixture
+def acp_agent_with_session_config(
+    backend: FakeBackend, temp_session_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[VibeAcpAgentLoop, FakeClient]:
+    session_config = SessionLoggingConfig(
+        save_dir=str(temp_session_dir), session_prefix="session", enabled=True
+    )
+    config = build_test_vibe_config(
+        active_model="devstral-latest",
+        models=[
+            ModelConfig(
+                name="devstral-latest", provider="mistral", alias="devstral-latest"
+            )
+        ],
+        session_logging=session_config,
+    )
+
+    class PatchedAgentLoop(AgentLoop):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **{**kwargs, "backend": backend})
+            self._base_config = config
+            self.agent_manager.invalidate_config()
+
+    monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)
+    monkeypatch.setattr(VibeAcpAgentLoop, "_load_config", lambda self: config)
+    monkeypatch.setattr(
+        "vibe.acp.acp_agent_loop.VibeConfig.load", lambda *args, **kwargs: config
+    )
+
+    vibe_acp_agent = VibeAcpAgentLoop()
+    client = FakeClient()
+    vibe_acp_agent.on_connect(client)
+    client.on_connect(vibe_acp_agent)
+
+    return vibe_acp_agent, client
 
 
 @pytest.fixture

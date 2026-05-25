@@ -12,7 +12,6 @@ from tests.stubs.fake_mcp_registry import (
     FakeMCPRegistryWithBrokenServer,
 )
 from vibe.core.config import MCPHttp, MCPStdio
-from vibe.core.tools.connectors import CONNECTORS_ENV_VAR
 from vibe.core.tools.mcp.tools import RemoteTool
 
 _MCP_PATCH = "vibe.core.agent_loop.MCPRegistry"
@@ -239,7 +238,6 @@ class SnapshotTestAppConnectorsMixedState(BaseSnapshotTestApp):
 # ---------------------------------------------------------------------------
 
 
-@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
 def test_snapshot_mcp_with_connectors_overview(snap_compare: SnapCompare) -> None:
 
     async def run_before(pilot: Pilot) -> None:
@@ -258,7 +256,6 @@ def test_snapshot_mcp_with_connectors_overview(snap_compare: SnapCompare) -> Non
 # ---------------------------------------------------------------------------
 
 
-@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
 def test_snapshot_connector_auth_opens_on_disconnected(
     snap_compare: SnapCompare,
 ) -> None:
@@ -280,7 +277,6 @@ def test_snapshot_connector_auth_opens_on_disconnected(
     )
 
 
-@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
 def test_snapshot_connector_auth_show_url(snap_compare: SnapCompare) -> None:
     """Selecting 'Manually show the URL' reveals the auth URL."""
 
@@ -303,7 +299,6 @@ def test_snapshot_connector_auth_show_url(snap_compare: SnapCompare) -> None:
     )
 
 
-@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
 def test_snapshot_connector_auth_back_to_mcp(snap_compare: SnapCompare) -> None:
     """Pressing backspace in the auth app returns to the /mcp menu."""
 
@@ -323,7 +318,6 @@ def test_snapshot_connector_auth_back_to_mcp(snap_compare: SnapCompare) -> None:
     )
 
 
-@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
 def test_snapshot_mcp_help_bar_shows_authenticate(snap_compare: SnapCompare) -> None:
     """Help bar shows 'Enter Authenticate' when a disconnected connector is highlighted."""
 
@@ -340,7 +334,6 @@ def test_snapshot_mcp_help_bar_shows_authenticate(snap_compare: SnapCompare) -> 
     )
 
 
-@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
 def test_snapshot_mcp_connectors_only(snap_compare: SnapCompare) -> None:
 
     async def run_before(pilot: Pilot) -> None:
@@ -353,7 +346,6 @@ def test_snapshot_mcp_connectors_only(snap_compare: SnapCompare) -> None:
     )
 
 
-@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
 def test_snapshot_mcp_connectors_sorted_by_status(snap_compare: SnapCompare) -> None:
 
     async def run_before(pilot: Pilot) -> None:
@@ -366,7 +358,6 @@ def test_snapshot_mcp_connectors_sorted_by_status(snap_compare: SnapCompare) -> 
     )
 
 
-@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
 def test_snapshot_mcp_drill_into_connector(snap_compare: SnapCompare) -> None:
 
     async def run_before(pilot: Pilot) -> None:
@@ -387,7 +378,6 @@ def test_snapshot_mcp_drill_into_connector(snap_compare: SnapCompare) -> None:
         )
 
 
-@patch.dict("os.environ", {CONNECTORS_ENV_VAR: "1"})
 def test_snapshot_mcp_connector_back_to_overview(snap_compare: SnapCompare) -> None:
 
     async def run_before(pilot: Pilot) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import cache
 import logging
@@ -8,6 +9,22 @@ import os
 from pathlib import Path
 
 from vibe.core.autocompletion.file_indexer.ignore_rules import WALK_SKIP_DIR_NAMES
+
+
+def dedup_paths(paths: Iterable[Path], *, drop_nested: bool = False) -> list[Path]:
+    """Resolve and dedup paths, preserving first-occurrence order.
+
+    With ``drop_nested=True``, also drop paths contained inside another path
+    (so adding ``/x`` and ``/x/y`` collapses to just ``/x``).
+    """
+    resolved = [p.resolve() for p in paths]
+    return [
+        p
+        for i, p in enumerate(resolved)
+        if p not in resolved[:i]
+        and not (drop_nested and any(p != q and p.is_relative_to(q) for q in resolved))
+    ]
+
 
 logger = logging.getLogger("vibe")
 
@@ -30,6 +47,14 @@ class ConfigWalkResult:
     tools: tuple[Path, ...] = ()
     skills: tuple[Path, ...] = ()
     agents: tuple[Path, ...] = ()
+
+    def __or__(self, other: ConfigWalkResult) -> ConfigWalkResult:
+        return ConfigWalkResult(
+            config_dirs=tuple(dedup_paths([*self.config_dirs, *other.config_dirs])),
+            tools=tuple(dedup_paths([*self.tools, *other.tools])),
+            skills=tuple(dedup_paths([*self.skills, *other.skills])),
+            agents=tuple(dedup_paths([*self.agents, *other.agents])),
+        )
 
 
 @dataclass

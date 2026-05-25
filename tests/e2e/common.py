@@ -29,6 +29,7 @@ def write_e2e_config(vibe_home: Path, api_base: str) -> None:
             'active_model = "mock-model"',
             "enable_update_checks = false",
             "enable_auto_update = false",
+            "disable_welcome_banner_animation = true",
             "",
             "[[providers]]",
             'name = "mock-provider"',

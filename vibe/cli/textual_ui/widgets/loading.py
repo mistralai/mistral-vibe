@@ -16,6 +16,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 DEFAULT_LOADING_STATUS = "Generating"
+_DEBOUNCE_HINT_TEXT = "[dim italic]typing detected, waiting…[/]"
 
 
 def _format_elapsed(seconds: int) -> str:
@@ -84,6 +85,7 @@ class LoadingWidget(SpinnerMixin, Static):
         self._status_widget: Static | None = None
         self.hint_widget: Static | None = None
         self._show_hint = show_hint
+        self.debounce_widget: Static | None = None
         self.start_time: float | None = None
         self._last_elapsed: int = -1
         self._paused_total: float = 0.0
@@ -111,6 +113,15 @@ class LoadingWidget(SpinnerMixin, Static):
 
     def _apply_easter_egg(self, status: str) -> str:
         return self._get_easter_egg() or status
+
+    def show_debounce_hint(self) -> None:
+        if self.debounce_widget:
+            self.debounce_widget.update(_DEBOUNCE_HINT_TEXT)
+            self.debounce_widget.display = True
+
+    def hide_debounce_hint(self) -> None:
+        if self.debounce_widget:
+            self.debounce_widget.display = False
 
     def pause_timer(self) -> None:
         if self._pause_start is None:
@@ -141,6 +152,10 @@ class LoadingWidget(SpinnerMixin, Static):
                     "(0s Esc/Ctrl+C to interrupt)", classes="loading-hint"
                 )
                 yield self.hint_widget
+
+            self.debounce_widget = Static("", classes="loading-debounce")
+            self.debounce_widget.display = False
+            yield self.debounce_widget
 
     def on_mount(self) -> None:
         self.start_time = time()

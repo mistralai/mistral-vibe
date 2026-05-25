@@ -432,12 +432,12 @@ class TestMistralRetry:
         with patch("vibe.core.llm.backend.mistral.Mistral") as mock_mistral_class:
             mock_mistral_class.return_value = MagicMock()
             backend._get_client()
-            mock_mistral_class.assert_called_once_with(
-                api_key=backend._api_key,
-                server_url=backend._server_url,
-                timeout_ms=720000,
-                retry_config=backend._retry_config,
-            )
+            call_kwargs = mock_mistral_class.call_args.kwargs
+            assert call_kwargs["api_key"] == backend._api_key
+            assert call_kwargs["server_url"] == backend._server_url
+            assert call_kwargs["timeout_ms"] == 720000
+            assert call_kwargs["retry_config"] is backend._retry_config
+            assert "async_client" in call_kwargs
 
 
 class TestMistralMapperPrepareMessage:

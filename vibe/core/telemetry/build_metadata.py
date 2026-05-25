@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 from vibe.core.telemetry.types import (
     AgentEntrypoint,
@@ -16,15 +16,17 @@ def build_base_metadata(
     entrypoint_metadata: EntrypointMetadata | None,
     session_id: str | None,
     parent_session_id: str | None = None,
-) -> dict[str, str]:
+    experiments: dict[str, str] | None = None,
+) -> dict[str, Any]:
     entrypoint_payload = (
         entrypoint_metadata.model_dump() if entrypoint_metadata is not None else {}
     )
     return cast(
-        dict[str, str],
+        dict[str, Any],
         TelemetryBaseMetadata(
             session_id=session_id,
             parent_session_id=parent_session_id,
+            experiments=experiments or None,
             **entrypoint_payload,
         ).model_dump(exclude_none=True),
     )

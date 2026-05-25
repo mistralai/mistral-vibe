@@ -54,9 +54,7 @@ def acp_write_file_tool(
     monkeypatch.chdir(tmp_path)
     config = WriteFileConfig()
     state = AcpWriteFileState.model_construct(
-        client=mock_client,
-        session_id="test_session_123",
-        tool_call_id="test_tool_call_456",
+        client=mock_client, session_id="test_session_123"
     )
     return WriteFile(config_getter=lambda: config, state=state)
 
@@ -81,7 +79,6 @@ class TestAcpWriteFileExecution:
         assert result.bytes_written == len(b"Hello, world!")
         assert result.file_existed is False
         assert mock_client._write_text_file_called
-        assert mock_client._session_update_called
 
         # Verify write_text_file was called correctly
         params = mock_client._last_write_params
@@ -97,7 +94,7 @@ class TestAcpWriteFileExecution:
         tool = WriteFile(
             config_getter=lambda: WriteFileConfig(),
             state=AcpWriteFileState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -114,7 +111,6 @@ class TestAcpWriteFileExecution:
         assert result.bytes_written == len(b"New content")
         assert result.file_existed is True
         assert mock_client._write_text_file_called
-        assert mock_client._session_update_called
 
         # Verify write_text_file was called correctly
         params = mock_client._last_write_params
@@ -132,7 +128,7 @@ class TestAcpWriteFileExecution:
         tool = WriteFile(
             config_getter=lambda: WriteFileConfig(),
             state=AcpWriteFileState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -151,7 +147,7 @@ class TestAcpWriteFileExecution:
         tool = WriteFile(
             config_getter=lambda: WriteFileConfig(),
             state=AcpWriteFileState.model_construct(
-                client=None, session_id="test_session", tool_call_id="test_call"
+                client=None, session_id="test_session"
             ),
         )
 
@@ -173,7 +169,7 @@ class TestAcpWriteFileExecution:
         tool = WriteFile(
             config_getter=lambda: WriteFileConfig(),
             state=AcpWriteFileState.model_construct(
-                client=mock_client, session_id=None, tool_call_id="test_call"
+                client=mock_client, session_id=None
             ),
         )
 

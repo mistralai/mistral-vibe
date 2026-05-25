@@ -14,7 +14,7 @@ class TestTrustedWorkdir:
     ) -> None:
         monkeypatch.chdir(tmp_path)
         mgr = HarnessFilesManager(sources=("user",))
-        assert mgr.trusted_workdir is None
+        assert mgr._trusted_workdir is None
 
     def test_returns_none_when_not_trusted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -22,7 +22,7 @@ class TestTrustedWorkdir:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: False)
         mgr = HarnessFilesManager(sources=("user", "project"))
-        assert mgr.trusted_workdir is None
+        assert mgr._trusted_workdir is None
 
     def test_returns_cwd_when_project_in_sources_and_trusted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -30,7 +30,7 @@ class TestTrustedWorkdir:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
         mgr = HarnessFilesManager(sources=("user", "project"))
-        assert mgr.trusted_workdir == tmp_path
+        assert mgr._trusted_workdir == tmp_path
 
 
 class TestProjectToolsDirs:

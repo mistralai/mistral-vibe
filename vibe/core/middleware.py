@@ -125,7 +125,30 @@ class ContextWarningMiddleware:
         self.has_warned = False
 
 
-def make_plan_agent_reminder(plan_file_path: str) -> str:
+def make_plan_agent_reminder(
+    plan_file_path: str,
+    *,
+    has_ask_user_question: bool = True,
+    has_exit_plan_mode: bool = True,
+) -> str:
+    instructions = [
+        "Research the user's query using read-only tools (grep, read_file, etc.)"
+    ]
+    if has_ask_user_question:
+        instructions.append(
+            "If you are unsure about requirements or approach, use the ask_user_question tool to clarify before finalizing your plan"
+        )
+    instructions.append("Write your plan to the plan file above")
+    if has_exit_plan_mode:
+        instructions.append(
+            "When your plan is complete, call the exit_plan_mode tool to request user approval and switch to implementation mode"
+        )
+    else:
+        instructions.append(
+            "When your plan is complete, present it to the user and tell them to switch modes if they approve the plan"
+        )
+    numbered = "\n".join(f"{i}. {step}" for i, step in enumerate(instructions, start=1))
+
     return f"""<{VIBE_WARNING_TAG}>Plan mode is active. You MUST NOT make any edits (except to the plan file below, or in your scratchpad), run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
 
 ## Plan File Info
@@ -134,10 +157,7 @@ Build your plan incrementally by writing to or editing this file.
 This is the only file you are allowed to edit. Make sure to create it early and edit as soon as you internally update your plan.
 
 ## Instructions
-1. Research the user's query using read-only tools (grep, read_file, etc.)
-2. If you are unsure about requirements or approach, use the ask_user_question tool to clarify before finalizing your plan
-3. Write your plan to the plan file above
-4. When your plan is complete, call the exit_plan_mode tool to request user approval and switch to implementation mode</{VIBE_WARNING_TAG}>"""
+{numbered}</{VIBE_WARNING_TAG}>"""
 
 
 PLAN_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Plan mode has ended. If you have a plan ready, you can now start executing it. If not, you can now use editing tools and make changes to the system.</{VIBE_WARNING_TAG}>"""

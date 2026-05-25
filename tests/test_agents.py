@@ -11,6 +11,7 @@ from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
+    CHAT,
     AgentProfile,
     AgentSafety,
     AgentType,
@@ -188,6 +189,49 @@ class TestAgentApplyToConfig:
             "exit_plan_mode",
         }
 
+    def test_base_disabled_tools_are_filtered_from_profile_enabled_tools(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=["ask_user_question"],
+        )
+
+        result = CHAT.apply_to_config(base)
+
+        assert "ask_user_question" not in result.enabled_tools
+        assert "grep" in result.enabled_tools
+        assert "read_file" in result.enabled_tools
+        assert "task" in result.enabled_tools
+
+    def test_base_disabled_tools_filter_supports_glob_patterns(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=["ask_*"],
+        )
+        agent = AgentProfile(
+            name="custom",
+            display_name="Custom",
+            description="",
+            safety=AgentSafety.NEUTRAL,
+            overrides={"enabled_tools": ["grep", "ask_user_question", "ask_extra"]},
+        )
+
+        result = agent.apply_to_config(base)
+
+        assert result.enabled_tools == ["grep"]
+
+    def test_empty_base_disabled_tools_leaves_enabled_tools_untouched(self) -> None:
+        base = VibeConfig(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_tools=[],
+        )
+
+        result = CHAT.apply_to_config(base)
+
+        assert "ask_user_question" in result.enabled_tools
+
     def test_custom_prompt_found_in_global_when_missing_from_project(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -215,7 +259,7 @@ class TestAgentApplyToConfig:
 
         mock_manager = _MockManager(sources=("user",))
         monkeypatch.setattr(
-            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
+            "vibe.core.prompts.get_harness_files_manager", lambda: mock_manager
         )
 
         base = VibeConfig(include_project_context=False, include_prompt_detail=False)
@@ -254,7 +298,7 @@ class TestAgentApplyToConfig:
 
         mock_manager = _MockManager(sources=("user",))
         monkeypatch.setattr(
-            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
+            "vibe.core.prompts.get_harness_files_manager", lambda: mock_manager
         )
 
         config = VibeConfig(
@@ -656,7 +700,7 @@ class TestAgentLoopInitialization:
 
         mock_manager = _MockManager(sources=("user",))
         monkeypatch.setattr(
-            "vibe.core.config._settings.get_harness_files_manager", lambda: mock_manager
+            "vibe.core.prompts.get_harness_files_manager", lambda: mock_manager
         )
 
         custom_agent = AgentProfile(

@@ -38,6 +38,7 @@ from vibe.core.teleport.types import (
     TeleportWaitingForGitHubEvent,
     TeleportYieldEvent,
 )
+from vibe.core.utils.http import build_ssl_context
 
 _DEFAULT_TELEPORT_PROMPT = "Your session has been teleported on a remote workspace. Changes of workspace has been automatically teleported. External workspace changes has NOT been teleported. Environment variables has NOT been teleported. Please continue where you left off."
 
@@ -73,7 +74,9 @@ class TeleportService:
 
     async def __aenter__(self) -> TeleportService:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(self._timeout))
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+            )
         self._nuage_client_instance = NuageClient(
             self._vibe_code_base_url,
             self._vibe_code_api_key,
@@ -98,7 +101,9 @@ class TeleportService:
     @property
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(self._timeout))
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+            )
             self._owns_client = True
         return self._client
 

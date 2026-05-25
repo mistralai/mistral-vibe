@@ -47,12 +47,6 @@ class TestACPNewSession:
             cwd=str(Path.cwd()), mcp_servers=[]
         )
 
-        new_session_events = [
-            e for e in telemetry_events if e.get("event_name") == "vibe.new_session"
-        ]
-        assert len(new_session_events) == 1
-        assert new_session_events[0]["properties"]["entrypoint"] == "acp"
-
         assert session_response.session_id is not None
         acp_session = next(
             (
@@ -63,6 +57,17 @@ class TestACPNewSession:
             None,
         )
         assert acp_session is not None
+
+        # Telemetry now fires from the background warm-up worker once
+        # `wait_until_ready` joins both MCP and experiments. Awaiting it here
+        # forces emission before assertions.
+        await acp_session.agent_loop.wait_until_ready()
+
+        new_session_events = [
+            e for e in telemetry_events if e.get("event_name") == "vibe.new_session"
+        ]
+        assert len(new_session_events) == 1
+        assert new_session_events[0]["properties"]["entrypoint"] == "acp"
         assert (
             acp_session.agent_loop.session_logger.session_id
             == session_response.session_id

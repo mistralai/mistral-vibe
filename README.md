@@ -607,6 +607,14 @@ vibe --workdir /path/to/project
 
 This is useful when you want to run Vibe from a different location than your current directory.
 
+Use `--add-dir` (repeatable) to make additional directories available to the agent for the duration of the session:
+
+```bash
+vibe --add-dir /path/to/other-project --add-dir /path/to/library
+```
+
+Each path is implicitly trusted (no trust prompt) and contributes its `AGENTS.md` and `.vibe/` configuration (tools, skills, agents, prompts, hooks) to the session. File-tool permissions treat each `--add-dir` path the same way as your primary working directory — reads and writes inside them don't require the "outside workdir" prompt. Nested paths collapse: passing `/repo` and `/repo/sub` is equivalent to passing just `/repo`.
+
 ### Update Settings
 
 #### Auto-Update

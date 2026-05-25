@@ -12,18 +12,6 @@ from vibe.core.tools.permissions import (
 )
 
 
-def wildcard_match(text: str, pattern: str) -> bool:
-    """Match text against a wildcard pattern using fnmatch.
-
-    If pattern ends with " *", trailing part is optional (matches with or without args).
-    """
-    if fnmatch.fnmatch(text, pattern):
-        return True
-    if pattern.endswith(" *") and fnmatch.fnmatch(text, pattern[:-2]):
-        return True
-    return False
-
-
 def _make_absolute(path_str: str) -> Path:
     path = Path(path_str).expanduser()
     if not path.is_absolute():
@@ -52,12 +40,25 @@ def resolve_path_permission(
 
 
 def is_path_within_workdir(path_str: str) -> bool:
-    """Return True if the resolved path is inside cwd."""
+    """Return True if the resolved path is inside cwd or any project root.
+
+    Project roots come from the harness manager (trusted cwd + ``--add-dir``).
+    cwd is always in-bounds, even when the manager isn't initialized or when
+    the project source is disabled.
+    """
     try:
-        _make_absolute(path_str).resolve().relative_to(Path.cwd().resolve())
-        return True
-    except ValueError:
+        resolved = _make_absolute(path_str).resolve()
+    except (ValueError, OSError):
         return False
+    if resolved.is_relative_to(Path.cwd().resolve()):
+        return True
+    from vibe.core.config.harness_files import get_harness_files_manager
+
+    try:
+        mgr = get_harness_files_manager()
+    except RuntimeError:
+        return False
+    return any(resolved.is_relative_to(r) for r in mgr.project_roots)
 
 
 def resolve_file_tool_permission(

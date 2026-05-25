@@ -4,6 +4,7 @@ import httpx
 import pytest
 import respx
 
+from tests.conftest import build_test_vibe_config
 from vibe.cli.plan_offer.adapters.http_whoami_gateway import HttpWhoAmIGateway
 from vibe.cli.plan_offer.ports.whoami_gateway import (
     WhoAmIGatewayError,
@@ -11,6 +12,7 @@ from vibe.cli.plan_offer.ports.whoami_gateway import (
     WhoAmIPlanType,
     WhoAmIResponse,
 )
+from vibe.core.config import DEFAULT_CONSOLE_BASE_URL
 
 
 @pytest.mark.asyncio
@@ -170,3 +172,53 @@ async def test_return_unknown_plan_on_unsupported_plan_type(
         plan_name="INDIVIDUAL",
         prompt_switching_to_pro_plan=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_gateway_calls_custom_console_base_url_from_config(
+    respx_mock: respx.MockRouter,
+) -> None:
+    custom_url = "https://custom-console.example.com"
+    config = build_test_vibe_config(console_base_url=custom_url)
+
+    route = respx_mock.get(f"{custom_url}/api/vibe/whoami").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "plan_type": "CHAT",
+                "plan_name": "INDIVIDUAL",
+                "prompt_switching_to_pro_plan": False,
+            },
+        )
+    )
+
+    gateway = HttpWhoAmIGateway(base_url=config.console_base_url)
+    response = await gateway.whoami("api-key")
+
+    assert route.called
+    assert response.plan_type == "CHAT"
+
+
+@pytest.mark.asyncio
+async def test_gateway_uses_default_console_url_when_not_configured(
+    respx_mock: respx.MockRouter,
+) -> None:
+    config = build_test_vibe_config()
+
+    assert config.console_base_url == DEFAULT_CONSOLE_BASE_URL
+
+    route = respx_mock.get(f"{DEFAULT_CONSOLE_BASE_URL}/api/vibe/whoami").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "plan_type": "CHAT",
+                "plan_name": "INDIVIDUAL",
+                "prompt_switching_to_pro_plan": False,
+            },
+        )
+    )
+
+    gateway = HttpWhoAmIGateway(base_url=config.console_base_url)
+    await gateway.whoami("api-key")
+
+    assert route.called

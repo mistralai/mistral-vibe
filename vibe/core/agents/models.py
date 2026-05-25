@@ -7,6 +7,7 @@ import tomllib
 from typing import TYPE_CHECKING, Any
 
 from vibe.core.paths import PLANS_DIR
+from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
@@ -67,6 +68,15 @@ class AgentProfile:
                 *base_disabled,
                 *merged.get("disabled_tools", []),
             })
+
+        # Environment-level disables (set by ACP/programmatic mode) must take
+        # precedence over an agent's enabled_tools allowlist
+        if base.disabled_tools and merged.get("enabled_tools"):
+            merged["enabled_tools"] = [
+                t
+                for t in merged["enabled_tools"]
+                if not name_matches(t, base.disabled_tools)
+            ]
 
         return VC.model_validate(merged)
 

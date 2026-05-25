@@ -105,11 +105,15 @@ class SessionLoader:
 
     @staticmethod
     def find_session_by_id(
-        session_id: str, config: SessionLoggingConfig
+        session_id: str,
+        config: SessionLoggingConfig,
+        working_directory: Path | None = None,
     ) -> Path | None:
         matches = SessionLoader._find_session_dirs_by_short_id(session_id, config)
 
-        return SessionLoader.latest_session(matches)
+        return SessionLoader.latest_session(
+            matches, working_directory=working_directory
+        )
 
     @staticmethod
     def does_session_exist(

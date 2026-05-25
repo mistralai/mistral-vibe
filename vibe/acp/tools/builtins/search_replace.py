@@ -30,6 +30,7 @@ from vibe.core.utils.io import ReadSafeResult
 class AcpSearchReplaceState(BaseToolState, AcpToolState):
     file_backup_content: str | None = None
     file_backup_encoding: str = "utf-8"
+    file_backup_newline: str = "\n"
 
 
 class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
@@ -43,9 +44,7 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
         return AcpSearchReplaceState
 
     async def _read_file(self, file_path: Path) -> ReadSafeResult:
-        client, session_id, _ = self._load_state()
-
-        await self._send_in_progress_session_update()
+        client, session_id = self._load_state()
 
         try:
             response = await client.read_text_file(
@@ -56,7 +55,8 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
 
         self.state.file_backup_content = response.content
         self.state.file_backup_encoding = "utf-8"
-        return ReadSafeResult(response.content, "utf-8")
+        self.state.file_backup_newline = "\n"
+        return ReadSafeResult(response.content, "utf-8", "\n")
 
     async def _backup_file(self, file_path: Path) -> None:
         if self.state.file_backup_content is None:
@@ -66,10 +66,13 @@ class SearchReplace(CoreSearchReplaceTool, BaseAcpTool[AcpSearchReplaceState]):
             file_path.with_suffix(file_path.suffix + ".bak"),
             self.state.file_backup_content,
             self.state.file_backup_encoding,
+            self.state.file_backup_newline,
         )
 
-    async def _write_file(self, file_path: Path, content: str, encoding: str) -> None:
-        client, session_id, _ = self._load_state()
+    async def _write_file(
+        self, file_path: Path, content: str, encoding: str, newline: str
+    ) -> None:
+        client, session_id = self._load_state()
 
         try:
             await client.write_text_file(

@@ -1,5 +1,4 @@
-# What's new in v2.9.5
+# What's new in v2.10.0
 
-- **`/loop` command**: Run a prompt or slash command on a recurring interval.
-- **`default_agent` config**: Set which agent profile starts each session.
-- **Parallel-safe history**: Multiple `vibe` instances no longer clobber each other's history file.
+- **Multi-repo sessions**: Use `--add-dir` to pull additional repository roots into your session
+- **Improved plan mode**: Plan is now displayed as live-updating markdown with Ctrl+G to edit in your default editor

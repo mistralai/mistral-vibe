@@ -3,6 +3,7 @@ from __future__ import annotations
 from vibe.core.paths._local_config_walk import (
     WALK_MAX_DEPTH,
     ConfigWalkResult,
+    dedup_paths,
     walk_local_config_dirs,
 )
 from vibe.core.paths._vibe_home import (
@@ -35,5 +36,6 @@ __all__ = [
     "WALK_MAX_DEPTH",
     "ConfigWalkResult",
     "GlobalPath",
+    "dedup_paths",
     "walk_local_config_dirs",
 ]

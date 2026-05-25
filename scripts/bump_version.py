@@ -79,7 +79,7 @@ def get_current_version() -> str:
     return version_match.group(1)
 
 
-def update_changelog(current_version: str, new_version: str) -> None:
+def scaffold_changelog(new_version: str) -> None:
     changelog_path = Path("CHANGELOG.md")
 
     if not changelog_path.exists():
@@ -104,52 +104,53 @@ def update_changelog(current_version: str, new_version: str) -> None:
     updated_content = content[:insert_position] + new_entry + content[insert_position:]
     changelog_path.write_text(updated_content)
 
-    # Auto-fill changelog using Vibe in headless mode
-    print("Filling CHANGELOG.md...")
-    prompt = f"""Fill the new CHANGELOG.md section for version {new_version} (the one that was just added).
 
-Rules:
-- Use only commits in origin/main that touch the `vibe` folder in this repo since version {current_version}. Inspect git history to list relevant changes.
-- Follow the existing file convention: Keep a Changelog format with ### Added, ### Changed, ### Fixed, ### Removed. One bullet per line, concise. Match the tone and style of the entries already in the file.
-- Do not mention commit hashes or PR numbers.
-- Remove any subsection that has no bullets (leave no empty ### Added / ### Changed / etc)."""
-    try:
-        result = subprocess.run(
-            ["vibe", "-p", prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        if result.returncode != 0:
-            raise RuntimeError("Failed to auto-fill CHANGELOG.md")
-    except Exception:
-        print(
-            "Warning: failed to auto-fill CHANGELOG.md, please fill it manually.",
-            file=sys.stderr,
-        )
-
-
-def fill_whats_new_message(new_version: str) -> None:
+def scaffold_whats_new() -> None:
     whats_new_path = Path("vibe/whats_new.md")
     if not whats_new_path.exists():
         raise FileNotFoundError("whats_new.md not found in current directory")
 
     whats_new_path.write_text("")
 
-    print("Filling whats_new.md...")
-    prompt = f"""Fill vibe/whats_new.md using only the CHANGELOG.md section for version {new_version}.
 
-Rules:
-- Include only the most important user-facing changes: visible CLI/UI behavior, new commands or key bindings, UX improvements. Exclude internal refactors, API-only changes, and dev/tooling updates.
-- If there are no such changes, write nothing (empty file).
-- Otherwise: first line must be "# What's new in v{new_version}" (no extra heading). Then one bullet per item, format: "- **Feature**: short summary" (e.g. - **Interactive resume**: Added a /resume command to choose which session to resume). One line per bullet, concise.
-- Do not copy the full changelog; summarize only what matters to someone reading "what's new" in the app."""
+def fill_release_notes(current_version: str, new_version: str, autofill: bool) -> None:
+    if not autofill:
+        print("Skipping CHANGELOG.md and whats_new.md auto-fill.")
+        return
+
+    print("Filling CHANGELOG.md and vibe/whats_new.md...")
+    prompt = f"""Fill both CHANGELOG.md and vibe/whats_new.md for version {new_version} in a single pass, reusing the same git history context for both files.
+
+Step 1 — Gather context (do this once):
+- Inspect git history for commits in origin/main that touch the `vibe` folder since version {current_version}.
+- Build a single mental list of relevant changes. Do not mention commit hashes or PR numbers.
+
+Step 2 — Fill CHANGELOG.md:
+- Edit the section for version {new_version} that was just scaffolded at the top of the file.
+- Follow the existing file convention: Keep a Changelog format with ### Added, ### Changed, ### Fixed, ### Removed. One bullet per line, concise. Match the tone and style of existing entries.
+- Remove any subsection that has no bullets (leave no empty ### Added / ### Changed / etc).
+
+Step 3 — Fill vibe/whats_new.md (reuse the same context, do NOT re-inspect git):
+- This file is an in-app announcement shown to users on upgrade. It is NOT a changelog. Its only purpose is to advertise a handful of notable new things. Most releases warrant 0-3 bullets. If nothing is genuinely noteworthy to an end user, leave the file empty.
+- Inclusion criteria (a bullet must meet ALL):
+  * Visible in the CLI/UI: a new command, key binding, screen, flag, or behavior the user will actually notice.
+  * Net-new capability or a meaningful UX improvement (not a tweak, polish, or fix unless it unblocks a real workflow).
+  * Worth interrupting the user to tell them about.
+- Hard exclusions (never include, even if user-facing): bug fixes, small UI polish, copy changes, refactors, performance tweaks, dependency bumps, internal/API-only changes, config plumbing, telemetry, logging, build/CI, tests, docs.
+- Be ruthless. When in doubt, leave it out. Prefer an empty file over a weak bullet. Do NOT pad the list to look substantial.
+- Format (only if there is at least one qualifying item):
+  * First line: "# What's new in v{new_version}" (no other headings).
+  * Then up to 3 bullets, one line each: "- **Feature**: short summary" (e.g. "- **Interactive resume**: Added a /resume command to choose which session to resume").
+  * Do not copy or paraphrase the full changelog."""
     try:
         result = subprocess.run(
             ["vibe", "-p", prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         if result.returncode != 0:
-            raise RuntimeError("Failed to auto-fill whats_new.md")
+            raise RuntimeError("Failed to auto-fill release notes")
     except Exception:
         print(
-            "Warning: failed to auto-fill whats_new.md, please fill it manually.",
+            "Warning: failed to auto-fill CHANGELOG.md and whats_new.md, please fill them manually.",
             file=sys.stderr,
         )
 
@@ -172,8 +173,14 @@ Examples:
     parser.add_argument(
         "bump_type", choices=BUMP_TYPES, help="Type of version bump to perform"
     )
+    parser.add_argument(
+        "--no-autofill",
+        action="store_true",
+        help="Skip auto-filling CHANGELOG.md and whats_new.md via vibe -p",
+    )
 
     args = parser.parse_args()
+    autofill = not args.no_autofill
 
     try:
         # Get current version
@@ -213,9 +220,11 @@ Examples:
         )
 
         print()
-        update_changelog(current_version=current_version, new_version=new_version)
-
-        fill_whats_new_message(new_version=new_version)
+        scaffold_changelog(new_version=new_version)
+        scaffold_whats_new()
+        fill_release_notes(
+            current_version=current_version, new_version=new_version, autofill=autofill
+        )
         print()
 
         subprocess.run(["uv", "lock"], check=True)

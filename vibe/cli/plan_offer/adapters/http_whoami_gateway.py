@@ -10,20 +10,20 @@ from vibe.cli.plan_offer.ports.whoami_gateway import (
     WhoAmIGatewayUnauthorized,
     WhoAmIResponse,
 )
+from vibe.core.utils.http import build_ssl_context
 
-BASE_URL = "https://console.mistral.ai"
 WHOAMI_PATH = "/api/vibe/whoami"
 
 
 class HttpWhoAmIGateway:
-    def __init__(self, base_url: str = BASE_URL) -> None:
+    def __init__(self, base_url: str) -> None:
         self._base_url = base_url.rstrip("/")
 
     async def whoami(self, api_key: str) -> WhoAmIResponse:
         url = f"{self._base_url}{WHOAMI_PATH}"
         headers = {"Authorization": f"Bearer {api_key}"}
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(verify=build_ssl_context()) as client:
                 response = await client.get(url, headers=headers)
         except httpx.RequestError as exc:
             raise WhoAmIGatewayError() from exc

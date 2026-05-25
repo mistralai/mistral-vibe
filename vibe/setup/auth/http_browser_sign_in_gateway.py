@@ -10,6 +10,7 @@ from urllib.parse import SplitResult, unquote, urlsplit
 import httpx
 
 from vibe.core.logger import logger
+from vibe.core.utils.http import build_ssl_context
 from vibe.setup.auth.browser_sign_in_gateway import (
     BrowserSignInError,
     BrowserSignInErrorCode,
@@ -187,9 +188,21 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
                 json={"exchange_token": exchange_token, "code_verifier": code_verifier},
             )
         except httpx.HTTPError as err:
+            logger.warning(
+                "Browser sign-in exchange request failed for api_base_url=%s: %s",
+                self._api_base_url,
+                err,
+                exc_info=True,
+            )
             raise BrowserSignInError(message, code=code) from err
 
         if not response.is_success:
+            logger.warning(
+                "Browser sign-in exchange request returned status_code=%s for api_base_url=%s response_detail=%s",
+                response.status_code,
+                self._api_base_url,
+                _build_safe_response_error_detail(response),
+            )
             raise BrowserSignInError(message, code=code)
 
         raw_payload = _response_json_or_raise(response, message=message, code=code)
@@ -203,7 +216,7 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
 
     def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient()
+            self._client = httpx.AsyncClient(verify=build_ssl_context())
             self._should_manage_client = True
         return self._client
 
@@ -295,6 +308,29 @@ def _response_json_or_raise(
         raise BrowserSignInError(message, code=code)
 
     return dict(payload)
+
+
+def _build_safe_response_error_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return "unavailable"
+
+    if not isinstance(payload, Mapping):
+        return "unavailable"
+
+    for key in ("detail", "message", "error"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            return _truncate_log_value(value)
+
+    return "unavailable"
+
+
+def _truncate_log_value(value: str, *, max_length: int = 200) -> str:
+    if len(value) <= max_length:
+        return value
+    return f"{value[: max_length - 3]}..."
 
 
 def _build_safe_url_log_details(value: object) -> str:

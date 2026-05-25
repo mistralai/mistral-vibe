@@ -11,6 +11,7 @@ import httpx
 from vibe import __version__
 from vibe.core.config import ProviderConfig, VibeConfig
 from vibe.core.llm.format import ResolvedToolCall
+from vibe.core.logger import logger
 from vibe.core.telemetry.build_metadata import build_base_metadata
 from vibe.core.telemetry.types import (
     AgentEntrypoint,
@@ -21,12 +22,37 @@ from vibe.core.telemetry.types import (
     TeleportFailureStage,
 )
 from vibe.core.utils import get_server_url_from_api_base, get_user_agent
+from vibe.core.utils.http import build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.agent_loop import ToolDecision
 
 _DEFAULT_TELEMETRY_BASE_URL = "https://api.mistral.ai"
 _DATALAKE_EVENTS_PATH = "/v1/datalake/events"
+
+
+def get_mistral_provider_and_api_key(
+    config: VibeConfig,
+) -> tuple[ProviderConfig, str] | None:
+    """Resolve a Mistral provider and its API key, or None.
+
+    Prefers the active provider when it is a Mistral provider; otherwise
+    falls back to the first configured Mistral provider. Returns a key
+    only when a Mistral provider is found, to avoid leaking third-party
+    credentials to Mistral-controlled endpoints (telemetry, A/B test
+    evaluation, ...).
+    """
+    try:
+        provider = config.get_mistral_provider()
+    except Exception:
+        return None
+    if provider is None:
+        return None
+    env_var = provider.api_key_env_var
+    api_key = os.getenv(env_var) if env_var else None
+    if api_key is None:
+        return None
+    return provider, api_key
 
 
 class TelemetryClient:
@@ -37,11 +63,13 @@ class TelemetryClient:
         parent_session_id_getter: Callable[[], str | None] | None = None,
         entrypoint_metadata_getter: Callable[[], EntrypointMetadata | None]
         | None = None,
+        experiments_getter: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._session_id_getter = session_id_getter
         self._parent_session_id_getter = parent_session_id_getter
         self._entrypoint_metadata_getter = entrypoint_metadata_getter
+        self._experiments_getter = experiments_getter
         self._client: httpx.AsyncClient | None = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self.last_correlation_id: str | None = None
@@ -51,33 +79,13 @@ class TelemetryClient:
         return urljoin(base.rstrip("/"), _DATALAKE_EVENTS_PATH)
 
     def _get_mistral_api_key(self) -> str | None:
-        """Get the API key from the active provider if it's Mistral,
-        otherwise the first Mistral provider.
-
-        Only returns an API key if the provider is a Mistral provider
-        to avoid leaking third-party credentials to the telemetry endpoint.
-        """
-        provider_and_api_key = self._get_mistral_provider_and_api_key()
+        provider_and_api_key = get_mistral_provider_and_api_key(self._config_getter())
         if provider_and_api_key is None:
             return None
         _, api_key = provider_and_api_key
         return api_key
 
-    def _get_mistral_provider_and_api_key(self) -> tuple[ProviderConfig, str] | None:
-        try:
-            provider = self._config_getter().get_mistral_provider()
-        except Exception:
-            return None
-        if provider is None:
-            return None
-        env_var = provider.api_key_env_var
-        api_key = os.getenv(env_var) if env_var else None
-        if api_key is None:
-            return None
-        return provider, api_key
-
     def _is_enabled(self) -> bool:
-        """Check if telemetry is enabled in the current config."""
         try:
             return self._config_getter().enable_telemetry
         except Exception:
@@ -92,6 +100,7 @@ class TelemetryClient:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(5.0),
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                verify=build_ssl_context(),
             )
         return self._client
 
@@ -107,7 +116,10 @@ class TelemetryClient:
             return None
         return self._parent_session_id_getter()
 
-    def build_client_event_metadata(self) -> dict[str, str]:
+    def build_client_event_metadata(self) -> dict[str, Any]:
+        experiments = (
+            self._experiments_getter() if self._experiments_getter is not None else None
+        )
         return build_base_metadata(
             entrypoint_metadata=(
                 self._entrypoint_metadata_getter()
@@ -116,6 +128,7 @@ class TelemetryClient:
             ),
             session_id=self.session_id,
             parent_session_id=self.parent_session_id,
+            experiments=experiments,
         )
 
     def send_telemetry_event(
@@ -127,13 +140,19 @@ class TelemetryClient:
     ) -> None:
         if not self._is_enabled():
             return
-        provider_and_api_key = self._get_mistral_provider_and_api_key()
+        provider_and_api_key = get_mistral_provider_and_api_key(self._config_getter())
         if provider_and_api_key is None:
             return
         provider, mistral_api_key = provider_and_api_key
         telemetry_url = self._get_telemetry_url(provider.api_base)
         user_agent = get_user_agent(provider.backend)
         properties = self.build_client_event_metadata() | properties
+        logger.debug(
+            "telemetry event=%s properties=%s correlation_id=%s",
+            event_name,
+            properties,
+            correlation_id,
+        )
 
         payload: dict[str, Any] = {"event": event_name, "properties": properties}
         if correlation_id:

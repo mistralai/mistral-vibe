@@ -8,7 +8,8 @@ import pytest
 
 from tests.mock.utils import collect_result
 from vibe.acp.tools.builtins.bash import AcpBashState, Bash
-from vibe.core.tools.base import ToolError
+from vibe.acp.tools.events import ToolTerminalOpenedEvent
+from vibe.core.tools.base import InvokeContext, ToolError
 from vibe.core.tools.builtins.bash import BashArgs, BashResult, BashToolConfig
 
 
@@ -105,9 +106,7 @@ def acp_bash_tool(mock_client: MockClient) -> Bash:
     config = BashToolConfig()
     # Use model_construct to bypass Pydantic validation for testing
     state = AcpBashState.model_construct(
-        client=mock_client,
-        session_id="test_session_123",
-        tool_call_id="test_tool_call_456",
+        client=mock_client, session_id="test_session_123"
     )
     return Bash(config_getter=lambda: config, state=state)
 
@@ -156,7 +155,7 @@ class TestAcpBashExecution:
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -176,7 +175,7 @@ class TestAcpBashExecution:
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -196,7 +195,7 @@ class TestAcpBashExecution:
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -213,9 +212,7 @@ class TestAcpBashExecution:
     async def test_run_without_client(self) -> None:
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
-            state=AcpBashState.model_construct(
-                client=None, session_id="test_session", tool_call_id="test_call"
-            ),
+            state=AcpBashState.model_construct(client=None, session_id="test_session"),
         )
 
         args = BashArgs(command="test")
@@ -232,9 +229,7 @@ class TestAcpBashExecution:
         mock_client = MockClient()
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
-            state=AcpBashState.model_construct(
-                client=mock_client, session_id=None, tool_call_id="test_call"
-            ),
+            state=AcpBashState.model_construct(client=mock_client, session_id=None),
         )
 
         args = BashArgs(command="test")
@@ -256,7 +251,7 @@ class TestAcpBashExecution:
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -283,7 +278,7 @@ class TestAcpBashTimeout:
         tool = Bash(
             config_getter=lambda: BashToolConfig(default_timeout=30),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -312,7 +307,7 @@ class TestAcpBashTimeout:
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -324,61 +319,56 @@ class TestAcpBashTimeout:
         assert str(exc_info.value) == "Command timed out after 1s: 'slow_command'"
 
 
-class TestAcpBashEmbedding:
+class TestAcpBashTerminalOpenedEvent:
     @pytest.mark.asyncio
-    async def test_run_with_embedding(self, mock_client: MockClient) -> None:
-        tool = Bash(
-            config_getter=lambda: BashToolConfig(),
-            state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
-            ),
-        )
-
-        args = BashArgs(command="test")
-        await collect_result(tool.run(args))
-
-        assert mock_client._session_update_called
-
-    @pytest.mark.asyncio
-    async def test_run_embedding_without_tool_call_id(
+    async def test_run_yields_terminal_opened_event(
         self, mock_client: MockClient
     ) -> None:
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id=None
+                client=mock_client, session_id="test_session"
             ),
         )
 
         args = BashArgs(command="test")
-        await collect_result(tool.run(args))
+        events: list[ToolTerminalOpenedEvent] = []
+        async for item in tool.run(args, InvokeContext(tool_call_id="test_call")):
+            if isinstance(item, ToolTerminalOpenedEvent):
+                events.append(item)
 
-        # Embedding should be skipped when tool_call_id is None
-        assert not mock_client._session_update_called
+        assert len(events) == 1
+        assert events[0].terminal_id == mock_client._terminal_handle.id
+        assert events[0].tool_call_id == "test_call"
+        assert events[0].tool_name == "bash"
 
+
+class TestAcpBashConcurrentInvocations:
     @pytest.mark.asyncio
-    async def test_run_embedding_handles_exception(
-        self, mock_client: MockClient
-    ) -> None:
-        # Make session_update raise an exception
-        async def failing_session_update(session_id: str, update, **kwargs) -> None:
-            raise RuntimeError("Session update failed")
-
-        mock_client.session_update = failing_session_update
-
+    async def test_concurrent_invocations_yield_distinct_tool_call_ids(self) -> None:
+        mock_client = MockClient(MockTerminalHandle(terminal_id="t", wait_delay=0.05))
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
-        args = BashArgs(command="test")
-        # Should not raise, embedding failure is silently ignored
-        result = await collect_result(tool.run(args))
+        async def run_and_collect_ids(tool_call_id: str) -> list[str]:
+            ids: list[str] = []
+            async for item in tool.run(
+                BashArgs(command="echo hi"), InvokeContext(tool_call_id=tool_call_id)
+            ):
+                if isinstance(item, ToolTerminalOpenedEvent):
+                    ids.append(item.tool_call_id)
+            return ids
 
-        assert result is not None
-        assert result.stdout == "test output"
+        results = await asyncio.gather(
+            run_and_collect_ids("T1"), run_and_collect_ids("T2")
+        )
+
+        assert results[0] == ["T1"]
+        assert results[1] == ["T2"]
 
 
 class TestAcpBashConfig:
@@ -395,7 +385,7 @@ class TestAcpBashConfig:
         tool = Bash(
             config_getter=lambda: BashToolConfig(default_timeout=30),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -425,7 +415,7 @@ class TestAcpBashCleanup:
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -457,7 +447,7 @@ class TestAcpBashCleanup:
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
@@ -483,7 +473,7 @@ class TestAcpBashCleanup:
         tool = Bash(
             config_getter=lambda: BashToolConfig(),
             state=AcpBashState.model_construct(
-                client=mock_client, session_id="test_session", tool_call_id="test_call"
+                client=mock_client, session_id="test_session"
             ),
         )
 
