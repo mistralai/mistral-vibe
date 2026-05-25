@@ -14,13 +14,8 @@ from vibe.core.telemetry.send import TelemetryClient
 
 @pytest.fixture(autouse=True)
 def _enable_feedback_bar(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "vibe.cli.textual_ui.widgets.feedback_bar_manager.FEEDBACK_PROBABILITY", 1
-    )
-    monkeypatch.setattr(
-        "vibe.cli.textual_ui.widgets.feedback_bar_manager.MIN_USER_MESSAGES_FOR_FEEDBACK",
-        1,
-    )
+    monkeypatch.setattr("vibe.core.feedback.FEEDBACK_PROBABILITY", 1)
+    monkeypatch.setattr("vibe.core.feedback.MIN_USER_MESSAGES_FOR_FEEDBACK", 1)
     monkeypatch.setattr(TelemetryClient, "is_active", lambda self: True)
 
 
@@ -38,10 +33,7 @@ class FeedbackBarSnapshotApp(BaseSnapshotTestApp):
 
 def test_snapshot_feedback_bar_visible(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
-        with patch(
-            "vibe.cli.textual_ui.widgets.feedback_bar_manager.random.random",
-            return_value=0,
-        ):
+        with patch("vibe.core.feedback.random.random", return_value=0):
             await pilot.press(*"Hello")
             await pilot.press("enter")
             await pilot.pause(0.4)

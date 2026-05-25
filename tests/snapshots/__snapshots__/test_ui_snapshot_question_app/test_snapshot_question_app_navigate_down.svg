@@ -32,10 +32,11 @@
         font-family: arial;
     }
 
-    .terminal-r1 { fill: #625e4c }
+    .terminal-r1 { fill: #8d8d8d }
 .terminal-r2 { fill: #c5c8c6 }
-.terminal-r3 { fill: #9d65ff;font-weight: bold }
-.terminal-r4 { fill: #d9d9d9 }
+.terminal-r3 { fill: #0178d4;font-weight: bold }
+.terminal-r4 { fill: #e0e0e0 }
+.terminal-r5 { fill: #a0a0a0 }
     </style>
 
     <defs>
@@ -117,9 +118,9 @@
 </text><text class="terminal-r1" x="0" y="93.2" textLength="12.2" clip-path="url(#terminal-line-3)">│</text><text class="terminal-r4" x="24.4" y="93.2" textLength="451.4" clip-path="url(#terminal-line-3)">&#160;&#160;1.&#160;PostgreSQL&#160;-&#160;Relational&#160;database</text><text class="terminal-r1" x="963.8" y="93.2" textLength="12.2" clip-path="url(#terminal-line-3)">│</text><text class="terminal-r2" x="976" y="93.2" textLength="12.2" clip-path="url(#terminal-line-3)">
 </text><text class="terminal-r1" x="0" y="117.6" textLength="12.2" clip-path="url(#terminal-line-4)">│</text><text class="terminal-r3" x="24.4" y="117.6" textLength="390.4" clip-path="url(#terminal-line-4)">›&#160;2.&#160;MongoDB&#160;-&#160;Document&#160;database</text><text class="terminal-r1" x="963.8" y="117.6" textLength="12.2" clip-path="url(#terminal-line-4)">│</text><text class="terminal-r2" x="976" y="117.6" textLength="12.2" clip-path="url(#terminal-line-4)">
 </text><text class="terminal-r1" x="0" y="142" textLength="12.2" clip-path="url(#terminal-line-5)">│</text><text class="terminal-r4" x="24.4" y="142" textLength="341.6" clip-path="url(#terminal-line-5)">&#160;&#160;3.&#160;Redis&#160;-&#160;In-memory&#160;store</text><text class="terminal-r1" x="963.8" y="142" textLength="12.2" clip-path="url(#terminal-line-5)">│</text><text class="terminal-r2" x="976" y="142" textLength="12.2" clip-path="url(#terminal-line-5)">
-</text><text class="terminal-r1" x="0" y="166.4" textLength="12.2" clip-path="url(#terminal-line-6)">│</text><text class="terminal-r4" x="24.4" y="166.4" textLength="61" clip-path="url(#terminal-line-6)">&#160;&#160;4.&#160;</text><text class="terminal-r1" x="85.4" y="166.4" textLength="231.8" clip-path="url(#terminal-line-6)">Type&#160;your&#160;answer...</text><text class="terminal-r1" x="963.8" y="166.4" textLength="12.2" clip-path="url(#terminal-line-6)">│</text><text class="terminal-r2" x="976" y="166.4" textLength="12.2" clip-path="url(#terminal-line-6)">
+</text><text class="terminal-r1" x="0" y="166.4" textLength="12.2" clip-path="url(#terminal-line-6)">│</text><text class="terminal-r4" x="24.4" y="166.4" textLength="61" clip-path="url(#terminal-line-6)">&#160;&#160;4.&#160;</text><text class="terminal-r5" x="85.4" y="166.4" textLength="231.8" clip-path="url(#terminal-line-6)">Type&#160;your&#160;answer...</text><text class="terminal-r1" x="963.8" y="166.4" textLength="12.2" clip-path="url(#terminal-line-6)">│</text><text class="terminal-r2" x="976" y="166.4" textLength="12.2" clip-path="url(#terminal-line-6)">
 </text><text class="terminal-r1" x="0" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">│</text><text class="terminal-r1" x="963.8" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">│</text><text class="terminal-r2" x="976" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">
-</text><text class="terminal-r1" x="0" y="215.2" textLength="12.2" clip-path="url(#terminal-line-8)">│</text><text class="terminal-r1" x="24.4" y="215.2" textLength="451.4" clip-path="url(#terminal-line-8)">↑↓&#160;navigate&#160;&#160;Enter&#160;select&#160;&#160;Esc&#160;cancel</text><text class="terminal-r1" x="963.8" y="215.2" textLength="12.2" clip-path="url(#terminal-line-8)">│</text><text class="terminal-r2" x="976" y="215.2" textLength="12.2" clip-path="url(#terminal-line-8)">
+</text><text class="terminal-r1" x="0" y="215.2" textLength="12.2" clip-path="url(#terminal-line-8)">│</text><text class="terminal-r5" x="24.4" y="215.2" textLength="451.4" clip-path="url(#terminal-line-8)">↑↓&#160;navigate&#160;&#160;Enter&#160;select&#160;&#160;Esc&#160;cancel</text><text class="terminal-r1" x="963.8" y="215.2" textLength="12.2" clip-path="url(#terminal-line-8)">│</text><text class="terminal-r2" x="976" y="215.2" textLength="12.2" clip-path="url(#terminal-line-8)">
 </text><text class="terminal-r1" x="0" y="239.6" textLength="976" clip-path="url(#terminal-line-9)">└──────────────────────────────────────────────────────────────────────────────┘</text><text class="terminal-r2" x="976" y="239.6" textLength="12.2" clip-path="url(#terminal-line-9)">
 </text><text class="terminal-r2" x="976" y="264" textLength="12.2" clip-path="url(#terminal-line-10)">
 </text><text class="terminal-r2" x="976" y="288.4" textLength="12.2" clip-path="url(#terminal-line-11)">

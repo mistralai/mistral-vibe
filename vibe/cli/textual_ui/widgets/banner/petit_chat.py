@@ -163,7 +163,9 @@ TRANSITIONS = [
 
 class PetitChat(Static):
     def __init__(self, animate: bool = True, **kwargs: Any) -> None:
-        super().__init__(**kwargs, classes="banner-chat")
+        classes = kwargs.pop("classes", None)
+        merged_classes = "banner-chat" if classes is None else f"banner-chat {classes}"
+        super().__init__(**kwargs, classes=merged_classes)
         self._dots = {1j * y + x for y, row in enumerate(STARTING_DOTS) for x in row}
         self._transition_index = 0
         self._do_animate = animate

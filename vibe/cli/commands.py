@@ -174,6 +174,11 @@ class CommandRegistry:
                 description="Show data retention information",
                 handler="_show_data_retention",
             ),
+            "theme": Command(
+                aliases=frozenset(["/theme"]),
+                description="Select theme",
+                handler="_show_theme",
+            ),
         }
 
     @property

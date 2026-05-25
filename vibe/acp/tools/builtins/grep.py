@@ -41,8 +41,11 @@ class Grep(
             tool_call_id=event.tool_call_id,
             kind=resolve_kind(event.tool_name),
             raw_input=event.args.model_dump_json(),
-            locations=[ToolCallLocation(path=search_path)],
-            field_meta={"tool_name": event.tool_name, "query": event.args.pattern},
+            field_meta={
+                "tool_name": event.tool_name,
+                "query": event.args.pattern,
+                "search_path": search_path,
+            },
         )
 
     @classmethod

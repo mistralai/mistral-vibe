@@ -16,6 +16,13 @@ from vibe.core.tools.builtins.search_replace import (
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
 
+def _make_block(search: str, replace: str) -> str:
+    head = "<" * 7 + " SEARCH"
+    sep = "=" * 7
+    tail = ">" * 7 + " REPLACE"
+    return f"{head}\n{search}\n{sep}\n{replace}\n{tail}"
+
+
 class MockClient:
     def __init__(
         self,
@@ -153,10 +160,73 @@ class TestAcpSearchReplaceExecution:
         result = await collect_result(tool.run(args))
 
         assert result.blocks_applied == 1
-        # Should have written the main file and the backup
-        assert len(mock_client._write_calls) >= 1
-        # Check if backup was written (it should be written to .bak file)
         assert sum(w["path"].endswith(".bak") for w in mock_client._write_calls) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("newline", ["\r\n", "\r", "\n"])
+    async def test_run_preserves_line_endings(
+        self,
+        newline: str,
+        mock_client: MockClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        mock_client._file_content = newline.join([
+            "original line 1",
+            "original line 2",
+            "original line 3",
+        ])
+
+        tool = SearchReplace(
+            config_getter=lambda: SearchReplaceConfig(),
+            state=AcpSearchReplaceState.model_construct(
+                client=mock_client, session_id="test_session"
+            ),
+        )
+
+        test_file = tmp_path / "test_file.txt"
+        test_file.touch()
+        args = SearchReplaceArgs(
+            file_path=str(test_file),
+            content=_make_block("original line 2", "modified line 2"),
+        )
+        await collect_result(tool.run(args))
+
+        assert mock_client._last_write_params["content"] == newline.join([
+            "original line 1",
+            "modified line 2",
+            "original line 3",
+        ])
+
+    @pytest.mark.asyncio
+    async def test_run_backup_preserves_crlf_byte_for_byte(
+        self, mock_client: MockClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        original = "original line 1\r\noriginal line 2\r\noriginal line 3"
+        mock_client._file_content = original
+
+        tool = SearchReplace(
+            config_getter=lambda: SearchReplaceConfig(create_backup=True),
+            state=AcpSearchReplaceState.model_construct(
+                client=mock_client, session_id="test_session"
+            ),
+        )
+
+        test_file = tmp_path / "test_file.txt"
+        test_file.touch()
+        args = SearchReplaceArgs(
+            file_path=str(test_file),
+            content=_make_block("original line 1", "modified line 1"),
+        )
+        await collect_result(tool.run(args))
+
+        backup_calls = [
+            w for w in mock_client._write_calls if w["path"].endswith(".bak")
+        ]
+        assert len(backup_calls) == 1
+        assert backup_calls[0]["content"] == original
 
     @pytest.mark.asyncio
     async def test_run_read_error(

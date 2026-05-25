@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.0] - 2026-05-25
+
+### Added
+
+- Load skills from `~/.agents/skills` so they can be shared across agents
+- Restore the textual theme selection system with an onboarding theme picker
+- Surface unauthenticated connectors in `/mcp` with `needs auth` / `needs setup` labels and start the OAuth flow from inside the CLI
+- Current date injected into the system prompt
+- `minimal` system prompt variant for eval and training
+
+### Changed
+
+- Refreshed manual API key onboarding screen to match the new onboarding panel layout
+- Newly discovered connectors are now disabled by default; existing user choices are preserved
+
+### Fixed
+
+- Preserve original line endings in ACP `search_replace`
+- Show MCP/connectors count as `enabled/total` in the banner
+- ACP grep tool displays the search path as a chip and no longer drops the filename
+
+
 ## [2.10.1] - 2026-05-20
 
 ### Added

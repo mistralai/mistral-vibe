@@ -176,18 +176,14 @@ class TestUserToolsDirs:
         mgr = HarnessFilesManager(sources=("project",))
         assert mgr.user_tools_dirs == []
 
-    def test_returns_empty_when_dir_does_not_exist(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", tmp_path)
+    def test_returns_empty_when_dir_does_not_exist(self) -> None:
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.user_tools_dirs == []
 
     def test_returns_path_when_user_in_sources_and_dir_exists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, config_dir: Path
     ) -> None:
-        monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", tmp_path)
-        tools_dir = tmp_path / "tools"
+        tools_dir = config_dir / "tools"
         tools_dir.mkdir()
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.user_tools_dirs == [tools_dir]
@@ -198,21 +194,35 @@ class TestUserSkillsDirs:
         mgr = HarnessFilesManager(sources=("project",))
         assert mgr.user_skills_dirs == []
 
-    def test_returns_empty_when_dir_does_not_exist(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", tmp_path)
+    def test_returns_empty_when_dir_does_not_exist(self) -> None:
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.user_skills_dirs == []
 
     def test_returns_path_when_user_in_sources_and_dir_exists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, config_dir: Path
     ) -> None:
-        monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", tmp_path)
-        skills_dir = tmp_path / "skills"
+        skills_dir = config_dir / "skills"
         skills_dir.mkdir()
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.user_skills_dirs == [skills_dir]
+
+    def test_returns_agents_skills_dir_when_only_it_exists(
+        self, config_dir: Path
+    ) -> None:
+        agents_dir = config_dir.parent / ".agents"
+        agents_skills = agents_dir / "skills"
+        agents_skills.mkdir(parents=True)
+        mgr = HarnessFilesManager(sources=("user",))
+        assert mgr.user_skills_dirs == [agents_skills]
+
+    def test_returns_both_skills_dirs_when_both_exist(self, config_dir: Path) -> None:
+        vibe_skills_dir = config_dir / "skills"
+        vibe_skills_dir.mkdir()
+        agents_dir = config_dir.parent / ".agents"
+        agents_skills = agents_dir / "skills"
+        agents_skills.mkdir(parents=True)
+        mgr = HarnessFilesManager(sources=("user",))
+        assert mgr.user_skills_dirs == [vibe_skills_dir, agents_skills]
 
 
 class TestUserAgentsDirs:
@@ -220,18 +230,14 @@ class TestUserAgentsDirs:
         mgr = HarnessFilesManager(sources=("project",))
         assert mgr.user_agents_dirs == []
 
-    def test_returns_empty_when_dir_does_not_exist(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", tmp_path)
+    def test_returns_empty_when_dir_does_not_exist(self) -> None:
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.user_agents_dirs == []
 
     def test_returns_path_when_user_in_sources_and_dir_exists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, config_dir: Path
     ) -> None:
-        monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", tmp_path)
-        agents_dir = tmp_path / "agents"
+        agents_dir = config_dir / "agents"
         agents_dir.mkdir()
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.user_agents_dirs == [agents_dir]
@@ -569,26 +575,19 @@ class TestLoadUserDoc:
         mgr = HarnessFilesManager(sources=("project",))
         assert mgr.load_user_doc() == ""
 
-    def test_returns_empty_when_file_does_not_exist(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", tmp_path)
+    def test_returns_empty_when_file_does_not_exist(self) -> None:
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.load_user_doc() == ""
 
-    def test_returns_file_content_when_file_exists(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", tmp_path)
-        (tmp_path / "AGENTS.md").write_text("# User instructions", encoding="utf-8")
+    def test_returns_file_content_when_file_exists(self, config_dir: Path) -> None:
+        (config_dir / "AGENTS.md").write_text("# User instructions", encoding="utf-8")
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.load_user_doc() == "# User instructions"
 
     def test_returns_empty_string_for_whitespace_only_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, config_dir: Path
     ) -> None:
         # load_user_doc strips — consistent with _collect_agents_md
-        monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", tmp_path)
-        (tmp_path / "AGENTS.md").write_text("   \n  ", encoding="utf-8")
+        (config_dir / "AGENTS.md").write_text("   \n  ", encoding="utf-8")
         mgr = HarnessFilesManager(sources=("user",))
         assert mgr.load_user_doc() == ""

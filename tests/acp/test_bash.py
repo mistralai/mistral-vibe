@@ -11,6 +11,7 @@ from vibe.acp.tools.builtins.bash import AcpBashState, Bash
 from vibe.acp.tools.events import ToolTerminalOpenedEvent
 from vibe.core.tools.base import InvokeContext, ToolError
 from vibe.core.tools.builtins.bash import BashArgs, BashResult, BashToolConfig
+from vibe.core.types import ToolResultEvent
 
 
 class MockTerminalHandle:
@@ -483,3 +484,42 @@ class TestAcpBashCleanup:
 
         assert result is not None
         assert result.stdout == "test output"
+
+
+class TestAcpBashToolResultSessionUpdate:
+    def test_success_reports_completed(self) -> None:
+        event = ToolResultEvent(
+            tool_name="bash",
+            tool_call_id="call_1",
+            tool_class=Bash,
+            result=BashResult(command="echo ok", stdout="ok", stderr="", returncode=0),
+        )
+
+        update = Bash.tool_result_session_update(event)
+
+        assert update is not None
+        assert update.status == "completed"
+
+    def test_user_rejection_reports_failed(self) -> None:
+        event = ToolResultEvent(
+            tool_name="bash",
+            tool_call_id="call_1",
+            tool_class=Bash,
+            skipped=True,
+            skip_reason="User rejected the tool call, provide an alternative plan",
+        )
+
+        update = Bash.tool_result_session_update(event)
+
+        assert update is not None
+        assert update.status == "failed"
+
+    def test_error_reports_failed(self) -> None:
+        event = ToolResultEvent(
+            tool_name="bash", tool_call_id="call_1", tool_class=Bash, error="boom"
+        )
+
+        update = Bash.tool_result_session_update(event)
+
+        assert update is not None
+        assert update.status == "failed"

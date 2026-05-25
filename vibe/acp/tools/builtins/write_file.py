@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from acp.helpers import SessionUpdate
@@ -24,6 +25,7 @@ from vibe.core.tools.builtins.write_file import (
     WriteFileResult,
 )
 from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.utils.io import normalize_newlines
 
 
 class AcpWriteFileState(BaseToolState, AcpToolState):
@@ -42,10 +44,12 @@ class WriteFile(CoreWriteFileTool, BaseAcpTool[AcpWriteFileState]):
 
     async def _write_file(self, args: WriteFileArgs, file_path: Path) -> None:
         client, session_id = self._load_state()
+        normalized_text, _ = normalize_newlines(args.content)
+        content = normalized_text.replace("\n", os.linesep)
 
         try:
             await client.write_text_file(
-                session_id=session_id, path=str(file_path), content=args.content
+                session_id=session_id, path=str(file_path), content=content
             )
         except Exception as e:
             raise ToolError(f"Error writing {file_path}: {e}") from e

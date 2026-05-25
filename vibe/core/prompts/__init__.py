@@ -24,6 +24,7 @@ class SystemPrompt(Prompt):
     EXPLORE = auto()
     TESTS = auto()
     LEAN = auto()
+    MINIMAL = auto()
 
 
 class UtilityPrompt(Prompt):

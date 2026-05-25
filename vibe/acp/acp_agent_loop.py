@@ -123,6 +123,7 @@ from vibe.core.config import (
     load_dotenv_values,
 )
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
+from vibe.core.feedback import record_feedback_asked, should_show_feedback
 from vibe.core.hooks.config import load_hooks_from_fs
 from vibe.core.proxy_setup import (
     ProxySetupError,
@@ -464,9 +465,11 @@ class VibeAcpAgentLoop(AcpAgent):
             field_meta={
                 "browser-auth-delegated": {
                     "attemptId": attempt.process_id,
-                    "expiresAt": attempt.expires_at.astimezone(UTC)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "expiresAt": (
+                        attempt.expires_at.astimezone(UTC)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    ),
                     "signInUrl": attempt.sign_in_url,
                 }
             }
@@ -1102,11 +1105,27 @@ class VibeAcpAgentLoop(AcpAgent):
             raise InternalError(str(e)) from e
 
         self._send_usage_update(session)
+        meta = self._build_end_turn_meta(session)
         return PromptResponse(
             stop_reason="end_turn",
             usage=self._build_usage(session),
             user_message_id=resolved_message_id,
+            field_meta=meta or None,
         )
+
+    def _build_end_turn_meta(self, session: AcpSessionLoop) -> dict[str, Any] | None:
+        agent_loop = session.agent_loop
+        user_message_count = (
+            sum(m.role == Role.user and not m.injected for m in agent_loop.messages) + 1
+        )  # +1 for the message just sent
+        if not should_show_feedback(
+            telemetry_active=agent_loop.telemetry_client.is_active(),
+            is_mistral_model=agent_loop.config.is_active_model_mistral(),
+            user_message_count=user_message_count,
+        ):
+            return None
+        record_feedback_asked()
+        return {"show_feedback_prompt": True}
 
     def _build_text_prompt(self, acp_prompt: list[ContentBlock]) -> str:
         def _is_automatic_resource(block: ContentBlock) -> bool:

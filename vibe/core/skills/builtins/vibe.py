@@ -35,6 +35,9 @@ agents, prompts, logs, and session data live here.
     vibe.log           # Main log file
     session/           # Session log files
   plans/               # Session plans
+
+~/.agents/
+  skills/              # Additional user-level skills directory
 ```
 
 ### Project-Local Configuration
@@ -413,6 +416,7 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/config` - Edit config settings
 - `/model` - Select active model
 - `/thinking` - Select thinking level
+- `/theme` - Select Textual UI theme (persisted in config)
 - `/reload` - Reload configuration, agent instructions, and skills from disk
 - `/clear` - Clear conversation history
 - `/log` - Show path to current interaction log file
@@ -466,6 +470,7 @@ Detailed instructions for the model...
 2. `.vibe/skills/` in trusted project directory
 3. `.agents/skills/` in trusted project directory
 4. `~/.vibe/skills/` (user global)
+5. `~/.agents/skills/` (user global, Agent Skills standard)
 
 ## Environment Variables
 

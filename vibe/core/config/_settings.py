@@ -23,6 +23,7 @@ from pydantic_settings import (
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
+from textual.theme import BUILTIN_THEMES
 import tomli_w
 
 from vibe.core.agents.models import BuiltinAgentName
@@ -491,10 +492,13 @@ DEFAULT_TTS_MODELS = [
     )
 ]
 
+DEFAULT_THEME = "ansi-dark"
+
 
 class VibeConfig(BaseSettings):
     active_model: str = DEFAULT_ACTIVE_MODEL
     vim_keybindings: bool = False
+    theme: str = DEFAULT_THEME
     disable_welcome_banner_animation: bool = False
     autocopy_to_clipboard: bool = True
     file_watcher_for_autocomplete: bool = False
@@ -524,6 +528,7 @@ class VibeConfig(BaseSettings):
     vibe_code_task_queue: str | None = Field(default="shared-vibe-nuage", exclude=True)
     vibe_code_api_key_env_var: str = Field(default="MISTRAL_API_KEY", exclude=True)
     vibe_code_project_name: str | None = Field(default=None, exclude=True)
+    vibe_code_experimental_nuage_enabled: bool = Field(default=False, exclude=True)
 
     # TODO(otel): remove exclude=True once the feature is publicly available
     enable_otel: bool = Field(default=False, exclude=True)
@@ -848,6 +853,18 @@ class VibeConfig(BaseSettings):
         except ValueError:
             pass
         return self
+
+    @field_validator("theme", mode="before")
+    @classmethod
+    def _validate_theme(cls, v: Any) -> str:
+        if not isinstance(v, str) or not v:
+            return DEFAULT_THEME
+        if v not in BUILTIN_THEMES:
+            logger.warning(
+                "Unknown theme=%s in config; falling back to %s", v, DEFAULT_THEME
+            )
+            return DEFAULT_THEME
+        return v
 
     @field_validator("tool_paths", mode="before")
     @classmethod

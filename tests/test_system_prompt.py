@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 import sys
 
 import pytest
@@ -123,3 +124,25 @@ def test_headless_section_absent_by_default() -> None:
     )
 
     assert "Headless Mode" not in prompt
+
+
+def test_current_date_placeholder_substituted_in_prompt() -> None:
+    config = build_test_vibe_config(
+        system_prompt_id="cli",
+        include_project_context=False,
+        include_prompt_detail=False,
+        include_model_info=False,
+        include_commit_signature=False,
+    )
+    tool_manager = ToolManager(lambda: config)
+    skill_manager = SkillManager(lambda: config)
+    agent_manager = AgentManager(lambda: config)
+
+    prompt = get_universal_system_prompt(
+        tool_manager, config, skill_manager, agent_manager
+    )
+
+    today = date.today()
+    expected = f"Today's date is {today.isoformat()} ({today.strftime('%A')})."
+    assert expected in prompt
+    assert "$current_date" not in prompt

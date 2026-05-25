@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import base64
 import importlib
+import json
 import os
 from pathlib import Path
 import sys
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import zstandard
 
+from vibe.core.config import VibeConfig
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
@@ -454,6 +457,225 @@ class TestTeleportServiceExecute:
 
         call_args = mock_nuage.start_workflow.call_args
         assert "teleported" in call_args[0][0].prompt.lower()
+
+    @pytest.mark.asyncio
+    async def test_execute_uses_experimental_nuage_when_enabled(
+        self, tmp_path: Path
+    ) -> None:
+        seen_body: dict[str, object] | None = None
+        seen_url: str | None = None
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal seen_body, seen_url
+            seen_url = str(request.url)
+            seen_body = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "sessionId": "controller-session-id",
+                    "webSessionId": "web-session-id",
+                    "projectId": "project-id",
+                    "status": "running",
+                    "url": "https://chat.example.com/code/project-id/web-session-id",
+                },
+            )
+
+        config = VibeConfig(vibe_code_experimental_nuage_enabled=True)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = TeleportService(
+                session_logger=MagicMock(),
+                vibe_code_base_url="https://chat.example.com",
+                vibe_code_workflow_id="workflow-id",
+                vibe_code_api_key="api-key",
+                workdir=tmp_path,
+                vibe_config=config,
+                client=client,
+            )
+            service._git.fetch = AsyncMock()
+            service._git.get_info = AsyncMock(
+                return_value=GitRepoInfo(
+                    remote_url="https://github.com/owner/repo",
+                    owner="owner",
+                    repo="repo",
+                    branch="main",
+                    commit="abc123",
+                    diff="local diff is intentionally not sent",
+                )
+            )
+            service._git.is_commit_pushed = AsyncMock(return_value=True)
+            service._git.is_branch_pushed = AsyncMock(return_value=True)
+
+            events = [
+                event
+                async for event in service.execute("test prompt", TeleportSession())
+            ]
+
+        assert isinstance(events[0], TeleportCheckingGitEvent)
+        assert isinstance(events[1], TeleportStartingWorkflowEvent)
+        assert isinstance(events[2], TeleportCompleteEvent)
+        assert (
+            events[2].url == "https://chat.example.com/code/project-id/web-session-id"
+        )
+        assert service._nuage_client_instance is None
+        assert seen_url == "https://chat.example.com/api/v1/code/sessions"
+        assert seen_body is not None
+        assert seen_body["message"] == {
+            "role": "user",
+            "parts": [{"type": "text", "text": "test prompt"}],
+        }
+        assert seen_body["context"] == {
+            "repositories": [
+                {"repoUrl": "https://github.com/owner/repo", "branch": "main"}
+            ]
+        }
+        assert "idempotencyKey" in seen_body
+
+    @pytest.mark.asyncio
+    async def test_execute_experimental_nuage_uses_last_message_when_prompt_missing(
+        self, tmp_path: Path
+    ) -> None:
+        seen_body: dict[str, object] | None = None
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal seen_body
+            seen_body = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "sessionId": "controller-session-id",
+                    "webSessionId": "web-session-id",
+                    "projectId": "project-id",
+                    "status": "running",
+                    "url": "https://chat.example.com/code/project-id/web-session-id",
+                },
+            )
+
+        config = VibeConfig(vibe_code_experimental_nuage_enabled=True)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = TeleportService(
+                session_logger=MagicMock(),
+                vibe_code_base_url="https://api.example.com",
+                vibe_code_workflow_id="workflow-id",
+                vibe_code_api_key="api-key",
+                workdir=tmp_path,
+                vibe_config=config,
+                client=client,
+            )
+            service._git.fetch = AsyncMock()
+            service._git.get_info = AsyncMock(
+                return_value=GitRepoInfo(
+                    remote_url="https://github.com/owner/repo",
+                    owner="owner",
+                    repo="repo",
+                    branch="main",
+                    commit="abc123",
+                    diff="",
+                )
+            )
+            service._git.is_commit_pushed = AsyncMock(return_value=True)
+            service._git.is_branch_pushed = AsyncMock(return_value=True)
+
+            session = TeleportSession(
+                messages=[{"role": "user", "content": "help me refactor"}]
+            )
+            events = [event async for event in service.execute(None, session)]
+
+        assert isinstance(events[-1], TeleportCompleteEvent)
+        assert seen_body is not None
+        assert seen_body["message"] == {
+            "role": "user",
+            "parts": [{"type": "text", "text": "help me refactor (continue)"}],
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_experimental_nuage_requires_branch(
+        self, tmp_path: Path
+    ) -> None:
+        config = VibeConfig(vibe_code_experimental_nuage_enabled=True)
+        service = TeleportService(
+            session_logger=MagicMock(),
+            vibe_code_base_url="https://api.example.com",
+            vibe_code_workflow_id="workflow-id",
+            vibe_code_api_key="api-key",
+            workdir=tmp_path,
+            vibe_config=config,
+        )
+        service._git.fetch = AsyncMock()
+        service._git.get_info = AsyncMock(
+            return_value=GitRepoInfo(
+                remote_url="https://github.com/owner/repo",
+                owner="owner",
+                repo="repo",
+                branch=None,
+                commit="abc123",
+                diff="",
+            )
+        )
+
+        with pytest.raises(ServiceTeleportError, match="checked-out branch"):
+            async for _ in service.execute("test prompt", TeleportSession()):
+                pass
+
+        service._git.fetch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execute_experimental_nuage_keeps_push_confirmation(
+        self, tmp_path: Path
+    ) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "sessionId": "controller-session-id",
+                    "webSessionId": "web-session-id",
+                    "projectId": "project-id",
+                    "status": "running",
+                    "url": "https://chat.example.com/code/project-id/web-session-id",
+                },
+            )
+
+        config = VibeConfig(vibe_code_experimental_nuage_enabled=True)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            service = TeleportService(
+                session_logger=MagicMock(),
+                vibe_code_base_url="https://api.example.com",
+                vibe_code_workflow_id="workflow-id",
+                vibe_code_api_key="api-key",
+                workdir=tmp_path,
+                vibe_config=config,
+                client=client,
+            )
+            service._git.fetch = AsyncMock()
+            service._git.get_info = AsyncMock(
+                return_value=GitRepoInfo(
+                    remote_url="https://github.com/owner/repo",
+                    owner="owner",
+                    repo="repo",
+                    branch="main",
+                    commit="abc123",
+                    diff="",
+                )
+            )
+            service._git.is_commit_pushed = AsyncMock(return_value=False)
+            service._git.is_branch_pushed = AsyncMock(return_value=False)
+            service._git.get_unpushed_commit_count = AsyncMock(return_value=2)
+            service._git.push_current_branch = AsyncMock(return_value=True)
+
+            gen = service.execute("test prompt", TeleportSession())
+            assert isinstance(await gen.asend(None), TeleportCheckingGitEvent)
+            push_event = await gen.asend(None)
+            assert isinstance(push_event, TeleportPushRequiredEvent)
+            assert push_event.unpushed_count == 2
+            assert push_event.branch_not_pushed is True
+            assert isinstance(
+                await gen.asend(TeleportPushResponseEvent(approved=True)),
+                TeleportPushingEvent,
+            )
+            events = [event async for event in gen]
+
+        service._git.push_current_branch.assert_awaited_once()
+        assert isinstance(events[0], TeleportStartingWorkflowEvent)
+        assert isinstance(events[1], TeleportCompleteEvent)
 
 
 class TestTeleportServiceContextManager:

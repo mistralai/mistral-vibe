@@ -53,22 +53,24 @@ def _result_event(
 
 
 class TestGrepFieldMeta:
-    def test_call_meta_contains_query_and_tool_name(self) -> None:
+    def test_call_meta_contains_query_tool_name_and_search_path(self) -> None:
         event = _call_event("grep", Grep, GrepArgs(pattern="TODO", path="src"))
         update = tool_call_session_update(event)
 
         assert isinstance(update, ToolCallStart)
-        assert update.field_meta == {"tool_name": "grep", "query": "TODO"}
+        assert update.field_meta == {
+            "tool_name": "grep",
+            "query": "TODO",
+            "search_path": str(Path("src").resolve()),
+        }
         assert update.kind == "search"
 
-    def test_call_location_is_resolved_search_path(self) -> None:
+    def test_call_has_no_locations_so_result_matches_are_not_replaced(self) -> None:
         event = _call_event("grep", Grep, GrepArgs(pattern="TODO", path="src"))
         update = tool_call_session_update(event)
 
         assert isinstance(update, ToolCallStart)
-        assert update.locations is not None
-        assert len(update.locations) == 1
-        assert update.locations[0].path == str(Path("src").resolve())
+        assert update.locations is None
 
     def test_result_locations_from_parsed_matches(self) -> None:
         result = GrepResult(

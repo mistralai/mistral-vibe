@@ -15,7 +15,7 @@ from acp.schema import (
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
 from vibe.acp.tools.events import ToolTerminalOpenedEvent
-from vibe.acp.tools.session_update import resolve_kind
+from vibe.acp.tools.session_update import failed_tool_result, resolve_kind
 from vibe.core.logger import logger
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.bash import Bash as CoreBashTool, BashArgs, BashResult
@@ -118,9 +118,13 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
     @classmethod
     def tool_call_session_update(cls, event: ToolCallEvent) -> ToolCallStart | None:
         if event.args is None:
+            # Title is left empty until args resolve so clients don't briefly
+            # render the tool name (e.g. "bash") as a stand-in command while
+            # the LLM is still streaming BashArgs. ACP requires title to be a
+            # str, so we use "" as the "unknown yet" sentinel.
             return ToolCallStart(
                 session_update="tool_call",
-                title="bash",
+                title="",
                 tool_call_id=event.tool_call_id,
                 kind=resolve_kind(event.tool_name),
                 content=None,
@@ -144,10 +148,13 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
     def tool_result_session_update(
         cls, event: ToolResultEvent
     ) -> ToolCallProgress | None:
+        if failure := failed_tool_result(event, BashResult):
+            return failure
+
         return ToolCallProgress(
             session_update="tool_call_update",
             tool_call_id=event.tool_call_id,
-            status="failed" if event.error else "completed",
+            status="completed",
             content=[
                 ContentToolCallContent(
                     type="content",

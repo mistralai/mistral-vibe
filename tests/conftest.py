@@ -77,6 +77,9 @@ def config_dir(
     config_file.write_text(tomli_w.dumps(get_base_config()), encoding="utf-8")
 
     monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", config_dir)
+    agents_dir = tmp_path / ".agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("vibe.core.paths._agents_home._DEFAULT_AGENTS_HOME", agents_dir)
 
     # Re-evaluate PLAN agent overrides so the allowlist uses the monkeypatched path
     from vibe.core.agents.models import PLAN, _plan_overrides
@@ -159,9 +162,7 @@ def _mock_update_commands(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _disable_feedback_bar(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "vibe.cli.textual_ui.widgets.feedback_bar_manager.FEEDBACK_PROBABILITY", 0
-    )
+    monkeypatch.setattr("vibe.core.feedback.FEEDBACK_PROBABILITY", 0)
 
 
 @pytest.fixture(autouse=True)

@@ -1,12 +1,6 @@
 $mistral_orange: #FF8205;
 
 * {
-    scrollbar-color: ansi_black;
-    scrollbar-color-hover: ansi_bright_black;
-    scrollbar-color-active: ansi_bright_black;
-    scrollbar-background: transparent;
-    scrollbar-background-hover: transparent;
-    scrollbar-background-active: transparent;
     scrollbar-size: 1 1;
 }
 
@@ -20,7 +14,7 @@ Horizontal {
 }
 
 TextArea > .text-area--cursor {
-    color: ansi_default;
+    color: $foreground;
 }
 
 #chat {
@@ -52,6 +46,55 @@ TextArea > .text-area--cursor {
     height: auto;
     width: 100%;
     background: transparent;
+}
+
+#queued-messages {
+    height: auto;
+    width: 100%;
+    background: transparent;
+    padding: 0 0 1 0;
+}
+
+#queued-messages-box {
+    height: auto;
+    width: 100%;
+    border: round $surface-lighten-2;
+    border-title-color: $text-muted;
+    border-title-style: bold;
+    padding: 0 1;
+}
+
+#queued-messages-list {
+    height: auto;
+    max-height: 8;
+    width: 100%;
+    padding: 0;
+    background: transparent;
+}
+
+#queued-messages-hint {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    padding: 0;
+}
+
+.queued-message-item {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    color: $text-muted;
+    text-style: italic;
+}
+
+.queued-message-bash {
+    color: $accent;
+}
+
+.queued-message-content {
+    width: 100%;
+    height: auto;
+    padding: 0;
 }
 
 #bottom-bar {
@@ -89,12 +132,17 @@ TextArea > .text-area--cursor {
     display: none;
     width: auto;
     height: auto;
-    color: ansi_default;
-    background: $surface;
-    border: solid ansi_bright_black;
+    color: $foreground;
+    background: $background;
+    border: solid $foreground-muted;
     overflow-y: auto;
     scrollbar-size-vertical: 1;
     /* max-height, max-width and padding set in completion_popup.py */
+}
+
+OptionList, OptionList:focus {
+    background: $background;
+    background-tint: transparent;
 }
 
 #completion-popup _CompletionItem {
@@ -106,24 +154,24 @@ TextArea > .text-area--cursor {
     height: auto;
     width: 100%;
     background: transparent;
-    border: solid ansi_bright_black;
+    border: solid $foreground-muted;
     border-title-align: right;
-    border-title-color: ansi_bright_black;
+    border-title-color: $text-muted;
     padding: 0 1;
 
     &.border-warning {
-        border: solid ansi_yellow;
-        border-title-color: ansi_yellow;
+        border: solid $warning;
+        border-title-color: $warning;
     }
 
     &.border-safe {
-        border: solid ansi_green;
-        border-title-color: ansi_green;
+        border: solid $success;
+        border-title-color: $success;
     }
 
     &.border-error {
-        border: solid ansi_red;
-        border-title-color: ansi_red;
+        border: solid $error;
+        border-title-color: $error;
     }
 
     &.border-recording {
@@ -157,13 +205,17 @@ TextArea > .text-area--cursor {
     min-height: 3;
     max-height: 50vh;
     background: transparent;
-    color: ansi_default;
+    color: $foreground;
     border: none;
     padding: 0;
     scrollbar-visibility: hidden;
 
     &.recording {
-        color: ansi_bright_black;
+        color: $text-muted;
+
+        &:ansi {
+            text-style: dim;
+        }
     }
 }
 
@@ -174,10 +226,10 @@ ToastRack {
 }
 
 Markdown {
-    color: ansi_default;
+    color: $foreground;
 
     .code_inline {
-        color: ansi_green;
+        color: $success;
         background: transparent;
         text-style: bold;
     }
@@ -199,13 +251,13 @@ Markdown {
 
     MarkdownBlockQuote {
         background: transparent;
-        border-left: outer ansi_bright_black;
+        border-left: outer $foreground-muted;
     }
 
     MarkdownBullet,
     MarkdownBulletList,
     MarkdownOrderedList {
-        color: ansi_default;
+        color: $foreground;
     }
 }
 
@@ -240,7 +292,6 @@ Markdown {
     text-style: bold;
     padding-left: 1;
     border-left: heavy $mistral_orange;
-    color: $mistral_orange;
 }
 
 .assistant-message {
@@ -277,11 +328,15 @@ Markdown {
 .reasoning-indicator {
     width: auto;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     margin-right: 1;
 
     &.success {
-        color: ansi_green;
+        color: $success;
+    }
+
+    &:ansi {
+        text-style: dim;
     }
 }
 
@@ -289,8 +344,12 @@ Markdown {
 .reasoning-triangle {
     width: auto;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     text-style: italic;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .reasoning-triangle {
@@ -303,12 +362,20 @@ Markdown {
     height: auto;
     padding: 0 0 0 2;
     margin: 0;
-    color: ansi_bright_black;
+    color: $text-muted;
     text-style: italic;
 
+    &:ansi {
+        text-style: dim;
+    }
+
     * {
-        color: ansi_bright_black;
+        color: $text-muted;
         text-style: italic;
+
+        &:ansi {
+            text-style: dim;
+        }
     }
 
     & > MarkdownBlock:last-child {
@@ -335,7 +402,7 @@ Markdown {
     .plan-file-wrapper {
         height: auto;
         width: 100%;
-        border: solid ansi_bright_black;
+        border: solid $foreground-muted;
         padding: 0 1;
     }
 
@@ -372,21 +439,20 @@ Markdown {
     width: auto;
     height: 100%;
     padding: 0 1 0 2;
-    color: ansi_bright_black;
 }
 
 .interrupt-content {
     width: 1fr;
     height: auto;
     margin: 0;
-    color: ansi_yellow;
+    color: $warning;
 }
 
 .error-content {
     width: 1fr;
     height: auto;
     margin: 0;
-    color: ansi_red;
+    color: $error;
     text-style: bold;
 }
 
@@ -394,7 +460,7 @@ Markdown {
     width: 1fr;
     height: auto;
     margin: 0;
-    color: ansi_yellow;
+    color: $warning;
 }
 
 .user-command-content {
@@ -441,15 +507,15 @@ Markdown {
     }
 
     &.bash-success {
-        color: ansi_green;
+        color: $success;
     }
 
     &.bash-error {
-        color: ansi_red;
+        color: $error;
     }
 
     &.bash-interrupted {
-        color: ansi_yellow;
+        color: $warning;
     }
 }
 
@@ -468,7 +534,11 @@ Markdown {
     width: auto;
     height: 100%;
     padding: 0 1 0 2;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .bash-output {
@@ -478,7 +548,11 @@ Markdown {
 
 .unknown-event {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 StatusMessage {
@@ -494,22 +568,22 @@ StatusMessage {
 .status-indicator-icon {
     width: auto;
     height: auto;
-    color: ansi_default;
+    color: $foreground;
     margin-right: 1;
 
     &.success {
-        color: ansi_green;
+        color: $success;
     }
 
     &.error {
-        color: ansi_red;
+        color: $error;
     }
 }
 
 .status-indicator-text {
     width: 1fr;
     height: auto;
-    color: ansi_default;
+    color: $foreground;
 }
 
 .compact-message,
@@ -531,8 +605,12 @@ StatusMessage {
 .tool-stream-message {
     width: 100%;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     padding-left: 2;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .tool-result {
@@ -542,14 +620,14 @@ StatusMessage {
     margin-left: 0;
     padding: 0;
     background: transparent;
-    color: ansi_default;
+    color: $foreground;
 
     &.error-text {
-        color: ansi_red;
+        color: $error;
     }
 
     &.warning-text {
-        color: ansi_yellow;
+        color: $warning;
     }
 }
 
@@ -564,7 +642,11 @@ StatusMessage {
     width: auto;
     height: 100%;
     padding: 0 1 0 2;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .tool-result-content {
@@ -577,7 +659,7 @@ StatusMessage {
 .tool-result-widget {
     width: 100%;
     height: auto;
-    color: ansi_default;
+    color: $foreground;
 }
 
 .tool-result-widget Static {
@@ -605,7 +687,11 @@ StatusMessage {
 .tool-call-detail,
 .tool-result-detail {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .tool-result-detail {
@@ -613,64 +699,76 @@ StatusMessage {
 }
 
 .tool-result-error {
-    color: ansi_red;
+    color: $error;
 }
 
 .tool-result-warning {
-    color: ansi_yellow;
+    color: $warning;
 }
 
 .diff-header {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     text-style: bold;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .diff-removed {
     height: auto;
-    color: ansi_red;
+    color: $error;
 }
 
 .diff-added {
     height: auto;
-    color: ansi_green;
+    color: $success;
 }
 
 .diff-range {
     height: auto;
-    color: ansi_blue;
+    color: $primary;
 }
 
 .diff-context {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .todo-empty,
 .todo-cancelled {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .todo-pending {
     height: auto;
-    color: ansi_default;
+    color: $foreground;
 }
 
 .todo-in_progress {
     height: auto;
-    color: ansi_yellow;
+    color: $warning;
 }
 
 .todo-completed {
     height: auto;
-    color: ansi_green;
+    color: $success;
 }
 
 .loading-widget {
     width: 100%;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
 }
 
 .loading-container,
@@ -698,7 +796,11 @@ StatusMessage {
 .loading-hint {
     width: auto;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .loading-debounce {
@@ -724,7 +826,7 @@ StatusMessage {
 .history-load-more-button {
     background: transparent;
     border: none;
-    color: ansi_yellow;
+    color: $warning;
     text-style: bold;
     pointer: pointer;
     padding: 1;
@@ -738,7 +840,7 @@ StatusMessage {
     width: 100%;
     height: auto;
     background: transparent;
-    border: solid ansi_bright_black;
+    border: solid $foreground-muted;
     padding: 0 1;
     margin: 0;
 }
@@ -751,7 +853,7 @@ StatusMessage {
 .settings-title {
     height: auto;
     text-style: bold;
-    color: ansi_blue;
+    color: $primary;
 }
 
 #config-options, #mcp-options, #connectorauth-options {
@@ -770,14 +872,18 @@ StatusMessage {
 
 .settings-help {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 #proxysetup-app {
     width: 100%;
     height: auto;
     background: transparent;
-    border: solid ansi_bright_black;
+    border: solid $foreground-muted;
     padding: 0 1;
     margin: 0;
 }
@@ -795,7 +901,7 @@ StatusMessage {
     width: 100%;
     height: auto;
     border: none;
-    border-left: wide ansi_bright_black;
+    border-left: wide $foreground-muted;
     padding: 0 0 0 1;
 }
 
@@ -804,7 +910,7 @@ StatusMessage {
     height: auto;
     max-height: 70vh;
     background: transparent;
-    border: solid ansi_bright_black;
+    border: solid $foreground-muted;
     padding: 0 1;
     margin: 0;
 }
@@ -829,7 +935,7 @@ StatusMessage {
 .approval-title {
     height: auto;
     text-style: bold;
-    color: ansi_bright_yellow;
+    color: $warning;
 }
 
 .approval-tool-info-container {
@@ -850,7 +956,7 @@ StatusMessage {
 
 .approval-option {
     height: auto;
-    color: ansi_default;
+    color: $foreground;
     margin-bottom: 1;
 
     &:last-of-type {
@@ -860,39 +966,47 @@ StatusMessage {
 
 .approval-cursor-selected {
     &.approval-option-yes {
-        color: ansi_green;
+        color: $success;
         text-style: bold;
     }
 
     &.approval-option-no {
-        color: ansi_bright_red;
+        color: $error;
         text-style: bold;
     }
 }
 
 .approval-option-selected {
     &.approval-option-yes {
-        color: ansi_white;
+        color: $foreground;
     }
 
     &.approval-option-no {
-        color: ansi_red;
+        color: $error;
     }
 }
 
 .approval-help {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .approval-description {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .code-block {
     height: auto;
-    color: ansi_default;
+    color: $foreground;
     background: transparent;
     padding: 1;
 }
@@ -902,7 +1016,7 @@ StatusMessage {
     height: auto;
     max-height: 70vh;
     background: transparent;
-    border: solid ansi_bright_black;
+    border: solid $foreground-muted;
     padding: 0 1;
     margin: 0;
 }
@@ -914,24 +1028,24 @@ StatusMessage {
 
 .question-tabs {
     height: auto;
-    color: ansi_blue;
+    color: $primary;
     margin-bottom: 1;
 }
 
 .question-title {
     height: auto;
     text-style: bold;
-    color: ansi_blue;
+    color: $primary;
     margin-bottom: 1;
 }
 
 .question-option {
     height: auto;
-    color: ansi_default;
+    color: $foreground;
 }
 
 .question-option-selected {
-    color: ansi_blue;
+    color: $primary;
     text-style: bold;
 }
 
@@ -943,7 +1057,7 @@ StatusMessage {
 .question-other-prefix {
     width: auto;
     height: auto;
-    color: ansi_default;
+    color: $foreground;
 }
 
 .question-other-input {
@@ -957,26 +1071,38 @@ StatusMessage {
 .question-other-static {
     width: auto;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .question-submit {
     height: auto;
-    color: ansi_default;
+    color: $foreground;
     margin-top: 1;
 }
 
 .question-footer-note {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     text-style: italic;
     margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .question-help {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 ExpandingBorder {
@@ -992,7 +1118,11 @@ ContextProgress {
     background: transparent;
     padding: 0;
     margin: 0;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 NarratorStatus {
@@ -1037,12 +1167,12 @@ NarratorStatus {
 }
 
 .banner-meta {
-    color: ansi_default;
+    color: $foreground;
     width: auto;
 }
 
 #banner-model {
-    color: ansi_cyan;
+    color: $secondary;
     width: auto;
 }
 
@@ -1055,12 +1185,12 @@ NarratorStatus {
 }
 
 .banner-cmd {
-    color: ansi_cyan;
+    color: $secondary;
     width: auto;
 }
 
 .petit-chat {
-    color: ansi_default;
+    color: $foreground;
     width: 12;
 }
 
@@ -1105,7 +1235,7 @@ NarratorStatus {
     width: 100%;
     height: auto;
     background: transparent;
-    border: solid ansi_bright_black;
+    border: solid $foreground-muted;
     padding: 0 1;
     margin: 0;
 }
@@ -1130,8 +1260,12 @@ NarratorStatus {
 .sessionpicker-help {
     width: 100%;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 /* Debug Console */
@@ -1143,14 +1277,14 @@ NarratorStatus {
     min-width: 40;
     height: 100%;
     background: transparent;
-    border-left: solid ansi_bright_black;
+    border-left: solid $foreground-muted;
     padding: 0 1;
 }
 
 #debug-console-header {
     width: 100%;
     height: auto;
-    color: ansi_default;
+    color: $foreground;
     padding: 0 0 1 0;
     text-align: left;
 }
@@ -1167,7 +1301,7 @@ NarratorStatus {
     width: 100%;
     height: auto;
     background: transparent;
-    border: solid ansi_bright_black;
+    border: solid $foreground-muted;
     padding: 0 1;
     margin: 0;
 }
@@ -1180,7 +1314,7 @@ NarratorStatus {
 .modelpicker-title {
     height: auto;
     text-style: bold;
-    color: ansi_blue;
+    color: $primary;
 }
 
 #modelpicker-options {
@@ -1198,15 +1332,19 @@ NarratorStatus {
 .modelpicker-help {
     width: 100%;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 #thinkingpicker-app {
     width: 100%;
     height: auto;
     background: transparent;
-    border: solid ansi_bright_black;
+    border: solid $foreground-muted;
     padding: 0 1;
     margin: 0;
 }
@@ -1219,7 +1357,7 @@ NarratorStatus {
 .thinkingpicker-title {
     height: auto;
     text-style: bold;
-    color: ansi_blue;
+    color: $primary;
 }
 
 #thinkingpicker-options {
@@ -1237,8 +1375,55 @@ NarratorStatus {
 .thinkingpicker-help {
     width: 100%;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#themepicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid $foreground-muted;
+    padding: 0 1;
+    margin: 0;
+}
+
+#themepicker-content {
+    width: 100%;
+    height: auto;
+}
+
+.themepicker-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+}
+
+#themepicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
+}
+
+#themepicker-options:focus {
+    border: none;
+}
+
+.themepicker-help {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 FeedbackBar {
@@ -1257,7 +1442,7 @@ FeedbackBar {
     width: 100%;
     height: auto;
     background: transparent;
-    border: solid ansi_bright_black;
+    border: solid $foreground-muted;
     padding: 0 1;
     margin: 0;
 }
@@ -1270,32 +1455,36 @@ FeedbackBar {
 .rewind-title {
     height: auto;
     text-style: bold;
-    color: ansi_blue;
+    color: $primary;
 }
 
 .rewind-option {
     height: auto;
-    color: ansi_default;
+    color: $foreground;
 }
 
 .rewind-cursor-selected {
-    color: ansi_blue;
+    color: $primary;
     text-style: bold;
 }
 
 .rewind-option-unselected {
-    color: ansi_default;
+    color: $foreground;
 }
 
 .rewind-help {
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 #feedback-text {
     width: auto;
     height: auto;
-    color: ansi_default;
+    color: $foreground;
 }
 
 .hook-system-message {
@@ -1333,17 +1522,21 @@ FeedbackBar {
     height: auto;
     max-height: 3;
     overflow: hidden;
-    color: ansi_bright_black;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .hook-severity-ok .hook-system-icon {
-    color: ansi_green;
+    color: $success;
 }
 
 .hook-severity-warning .hook-system-icon {
-    color: ansi_yellow;
+    color: $warning;
 }
 
 .hook-severity-error .hook-system-icon {
-    color: ansi_red;
+    color: $error;
 }
