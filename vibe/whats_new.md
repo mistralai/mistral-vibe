@@ -1,4 +1,5 @@
-# What's new in v2.10.0
+# What's new in v2.11.0
 
-- **Multi-repo sessions**: Use `--add-dir` to pull additional repository roots into your session
-- **Improved plan mode**: Plan is now displayed as live-updating markdown with Ctrl+G to edit in your default editor
+- **Shared skills**: Vibe now loads skills from `~/.agents/skills` so they can be reused across agents
+- **Connector onboarding from the CLI**: `/mcp` lists unauthenticated connectors and lets you start the OAuth flow without leaving Vibe
+- **Theme picker is back**: Pick a theme during onboarding (`vibe --setup`) or switch any time with `/theme`

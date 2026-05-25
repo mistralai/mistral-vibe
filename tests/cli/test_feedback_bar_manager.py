@@ -5,12 +5,12 @@ import time
 import tomllib
 from unittest.mock import MagicMock, patch
 
-from vibe.cli.textual_ui.widgets.feedback_bar_manager import (
+from vibe.cli.textual_ui.widgets.feedback_bar_manager import FeedbackBarManager
+from vibe.core.feedback import (
     _CACHE_SECTION,
     _LAST_SHOWN_KEY,
     FEEDBACK_COOLDOWN_SECONDS,
     MIN_USER_MESSAGES_FOR_FEEDBACK,
-    FeedbackBarManager,
 )
 from vibe.core.types import LLMMessage, Role
 
@@ -19,15 +19,12 @@ def _patch_cache_file(tmp_path: Path):
     from vibe.core.paths._vibe_home import GlobalPath
 
     return patch(
-        "vibe.cli.textual_ui.widgets.feedback_bar_manager.CACHE_FILE",
-        GlobalPath(lambda: tmp_path / "cache.toml"),
+        "vibe.core.feedback.CACHE_FILE", GlobalPath(lambda: tmp_path / "cache.toml")
     )
 
 
 def _patch_probability(value: float):
-    return patch(
-        "vibe.cli.textual_ui.widgets.feedback_bar_manager.FEEDBACK_PROBABILITY", value
-    )
+    return patch("vibe.core.feedback.FEEDBACK_PROBABILITY", value)
 
 
 def _make_agent_loop(
@@ -50,10 +47,7 @@ class TestShouldShow:
         with (
             _patch_cache_file(tmp_path),
             _patch_probability(0.2),
-            patch(
-                "vibe.cli.textual_ui.widgets.feedback_bar_manager.random.random",
-                return_value=0.0,
-            ),
+            patch("vibe.core.feedback.random.random", return_value=0.0),
         ):
             assert manager.should_show(_make_agent_loop()) is True
 
@@ -62,10 +56,7 @@ class TestShouldShow:
         with (
             _patch_cache_file(tmp_path),
             _patch_probability(0.2),
-            patch(
-                "vibe.cli.textual_ui.widgets.feedback_bar_manager.random.random",
-                return_value=1.0,
-            ),
+            patch("vibe.core.feedback.random.random", return_value=1.0),
         ):
             assert manager.should_show(_make_agent_loop()) is False
 
@@ -77,10 +68,7 @@ class TestShouldShow:
         with (
             _patch_cache_file(tmp_path),
             _patch_probability(0.2),
-            patch(
-                "vibe.cli.textual_ui.widgets.feedback_bar_manager.random.random",
-                return_value=0.0,
-            ),
+            patch("vibe.core.feedback.random.random", return_value=0.0),
         ):
             assert manager.should_show(_make_agent_loop()) is False
 
@@ -92,10 +80,7 @@ class TestShouldShow:
         with (
             _patch_cache_file(tmp_path),
             _patch_probability(0.2),
-            patch(
-                "vibe.cli.textual_ui.widgets.feedback_bar_manager.random.random",
-                return_value=0.0,
-            ),
+            patch("vibe.core.feedback.random.random", return_value=0.0),
         ):
             assert manager.should_show(_make_agent_loop()) is True
 
@@ -111,10 +96,7 @@ class TestShouldShow:
         with (
             _patch_cache_file(tmp_path),
             _patch_probability(0.2),
-            patch(
-                "vibe.cli.textual_ui.widgets.feedback_bar_manager.random.random",
-                return_value=0.0,
-            ),
+            patch("vibe.core.feedback.random.random", return_value=0.0),
         ):
             assert manager.should_show(_make_agent_loop(user_message_count=1)) is False
 
@@ -129,10 +111,7 @@ class TestShouldShow:
         with (
             _patch_cache_file(tmp_path),
             _patch_probability(0.2),
-            patch(
-                "vibe.cli.textual_ui.widgets.feedback_bar_manager.random.random",
-                return_value=0.0,
-            ),
+            patch("vibe.core.feedback.random.random", return_value=0.0),
         ):
             # Only 1 non-injected user message, below MIN_USER_MESSAGES_FOR_FEEDBACK
             assert manager.should_show(loop) is False

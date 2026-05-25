@@ -46,7 +46,7 @@ class ProxySetupApp(Container):
             yield NoMarkupStatic("Proxy Configuration", classes="settings-title")
 
             for key, description in SUPPORTED_PROXY_VARS.items():
-                yield Static(f"[bold ansi_blue]{key}[/]", classes="proxy-label-line")
+                yield Static(f"[bold $primary]{key}[/]", classes="proxy-label-line")
 
                 initial_value = self.initial_values.get(key) or ""
                 input_widget = VscodeCompatInput(

@@ -4,12 +4,13 @@ from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Center, Horizontal, Vertical
+from textual.containers import Center, Vertical
 from textual.events import MouseUp
 from textual.validation import Length
-from textual.widgets import Input, Link, Static
+from textual.widgets import Input, Link
 
 from vibe.cli.clipboard import copy_selection_to_clipboard
+from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ProviderConfig
 from vibe.core.telemetry.types import EntrypointMetadata
@@ -19,9 +20,8 @@ from vibe.setup.auth.api_key_persistence import (
 )
 from vibe.setup.onboarding.base import OnboardingScreen
 
-PROVIDER_HELP = {
-    "mistral": ("https://console.mistral.ai/codestral/cli", "Mistral AI Studio")
-}
+# providers with a dedicated key creation page get a direct onboarding link
+PROVIDER_HELP = {"mistral": ("https://console.mistral.ai/codestral/cli", "AI Studio")}
 CONFIG_DOCS_URL = (
     "https://github.com/mistralai/mistral-vibe?tab=readme-ov-file#configuration"
 )
@@ -45,54 +45,51 @@ class ApiKeyScreen(OnboardingScreen):
         self.provider = resolve_api_key_provider(provider)
         self._entrypoint_metadata = entrypoint_metadata
 
-    def _compose_provider_link(self, provider_name: str) -> ComposeResult:
-        if self.provider.name not in PROVIDER_HELP:
+    def _compose_provider_link(self) -> ComposeResult:
+        if (help_info := PROVIDER_HELP.get(self.provider.name)) is None:
             return
 
-        help_url, help_name = PROVIDER_HELP[self.provider.name]
-        yield NoMarkupStatic(f"Grab your {provider_name} API key from the {help_name}:")
-        yield Center(
-            Horizontal(
-                NoMarkupStatic("→ ", classes="link-chevron"),
-                Link(help_url, url=help_url),
-                classes="link-row",
-            )
-        )
+        help_url, _ = help_info
+        yield Link(help_url, url=help_url, id="api-key-provider-link")
 
     def _compose_config_docs(self) -> ComposeResult:
-        yield Static("[dim]Learn more about Vibe configuration:[/]")
-        yield Horizontal(
-            NoMarkupStatic("→ ", classes="link-chevron"),
-            Link(CONFIG_DOCS_URL, url=CONFIG_DOCS_URL),
-            classes="link-row",
+        yield NoMarkupStatic(
+            "Learn more about Vibe configurations", id="config-docs-label"
         )
+        yield Link(CONFIG_DOCS_URL, url=CONFIG_DOCS_URL, id="config-docs-link")
 
     def compose(self) -> ComposeResult:
         provider_name = self.provider.name.capitalize()
+        help_info = PROVIDER_HELP.get(self.provider.name)
+        help_name = help_info[1] if help_info is not None else "your provider"
 
         self.input_widget = Input(
             password=True,
             id="key",
-            placeholder="Paste your API key here",
             validators=[Length(minimum=1, failure_description="No API key provided.")],
         )
+        input_box = Vertical(
+            self.input_widget, id="input-box", classes="onboarding-card"
+        )
+        input_box.border_title = "Paste API key"
 
-        with Vertical(id="api-key-outer"):
-            yield NoMarkupStatic("", classes="spacer")
-            yield Center(NoMarkupStatic("One last thing...", id="api-key-title"))
+        with Vertical(id="api-key-outer", classes="onboarding-content"):
             with Center():
-                with Vertical(id="api-key-content"):
-                    yield from self._compose_provider_link(provider_name)
+                with Vertical(id="api-key-panel", classes="onboarding-panel"):
+                    yield PetitChat(id="api-key-chat", classes="onboarding-chat")
                     yield NoMarkupStatic(
-                        "...and paste it below to finish the setup:", id="paste-hint"
+                        f"Get your {provider_name} API key",
+                        id="api-key-title",
+                        classes="onboarding-heading",
                     )
-                    yield Center(Horizontal(self.input_widget, id="input-box"))
+                    yield NoMarkupStatic(
+                        f"Visit {help_name} to generate or copy your Vibe key",
+                        id="api-key-subtitle",
+                    )
+                    yield from self._compose_provider_link()
+                    yield input_box
                     yield NoMarkupStatic("", id="feedback")
-            yield NoMarkupStatic("", classes="spacer")
-            yield Vertical(
-                Vertical(*self._compose_config_docs(), id="config-docs-group"),
-                id="config-docs-section",
-            )
+                    yield from self._compose_config_docs()
 
     def on_mount(self) -> None:
         self.input_widget.focus()

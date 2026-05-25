@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import date
+from string import Template
+
 import pytest
 
 from tests.conftest import build_test_vibe_config
@@ -12,6 +15,14 @@ from vibe.core.prompts import load_system_prompt
 from vibe.core.skills.manager import SkillManager
 from vibe.core.system_prompt import get_universal_system_prompt
 from vibe.core.tools.manager import ToolManager
+
+
+def _expected_prompt(prompt_id: str) -> str:
+    today = date.today()
+    current_date = f"{today.isoformat()} ({today.strftime('%A')})"
+    return Template(load_system_prompt(prompt_id)).safe_substitute(
+        current_date=current_date
+    )
 
 
 class _StubClient(RemoteEvalClient):
@@ -125,7 +136,7 @@ def test_system_prompt_honors_user_config_when_manager_uninitialized() -> None:
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, experiment_manager=manager
     )
-    assert prompt == load_system_prompt("lean")
+    assert prompt == _expected_prompt("lean")
 
 
 @pytest.mark.asyncio
@@ -151,7 +162,7 @@ async def test_system_prompt_honors_user_config_when_no_remote_assignment() -> N
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, experiment_manager=manager
     )
-    assert prompt == load_system_prompt("lean")
+    assert prompt == _expected_prompt("lean")
 
 
 @pytest.mark.asyncio
@@ -182,5 +193,5 @@ async def test_user_config_overrides_assigned_experiment_variant() -> None:
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, experiment_manager=manager
     )
-    assert prompt == load_system_prompt("lean")
-    assert prompt != load_system_prompt("explore")
+    assert prompt == _expected_prompt("lean")
+    assert prompt != _expected_prompt("explore")

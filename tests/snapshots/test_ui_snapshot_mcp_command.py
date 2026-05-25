@@ -12,6 +12,7 @@ from tests.stubs.fake_mcp_registry import (
     FakeMCPRegistryWithBrokenServer,
 )
 from vibe.core.config import MCPHttp, MCPStdio
+from vibe.core.tools.connectors import ConnectorAuthAction
 from vibe.core.tools.mcp.tools import RemoteTool
 
 _MCP_PATCH = "vibe.core.agent_loop.MCPRegistry"
@@ -32,6 +33,10 @@ _FAKE_CONNECTORS_MIXED_CONNECTION = {
     "zeta": [],
     "alpha": [RemoteTool(name="lookup", description="Lookup Alpha records")],
     "beta": [],
+}
+_FAKE_CONNECTOR_AUTH_ACTIONS = {
+    "beta": ConnectorAuthAction.OAUTH,
+    "zeta": ConnectorAuthAction.CREDENTIALS_SETUP,
 }
 
 
@@ -200,9 +205,16 @@ def test_snapshot_mcp_refresh_shortcut(snap_compare: SnapCompare) -> None:
 
 class SnapshotTestAppWithConnectors(BaseSnapshotTestApp):
     def __init__(self) -> None:
+        from vibe.core.config import ConnectorConfig
+
         config = default_config()
         config.mcp_servers = [
             MCPStdio(name="filesystem", transport="stdio", command="npx")
+        ]
+        # Explicitly enable all fake connectors so they appear enabled in snapshots
+        config.connectors = [
+            ConnectorConfig(name="gmail", disabled=False),
+            ConnectorConfig(name="slack", disabled=False),
         ]
         super().__init__(config=config)
         registry = FakeConnectorRegistry(connectors=_FAKE_CONNECTORS)
@@ -213,8 +225,15 @@ class SnapshotTestAppWithConnectors(BaseSnapshotTestApp):
 
 class SnapshotTestAppConnectorsOnly(BaseSnapshotTestApp):
     def __init__(self) -> None:
+        from vibe.core.config import ConnectorConfig
+
         config = default_config()
         config.mcp_servers = []
+        # Explicitly enable all fake connectors so they appear enabled in snapshots
+        config.connectors = [
+            ConnectorConfig(name="gmail", disabled=False),
+            ConnectorConfig(name="slack", disabled=False),
+        ]
         super().__init__(config=config)
         registry = FakeConnectorRegistry(connectors=_FAKE_CONNECTORS)
         self.agent_loop.connector_registry = registry
@@ -224,10 +243,22 @@ class SnapshotTestAppConnectorsOnly(BaseSnapshotTestApp):
 
 class SnapshotTestAppConnectorsMixedState(BaseSnapshotTestApp):
     def __init__(self) -> None:
+        from vibe.core.config import ConnectorConfig
+
         config = default_config()
         config.mcp_servers = []
+        # Explicitly enable connectors that should appear connected in snapshots
+        # alpha is connected, beta and zeta are disconnected
+        config.connectors = [
+            ConnectorConfig(name="alpha", disabled=False),
+            ConnectorConfig(name="beta", disabled=False),
+            ConnectorConfig(name="zeta", disabled=False),
+        ]
         super().__init__(config=config)
-        registry = FakeConnectorRegistry(connectors=_FAKE_CONNECTORS_MIXED_CONNECTION)
+        registry = FakeConnectorRegistry(
+            connectors=_FAKE_CONNECTORS_MIXED_CONNECTION,
+            auth_actions=_FAKE_CONNECTOR_AUTH_ACTIONS,
+        )
         self.agent_loop.connector_registry = registry
         self.agent_loop.tool_manager._connector_registry = registry
         self.agent_loop.tool_manager.integrate_connectors()
@@ -318,9 +349,7 @@ def test_snapshot_connector_auth_back_to_mcp(snap_compare: SnapCompare) -> None:
     )
 
 
-def test_snapshot_mcp_help_bar_shows_authenticate(snap_compare: SnapCompare) -> None:
-    """Help bar shows 'Enter Authenticate' when a disconnected connector is highlighted."""
-
+def test_snapshot_mcp_help_bar_shows_connect(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
         await _run_mcp_command(pilot, "/mcp")
         # Navigate to a disconnected connector (beta or zeta)

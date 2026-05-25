@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from enum import StrEnum
 import re
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -32,6 +33,24 @@ if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
 
 _BOOTSTRAP_TIMEOUT = 30.0
+
+
+class ConnectorAuthAction(StrEnum):
+    NONE = "none"
+    OAUTH = "oauth"
+    CREDENTIALS_SETUP = "credentials_setup"
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any] | None) -> ConnectorAuthAction:
+        if not payload:
+            return cls.NONE
+        match payload.get("type"):
+            case "oauth":
+                return cls.OAUTH
+            case "credentials_setup":
+                return cls.CREDENTIALS_SETUP
+            case _:
+                return cls.NONE
 
 
 def _normalize_name(name: str) -> str:
@@ -234,6 +253,7 @@ class ConnectorRegistry:
         self._cache: dict[str, dict[str, type[BaseTool]]] | None = None
         self._connector_names: list[str] = []
         self._connector_connected: dict[str, bool] = {}
+        self._connector_auth_action: dict[str, ConnectorAuthAction] = {}
         self._alias_to_id: dict[str, str] = {}
         self._discover_lock = asyncio.Lock()
 
@@ -255,10 +275,11 @@ class ConnectorRegistry:
         base_url = self._server_url or _DEFAULT_BASE_URL
         url = f"{base_url}/v1/connectors/bootstrap"
         headers = {"Authorization": f"Bearer {self._api_key}"}
+        params = {"include_auth_actionable_connectors": "true"}
         async with httpx.AsyncClient(
             timeout=_BOOTSTRAP_TIMEOUT, verify=build_ssl_context()
         ) as http:
-            response = await http.get(url, headers=headers)
+            response = await http.get(url, headers=headers, params=params)
             response.raise_for_status()
             return response.json()
 
@@ -311,6 +332,7 @@ class ConnectorRegistry:
                 self._cache = {}
                 self._connector_names = []
                 self._connector_connected = {}
+                self._connector_auth_action = {}
                 self._alias_to_id = {}
                 return {}
 
@@ -320,10 +342,15 @@ class ConnectorRegistry:
             all_tools: dict[str, type[BaseTool]] = {}
             connector_names: list[str] = []
             connector_connected: dict[str, bool] = {}
+            connector_auth_action: dict[str, ConnectorAuthAction] = {}
 
             for connector_id, alias, connector in unique_connectors:
                 connector_names.append(alias)
                 name = connector.get("name") or connector_id
+                auth_action = ConnectorAuthAction.from_payload(
+                    connector.get("auth_action")
+                )
+                connector_auth_action[alias] = auth_action
 
                 if bootstrap_errors := connector.get("bootstrap_errors"):
                     logger.warning(
@@ -349,6 +376,7 @@ class ConnectorRegistry:
             # lock will see the completed cache.
             self._connector_names = connector_names
             self._connector_connected = connector_connected
+            self._connector_auth_action = connector_auth_action
             self._alias_to_id = {alias: cid for cid, alias, _ in unique_connectors}
             self._cache = cache
 
@@ -366,6 +394,9 @@ class ConnectorRegistry:
     def is_connected(self, name: str) -> bool:
         return self._connector_connected.get(name, False)
 
+    def get_auth_action(self, alias: str) -> ConnectorAuthAction:
+        return self._connector_auth_action.get(alias, ConnectorAuthAction.NONE)
+
     def get_connector_id(self, alias: str) -> str | None:
         """Return the API connector ID for a given alias, or None."""
         return self._alias_to_id.get(alias)
@@ -382,13 +413,21 @@ class ConnectorRegistry:
             return {}
 
         tools_map: dict[str, type[BaseTool]] | None = None
+        fresh_auth_action: ConnectorAuthAction | None = None
+        found = False
+        fetch_ok = False
         try:
             data = await self._fetch_bootstrap()
+            fetch_ok = True
             for connector in data.get("connectors") or []:
                 if str(connector.get("id")) != connector_id:
                     continue
 
+                found = True
                 name = connector.get("name") or connector_id
+                fresh_auth_action = ConnectorAuthAction.from_payload(
+                    connector.get("auth_action")
+                )
                 status = connector.get("status") or {}
                 if not status.get("is_ready", False):
                     break
@@ -406,6 +445,13 @@ class ConnectorRegistry:
         if self._cache is None:
             self._cache = {}
 
+        if fetch_ok and not found:
+            self._drop_connector(alias, connector_id)
+            return {}
+
+        if fresh_auth_action is not None:
+            self._connector_auth_action[alias] = fresh_auth_action
+
         if tools_map is None:
             self._cache.pop(connector_id, None)
             self._connector_connected[alias] = False
@@ -414,6 +460,15 @@ class ConnectorRegistry:
         self._cache[connector_id] = tools_map
         self._connector_connected[alias] = bool(tools_map)
         return tools_map
+
+    def _drop_connector(self, alias: str, connector_id: str) -> None:
+        if self._cache is not None:
+            self._cache.pop(connector_id, None)
+        self._connector_connected.pop(alias, None)
+        self._connector_auth_action.pop(alias, None)
+        self._alias_to_id.pop(alias, None)
+        if alias in self._connector_names:
+            self._connector_names.remove(alias)
 
     async def get_auth_url(self, alias: str) -> str | None:
         """Return the OAuth authorization URL for a connector, or None.
@@ -449,4 +504,5 @@ class ConnectorRegistry:
         self._cache = None
         self._connector_names = []
         self._connector_connected = {}
+        self._connector_auth_action = {}
         self._alias_to_id = {}

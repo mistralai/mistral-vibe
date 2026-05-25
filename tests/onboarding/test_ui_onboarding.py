@@ -3,14 +3,20 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from pathlib import Path
+import tomllib
 from typing import cast
 
 import pytest
+from textual.events import Resize
+from textual.geometry import Size
 from textual.pilot import Pilot
+from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Input
 
 from tests.browser_sign_in.stubs import build_browser_sign_in_service_factory
 from tests.conftest import build_test_vibe_config
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.config._settings import (
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
@@ -20,7 +26,7 @@ from vibe.core.config.harness_files import (
     init_harness_files_manager,
     reset_harness_files_manager,
 )
-from vibe.core.paths import GLOBAL_ENV_FILE
+from vibe.core.paths import GLOBAL_ENV_FILE, VIBE_HOME
 from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.types import Backend
@@ -33,14 +39,11 @@ from vibe.setup.auth import (
 from vibe.setup.auth.api_key_persistence import persist_api_key
 import vibe.setup.onboarding as onboarding_module
 from vibe.setup.onboarding import OnboardingApp
+from vibe.setup.onboarding.context import OnboardingContext
 from vibe.setup.onboarding.screens.api_key import ApiKeyScreen
 from vibe.setup.onboarding.screens.auth_method import AuthMethodScreen
-from vibe.setup.onboarding.screens.browser_sign_in import (
-    ERROR_HINT,
-    PENDING_HINT,
-    UNEXPECTED_ERROR_MESSAGE,
-    BrowserSignInScreen,
-)
+from vibe.setup.onboarding.screens.browser_sign_in import BrowserSignInScreen
+from vibe.setup.onboarding.screens.theme_selection import THEMES, ThemeSelectionScreen
 
 CONSOLE_URL = "https://console.mistral.ai"
 BROWSER_AUTH_API_URL = "https://console.mistral.ai/api"
@@ -90,7 +93,9 @@ def _build_onboarding_config(
 
 
 def _build_browser_onboarding_app(
-    *, browser_sign_in_service_factory: Callable[[], BrowserSignInService] | None = None
+    *,
+    browser_sign_in_service_factory: Callable[[], BrowserSignInService] | None = None,
+    browser_sign_in_success_delay: float = 0,
 ) -> OnboardingApp:
     return OnboardingApp(
         config=_build_onboarding_config(
@@ -99,6 +104,7 @@ def _build_browser_onboarding_app(
             enable_experimental_browser_sign_in=True,
         ),
         browser_sign_in_service_factory=browser_sign_in_service_factory,
+        browser_sign_in_success_delay=browser_sign_in_success_delay,
     )
 
 
@@ -128,6 +134,30 @@ def _patch_failing_browser_sign_in_service(
 
 def _saved_env_contents() -> str:
     return GLOBAL_ENV_FILE.path.read_text(encoding="utf-8")
+
+
+def _browser_sign_in_step_cards(screen: Screen) -> list[Widget]:
+    return list(screen.query(".browser-sign-in-step"))
+
+
+def _browser_sign_in_step_card(screen: Screen, index: int) -> Widget:
+    return _browser_sign_in_step_cards(screen)[index]
+
+
+def _active_browser_sign_in_step_card(screen: Screen) -> Widget:
+    active_cards = [
+        card for card in _browser_sign_in_step_cards(screen) if card.has_class("active")
+    ]
+    if len(active_cards) != 1:
+        msg = "Expected exactly one active browser sign-in step."
+        raise AssertionError(msg)
+    return active_cards[0]
+
+
+def _browser_sign_in_step_text(card: Widget) -> str:
+    title = card.query_one(".browser-sign-in-step-title", NoMarkupStatic)
+    detail = card.query_one(".browser-sign-in-step-detail", NoMarkupStatic)
+    return f"{title.render()}\n{detail.render()}"
 
 
 def _build_unexpected_browser_sign_in_service_factory(
@@ -193,10 +223,16 @@ async def _pass_welcome_screen(pilot: Pilot) -> None:
         lambda: not welcome_screen.query_one("#enter-hint").has_class("hidden"), pilot
     )
     await pilot.press("enter")
+    await _wait_for(lambda: isinstance(pilot.app.screen, ThemeSelectionScreen), pilot)
+
+
+async def _pass_theme_selection_screen(pilot: Pilot) -> None:
+    await pilot.press("enter")
 
 
 async def _show_auth_method(pilot: Pilot) -> None:
     await _pass_welcome_screen(pilot)
+    await _pass_theme_selection_screen(pilot)
     await _wait_for(lambda: isinstance(pilot.app.screen, AuthMethodScreen), pilot)
 
 
@@ -219,6 +255,7 @@ async def test_ui_keeps_manual_flow_when_browser_sign_in_is_unsupported() -> Non
 
     async with app.run_test() as pilot:
         await _pass_welcome_screen(pilot)
+        await _pass_theme_selection_screen(pilot)
         await _wait_for(lambda: isinstance(pilot.app.screen, ApiKeyScreen), pilot)
         input_widget = app.screen.query_one("#key", Input)
         await pilot.press(*api_key_value)
@@ -247,6 +284,7 @@ async def test_ui_hides_browser_sign_in_when_experimental_flag_is_disabled() -> 
 
     async with app.run_test() as pilot:
         await _pass_welcome_screen(pilot)
+        await _pass_theme_selection_screen(pilot)
         await _wait_for(lambda: isinstance(pilot.app.screen, ApiKeyScreen), pilot)
 
 
@@ -308,6 +346,54 @@ async def test_ui_allows_manual_path_when_browser_sign_in_is_supported() -> None
 
 
 @pytest.mark.asyncio
+async def test_ui_does_not_show_browser_opened_before_attempt_starts() -> None:
+    authenticate_started = asyncio.Event()
+    finish_authenticate = asyncio.Event()
+    keep_authenticate_running = asyncio.Event()
+
+    class DelayedBrowserSignInService:
+        async def authenticate(
+            self, status_callback: Callable[[BrowserSignInStatus], None] | None = None
+        ) -> str:
+            authenticate_started.set()
+            await finish_authenticate.wait()
+            if status_callback is not None:
+                status_callback(BrowserSignInStatus.OPENING_BROWSER)
+            await keep_authenticate_running.wait()
+            return "sk-never-reached"
+
+        async def aclose(self) -> None:
+            return None
+
+    app = _build_browser_onboarding_app(
+        browser_sign_in_service_factory=lambda: cast(
+            BrowserSignInService, DelayedBrowserSignInService()
+        )
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(authenticate_started.is_set, pilot)
+
+        active_step = _active_browser_sign_in_step_card(app.screen)
+        active_step_text = _browser_sign_in_step_text(active_step)
+        assert "Open browser" in active_step_text
+        assert "Getting things ready..." in active_step_text
+        assert "Browser opened" not in active_step_text
+
+        finish_authenticate.set()
+        await _wait_for(
+            lambda: (
+                "Opening your browser..."
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
+            ),
+            pilot,
+        )
+
+
+@pytest.mark.asyncio
 async def test_ui_completes_browser_sign_in_and_retries_after_failure() -> None:
     gateway, browser_sign_in_service_factory, created_services = (
         build_browser_sign_in_service_factory(outcomes=["expired", "completed"])
@@ -321,7 +407,9 @@ async def test_ui_completes_browser_sign_in_and_retries_after_failure() -> None:
         await _wait_for(
             lambda: (
                 "expired"
-                in str(app.screen.query_one("#browser-sign-in-status").render())
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
             ),
             pilot,
         )
@@ -333,6 +421,73 @@ async def test_ui_completes_browser_sign_in_and_retries_after_failure() -> None:
     assert created_services[0] is not created_services[1]
     assert app.return_value == "completed"
     assert "sk-browser-onboarding-test-key" in _saved_env_contents()
+
+
+@pytest.mark.asyncio
+async def test_ui_preserves_completed_browser_sign_in_during_success_delay() -> None:
+    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
+        outcomes=["completed"]
+    )
+    app = _build_browser_onboarding_app(
+        browser_sign_in_service_factory=browser_sign_in_service_factory,
+        browser_sign_in_success_delay=0.5,
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(
+            lambda: (
+                "Sign-in complete"
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
+            ),
+            pilot,
+        )
+        assert isinstance(app.screen, BrowserSignInScreen)
+        assert app.screen.state.variant == "success"
+        hint = str(app.screen.query_one("#browser-sign-in-hint").render())
+        assert "Finishing setup..." in hint
+        assert "Press M to enter API key manually - Esc to cancel" not in hint
+        assert app.return_value is None
+        assert "sk-browser-onboarding-test-key" in _saved_env_contents()
+        await pilot.press("m", "escape")
+        assert isinstance(app.screen, BrowserSignInScreen)
+        assert app.return_value is None
+        await _wait_for(lambda: app.return_value is not None, pilot, timeout=2.0)
+
+    assert app.return_value == "completed"
+    assert "sk-browser-onboarding-test-key" in _saved_env_contents()
+
+
+@pytest.mark.asyncio
+async def test_ui_skips_success_delay_when_browser_api_key_cannot_be_persisted() -> (
+    None
+):
+    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
+        outcomes=["completed"]
+    )
+    provider = ProviderConfig(
+        name="mistral",
+        api_base="https://api.mistral.ai/v1",
+        api_key_env_var="BAD=NAME",
+        browser_auth_base_url=CONSOLE_URL,
+        browser_auth_api_base_url=BROWSER_AUTH_API_URL,
+        backend=Backend.MISTRAL,
+    )
+    app = OnboardingApp(
+        config=OnboardingContext(
+            provider=provider, enable_experimental_browser_sign_in=True
+        ),
+        browser_sign_in_service_factory=browser_sign_in_service_factory,
+        browser_sign_in_success_delay=2.0,
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(lambda: app.return_value is not None, pilot, timeout=0.5)
+
+    assert app.return_value == "env_var_error:BAD=NAME"
 
 
 @pytest.mark.asyncio
@@ -375,7 +530,9 @@ async def test_ui_shows_human_message_when_polling_fails() -> None:
         await _wait_for(
             lambda: (
                 "We couldn't complete sign-in. Please try again."
-                in str(app.screen.query_one("#browser-sign-in-status").render())
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
             ),
             pilot,
         )
@@ -395,17 +552,21 @@ async def test_ui_shows_retryable_error_when_browser_sign_in_fails_unexpectedly(
         await _show_browser_sign_in(pilot)
         await _wait_for(
             lambda: (
-                UNEXPECTED_ERROR_MESSAGE
-                in str(app.screen.query_one("#browser-sign-in-status").render())
+                "Something went wrong during browser sign-in. Please try again."
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
             ),
             pilot,
         )
 
         assert isinstance(app.screen, BrowserSignInScreen)
-        status_widget = app.screen.query_one("#browser-sign-in-status")
-        assert status_widget.has_class("error")
-        assert not status_widget.has_class("pending")
-        assert ERROR_HINT in str(app.screen.query_one("#browser-sign-in-hint").render())
+        assert app.screen.state.variant == "error"
+        assert _active_browser_sign_in_step_card(app.screen).has_class("active")
+        assert (
+            "Press R to retry - Press M to enter API key manually - Esc to cancel"
+            in str(app.screen.query_one("#browser-sign-in-hint").render())
+        )
         assert app.return_value is None
 
 
@@ -422,8 +583,10 @@ async def test_ui_retries_after_unexpected_browser_sign_in_failure() -> None:
         await _show_browser_sign_in(pilot)
         await _wait_for(
             lambda: (
-                UNEXPECTED_ERROR_MESSAGE
-                in str(app.screen.query_one("#browser-sign-in-status").render())
+                "Something went wrong during browser sign-in. Please try again."
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
             ),
             pilot,
         )
@@ -450,25 +613,50 @@ async def test_ui_waits_for_browser_sign_in_cleanup_before_retrying() -> None:
         await _show_browser_sign_in(pilot)
         await _wait_for(close_started.is_set, pilot)
 
-        status_widget = app.screen.query_one("#browser-sign-in-status")
         hint_widget = app.screen.query_one("#browser-sign-in-hint")
         await _wait_for(
-            lambda: "Getting things ready..." in str(status_widget.render()), pilot
+            lambda: (
+                "Getting things ready..."
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
+            ),
+            pilot,
         )
-        await _wait_for(lambda: PENDING_HINT in str(hint_widget.render()), pilot)
+        await _wait_for(
+            lambda: (
+                "Press M to enter API key manually - Esc to cancel"
+                in str(hint_widget.render())
+            ),
+            pilot,
+        )
 
         await pilot.press("r")
         await _wait_for(
-            lambda: "Getting things ready..." in str(status_widget.render()), pilot
+            lambda: (
+                "Getting things ready..."
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
+            ),
+            pilot,
         )
-        await _wait_for(lambda: PENDING_HINT in str(hint_widget.render()), pilot)
+        await _wait_for(
+            lambda: (
+                "Press M to enter API key manually - Esc to cancel"
+                in str(hint_widget.render())
+            ),
+            pilot,
+        )
         assert app.return_value is None
 
         close_blocker.set()
         await _wait_for(
             lambda: (
-                UNEXPECTED_ERROR_MESSAGE
-                in str(app.screen.query_one("#browser-sign-in-status").render())
+                "Something went wrong during browser sign-in. Please try again."
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
             ),
             pilot,
         )
@@ -530,22 +718,27 @@ async def test_ui_switches_to_manual_path_while_browser_sign_in_is_running() -> 
         await _show_browser_sign_in(pilot)
         await _wait_for(
             lambda: (
-                "Waiting for you to finish signing in..."
-                in str(app.screen.query_one("#browser-sign-in-status").render())
+                "Waiting for authentication..."
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
             ),
             pilot,
         )
-        status_widget = app.screen.query_one("#browser-sign-in-status")
-        assert status_widget.has_class("pending")
-        assert not status_widget.has_class("error")
-        step_widgets = list(app.screen.query(".browser-sign-in-step"))
-        assert len(step_widgets) == 3
-        assert step_widgets[0].has_class("done")
-        assert "Open your browser" in str(step_widgets[0].render())
-        assert step_widgets[1].has_class("active")
-        assert "Sign in and return here" in str(step_widgets[1].render())
-        assert step_widgets[2].has_class("idle")
-        assert "Finish setup" in str(step_widgets[2].render())
+        assert isinstance(app.screen, BrowserSignInScreen)
+        assert app.screen.state.variant == "pending"
+        step_cards = _browser_sign_in_step_cards(app.screen)
+        assert len(step_cards) == 3
+        assert step_cards[0].has_class("done")
+        assert "Open browser" in _browser_sign_in_step_text(step_cards[0])
+        assert "Browser opened" in _browser_sign_in_step_text(step_cards[0])
+        assert step_cards[1].has_class("active")
+        assert "Complete sign-in" in _browser_sign_in_step_text(step_cards[1])
+        assert "Waiting for authentication..." in _browser_sign_in_step_text(
+            step_cards[1]
+        )
+        assert step_cards[2].has_class("idle")
+        assert "Finished setup" in _browser_sign_in_step_text(step_cards[2])
         await pilot.press("m")
         await _wait_for(lambda: isinstance(pilot.app.screen, ApiKeyScreen), pilot)
         await pilot.press(*api_key_value)
@@ -621,6 +814,7 @@ async def test_ui_keeps_browser_sign_in_disabled_from_false_env_var(
 
     async with app.run_test() as pilot:
         await _pass_welcome_screen(pilot)
+        await _pass_theme_selection_screen(pilot)
         await _wait_for(lambda: isinstance(pilot.app.screen, ApiKeyScreen), pilot)
 
 
@@ -704,6 +898,37 @@ async def test_ui_falls_back_to_default_onboarding_context_with_invalid_active_m
 
     async with app.run_test() as pilot:
         await _show_auth_method(pilot)
+
+
+@pytest.mark.asyncio
+async def test_ui_can_pick_a_theme_and_saves_selection() -> None:
+    app = OnboardingApp()
+
+    async with app.run_test() as pilot:
+        await _pass_welcome_screen(pilot)
+
+        theme_screen = app.screen
+        assert isinstance(theme_screen, ThemeSelectionScreen)
+        app.post_message(Resize(Size(40, 10), Size(40, 10)))
+        preview = theme_screen.query_one("#preview")
+        assert preview.styles.max_height is not None
+
+        target_theme = "gruvbox"
+        assert target_theme in THEMES
+        start_index = THEMES.index(app.theme)
+        target_index = THEMES.index(target_theme)
+        steps_down = (target_index - start_index) % len(THEMES)
+        await pilot.press(*["down"] * steps_down)
+        assert app.theme == target_theme
+
+        await pilot.press("enter")
+        await _wait_for(lambda: isinstance(app.screen, ApiKeyScreen), pilot)
+
+    config_path = VIBE_HOME.path / "config.toml"
+    assert config_path.is_file()
+    config_contents = config_path.read_text(encoding="utf-8")
+    config_dict = tomllib.loads(config_contents)
+    assert config_dict.get("theme") == target_theme
 
 
 def test_api_key_screen_falls_back_to_mistral_for_provider_without_env_key() -> None:

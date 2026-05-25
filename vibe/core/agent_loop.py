@@ -624,8 +624,17 @@ class AgentLoop:  # noqa: PLR0904
         )
 
     @requires_init
-    async def inject_user_context(self, content: str) -> None:
-        self.messages.append(LLMMessage(role=Role.user, content=content, injected=True))
+    async def inject_user_context(
+        self, content: str, *, as_message: bool = False
+    ) -> None:
+        if as_message:
+            self.messages.append(
+                LLMMessage(role=Role.user, content=content, message_id=str(uuid4()))
+            )
+        else:
+            self.messages.append(
+                LLMMessage(role=Role.user, content=content, injected=True)
+            )
         await self._save_messages()
 
     @requires_init

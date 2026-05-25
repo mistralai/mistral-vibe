@@ -1,22 +1,22 @@
-/* =============================================================================
-   Onboarding App Styles
-   ============================================================================= */
+/* Onboarding App Styles */
+
+$mistral_orange: #FF8205;
+$mistral_orange_title: #ff5a00;
+$browser_sign_in_card_border: #303040;
 
 Screen,
 OnboardingScreen {
     align: center middle;
 }
 
-/* =============================================================================
-   Welcome Screen
-   ============================================================================= */
+/* Welcome Screen */
 
 #welcome-container {
     align: center middle;
 }
 
 #welcome-text {
-    border: round #555555;
+    border: round $foreground-muted;
     padding: 1 3;
     margin-bottom: 2;
     text-align: center;
@@ -24,7 +24,7 @@ OnboardingScreen {
 }
 
 WelcomeScreen #enter-hint {
-    color: ansi_bright_black;
+    color: $text;
     min-width: 16;
     text-align: center;
 }
@@ -33,100 +33,301 @@ WelcomeScreen #enter-hint.hidden {
     visibility: hidden;
 }
 
+/* Theme Selection Screen */
+
+#theme-outer {
+    width: 100%;
+    height: 100%;
+    align: center middle;
+    overflow-y: auto;
+}
+
+#theme-content {
+    width: auto;
+    height: auto;
+}
+
+#theme-title {
+    text-align: center;
+    width: 100%;
+    margin-bottom: 2;
+}
+
+#theme-row {
+    width: auto;
+    height: auto;
+}
+
+#nav-hint {
+    color: $text;
+    width: 16;
+    height: 100%;
+    content-align: right middle;
+    padding-right: 2;
+}
+
+#theme-list {
+    width: 30;
+    height: auto;
+}
+
+.theme-item {
+    text-align: center;
+    width: 100%;
+    background: transparent;
+}
+
+.theme-item.selected {
+    color: $text;
+    text-style: bold;
+    border: round $foreground-muted;
+    padding: 0 2;
+}
+
+.theme-item.fade-1 {
+    text-opacity: 50%;
+}
+
+.theme-item.fade-2 {
+    text-opacity: 25%;
+}
+
+.theme-item.fade-3 {
+    text-opacity: 10%;
+}
+
+ThemeSelectionScreen #enter-hint {
+    color: $text;
+    width: 16;
+    height: 100%;
+    content-align: left middle;
+    padding-left: 2;
+}
+
+#preview-center {
+    width: 100%;
+    height: auto;
+    margin-top: 2;
+    align: center middle;
+}
+
+#preview {
+    min-width: 50;
+    max-width: 70;
+    height: auto;
+    max-height: 100%;
+    overflow: auto;
+    border: round $foreground-muted;
+    border-title-align: center;
+}
+
+#preview-inner {
+    width: 100%;
+    height: auto;
+    padding: 0 1 0 1;
+}
+
 /* =============================================================================
    Auth Method Screen
    ============================================================================= */
 
-#auth-method-content,
-#browser-sign-in-content {
+.onboarding-content {
     width: 100%;
     height: auto;
 }
 
-#auth-method-card,
-#browser-sign-in-card {
-    border: round #555555;
-    padding: 1 2;
-    width: 72;
-    max-width: 90w;
+.onboarding-panel {
+    width: 70;
+    max-width: 88w;
     height: auto;
 }
 
-#auth-method-title,
-#browser-sign-in-title {
-    margin-bottom: 1;
-    text-align: center;
+.onboarding-chat {
+    width: auto;
+    height: auto;
+    margin-left: 2;
+    margin-bottom: 0;
+}
+
+.onboarding-chat .petit-chat {
+    width: auto;
+    color: $text;
+}
+
+.onboarding-heading {
+    width: 100%;
+    margin-left: 2;
+    margin-bottom: 0;
     text-style: bold;
 }
 
-#auth-method-subtitle,
-#browser-sign-in-subtitle {
-    color: ansi_bright_black;
-    text-align: center;
-    margin-bottom: 2;
+#auth-method-title {
+    color: $mistral_orange_title;
 }
 
-.auth-method-option {
-    border: round #444444;
-    padding: 1 2;
-    margin-top: 1;
+#auth-method-subtitle {
+    width: 100%;
+    margin-left: 2;
+    margin-bottom: 2;
+    color: $text;
+    text-style: bold;
+}
+
+#auth-method-options {
     width: 100%;
     height: auto;
 }
 
-.auth-method-option.selected {
-    border: round ansi_bright_yellow;
-    background: #2b2400;
+.onboarding-option-row {
+    width: 100%;
+    height: auto;
+    margin: 0 0;
 }
 
-#auth-method-help,
-#browser-sign-in-hint {
-    color: ansi_bright_black;
-    text-align: center;
+.auth-method-option-marker {
+    width: 2;
+    height: 3;
+    content-align: center middle;
+    color: transparent;
+}
+
+.auth-method-option-marker.selected {
+    color: $mistral_orange;
+}
+
+.onboarding-card {
+    border: solid $browser_sign_in_card_border;
+    padding: 0 1;
+    width: 1fr;
+    height: auto;
+}
+
+.auth-method-option {
+    color: $foreground-muted;
+    border-title-align: right;
+    border-title-color: $primary;
+    border-title-style: bold;
+}
+
+.auth-method-option.selected {
+    border: solid $browser_sign_in_card_border;
+    border-left: solid $mistral_orange;
+    color: $text;
+}
+
+.auth-method-separator {
+    width: 100%;
+    height: 1;
+    margin: 1 0 1 2;
+    color: $text-muted;
+    text-style: dim;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+.onboarding-hint-row {
+    width: 100%;
+    color: $foreground-muted;
     margin-top: 2;
+    padding-left: 2;
 }
 
 /* =============================================================================
    Browser Sign-In Screen
    ============================================================================= */
 
-.browser-sign-in-step {
-    border-left: wide #444444;
-    padding-left: 1;
+#browser-sign-in-subtitle {
+    width: 100%;
+    color: $foreground-muted;
+    margin-left: 2;
     margin-bottom: 1;
-    color: ansi_bright_black;
+}
+
+#browser-sign-in-steps {
+    width: 100%;
+    height: auto;
+}
+
+.browser-sign-in-step-marker {
+    width: 2;
+    height: 3;
+    margin-top: 0;
+    content-align: center middle;
+    color: $mistral_orange;
+}
+
+.browser-sign-in-step-marker.idle,
+.browser-sign-in-step-marker.done {
+    color: transparent;
+}
+
+.browser-sign-in-step {
+    color: $foreground-muted;
 }
 
 .browser-sign-in-step.active {
-    border-left: wide ansi_bright_yellow;
     color: $text;
 }
 
 .browser-sign-in-step.done {
-    border-left: wide ansi_green;
-    color: ansi_green;
+    border-left: solid $success;
+    color: $text;
 }
 
-#browser-sign-in-status {
-    border: round #444444;
-    padding: 1 2;
+.browser-sign-in-step.idle {
+    color: $foreground-muted;
+}
+
+.browser-sign-in-step-title,
+.browser-sign-in-step-detail {
     width: 100%;
     height: auto;
-    margin-top: 2;
+    padding-left: 2;
 }
 
-#browser-sign-in-status.pending {
-    border: round ansi_bright_yellow;
+.browser-sign-in-step-title {
+    text-style: bold;
 }
 
-#browser-sign-in-status.error {
-    border: round ansi_red;
-    color: ansi_red;
+.browser-sign-in-step-title.idle {
+    color: $foreground-muted;
+    text-style: bold dim;
 }
 
-#browser-sign-in-status.success {
-    border: round ansi_green;
-    color: ansi_green;
+.browser-sign-in-step-detail.idle,
+.browser-sign-in-step-detail.done {
+    color: $foreground-muted;
+    text-style: dim;
+}
+
+.browser-sign-in-step-title.active,
+.browser-sign-in-step-title.done {
+    color: $text;
+}
+
+.browser-sign-in-step-detail.pending {
+    color: $mistral_orange;
+    text-style: bold;
+}
+
+.browser-sign-in-step-detail.error {
+    color: $error;
+    text-style: bold;
+}
+
+.browser-sign-in-step-detail.success {
+    color: $success;
+    text-style: bold;
+}
+
+#browser-sign-in-hint {
+    width: 100%;
+    color: $foreground-muted;
+    text-align: center;
+    margin-top: 1;
+    padding-left: 2;
 }
 
 /* =============================================================================
@@ -134,94 +335,105 @@ WelcomeScreen #enter-hint.hidden {
    ============================================================================= */
 
 #api-key-outer {
-    overflow-y: auto;
-}
-
-.spacer {
-    height: 1fr;
+    width: 100%;
+    height: auto;
 }
 
 #api-key-title {
-    text-align: center;
+    color: $mistral_orange_title;
+}
+
+#api-key-panel {
+    width: 76;
+    max-width: 100%;
+}
+
+#api-key-subtitle {
+    width: 100%;
+    margin-left: 2;
+    margin-bottom: 1;
+    color: $text;
+    text-style: bold;
+}
+
+#api-key-provider-link {
+    width: 100%;
+    height: auto;
+    margin-left: 2;
     margin-bottom: 2;
-}
+    color: $primary;
+    text-style: underline;
+    pointer: pointer;
 
-#api-key-content {
-    width: auto;
-    height: auto;
-}
-
-#api-key-content Static {
-    text-align: center;
-}
-
-.link-row {
-    width: auto;
-    height: auto;
-    margin-top: 1;
-}
-
-.link-chevron {
-    width: auto;
+    &:hover {
+        color: $secondary;
+        text-style: bold underline;
+    }
 }
 
 #input-box {
-    border: round #555555;
-    padding: 0 1;
-    margin-top: 2;
-    width: auto;
+    border-title-align: left;
+    border-title-color: $text;
+    border-title-style: bold;
+    margin-left: 2;
+    margin-bottom: 1;
+    width: 100%;
     height: 3;
 }
 
 #input-box.valid {
-    border: round ansi_green;
+    border: solid $success;
 }
 
 #input-box.invalid {
-    border: round ansi_red;
+    border: solid $error;
 }
 
 #key {
     border: none;
-    width: 48;
+    width: 100%;
     height: 1;
-    padding: 0;
-}
-
-#paste-hint {
-    margin-top: 3;
+    padding: 0 1;
 }
 
 #feedback {
-    text-align: center;
+    width: 100%;
     height: 1;
-    margin-top: 1;
+    color: $text-muted;
+    padding-left: 2;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 #feedback.error {
-    color: ansi_red;
+    color: $error;
 }
 
 #feedback.success {
-    color: ansi_bright_black;
+    color: $text-muted;
 }
 
-#config-docs-section {
+#config-docs-label {
     width: 100%;
-    height: auto;
-    align: center top;
-    padding-bottom: 2;
+    height: 1;
+    margin-left: 2;
+    margin-top: 1;
+    color: $text-muted;
+    text-style: dim;
 }
 
-#config-docs-group {
-    width: auto;
-    height: auto;
-}
+#config-docs-link {
+    width: 100%;
+    height: 1;
+    color: $text;
+    margin-left: 2;
+    text-style: dim;
 
-#config-docs-group Static {
-    color: ansi_bright_black;
-}
-
-#config-docs-group .link-row {
-    margin-top: 0;
+    pointer: pointer;
+    &:hover {
+        color: $primary;
+        text-style: bold underline;
+    }
 }

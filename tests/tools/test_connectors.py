@@ -13,6 +13,7 @@ from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.config import ConnectorConfig, VibeConfig
 from vibe.core.tools.base import BaseToolConfig, ToolError
 from vibe.core.tools.connectors.connector_registry import (
+    ConnectorAuthAction,
     ConnectorRegistry,
     RemoteTool,
     _connector_error_message,
@@ -424,7 +425,7 @@ class TestConnectorDisableFiltering:
         assert "connector_mail_send" not in tm.available_tools
         assert "connector_mail_read" in tm.available_tools
 
-    def test_no_config_means_all_enabled(self) -> None:
+    def test_no_config_means_all_disabled_by_default(self) -> None:
         registry = FakeConnectorRegistry(
             connectors={"wiki": [RemoteTool(name="search", description="Search")]}
         )
@@ -434,7 +435,10 @@ class TestConnectorDisableFiltering:
             mcp_registry=FakeMCPRegistry(),
             connector_registry=registry,
         )
-        assert "connector_wiki_search" in tm.available_tools
+        # Connectors without config entries are disabled by default
+        assert "connector_wiki_search" not in tm.available_tools
+        # But still registered (discoverable for UI)
+        assert "connector_wiki_search" in tm.registered_tools
 
     def test_unrelated_config_does_not_affect_other_connectors(self) -> None:
         registry = FakeConnectorRegistry(
@@ -443,8 +447,12 @@ class TestConnectorDisableFiltering:
                 "mail": [RemoteTool(name="send", description="Send")],
             }
         )
+        # Explicitly enable wiki, disable mail
         config = self._make_config(
-            connectors=[ConnectorConfig(name="mail", disabled=True)]
+            connectors=[
+                ConnectorConfig(name="mail", disabled=True),
+                ConnectorConfig(name="wiki", disabled=False),
+            ]
         )
         tm = ToolManager(
             config_getter=lambda: config,
@@ -475,6 +483,7 @@ def _make_connector_payload(
     is_ready: bool = True,
     tools: list[dict[str, Any]] | None = None,
     bootstrap_errors: list[str] | None = None,
+    auth_action: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": connector_id,
@@ -484,6 +493,7 @@ def _make_connector_payload(
         "status": {"is_ready": is_ready},
         "tools": tools or [],
         "bootstrap_errors": bootstrap_errors,
+        "auth_action": auth_action,
     }
 
 
@@ -656,3 +666,219 @@ class TestBootstrapDiscovery:
         refreshed = await registry.refresh_connector_async("wiki")
         assert "connector_wiki_search" in refreshed
         assert "connector_wiki_write" in refreshed
+
+
+# ---------------------------------------------------------------------------
+# Auth-actionable connector discovery
+# ---------------------------------------------------------------------------
+
+
+class TestAuthActionablediscovery:
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_bootstrap_url_opts_into_auth_actionable_connectors(self) -> None:
+        payload = _make_bootstrap_response([])
+        route = respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        assert route.called
+        called_url = str(route.calls.last.request.url)
+        assert "include_auth_actionable_connectors=true" in called_url
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_oauth_connector_is_discovered_but_disconnected(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                name="linear", is_ready=False, tools=[], auth_action={"type": "oauth"}
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        tools = await registry.get_tools_async()
+
+        assert tools == {}
+        assert "linear" in registry.get_connector_names()
+        assert not registry.is_connected("linear")
+        assert registry.get_auth_action("linear") == ConnectorAuthAction.OAUTH
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_credentials_setup_connector_is_discovered_but_disconnected(
+        self,
+    ) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                name="custom_crm",
+                is_ready=False,
+                tools=[],
+                auth_action={"type": "credentials_setup"},
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        assert "custom_crm" in registry.get_connector_names()
+        assert not registry.is_connected("custom_crm")
+        assert (
+            registry.get_auth_action("custom_crm")
+            == ConnectorAuthAction.CREDENTIALS_SETUP
+        )
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_ready_connector_has_no_auth_action(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(name="wiki", tools=[_make_tool_payload("search")])
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        assert registry.is_connected("wiki")
+        assert registry.get_auth_action("wiki") == ConnectorAuthAction.NONE
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_degraded_connector_has_no_auth_action(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                name="degraded",
+                is_ready=False,
+                tools=[],
+                bootstrap_errors=["tools_or_system_prompt_failed: timeout"],
+                auth_action=None,
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        assert "degraded" in registry.get_connector_names()
+        assert not registry.is_connected("degraded")
+        assert registry.get_auth_action("degraded") == ConnectorAuthAction.NONE
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_unknown_auth_action_type_is_treated_as_none(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                name="weird",
+                is_ready=False,
+                tools=[],
+                auth_action={"type": "magic_link"},
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+
+        assert registry.get_auth_action("weird") == ConnectorAuthAction.NONE
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_refresh_picks_up_oauth_completed(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1",
+                name="linear",
+                is_ready=False,
+                tools=[],
+                auth_action={"type": "oauth"},
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+        assert registry.get_auth_action("linear") == ConnectorAuthAction.OAUTH
+
+        refresh_payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1",
+                name="linear",
+                tools=[_make_tool_payload("search_issues")],
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(200, json=refresh_payload)
+        )
+
+        refreshed = await registry.refresh_connector_async("linear")
+        assert "connector_linear_search_issues" in refreshed
+        assert registry.is_connected("linear")
+        assert registry.get_auth_action("linear") == ConnectorAuthAction.NONE
+
+    def test_get_auth_action_unknown_alias_returns_none(self) -> None:
+        registry = ConnectorRegistry(api_key="test-key")
+        assert registry.get_auth_action("nobody") == ConnectorAuthAction.NONE
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_refresh_drops_connector_when_server_no_longer_lists_it(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1",
+                name="linear",
+                is_ready=False,
+                tools=[],
+                auth_action={"type": "oauth"},
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+        assert "linear" in registry.get_connector_names()
+
+        # Server now returns an empty connector list — the connector was
+        # deleted or revoked. Local state must drop it entirely.
+        respx.get(_BOOTSTRAP_URL).mock(
+            return_value=httpx.Response(200, json=_make_bootstrap_response([]))
+        )
+
+        refreshed = await registry.refresh_connector_async("linear")
+
+        assert refreshed == {}
+        assert "linear" not in registry.get_connector_names()
+        assert not registry.is_connected("linear")
+        assert registry.get_auth_action("linear") == ConnectorAuthAction.NONE
+        assert registry.get_connector_id("linear") is None
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_refresh_keeps_cached_auth_action_when_fetch_fails(self) -> None:
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1",
+                name="linear",
+                is_ready=False,
+                tools=[],
+                auth_action={"type": "oauth"},
+            )
+        ])
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(200, json=payload))
+
+        registry = ConnectorRegistry(api_key="test-key")
+        await registry.get_tools_async()
+        assert registry.get_auth_action("linear") == ConnectorAuthAction.OAUTH
+
+        # Bootstrap fails on refresh — cached state must survive.
+        respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(500))
+
+        refreshed = await registry.refresh_connector_async("linear")
+
+        assert refreshed == {}
+        assert "linear" in registry.get_connector_names()
+        assert registry.get_auth_action("linear") == ConnectorAuthAction.OAUTH
+        assert registry.get_connector_id("linear") == "c-1"

@@ -5,6 +5,7 @@ import base64
 from collections.abc import AsyncGenerator
 from pathlib import Path
 import types
+from uuid import uuid4
 
 import httpx
 import zstandard
@@ -12,6 +13,14 @@ import zstandard
 from vibe.core.config import VibeConfig
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.teleport.errors import ServiceTeleportError
+from vibe.core.teleport.experimental_nuage import (
+    ExperimentalNuageClient,
+    ExperimentalNuageContext,
+    ExperimentalNuageMessage,
+    ExperimentalNuageRepository,
+    ExperimentalNuageRequest,
+    ExperimentalNuageTextPart,
+)
 from vibe.core.teleport.git import GitRepoInfo, GitRepository
 from vibe.core.teleport.nuage import (
     ChatAssistantParams,
@@ -65,25 +74,34 @@ class TeleportService:
         self._vibe_code_project_name = (
             vibe_config.vibe_code_project_name if vibe_config else None
         )
+        self._experimental_nuage_enabled = (
+            vibe_config.vibe_code_experimental_nuage_enabled if vibe_config else False
+        )
         self._vibe_config = vibe_config
         self._git = GitRepository(workdir)
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
         self._nuage_client_instance: NuageClient | None = None
+        self._experimental_nuage_client_instance: ExperimentalNuageClient | None = None
 
     async def __aenter__(self) -> TeleportService:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
             )
-        self._nuage_client_instance = NuageClient(
-            self._vibe_code_base_url,
-            self._vibe_code_api_key,
-            self._vibe_code_workflow_id,
-            task_queue=self._vibe_code_task_queue,
-            client=self._client,
-        )
+        if self._experimental_nuage_enabled:
+            self._experimental_nuage_client_instance = ExperimentalNuageClient(
+                self._vibe_code_base_url, self._vibe_code_api_key, client=self._client
+            )
+        else:
+            self._nuage_client_instance = NuageClient(
+                self._vibe_code_base_url,
+                self._vibe_code_api_key,
+                self._vibe_code_workflow_id,
+                task_queue=self._vibe_code_task_queue,
+                client=self._client,
+            )
         await self._git.__aenter__()
         return self
 
@@ -119,6 +137,16 @@ class TeleportService:
             )
         return self._nuage_client_instance
 
+    @property
+    def _experimental_nuage_client(self) -> ExperimentalNuageClient:
+        if self._experimental_nuage_client_instance is None:
+            self._experimental_nuage_client_instance = ExperimentalNuageClient(
+                self._vibe_code_base_url,
+                self._vibe_code_api_key,
+                client=self._http_client,
+            )
+        return self._experimental_nuage_client_instance
+
     async def check_supported(self) -> None:
         await self._git.get_info()
 
@@ -141,6 +169,8 @@ class TeleportService:
         self._validate_config()
 
         git_info = await self._git.get_info()
+        if self._experimental_nuage_enabled:
+            self._validate_experimental_nuage_git_info(git_info)
 
         yield TeleportCheckingGitEvent()
         await self._git.fetch()
@@ -164,6 +194,15 @@ class TeleportService:
             await self._push_or_fail()
 
         yield TeleportStartingWorkflowEvent()
+
+        if self._experimental_nuage_enabled:
+            result = await self._experimental_nuage_client.start(
+                self._build_experimental_nuage_request(
+                    lechat_user_message=lechat_user_message, git_info=git_info
+                )
+            )
+            yield TeleportCompleteEvent(url=result.url)
+            return
 
         execution_id = await self._nuage_client.start_workflow(
             WorkflowParams(
@@ -233,6 +272,36 @@ class TeleportService:
             branch=git_info.branch,
             commit=git_info.commit,
             teleported_diffs=self._compress_diff(git_info.diff or ""),
+        )
+
+    def _build_experimental_nuage_request(
+        self, *, lechat_user_message: str, git_info: GitRepoInfo
+    ) -> ExperimentalNuageRequest:
+        if git_info.branch is None:
+            raise ServiceTeleportError(
+                "Experimental Nuage teleport requires a checked-out branch."
+            )
+
+        return ExperimentalNuageRequest(
+            idempotency_key=str(uuid4()),
+            message=ExperimentalNuageMessage(
+                parts=[ExperimentalNuageTextPart(text=lechat_user_message)]
+            ),
+            context=ExperimentalNuageContext(
+                repositories=[
+                    ExperimentalNuageRepository(
+                        repo_url=git_info.remote_url, branch=git_info.branch
+                    )
+                ]
+            ),
+        )
+
+    def _validate_experimental_nuage_git_info(self, git_info: GitRepoInfo) -> None:
+        if git_info.branch is not None:
+            return
+
+        raise ServiceTeleportError(
+            "Experimental Nuage teleport requires a checked-out branch."
         )
 
     def _compress_diff(self, diff: str, max_size: int = 1_000_000) -> bytes | None:

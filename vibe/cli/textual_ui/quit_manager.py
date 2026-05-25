@@ -31,15 +31,18 @@ class QuitManager:
             and (time.monotonic() - self._confirm_time) < QUIT_CONFIRM_DELAY
         )
 
-    def request_confirmation(self, key: QuitConfirmKey) -> None:
+    def request_confirmation(self, key: QuitConfirmKey, extra: str = "") -> None:
         if self._confirm_timer is not None:
             self._confirm_timer.stop()
             self._confirm_timer = None
         self._confirm_time = time.monotonic()
         self._confirm_key = key
+        prompt = f"Press {key} again to quit"
+        if extra:
+            prompt = f"{prompt} ({extra})"
         try:
             path_display = self._app.query_one(PathDisplay)
-            path_display.update(f"Press {key} again to quit")
+            path_display.update(prompt)
         except Exception:
             pass
         self._confirm_timer = self._app.set_timer(

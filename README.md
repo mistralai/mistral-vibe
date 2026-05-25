@@ -372,7 +372,7 @@ Vibe discovers skills from multiple locations:
 1. **Custom paths**: Configured in `config.toml` via `skill_paths`
 2. **Standard Agent Skills path** (project root, trusted folders only): `.agents/skills/` — [Agent Skills](https://agentskills.io) standard
 3. **Local project skills** (project root, trusted folders only): `.vibe/skills/` in your project
-4. **Global skills directory**: `~/.vibe/skills/`
+4. **Global skills directories**: `~/.vibe/skills/` and `~/.agents/skills/`
 
 ```toml
 skill_paths = ["/path/to/custom/skills"]

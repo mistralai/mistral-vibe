@@ -32,9 +32,9 @@
         font-family: arial;
     }
 
-    .terminal-r1 { fill: #98e024 }
+    .terminal-r1 { fill: #4ebf71 }
 .terminal-r2 { fill: #c5c8c6 }
-.terminal-r3 { fill: #d9d9d9 }
+.terminal-r3 { fill: #e0e0e0 }
     </style>
 
     <defs>

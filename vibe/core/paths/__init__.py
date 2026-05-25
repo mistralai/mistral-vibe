@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from vibe.core.paths._agents_home import AGENTS_HOME
 from vibe.core.paths._local_config_walk import (
     WALK_MAX_DEPTH,
     ConfigWalkResult,
@@ -22,6 +23,7 @@ from vibe.core.paths._vibe_home import (
 from vibe.core.paths.conventions import AGENTS_MD_FILENAME
 
 __all__ = [
+    "AGENTS_HOME",
     "AGENTS_MD_FILENAME",
     "CACHE_FILE",
     "DEFAULT_TOOL_DIR",

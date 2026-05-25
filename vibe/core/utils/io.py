@@ -68,6 +68,12 @@ def _get_candidate_encodings(raw: bytes) -> Iterator[str]:
         yield best
 
 
+def normalize_newlines(text: str) -> tuple[str, str]:
+    r"""Return ``text`` with ``\n`` newlines and the detected original style."""
+    newline = _detect_newline(text)
+    return text.replace("\r\n", "\n").replace("\r", "\n"), newline
+
+
 def decode_safe(raw: bytes, *, raise_on_error: bool = False) -> ReadSafeResult:
     """Decode ``raw`` like :func:`read_safe` after ``read_bytes``.
 
@@ -85,8 +91,7 @@ def decode_safe(raw: bytes, *, raise_on_error: bool = False) -> ReadSafeResult:
         errors = "strict" if raise_on_error else "replace"
         encoding = "utf-8"
         text = raw.decode(encoding, errors=errors)
-    newline = _detect_newline(text)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text, newline = normalize_newlines(text)
     return ReadSafeResult(text, encoding, newline)
 
 

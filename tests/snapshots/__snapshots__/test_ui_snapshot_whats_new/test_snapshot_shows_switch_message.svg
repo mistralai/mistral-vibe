@@ -36,9 +36,10 @@
 .terminal-r2 { fill: #ff8205;font-weight: bold }
 .terminal-r3 { fill: #68a0b3 }
 .terminal-r4 { fill: #ff8205 }
-.terminal-r5 { fill: #608ab1;font-weight: bold }
-.terminal-r6 { fill: #c5c8c6;font-weight: bold;text-decoration: underline; }
-.terminal-r7 { fill: #9a9b99 }
+.terminal-r5 { fill: #98729f;font-weight: bold }
+.terminal-r6 { fill: #608ab1 }
+.terminal-r7 { fill: #608ab1;text-decoration: underline; }
+.terminal-r8 { fill: #868887 }
     </style>
 
     <defs>
@@ -188,16 +189,16 @@
 </text><text class="terminal-r4" x="0" y="581.2" textLength="12.2" clip-path="url(#terminal-line-23)">┃</text><text class="terminal-r1" x="24.4" y="581.2" textLength="134.2" clip-path="url(#terminal-line-23)">•&#160;Feature&#160;2</text><text class="terminal-r1" x="1464" y="581.2" textLength="12.2" clip-path="url(#terminal-line-23)">
 </text><text class="terminal-r4" x="0" y="605.6" textLength="12.2" clip-path="url(#terminal-line-24)">┃</text><text class="terminal-r1" x="24.4" y="605.6" textLength="134.2" clip-path="url(#terminal-line-24)">•&#160;Feature&#160;3</text><text class="terminal-r1" x="1464" y="605.6" textLength="12.2" clip-path="url(#terminal-line-24)">
 </text><text class="terminal-r4" x="0" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">┃</text><text class="terminal-r1" x="1464" y="630" textLength="12.2" clip-path="url(#terminal-line-25)">
-</text><text class="terminal-r4" x="0" y="654.4" textLength="12.2" clip-path="url(#terminal-line-26)">┃</text><text class="terminal-r5" x="24.4" y="654.4" textLength="183" clip-path="url(#terminal-line-26)">Switch&#160;to&#160;your&#160;</text><text class="terminal-r6" x="207.4" y="654.4" textLength="231.8" clip-path="url(#terminal-line-26)">Le&#160;Chat&#160;Pro&#160;API&#160;key</text><text class="terminal-r1" x="1464" y="654.4" textLength="12.2" clip-path="url(#terminal-line-26)">
+</text><text class="terminal-r4" x="0" y="654.4" textLength="12.2" clip-path="url(#terminal-line-26)">┃</text><text class="terminal-r6" x="24.4" y="654.4" textLength="183" clip-path="url(#terminal-line-26)">Switch&#160;to&#160;your&#160;</text><text class="terminal-r7" x="207.4" y="654.4" textLength="231.8" clip-path="url(#terminal-line-26)">Le&#160;Chat&#160;Pro&#160;API&#160;key</text><text class="terminal-r1" x="1464" y="654.4" textLength="12.2" clip-path="url(#terminal-line-26)">
 </text><text class="terminal-r1" x="1464" y="678.8" textLength="12.2" clip-path="url(#terminal-line-27)">
 </text><text class="terminal-r1" x="1464" y="703.2" textLength="12.2" clip-path="url(#terminal-line-28)">
 </text><text class="terminal-r1" x="1464" y="727.6" textLength="12.2" clip-path="url(#terminal-line-29)">
-</text><text class="terminal-r7" x="0" y="752" textLength="1464" clip-path="url(#terminal-line-30)">┌────────────────────────────────────────────────────────────────────────────────────────────────────────────&#160;default&#160;─┐</text><text class="terminal-r1" x="1464" y="752" textLength="12.2" clip-path="url(#terminal-line-30)">
-</text><text class="terminal-r7" x="0" y="776.4" textLength="12.2" clip-path="url(#terminal-line-31)">│</text><text class="terminal-r2" x="24.4" y="776.4" textLength="12.2" clip-path="url(#terminal-line-31)">&gt;</text><text class="terminal-r7" x="1451.8" y="776.4" textLength="12.2" clip-path="url(#terminal-line-31)">│</text><text class="terminal-r1" x="1464" y="776.4" textLength="12.2" clip-path="url(#terminal-line-31)">
-</text><text class="terminal-r7" x="0" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">│</text><text class="terminal-r7" x="1451.8" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">│</text><text class="terminal-r1" x="1464" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">
-</text><text class="terminal-r7" x="0" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">│</text><text class="terminal-r7" x="1451.8" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">│</text><text class="terminal-r1" x="1464" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">
-</text><text class="terminal-r7" x="0" y="849.6" textLength="1464" clip-path="url(#terminal-line-34)">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text><text class="terminal-r1" x="1464" y="849.6" textLength="12.2" clip-path="url(#terminal-line-34)">
-</text><text class="terminal-r7" x="0" y="874" textLength="158.6" clip-path="url(#terminal-line-35)">/test/workdir</text><text class="terminal-r7" x="1256.6" y="874" textLength="207.4" clip-path="url(#terminal-line-35)">0%&#160;of&#160;200k&#160;tokens</text>
+</text><text class="terminal-r1" x="0" y="752" textLength="1464" clip-path="url(#terminal-line-30)">┌────────────────────────────────────────────────────────────────────────────────────────────────────────────&#160;default&#160;─┐</text><text class="terminal-r1" x="1464" y="752" textLength="12.2" clip-path="url(#terminal-line-30)">
+</text><text class="terminal-r1" x="0" y="776.4" textLength="12.2" clip-path="url(#terminal-line-31)">│</text><text class="terminal-r2" x="24.4" y="776.4" textLength="12.2" clip-path="url(#terminal-line-31)">&gt;</text><text class="terminal-r1" x="1451.8" y="776.4" textLength="12.2" clip-path="url(#terminal-line-31)">│</text><text class="terminal-r1" x="1464" y="776.4" textLength="12.2" clip-path="url(#terminal-line-31)">
+</text><text class="terminal-r1" x="0" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">│</text><text class="terminal-r1" x="1451.8" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">│</text><text class="terminal-r1" x="1464" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">
+</text><text class="terminal-r1" x="0" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">│</text><text class="terminal-r1" x="1451.8" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">│</text><text class="terminal-r1" x="1464" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">
+</text><text class="terminal-r1" x="0" y="849.6" textLength="1464" clip-path="url(#terminal-line-34)">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text><text class="terminal-r1" x="1464" y="849.6" textLength="12.2" clip-path="url(#terminal-line-34)">
+</text><text class="terminal-r8" x="0" y="874" textLength="158.6" clip-path="url(#terminal-line-35)">/test/workdir</text><text class="terminal-r8" x="1256.6" y="874" textLength="207.4" clip-path="url(#terminal-line-35)">0%&#160;of&#160;200k&#160;tokens</text>
     </g>
     </g>
 </svg>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from vibe.core.tools.base import BaseTool
 from vibe.core.tools.connectors.connector_registry import (
+    ConnectorAuthAction,
     ConnectorRegistry,
     RemoteTool,
     _normalize_name,
@@ -12,15 +13,21 @@ from vibe.core.tools.connectors.connector_registry import (
 class FakeConnectorRegistry(ConnectorRegistry):
     """Test double that returns canned connector tools without hitting the API."""
 
-    def __init__(self, connectors: dict[str, list[RemoteTool]] | None = None) -> None:
+    def __init__(
+        self,
+        connectors: dict[str, list[RemoteTool]] | None = None,
+        auth_actions: dict[str, ConnectorAuthAction] | None = None,
+    ) -> None:
         super().__init__(api_key="fake-key")
         self._fake_connectors = connectors or {}
+        self._fake_auth_actions = auth_actions or {}
         self._build_cache()
 
     def _build_cache(self) -> None:
         self._cache = {}
         self._connector_names = []
         self._connector_connected = {}
+        self._connector_auth_action = {}
         self._alias_to_id = {}
         for connector_name, tools in self._fake_connectors.items():
             alias = _normalize_name(connector_name)
@@ -39,6 +46,9 @@ class FakeConnectorRegistry(ConnectorRegistry):
             self._cache[connector_id] = tool_map
             self._connector_names.append(alias)
             self._connector_connected[alias] = bool(tool_map)
+            self._connector_auth_action[alias] = self._fake_auth_actions.get(
+                connector_name, ConnectorAuthAction.NONE
+            )
 
     def get_tools(self) -> dict[str, type[BaseTool]]:
         if self._cache is None:

@@ -13,6 +13,7 @@ from vibe.core.config import (
     RemoveFromList,
     SetField,
 )
+from vibe.core.config.patch import ConfigPatch
 
 
 def test_patch_op_union_contains_all_operations() -> None:
@@ -121,4 +122,136 @@ def test_scenario_mini_vibe_patch_operations() -> None:
         AppendToList("tools.disabled_tools", ("bash",)),
         RemoveFromList("models.available_models", ("codestral-latest",)),
         DeleteField("tools.deprecated_setting"),
+    ]
+
+
+# --- ConfigPatch ---
+
+
+def test_config_patch_stores_operations_and_metadata() -> None:
+    op = SetField("active_model", "devstral-small")
+    patch = ConfigPatch(op, fingerprint="fp-1", reason="test")
+
+    assert patch.operations == [op]
+    assert patch.fingerprint == "fp-1"
+    assert patch.reason == "test"
+
+
+def test_config_patch_defaults() -> None:
+    patch = ConfigPatch(fingerprint="fp-1")
+
+    assert patch.reason == ""
+    assert patch.operations == []
+
+
+def test_config_patch_accepts_multiple_operations() -> None:
+    ops: list[PatchOp] = [
+        SetField("active_model", "devstral-small"),
+        AppendToList("tools.disabled_tools", ("bash",)),
+    ]
+    patch = ConfigPatch(*ops, fingerprint="fp-1")
+
+    assert patch.operations == ops
+
+
+def test_config_patch_add_appends_operations() -> None:
+    patch = ConfigPatch(SetField("active_model", "devstral-small"), fingerprint="fp-1")
+    patch.add(DeleteField("tools.deprecated_setting"))
+
+    assert patch.operations == [
+        SetField("active_model", "devstral-small"),
+        DeleteField("tools.deprecated_setting"),
+    ]
+
+
+def test_config_patch_add_returns_self() -> None:
+    patch = ConfigPatch(fingerprint="fp-1")
+    result = patch.add(SetField("active_model", "devstral-small"))
+
+    assert result is patch
+
+
+def test_config_patch_add_accepts_multiple_operations() -> None:
+    patch = ConfigPatch(fingerprint="fp-1")
+    patch.add(
+        SetField("active_model", "devstral-small"),
+        AppendToList("tools.disabled_tools", ("bash",)),
+    )
+
+    assert len(patch.operations) == 2
+
+
+def test_config_patch_add_is_chainable() -> None:
+    patch = (
+        ConfigPatch(fingerprint="fp-1")
+        .add(SetField("active_model", "devstral-small"))
+        .add(DeleteField("tools.deprecated_setting"))
+    )
+
+    assert len(patch.operations) == 2
+
+
+def test_config_patch_describe_set_field() -> None:
+    patch = ConfigPatch(SetField("active_model", "devstral-small"), fingerprint="fp-1")
+
+    assert patch.describe() == ["set 'active_model' = 'devstral-small'"]
+
+
+def test_config_patch_describe_append_to_list() -> None:
+    patch = ConfigPatch(
+        AppendToList("tools.disabled_tools", ("bash", "python")), fingerprint="fp-1"
+    )
+
+    assert patch.describe() == ["append to 'tools.disabled_tools': ['bash', 'python']"]
+
+
+def test_config_patch_describe_remove_from_list() -> None:
+    patch = ConfigPatch(
+        RemoveFromList("models.available_models", ("codestral-latest",)),
+        fingerprint="fp-1",
+    )
+
+    assert patch.describe() == [
+        "remove from 'models.available_models': ['codestral-latest']"
+    ]
+
+
+def test_config_patch_describe_delete_field() -> None:
+    patch = ConfigPatch(DeleteField("tools.deprecated_setting"), fingerprint="fp-1")
+
+    assert patch.describe() == ["delete 'tools.deprecated_setting'"]
+
+
+def test_config_patch_describe_empty_returns_empty_list() -> None:
+    patch = ConfigPatch(fingerprint="fp-1")
+
+    assert patch.describe() == []
+
+
+def test_config_patch_describe_multiple_operations() -> None:
+    patch = ConfigPatch(
+        SetField("active_model", "devstral-small"),
+        AppendToList("tools.disabled_tools", ("bash",)),
+        DeleteField("tools.deprecated_setting"),
+        fingerprint="fp-1",
+    )
+
+    assert patch.describe() == [
+        "set 'active_model' = 'devstral-small'",
+        "append to 'tools.disabled_tools': ['bash']",
+        "delete 'tools.deprecated_setting'",
+    ]
+
+
+def test_scenario_build_patch_incrementally() -> None:
+    patch = ConfigPatch(fingerprint="fp-abc", reason="/model command")
+    patch.add(SetField("active_model", "devstral-small"))
+    patch.add(AppendToList("tools.disabled_tools", ("bash",)))
+
+    assert patch.fingerprint == "fp-abc"
+    assert patch.reason == "/model command"
+    assert len(patch.operations) == 2
+    assert patch.describe() == [
+        "set 'active_model' = 'devstral-small'",
+        "append to 'tools.disabled_tools': ['bash']",
     ]

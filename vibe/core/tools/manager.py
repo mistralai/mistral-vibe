@@ -254,12 +254,21 @@ class ToolManager:
             elif srv.disabled_tools:
                 per_source_disabled[key] = set(srv.disabled_tools)
 
+        # Track connector names that have explicit config entries
+        configured_connectors = {cfg.name for cfg in self._config.connectors}
+
         for cfg in self._config.connectors:
             key = (cfg.name, True)
             if cfg.disabled:
                 disabled_sources.add(key)
             elif cfg.disabled_tools:
                 per_source_disabled[key] = set(cfg.disabled_tools)
+
+        # Disable connectors discovered but not in config (new connectors)
+        if self._connector_registry is not None:
+            for name in self._connector_registry.get_connector_names():
+                if name not in configured_connectors:
+                    disabled_sources.add((name, True))
 
         return disabled_sources, per_source_disabled
 
