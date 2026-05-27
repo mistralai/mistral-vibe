@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
@@ -269,6 +270,28 @@ async def test_compact_appends_extra_instructions_to_prompt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compact_uses_configured_compaction_prompt(
+    mock_prompts_dirs: tuple[Path, Path],
+) -> None:
+    project_prompts, _ = mock_prompts_dirs
+    (project_prompts / "theorem_compact.md").write_text("Summarize theorem progress")
+
+    backend = FakeBackend([[mock_llm_chunk(content="<summary>")]])
+    cfg = build_test_vibe_config(
+        models=make_test_models(auto_compact_threshold=999),
+        compaction_prompt_id="theorem_compact",
+    )
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
+    agent.stats.context_tokens = 100
+
+    await agent.compact()
+
+    compaction_prompt = backend.requests_messages[0][-1].content
+    assert compaction_prompt == "Summarize theorem progress"
+
+
+@pytest.mark.asyncio
 async def test_compact_without_extra_instructions_has_no_additional_section() -> None:
     backend = FakeBackend([[mock_llm_chunk(content="<summary>")]])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
@@ -281,3 +304,39 @@ async def test_compact_without_extra_instructions_has_no_additional_section() ->
     compaction_prompt = backend.requests_messages[0][-1].content
     assert compaction_prompt is not None
     assert "## Additional Instructions" not in compaction_prompt
+
+
+@pytest.mark.asyncio
+async def test_compact_message_shape_preserves_prior_user_messages() -> None:
+    from vibe.core.prompts import UtilityPrompt
+
+    summary_prefix = UtilityPrompt.COMPACT_SUMMARY_PREFIX.read()
+    backend = FakeBackend([[mock_llm_chunk(content="fresh summary body")]])
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    system_message_before = agent.messages[0]
+
+    agent.messages.append(LLMMessage(role=Role.user, content="first real ask"))
+    agent.messages.append(
+        LLMMessage(role=Role.user, content="middleware ping", injected=True)
+    )
+    agent.messages.append(LLMMessage(role=Role.assistant, content="ack"))
+    agent.messages.append(
+        LLMMessage(role=Role.user, content=f"{summary_prefix}\nprior summary blob")
+    )
+    agent.messages.append(LLMMessage(role=Role.user, content="follow-up ask"))
+    agent.stats.context_tokens = 100
+
+    await agent.compact()
+
+    final = list(agent.messages)
+    assert len(final) == 4  # [system, prior_user_1, prior_user_2, wrapped_summary]
+    assert final[0] is system_message_before
+    assert [m.role for m in final[1:]] == [Role.user, Role.user, Role.user]
+    assert final[1].content == "first real ask"
+    assert final[2].content == "follow-up ask"
+    # Injected and prior-summary user messages must be filtered out.
+    assert all("middleware ping" not in (m.content or "") for m in final)
+    assert sum("prior summary blob" in (m.content or "") for m in final) == 0
+    # Final message is the wrapped summary the next agent will read first.
+    assert final[-1].content == f"{summary_prefix}\nfresh summary body"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC
@@ -125,6 +125,7 @@ from vibe.core.config import (
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.feedback import record_feedback_asked, should_show_feedback
 from vibe.core.hooks.config import load_hooks_from_fs
+from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.proxy_setup import (
     ProxySetupError,
     parse_proxy_command,
@@ -165,14 +166,18 @@ from vibe.core.utils import (
     get_user_cancellation_message,
 )
 from vibe.setup.auth import (
+    AuthState,
+    AuthStateKind,
     BrowserSignInAttempt,
     BrowserSignInError,
     BrowserSignInErrorCode,
     BrowserSignInService,
     HttpBrowserSignInGateway,
+    assess_auth_state,
 )
 from vibe.setup.auth.api_key_persistence import (
     persist_api_key,
+    remove_api_key,
     resolve_api_key_provider,
 )
 from vibe.setup.onboarding.context import OnboardingContext
@@ -203,6 +208,22 @@ class TelemetrySendNotification(BaseModel):
     event: str
     properties: dict[str, Any] = Field(default_factory=dict)
     session_id: str = Field(validation_alias=AliasChoices("session_id", "sessionId"))
+
+
+class AuthStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    authenticated: bool
+    auth_state: AuthStateKind = Field(alias="authState")
+    sign_out_available: bool = Field(alias="signOutAvailable")
+
+
+def _auth_status_response_from_auth_state(auth_state: AuthState) -> AuthStatusResponse:
+    return AuthStatusResponse(
+        authenticated=auth_state.can_use_active_provider,
+        authState=auth_state.kind,
+        signOutAvailable=auth_state.sign_out_available,
+    )
 
 
 def _dispatch_at_mention_inserted(
@@ -250,6 +271,7 @@ RETRYABLE_BROWSER_SIGN_IN_COMPLETION_ERRORS = {
 
 OnboardingContextLoader = Callable[[], OnboardingContext]
 ApiKeyPersister = Callable[[ProviderConfig, str], str]
+ApiKeyRemover = Callable[[ProviderConfig], None]
 
 
 class BrowserSignInServiceAdapter(Protocol):
@@ -274,10 +296,17 @@ class VibeAcpAgentLoop(AcpAgent):
         onboarding_context_loader: OnboardingContextLoader | None = None,
         browser_sign_in_service_factory: BrowserSignInServiceFactory | None = None,
         api_key_persister: ApiKeyPersister = persist_api_key,
+        api_key_remover: ApiKeyRemover = remove_api_key,
+        environ_before_dotenv_load: Mapping[str, str] | None = None,
     ) -> None:
         self.sessions: dict[str, AcpSessionLoop] = {}
         self.client_capabilities: ClientCapabilities | None = None
         self.client_info: Implementation | None = None
+        self._environ_before_dotenv_load = dict(
+            environ_before_dotenv_load
+            if environ_before_dotenv_load is not None
+            else os.environ
+        )
         self._pending_browser_sign_in_attempts: dict[
             str, PendingBrowserSignInAttempt
         ] = {}
@@ -288,11 +317,12 @@ class VibeAcpAgentLoop(AcpAgent):
             browser_sign_in_service_factory or self._build_browser_sign_in_service
         )
         self._persist_api_key = api_key_persister
+        self._remove_api_key = api_key_remover
 
     def _build_browser_auth_method(
         self, context: OnboardingContext, method_id: str
     ) -> AuthMethodAgent | None:
-        if not context.browser_sign_in_enabled:
+        if not context.supports_browser_sign_in:
             return None
 
         return AuthMethodAgent(
@@ -340,7 +370,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
     def _load_enabled_browser_sign_in_context(self) -> OnboardingContext:
         context = self._load_onboarding_context()
-        if not context.browser_sign_in_enabled:
+        if not context.supports_browser_sign_in:
             raise InvalidRequestError(
                 "Browser sign-in is not available for the configured provider."
             )
@@ -1474,8 +1504,46 @@ class VibeAcpAgentLoop(AcpAgent):
         )
         return {}
 
+    def _assess_current_auth_state(self) -> tuple[ProviderConfig, AuthState]:
+        load_dotenv_values(env_path=GLOBAL_ENV_FILE.path)
+        provider = self._load_onboarding_context().provider
+        auth_state = assess_auth_state(
+            provider,
+            process_env_had_value_before_dotenv_load=bool(
+                provider.api_key_env_var
+                and self._environ_before_dotenv_load.get(provider.api_key_env_var)
+            ),
+        )
+        return provider, auth_state
+
+    def _handle_auth_status(self) -> dict[str, Any]:
+        _, auth_state = self._assess_current_auth_state()
+        return _auth_status_response_from_auth_state(auth_state).model_dump(
+            mode="json", by_alias=True
+        )
+
+    def _handle_auth_sign_out(self) -> dict[str, Any]:
+        provider, auth_state = self._assess_current_auth_state()
+        if not auth_state.sign_out_available:
+            raise InvalidRequestError(
+                f"Sign out is not available for auth state: {auth_state.kind.value}"
+            )
+
+        try:
+            self._remove_api_key(provider)
+        except (OSError, ValueError) as exc:
+            raise InternalError(f"Failed to sign out: {exc}") from exc
+
+        return {}
+
     @override
     async def ext_method(self, method: str, params: dict) -> dict:
+        if method == "auth/status":
+            return self._handle_auth_status()
+
+        if method == "auth/signOut":
+            return self._handle_auth_sign_out()
+
         if method == "session/set_title":
             return await self._handle_session_set_title(params)
 
@@ -1744,8 +1812,10 @@ class VibeAcpAgentLoop(AcpAgent):
 SESSION_CLOSED_FLUSH_TIMEOUT_SECONDS = 1.0
 
 
-def run_acp_server() -> None:
-    agent = VibeAcpAgentLoop()
+def run_acp_server(
+    *, environ_before_dotenv_load: Mapping[str, str] | None = None
+) -> None:
+    agent = VibeAcpAgentLoop(environ_before_dotenv_load=environ_before_dotenv_load)
     install_sigterm_flush = TelemetryClient(config_getter=VibeConfig.load).is_active()
     received_sigterm = False
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)

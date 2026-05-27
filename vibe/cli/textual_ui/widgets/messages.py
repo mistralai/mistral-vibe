@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from vibe.core.hooks.models import HookMessageSeverity
 from vibe.core.logger import logger
@@ -47,7 +47,20 @@ class ExpandingBorder(NonSelectableStatic):
         self.refresh()
 
 
+# Mimic a border bottom with this component in order to have dimmed colors in ANSI themes
+# Move back to border when Textual supports dimmed borders or foreground-muted in ANSI themes
+class ExpandingSeparator(NonSelectableStatic):
+    def render(self) -> str:
+        return "─" * max(self.size.width, 1)
+
+    def on_resize(self) -> None:
+        self.refresh()
+
+
 class UserMessage(Static):
+    PROMPT_CHAR: ClassVar[str] = ">"
+    SHOW_SEPARATOR: ClassVar[bool] = True
+
     def __init__(
         self, content: str, pending: bool = False, message_index: int | None = None
     ) -> None:
@@ -61,10 +74,16 @@ class UserMessage(Static):
         return self._content
 
     def compose(self) -> ComposeResult:
-        with Horizontal(classes="user-message-container"):
-            yield NoMarkupStatic(self._content, classes="user-message-content")
-            if self._pending:
-                self.add_class("pending")
+        with Vertical(classes="user-message-wrapper"):
+            with Horizontal(classes="user-message-container"):
+                yield NonSelectableStatic(
+                    f"{self.PROMPT_CHAR} ", classes="user-message-prompt"
+                )
+                yield NoMarkupStatic(self._content, classes="user-message-content")
+            if self.SHOW_SEPARATOR:
+                yield ExpandingSeparator(classes="user-message-separator")
+        if self._pending:
+            self.add_class("pending")
 
     async def set_pending(self, pending: bool) -> None:
         if pending == self._pending:
@@ -77,6 +96,19 @@ class UserMessage(Static):
             return
 
         self.remove_class("pending")
+
+
+class SlashCommandMessage(UserMessage):
+    PROMPT_CHAR = "/"
+    SHOW_SEPARATOR = False
+
+    def __init__(self, content: str) -> None:
+        super().__init__(content)
+        self.add_class("slash-command-message")
+
+
+class TeleportUserMessage(UserMessage):
+    PROMPT_CHAR = "&"
 
 
 class StreamingMessageBase(Static):
@@ -247,10 +279,29 @@ class UserCommandMessage(Static):
                 yield Markdown(self._content)
 
 
+VSCODE_EXTENSION_URI = "vscode:extension/mistralai.vibe-code"
+VSCODE_EXTENSION_LINK_LABEL = "VS Code extension"
+VSCODE_EXTENSION_PROMO_STANDALONE = f"We now have a [{VSCODE_EXTENSION_LINK_LABEL}]({VSCODE_EXTENSION_URI}) with a rich UI. Check it out!"
+VSCODE_EXTENSION_PROMO_WHATS_NEW_SUFFIX = (
+    f"\n\n_Btw, we also have a new [{VSCODE_EXTENSION_LINK_LABEL}]"
+    f"({VSCODE_EXTENSION_URI}). Check it out!_"
+)
+
+
 class WhatsNewMessage(Static):
     def __init__(self, content: str) -> None:
         super().__init__()
         self.add_class("whats-new-message")
+        self._content = content
+
+    def compose(self) -> ComposeResult:
+        yield Markdown(self._content)
+
+
+class VscodeExtensionPromoMessage(Static):
+    def __init__(self, content: str = VSCODE_EXTENSION_PROMO_STANDALONE) -> None:
+        super().__init__()
+        self.add_class("vscode-extension-promo-message")
         self._content = content
 
     def compose(self) -> ComposeResult:

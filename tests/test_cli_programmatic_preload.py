@@ -7,6 +7,7 @@ from tests.mock.mock_backend_factory import mock_backend_factory
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core import run_programmatic
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.types import Backend, LLMMessage, OutputFormat, Role
 
 
@@ -66,6 +67,7 @@ def test_run_programmatic_preload_streaming_is_batched(
             prompt="Can you summarize what decorators are?",
             output_format=OutputFormat.STREAMING,
             previous_messages=previous,
+            agent_name=BuiltinAgentName.AUTO_APPROVE,
         )
 
         roles = [r for r, _ in spy.emitted]
@@ -136,6 +138,7 @@ def test_run_programmatic_ignores_system_messages_in_previous(
                     content="Second system message that should be ignored.",
                 ),
             ],
+            agent_name=BuiltinAgentName.AUTO_APPROVE,
         )
 
         roles = [r for r, _ in spy.emitted]
@@ -176,6 +179,7 @@ def test_run_programmatic_teleport_ignored_when_nuage_disabled(
             prompt="Hello",
             output_format=OutputFormat.STREAMING,
             teleport=True,
+            agent_name=BuiltinAgentName.AUTO_APPROVE,
         )
 
         roles = [r for r, _ in spy.emitted]

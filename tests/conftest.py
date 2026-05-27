@@ -10,6 +10,7 @@ import tomli_w
 
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.stubs.fake_backend import FakeBackend
+from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from tests.stubs.fake_voice_manager import FakeVoiceManager
 from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
@@ -26,6 +27,7 @@ from vibe.core.config import (
     VibeConfig,
 )
 from vibe.core.config.harness_files import (
+    HarnessFilesManager,
     init_harness_files_manager,
     reset_harness_files_manager,
 )
@@ -202,6 +204,31 @@ def telemetry_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
 
 @pytest.fixture
+def mock_prompts_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    project = tmp_path / "project" / ".vibe" / "prompts"
+    user = tmp_path / "home" / ".vibe" / "prompts"
+    project.mkdir(parents=True)
+    user.mkdir(parents=True)
+
+    class _MockManager(HarnessFilesManager):
+        @property
+        def project_prompts_dirs(self) -> list[Path]:
+            return [project]
+
+        @property
+        def user_prompts_dirs(self) -> list[Path]:
+            return [user]
+
+    monkeypatch.setattr(
+        "vibe.core.prompts.get_harness_files_manager",
+        lambda: _MockManager(sources=("user",)),
+    )
+    return project, user
+
+
+@pytest.fixture
 def vibe_app() -> VibeApp:
     return build_test_vibe_app()
 
@@ -259,6 +286,7 @@ def build_test_agent_loop(
         agent_name=agent_name,
         backend=backend or FakeBackend(),
         enable_streaming=enable_streaming,
+        mcp_registry=kwargs.pop("mcp_registry", FakeMCPRegistry()),
         **kwargs,
     )
 

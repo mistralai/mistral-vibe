@@ -78,6 +78,25 @@ class PriceLimitMiddleware:
         pass
 
 
+class TokenLimitMiddleware:
+    def __init__(self, max_tokens: int) -> None:
+        self.max_tokens = max_tokens
+
+    async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
+        if context.stats.session_total_llm_tokens > self.max_tokens:
+            return MiddlewareResult(
+                action=MiddlewareAction.STOP,
+                reason=(
+                    "Token limit exceeded: "
+                    f"{context.stats.session_total_llm_tokens:,} > {self.max_tokens:,}"
+                ),
+            )
+        return MiddlewareResult()
+
+    def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:
+        pass
+
+
 class AutoCompactMiddleware:
     async def before_turn(self, context: ConversationContext) -> MiddlewareResult:
         threshold = context.config.get_active_model().auto_compact_threshold

@@ -267,6 +267,7 @@ When using `--prompt`, you can specify additional options:
 
 - **`--max-turns N`**: Limit the maximum number of assistant turns. The session will stop after N turns.
 - **`--max-price DOLLARS`**: Set a maximum cost limit in dollars. The session will be interrupted if the cost exceeds this limit.
+- **`--max-tokens N`**: Set a maximum cumulative LLM token budget for the session, counting both prompt and completion tokens. The session will be interrupted if usage exceeds this limit.
 - **`--enabled-tools TOOL`**: Enable specific tools. In programmatic mode, this disables all other tools. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
 - **`--output FORMAT`**: Set the output format. Options:
   - `text` (default): Human-readable text output
@@ -276,7 +277,7 @@ When using `--prompt`, you can specify additional options:
 Example:
 
 ```bash
-vibe --prompt "Analyze the codebase" --max-turns 5 --max-price 1.0 --output json
+vibe --prompt "Analyze the codebase" --max-turns 5 --max-price 1.0 --max-tokens 50000 --output json
 ```
 
 ## Voice Mode
@@ -444,6 +445,21 @@ system_prompt_id = "my_custom_prompt"
 ```
 
 This will load the prompt from `~/.vibe/prompts/my_custom_prompt.md`.
+
+Project-local prompts in `.vibe/prompts/` are also supported and override user-level prompts with the same name. This applies to all custom prompts (system and compaction).
+
+### Custom Compaction Prompts
+
+Compaction uses the built-in prompt at `prompts/compact.md` by default. You can replace it with a custom prompt from `~/.vibe/prompts/` (or `.vibe/prompts/`) using the same resolution rules as system prompts.
+
+To use a custom compaction prompt, set `compaction_prompt_id` in your configuration to match the filename (without the `.md` extension):
+
+```toml
+# Use a custom compaction prompt
+compaction_prompt_id = "my_compaction_prompt"
+```
+
+Any extra instructions passed to `/compact ...` are appended after the configured compaction prompt.
 
 ### Custom Agent Configurations
 
@@ -650,7 +666,7 @@ This affects where Vibe looks for:
 - `config.toml` - Main configuration
 - `.env` - API keys
 - `agents/` - Custom agent configurations
-- `prompts/` - Custom system prompts
+- `prompts/` - Custom system and compaction prompts
 - `tools/` - Custom tools
 - `logs/` - Session logs
 

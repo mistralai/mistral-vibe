@@ -16,6 +16,7 @@ from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.experimental_nuage import (
     ExperimentalNuageClient,
     ExperimentalNuageContext,
+    ExperimentalNuageDiff,
     ExperimentalNuageMessage,
     ExperimentalNuageRepository,
     ExperimentalNuageRequest,
@@ -282,6 +283,13 @@ class TeleportService:
                 "Experimental Nuage teleport requires a checked-out branch."
             )
 
+        compressed = self._compress_diff(git_info.diff)
+        diff = (
+            ExperimentalNuageDiff(content=compressed.decode("ascii"))
+            if compressed is not None
+            else None
+        )
+
         return ExperimentalNuageRequest(
             idempotency_key=str(uuid4()),
             message=ExperimentalNuageMessage(
@@ -290,7 +298,10 @@ class TeleportService:
             context=ExperimentalNuageContext(
                 repositories=[
                     ExperimentalNuageRepository(
-                        repo_url=git_info.remote_url, branch=git_info.branch
+                        repo_url=git_info.remote_url,
+                        branch=git_info.branch,
+                        commit_sha=git_info.commit,
+                        diff=diff,
                     )
                 ]
             ),

@@ -70,7 +70,6 @@ def _build_onboarding_config(
     api_key_env_var: str = "MISTRAL_API_KEY",
     browser_auth_base_url: str | None = None,
     browser_auth_api_base_url: str | None = None,
-    enable_experimental_browser_sign_in: bool = False,
 ) -> VibeConfig:
     provider = ProviderConfig(
         name=provider_name,
@@ -85,11 +84,7 @@ def _build_onboarding_config(
         provider=model_provider or provider_name,
         alias="devstral-2",
     )
-    return build_test_vibe_config(
-        providers=[provider],
-        models=[model],
-        enable_experimental_browser_sign_in=enable_experimental_browser_sign_in,
-    )
+    return build_test_vibe_config(providers=[provider], models=[model])
 
 
 def _build_browser_onboarding_app(
@@ -101,7 +96,6 @@ def _build_browser_onboarding_app(
         config=_build_onboarding_config(
             browser_auth_base_url=CONSOLE_URL,
             browser_auth_api_base_url=BROWSER_AUTH_API_URL,
-            enable_experimental_browser_sign_in=True,
         ),
         browser_sign_in_service_factory=browser_sign_in_service_factory,
         browser_sign_in_success_delay=browser_sign_in_success_delay,
@@ -246,9 +240,7 @@ async def _show_browser_sign_in(pilot: Pilot) -> None:
 async def test_ui_keeps_manual_flow_when_browser_sign_in_is_unsupported() -> None:
     app = OnboardingApp(
         config=_build_onboarding_config(
-            browser_auth_base_url="",
-            browser_auth_api_base_url="",
-            enable_experimental_browser_sign_in=True,
+            browser_auth_base_url="", browser_auth_api_base_url=""
         )
     )
     api_key_value = "sk-onboarding-test-key"
@@ -268,7 +260,7 @@ async def test_ui_keeps_manual_flow_when_browser_sign_in_is_unsupported() -> Non
 
 
 @pytest.mark.asyncio
-async def test_ui_hides_browser_sign_in_when_experimental_flag_is_disabled() -> None:
+async def test_ui_supports_browser_sign_in_when_provider_supports_it() -> None:
     _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
         outcomes=["completed"]
     )
@@ -276,28 +268,6 @@ async def test_ui_hides_browser_sign_in_when_experimental_flag_is_disabled() -> 
         config=_build_onboarding_config(
             browser_auth_base_url=CONSOLE_URL,
             browser_auth_api_base_url=BROWSER_AUTH_API_URL,
-        ),
-        browser_sign_in_service_factory=browser_sign_in_service_factory,
-    )
-
-    assert app.supports_browser_sign_in is False
-
-    async with app.run_test() as pilot:
-        await _pass_welcome_screen(pilot)
-        await _pass_theme_selection_screen(pilot)
-        await _wait_for(lambda: isinstance(pilot.app.screen, ApiKeyScreen), pilot)
-
-
-@pytest.mark.asyncio
-async def test_ui_supports_browser_sign_in_when_experimental_flag_is_enabled() -> None:
-    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
-        outcomes=["completed"]
-    )
-    app = OnboardingApp(
-        config=_build_onboarding_config(
-            browser_auth_base_url=CONSOLE_URL,
-            browser_auth_api_base_url=BROWSER_AUTH_API_URL,
-            enable_experimental_browser_sign_in=True,
         ),
         browser_sign_in_service_factory=browser_sign_in_service_factory,
     )
@@ -316,7 +286,6 @@ async def test_ui_offers_browser_sign_in_for_renamed_mistral_provider() -> None:
             backend=Backend.MISTRAL,
             browser_auth_base_url=CONSOLE_URL,
             browser_auth_api_base_url=BROWSER_AUTH_API_URL,
-            enable_experimental_browser_sign_in=True,
         )
     )
 
@@ -476,9 +445,7 @@ async def test_ui_skips_success_delay_when_browser_api_key_cannot_be_persisted()
         backend=Backend.MISTRAL,
     )
     app = OnboardingApp(
-        config=OnboardingContext(
-            provider=provider, enable_experimental_browser_sign_in=True
-        ),
+        config=OnboardingContext(provider=provider),
         browser_sign_in_service_factory=browser_sign_in_service_factory,
         browser_sign_in_success_delay=2.0,
     )
@@ -501,7 +468,6 @@ async def test_ui_browser_sign_in_falls_back_to_mistral_env_var_when_missing() -
             api_key_env_var="",
             browser_auth_base_url=CONSOLE_URL,
             browser_auth_api_base_url=BROWSER_AUTH_API_URL,
-            enable_experimental_browser_sign_in=True,
         ),
         browser_sign_in_service_factory=browser_sign_in_service_factory,
     )
@@ -754,15 +720,13 @@ async def test_ui_switches_to_manual_path_while_browser_sign_in_is_running() -> 
 
 
 @pytest.mark.asyncio
-async def test_ui_uses_default_mistral_browser_auth_urls_when_experiment_is_enabled(
+async def test_ui_uses_default_mistral_browser_auth_urls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_base_urls: list[tuple[str, str]] = []
     _patch_failing_browser_sign_in_service(monkeypatch, captured_base_urls)
 
-    app = OnboardingApp(
-        config=build_test_vibe_config(enable_experimental_browser_sign_in=True)
-    )
+    app = OnboardingApp(config=build_test_vibe_config())
 
     assert app.supports_browser_sign_in is True
 
@@ -776,46 +740,6 @@ async def test_ui_uses_default_mistral_browser_auth_urls_when_experiment_is_enab
             DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
         )
     ]
-
-
-@pytest.mark.asyncio
-async def test_ui_enables_browser_sign_in_from_env_var(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VIBE_ENABLE_EXPERIMENTAL_BROWSER_SIGN_IN", "true")
-    captured_base_urls: list[tuple[str, str]] = []
-    _patch_failing_browser_sign_in_service(monkeypatch, captured_base_urls)
-
-    app = OnboardingApp()
-
-    assert app.supports_browser_sign_in is True
-
-    async with app.run_test() as pilot:
-        await _show_browser_sign_in(pilot)
-        await _wait_for(lambda: bool(captured_base_urls), pilot)
-
-    assert captured_base_urls == [
-        (
-            DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
-            DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
-        )
-    ]
-
-
-@pytest.mark.asyncio
-async def test_ui_keeps_browser_sign_in_disabled_from_false_env_var(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VIBE_ENABLE_EXPERIMENTAL_BROWSER_SIGN_IN", "false")
-
-    app = OnboardingApp()
-
-    assert app.supports_browser_sign_in is False
-
-    async with app.run_test() as pilot:
-        await _pass_welcome_screen(pilot)
-        await _pass_theme_selection_screen(pilot)
-        await _wait_for(lambda: isinstance(pilot.app.screen, ApiKeyScreen), pilot)
 
 
 @pytest.mark.asyncio
@@ -828,7 +752,6 @@ async def test_ui_preserves_custom_browser_auth_urls_when_api_key_is_missing(
     config_file.write_text(
         "\n".join([
             'active_model = "devstral-2"',
-            "enable_experimental_browser_sign_in = true",
             "[[providers]]",
             'name = "mistral"',
             'api_base = "https://api.mistral.ai/v1"',
@@ -871,7 +794,6 @@ async def test_ui_falls_back_to_default_onboarding_context_with_invalid_active_m
     config_file.write_text(
         "\n".join([
             'active_model = "does-not-exist"',
-            "enable_experimental_browser_sign_in = true",
             "",
             "[[providers]]",
             'name = "mistral"',
@@ -922,7 +844,7 @@ async def test_ui_can_pick_a_theme_and_saves_selection() -> None:
         assert app.theme == target_theme
 
         await pilot.press("enter")
-        await _wait_for(lambda: isinstance(app.screen, ApiKeyScreen), pilot)
+        await _wait_for(lambda: isinstance(app.screen, AuthMethodScreen), pilot)
 
     config_path = VIBE_HOME.path / "config.toml"
     assert config_path.is_file()

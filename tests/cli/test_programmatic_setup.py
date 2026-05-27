@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from vibe.cli import cli as cli_mod, entrypoint as entrypoint_mod
 from vibe.core.config import MissingAPIKeyError
 from vibe.core.trusted_folders import trusted_folders_manager
@@ -16,6 +17,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "prompt": "hello",
         "max_turns": None,
         "max_price": None,
+        "max_tokens": None,
         "enabled_tools": None,
         "output": "text",
         "agent": "default",
@@ -193,3 +195,32 @@ def test_session_trust_does_not_write_to_disk(
 
     assert trusted_folders_manager.is_trusted(project) is True
     assert not trust_file.exists()
+
+
+def test_run_cli_passes_max_tokens_to_run_programmatic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _make_args(max_tokens=123)
+    call: dict[str, object] = {}
+    config = build_test_vibe_config()
+
+    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "load_config_or_exit", lambda interactive: config)
+    monkeypatch.setattr(cli_mod, "load_hooks_from_fs", lambda _config: None)
+    monkeypatch.setattr(cli_mod, "setup_tracing", lambda _config: None)
+    monkeypatch.setattr(cli_mod, "load_session", lambda _args, _config: None)
+    monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
+    monkeypatch.setattr(cli_mod, "warn_if_workdir_trust_is_unset", lambda: None)
+    monkeypatch.setattr(cli_mod, "get_initial_agent_name", lambda _args, _config: "x")
+
+    def fake_run_programmatic(**kwargs: object) -> str:
+        call.update(kwargs)
+        return "done"
+
+    monkeypatch.setattr(cli_mod, "run_programmatic", fake_run_programmatic)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.run_cli(args)
+
+    assert exc_info.value.code == 0
+    assert call["max_session_tokens"] == 123

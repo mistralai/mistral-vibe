@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.1] - 2026-05-27
+
+### Added
+
+- Custom compaction prompts via the `compaction_prompt_id` config setting, resolved from `~/.vibe/prompts/` or `.vibe/prompts/`
+- `--max-tokens` flag for programmatic mode (`-p`)
+- ACP `_auth/status` and `_auth/signOut` extension methods so IDE extensions can show auth state and sign the user out
+- Auth source assessment in `vibe.setup.auth` to classify the active credential source
+- VS Code extension promo line in the CLI banner when launched from a VS Code, Cursor, or VS Code Insiders terminal
+- `OverridesLayer` and `ProjectConfigLayer` for the layered configuration system
+
+### Changed
+
+- Programmatic mode (`-p`) no longer auto-approves tool calls by default
+- Browser sign-in is enabled by default for Mistral providers; the `enable_experimental_browser_sign_in` flag is no longer required (stale entries are silently ignored)
+- Compaction quality improved
+- Refreshed user message styling and slash/teleport variants
+- `/teleport` to Vibe Code Web now carries the working diff and last commit, matching the legacy teleport
+- Reworded `/teleport` help and completion copy to say "Vibe Code Web"
+
+### Removed
+
+- Zed extension publishing job from the release workflow
+
+
 ## [2.11.0] - 2026-05-25
 
 ### Added

@@ -154,33 +154,39 @@ OptionList, OptionList:focus {
     height: auto;
     width: 100%;
     background: transparent;
-    border: solid $foreground-muted;
+    border: none;
+    border-top: solid $foreground-muted;
+    border-bottom: solid $foreground-muted;
     border-title-align: right;
     border-title-color: $text-muted;
-    padding: 0 1;
 
     &.border-warning {
-        border: solid $warning;
+        border-top: solid $warning;
+        border-bottom: solid $warning;
         border-title-color: $warning;
     }
 
     &.border-safe {
-        border: solid $success;
+        border-top: solid $success;
+        border-bottom: solid $success;
         border-title-color: $success;
     }
 
     &.border-error {
-        border: solid $error;
+        border-top: solid $error;
+        border-bottom: solid $error;
         border-title-color: $error;
     }
 
     &.border-recording {
-        border: solid $mistral_orange;
+        border-top: solid $mistral_orange;
+        border-bottom: solid $mistral_orange;
         border-title-color: $mistral_orange;
     }
 
     &.border-remote {
-        border: solid $mistral_orange;
+        border-top: solid $mistral_orange;
+        border-bottom: solid $mistral_orange;
         border-title-color: $mistral_orange;
     }
 }
@@ -275,6 +281,12 @@ Markdown {
     }
 }
 
+.user-message-wrapper {
+    margin-top: 1;
+    width: 100%;
+    height: auto;
+}
+
 .user-message-container {
     width: 100%;
     height: auto;
@@ -282,7 +294,8 @@ Markdown {
 
 .user-message-prompt {
     width: auto;
-    height: 100%;
+    height: auto;
+    color: $mistral_orange;
     text-style: bold;
 }
 
@@ -290,8 +303,22 @@ Markdown {
     width: 1fr;
     height: auto;
     text-style: bold;
-    padding-left: 1;
-    border-left: heavy $mistral_orange;
+}
+
+.slash-command-message {
+    .user-message-content {
+        color: $mistral_orange;
+    }
+}
+
+.user-message-separator {
+    width: 100%;
+    height: 1;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .assistant-message {
@@ -1135,7 +1162,7 @@ NarratorStatus {
 
 #banner-container {
     align: left middle;
-    padding: 0 1 0 0;
+    padding: 1 1 0 0;
     width: auto;
 }
 
@@ -1228,6 +1255,33 @@ NarratorStatus {
 }
 
 .whats-new-message.after-history {
+    margin-top: 1;
+}
+
+.vscode-extension-promo-message {
+    border-left: heavy $mistral_orange;
+    margin-bottom: 1;
+
+    Markdown {
+        padding: 0 0 0 1;
+        margin: 0;
+
+        & > MarkdownBlock:first-child {
+            margin-top: 0;
+        }
+
+        & > MarkdownBlock:last-child {
+            margin-bottom: 0;
+        }
+    }
+
+    link-style: none;
+    link-background-hover: transparent;
+    link-style-hover: underline;
+    link-color-hover: $mistral_orange;
+}
+
+.vscode-extension-promo-message.after-history {
     margin-top: 1;
 }
 

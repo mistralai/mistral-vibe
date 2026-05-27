@@ -35,13 +35,10 @@ def build_mistral_provider() -> ProviderConfig:
     )
 
 
-def build_acp_agent_loop(
-    *, provider: ProviderConfig | None = None, enable_browser_sign_in: bool = True
-) -> VibeAcpAgentLoop:
+def build_acp_agent_loop(*, provider: ProviderConfig | None = None) -> VibeAcpAgentLoop:
     return VibeAcpAgentLoop(
         onboarding_context_loader=lambda: OnboardingContext(
-            provider=provider or build_mistral_provider(),
-            enable_experimental_browser_sign_in=enable_browser_sign_in,
+            provider=provider or build_mistral_provider()
         )
     )
 
@@ -65,7 +62,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.11.0"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.11.1"
         )
 
         assert response.auth_methods is not None
@@ -97,7 +94,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.11.0"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.11.1"
         )
 
         assert response.auth_methods is not None
@@ -142,16 +139,6 @@ class TestACPInitialize:
         assert delegated_browser_auth_method.id == "browser-auth-delegated"
         assert delegated_browser_auth_method.name == BROWSER_AUTH_NAME
         assert delegated_browser_auth_method.description == BROWSER_AUTH_DESCRIPTION
-
-    @pytest.mark.asyncio
-    async def test_initialize_omits_browser_auth_when_experimental_flag_disabled(
-        self,
-    ) -> None:
-        acp_agent_loop = build_acp_agent_loop(enable_browser_sign_in=False)
-
-        response = await acp_agent_loop.initialize(protocol_version=PROTOCOL_VERSION)
-
-        assert response.auth_methods == []
 
     @pytest.mark.asyncio
     async def test_initialize_omits_browser_auth_when_provider_unsupported(

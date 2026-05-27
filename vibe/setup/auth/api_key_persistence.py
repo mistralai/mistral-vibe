@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from dotenv import set_key
+from dotenv import set_key, unset_key
 
 from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig, VibeConfig
 from vibe.core.paths import GLOBAL_ENV_FILE
@@ -14,6 +14,12 @@ from vibe.core.types import Backend
 def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
     GLOBAL_ENV_FILE.path.parent.mkdir(parents=True, exist_ok=True)
     set_key(GLOBAL_ENV_FILE.path, env_key, api_key)
+
+
+def _remove_api_key_from_env_file(env_key: str) -> None:
+    if not GLOBAL_ENV_FILE.path.exists():
+        return
+    unset_key(GLOBAL_ENV_FILE.path, env_key)
 
 
 def _get_mistral_provider() -> ProviderConfig:
@@ -62,3 +68,11 @@ def persist_api_key(
         except Exception:
             pass
     return "completed"
+
+
+def remove_api_key(provider: ProviderConfig) -> None:
+    env_key = provider.api_key_env_var
+    if not env_key:
+        raise ValueError("Cannot remove API key without an environment variable name")
+    _remove_api_key_from_env_file(env_key)
+    os.environ.pop(env_key, None)

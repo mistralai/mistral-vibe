@@ -263,9 +263,8 @@ class ChatInputContainer(Vertical):
         return SAFETY_BORDER_CLASSES.get(self._safety, "")
 
     def _get_border_title(self) -> str:
-        if self._custom_border_label is not None:
-            return self._custom_border_label
-        return self._agent_name
+        label = self._custom_border_label or self._agent_name
+        return f" {label} " if label else ""
 
     def _apply_input_box_chrome(self) -> None:
         try:

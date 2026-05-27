@@ -96,7 +96,7 @@ class OnboardingApp(App[str | None]):
     def _resolve_browser_sign_in_factory(
         self, browser_sign_in_service_factory: Callable[[], BrowserSignInService] | None
     ) -> Callable[[], BrowserSignInService] | None:
-        if not self._config.browser_sign_in_enabled:
+        if not self._config.supports_browser_sign_in:
             return None
 
         return (

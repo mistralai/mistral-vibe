@@ -55,17 +55,11 @@ def build_unsupported_provider() -> ProviderConfig:
 
 
 class MutableOnboardingContextLoader:
-    def __init__(
-        self, provider: ProviderConfig, *, enable_browser_sign_in: bool = True
-    ) -> None:
+    def __init__(self, provider: ProviderConfig) -> None:
         self.provider = provider
-        self.enable_browser_sign_in = enable_browser_sign_in
 
     def __call__(self) -> OnboardingContext:
-        return OnboardingContext(
-            provider=self.provider,
-            enable_experimental_browser_sign_in=self.enable_browser_sign_in,
-        )
+        return OnboardingContext(provider=self.provider)
 
 
 class FakeBrowserSignInService:
@@ -122,16 +116,13 @@ class InMemoryApiKeyPersister:
 def build_acp_agent(
     *,
     provider: ProviderConfig | None = None,
-    enable_browser_sign_in: bool = True,
     browser_sign_in: FakeBrowserSignInService | None = None,
     api_key_persister: InMemoryApiKeyPersister | None = None,
 ) -> tuple[VibeAcpAgentLoop, MutableOnboardingContextLoader, InMemoryApiKeyPersister]:
     provider = provider or build_mistral_provider()
     browser_sign_in = browser_sign_in or FakeBrowserSignInService()
     api_key_persister = api_key_persister or InMemoryApiKeyPersister()
-    context_loader = MutableOnboardingContextLoader(
-        provider, enable_browser_sign_in=enable_browser_sign_in
-    )
+    context_loader = MutableOnboardingContextLoader(provider)
 
     return (
         VibeAcpAgentLoop(
@@ -214,42 +205,6 @@ class TestACPAuthenticate:
             await acp_agent_loop.authenticate("browser-auth")
 
     @pytest.mark.asyncio
-    async def test_authenticate_rejects_browser_sign_in_when_flag_disabled(
-        self,
-    ) -> None:
-        browser_sign_in = FakeBrowserSignInService(api_key="api-key")
-        acp_agent_loop, _, api_key_persister = build_acp_agent(
-            browser_sign_in=browser_sign_in, enable_browser_sign_in=False
-        )
-
-        with pytest.raises(
-            InvalidRequestError,
-            match="Browser sign-in is not available for the configured provider.",
-        ):
-            await acp_agent_loop.authenticate("browser-auth")
-
-        assert api_key_persister.saved == []
-        assert browser_sign_in.close_count == 0
-
-    @pytest.mark.asyncio
-    async def test_authenticate_rejects_delegated_browser_sign_in_when_flag_disabled(
-        self,
-    ) -> None:
-        browser_sign_in = FakeBrowserSignInService()
-        acp_agent_loop, _, api_key_persister = build_acp_agent(
-            browser_sign_in=browser_sign_in, enable_browser_sign_in=False
-        )
-
-        with pytest.raises(
-            InvalidRequestError,
-            match="Browser sign-in is not available for the configured provider.",
-        ):
-            await acp_agent_loop.authenticate("browser-auth-delegated")
-
-        assert api_key_persister.saved == []
-        assert browser_sign_in.close_count == 0
-
-    @pytest.mark.asyncio
     async def test_authenticate_surfaces_start_failures(self) -> None:
         browser_sign_in = FakeBrowserSignInService(
             authenticate_error=BrowserSignInError(
@@ -318,7 +273,7 @@ class TestACPAuthenticate:
         assert api_key_persister.saved == [(start_provider, "api-key")]
 
     @pytest.mark.asyncio
-    async def test_authenticate_delegated_completion_allows_flag_disabled_after_start(
+    async def test_authenticate_delegated_completion_uses_started_provider(
         self,
     ) -> None:
         provider = build_mistral_provider()
@@ -330,7 +285,7 @@ class TestACPAuthenticate:
         attempt_id = require_auth_meta(start_response, "browser-auth-delegated")[
             "attemptId"
         ]
-        context_loader.enable_browser_sign_in = False
+        context_loader.provider = build_unsupported_provider()
 
         await acp_agent_loop.authenticate(
             "browser-auth-delegated", action="complete", attemptId=attempt_id

@@ -1,5 +1,4 @@
-# What's new in v2.11.0
+# What's new in v2.11.1
 
-- **Shared skills**: Vibe now loads skills from `~/.agents/skills` so they can be reused across agents
-- **Connector onboarding from the CLI**: `/mcp` lists unauthenticated connectors and lets you start the OAuth flow without leaving Vibe
-- **Theme picker is back**: Pick a theme during onboarding (`vibe --setup`) or switch any time with `/theme`
+- **Custom compaction prompts**: Override the default `/compact` prompt by setting `compaction_prompt_id` and dropping a markdown file in `~/.vibe/prompts/` or `.vibe/prompts/`.
+- **Safer programmatic mode**: `-p` no longer auto-approves tool calls by default — pass `--auto-approve` to restore the previous behavior.

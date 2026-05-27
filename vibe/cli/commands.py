@@ -114,7 +114,7 @@ class CommandRegistry:
             ),
             "teleport": Command(
                 aliases=frozenset(["/teleport"]),
-                description="Teleport session to Vibe Code",
+                description="Teleport session to Vibe Code Web",
                 handler="_teleport_command",
                 is_available=CommandAvailabilityContext.is_teleport_available,
             ),

@@ -9,6 +9,7 @@ from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.experimental_nuage import (
     ExperimentalNuageClient,
     ExperimentalNuageContext,
+    ExperimentalNuageDiff,
     ExperimentalNuageMessage,
     ExperimentalNuageRepository,
     ExperimentalNuageRequest,
@@ -122,6 +123,63 @@ async def test_start_omits_empty_branch() -> None:
         "idempotencyKey": "idem-1",
         "message": {"role": "user", "parts": [{"type": "text", "text": "prompt"}]},
         "context": {"repositories": [{"repoUrl": "https://github.com/owner/repo"}]},
+    }
+
+
+@pytest.mark.asyncio
+async def test_start_serializes_commit_sha_and_diff() -> None:
+    seen_body: dict[str, object] | None = None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_body
+        seen_body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "sessionId": "s",
+                "webSessionId": "ws",
+                "projectId": "p",
+                "status": "running",
+                "url": "https://chat.example.com/code/p/ws",
+            },
+        )
+
+    request = ExperimentalNuageRequest(
+        idempotency_key="idem-1",
+        message=ExperimentalNuageMessage(
+            parts=[ExperimentalNuageTextPart(text="prompt")]
+        ),
+        context=ExperimentalNuageContext(
+            repositories=[
+                ExperimentalNuageRepository(
+                    repo_url="https://github.com/owner/repo",
+                    branch="main",
+                    commit_sha="abc123",
+                    diff=ExperimentalNuageDiff(
+                        format="git-diff",
+                        encoding="base64",
+                        compression="zstd",
+                        content="ZGlmZnM=",
+                    ),
+                )
+            ]
+        ),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        nuage = ExperimentalNuageClient(
+            "https://chat.example.com", "api-key", client=client
+        )
+        await nuage.start(request)
+
+    assert seen_body is not None
+    repos = seen_body["context"]["repositories"]
+    assert len(repos) == 1
+    assert repos[0]["commitSha"] == "abc123"
+    assert repos[0]["diff"] == {
+        "format": "git-diff",
+        "encoding": "base64",
+        "compression": "zstd",
+        "content": "ZGlmZnM=",
     }
 
 

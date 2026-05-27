@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from vibe.cli.terminal_detect import detect_terminal
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
+from vibe.core.compaction import collect_prior_user_messages
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.experiments import ExperimentManager
 from vibe.core.experiments.client import RemoteEvalClient
@@ -53,6 +54,7 @@ from vibe.core.middleware import (
     PriceLimitMiddleware,
     ReadOnlyAgentMiddleware,
     ResetReason,
+    TokenLimitMiddleware,
     TurnLimitMiddleware,
     make_plan_agent_reminder,
 )
@@ -237,6 +239,7 @@ class AgentLoop:  # noqa: PLR0904
         message_observer: Callable[[LLMMessage], None] | None = None,
         max_turns: int | None = None,
         max_price: float | None = None,
+        max_session_tokens: int | None = None,
         backend: BackendLike | None = None,
         enable_streaming: bool = False,
         entrypoint_metadata: EntrypointMetadata | None = None,
@@ -245,6 +248,7 @@ class AgentLoop:  # noqa: PLR0904
         headless: bool = False,
         hook_config_result: HookConfigResult | None = None,
         permission_store: PermissionStore | None = None,
+        mcp_registry: MCPRegistry | None = None,
     ) -> None:
         self._base_config = config
         self._headless = headless
@@ -260,7 +264,7 @@ class AgentLoop:  # noqa: PLR0904
 
         self._permission_store = permission_store or PermissionStore()
 
-        self.mcp_registry = MCPRegistry()
+        self.mcp_registry = mcp_registry or MCPRegistry()
         self.connector_registry = self._create_connector_registry()
         self.agent_manager = AgentManager(
             lambda: self._base_config,
@@ -278,6 +282,7 @@ class AgentLoop:  # noqa: PLR0904
         self.message_observer = message_observer
         self._max_turns = max_turns
         self._max_price = max_price
+        self._max_session_tokens = max_session_tokens
         self._plan_session = PlanSession()
 
         self.format_handler = APIToolFormatHandler()
@@ -737,6 +742,9 @@ class AgentLoop:  # noqa: PLR0904
 
         if self._max_price is not None:
             self.middleware_pipeline.add(PriceLimitMiddleware(self._max_price))
+
+        if self._max_session_tokens is not None:
+            self.middleware_pipeline.add(TokenLimitMiddleware(self._max_session_tokens))
 
         self.middleware_pipeline.add(AutoCompactMiddleware())
         if self.config.context_warnings:
@@ -1698,7 +1706,12 @@ class AgentLoop:  # noqa: PLR0904
                 self.agent_profile,
             )
 
-            summary_request = UtilityPrompt.COMPACT.read()
+            summary_prefix = UtilityPrompt.COMPACT_SUMMARY_PREFIX.read()
+            prior_user_messages = collect_prior_user_messages(
+                list(self.messages), summary_prefix
+            )
+
+            summary_request = self.config.compaction_prompt
             if extra_instructions:
                 summary_request += (
                     f"\n\n## Additional Instructions\n{extra_instructions}"
@@ -1717,11 +1730,14 @@ class AgentLoop:  # noqa: PLR0904
                 raise AgentLoopLLMResponseError(
                     "Usage data missing in compaction summary response"
                 )
-            summary_content = summary_result.message.content or ""
+            summary_content = (summary_result.message.content or "").strip()
+            if not summary_content:
+                summary_content = "(no summary available)"
 
             system_message = self.messages[0]
-            summary_message = LLMMessage(role=Role.user, content=summary_content)
-            self.messages.reset([system_message, summary_message])
+            wrapped_summary = f"{summary_prefix}\n{summary_content}"
+            summary_message = LLMMessage(role=Role.user, content=wrapped_summary)
+            self.messages.reset([system_message, *prior_user_messages, summary_message])
 
             active_model = self.config.get_active_model()
             await self._reset_session()
@@ -1745,7 +1761,7 @@ class AgentLoop:  # noqa: PLR0904
 
             self.middleware_pipeline.reset(reset_reason=ResetReason.COMPACT)
 
-            return summary_content or ""
+            return summary_content
 
         except Exception:
             await self.session_logger.save_interaction(

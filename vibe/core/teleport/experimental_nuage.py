@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import types
+from typing import Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -23,11 +24,22 @@ class ExperimentalNuageMessage(BaseModel):
     parts: list[ExperimentalNuageTextPart]
 
 
+class ExperimentalNuageDiff(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    format: Literal["git-diff"] = "git-diff"
+    encoding: Literal["base64"] = "base64"
+    compression: Literal["zstd"] = "zstd"
+    content: str
+
+
 class ExperimentalNuageRepository(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     repo_url: str = Field(serialization_alias="repoUrl")
     branch: str | None = None
+    commit_sha: str | None = Field(default=None, serialization_alias="commitSha")
+    diff: ExperimentalNuageDiff | None = None
 
 
 class ExperimentalNuageContext(BaseModel):

@@ -499,7 +499,7 @@ class TestTeleportServiceExecute:
                     repo="repo",
                     branch="main",
                     commit="abc123",
-                    diff="local diff is intentionally not sent",
+                    diff="some local diff",
                 )
             )
             service._git.is_commit_pushed = AsyncMock(return_value=True)
@@ -523,11 +523,15 @@ class TestTeleportServiceExecute:
             "role": "user",
             "parts": [{"type": "text", "text": "test prompt"}],
         }
-        assert seen_body["context"] == {
-            "repositories": [
-                {"repoUrl": "https://github.com/owner/repo", "branch": "main"}
-            ]
-        }
+        repos = seen_body["context"]["repositories"]
+        assert len(repos) == 1
+        assert repos[0]["repoUrl"] == "https://github.com/owner/repo"
+        assert repos[0]["branch"] == "main"
+        assert repos[0]["commitSha"] == "abc123"
+        assert repos[0]["diff"]["format"] == "git-diff"
+        assert repos[0]["diff"]["encoding"] == "base64"
+        assert repos[0]["diff"]["compression"] == "zstd"
+        assert len(repos[0]["diff"]["content"]) > 0
         assert "idempotencyKey" in seen_body
 
     @pytest.mark.asyncio
