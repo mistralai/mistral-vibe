@@ -425,6 +425,37 @@ Vibe supports multiple ways to configure your API keys:
 
 **Note**: The `.env` file is specifically for API keys and other provider credentials. General Vibe configuration should be done in `config.toml`.
 
+### Alternative LLM Providers
+
+Vibe supports multiple LLM providers out of the box. In addition to Mistral's native models, you can use any OpenAI-compatible provider through the generic backend.
+
+#### MiniMax
+
+[MiniMax](https://www.minimax.io/) models are available as a built-in provider. To use MiniMax, set your API key and switch to a MiniMax model:
+
+```bash
+export MINIMAX_API_KEY="your_minimax_api_key"
+```
+
+Or add it to your `~/.vibe/.env` file:
+
+```bash
+MINIMAX_API_KEY=your_minimax_api_key
+```
+
+Then select a MiniMax model in your `config.toml`:
+
+```toml
+active_model = "minimax-m2.7"
+```
+
+Available MiniMax models:
+
+| Model | Alias | Context Window |
+| ----- | ----- | -------------- |
+| MiniMax-M2.7 | `minimax-m2.7` | 1M tokens |
+| MiniMax-M2.7-highspeed | `minimax-m2.7-highspeed` | 1M tokens |
+
 ### Custom System Prompts
 
 You can create `AGENTS.md` files to add custom instructions. You can also replace the entire system prompt.
