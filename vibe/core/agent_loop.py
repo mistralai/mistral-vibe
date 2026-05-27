@@ -675,10 +675,8 @@ class AgentLoop:  # noqa: PLR0904
                 raise TeleportError("_TeleportService is unexpectedly None")
             self._teleport_service = _TeleportService(
                 session_logger=self.session_logger,
-                vibe_code_base_url=self.config.vibe_code_base_url,
-                vibe_code_workflow_id=self.config.vibe_code_workflow_id,
+                vibe_code_sessions_base_url=self.config.vibe_code_sessions_base_url,
                 vibe_code_api_key=self.config.vibe_code_api_key,
-                vibe_code_task_queue=self.config.vibe_code_task_queue,
                 vibe_config=self._base_config,
             )
         return self._teleport_service
@@ -687,29 +685,23 @@ class AgentLoop:  # noqa: PLR0904
     async def teleport_to_vibe_code(
         self, prompt: str | None
     ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
-        from vibe.core.teleport.nuage import TeleportSession
-
-        session_messages = [
-            msg.model_dump(exclude_none=True) for msg in self.messages[1:]
-        ]
+        nb_session_messages = max(len(self.messages) - 1, 0)
+        if prompt:
+            resolved_prompt = prompt
+        else:
+            last = self._last_user_message()
+            content = last.content if last else None
+            resolved_prompt = (
+                f"{content} (continue)" if isinstance(content, str) and content else ""
+            )
         telemetry_tracker = TeleportTelemetryTracker(
             telemetry_client=self.telemetry_client,
-            nb_session_messages=len(session_messages),
-            stage="no_history"
-            if prompt is None and not session_messages
-            else "git_check",
-        )
-        session = TeleportSession(
-            metadata={
-                "agent": self.agent_profile.name,
-                "model": self.config.active_model,
-                "stats": self.stats.model_dump(),
-            },
-            messages=session_messages,
+            nb_session_messages=nb_session_messages,
+            stage="no_history" if not resolved_prompt else "git_check",
         )
         try:
             async with self.teleport_service:
-                gen = self.teleport_service.execute(prompt=prompt, session=session)
+                gen = self.teleport_service.execute(prompt=resolved_prompt)
                 response: TeleportPushResponseEvent | None = None
                 while True:
                     try:
@@ -732,6 +724,16 @@ class AgentLoop:  # noqa: PLR0904
         finally:
             telemetry_tracker.send_failure_if_needed()
             self._teleport_service = None
+
+    def _last_user_message(self) -> LLMMessage | None:
+        return next(
+            (
+                m
+                for m in reversed(self.messages)
+                if m.role == Role.user and not m.injected
+            ),
+            None,
+        )
 
     def _setup_middleware(self) -> None:
         """Configure middleware pipeline for this conversation."""
@@ -1330,14 +1332,7 @@ class AgentLoop:  # noqa: PLR0904
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
         tool_choice = self.format_handler.get_tool_choice()
 
-        last_user_message = next(
-            (
-                m
-                for m in reversed(self.messages)
-                if m.role == Role.user and not m.injected
-            ),
-            None,
-        )
+        last_user_message = self._last_user_message()
         self.telemetry_client.send_request_sent(
             model=active_model.alias,
             nb_context_chars=sum(len(m.content or "") for m in self.messages),
@@ -1400,14 +1395,7 @@ class AgentLoop:  # noqa: PLR0904
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
         tool_choice = self.format_handler.get_tool_choice()
 
-        last_user_message = next(
-            (
-                m
-                for m in reversed(self.messages)
-                if m.role == Role.user and not m.injected
-            ),
-            None,
-        )
+        last_user_message = self._last_user_message()
         self.telemetry_client.send_request_sent(
             model=active_model.alias,
             nb_context_chars=sum(len(m.content or "") for m in self.messages),

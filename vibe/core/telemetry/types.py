@@ -40,20 +40,12 @@ class TelemetryRequestMetadata(TelemetryBaseMetadata):
 
 
 TeleportFailureStage = Literal[
-    "no_history",
-    "remote_session",
-    "git_check",
-    "push",
-    "workflow_start",
-    "github_auth",
-    "fetch_url",
-    "cancelled",
+    "no_history", "remote_session", "git_check", "push", "workflow_start", "cancelled"
 ]
 
 
 class TeleportCompletedPayload(TypedDict):
     push_required: bool
-    github_auth_required: bool
     nb_session_messages: int
 
 

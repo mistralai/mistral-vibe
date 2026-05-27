@@ -10,15 +10,12 @@ from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.teleport import TeleportService
 from vibe.core.teleport.types import (
-    TeleportAuthRequiredEvent,
     TeleportCheckingGitEvent,
     TeleportCompleteEvent,
-    TeleportFetchingUrlEvent,
     TeleportPushingEvent,
     TeleportPushRequiredEvent,
     TeleportPushResponseEvent,
     TeleportStartingWorkflowEvent,
-    TeleportWaitingForGitHubEvent,
 )
 from vibe.core.types import LLMMessage, Role
 
@@ -46,9 +43,6 @@ class TestTeleportAgentLoopTelemetry:
                 yield TeleportPushRequiredEvent()
                 yield TeleportPushingEvent()
                 yield TeleportStartingWorkflowEvent()
-                yield TeleportWaitingForGitHubEvent()
-                yield TeleportAuthRequiredEvent(oauth_url="https://github.com/auth")
-                yield TeleportFetchingUrlEvent()
                 yield TeleportCompleteEvent(url="https://chat.example.com/123")
 
         agent_loop.messages.append(LLMMessage(role=Role.user, content="hello"))
@@ -73,7 +67,6 @@ class TestTeleportAgentLoopTelemetry:
         assert telemetry_events[-1]["event_name"] == "vibe.teleport_completed"
         assert telemetry_events[-1]["properties"] == {
             "push_required": True,
-            "github_auth_required": True,
             "nb_session_messages": 1,
             "session_id": agent_loop.session_id,
         }
@@ -109,7 +102,6 @@ class TestTeleportAgentLoopTelemetry:
             "stage": "workflow_start",
             "error_class": "ServiceTeleportError",
             "push_required": False,
-            "github_auth_required": False,
             "nb_session_messages": 1,
             "session_id": agent_loop.session_id,
         }
@@ -154,7 +146,6 @@ class TestTeleportAgentLoopTelemetry:
             "stage": "cancelled",
             "error_class": "ServiceTeleportError",
             "push_required": True,
-            "github_auth_required": False,
             "nb_session_messages": 1,
             "session_id": agent_loop.session_id,
         }
@@ -190,7 +181,6 @@ class TestTeleportAgentLoopTelemetry:
             "stage": "cancelled",
             "error_class": "CancelledError",
             "push_required": False,
-            "github_auth_required": False,
             "nb_session_messages": 1,
             "session_id": agent_loop.session_id,
         }
@@ -225,7 +215,6 @@ class TestTeleportAgentLoopTelemetry:
             "stage": "cancelled",
             "error_class": "CancelledError",
             "push_required": False,
-            "github_auth_required": False,
             "nb_session_messages": 1,
             "session_id": agent_loop.session_id,
         }

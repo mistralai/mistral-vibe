@@ -14,7 +14,6 @@ import time
 from typing import Any, ClassVar, assert_never, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
-import webbrowser
 
 from pydantic import BaseModel
 from rich import print as rprint
@@ -160,16 +159,12 @@ from vibe.core.session.title_format import format_session_title
 from vibe.core.skills.manager import SkillManager
 from vibe.core.teleport.telemetry import send_teleport_early_failure_telemetry
 from vibe.core.teleport.types import (
-    TeleportAuthCompleteEvent,
-    TeleportAuthRequiredEvent,
     TeleportCheckingGitEvent,
     TeleportCompleteEvent,
-    TeleportFetchingUrlEvent,
     TeleportPushingEvent,
     TeleportPushRequiredEvent,
     TeleportPushResponseEvent,
     TeleportStartingWorkflowEvent,
-    TeleportWaitingForGitHubEvent,
 )
 from vibe.core.tools.builtins.ask_user_question import (
     AskUserQuestionArgs,
@@ -1604,15 +1599,6 @@ class VibeApp(App):  # noqa: PLR0904
                         teleport_msg.set_status("Syncing with remote...")
                     case TeleportStartingWorkflowEvent():
                         teleport_msg.set_status("Teleporting...")
-                    case TeleportWaitingForGitHubEvent(message=msg):
-                        teleport_msg.set_status(msg or "Connecting to GitHub...")
-                    case TeleportAuthRequiredEvent(oauth_url=url, message=msg):
-                        webbrowser.open(url)
-                        teleport_msg.set_status(msg or "Authorizing GitHub...")
-                    case TeleportAuthCompleteEvent():
-                        teleport_msg.set_status("GitHub authorized")
-                    case TeleportFetchingUrlEvent():
-                        teleport_msg.set_status("Finalizing...")
                     case TeleportCompleteEvent(url=url):
                         teleport_msg.set_complete(url)
         except TeleportError as e:

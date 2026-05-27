@@ -525,11 +525,12 @@ class VibeConfig(BaseSettings):
 
     vibe_code_enabled: bool = Field(default=True, exclude=True)
     vibe_code_base_url: str = Field(default="https://api.mistral.ai", exclude=True)
+    vibe_code_sessions_base_url: str = Field(
+        default="https://chat.mistral.ai", exclude=True
+    )
     vibe_code_workflow_id: str = Field(default="__shared-nuage-workflow", exclude=True)
-    vibe_code_task_queue: str | None = Field(default="shared-vibe-nuage", exclude=True)
     vibe_code_api_key_env_var: str = Field(default="MISTRAL_API_KEY", exclude=True)
     vibe_code_project_name: str | None = Field(default=None, exclude=True)
-    vibe_code_experimental_nuage_enabled: bool = Field(default=False, exclude=True)
 
     # TODO(otel): remove exclude=True once the feature is publicly available
     enable_otel: bool = Field(default=False, exclude=True)

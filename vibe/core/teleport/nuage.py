@@ -1,104 +1,71 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncGenerator
-from enum import StrEnum, auto
-import time
 import types
-from typing import Any
+from typing import Literal
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.utils.http import build_ssl_context
 
 
-class GitHubParams(BaseModel):
-    repo: str | None = None
-    branch: str | None = None
-    commit: str | None = None
-    pr_number: int | None = None
-    teleported_diffs: bytes | None = None
+class NuageTextPart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-
-class ChatAssistantParams(BaseModel):
-    create_thread: bool = False
-    user_message: str | None = None
-    project_name: str | None = None
-
-
-class TeleportSession(BaseModel):
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    messages: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class WorkflowIntegrations(BaseModel):
-    github: GitHubParams | None = None
-    chat_assistant: ChatAssistantParams | None = None
-
-
-class VibeAgent(BaseModel):
-    polymorphic_type: str = "vibe_agent"
-    name: str = "vibe-agent"
-    vibe_config: dict[str, Any] | None = None
-    session: TeleportSession | None = None
-
-
-class WorkflowConfig(BaseModel):
-    agent: VibeAgent = Field(default_factory=VibeAgent)
-
-
-class TextChunk(BaseModel):
     type: str = "text"
     text: str
 
 
-class WorkflowParams(BaseModel):
-    prompt: str
-    message: list[TextChunk] | None = None
-    config: WorkflowConfig = Field(default_factory=WorkflowConfig)
-    integrations: WorkflowIntegrations = Field(default_factory=WorkflowIntegrations)
+class NuageMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str = "user"
+    parts: list[NuageTextPart]
 
 
-class WorkflowExecuteResponse(BaseModel):
-    execution_id: str
+class NuageDiff(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    format: Literal["git-diff"] = "git-diff"
+    encoding: Literal["base64"] = "base64"
+    compression: Literal["zstd"] = "zstd"
+    content: str
 
 
-class GitHubStatus(StrEnum):
-    PENDING = auto()
-    WAITING_FOR_OAUTH = auto()
-    CONNECTED = auto()
-    OAUTH_TIMEOUT = auto()
-    ERROR = auto()
+class NuageRepository(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repo_url: str = Field(serialization_alias="repoUrl")
+    branch: str | None = None
+    commit_sha: str | None = Field(default=None, serialization_alias="commitSha")
+    diff: NuageDiff | None = None
 
 
-class GitHubPublicData(BaseModel):
-    status: GitHubStatus
-    oauth_url: str | None = None
-    error: str | None = None
-    working_branch: str | None = None
-    repo: str | None = None
+class NuageContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-    @property
-    def connected(self) -> bool:
-        return self.status == GitHubStatus.CONNECTED
-
-    @property
-    def is_error(self) -> bool:
-        return self.status in {GitHubStatus.OAUTH_TIMEOUT, GitHubStatus.ERROR}
+    repositories: list[NuageRepository]
 
 
-class ChatAssistantPublicData(BaseModel):
-    chat_url: str | None = None
+class NuageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_name: str = Field(default="Vibe CLI", serialization_alias="project_name")
+    source: str = "vibe_code_cli"
+    idempotency_key: str = Field(serialization_alias="idempotencyKey")
+    message: NuageMessage
+    context: NuageContext
 
 
-class GetChatAssistantIntegrationResponse(BaseModel):
-    result: ChatAssistantPublicData
+class NuageResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
 
-
-class GetGitHubIntegrationResponse(BaseModel):
-    result: GitHubPublicData
+    nuage_session_id: str = Field(validation_alias="sessionId")
+    nuage_web_session_id: str = Field(validation_alias="webSessionId")
+    nuage_project_id: str = Field(validation_alias="projectId")
+    status: str
+    url: str
 
 
 class NuageClient:
@@ -106,16 +73,12 @@ class NuageClient:
         self,
         base_url: str,
         api_key: str,
-        workflow_id: str,
         *,
-        task_queue: str | None = None,
         client: httpx.AsyncClient | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
-        self._workflow_id = workflow_id
-        self._task_queue = task_queue
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
@@ -152,74 +115,16 @@ class NuageClient:
             "Content-Type": "application/json",
         }
 
-    async def start_workflow(self, params: WorkflowParams) -> str:
+    async def start(self, request: NuageRequest) -> NuageResponse:
         response = await self._http_client.post(
-            f"{self._base_url}/v1/workflows/{self._workflow_id}/execute",
+            f"{self._base_url}/api/v1/code/sessions",
             headers=self._headers(),
-            json={
-                "input": params.model_dump(mode="json"),
-                "task_queue": self._task_queue,
-            },
+            json=request.model_dump(mode="json", by_alias=True, exclude_none=True),
         )
         if not response.is_success:
-            error_msg = f"Vibe Code workflow trigger failed: {response.text}"
-            raise ServiceTeleportError(error_msg)
-        result = WorkflowExecuteResponse.model_validate(response.json())
-        return result.execution_id
+            raise ServiceTeleportError(f"Vibe Code Nuage start failed: {response.text}")
 
-    async def get_github_integration(self, execution_id: str) -> GitHubPublicData:
-        response = await self._http_client.post(
-            f"{self._base_url}/v1/workflows/executions/{execution_id}/updates",
-            headers=self._headers(),
-            json={"name": "get_integration", "input": {"integration_id": "github"}},
-        )
-        if not response.is_success:
-            raise ServiceTeleportError(
-                f"Failed to get GitHub integration: {response.text}"
-            )
         try:
-            result = GetGitHubIntegrationResponse.model_validate(response.json())
-        except ValidationError as e:
-            data = response.json()
-            error = data.get("result", {}).get("error")
-            status = data.get("result", {}).get("status")
-            raise ServiceTeleportError(
-                f"GitHub integration error: {error or status}"
-            ) from e
-        return result.result
-
-    async def wait_for_github_connection(
-        self, execution_id: str, timeout: float = 600.0, interval: float = 2.0
-    ) -> AsyncGenerator[GitHubPublicData, None]:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            github_data = await self.get_github_integration(execution_id)
-            yield github_data
-            if github_data.connected:
-                return
-            if github_data.is_error:
-                raise ServiceTeleportError(
-                    github_data.error
-                    or f"GitHub integration failed: {github_data.status.value}"
-                )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            await asyncio.sleep(min(interval, remaining))
-        raise ServiceTeleportError("GitHub connection timed out")
-
-    async def get_chat_assistant_url(self, execution_id: str) -> str | None:
-        response = await self._http_client.post(
-            f"{self._base_url}/v1/workflows/executions/{execution_id}/updates",
-            headers=self._headers(),
-            json={
-                "name": "get_integration",
-                "input": {"integration_id": "chat_assistant"},
-            },
-        )
-        if not response.is_success:
-            raise ServiceTeleportError(
-                f"Failed to get chat assistant integration: {response.text}"
-            )
-        result = GetChatAssistantIntegrationResponse.model_validate(response.json())
-        return result.result.chat_url
+            return NuageResponse.model_validate(response.json())
+        except (ValueError, ValidationError) as e:
+            raise ServiceTeleportError("Vibe Code Nuage response was invalid") from e

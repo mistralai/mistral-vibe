@@ -6,14 +6,11 @@ from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import TeleportFailureStage
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.types import (
-    TeleportAuthRequiredEvent,
     TeleportCheckingGitEvent,
     TeleportCompleteEvent,
-    TeleportFetchingUrlEvent,
     TeleportPushingEvent,
     TeleportPushRequiredEvent,
     TeleportStartingWorkflowEvent,
-    TeleportWaitingForGitHubEvent,
     TeleportYieldEvent,
 )
 
@@ -29,7 +26,6 @@ def send_teleport_early_failure_telemetry(
         stage=stage,
         error_class=error_class,
         push_required=False,
-        github_auth_required=False,
         nb_session_messages=nb_session_messages,
     )
 
@@ -40,7 +36,6 @@ class TeleportTelemetryTracker:
     nb_session_messages: int
     stage: TeleportFailureStage
     push_required: bool = False
-    github_auth_required: bool = False
     success: bool = False
     error_class: str | None = None
 
@@ -55,13 +50,6 @@ class TeleportTelemetryTracker:
                 self.stage = "push"
             case TeleportStartingWorkflowEvent():
                 self.stage = "workflow_start"
-            case TeleportWaitingForGitHubEvent():
-                self.stage = "github_auth"
-            case TeleportAuthRequiredEvent():
-                self.github_auth_required = True
-                self.stage = "github_auth"
-            case TeleportFetchingUrlEvent():
-                self.stage = "fetch_url"
             case TeleportCompleteEvent():
                 self.success = True
 
@@ -78,7 +66,6 @@ class TeleportTelemetryTracker:
     def send_success(self) -> None:
         self.telemetry_client.send_teleport_completed(
             push_required=self.push_required,
-            github_auth_required=self.github_auth_required,
             nb_session_messages=self.nb_session_messages,
         )
 
@@ -89,6 +76,5 @@ class TeleportTelemetryTracker:
             stage=self.stage,
             error_class=self.error_class,
             push_required=self.push_required,
-            github_auth_required=self.github_auth_required,
             nb_session_messages=self.nb_session_messages,
         )
