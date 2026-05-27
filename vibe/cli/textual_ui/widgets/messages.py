@@ -279,7 +279,7 @@ class UserCommandMessage(Static):
                 yield Markdown(self._content)
 
 
-VSCODE_EXTENSION_URI = "vscode:extension/mistralai.vibe-code"
+VSCODE_EXTENSION_URI = "vscode:extension/mistralai.mistral-vibe-code"
 VSCODE_EXTENSION_LINK_LABEL = "VS Code extension"
 VSCODE_EXTENSION_PROMO_STANDALONE = f"We now have a [{VSCODE_EXTENSION_LINK_LABEL}]({VSCODE_EXTENSION_URI}) with a rich UI. Check it out!"
 VSCODE_EXTENSION_PROMO_WHATS_NEW_SUFFIX = (
