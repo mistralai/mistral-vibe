@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import ssl
 import tomllib
 from typing import Literal, TypedDict, Unpack
+from unittest.mock import MagicMock, patch
 
 import pytest
 import tomli_w
@@ -23,6 +25,7 @@ from vibe.core.config.harness_files import (
 from vibe.core.paths import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import Backend
+from vibe.core.utils.http import build_ssl_context, configure_ssl_context
 from vibe.setup.onboarding.context import OnboardingContext
 
 
@@ -196,6 +199,73 @@ class TestSaveUpdates:
             result = tomllib.load(f)
 
         assert result == {"tools": {"bash": {"default_timeout": 600}}}
+
+
+class TestSystemTrustStoreConfig:
+    def test_load_configures_ssl_context_from_toml(self, config_dir: Path) -> None:
+        config_file = config_dir / "config.toml"
+        with config_file.open("rb") as f:
+            data = tomllib.load(f)
+        data["enable_system_trust_store"] = True
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        with patch("vibe.core.config._settings.configure_ssl_context") as configure:
+            config = VibeConfig.load()
+
+        assert config.enable_system_trust_store is True
+        configure.assert_called_once_with(enable_system_trust_store=True)
+
+    def test_load_configures_ssl_context_from_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_ENABLE_SYSTEM_TRUST_STORE", "true")
+
+        with patch("vibe.core.config._settings.configure_ssl_context") as configure:
+            config = VibeConfig.load()
+
+        assert config.enable_system_trust_store is True
+        configure.assert_called_once_with(enable_system_trust_store=True)
+
+    def test_load_clears_cached_ssl_context_when_setting_changes(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+        configure_ssl_context(enable_system_trust_store=False)
+        build_ssl_context.cache_clear()
+
+        try:
+            config_file = config_dir / "config.toml"
+            with config_file.open("rb") as f:
+                data = tomllib.load(f)
+
+            data["enable_system_trust_store"] = False
+            with config_file.open("wb") as f:
+                tomli_w.dump(data, f)
+
+            default_ctx = MagicMock(spec=ssl.SSLContext)
+            with patch(
+                "vibe.core.utils.http.ssl.create_default_context",
+                return_value=default_ctx,
+            ):
+                VibeConfig.load()
+                assert build_ssl_context() is default_ctx
+
+            data["enable_system_trust_store"] = True
+            with config_file.open("wb") as f:
+                tomli_w.dump(data, f)
+
+            truststore_ctx = MagicMock(spec=ssl.SSLContext)
+            with patch(
+                "vibe.core.utils.http.truststore.SSLContext",
+                return_value=truststore_ctx,
+            ):
+                VibeConfig.load()
+                assert build_ssl_context() is truststore_ctx
+        finally:
+            configure_ssl_context(enable_system_trust_store=False)
+            build_ssl_context.cache_clear()
 
 
 class TestSetThinking:
@@ -821,6 +891,7 @@ class TestOnboardingContextResolution:
     def test_load_uses_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
         reset_harness_files_manager()
         monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
+        monkeypatch.setenv("VIBE_VIBE_BASE_URL", "https://env-vibe.example.com")
         monkeypatch.setenv(
             "VIBE_PROVIDERS",
             json.dumps([
@@ -842,6 +913,7 @@ class TestOnboardingContextResolution:
 
         assert context.provider.name == "env-provider"
         assert context.provider.api_key_env_var == "ENV_API_KEY"
+        assert context.vibe_base_url == "https://env-vibe.example.com"
 
     def test_load_prefers_explicit_overrides_over_toml_and_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

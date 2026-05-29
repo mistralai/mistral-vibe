@@ -331,17 +331,13 @@ class TestTelemetryClient:
         client = TelemetryClient(config_getter=lambda: config)
 
         client.send_auto_compact_triggered(
-            nb_context_tokens_before=123,
-            nb_context_tokens_after=45,
-            auto_compact_threshold=100,
-            status="success",
+            nb_context_tokens_before=123, auto_compact_threshold=100, status="success"
         )
 
         assert len(telemetry_events) == 1
         assert telemetry_events[0]["event_name"] == "vibe.auto_compact_triggered"
         assert telemetry_events[0]["properties"] == {
             "nb_context_tokens_before": 123,
-            "nb_context_tokens_after": 45,
             "auto_compact_threshold": 100,
             "status": "success",
         }
@@ -674,7 +670,6 @@ class TestTelemetryClient:
 
         client.send_auto_compact_triggered(
             nb_context_tokens_before=123,
-            nb_context_tokens_after=45,
             auto_compact_threshold=100,
             status="success",
             session_id="original-session-id",

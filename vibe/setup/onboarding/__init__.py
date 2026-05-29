@@ -42,6 +42,7 @@ class OnboardingApp(App[str | None]):
 
         self._config = config
         self._provider = config.provider
+        self._vibe_base_url = config.vibe_base_url
         self._entrypoint_metadata = entrypoint_metadata
         self._browser_sign_in_success_delay = browser_sign_in_success_delay
         self._browser_sign_in_service_factory = self._resolve_browser_sign_in_factory(
@@ -58,7 +59,11 @@ class OnboardingApp(App[str | None]):
             ThemeSelectionScreen(next_screen=theme_next), "theme_selection"
         )
         self.install_screen(
-            ApiKeyScreen(self._provider, entrypoint_metadata=self._entrypoint_metadata),
+            ApiKeyScreen(
+                self._provider,
+                vibe_base_url=self._vibe_base_url,
+                entrypoint_metadata=self._entrypoint_metadata,
+            ),
             "api_key",
         )
         if self._browser_sign_in_service_factory is not None:

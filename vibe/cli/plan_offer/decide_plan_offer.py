@@ -12,8 +12,8 @@ from vibe.cli.plan_offer.ports.whoami_gateway import (
     WhoAmIResponse,
 )
 from vibe.core.config import (
-    DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_API_ENV_KEY,
+    DEFAULT_VIBE_BASE_URL,
     ProviderConfig,
 )
 from vibe.core.types import Backend
@@ -97,20 +97,18 @@ def resolve_api_key_for_plan(provider: ProviderConfig) -> str | None:
 
 
 def plan_offer_cta(
-    payload: PlanInfo | None, console_base_url: str = DEFAULT_CONSOLE_BASE_URL
+    payload: PlanInfo | None, *, vibe_base_url: str = DEFAULT_VIBE_BASE_URL
 ) -> str | None:
     if not payload:
         return
-    console_cli_url = f"{console_base_url.rstrip('/')}/codestral/cli"
-    switch_to_pro_key_url = console_cli_url
-    upgrade_url = console_cli_url
+    vibe_api_key_url = f"{vibe_base_url.rstrip('/')}/code/extensions?focus=key"
     if payload.prompt_switching_to_pro_plan:
-        return f"### Switch to your [Le Chat Pro API key]({switch_to_pro_key_url})"
+        return f"### Switch to your [Vibe Pro API key]({vibe_api_key_url})"
     if (
         payload.plan_type in {WhoAmIPlanType.API, WhoAmIPlanType.UNAUTHORIZED}
         or payload.is_free_mistral_code_plan()
     ):
-        return f"### Unlock more with Vibe - [Upgrade to Le Chat Pro]({upgrade_url})"
+        return f"### Unlock more with Vibe - [Upgrade to Vibe Pro]({vibe_api_key_url})"
 
 
 def plan_title(payload: PlanInfo | None) -> str | None:  # noqa: PLR0911

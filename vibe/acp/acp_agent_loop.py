@@ -1516,6 +1516,14 @@ class VibeAcpAgentLoop(AcpAgent):
         )
         return provider, auth_state
 
+    def _process_env_value_before_dotenv_load(
+        self, provider: ProviderConfig
+    ) -> str | None:
+        if not provider.api_key_env_var:
+            return None
+
+        return self._environ_before_dotenv_load.get(provider.api_key_env_var)
+
     def _handle_auth_status(self) -> dict[str, Any]:
         _, auth_state = self._assess_current_auth_state()
         return _auth_status_response_from_auth_state(auth_state).model_dump(
@@ -1531,6 +1539,14 @@ class VibeAcpAgentLoop(AcpAgent):
 
         try:
             self._remove_api_key(provider)
+            if (
+                auth_state.kind
+                == AuthStateKind.VIBE_HOME_ENV_FILE_OVERRIDES_PROCESS_ENV
+                and auth_state.env_key
+            ):
+                process_env_value = self._process_env_value_before_dotenv_load(provider)
+                if process_env_value:
+                    os.environ[auth_state.env_key] = process_env_value
         except (OSError, ValueError) as exc:
             raise InternalError(f"Failed to sign out: {exc}") from exc
 
@@ -1650,11 +1666,8 @@ class VibeAcpAgentLoop(AcpAgent):
         )
 
         await session.agent_loop.compact(extra_instructions=cmd_args.strip())
-        new_tokens = session.agent_loop.stats.context_tokens
 
         end_event = CompactEndEvent(
-            old_context_tokens=old_tokens or 0,
-            new_context_tokens=new_tokens or 0,
             summary_length=0,
             old_session_id=old_session_id,
             new_session_id=session.agent_loop.session_id,

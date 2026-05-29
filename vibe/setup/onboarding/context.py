@@ -12,6 +12,7 @@ from vibe.core.config._settings import (
     DEFAULT_ACTIVE_MODEL,
     DEFAULT_MODELS,
     DEFAULT_PROVIDERS,
+    DEFAULT_VIBE_BASE_URL,
 )
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
@@ -29,6 +30,7 @@ def _default_model_payloads() -> list[dict[str, Any]]:
 
 class _OnboardingSnapshot(BaseModel):
     active_model: str = DEFAULT_ACTIVE_MODEL
+    vibe_base_url: str = DEFAULT_VIBE_BASE_URL
     providers: list[Any] = Field(default_factory=_default_provider_payloads)
     models: list[Any] = Field(default_factory=_default_model_payloads)
 
@@ -97,6 +99,12 @@ def _load_onboarding_env_payload_for_fields(
         and (models := _find_env_value("VIBE_MODELS")) is not None
     ):
         payload["models"] = _ONBOARDING_LIST_ADAPTER.validate_json(models)
+    if (
+        "vibe_base_url" in field_names
+        and (vibe_base_url := _find_env_value("VIBE_VIBE_BASE_URL")) is not None
+    ):
+        payload["vibe_base_url"] = vibe_base_url
+
     return payload
 
 
@@ -180,6 +188,7 @@ def _resolve_provider(
 @dataclass(frozen=True)
 class OnboardingContext:
     provider: ProviderConfig
+    vibe_base_url: str = DEFAULT_VIBE_BASE_URL
 
     @property
     def supports_browser_sign_in(self) -> bool:
@@ -187,7 +196,9 @@ class OnboardingContext:
 
     @classmethod
     def from_config(cls, config: VibeConfig) -> OnboardingContext:
-        return cls(provider=config.get_active_provider())
+        return cls(
+            provider=config.get_active_provider(), vibe_base_url=config.vibe_base_url
+        )
 
     @classmethod
     def load(cls, **overrides: Any) -> OnboardingContext:
@@ -198,7 +209,8 @@ class OnboardingContext:
             return cls(
                 provider=_resolve_provider(
                     active_model=snapshot.active_model, snapshot=snapshot
-                )
+                ),
+                vibe_base_url=snapshot.vibe_base_url,
             )
         except (RuntimeError, ValidationError, ValueError):
             logger.warning(

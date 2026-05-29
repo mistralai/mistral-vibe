@@ -116,7 +116,7 @@ def test_assess_vibe_home_env_file_overrides_process_env_when_both_sources_exist
     assert state == AuthState(
         kind=AuthStateKind.VIBE_HOME_ENV_FILE_OVERRIDES_PROCESS_ENV,
         can_use_active_provider=True,
-        sign_out_available=False,
+        sign_out_available=True,
         env_key=DEFAULT_MISTRAL_API_ENV_KEY,
     )
 

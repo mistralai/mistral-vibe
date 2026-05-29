@@ -315,7 +315,7 @@ class TestAdapterPrepareRequest:
         payload = json.loads(req.body)
         assert payload["model"] == "claude-sonnet-4-20250514"
         assert payload["max_tokens"] == 1024
-        assert payload["temperature"] == 0.5
+        assert "temperature" not in payload
         assert req.endpoint == "/v1/messages"
         assert req.headers["anthropic-version"] == "2023-06-01"
 
@@ -392,9 +392,10 @@ class TestAdapterPrepareRequest:
             thinking="medium",
         )
         payload = json.loads(req.body)
-        assert payload["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+        assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert payload["output_config"] == {"effort": "medium"}
         assert payload["max_tokens"] == 1024
-        assert payload["temperature"] == 1
+        assert "temperature" not in payload
 
     def test_system_cached(self, adapter, provider):
         messages = [
@@ -439,40 +440,11 @@ class TestAdapterPrepareRequest:
         assert len(payload["tools"]) == 1
         assert payload["tools"][0]["name"] == "test_tool"
 
-    @pytest.mark.parametrize(
-        "level,expected_budget", [("low", 1024), ("medium", 10_000), ("high", 32_000)]
-    )
-    def test_thinking_levels_budget_model(
-        self, adapter, provider, level, expected_budget
-    ):
+    @pytest.mark.parametrize("level", ["low", "medium", "high", "max"])
+    def test_thinking_levels(self, adapter, provider, level):
         messages = [LLMMessage(role=Role.user, content="Hello")]
         req = adapter.prepare_request(
             model_name="claude-sonnet-4-20250514",
-            messages=messages,
-            temperature=0.5,
-            tools=None,
-            max_tokens=None,
-            tool_choice=None,
-            enable_streaming=False,
-            provider=provider,
-            thinking=level,
-        )
-        payload = json.loads(req.body)
-        assert payload["thinking"] == {
-            "type": "enabled",
-            "budget_tokens": expected_budget,
-        }
-        assert payload["temperature"] == 1
-        assert payload["max_tokens"] == expected_budget + 8192
-
-    @pytest.mark.parametrize(
-        "model_name", ["claude-opus-4-6-20260101", "claude-opus-4-7-20260418"]
-    )
-    @pytest.mark.parametrize("level", ["low", "medium", "high"])
-    def test_thinking_levels_adaptive_model(self, adapter, provider, model_name, level):
-        messages = [LLMMessage(role=Role.user, content="Hello")]
-        req = adapter.prepare_request(
-            model_name=model_name,
             messages=messages,
             temperature=0.5,
             tools=None,
@@ -485,32 +457,10 @@ class TestAdapterPrepareRequest:
         payload = json.loads(req.body)
         assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert payload["output_config"] == {"effort": level}
-        if "opus-4-7" in model_name:
-            assert "temperature" not in payload
-        else:
-            assert payload["temperature"] == 1
+        assert "temperature" not in payload
         assert payload["max_tokens"] == 32_768
 
-    @pytest.mark.parametrize("thinking_level", ["off", "low", "medium", "high"])
-    def test_temperature_omitted_for_deprecated_model(
-        self, adapter, provider, thinking_level
-    ):
-        messages = [LLMMessage(role=Role.user, content="Hello")]
-        req = adapter.prepare_request(
-            model_name="claude-opus-4-7-20260418",
-            messages=messages,
-            temperature=0.5,
-            tools=None,
-            max_tokens=None,
-            tool_choice=None,
-            enable_streaming=False,
-            provider=provider,
-            thinking=thinking_level,
-        )
-        payload = json.loads(req.body)
-        assert "temperature" not in payload
-
-    def test_history_forced_thinking_budget_model(self, adapter, provider):
+    def test_history_forced_thinking(self, adapter, provider):
         messages = [
             LLMMessage(role=Role.user, content="Hello"),
             LLMMessage(
@@ -532,34 +482,9 @@ class TestAdapterPrepareRequest:
             provider=provider,
         )
         payload = json.loads(req.body)
-        assert payload["thinking"] == {"type": "enabled", "budget_tokens": 10_000}
-        assert payload["temperature"] == 1
-        assert payload["max_tokens"] == 18_192
-
-    def test_history_forced_thinking_adaptive_model(self, adapter, provider):
-        messages = [
-            LLMMessage(role=Role.user, content="Hello"),
-            LLMMessage(
-                role=Role.assistant,
-                content="Answer",
-                reasoning_content="thinking...",
-                reasoning_signature="sig",
-            ),
-            LLMMessage(role=Role.user, content="Follow up"),
-        ]
-        req = adapter.prepare_request(
-            model_name="claude-opus-4-6-20260101",
-            messages=messages,
-            temperature=0.5,
-            tools=None,
-            max_tokens=None,
-            tool_choice=None,
-            enable_streaming=False,
-            provider=provider,
-        )
-        payload = json.loads(req.body)
         assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert payload["output_config"] == {"effort": "medium"}
+        assert "temperature" not in payload
         assert payload["max_tokens"] == 32_768
 
 

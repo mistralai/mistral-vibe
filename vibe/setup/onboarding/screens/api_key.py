@@ -12,7 +12,7 @@ from textual.widgets import Input, Link
 from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import ProviderConfig
+from vibe.core.config import DEFAULT_VIBE_BASE_URL, ProviderConfig
 from vibe.core.telemetry.types import EntrypointMetadata
 from vibe.setup.auth.api_key_persistence import (
     persist_api_key,
@@ -20,8 +20,8 @@ from vibe.setup.auth.api_key_persistence import (
 )
 from vibe.setup.onboarding.base import OnboardingScreen
 
-# providers with a dedicated key creation page get a direct onboarding link
-PROVIDER_HELP = {"mistral": ("https://console.mistral.ai/codestral/cli", "AI Studio")}
+MISTRAL_PROVIDER_NAME = "mistral"
+MISTRAL_PROVIDER_HELP_NAME = "Mistral Vibe"
 CONFIG_DOCS_URL = (
     "https://github.com/mistralai/mistral-vibe?tab=readme-ov-file#configuration"
 )
@@ -39,17 +39,19 @@ class ApiKeyScreen(OnboardingScreen):
         self,
         provider: ProviderConfig | None = None,
         *,
+        vibe_base_url: str = DEFAULT_VIBE_BASE_URL,
         entrypoint_metadata: EntrypointMetadata | None = None,
     ) -> None:
         super().__init__()
         self.provider = resolve_api_key_provider(provider)
+        self._vibe_base_url = vibe_base_url
         self._entrypoint_metadata = entrypoint_metadata
 
     def _compose_provider_link(self) -> ComposeResult:
-        if (help_info := PROVIDER_HELP.get(self.provider.name)) is None:
+        if self.provider.name != MISTRAL_PROVIDER_NAME:
             return
 
-        help_url, _ = help_info
+        help_url = f"{self._vibe_base_url.rstrip('/')}/code/extensions?focus=key"
         yield Link(help_url, url=help_url, id="api-key-provider-link")
 
     def _compose_config_docs(self) -> ComposeResult:
@@ -60,8 +62,11 @@ class ApiKeyScreen(OnboardingScreen):
 
     def compose(self) -> ComposeResult:
         provider_name = self.provider.name.capitalize()
-        help_info = PROVIDER_HELP.get(self.provider.name)
-        help_name = help_info[1] if help_info is not None else "your provider"
+        help_name = (
+            MISTRAL_PROVIDER_HELP_NAME
+            if self.provider.name == MISTRAL_PROVIDER_NAME
+            else "your provider"
+        )
 
         self.input_widget = Input(
             password=True,

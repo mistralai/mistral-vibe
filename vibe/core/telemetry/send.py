@@ -245,7 +245,6 @@ class TelemetryClient:
         self,
         *,
         nb_context_tokens_before: int,
-        nb_context_tokens_after: int,
         auto_compact_threshold: int,
         status: Literal["success", "failure", "cancelled"],
         session_id: str | None = None,
@@ -253,7 +252,6 @@ class TelemetryClient:
     ) -> None:
         payload = {
             "nb_context_tokens_before": nb_context_tokens_before,
-            "nb_context_tokens_after": nb_context_tokens_after,
             "auto_compact_threshold": auto_compact_threshold,
             "status": status,
         }

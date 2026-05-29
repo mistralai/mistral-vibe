@@ -1281,10 +1281,6 @@ NarratorStatus {
     link-color-hover: $mistral_orange;
 }
 
-.vscode-extension-promo-message.after-history {
-    margin-top: 1;
-}
-
 #sessionpicker-app {
     width: 100%;
     height: auto;

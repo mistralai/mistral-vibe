@@ -139,7 +139,7 @@ class TestACPAuthStatus:
         assert response == {
             "authenticated": True,
             "authState": AuthStateKind.VIBE_HOME_ENV_FILE_OVERRIDES_PROCESS_ENV.value,
-            "signOutAvailable": False,
+            "signOutAvailable": True,
         }
 
     @pytest.mark.asyncio
@@ -213,22 +213,23 @@ class TestACPAuthSignOut:
         assert os.environ[DEFAULT_MISTRAL_API_ENV_KEY] == "process-key"
 
     @pytest.mark.asyncio
-    async def test_refuses_combined_dotenv_and_process_env_key(
+    async def test_removes_dotenv_key_and_restores_process_env_key(
         self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(DEFAULT_MISTRAL_API_ENV_KEY, "process-key")
         write_env_file(config_dir, f"{DEFAULT_MISTRAL_API_ENV_KEY}=file-key\n")
         acp_agent_loop = build_acp_agent_loop(build_mistral_provider())
 
-        with pytest.raises(
-            InvalidRequestError,
-            match=AuthStateKind.VIBE_HOME_ENV_FILE_OVERRIDES_PROCESS_ENV.value,
-        ):
-            await acp_agent_loop.ext_method("auth/signOut", {})
+        response = await acp_agent_loop.ext_method("auth/signOut", {})
 
-        assert dotenv_values(config_dir / ".env")[DEFAULT_MISTRAL_API_ENV_KEY] == (
-            "file-key"
-        )
+        assert response == {}
+        assert DEFAULT_MISTRAL_API_ENV_KEY not in dotenv_values(config_dir / ".env")
+        assert os.environ[DEFAULT_MISTRAL_API_ENV_KEY] == "process-key"
+        assert await acp_agent_loop.ext_method("auth/status", {}) == {
+            "authenticated": True,
+            "authState": AuthStateKind.PROCESS_ENV.value,
+            "signOutAvailable": False,
+        }
 
     @pytest.mark.asyncio
     async def test_refuses_unsupported_provider_key(

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
 from textual.app import App
 from textual.pilot import Pilot
 
 from tests.snapshots.snap_compare import SnapCompare
+from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.core.config import ProviderConfig
 from vibe.core.types import Backend
 from vibe.setup.onboarding.screens.api_key import ApiKeyScreen
+
+
+class StaticPetitChat(PetitChat):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(animate=False, **kwargs)
 
 
 class ApiKeyScreenSnapshotApp(App[str | None]):
@@ -27,8 +36,12 @@ class ApiKeyScreenSnapshotApp(App[str | None]):
 
 
 def test_snapshot_onboarding_api_key_with_valid_input(
-    snap_compare: SnapCompare,
+    snap_compare: SnapCompare, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        "vibe.setup.onboarding.screens.api_key.PetitChat", StaticPetitChat
+    )
+
     async def run_before(pilot: Pilot) -> None:
         await pilot.pause(0.2)
         await pilot.press(*"sk-test-api-key")

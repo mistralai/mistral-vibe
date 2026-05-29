@@ -416,35 +416,6 @@ class GenericBackend:
                     return
                 yield json.loads(value.strip())
 
-    async def count_tokens(
-        self,
-        *,
-        model: ModelConfig,
-        messages: Sequence[LLMMessage],
-        temperature: float = 0.0,
-        tools: list[AvailableTool] | None = None,
-        tool_choice: StrToolChoice | AvailableTool | None = None,
-        extra_headers: dict[str, str] | None = None,
-        metadata: dict[str, str] | None = None,
-    ) -> int:
-        probe_messages = list(messages)
-        if not probe_messages or probe_messages[-1].role != Role.user:
-            probe_messages.append(LLMMessage(role=Role.user, content=""))
-
-        result = await self.complete(
-            model=model,
-            messages=probe_messages,
-            temperature=temperature,
-            tools=tools,
-            max_tokens=16,  # Minimal amount for openrouter with openai models
-            tool_choice=tool_choice,
-            extra_headers=extra_headers,
-        )
-        if result.usage is None:
-            raise ValueError("Missing usage in non streaming completion")
-
-        return result.usage.prompt_tokens
-
     async def close(self) -> None:
         if self._owns_client and self._client:
             await self._client.aclose()
