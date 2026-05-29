@@ -570,6 +570,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.call_after_refresh(self._refresh_banner)
         self._show_hook_config_issues_once()
+        self._show_skill_load_issues_once()
 
         self.run_worker(self._watch_init_completion(), exclusive=False)
 
@@ -583,6 +584,15 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _show_hook_config_issues_once(self) -> None:
         for issue in self.agent_loop.hook_config_issues:
+            self.notify(
+                f"{issue.file}\n{issue.message}",
+                severity="warning",
+                markup=False,
+                timeout=10,
+            )
+
+    def _show_skill_load_issues_once(self) -> None:
+        for issue in self.agent_loop.skill_manager.issues:
             self.notify(
                 f"{issue.file}\n{issue.message}",
                 severity="warning",
