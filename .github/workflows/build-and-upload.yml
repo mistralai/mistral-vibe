@@ -26,7 +26,8 @@ jobs:
               {"runner": "ubuntu-22.04-arm", "os": "linux", "arch": "aarch64", "container": "quay.io/pypa/manylinux_2_28_aarch64"},
               {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
               {"runner": "macos-14", "os": "darwin", "arch": "aarch64"},
-              {"runner": "windows-2022", "os": "windows", "arch": "x86_64"}
+              {"runner": "windows-2022", "os": "windows", "arch": "x86_64"},
+              {"runner": "windows-11-arm", "os": "windows", "arch": "aarch64"}
             ]
           }'
           smoke_matrix='{
@@ -36,7 +37,8 @@ jobs:
               {"runner": "ubuntu-24.04-arm", "os": "linux", "arch": "aarch64"},
               {"runner": "macos-15", "os": "darwin", "arch": "aarch64"},
               {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
-              {"runner": "windows-latest", "os": "windows", "arch": "x86_64"}
+              {"runner": "windows-latest", "os": "windows", "arch": "x86_64"},
+              {"runner": "windows-11-arm", "os": "windows", "arch": "aarch64"}
             ]
           }'
           echo "matrix=$(echo $matrix | jq -c .)" >> $GITHUB_OUTPUT
@@ -80,6 +82,13 @@ jobs:
           # python-build-standalone ships libpython with GNU_STACK RWE (executable stack)
           # which is rejected by hardened Linux kernels — clear it with patchelf
           find "$(uv python dir)" -name 'libpython*.so*' -exec patchelf --clear-execstack {} \;
+
+      - name: Install OpenSSL (Windows aarch64)
+        if: ${{ matrix.runner == 'windows-11-arm' }}
+        shell: powershell
+        run: |
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+          vcpkg install openssl:arm64-windows-static-md
 
       - name: Sync dependencies
         run: uv sync --no-dev --group build
