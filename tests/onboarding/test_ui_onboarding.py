@@ -12,7 +12,7 @@ from textual.geometry import Size
 from textual.pilot import Pilot
 from textual.screen import Screen
 from textual.widget import Widget
-from textual.widgets import Input
+from textual.widgets import Input, Link
 
 from tests.browser_sign_in.stubs import build_browser_sign_in_service_factory
 from tests.conftest import build_test_vibe_config
@@ -70,6 +70,7 @@ def _build_onboarding_config(
     api_key_env_var: str = "MISTRAL_API_KEY",
     browser_auth_base_url: str | None = None,
     browser_auth_api_base_url: str | None = None,
+    vibe_base_url: str = "https://chat.mistral.ai",
 ) -> VibeConfig:
     provider = ProviderConfig(
         name=provider_name,
@@ -84,7 +85,9 @@ def _build_onboarding_config(
         provider=model_provider or provider_name,
         alias="devstral-2",
     )
-    return build_test_vibe_config(providers=[provider], models=[model])
+    return build_test_vibe_config(
+        providers=[provider], models=[model], vibe_base_url=vibe_base_url
+    )
 
 
 def _build_browser_onboarding_app(
@@ -234,6 +237,12 @@ async def _show_browser_sign_in(pilot: Pilot) -> None:
     await _show_auth_method(pilot)
     await pilot.press("enter")
     await _wait_for(lambda: isinstance(pilot.app.screen, BrowserSignInScreen), pilot)
+
+
+async def _show_manual_api_key_screen(pilot: Pilot) -> None:
+    await _show_auth_method(pilot)
+    await pilot.press("down", "enter")
+    await _wait_for(lambda: isinstance(pilot.app.screen, ApiKeyScreen), pilot)
 
 
 @pytest.mark.asyncio
@@ -890,6 +899,20 @@ def test_api_key_screen_uses_mistral_fallback_for_context_without_env_key(
 
     assert screen.provider.name == "mistral"
     assert screen.provider.api_key_env_var == "MISTRAL_API_KEY"
+
+
+@pytest.mark.asyncio
+async def test_ui_manual_api_key_screen_uses_configured_vibe_url() -> None:
+    app = OnboardingApp(
+        config=_build_onboarding_config(vibe_base_url="https://vibe.example.com/")
+    )
+
+    async with app.run_test() as pilot:
+        await _show_manual_api_key_screen(pilot)
+
+        provider_link = app.screen.query_one("#api-key-provider-link", Link)
+
+    assert provider_link.url == "https://vibe.example.com/code/extensions?focus=key"
 
 
 def test_persist_api_key_returns_save_error_for_invalid_env_var_name() -> None:

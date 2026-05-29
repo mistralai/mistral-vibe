@@ -60,13 +60,11 @@ async def test_auto_compact_emits_correct_events(telemetry_events: list[dict]) -
     final: AssistantEvent = events[3]
     assert start.current_context_tokens == 2
     assert start.threshold == 1
-    assert end.old_context_tokens == 2
-    assert end.new_context_tokens >= 1
+    assert isinstance(end, CompactEndEvent)
     assert final.content == "<final>"
 
     properties = _get_auto_compact_properties(telemetry_events)
     assert properties["nb_context_tokens_before"] == 2
-    assert properties["nb_context_tokens_after"] == end.new_context_tokens
     assert properties["auto_compact_threshold"] == 1
     assert properties["status"] == "success"
     assert properties["session_id"] == old_session_id
@@ -119,7 +117,6 @@ async def test_auto_compact_emits_terminal_telemetry(
 
     properties = _get_auto_compact_properties(telemetry_events)
     assert properties["nb_context_tokens_before"] == 2
-    assert properties["nb_context_tokens_after"] == 2
     assert properties["auto_compact_threshold"] == 1
     assert properties["status"] == expected_status
     assert properties["session_id"] == old_session_id

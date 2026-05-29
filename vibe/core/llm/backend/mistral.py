@@ -426,29 +426,3 @@ class MistralBackend:
                 has_tools=bool(tools),
                 tool_choice=tool_choice,
             ) from e
-
-    async def count_tokens(
-        self,
-        *,
-        model: ModelConfig,
-        messages: Sequence[LLMMessage],
-        temperature: float = 0.0,
-        tools: list[AvailableTool] | None = None,
-        tool_choice: StrToolChoice | AvailableTool | None = None,
-        extra_headers: dict[str, str] | None = None,
-        metadata: dict[str, str] | None = None,
-    ) -> int:
-        result = await self.complete(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            tools=tools,
-            max_tokens=1,
-            tool_choice=tool_choice,
-            extra_headers=extra_headers,
-            metadata=metadata,
-        )
-        if result.usage is None:
-            raise ValueError("Missing usage in non streaming completion")
-
-        return result.usage.prompt_tokens

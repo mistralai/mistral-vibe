@@ -79,6 +79,7 @@ enable_telemetry = true
 enable_update_checks = true
 enable_auto_update = true
 enable_notifications = true
+enable_system_trust_store = false  # Use OS trust store for outbound HTTPS
 api_timeout = 720.0               # API request timeout in seconds
 auto_compact_threshold = 200000   # Token count before auto-compaction
 
@@ -265,6 +266,13 @@ must configure both URLs:
 [[providers]]
 browser_auth_base_url = "https://console.mistral.ai"
 browser_auth_api_base_url = "https://console.mistral.ai/api"
+```
+
+Self-hosted deployments can point Vibe CLI upgrade and API-key links to their
+Le Chat web deployment, where the Vibe API key is managed:
+
+```toml
+vibe_base_url = "https://chat.mistral.ai"
 ```
 
 ### Hooks (Experimental)

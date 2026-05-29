@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.12"
 
 [options]
-exclude-newer = "2026-05-20T19:55:04.890389Z"
+exclude-newer = "2026-05-22T14:05:58.077106Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -775,7 +775,7 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "1.27.0"
+version = "1.27.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -793,9 +793,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uvicorn", marker = "sys_platform != 'emscripten'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8b/eb/c0cfc62075dc6e1ec1c64d352ae09ac051d9334311ed226f1f425312848a/mcp-1.27.0.tar.gz", hash = "sha256:d3dc35a7eec0d458c1da4976a48f982097ddaab87e278c5511d5a4a56e852b83", size = 607509, upload-time = "2026-04-02T14:48:08.88Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/38/83/d1efe7c2980d8a3afa476f4e3d42d53dd54c0ab94c27bee5d755b45c8b73/mcp-1.27.1.tar.gz", hash = "sha256:0f47e1820f8f8f941466b39749eb1d1839a04caddca2bc60e9d46e8a99914924", size = 608458, upload-time = "2026-05-08T16:50:12.601Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9c/46/f6b4ad632c67ef35209a66127e4bddc95759649dd595f71f13fba11bdf9a/mcp-1.27.0-py3-none-any.whl", hash = "sha256:5ce1fa81614958e267b21fb2aa34e0aea8e2c6ede60d52aba45fd47246b4d741", size = 215967, upload-time = "2026-04-02T14:48:07.24Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/73/42d9596facebdb533b7f0b86c1b0364ef350d1f8ba78b1052e8a58b48b65/mcp-1.27.1-py3-none-any.whl", hash = "sha256:1af3c4203b329430fde7a87b4fcb6392a041f5cb851fd68fc674016ab4e7c06f", size = 216260, upload-time = "2026-05-08T16:50:10.547Z" },
 ]
 
 [[package]]
@@ -821,7 +821,7 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "2.12.1"
+version = "2.13.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -908,6 +908,7 @@ dependencies = [
     { name = "tomli-w" },
     { name = "tree-sitter" },
     { name = "tree-sitter-bash" },
+    { name = "truststore" },
     { name = "typing-extensions" },
     { name = "typing-inspection" },
     { name = "uc-micro-py" },
@@ -922,14 +923,65 @@ dependencies = [
 [package.dev-dependencies]
 build = [
     { name = "altgraph" },
+    { name = "anyio" },
+    { name = "certifi" },
+    { name = "cffi", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x' and platform_python_implementation != 'PyPy' and sys_platform == 'linux'" },
+    { name = "cfgv" },
+    { name = "charset-normalizer" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "cryptography", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux'" },
+    { name = "distlib" },
+    { name = "docutils" },
+    { name = "execnet" },
+    { name = "filelock" },
+    { name = "h11" },
+    { name = "httpcore" },
+    { name = "httpx" },
+    { name = "id" },
+    { name = "identify" },
+    { name = "idna" },
+    { name = "iniconfig" },
+    { name = "jaraco-classes", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'" },
+    { name = "jaraco-context", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'" },
+    { name = "jaraco-functools", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'" },
+    { name = "jeepney", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux'" },
+    { name = "jinja2" },
+    { name = "keyring", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'" },
+    { name = "linkify-it-py" },
     { name = "macholib", marker = "sys_platform == 'darwin'" },
+    { name = "markdown-it-py" },
+    { name = "markupsafe" },
+    { name = "mdit-py-plugins" },
+    { name = "mdurl" },
+    { name = "more-itertools", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'" },
+    { name = "nh3" },
+    { name = "nodeenv" },
     { name = "packaging" },
     { name = "pefile", marker = "sys_platform == 'win32'" },
+    { name = "platformdirs" },
+    { name = "pluggy" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' and platform_machine != 'ppc64le' and platform_machine != 's390x' and platform_python_implementation != 'PyPy' and sys_platform == 'linux'" },
+    { name = "pygments" },
     { name = "pyinstaller" },
     { name = "pyinstaller-hooks-contrib" },
+    { name = "pyinstrument" },
+    { name = "python-discovery" },
     { name = "pywin32-ctypes", marker = "sys_platform == 'win32'" },
+    { name = "pyyaml" },
+    { name = "readme-renderer" },
+    { name = "requests" },
+    { name = "requests-toolbelt" },
+    { name = "rfc3986" },
+    { name = "rich" },
+    { name = "secretstorage", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux'" },
     { name = "setuptools" },
+    { name = "syrupy" },
+    { name = "textual" },
     { name = "truststore" },
+    { name = "typing-extensions" },
+    { name = "uc-micro-py" },
+    { name = "urllib3" },
+    { name = "virtualenv" },
 ]
 dev = [
     { name = "debugpy" },
@@ -988,7 +1040,7 @@ requires-dist = [
     { name = "linkify-it-py", specifier = "==2.1.0" },
     { name = "markdown-it-py", specifier = "==4.0.0" },
     { name = "markdownify", specifier = "==1.2.2" },
-    { name = "mcp", specifier = "==1.27.0" },
+    { name = "mcp", specifier = "==1.27.1" },
     { name = "mdit-py-plugins", specifier = "==0.5.0" },
     { name = "mdurl", specifier = "==0.1.2" },
     { name = "mistralai", specifier = "==2.4.4" },
@@ -1035,6 +1087,7 @@ requires-dist = [
     { name = "tomli-w", specifier = "==1.2.0" },
     { name = "tree-sitter", specifier = "==0.25.2" },
     { name = "tree-sitter-bash", specifier = "==0.25.1" },
+    { name = "truststore", specifier = "==0.10.4" },
     { name = "typing-extensions", specifier = "==4.15.0" },
     { name = "typing-inspection", specifier = "==0.4.2" },
     { name = "uc-micro-py", specifier = "==2.0.0" },
@@ -1049,14 +1102,65 @@ requires-dist = [
 [package.metadata.requires-dev]
 build = [
     { name = "altgraph", specifier = "==0.17.5" },
+    { name = "anyio", specifier = "==4.13.0" },
+    { name = "certifi", specifier = "==2026.4.22" },
+    { name = "cffi", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x' and platform_python_implementation != 'PyPy' and sys_platform == 'linux'", specifier = "==2.0.0" },
+    { name = "cfgv", specifier = "==3.5.0" },
+    { name = "charset-normalizer", specifier = "==3.4.7" },
+    { name = "colorama", marker = "sys_platform == 'win32'", specifier = "==0.4.6" },
+    { name = "cryptography", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux'", specifier = "==47.0.0" },
+    { name = "distlib", specifier = "==0.4.0" },
+    { name = "docutils", specifier = "==0.22.4" },
+    { name = "execnet", specifier = "==2.1.2" },
+    { name = "filelock", specifier = "==3.29.0" },
+    { name = "h11", specifier = "==0.16.0" },
+    { name = "httpcore", specifier = "==1.0.9" },
+    { name = "httpx", specifier = "==0.28.1" },
+    { name = "id", specifier = "==1.6.1" },
+    { name = "identify", specifier = "==2.6.19" },
+    { name = "idna", specifier = "==3.13" },
+    { name = "iniconfig", specifier = "==2.3.0" },
+    { name = "jaraco-classes", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'", specifier = "==3.4.0" },
+    { name = "jaraco-context", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'", specifier = "==6.1.2" },
+    { name = "jaraco-functools", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'", specifier = "==4.4.0" },
+    { name = "jeepney", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux'", specifier = "==0.9.0" },
+    { name = "jinja2", specifier = "==3.1.6" },
+    { name = "keyring", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'", specifier = "==25.7.0" },
+    { name = "linkify-it-py", specifier = "==2.1.0" },
     { name = "macholib", marker = "sys_platform == 'darwin'", specifier = "==1.16.4" },
+    { name = "markdown-it-py", specifier = "==4.0.0" },
+    { name = "markupsafe", specifier = "==3.0.3" },
+    { name = "mdit-py-plugins", specifier = "==0.5.0" },
+    { name = "mdurl", specifier = "==0.1.2" },
+    { name = "more-itertools", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'", specifier = "==11.0.2" },
+    { name = "nh3", specifier = "==0.3.5" },
+    { name = "nodeenv", specifier = "==1.10.0" },
     { name = "packaging", specifier = "==26.2" },
     { name = "pefile", marker = "sys_platform == 'win32'", specifier = "==2024.8.26" },
+    { name = "platformdirs", specifier = "==4.9.6" },
+    { name = "pluggy", specifier = "==1.6.0" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' and platform_machine != 'ppc64le' and platform_machine != 's390x' and platform_python_implementation != 'PyPy' and sys_platform == 'linux'", specifier = "==3.0" },
+    { name = "pygments", specifier = "==2.20.0" },
     { name = "pyinstaller", specifier = "==6.20.0" },
     { name = "pyinstaller-hooks-contrib", specifier = "==2026.4" },
+    { name = "pyinstrument", specifier = "==5.1.2" },
+    { name = "python-discovery", specifier = "==1.2.2" },
     { name = "pywin32-ctypes", marker = "sys_platform == 'win32'", specifier = "==0.2.3" },
+    { name = "pyyaml", specifier = "==6.0.3" },
+    { name = "readme-renderer", specifier = "==44.0" },
+    { name = "requests", specifier = "==2.33.1" },
+    { name = "requests-toolbelt", specifier = "==1.0.0" },
+    { name = "rfc3986", specifier = "==2.0.0" },
+    { name = "rich", specifier = "==15.0.0" },
+    { name = "secretstorage", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux'", specifier = "==3.5.0" },
     { name = "setuptools", specifier = "==82.0.1" },
+    { name = "syrupy", specifier = "==4.8.0" },
+    { name = "textual", specifier = "==8.2.7" },
     { name = "truststore", specifier = "==0.10.4" },
+    { name = "typing-extensions", specifier = "==4.15.0" },
+    { name = "uc-micro-py", specifier = "==2.0.0" },
+    { name = "urllib3", specifier = "==2.6.3" },
+    { name = "virtualenv", specifier = "==21.2.4" },
 ]
 dev = [
     { name = "debugpy", specifier = ">=1.8.19" },

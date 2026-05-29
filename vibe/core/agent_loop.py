@@ -810,7 +810,6 @@ class AgentLoop:  # noqa: PLR0904
                 )
 
                 compact_status: Literal["success", "failure", "cancelled"] = "success"
-                new_tokens = self.stats.context_tokens
                 try:
                     summary = await self.compact()
                 except asyncio.CancelledError:
@@ -820,10 +819,8 @@ class AgentLoop:  # noqa: PLR0904
                     compact_status = "failure"
                     raise
                 finally:
-                    new_tokens = self.stats.context_tokens
                     self.telemetry_client.send_auto_compact_triggered(
                         nb_context_tokens_before=old_tokens,
-                        nb_context_tokens_after=new_tokens,
                         auto_compact_threshold=threshold,
                         status=compact_status,
                         session_id=old_session_id,
@@ -832,8 +829,6 @@ class AgentLoop:  # noqa: PLR0904
 
                 yield CompactEndEvent(
                     tool_call_id=tool_call_id,
-                    old_context_tokens=old_tokens,
-                    new_context_tokens=new_tokens,
                     summary_length=len(summary),
                     old_session_id=old_session_id,
                     new_session_id=self.session_id,
@@ -1724,21 +1719,16 @@ class AgentLoop:  # noqa: PLR0904
 
             system_message = self.messages[0]
             wrapped_summary = f"{summary_prefix}\n{summary_content}"
-            summary_message = LLMMessage(role=Role.user, content=wrapped_summary)
+            summary_message = LLMMessage(
+                role=Role.user, content=wrapped_summary, injected=True
+            )
             self.messages.reset([system_message, *prior_user_messages, summary_message])
 
-            active_model = self.config.get_active_model()
             await self._reset_session()
 
-            actual_context_tokens = await self.backend.count_tokens(
-                model=active_model,
-                messages=self.messages,
-                tools=self.format_handler.get_available_tools(self.tool_manager),
-                extra_headers=self._get_extra_headers(),
-                metadata=self._build_backend_metadata().model_dump(exclude_none=True),
-            )
-
-            self.stats.context_tokens = actual_context_tokens
+            # Context size is unknown without an API call; reset to 0. The next
+            # LLM turn recomputes it accurately from real usage (_update_stats).
+            self.stats.context_tokens = 0
             await self.session_logger.save_interaction(
                 self.messages,
                 self.stats,

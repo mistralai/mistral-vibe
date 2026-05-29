@@ -2183,32 +2183,26 @@ class VibeApp(App):  # noqa: PLR0904
         if not self.event_handler:
             return
 
-        old_tokens = self.agent_loop.stats.context_tokens
         old_session_id = self.agent_loop.session_id
         compact_msg = CompactMessage()
         self.event_handler.current_compact = compact_msg
         await self._mount_and_scroll(compact_msg)
 
         self._agent_task = asyncio.create_task(
-            self._run_compact(compact_msg, old_tokens, old_session_id, cmd_args.strip())
+            self._run_compact(compact_msg, old_session_id, cmd_args.strip())
         )
 
     async def _run_compact(
         self,
         compact_msg: CompactMessage,
-        old_tokens: int,
         old_session_id: str,
         extra_instructions: str = "",
     ) -> None:
         self._agent_running = True
         try:
             await self.agent_loop.compact(extra_instructions=extra_instructions)
-            new_tokens = self.agent_loop.stats.context_tokens
             compact_msg.set_complete(
-                old_tokens=old_tokens,
-                new_tokens=new_tokens,
-                old_session_id=old_session_id,
-                new_session_id=self.agent_loop.session_id,
+                old_session_id=old_session_id, new_session_id=self.agent_loop.session_id
             )
 
         except asyncio.CancelledError:
@@ -2887,13 +2881,18 @@ class VibeApp(App):  # noqa: PLR0904
         if self._chat_input_container:
             self._chat_input_container.switching_mode = True
 
+        loop = asyncio.get_running_loop()
+
         def schedule_switch() -> None:
             self._switch_agent_generation += 1
             my_gen = self._switch_agent_generation
 
             def switch_agent_sync() -> None:
                 try:
-                    asyncio.run(self.agent_loop.switch_agent(new_profile.name))
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.agent_loop.switch_agent(new_profile.name), loop
+                    )
+                    future.result()
                     self.agent_loop.set_approval_callback(self._approval_callback)
                     self.agent_loop.set_user_input_callback(self._user_input_callback)
                 finally:
@@ -3031,7 +3030,7 @@ class VibeApp(App):  # noqa: PLR0904
         if content is not None:
             body = content
             plan_offer = plan_offer_cta(
-                self._plan_info, console_base_url=self.config.console_base_url
+                self._plan_info, vibe_base_url=self.config.vibe_base_url
             )
             if plan_offer is not None:
                 body = f"{body}\n\n{plan_offer}"
@@ -3059,12 +3058,10 @@ class VibeApp(App):  # noqa: PLR0904
         if not self._show_vscode_extension_promo:
             return
         promo_message = VscodeExtensionPromoMessage()
-        if self._history_widget_indices:
-            promo_message.add_class("after-history")
         messages_area = self._cached_messages_area or self.query_one("#messages")
         chat = self._cached_chat or self.query_one("#chat", ChatScroll)
         should_anchor = chat.is_at_bottom
-        await chat.mount(promo_message, after=messages_area)
+        await chat.mount(promo_message, before=messages_area)
         if should_anchor:
             chat.anchor()
         self.run_worker(self._record_vscode_extension_promo_shown(), exclusive=False)

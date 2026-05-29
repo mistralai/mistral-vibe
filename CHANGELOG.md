@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0] - 2026-05-29
+
+### Added
+
+- `enable_system_trust_store` config flag to switch the shared SSL context to the OS trust store for corporate TLS / private CA setups
+
+### Changed
+
+- MCP HTTP transport now uses Vibe's shared SSL context so it honors `SSL_CERT_FILE` / `SSL_CERT_DIR` and the system trust store opt-in
+- API key onboarding and plan-upgrade CTAs now link to the new Mistral Vibe Code extensions page
+- Compaction summaries are now injected into the conversation instead of replacing it
+
+### Fixed
+
+- Crash during initialization
+- VS Code extension promo banner now sits at the top of the conversation instead of being pinned above the input
+
 ## [2.12.1] - 2026-05-27
 
 ### Fixed

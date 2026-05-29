@@ -34,11 +34,13 @@ def collect_prior_user_messages(
         content = m.content or ""
         cost = approx_token_count(content)
         if cost <= remaining:
-            selected.append(LLMMessage(role=Role.user, content=content))
+            selected.append(LLMMessage(role=Role.user, content=content, injected=True))
             remaining -= cost
         else:
             truncated = truncate_middle_to_tokens(content, remaining)
-            selected.append(LLMMessage(role=Role.user, content=truncated))
+            selected.append(
+                LLMMessage(role=Role.user, content=truncated, injected=True)
+            )
             remaining = 0
 
     selected.reverse()

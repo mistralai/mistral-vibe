@@ -425,6 +425,16 @@ Vibe supports multiple ways to configure your API keys:
 
 **Note**: The `.env` file is specifically for API keys and other provider credentials. General Vibe configuration should be done in `config.toml`.
 
+### TLS and Corporate Certificate Authorities
+
+By default, Vibe uses the bundled `certifi` certificate roots for outbound HTTPS requests. If your organization installs private certificate authorities in the operating system trust store, you can opt in to the system trust store in `config.toml`:
+
+```toml
+enable_system_trust_store = true
+```
+
+`SSL_CERT_FILE` and `SSL_CERT_DIR` are still supported and are loaded as additional trust anchors.
+
 ### Custom System Prompts
 
 You can create `AGENTS.md` files to add custom instructions. You can also replace the entire system prompt.

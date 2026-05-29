@@ -32,7 +32,7 @@ from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
 from vibe.core.prompts import UtilityPrompt, load_prompt, load_system_prompt
 from vibe.core.types import Backend
-from vibe.core.utils import get_server_url_from_api_base
+from vibe.core.utils import configure_ssl_context, get_server_url_from_api_base
 
 
 def _strip_bash_pattern_wildcard(pattern: str) -> str:
@@ -165,6 +165,7 @@ DEFAULT_MISTRAL_API_ENV_KEY = "MISTRAL_API_KEY"
 DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL = "https://console.mistral.ai"
 DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL = "https://console.mistral.ai/api"
 DEFAULT_CONSOLE_BASE_URL = "https://console.mistral.ai"
+DEFAULT_VIBE_BASE_URL = "https://chat.mistral.ai"
 
 
 class ProviderConfig(BaseModel):
@@ -520,6 +521,7 @@ class VibeConfig(BaseSettings):
     enable_update_checks: bool = True
     enable_auto_update: bool = True
     enable_notifications: bool = True
+    enable_system_trust_store: bool = False
     api_timeout: float = 720.0
     auto_compact_threshold: int = 200_000
 
@@ -537,6 +539,7 @@ class VibeConfig(BaseSettings):
     otel_endpoint: str = Field(default="", exclude=True)
 
     console_base_url: str = Field(default=DEFAULT_CONSOLE_BASE_URL, exclude=True)
+    vibe_base_url: str = Field(default=DEFAULT_VIBE_BASE_URL, exclude=True)
 
     enable_experimental_hooks: bool = Field(default=False, exclude=True)
 
@@ -1064,7 +1067,11 @@ class VibeConfig(BaseSettings):
     @classmethod
     def load(cls, **overrides: Any) -> VibeConfig:
         cls._migrate()
-        return cls(**(overrides or {}))
+        config = cls(**(overrides or {}))
+        configure_ssl_context(
+            enable_system_trust_store=config.enable_system_trust_store
+        )
+        return config
 
     @classmethod
     def create_default(cls) -> dict[str, Any]:

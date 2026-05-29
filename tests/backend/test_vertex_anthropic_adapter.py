@@ -91,7 +91,7 @@ class TestPrepareRequest:
         assert payload["anthropic_version"] == "vertex-2023-10-16"
         assert "model" not in payload
         assert payload["max_tokens"] == 1024
-        assert payload["temperature"] == 0.5
+        assert "temperature" not in payload
         assert req.headers["Authorization"] == "Bearer fake-token"
         assert req.headers["anthropic-beta"] == adapter.BETA_FEATURES
         assert "rawPredict" in req.endpoint
@@ -147,9 +147,10 @@ class TestPrepareRequest:
         )
 
         payload = json.loads(req.body)
-        assert payload["thinking"] == {"type": "enabled", "budget_tokens": 10000}
+        assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert payload["output_config"] == {"effort": "medium"}
         assert payload["max_tokens"] == 1024
-        assert payload["temperature"] == 1
+        assert "temperature" not in payload
 
     def test_with_tools(self, adapter, provider):
         messages = [LLMMessage(role=Role.user, content="Hello")]
