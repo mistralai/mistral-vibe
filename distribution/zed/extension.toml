@@ -22,6 +22,10 @@ cmd = "./vibe-acp"
 archive = "https://github.com/mistralai/mistral-vibe/releases/download/v2.13.0/vibe-acp-linux-aarch64-2.13.0.zip"
 cmd = "./vibe-acp"
 
+[agent_servers.mistral-vibe.targets.linux-riscv64]
+archive = "https://github.com/mistralai/mistral-vibe/releases/download/v2.7.3/vibe-acp-linux-riscv64-2.7.3.zip"
+cmd = "./vibe-acp"
+
 [agent_servers.mistral-vibe.targets.linux-x86_64]
 archive = "https://github.com/mistralai/mistral-vibe/releases/download/v2.13.0/vibe-acp-linux-x86_64-2.13.0.zip"
 cmd = "./vibe-acp"
