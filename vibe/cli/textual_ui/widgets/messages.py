@@ -238,6 +238,11 @@ class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
     def on_resize(self) -> None:
         self.refresh_spinner()
 
+    def stop_spinning(self, success: bool = True) -> None:
+        super().stop_spinning(success)
+        if self._indicator_widget:
+            self._indicator_widget.update("■")
+
     async def on_click(self) -> None:
         await self._toggle_collapsed()
 
@@ -324,6 +329,7 @@ class InterruptMessage(Static):
 
 class BashOutputMessage(SpinnerMixin, Static):
     SPINNER_TYPE = SpinnerType.PULSE
+    _PREVIEW_LINES = 3
 
     def __init__(
         self,
@@ -342,10 +348,38 @@ class BashOutputMessage(SpinnerMixin, Static):
         self._output = output.rstrip("\n")
         self._exit_code = exit_code
         self._pending = pending
+        self._collapsed = True
         self._output_widget: NoMarkupStatic | None = None
+        self._overflow_widget: NoMarkupStatic | None = None
+        self._toggle_widget: Horizontal | None = None
+        self._toggle_triangle: NonSelectableStatic | None = None
+        self._toggle_label: NoMarkupStatic | None = None
         self._output_container: Horizontal | None = None
         self._prompt_widget: NonSelectableStatic | None = None
         self._indicator_widget: Static | None = None
+
+    def _preview_text(self) -> str:
+        return "\n".join(self._output.splitlines()[:self._PREVIEW_LINES])
+
+    def _overflow_text(self) -> str:
+        return "\n".join(self._output.splitlines()[self._PREVIEW_LINES:])
+
+    def _overflow_count(self) -> int:
+        return max(0, len(self._output.splitlines()) - self._PREVIEW_LINES)
+
+    def _refresh_output_widgets(self) -> None:
+        count = self._overflow_count()
+        if self._output_widget:
+            self._output_widget.update(self._preview_text())
+        if self._overflow_widget:
+            self._overflow_widget.update(self._overflow_text())
+            self._overflow_widget.display = not self._collapsed and count > 0
+        if self._toggle_widget:
+            self._toggle_widget.display = count > 0
+        if self._toggle_label:
+            self._toggle_label.update(f"+{count} more lines")
+        if self._toggle_triangle:
+            self._toggle_triangle.update("▼" if not self._collapsed else "▶")
 
     def _update_spinner_frame(self) -> None:
         if not self._is_spinning or not self._prompt_widget:
@@ -372,21 +406,53 @@ class BashOutputMessage(SpinnerMixin, Static):
             yield self._prompt_widget
             yield NoMarkupStatic(self._command, classes="bash-command")
         if not self._pending:
+            count = self._overflow_count()
+            self._output_widget = NoMarkupStatic(self._preview_text(), classes="bash-output")
+            self._overflow_widget = NoMarkupStatic(self._overflow_text(), classes="bash-output")
+            self._overflow_widget.display = False
+            self._toggle_triangle = NonSelectableStatic("▶", classes="bash-output-triangle")
+            self._toggle_label = NoMarkupStatic(f"+{count} more lines", classes="bash-output-toggle-label")
+            self._toggle_widget = Horizontal(
+                self._toggle_triangle,
+                self._toggle_label,
+                classes="bash-output-toggle",
+            )
+            self._toggle_widget.display = count > 0
             self._output_container = Horizontal(classes="bash-output-container")
             with self._output_container:
                 yield ExpandingBorder(classes="bash-output-border")
-                self._output_widget = NoMarkupStatic(
-                    self._output, classes="bash-output"
-                )
-                yield self._output_widget
+                with Vertical(classes="bash-output-body"):
+                    yield self._output_widget
+                    yield self._overflow_widget
+                    yield self._toggle_widget
+
+    async def on_click(self) -> None:
+        if self._overflow_count() > 0:
+            self._collapsed = not self._collapsed
+            self._refresh_output_widgets()
 
     async def _ensure_output_container(self) -> None:
         if self._output_container is not None:
             return
         self._output_widget = NoMarkupStatic("", classes="bash-output")
+        self._overflow_widget = NoMarkupStatic("", classes="bash-output")
+        self._overflow_widget.display = False
+        self._toggle_triangle = NonSelectableStatic("▶", classes="bash-output-triangle")
+        self._toggle_label = NoMarkupStatic("+0 more lines", classes="bash-output-toggle-label")
+        self._toggle_widget = Horizontal(
+            self._toggle_triangle,
+            self._toggle_label,
+            classes="bash-output-toggle",
+        )
+        self._toggle_widget.display = False
         self._output_container = Horizontal(
             ExpandingBorder(classes="bash-output-border"),
-            self._output_widget,
+            Vertical(
+                self._output_widget,
+                self._overflow_widget,
+                self._toggle_widget,
+                classes="bash-output-body",
+            ),
             classes="bash-output-container",
         )
         await self.mount(self._output_container)
@@ -394,8 +460,7 @@ class BashOutputMessage(SpinnerMixin, Static):
     async def append_output(self, text: str) -> None:
         await self._ensure_output_container()
         self._output += text
-        if self._output_widget:
-            self._output_widget.update(self._output.rstrip("\n"))
+        self._refresh_output_widgets()
 
     async def finish(self, exit_code: int, *, interrupted: bool = False) -> None:
         self._exit_code = exit_code
@@ -424,8 +489,7 @@ class BashOutputMessage(SpinnerMixin, Static):
         if not self._output:
             self._output = "(no output)"
         await self._ensure_output_container()
-        if self._output_widget:
-            self._output_widget.update(self._output.rstrip("\n"))
+        self._refresh_output_widgets()
 
 
 class ErrorMessage(Static):

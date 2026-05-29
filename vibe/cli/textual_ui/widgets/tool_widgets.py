@@ -5,9 +5,10 @@ from pathlib import Path
 
 from pydantic import BaseModel
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Markdown, Static
 
+from vibe.cli.textual_ui.widgets.messages import NonSelectableStatic
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.tools.builtins.ask_user_question import AskUserQuestionResult
 from vibe.core.tools.builtins.bash import BashArgs, BashResult
@@ -130,18 +131,42 @@ class BashApprovalWidget(ToolApprovalWidget[BashArgs]):
 
 
 class BashResultWidget(ToolResultWidget[BashResult]):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._inner_collapsed = True
+        self._overflow_widget: NoMarkupStatic | None = None
+        self._toggle_triangle: NonSelectableStatic | None = None
+        self._toggle_label: NoMarkupStatic | None = None
+        self._toggle_row: Horizontal | None = None
+
     def compose(self) -> ComposeResult:
         if not self.result:
             yield from self._footer()
             return
         if self.collapsed:
-            truncation_info = None
             if self.result.stdout:
-                content, truncation_info = _truncate_lines(self.result.stdout, 10)
-                yield NoMarkupStatic(content, classes="tool-result-detail")
+                lines = self.result.stdout.strip("\n").split("\n")
+                self._overflow_widget = NoMarkupStatic(
+                    "\n".join(lines), classes="tool-result-detail"
+                )
+                self._overflow_widget.display = False
+                yield self._overflow_widget
+                self._toggle_triangle = NonSelectableStatic(
+                    "▶", classes="bash-output-triangle"
+                )
+                self._toggle_label = NoMarkupStatic(
+                    f"{len(lines)} lines",
+                    classes="bash-output-toggle-label",
+                )
+                self._toggle_row = Horizontal(
+                    self._toggle_triangle,
+                    self._toggle_label,
+                    classes="bash-output-toggle",
+                )
+                yield self._toggle_row
             else:
                 yield NoMarkupStatic("(no content)", classes="tool-result-detail")
-            yield from self._footer(truncation_info)
+            yield from self._footer()
             return
         yield NoMarkupStatic(
             f"returncode: {self.result.returncode}", classes="tool-result-detail"
@@ -157,6 +182,16 @@ class BashResultWidget(ToolResultWidget[BashResult]):
                 f"stderr:{sep}{self.result.stderr}", classes="tool-result-detail"
             )
         yield from self._footer()
+
+    async def on_click(self) -> None:
+        if self._overflow_widget is None:
+            return
+        self._inner_collapsed = not self._inner_collapsed
+        self._overflow_widget.display = not self._inner_collapsed
+        if self._toggle_triangle:
+            self._toggle_triangle.update("▼" if not self._inner_collapsed else "▶")
+        if self._inner_collapsed and self._toggle_row:
+            self._toggle_row.scroll_visible()
 
 
 class WriteFileApprovalWidget(ToolApprovalWidget[WriteFileArgs]):

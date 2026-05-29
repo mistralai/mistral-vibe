@@ -568,9 +568,41 @@ Markdown {
     }
 }
 
+.bash-output-body {
+    width: 1fr;
+    height: auto;
+}
+
 .bash-output {
     width: 1fr;
     height: auto;
+}
+
+.bash-output-toggle {
+    width: auto;
+    height: auto;
+    margin-top: 0;
+}
+
+.bash-output-triangle {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    margin-right: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+.bash-output-toggle-label {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .unknown-event {
@@ -1161,7 +1193,7 @@ NarratorStatus {
 }
 
 #banner-container {
-    align: left middle;
+    align: left top;
     padding: 1 1 0 0;
     width: auto;
 }
@@ -1173,8 +1205,8 @@ NarratorStatus {
 #banner-info {
     width: auto;
     height: auto;
-    margin-left: 2;
-    content-align: left middle;
+    margin-top: 1;
+    content-align: left top;
 }
 
 .banner-line {
