@@ -41,3 +41,37 @@ IMPORTANT:
 - The tool will provide detailed error messages showing context if search text is not found
 - Each search/replace block is applied in order, so later blocks see the results of earlier ones
 - Be careful with escape sequences in string literals - use \n not \\n for newlines in code
+
+## Multi-line Replacements
+
+When replacing content that spans multiple lines, **you must include ALL intermediate lines** in your SEARCH block. For example, if you want to modify two dependencies in a Cargo.toml file that have other dependencies between them:
+
+```toml
+# WRONG - missing intermediate lines
+<<<<<<< SEARCH
+tokio = { version = "1.0", features = ["fs", "process"] }
+reqwest = { version = "0.13.2", features = ["json"] }
+=======
+tokio = { version = "2.0", features = ["fs", "process"] }
+reqwest = { version = "0.14.0", features = ["json"] }
+>>>>>>> REPLACE
+
+# CORRECT - includes all intermediate lines
+<<<<<<< SEARCH
+tokio = { version = "1.0", features = ["fs", "process"] }
+sha2 = "0.10"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"], optional = true }
+walkdir = "2.3"
+reqwest = { version = "0.13.2", features = ["json"] }
+=======
+tokio = { version = "2.0", features = ["fs", "process"] }
+sha2 = "0.10"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"], optional = true }
+walkdir = "2.3"
+reqwest = { version = "0.14.0", features = ["json"] }
+>>>>>>> REPLACE
+```
+
+The search text must match the file content exactly, including all lines between your target lines.
