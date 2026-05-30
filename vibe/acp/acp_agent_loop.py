@@ -72,6 +72,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from vibe import VIBE_ROOT, __version__
 from vibe.acp.acp_logger import acp_message_observer
+from vibe.core.paths._vibe_home import is_acp_mode, resolve_vibe_home
 from vibe.acp.commands import AcpCommandRegistry
 from vibe.acp.exceptions import (
     ConfigurationError,
@@ -586,6 +587,23 @@ class VibeAcpAgentLoop(AcpAgent):
         except Exception as e:
             raise ConfigurationError(str(e)) from e
 
+    def _resolve_and_bootstrap_vibe_home(self, cwd: str) -> Path:
+        """Resolve VIBE_HOME for *cwd* and ensure required directories exist.
+
+        In ACP mode the resolved path will be *cwd*/.vibe/ so that all
+        runtime artifacts (plans, logs, …) stay inside the project
+        boundary and satisfy ACP sandbox constraints.
+        """
+        vibe_home = resolve_vibe_home(Path(cwd).resolve())
+        os.environ["VIBE_HOME"] = str(vibe_home)
+
+        # Bootstrap directories required at runtime
+        vibe_home.mkdir(parents=True, exist_ok=True)
+        (vibe_home / "plans").mkdir(parents=True, exist_ok=True)
+        (vibe_home / "logs" / "session").mkdir(parents=True, exist_ok=True)
+
+        return vibe_home
+
     async def _create_acp_session(
         self, session_id: str, agent_loop: AgentLoop
     ) -> AcpSessionLoop:
@@ -651,6 +669,7 @@ class VibeAcpAgentLoop(AcpAgent):
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> NewSessionResponse:
+        self._resolve_and_bootstrap_vibe_home(cwd)
         load_dotenv_values()
         os.chdir(cwd)
 
@@ -907,6 +926,7 @@ class VibeAcpAgentLoop(AcpAgent):
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> LoadSessionResponse | None:
+        self._resolve_and_bootstrap_vibe_home(cwd)
         load_dotenv_values()
         os.chdir(cwd)
 

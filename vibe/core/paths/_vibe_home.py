@@ -19,6 +19,34 @@ class GlobalPath:
 _DEFAULT_VIBE_HOME = Path.home() / ".vibe"
 
 
+def is_acp_mode() -> bool:
+    """Detect if the current process is running in ACP server mode.
+
+    Set by ``vibe/acp/entrypoint.py`` at startup so that
+    path-resolution policies can distinguish ACP from CLI contexts.
+    """
+    return os.getenv("ACP_MODE") == "1"
+
+
+def resolve_vibe_home(cwd: Path) -> Path:
+    """Resolve the VIBE_HOME directory based on execution context.
+
+    Policy (highest priority first):
+    1. Explicit ``VIBE_HOME`` environment variable — always wins.
+    2. ACP mode (``is_acp_mode() == True``) — use ``.vibe/`` inside *cwd*.
+       This keeps all runtime artifacts inside the project boundary so
+       that ACP clients (Zed, VS Code, …) can permit the writes.
+    3. Default — ``~/.vibe`` for global CLI / standalone usage.
+    """
+    if vibe_home := os.getenv("VIBE_HOME"):
+        return Path(vibe_home).expanduser().resolve()
+
+    if is_acp_mode():
+        return (cwd / ".vibe").resolve()
+
+    return _DEFAULT_VIBE_HOME
+
+
 def _get_vibe_home() -> Path:
     if vibe_home := os.getenv("VIBE_HOME"):
         return Path(vibe_home).expanduser().resolve()
