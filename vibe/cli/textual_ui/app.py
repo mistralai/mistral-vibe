@@ -292,12 +292,16 @@ def _resolve_typing_debounce_s() -> float:
 
 
 async def prune_oldest_children(
-    messages_area: Widget, low_mark: int, high_mark: int
+    messages_area: Widget,
+    chat_scroll: ChatScroll,
+    low_mark: int,
+    high_mark: int,
 ) -> bool:
     """Remove the oldest children so the virtual height stays within bounds.
 
     Walks children back-to-front to find how much to keep (up to *low_mark*
     of visible height), then removes everything before that point.
+    Preserves scroll position if the user is not at the bottom.
     """
     total_height = messages_area.virtual_size.height
     if total_height <= high_mark:
@@ -323,7 +327,20 @@ async def prune_oldest_children(
     if not to_remove:
         return False
 
+    # Preserve scroll position if user is not at bottom
+    was_at_bottom = chat_scroll.is_at_bottom
+    scroll_offset_from_bottom = 0
+    if not was_at_bottom:
+        scroll_offset_from_bottom = chat_scroll.max_scroll_y - chat_scroll.scroll_y
+
     await messages_area.remove_children(to_remove)
+
+    # Restore scroll position after pruning
+    if not was_at_bottom:
+        # Recalculate scroll position based on new max_scroll_y
+        new_scroll_y = max(0, chat_scroll.max_scroll_y - scroll_offset_from_bottom)
+        chat_scroll.scroll_y = new_scroll_y
+
     return True
 
 
@@ -3111,15 +3128,14 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _try_prune(self) -> None:
         messages_area = self._cached_messages_area or self.query_one("#messages")
+        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
         pruned = await prune_oldest_children(
-            messages_area, PRUNE_LOW_MARK, PRUNE_HIGH_MARK
+            messages_area, chat, PRUNE_LOW_MARK, PRUNE_HIGH_MARK
         )
         if self._load_more.widget and not self._load_more.widget.parent:
             self._load_more.widget = None
-        if pruned:
-            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-            if chat.is_at_bottom:
-                self.call_later(chat.anchor)
+        if pruned and chat.is_at_bottom:
+            self.call_later(chat.anchor)
 
     async def _refresh_windowing_from_history(self) -> None:
         if self._load_more.widget is None:
