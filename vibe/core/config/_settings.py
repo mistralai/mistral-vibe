@@ -28,6 +28,7 @@ import tomli_w
 
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config.schema import WithReplaceMerge
 from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
 from vibe.core.prompts import UtilityPrompt, load_prompt, load_system_prompt
@@ -497,7 +498,7 @@ DEFAULT_THEME = "ansi-dark"
 
 
 class VibeConfig(BaseSettings):
-    active_model: str = DEFAULT_ACTIVE_MODEL
+    active_model: Annotated[str, WithReplaceMerge()] = DEFAULT_ACTIVE_MODEL
     vim_keybindings: bool = False
     theme: str = DEFAULT_THEME
     disable_welcome_banner_animation: bool = False
