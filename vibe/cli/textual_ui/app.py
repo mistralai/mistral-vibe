@@ -1300,6 +1300,47 @@ class VibeApp(App):  # noqa: PLR0904
             entries.append((f"/skill activate {name}", f"Enable skill: {name}"))
             entries.append((f"/skill deactivate {name}", f"Disable skill: {name}"))
 
+        mcp_servers = self.config.mcp_servers if self.config else []
+        connector_registry = (
+            self.agent_loop.connector_registry
+            if (
+                self.agent_loop
+                and hasattr(self.agent_loop, "connector_registry")
+                and self._connectors_enabled
+            )
+            else None
+        )
+        connector_names = (
+            connector_registry.get_connector_names() if connector_registry else []
+        )
+        all_mcp_names = [s.name for s in mcp_servers] + connector_names
+        for name in all_mcp_names:
+            entries.append((f"/mcp {name}", f"Inspect MCP server/connector: {name}"))
+            entries.append((
+                f"/connectors {name}",
+                f"Inspect MCP server/connector: {name}",
+            ))
+
+        entries.append(("/loop list", "List scheduled loops"))
+        entries.append(("/loop cancel", "Cancel a scheduled loop run"))
+        entries.append(("/loop cancel all", "Cancel all scheduled loops"))
+        if (
+            self._loop_runner
+            and hasattr(self._loop_runner, "_manager")
+            and self._loop_runner._manager
+        ):
+            max_prompt_len = 30
+            for loop in self._loop_runner._manager.loops:
+                short_prompt = (
+                    loop.prompt[:max_prompt_len] + "..."
+                    if len(loop.prompt) > max_prompt_len
+                    else loop.prompt
+                )
+                entries.append((
+                    f"/loop cancel {loop.id}",
+                    f"Cancel loop {loop.id}: {short_prompt}",
+                ))
+
         return entries
 
     def _expand_skill(self, user_input: str) -> Skill | None:
@@ -2186,7 +2227,7 @@ class VibeApp(App):  # noqa: PLR0904
                     uncolor = "\033[0m"
                     lines.append(f"{color} •{uncolor} **{name}** : {desc}")
 
-                await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+                await self._mount_and_scroll(UserCommandMessage("\n\n".join(lines)))
         elif action == "activate":
             if not args:
                 await self._mount_and_scroll(
