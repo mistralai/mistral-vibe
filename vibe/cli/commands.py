@@ -244,6 +244,10 @@ class CommandRegistry:
         if not normalized.startswith("/"):
             return None
 
+        for cmd in self._build_commands().values():
+            if normalized in cmd.aliases:
+                return None
+
         best_score = MIN_FUZZY_SCORE
         best_name: str | None = None
         for alias, cmd_name in self._alias_map().items():

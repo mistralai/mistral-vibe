@@ -66,6 +66,13 @@ class CommandCompleter(Completer):
         return filtered
 
     def _head_word(self, text: str, cursor_pos: int) -> str:
+        full_typed = text[1:cursor_pos].lower()
+        aliases, _ = self._build_lookup()
+        prefix = "/" + full_typed
+        for alias in aliases:
+            if alias.lower().startswith(prefix):
+                return full_typed
+
         head = text.split(" ", 1)[0]
         return head[1 : min(cursor_pos, len(head))].lower()
 
@@ -95,11 +102,19 @@ class CommandCompleter(Completer):
         if " " in text[:cursor_pos]:
             search_str = text[:cursor_pos].lower()
             filtered_aliases = self._filter_aliases_by_prefix(aliases, search_str)
+            if search_str.endswith(" "):
+                return filtered_aliases
 
-            return filtered_aliases
+            ranked = self._fuzzy_rank(filtered_aliases, search_str)
+            if len(ranked) == 1 and ranked[0][0] == search_str:
+                return []
+            return [alias for alias, _ in ranked]
 
         search_str = "/" + self._head_word(text, cursor_pos)
-        return self._fuzzy_filter(aliases, search_str)
+        ranked_aliases = self._fuzzy_filter(aliases, search_str)
+        if len(ranked_aliases) == 1 and ranked_aliases[0] == search_str:
+            return []
+        return ranked_aliases
 
     def get_completion_items(self, text: str, cursor_pos: int) -> list[tuple[str, str]]:
         if not text.startswith("/"):
@@ -109,21 +124,26 @@ class CommandCompleter(Completer):
         if " " in text[:cursor_pos]:
             search_str = text[:cursor_pos].lower()
             filtered_aliases = self._filter_aliases_by_prefix(aliases, search_str)
-            return [(alias, descriptions.get(alias, "")) for alias in filtered_aliases]
+            if search_str.endswith(" "):
+                return [(alias, descriptions.get(alias, "")) for alias in filtered_aliases]
+
+            ranked = self._fuzzy_rank(filtered_aliases, search_str)
+            if len(ranked) == 1 and ranked[0][0] == search_str:
+                return []
+            return [(alias, descriptions.get(alias, "")) for alias, _ in ranked]
 
         search_str = "/" + self._head_word(text, cursor_pos)
-        return [
-            (alias, descriptions.get(alias, ""))
-            for alias in self._fuzzy_filter(aliases, search_str)
-        ]
+        ranked_aliases = self._fuzzy_filter(aliases, search_str)
+        if len(ranked_aliases) == 1 and ranked_aliases[0] == search_str:
+            return []
+        return [(alias, descriptions.get(alias, "")) for alias in ranked_aliases]
 
     def get_replacement_range(
         self, text: str, cursor_pos: int
     ) -> tuple[int, int] | None:
         if not text.startswith("/"):
             return None
-        first_space = text.find(" ")
-        end = cursor_pos if first_space == -1 else min(cursor_pos, first_space)
+        end = 1 + len(self._head_word(text, cursor_pos))
         return (0, end)
 
 
