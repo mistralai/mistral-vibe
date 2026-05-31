@@ -358,3 +358,45 @@ def test_fuzzy_matching_does_not_prioritize_help_for_partial_inputs() -> None:
     suggestions, _ = view.suggestion_events[-1]
     aliases = [s.alias for s in suggestions]
     assert aliases[0] == "/exit"
+
+
+def test_tab_cycles_in_subcommand_context() -> None:
+    from vibe.cli.autocompletion.base import CompletionResult
+
+    # Set up commands including skill subcommands
+    commands = [
+        ("/skill", "Manage skills"),
+        ("/skill activate", "Enable skill"),
+        ("/skill deactivate", "Disable skill"),
+        ("/skill list", "List skills"),
+        ("/skill reload", "Reload skills"),
+    ]
+    completer = CommandCompleter(lambda: commands)
+    view = StubView()
+    controller = SlashCommandController(completer, view)
+
+    # Simulate typing "/skill " (with space)
+    text = "/skill "
+    controller.on_text_changed(text, cursor_index=len(text))
+    view.suggestion_events.clear()
+
+    # suggestions: activate, deactivate, list, reload
+    # Press tab -> since there are multiple suggestions and a space, it should cycle instead of applying
+    result = controller.on_key(key_event("tab"), text=text, cursor_index=len(text))
+
+    assert result is CompletionResult.HANDLED
+    # It should cycle selection (which triggers render) and NOT apply replacement yet!
+    assert len(view.replacements) == 0
+
+    # Check that selected index is 1 (cycles down from 0)
+    suggestions, selected_index = view.suggestion_events[-1]
+    assert selected_index == 1
+
+    # Press Shift+Tab -> cycles back to 0
+    result = controller.on_key(
+        key_event("shift+tab"), text=text, cursor_index=len(text)
+    )
+    assert result is CompletionResult.HANDLED
+    assert len(view.replacements) == 0
+    _, selected_index = view.suggestion_events[-1]
+    assert selected_index == 0
