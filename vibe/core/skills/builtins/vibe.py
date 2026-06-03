@@ -28,13 +28,16 @@ agents, prompts, logs, and session data live here.
   vibehistory          # Command history
   trusted_folders.toml # Trust database for project folders
   agents/              # Custom agent profiles (*.toml)
-  prompts/             # Custom system prompts (*.md)
+  prompts/             # Custom prompts (*.md)
   skills/              # User-level skills (each skill is a subdirectory with SKILL.md)
   tools/               # Custom tool definitions
   logs/
     vibe.log           # Main log file
     session/           # Session log files
   plans/               # Session plans
+
+~/.agents/
+  skills/              # Additional user-level skills directory
 ```
 
 ### Project-Local Configuration
@@ -53,6 +56,9 @@ When in a trusted folder, Vibe also looks for project-local configuration:
 The configuration file uses TOML format. Settings can also be overridden via
 environment variables with the `VIBE_` prefix (e.g., `VIBE_ACTIVE_MODEL=local`).
 
+Custom prompt IDs are resolved from project-local `.vibe/prompts/` first, then
+from `~/.vibe/prompts/`, and finally from the built-in bundled prompts.
+
 ### Key Settings
 
 ```toml
@@ -68,10 +74,12 @@ file_watcher_for_autocomplete = false
 # Behavior
 bypass_tool_permissions = false    # Skip tool approval prompts
 system_prompt_id = "cli"          # System prompt: "cli", "lean", or custom .md filename
+compaction_prompt_id = "compact"  # Compaction prompt: built-in "compact" or custom .md filename
 enable_telemetry = true
 enable_update_checks = true
 enable_auto_update = true
 enable_notifications = true
+enable_system_trust_store = false  # Use OS trust store for outbound HTTPS
 api_timeout = 720.0               # API request timeout in seconds
 auto_compact_threshold = 200000   # Token count before auto-compaction
 
@@ -248,18 +256,9 @@ save_dir = ""                     # Defaults to ~/.vibe/logs/session
 session_prefix = "session"
 ```
 
-### Browser Sign-In (Experimental)
+### Browser Sign-In
 
 Browser sign-in lets users authenticate through the browser during onboarding.
-The feature is **experimental** and must be enabled first:
-
-```toml
-# In config.toml
-enable_experimental_browser_sign_in = true
-```
-
-Or via the environment variable `VIBE_ENABLE_EXPERIMENTAL_BROWSER_SIGN_IN=true`.
-
 Mistral providers use default browser sign-in URLs. Custom or renamed providers
 must configure both URLs:
 
@@ -267,6 +266,13 @@ must configure both URLs:
 [[providers]]
 browser_auth_base_url = "https://console.mistral.ai"
 browser_auth_api_base_url = "https://console.mistral.ai/api"
+```
+
+Self-hosted deployments can point Vibe CLI upgrade and API-key links to their
+Le Chat web deployment, where the Vibe API key is managed:
+
+```toml
+vibe_base_url = "https://chat.mistral.ai"
 ```
 
 ### Hooks (Experimental)
@@ -379,6 +385,7 @@ vibe -v / --version                 # Show version
 vibe --setup                        # Run onboarding/setup
 vibe --max-turns N                  # Max assistant turns (programmatic mode)
 vibe --max-price DOLLARS            # Max cost limit (programmatic mode)
+vibe --max-tokens N                 # Max total session tokens (programmatic mode)
 vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
 vibe --output text|json|streaming   # Output format (programmatic mode)
 ```
@@ -413,6 +420,7 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/config` - Edit config settings
 - `/model` - Select active model
 - `/thinking` - Select thinking level
+- `/theme` - Select Textual UI theme (persisted in config)
 - `/reload` - Reload configuration, agent instructions, and skills from disk
 - `/clear` - Clear conversation history
 - `/log` - Show path to current interaction log file
@@ -437,7 +445,7 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/leanstall` - Install the Lean 4 agent (leanstral)
 - `/unleanstall` - Uninstall the Lean 4 agent
 - `/data-retention` - Show data retention information
-- `/teleport` - Teleport session to Vibe Code (only available when Vibe Code is enabled)
+- `/teleport` - Teleport session to Vibe Code Web (only available when Vibe Code is enabled)
 - `/exit` - Exit the application
 
 ## Skills System
@@ -466,6 +474,7 @@ Detailed instructions for the model...
 2. `.vibe/skills/` in trusted project directory
 3. `.agents/skills/` in trusted project directory
 4. `~/.vibe/skills/` (user global)
+5. `~/.agents/skills/` (user global, Agent Skills standard)
 
 ## Environment Variables
 

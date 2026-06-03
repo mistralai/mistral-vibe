@@ -101,22 +101,15 @@ async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
             await proc.wait()
 
 
-def _build_env(
-    vibe_home_dir: Path, *, include_api_key: bool, enable_browser_sign_in: bool = False
-) -> dict[str, str]:
+def _build_env(vibe_home_dir: Path, *, include_api_key: bool) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["VIBE_HOME"] = str(vibe_home_dir)
 
     vibe_home_dir.mkdir(parents=True, exist_ok=True)
-    config_lines = ["enable_telemetry = false"]
-    if enable_browser_sign_in:
-        config_lines.append("enable_experimental_browser_sign_in = true")
     config_file = vibe_home_dir / "config.toml"
     if not config_file.exists():
-        config_file.write_text("\n".join(config_lines) + "\n")
-    elif enable_browser_sign_in:
-        config_file.write_text(config_file.read_text() + config_lines[-1] + "\n")
+        config_file.write_text("enable_telemetry = false\n")
 
     if include_api_key:
         env["MISTRAL_API_KEY"] = "mock"
@@ -144,15 +137,10 @@ async def _connect_and_initialize(
     *,
     vibe_home_dir: Path,
     include_api_key: bool,
-    enable_browser_sign_in: bool = False,
     terminal_auth: bool = False,
     delegated_browser_auth: bool = False,
 ) -> tuple[asyncio.subprocess.Process, Any, Any]:
-    env = _build_env(
-        vibe_home_dir,
-        include_api_key=include_api_key,
-        enable_browser_sign_in=enable_browser_sign_in,
-    )
+    env = _build_env(vibe_home_dir, include_api_key=include_api_key)
     proc = await _spawn_vibe_acp(env)
 
     try:
@@ -219,7 +207,7 @@ async def test_vibe_acp_bootstraps_default_files(vibe_home_dir: Path) -> None:
 @pytest.mark.asyncio
 async def test_vibe_acp_initialize_exposes_browser_auth(vibe_home_dir: Path) -> None:
     proc, initialize_response, _conn = await _connect_and_initialize(
-        vibe_home_dir=vibe_home_dir, include_api_key=True, enable_browser_sign_in=True
+        vibe_home_dir=vibe_home_dir, include_api_key=True
     )
 
     try:
@@ -238,10 +226,7 @@ async def test_vibe_acp_initialize_exposes_delegated_browser_auth_when_supported
     vibe_home_dir: Path,
 ) -> None:
     proc, initialize_response, _conn = await _connect_and_initialize(
-        vibe_home_dir=vibe_home_dir,
-        include_api_key=True,
-        enable_browser_sign_in=True,
-        delegated_browser_auth=True,
+        vibe_home_dir=vibe_home_dir, include_api_key=True, delegated_browser_auth=True
     )
 
     try:
@@ -266,10 +251,7 @@ async def test_vibe_acp_initialize_exposes_terminal_auth_when_supported(
     vibe_home_dir: Path,
 ) -> None:
     proc, initialize_response, _conn = await _connect_and_initialize(
-        vibe_home_dir=vibe_home_dir,
-        include_api_key=True,
-        enable_browser_sign_in=True,
-        terminal_auth=True,
+        vibe_home_dir=vibe_home_dir, include_api_key=True, terminal_auth=True
     )
 
     try:

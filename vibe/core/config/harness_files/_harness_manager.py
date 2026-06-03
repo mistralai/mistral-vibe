@@ -6,6 +6,7 @@ from typing import Literal
 
 from vibe.core.config.harness_files._paths import (
     GLOBAL_AGENTS_DIR,
+    GLOBAL_AGENTS_SKILLS_DIR,
     GLOBAL_PROMPTS_DIR,
     GLOBAL_SKILLS_DIR,
     GLOBAL_TOOLS_DIR,
@@ -96,8 +97,11 @@ class HarnessFilesManager:
     def user_skills_dirs(self) -> list[Path]:
         if "user" not in self.sources:
             return []
-        d = GLOBAL_SKILLS_DIR.path
-        return [d] if d.is_dir() else []
+        return [
+            d
+            for d in (GLOBAL_SKILLS_DIR.path, GLOBAL_AGENTS_SKILLS_DIR.path)
+            if d.is_dir()
+        ]
 
     @property
     def user_agents_dirs(self) -> list[Path]:

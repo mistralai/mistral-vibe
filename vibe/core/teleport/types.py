@@ -3,15 +3,6 @@ from __future__ import annotations
 from vibe.core.types import BaseEvent
 
 
-class TeleportAuthRequiredEvent(BaseEvent):
-    oauth_url: str
-    message: str | None = None
-
-
-class TeleportAuthCompleteEvent(BaseEvent):
-    pass
-
-
 class TeleportStartingWorkflowEvent(BaseEvent):
     pass
 
@@ -33,27 +24,15 @@ class TeleportPushingEvent(BaseEvent):
     pass
 
 
-class TeleportWaitingForGitHubEvent(BaseEvent):
-    message: str | None = None
-
-
-class TeleportFetchingUrlEvent(BaseEvent):
-    pass
-
-
 class TeleportCompleteEvent(BaseEvent):
     url: str
 
 
 type TeleportYieldEvent = (
-    TeleportAuthRequiredEvent
-    | TeleportAuthCompleteEvent
-    | TeleportCheckingGitEvent
+    TeleportCheckingGitEvent
     | TeleportPushRequiredEvent
     | TeleportPushingEvent
     | TeleportStartingWorkflowEvent
-    | TeleportWaitingForGitHubEvent
-    | TeleportFetchingUrlEvent
     | TeleportCompleteEvent
 )
 

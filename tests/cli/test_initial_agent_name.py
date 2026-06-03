@@ -32,20 +32,18 @@ def test_defaults_to_default_when_unset_in_config_and_args() -> None:
     assert get_initial_agent_name(args, config) == BuiltinAgentName.DEFAULT
 
 
-def test_programmatic_mode_promotes_default_to_auto_approve() -> None:
+def test_programmatic_mode_falls_back_to_default_agent() -> None:
     config = VibeConfig.model_construct(default_agent=BuiltinAgentName.DEFAULT)
     args = _make_args(agent=None, prompt="hello")
 
-    assert get_initial_agent_name(args, config) == BuiltinAgentName.AUTO_APPROVE
+    assert get_initial_agent_name(args, config) == BuiltinAgentName.DEFAULT
 
 
-def test_programmatic_mode_ignores_config_default_agent_when_args_agent_is_none() -> (
-    None
-):
+def test_programmatic_mode_uses_config_default_agent_when_args_agent_is_none() -> None:
     config = VibeConfig.model_construct(default_agent=BuiltinAgentName.PLAN)
     args = _make_args(agent=None, prompt="hello")
 
-    assert get_initial_agent_name(args, config) == BuiltinAgentName.AUTO_APPROVE
+    assert get_initial_agent_name(args, config) == BuiltinAgentName.PLAN
 
 
 def test_programmatic_mode_keeps_explicit_agent_arg() -> None:

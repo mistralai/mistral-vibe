@@ -14,7 +14,7 @@ class BackendLike(Protocol):
     """Port protocol for dependency-injectable LLM backends.
 
     Any backend used by AgentLoop should implement this async context manager
-    interface with `complete`, `complete_streaming` and `count_tokens` methods.
+    interface with `complete` and `complete_streaming` methods.
     """
 
     async def __aenter__(self) -> BackendLike: ...
@@ -90,37 +90,5 @@ class BackendLike(Protocol):
 
         Raises:
             BackendError: If the API request fails
-        """
-        ...
-
-    async def count_tokens(
-        self,
-        *,
-        model: ModelConfig,
-        messages: Sequence[LLMMessage],
-        temperature: float = 0.0,
-        tools: list[AvailableTool] | None,
-        tool_choice: StrToolChoice | AvailableTool | None = None,
-        extra_headers: dict[str, str] | None,
-        metadata: dict[str, str] | None = None,
-    ) -> int:
-        """Count the number of tokens in the prompt without generating a real response.
-
-        This is useful for:
-        - Determining system prompt token count
-        - Checking context size after compaction
-        - Pre-flight token validation
-
-        Args:
-            model: Model configuration
-            messages: List of messages to count tokens for
-            temperature: Sampling temperature
-            tools: Optional list of available tools
-            tool_choice: How to choose tools
-            extra_headers: Additional HTTP headers to include
-            metadata: Optional metadata to attach to the request
-
-        Returns:
-            The number of prompt tokens
         """
         ...

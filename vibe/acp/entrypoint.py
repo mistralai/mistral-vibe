@@ -84,6 +84,7 @@ def main() -> None:
     from vibe.core.tracing import setup_tracing
     from vibe.setup.onboarding import run_onboarding
 
+    environ_before_dotenv_load = os.environ.copy()
     load_dotenv_values()
     bootstrap_config_files()
     args = parse_arguments()
@@ -104,7 +105,7 @@ def main() -> None:
     except Exception:
         pass  # tracing disabled
 
-    run_acp_server()
+    run_acp_server(environ_before_dotenv_load=environ_before_dotenv_load)
 
 
 if __name__ == "__main__":

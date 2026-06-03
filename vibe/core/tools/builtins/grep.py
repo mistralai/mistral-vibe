@@ -239,6 +239,7 @@ class Grep(
             "rg",
             "--line-number",
             "--no-heading",
+            "--with-filename",
             "--smart-case",
             "--no-binary",
             # Request one extra to detect truncation
@@ -261,7 +262,7 @@ class Grep(
     ) -> list[str]:
         max_matches = args.max_matches or self.config.default_max_matches
 
-        cmd = ["grep", "-r", "-n", "-I", "-E", f"--max-count={max_matches + 1}"]
+        cmd = ["grep", "-r", "-n", "-H", "-I", "-E", f"--max-count={max_matches + 1}"]
 
         if args.pattern.islower():
             cmd.append("-i")

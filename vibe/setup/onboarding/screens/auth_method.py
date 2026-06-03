@@ -5,8 +5,9 @@ from typing import ClassVar
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Center, Vertical
+from textual.containers import Center, Horizontal, Vertical
 
+from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ProviderConfig
 from vibe.setup.onboarding.base import OnboardingScreen
@@ -28,27 +29,45 @@ class AuthMethodScreen(OnboardingScreen):
         super().__init__()
         self.provider = provider
         self._selected_index = OPTION_BROWSER
+        self._option_markers: list[NoMarkupStatic] = []
         self._option_widgets: list[NoMarkupStatic] = []
         self._help_widget: NoMarkupStatic
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="auth-method-content"):
+        with Vertical(id="auth-method-content", classes="onboarding-content"):
             with Center():
-                with Vertical(id="auth-method-card"):
+                with Vertical(id="auth-method-panel", classes="onboarding-panel"):
+                    yield PetitChat(id="auth-method-chat", classes="onboarding-chat")
                     yield NoMarkupStatic(
-                        "How would you like to sign in?", id="auth-method-title"
+                        "Welcome to Mistral Vibe",
+                        id="auth-method-title",
+                        classes="onboarding-heading",
                     )
                     yield NoMarkupStatic(
-                        "Choose the setup that works best for you.",
-                        id="auth-method-subtitle",
+                        "Choose your sign in method", id="auth-method-subtitle"
                     )
-                    self._option_widgets = [
-                        NoMarkupStatic("", classes="auth-method-option"),
-                        NoMarkupStatic("", classes="auth-method-option"),
-                    ]
-                    yield from self._option_widgets
-                    self._help_widget = NoMarkupStatic("", id="auth-method-help")
+                    with Vertical(id="auth-method-options"):
+                        yield from self._compose_option_rows()
+                    self._help_widget = NoMarkupStatic(
+                        "", id="auth-method-help", classes="onboarding-hint-row"
+                    )
                     yield self._help_widget
+
+    def _compose_option_rows(self) -> ComposeResult:
+        self._option_markers = []
+        self._option_widgets = []
+        for index in range(2):
+            if index == OPTION_MANUAL:
+                yield NoMarkupStatic("or", classes="auth-method-separator")
+            with Horizontal(classes="auth-method-option-row onboarding-option-row"):
+                marker = NoMarkupStatic("", classes="auth-method-option-marker")
+                option = NoMarkupStatic(
+                    "", classes="auth-method-option onboarding-card"
+                )
+                self._option_markers.append(marker)
+                self._option_widgets.append(option)
+                yield marker
+                yield option
 
     def on_mount(self) -> None:
         self._update_display()
@@ -75,27 +94,30 @@ class AuthMethodScreen(OnboardingScreen):
         self._update_display()
 
     def _update_display(self) -> None:
-        provider_name = self.provider.name.capitalize()
         options = [
             (
-                "Sign in with your browser",
-                f"Sign in to {provider_name} to finish setup automatically.",
+                "Launch browser",
+                "Recommended",
+                "Sign in to Mistral AI Studio and finish setup automatically.",
             ),
-            ("Use an API key", "Paste an existing API key to sign in manually."),
+            ("Use an API key", None, "Already have a key? Paste it manually instead."),
         ]
 
-        for index, (widget, (title, description)) in enumerate(
-            zip(self._option_widgets, options, strict=True)
+        for index, (marker, widget, (title, badge, description)) in enumerate(
+            zip(self._option_markers, self._option_widgets, options, strict=True)
         ):
             is_selected = index == self._selected_index
-            prefix = "›" if is_selected else " "
             content = Text()
-            content.append(f"{prefix} ")
             content.append(title, style="bold")
-            content.append(f"\n  {description}")
+            content.append("\n")
+            content.append(description, style="dim")
+            marker.update(">" if is_selected else "")
+            marker.remove_class("selected")
+            widget.border_title = badge
             widget.update(content)
             widget.remove_class("selected")
             if is_selected:
+                marker.add_class("selected")
                 widget.add_class("selected")
 
-        self._help_widget.update("↑↓ Choose · Enter to select · Esc Cancel")
+        self._help_widget.update("Use arrows to navigate - Enter Select - Esc Cancel")

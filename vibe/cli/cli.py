@@ -11,13 +11,7 @@ import tomli_w
 from vibe import __version__
 from vibe.cli.textual_ui.app import StartupOptions, run_textual_ui
 from vibe.core.agent_loop import AgentLoop, TeleportError
-from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import (
-    MissingAPIKeyError,
-    MissingPromptFileError,
-    VibeConfig,
-    load_dotenv_values,
-)
+from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.hooks.config import load_hooks_from_fs
 from vibe.core.logger import logger
@@ -44,8 +38,6 @@ def _build_cli_entrypoint_metadata() -> EntrypointMetadata:
 
 
 def get_initial_agent_name(args: argparse.Namespace, config: VibeConfig) -> str:
-    if args.prompt is not None and args.agent is None:
-        return BuiltinAgentName.AUTO_APPROVE
     return args.agent or config.default_agent
 
 
@@ -77,9 +69,6 @@ def load_config_or_exit(*, interactive: bool) -> VibeConfig:
             sys.exit(1)
         run_onboarding(entrypoint_metadata=_build_cli_entrypoint_metadata())
         return VibeConfig.load()
-    except MissingPromptFileError as e:
-        rprint(f"[yellow]Invalid system prompt id: {e}[/]")
-        sys.exit(1)
     except ValueError as e:
         rprint(f"[yellow]{e}[/]")
         sys.exit(1)
@@ -238,6 +227,7 @@ def run_cli(args: argparse.Namespace) -> None:
                     prompt=programmatic_prompt or "",
                     max_turns=args.max_turns,
                     max_price=args.max_price,
+                    max_session_tokens=args.max_tokens,
                     output_format=output_format,
                     previous_messages=loaded_session[0] if loaded_session else None,
                     agent_name=initial_agent_name,

@@ -10,6 +10,7 @@ import tomli_w
 
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.stubs.fake_backend import FakeBackend
+from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from tests.stubs.fake_voice_manager import FakeVoiceManager
 from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
@@ -26,6 +27,7 @@ from vibe.core.config import (
     VibeConfig,
 )
 from vibe.core.config.harness_files import (
+    HarnessFilesManager,
     init_harness_files_manager,
     reset_harness_files_manager,
 )
@@ -77,6 +79,9 @@ def config_dir(
     config_file.write_text(tomli_w.dumps(get_base_config()), encoding="utf-8")
 
     monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", config_dir)
+    agents_dir = tmp_path / ".agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("vibe.core.paths._agents_home._DEFAULT_AGENTS_HOME", agents_dir)
 
     # Re-evaluate PLAN agent overrides so the allowlist uses the monkeypatched path
     from vibe.core.agents.models import PLAN, _plan_overrides
@@ -159,9 +164,7 @@ def _mock_update_commands(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _disable_feedback_bar(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "vibe.cli.textual_ui.widgets.feedback_bar_manager.FEEDBACK_PROBABILITY", 0
-    )
+    monkeypatch.setattr("vibe.core.feedback.FEEDBACK_PROBABILITY", 0)
 
 
 @pytest.fixture(autouse=True)
@@ -198,6 +201,31 @@ def telemetry_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         record_telemetry,
     )
     return events
+
+
+@pytest.fixture
+def mock_prompts_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    project = tmp_path / "project" / ".vibe" / "prompts"
+    user = tmp_path / "home" / ".vibe" / "prompts"
+    project.mkdir(parents=True)
+    user.mkdir(parents=True)
+
+    class _MockManager(HarnessFilesManager):
+        @property
+        def project_prompts_dirs(self) -> list[Path]:
+            return [project]
+
+        @property
+        def user_prompts_dirs(self) -> list[Path]:
+            return [user]
+
+    monkeypatch.setattr(
+        "vibe.core.prompts.get_harness_files_manager",
+        lambda: _MockManager(sources=("user",)),
+    )
+    return project, user
 
 
 @pytest.fixture
@@ -258,6 +286,7 @@ def build_test_agent_loop(
         agent_name=agent_name,
         backend=backend or FakeBackend(),
         enable_streaming=enable_streaming,
+        mcp_registry=kwargs.pop("mcp_registry", FakeMCPRegistry()),
         **kwargs,
     )
 

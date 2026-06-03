@@ -36,11 +36,16 @@ class BaseSnapshotTestApp(VibeApp):
         backend: FakeBackend | None = None,
         **kwargs,
     ):
+        agent_loop_kwargs: dict = {}
+        if "mcp_registry" in kwargs:
+            agent_loop_kwargs["mcp_registry"] = kwargs.pop("mcp_registry")
+
         agent_loop = build_test_agent_loop(
             config=config or default_config(),
             agent_name=self._current_agent_name,
             enable_streaming=bool(kwargs.get("enable_streaming", False)),
             backend=backend or FakeBackend(),
+            **agent_loop_kwargs,
         )
 
         plan_offer_gateway = kwargs.pop(

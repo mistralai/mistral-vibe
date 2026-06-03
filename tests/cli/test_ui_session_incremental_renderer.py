@@ -166,7 +166,15 @@ async def test_ui_session_incremental_loader_keeps_top_alignment_when_not_scroll
 
     app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
 
-    async with app.run_test(size=(120, 80)) as pilot:
+    # Each UserMessage renders as ~3 rows (top margin + content + separator);
+    # add chrome (input box, banner, status) so all messages fit without scrolling.
+    user_message_rows = 3
+    chrome_rows = 40
+    viewport_height = (
+        HISTORY_RESUME_TAIL_MESSAGES + 1
+    ) * user_message_rows + chrome_rows
+
+    async with app.run_test(size=(120, viewport_height)) as pilot:
         await _wait_for_load_more(app, pilot.pause)
         chat = app.query_one("#chat", ChatScroll)
         assert chat.max_scroll_y == 0

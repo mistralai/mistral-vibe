@@ -9,11 +9,12 @@ from pathlib import Path
 import threading
 from typing import TYPE_CHECKING, Any, ClassVar, TextIO
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 from vibe.core.logger import logger
 from vibe.core.tools.base import (
     BaseTool,
@@ -25,9 +26,16 @@ from vibe.core.tools.base import (
 from vibe.core.tools.mcp_sampling import MCPSamplingHandler
 from vibe.core.tools.ui import ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolStreamEvent
+from vibe.core.utils.http import build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
+
+
+# Mirrors MCP's default Streamable HTTP timeout values while avoiding an import from
+# mcp.shared._httpx_utils, which is an internal module.
+_MCP_DEFAULT_TIMEOUT = 30.0
+_MCP_DEFAULT_SSE_READ_TIMEOUT = 300.0
 
 
 def _stderr_logger_thread(read_fd: int) -> None:
@@ -167,6 +175,15 @@ def _parse_call_result(server: str, tool: str, result_obj: Any) -> MCPToolResult
     return MCPToolResult(server=server, tool=tool, text=text, structured=None)
 
 
+def create_vibe_mcp_http_client(headers: dict[str, str] | None) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        follow_redirects=True,
+        headers=headers,
+        timeout=httpx.Timeout(_MCP_DEFAULT_TIMEOUT, read=_MCP_DEFAULT_SSE_READ_TIMEOUT),
+        verify=build_ssl_context(),
+    )
+
+
 async def list_tools_http(
     url: str,
     *,
@@ -174,11 +191,18 @@ async def list_tools_http(
     startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
     timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
-            await session.initialize()
-            tools_resp = await session.list_tools()
-            return [RemoteTool.model_validate(t) for t in tools_resp.tools]
+    async with create_vibe_mcp_http_client(headers) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as (
+            read,
+            write,
+            _,
+        ):
+            async with ClientSession(
+                read, write, read_timeout_seconds=timeout
+            ) as session:
+                await session.initialize()
+                tools_resp = await session.list_tools()
+                return [RemoteTool.model_validate(t) for t in tools_resp.tools]
 
 
 async def call_tool_http(
@@ -195,18 +219,23 @@ async def call_tool_http(
         timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     )
     call_timeout = timedelta(seconds=tool_timeout_sec) if tool_timeout_sec else None
-    async with streamablehttp_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(
+    async with create_vibe_mcp_http_client(headers) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as (
             read,
             write,
-            read_timeout_seconds=init_timeout,
-            sampling_callback=sampling_callback,
-        ) as session:
-            await session.initialize()
-            result = await session.call_tool(
-                tool_name, arguments, read_timeout_seconds=call_timeout
-            )
-            return _parse_call_result(url, tool_name, result)
+            _,
+        ):
+            async with ClientSession(
+                read,
+                write,
+                read_timeout_seconds=init_timeout,
+                sampling_callback=sampling_callback,
+            ) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    tool_name, arguments, read_timeout_seconds=call_timeout
+                )
+                return _parse_call_result(url, tool_name, result)
 
 
 def create_mcp_http_proxy_tool_class(

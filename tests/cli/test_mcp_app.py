@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from textual.widgets.option_list import Option
 
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from vibe.cli.textual_ui.widgets.mcp_app import (
@@ -17,7 +18,10 @@ from vibe.cli.textual_ui.widgets.mcp_app import (
 )
 from vibe.core.config import MCPStdio
 from vibe.core.tools.base import InvokeContext
-from vibe.core.tools.connectors.connector_registry import RemoteTool
+from vibe.core.tools.connectors.connector_registry import (
+    ConnectorAuthAction,
+    RemoteTool,
+)
 from vibe.core.tools.mcp.tools import MCPTool, MCPToolResult, _OpenArgs
 from vibe.core.types import ToolStreamEvent
 
@@ -271,7 +275,8 @@ class TestHelpBarChanges:
             connectors={
                 "gmail": [RemoteTool(name="search", description="Search")],
                 "slack": [],
-            }
+            },
+            auth_actions={"slack": ConnectorAuthAction.OAUTH},
         )
         mgr = _make_tool_manager({})
         return MCPApp(
@@ -282,33 +287,35 @@ class TestHelpBarChanges:
 
     def test_help_shows_show_tools_for_server(self) -> None:
         app = self._make_app_with_connectors()
-        option = MagicMock()
-        option.id = "server:srv"
+        option = Option("", id="server:srv")
         assert app._list_help_for_option(option) == _LIST_VIEW_HELP_TOOLS
 
     def test_help_shows_show_tools_for_connected_connector(self) -> None:
         app = self._make_app_with_connectors()
-        option = MagicMock()
-        option.id = "connector:gmail"
+        option = Option("", id="connector:gmail")
         assert app._list_help_for_option(option) == _LIST_VIEW_HELP_TOOLS
 
     def test_help_shows_authenticate_for_disconnected_connector(self) -> None:
         app = self._make_app_with_connectors()
-        option = MagicMock()
-        option.id = "connector:slack"
+        option = Option("", id="connector:slack")
         assert app._list_help_for_option(option) == _LIST_VIEW_HELP_AUTH
+
+    def test_help_shows_tools_for_degraded_connector(self) -> None:
+        registry = FakeConnectorRegistry(connectors={"slack": []})
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[], tool_manager=mgr, connector_registry=registry)
+        option = Option("", id="connector:slack")
+        assert app._list_help_for_option(option) == _LIST_VIEW_HELP_TOOLS
 
     def test_help_defaults_to_tools_for_unknown_option(self) -> None:
         app = self._make_app_with_connectors()
-        option = MagicMock()
-        option.id = ""
+        option = Option("")
         assert app._list_help_for_option(option) == _LIST_VIEW_HELP_TOOLS
 
     def test_help_shows_tools_without_registry(self) -> None:
         mgr = _make_tool_manager({})
         app = MCPApp(mcp_servers=[], tool_manager=mgr)
-        option = MagicMock()
-        option.id = "connector:slack"
+        option = Option("", id="connector:slack")
         assert app._list_help_for_option(option) == _LIST_VIEW_HELP_TOOLS
 
 
@@ -316,7 +323,9 @@ class TestConnectorAuthRequested:
     """Clicking a disconnected connector posts ConnectorAuthRequested."""
 
     def test_disconnected_connector_posts_auth_requested(self) -> None:
-        registry = FakeConnectorRegistry(connectors={"slack": []})
+        registry = FakeConnectorRegistry(
+            connectors={"slack": []}, auth_actions={"slack": ConnectorAuthAction.OAUTH}
+        )
         mgr = _make_tool_manager({})
         app = MCPApp(mcp_servers=[], tool_manager=mgr, connector_registry=registry)
         app.query_one = MagicMock()
@@ -333,6 +342,24 @@ class TestConnectorAuthRequested:
         assert msg.connector_name == "slack"
         assert msg.connector_registry is registry
         assert msg.tool_manager is mgr
+
+    def test_degraded_connector_shows_refresh_message(self) -> None:
+        registry = FakeConnectorRegistry(connectors={"slack": []})
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[], tool_manager=mgr, connector_registry=registry)
+        app.query_one = MagicMock()
+        app.post_message = MagicMock()
+
+        option_list = MagicMock()
+        app._show_detail_view(
+            "slack", option_list, app._index, kind=MCPSourceKind.CONNECTOR
+        )
+
+        app.post_message.assert_not_called()
+        option_list.add_option.assert_called_once()
+        assert "press R to refresh" in str(
+            option_list.add_option.call_args.args[0].prompt
+        )
 
     def test_connected_connector_with_no_indexed_tools_shows_message(self) -> None:
         registry = MagicMock()

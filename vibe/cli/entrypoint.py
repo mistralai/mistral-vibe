@@ -44,8 +44,9 @@ def parse_arguments() -> argparse.Namespace:
         nargs="?",
         const="",
         metavar="TEXT",
-        help="Run in programmatic mode: send prompt, auto-approve all tools, "
-        "output response, and exit.",
+        help="Run in programmatic mode: send prompt, output response, and exit. "
+        "Tool approval follows the selected --agent (or 'default_agent' config); "
+        "pass --agent auto-approve for the previous YOLO behavior.",
     )
     parser.add_argument(
         "--max-turns",
@@ -60,6 +61,14 @@ def parse_arguments() -> argparse.Namespace:
         metavar="DOLLARS",
         help="Maximum cost in dollars (only applies in programmatic mode with -p). "
         "Session will be interrupted if cost exceeds this limit.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        metavar="N",
+        help="Maximum total prompt + completion tokens across the session "
+        "(only applies in programmatic mode with -p). "
+        "Session will be interrupted if usage exceeds this limit.",
     )
     parser.add_argument(
         "--enabled-tools",
@@ -84,10 +93,10 @@ def parse_arguments() -> argparse.Namespace:
         metavar="NAME",
         default=None,
         help="Agent to use (builtin: default, plan, accept-edits, auto-approve, "
-        "or custom from ~/.vibe/agents/NAME.toml). In interactive mode, "
-        "defaults to the 'default_agent' config setting. In programmatic "
-        "mode (-p/--prompt), defaults to auto-approve and 'default_agent' "
-        "is ignored.",
+        "or custom from ~/.vibe/agents/NAME.toml). Defaults to the "
+        "'default_agent' config setting in both interactive and programmatic "
+        "(-p/--prompt) mode. Pass --agent auto-approve for non-interactive "
+        "automation that needs tools to run without approval.",
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
     parser.add_argument(

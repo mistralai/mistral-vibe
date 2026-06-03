@@ -36,6 +36,15 @@ class EmptyLayerError(ConfigLayerError):
         super().__init__(layer_name, f"Layer '{layer_name}' has no data after load")
 
 
+class TrustNotResolvedError(ConfigLayerError):
+    """Raised when grant_trust/revoke_trust is called before trust has been resolved."""
+
+    def __init__(self, layer_name: str) -> None:
+        super().__init__(
+            layer_name, f"Layer '{layer_name}': trust has not been resolved yet"
+        )
+
+
 class TrustResolutionError(ConfigLayerError):
     """Raised when trust status is not resolvable."""
 
@@ -171,6 +180,9 @@ class ConfigLayer[S: BaseModel](ABC):
             return new_state
 
     async def _handle_grant_trust(self, state: _LayerState[S]) -> _LayerState[S]:
+        if state.is_trusted is None:
+            raise TrustNotResolvedError(self.name)
+
         if state.is_trusted is True:
             return state
 
@@ -179,6 +191,9 @@ class ConfigLayer[S: BaseModel](ABC):
         return _LayerState(is_trusted=True, data=state.data)
 
     async def _handle_revoke_trust(self, state: _LayerState[S]) -> _LayerState[S]:
+        if state.is_trusted is None:
+            raise TrustNotResolvedError(self.name)
+
         if state.is_trusted is False:
             return state
 

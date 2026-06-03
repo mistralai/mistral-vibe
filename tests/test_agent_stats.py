@@ -526,13 +526,10 @@ class TestAutoCompactIntegration:
         assert isinstance(events[3], AssistantEvent)
 
         start: CompactStartEvent = events[1]
-        end: CompactEndEvent = events[2]
         final: AssistantEvent = events[3]
 
         assert start.current_context_tokens == 2
         assert start.threshold == 1
-        assert end.old_context_tokens == 2
-        assert end.new_context_tokens >= 1
         assert final.content == "<final>"
 
         roles = [r for r, _ in observed]

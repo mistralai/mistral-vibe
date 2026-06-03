@@ -16,8 +16,10 @@ from vibe.setup.onboarding.screens import (
     ApiKeyScreen,
     AuthMethodScreen,
     BrowserSignInScreen,
+    ThemeSelectionScreen,
     WelcomeScreen,
 )
+from vibe.setup.onboarding.screens.browser_sign_in import SUCCESS_EXIT_DELAY_SECONDS
 
 
 class OnboardingApp(App[str | None]):
@@ -29,6 +31,7 @@ class OnboardingApp(App[str | None]):
         browser_sign_in_service_factory: Callable[[], BrowserSignInService]
         | None = None,
         entrypoint_metadata: EntrypointMetadata | None = None,
+        browser_sign_in_success_delay: float = SUCCESS_EXIT_DELAY_SECONDS,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -39,19 +42,28 @@ class OnboardingApp(App[str | None]):
 
         self._config = config
         self._provider = config.provider
+        self._vibe_base_url = config.vibe_base_url
         self._entrypoint_metadata = entrypoint_metadata
+        self._browser_sign_in_success_delay = browser_sign_in_success_delay
         self._browser_sign_in_service_factory = self._resolve_browser_sign_in_factory(
             browser_sign_in_service_factory
         )
 
     def on_mount(self) -> None:
-        self.theme = "textual-ansi"
+        self.theme = "ansi-dark"
 
-        welcome_next = "auth_method" if self.supports_browser_sign_in else "api_key"
-        welcome_screen = WelcomeScreen(next_screen=welcome_next)
+        theme_next = "auth_method" if self.supports_browser_sign_in else "api_key"
+        welcome_screen = WelcomeScreen(next_screen="theme_selection")
         self.install_screen(welcome_screen, "welcome")
         self.install_screen(
-            ApiKeyScreen(self._provider, entrypoint_metadata=self._entrypoint_metadata),
+            ThemeSelectionScreen(next_screen=theme_next), "theme_selection"
+        )
+        self.install_screen(
+            ApiKeyScreen(
+                self._provider,
+                vibe_base_url=self._vibe_base_url,
+                entrypoint_metadata=self._entrypoint_metadata,
+            ),
             "api_key",
         )
         if self._browser_sign_in_service_factory is not None:
@@ -61,6 +73,7 @@ class OnboardingApp(App[str | None]):
                     self._provider,
                     self._browser_sign_in_service_factory,
                     entrypoint_metadata=self._entrypoint_metadata,
+                    success_exit_delay=self._browser_sign_in_success_delay,
                 ),
                 "browser_sign_in",
             )
@@ -88,7 +101,7 @@ class OnboardingApp(App[str | None]):
     def _resolve_browser_sign_in_factory(
         self, browser_sign_in_service_factory: Callable[[], BrowserSignInService] | None
     ) -> Callable[[], BrowserSignInService] | None:
-        if not self._config.browser_sign_in_enabled:
+        if not self._config.supports_browser_sign_in:
             return None
 
         return (

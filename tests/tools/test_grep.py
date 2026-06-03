@@ -198,6 +198,21 @@ async def test_uses_effective_workdir(tmp_path, monkeypatch):
     assert "test.py" in result.matches
 
 
+@pytest.mark.asyncio
+async def test_single_file_match_includes_filename_in_output(grep, tmp_path):
+    # Without --with-filename / -H, rg and grep omit the filename when
+    # searching a single file, causing GrepMatch.from_output_line to
+    # misinterpret the line number as a path. See VIBE-2772.
+    (tmp_path / "only.py").write_text("hit one\nnope\nhit two\n")
+
+    result = await collect_result(grep.run(GrepArgs(pattern="hit", path="only.py")))
+
+    assert result.match_count == 2
+    for parsed in result.parsed_matches:
+        assert parsed.path.endswith("only.py")
+        assert parsed.line is not None
+
+
 @pytest.mark.skipif(not shutil.which("grep"), reason="GNU grep not available")
 class TestGnuGrepBackend:
     @pytest.mark.asyncio

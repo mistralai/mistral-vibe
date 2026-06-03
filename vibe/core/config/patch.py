@@ -4,6 +4,37 @@ from dataclasses import dataclass
 from typing import Any
 
 
+class ConfigPatch:
+    """Declarative, storage-agnostic description of a config delta."""
+
+    def __init__(
+        self, *operations: PatchOp, fingerprint: str, reason: str = ""
+    ) -> None:
+        self.operations = list(operations)
+        self.fingerprint = fingerprint
+        self.reason = reason
+
+    def add(self, *operations: PatchOp) -> ConfigPatch:
+        """Append operations after construction."""
+        self.operations.extend(operations)
+        return self
+
+    def describe(self) -> list[str]:
+        """Human-readable summary of each operation."""
+        lines: list[str] = []
+        for op in self.operations:
+            match op:
+                case SetField(key=key, value=value):
+                    lines.append(f"set {key!r} = {value!r}")
+                case AppendToList(key=key, items=items):
+                    lines.append(f"append to {key!r}: {list(items)!r}")
+                case RemoveFromList(key=key, values=values):
+                    lines.append(f"remove from {key!r}: {list(values)!r}")
+                case DeleteField(key=key):
+                    lines.append(f"delete {key!r}")
+        return lines
+
+
 @dataclass(frozen=True, slots=True)
 class SetField:
     """Set a top-level or nested field to a value."""

@@ -433,8 +433,6 @@ class CompactStartEvent(BaseEvent):
 
 
 class CompactEndEvent(BaseEvent):
-    old_context_tokens: int
-    new_context_tokens: int
     summary_length: int
     old_session_id: str | None = None
     new_session_id: str | None = None

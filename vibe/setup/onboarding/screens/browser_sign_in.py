@@ -6,12 +6,15 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import ClassVar, Literal
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Center, Vertical
+from textual.containers import Center, Horizontal, Vertical
 from textual.reactive import reactive
+from textual.timer import Timer
 from textual.worker import Worker
 
+from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ProviderConfig
 from vibe.core.logger import logger
@@ -27,10 +30,18 @@ from vibe.setup.auth.api_key_persistence import (
     resolve_api_key_provider,
 )
 from vibe.setup.onboarding.base import OnboardingScreen
+from vibe.setup.onboarding.gradient_text import GRADIENT_COLORS, append_gradient_text
 
-PENDING_HINT = "Press M to enter API key manually · Esc to cancel"
-ERROR_HINT = "Press R to retry · Press M to enter API key manually · Esc to cancel"
-STEP_DESCRIPTIONS = ["Open your browser", "Sign in and return here", "Finish setup"]
+PENDING_HINT = "Press M to enter API key manually - Esc to cancel"
+ERROR_HINT = "Press R to retry - Press M to enter API key manually - Esc to cancel"
+SUCCESS_HINT = "Finishing setup..."
+SUCCESS_EXIT_DELAY_SECONDS: float = 2.0
+WAITING_FOR_AUTHENTICATION_MESSAGE = "Waiting for authentication..."
+STEP_DESCRIPTIONS = [
+    ("Open browser", "Your browser should open automatically", "Browser opened"),
+    ("Complete sign-in", WAITING_FOR_AUTHENTICATION_MESSAGE, "Sign-in confirmed."),
+    ("Finished setup", "Vibe will start automatically", "Setup complete."),
+]
 UNEXPECTED_ERROR_MESSAGE = (
     "Something went wrong during browser sign-in. Please try again."
 )
@@ -53,6 +64,14 @@ class BrowserSignInViewState:
     hint: str
     variant: Literal["pending", "error", "success"]
     running: bool
+
+
+@dataclass(frozen=True)
+class BrowserSignInStepWidgets:
+    marker: NoMarkupStatic
+    card: Vertical
+    title: NoMarkupStatic
+    detail: NoMarkupStatic
 
 
 class BrowserSignInScreen(OnboardingScreen):
@@ -80,14 +99,18 @@ class BrowserSignInScreen(OnboardingScreen):
         browser_sign_in_factory: Callable[[], BrowserSignInService],
         *,
         entrypoint_metadata: EntrypointMetadata | None = None,
+        success_exit_delay: float = SUCCESS_EXIT_DELAY_SECONDS,
     ) -> None:
         super().__init__()
         self.provider = provider
         self._browser_sign_in_factory = browser_sign_in_factory
         self._entrypoint_metadata = entrypoint_metadata
+        self._success_exit_delay = success_exit_delay
         self._attempt_number = 0
         self._active_attempt_number: int | None = None
         self._worker: Worker[None] | None = None
+        self._gradient_offset = 0
+        self._gradient_timer: Timer | None = None
         self._initial_state = BrowserSignInViewState(
             step=BrowserSignInStep.OPEN,
             message="Getting things ready...",
@@ -95,45 +118,57 @@ class BrowserSignInScreen(OnboardingScreen):
             variant="pending",
             running=False,
         )
-        self._step_widgets: list[NoMarkupStatic] = []
+        self._step_widgets: list[BrowserSignInStepWidgets] = []
         self._title_widget: NoMarkupStatic
-        self._subtitle_widget: NoMarkupStatic
-        self._status_widget: NoMarkupStatic
         self._hint_widget: NoMarkupStatic
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="browser-sign-in-content"):
+        with Vertical(id="browser-sign-in-content", classes="onboarding-content"):
             with Center():
-                with Vertical(id="browser-sign-in-card"):
+                with Vertical(id="browser-sign-in-panel", classes="onboarding-panel"):
+                    yield PetitChat(
+                        id="browser-sign-in-chat", classes="onboarding-chat"
+                    )
                     self._title_widget = NoMarkupStatic(
-                        "Sign in with your browser", id="browser-sign-in-title"
+                        "Launch browser",
+                        id="browser-sign-in-title",
+                        classes="onboarding-heading",
                     )
                     yield self._title_widget
-                    self._subtitle_widget = NoMarkupStatic(
-                        "", id="browser-sign-in-subtitle"
+                    yield NoMarkupStatic(
+                        "Your browser should open automatically",
+                        id="browser-sign-in-subtitle",
                     )
-                    yield self._subtitle_widget
-                    self._step_widgets = [
-                        NoMarkupStatic("", classes="browser-sign-in-step"),
-                        NoMarkupStatic("", classes="browser-sign-in-step"),
-                        NoMarkupStatic("", classes="browser-sign-in-step"),
-                    ]
-                    yield from self._step_widgets
-                    yield NoMarkupStatic("", id="browser-sign-in-status")
+                    with Vertical(id="browser-sign-in-steps"):
+                        yield from self._compose_step_rows()
                     yield NoMarkupStatic("", id="browser-sign-in-hint")
 
+    def _compose_step_rows(self) -> ComposeResult:
+        self._step_widgets = []
+        for _ in STEP_DESCRIPTIONS:
+            with Horizontal(classes="browser-sign-in-step-row onboarding-option-row"):
+                marker = NoMarkupStatic("", classes="browser-sign-in-step-marker")
+                yield marker
+                with Vertical(classes="browser-sign-in-step onboarding-card") as card:
+                    title = NoMarkupStatic("", classes="browser-sign-in-step-title")
+                    detail = NoMarkupStatic("", classes="browser-sign-in-step-detail")
+                    self._step_widgets.append(
+                        BrowserSignInStepWidgets(marker, card, title, detail)
+                    )
+                    yield title
+                    yield detail
+
     def on_mount(self) -> None:
-        provider_name = self.provider.name.capitalize()
-        self._subtitle_widget.update(
-            f"Continue with {provider_name} to finish setup automatically."
-        )
         self._hint_widget = self.query_one("#browser-sign-in-hint", NoMarkupStatic)
-        self._status_widget = self.query_one("#browser-sign-in-status", NoMarkupStatic)
         self.state = self._initial_state
         self.watch_state(self.state)
+        self._gradient_timer = self.set_interval(0.08, self._animate_gradient)
         self.call_after_refresh(self._start_browser_sign_in)
 
     def on_unmount(self) -> None:
+        if self._gradient_timer is not None:
+            self._gradient_timer.stop()
+            self._gradient_timer = None
         self._cancel_current_attempt()
 
     def action_retry(self) -> None:
@@ -141,10 +176,14 @@ class BrowserSignInScreen(OnboardingScreen):
             self._start_browser_sign_in()
 
     def action_manual(self) -> None:
+        if self.state.variant == "success":
+            return
         self._cancel_current_attempt()
         self.app.switch_screen("api_key")
 
     def action_cancel(self) -> None:
+        if self.state.variant == "success":
+            return
         self._cancel_current_attempt()
         super().action_cancel()
 
@@ -211,15 +250,29 @@ class BrowserSignInScreen(OnboardingScreen):
         if api_key is None:
             msg = "Browser sign-in finished without returning an API key."
             raise AssertionError(msg)
+        result = persist_api_key(
+            resolve_api_key_provider(self.provider),
+            api_key,
+            entrypoint_metadata=self._entrypoint_metadata,
+        )
+        if result != "completed":
+            self._active_attempt_number = None
+            self._worker = None
+            self.app.exit(result)
+            return
+
+        self.state = BrowserSignInViewState(
+            step=BrowserSignInStep.FINISH,
+            message="Sign-in complete",
+            hint=SUCCESS_HINT,
+            variant="success",
+            running=True,
+        )
+        if self._success_exit_delay > 0:
+            await asyncio.sleep(self._success_exit_delay)
         self._active_attempt_number = None
         self._worker = None
-        self.app.exit(
-            persist_api_key(
-                resolve_api_key_provider(self.provider),
-                api_key,
-                entrypoint_metadata=self._entrypoint_metadata,
-            )
-        )
+        self.app.exit(result)
 
     def _on_status(self, attempt_number: int, status: BrowserSignInStatus) -> None:
         if not self._is_attempt_active(attempt_number):
@@ -242,20 +295,12 @@ class BrowserSignInScreen(OnboardingScreen):
                     variant="pending",
                     running=True,
                 )
-            case BrowserSignInStatus.EXCHANGING:
+            case BrowserSignInStatus.EXCHANGING | BrowserSignInStatus.COMPLETED:
                 state = BrowserSignInViewState(
                     step=BrowserSignInStep.FINISH,
                     message="Finishing setup...",
                     hint=PENDING_HINT,
                     variant="pending",
-                    running=True,
-                )
-            case BrowserSignInStatus.COMPLETED:
-                state = BrowserSignInViewState(
-                    step=BrowserSignInStep.FINISH,
-                    message="You're signed in. Finishing setup...",
-                    hint=PENDING_HINT,
-                    variant="success",
                     running=True,
                 )
             case _:
@@ -267,26 +312,64 @@ class BrowserSignInScreen(OnboardingScreen):
         if not self.is_mounted:
             return
 
-        self._status_widget.update(state.message)
-        self._status_widget.remove_class("pending", "error", "success")
-        self._status_widget.add_class(state.variant)
         self._hint_widget.update(state.hint)
 
-        for index, (widget, description) in enumerate(
+        for index, (widgets, (title, pending_detail, done_detail)) in enumerate(
             zip(self._step_widgets, STEP_DESCRIPTIONS, strict=True)
         ):
             if index < state.step:
-                prefix = "✓"
+                detail = done_detail
                 widget_class = "done"
             elif index == state.step:
-                prefix = "›"
+                detail = pending_detail
                 widget_class = "active"
             else:
-                prefix = "·"
+                detail = pending_detail
                 widget_class = "idle"
-            widget.update(f"{prefix} {description}")
-            widget.remove_class("done", "active", "idle")
-            widget.add_class(widget_class)
+
+            widgets.title.update(title)
+            widgets.title.remove_class("done", "active", "idle")
+            widgets.title.add_class(widget_class)
+            widgets.detail.remove_class("done", "active", "idle")
+            widgets.detail.remove_class("pending", "error", "success")
+            if widget_class == "active":
+                self._update_active_step_detail(widgets.detail, state)
+            else:
+                widgets.detail.update(detail)
+                widgets.detail.add_class(widget_class)
+            widgets.marker.update(">" if widget_class == "active" else "")
+            widgets.marker.remove_class("done", "active", "idle")
+            widgets.marker.add_class(widget_class)
+            widgets.card.remove_class("done", "active", "idle")
+            widgets.card.add_class(widget_class)
+
+    def _update_active_step_detail(
+        self, detail: NoMarkupStatic, state: BrowserSignInViewState
+    ) -> None:
+        if state.variant == "pending" and state.step == BrowserSignInStep.CONFIRM:
+            content = Text()
+            append_gradient_text(
+                content, WAITING_FOR_AUTHENTICATION_MESSAGE, self._gradient_offset
+            )
+            detail.update(content)
+            detail.add_class("pending")
+            return
+
+        if state.variant == "error":
+            detail.update(state.message)
+            detail.add_class("error")
+            return
+
+        detail.update(state.message)
+        detail.add_class(state.variant)
+
+    def _animate_gradient(self) -> None:
+        self._gradient_offset = (self._gradient_offset + 1) % len(GRADIENT_COLORS)
+        if (
+            self.state.variant == "pending"
+            and self.state.step == BrowserSignInStep.CONFIRM
+        ):
+            self.watch_state(self.state)
 
     async def _close_browser_sign_in(
         self, browser_sign_in: BrowserSignInService | None

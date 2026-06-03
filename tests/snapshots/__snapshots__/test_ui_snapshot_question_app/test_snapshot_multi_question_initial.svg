@@ -32,11 +32,12 @@
         font-family: arial;
     }
 
-    .terminal-r1 { fill: #625e4c }
+    .terminal-r1 { fill: #8d8d8d }
 .terminal-r2 { fill: #c5c8c6 }
-.terminal-r3 { fill: #9d65ff }
-.terminal-r4 { fill: #9d65ff;font-weight: bold }
-.terminal-r5 { fill: #d9d9d9 }
+.terminal-r3 { fill: #0178d4 }
+.terminal-r4 { fill: #0178d4;font-weight: bold }
+.terminal-r5 { fill: #e0e0e0 }
+.terminal-r6 { fill: #a0a0a0 }
     </style>
 
     <defs>
@@ -119,9 +120,9 @@
 </text><text class="terminal-r1" x="0" y="117.6" textLength="12.2" clip-path="url(#terminal-line-4)">│</text><text class="terminal-r1" x="963.8" y="117.6" textLength="12.2" clip-path="url(#terminal-line-4)">│</text><text class="terminal-r2" x="976" y="117.6" textLength="12.2" clip-path="url(#terminal-line-4)">
 </text><text class="terminal-r1" x="0" y="142" textLength="12.2" clip-path="url(#terminal-line-5)">│</text><text class="terminal-r4" x="24.4" y="142" textLength="183" clip-path="url(#terminal-line-5)">›&#160;1.&#160;PostgreSQL</text><text class="terminal-r1" x="963.8" y="142" textLength="12.2" clip-path="url(#terminal-line-5)">│</text><text class="terminal-r2" x="976" y="142" textLength="12.2" clip-path="url(#terminal-line-5)">
 </text><text class="terminal-r1" x="0" y="166.4" textLength="12.2" clip-path="url(#terminal-line-6)">│</text><text class="terminal-r5" x="24.4" y="166.4" textLength="146.4" clip-path="url(#terminal-line-6)">&#160;&#160;2.&#160;MongoDB</text><text class="terminal-r1" x="963.8" y="166.4" textLength="12.2" clip-path="url(#terminal-line-6)">│</text><text class="terminal-r2" x="976" y="166.4" textLength="12.2" clip-path="url(#terminal-line-6)">
-</text><text class="terminal-r1" x="0" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">│</text><text class="terminal-r5" x="24.4" y="190.8" textLength="61" clip-path="url(#terminal-line-7)">&#160;&#160;3.&#160;</text><text class="terminal-r1" x="85.4" y="190.8" textLength="231.8" clip-path="url(#terminal-line-7)">Type&#160;your&#160;answer...</text><text class="terminal-r1" x="963.8" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">│</text><text class="terminal-r2" x="976" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">
+</text><text class="terminal-r1" x="0" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">│</text><text class="terminal-r5" x="24.4" y="190.8" textLength="61" clip-path="url(#terminal-line-7)">&#160;&#160;3.&#160;</text><text class="terminal-r6" x="85.4" y="190.8" textLength="231.8" clip-path="url(#terminal-line-7)">Type&#160;your&#160;answer...</text><text class="terminal-r1" x="963.8" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">│</text><text class="terminal-r2" x="976" y="190.8" textLength="12.2" clip-path="url(#terminal-line-7)">
 </text><text class="terminal-r1" x="0" y="215.2" textLength="12.2" clip-path="url(#terminal-line-8)">│</text><text class="terminal-r1" x="963.8" y="215.2" textLength="12.2" clip-path="url(#terminal-line-8)">│</text><text class="terminal-r2" x="976" y="215.2" textLength="12.2" clip-path="url(#terminal-line-8)">
-</text><text class="terminal-r1" x="0" y="239.6" textLength="12.2" clip-path="url(#terminal-line-9)">│</text><text class="terminal-r1" x="24.4" y="239.6" textLength="622.2" clip-path="url(#terminal-line-9)">←→&#160;questions&#160;&#160;↑↓&#160;navigate&#160;&#160;Enter&#160;select&#160;&#160;Esc&#160;cancel</text><text class="terminal-r1" x="963.8" y="239.6" textLength="12.2" clip-path="url(#terminal-line-9)">│</text><text class="terminal-r2" x="976" y="239.6" textLength="12.2" clip-path="url(#terminal-line-9)">
+</text><text class="terminal-r1" x="0" y="239.6" textLength="12.2" clip-path="url(#terminal-line-9)">│</text><text class="terminal-r6" x="24.4" y="239.6" textLength="622.2" clip-path="url(#terminal-line-9)">←→&#160;questions&#160;&#160;↑↓&#160;navigate&#160;&#160;Enter&#160;select&#160;&#160;Esc&#160;cancel</text><text class="terminal-r1" x="963.8" y="239.6" textLength="12.2" clip-path="url(#terminal-line-9)">│</text><text class="terminal-r2" x="976" y="239.6" textLength="12.2" clip-path="url(#terminal-line-9)">
 </text><text class="terminal-r1" x="0" y="264" textLength="976" clip-path="url(#terminal-line-10)">└──────────────────────────────────────────────────────────────────────────────┘</text><text class="terminal-r2" x="976" y="264" textLength="12.2" clip-path="url(#terminal-line-10)">
 </text><text class="terminal-r2" x="976" y="288.4" textLength="12.2" clip-path="url(#terminal-line-11)">
 </text><text class="terminal-r2" x="976" y="312.8" textLength="12.2" clip-path="url(#terminal-line-12)">

@@ -7,7 +7,7 @@ Screen {
 #trust-dialog {
     max-width: 70;
     overflow-y: scroll;
-    border: round ansi_bright_black;
+    border: round $border-blurred;
     background: transparent;
     height:auto;
     max-height: 1fr;
@@ -28,7 +28,7 @@ Screen {
     width: 100%;
     height: auto;
     text-style: bold;
-    color: ansi_yellow;
+    color: $warning;
     text-align: center;
     margin-bottom: 1;
 }
@@ -36,7 +36,7 @@ Screen {
 #trust-dialog-path {
     width: 100%;
     height: auto;
-    color: ansi_blue;
+    color: $primary;
     text-align: center;
     text-wrap: wrap;
     margin-bottom: 1;
@@ -45,7 +45,7 @@ Screen {
 .trust-dialog-section-header {
     width: 100%;
     height: auto;
-    color: ansi_default;
+    color: $foreground;
     text-align: center;
     text-wrap: wrap;
     padding: 0 2;
@@ -61,7 +61,7 @@ Screen {
     width: auto;
     max-width: 100%;
     height: auto;
-    color: ansi_default;
+    color: $foreground;
     text-align: center;
     text-overflow: fold;
 }
@@ -69,11 +69,11 @@ Screen {
 .trust-dialog-footer-warning {
     width: 100%;
     height: auto;
-    color: ansi_yellow;
+    color: $warning;
     text-align: center;
     text-style: bold;
-    border-top: solid ansi_bright_black;
-    border-bottom: solid ansi_bright_black;
+    border-top: solid $border-blurred;
+    border-bottom: solid $border-blurred;
     margin-bottom: 1;
     padding: 0 1;
 }
@@ -88,33 +88,41 @@ Screen {
 .trust-option {
     height: auto;
     width: auto;
-    color: ansi_default;
+    color: $foreground;
     margin: 0 3;
     content-align: center middle;
 }
 
 .trust-cursor-selected {
-    color: ansi_default;
+    color: $foreground;
     text-style: bold;
 }
 
 .trust-option-selected {
-    color: ansi_default;
+    color: $foreground;
 }
 
 .trust-dialog-help {
     width: 100%;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     text-align: center;
     margin-bottom: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 .trust-dialog-save-info {
     width: 100%;
     height: auto;
-    color: ansi_bright_black;
+    color: $text-muted;
     text-align: center;
     text-style: italic;
     text-wrap: wrap;
+
+    &:ansi {
+        text-style: dim;
+    }
 }

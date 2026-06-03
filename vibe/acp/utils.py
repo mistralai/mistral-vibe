@@ -26,7 +26,7 @@ from vibe.core.config._settings import THINKING_LEVELS, ThinkingLevel
 from vibe.core.proxy_setup import SUPPORTED_PROXY_VARS, get_current_proxy_settings
 from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.types import CompactEndEvent, CompactStartEvent, LLMMessage
-from vibe.core.utils import compact_reduction_display
+from vibe.core.utils import compact_complete_display
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig
@@ -230,9 +230,7 @@ def create_compact_end_session_update(event: CompactEndEvent) -> ToolCallProgres
                 content=TextContentBlock(
                     type="text",
                     text=(
-                        compact_reduction_display(
-                            event.old_context_tokens,
-                            event.new_context_tokens,
+                        compact_complete_display(
                             old_session_id=event.old_session_id,
                             new_session_id=event.new_session_id,
                         )

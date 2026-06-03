@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0] - 2026-05-29
+
+### Added
+
+- `enable_system_trust_store` config flag to switch the shared SSL context to the OS trust store for corporate TLS / private CA setups
+
+### Changed
+
+- MCP HTTP transport now uses Vibe's shared SSL context so it honors `SSL_CERT_FILE` / `SSL_CERT_DIR` and the system trust store opt-in
+- API key onboarding and plan-upgrade CTAs now link to the new Mistral Vibe Code extensions page
+- Compaction summaries are now injected into the conversation instead of replacing it
+
+### Fixed
+
+- Crash during initialization
+- VS Code extension promo banner now sits at the top of the conversation instead of being pinned above the input
+
+## [2.12.1] - 2026-05-27
+
+### Fixed
+
+- VS Code extension promo link in the CLI banner now points to the renamed `mistralai.mistral-vibe-code` extension
+
+
+## [2.12.0] - 2026-05-27
+
+### Changed
+
+- `/teleport` now uses the new Vibe Code Web sessions
+
+## [2.11.1] - 2026-05-27
+
+### Added
+
+- Custom compaction prompts via the `compaction_prompt_id` config setting, resolved from `~/.vibe/prompts/` or `.vibe/prompts/`
+- `--max-tokens` flag for programmatic mode (`-p`)
+- ACP `_auth/status` and `_auth/signOut` extension methods so IDE extensions can show auth state and sign the user out
+- Auth source assessment in `vibe.setup.auth` to classify the active credential source
+- VS Code extension promo line in the CLI banner when launched from a VS Code, Cursor, or VS Code Insiders terminal
+- `OverridesLayer` and `ProjectConfigLayer` for the layered configuration system
+
+### Changed
+
+- Programmatic mode (`-p`) no longer auto-approves tool calls by default
+- Browser sign-in is enabled by default for Mistral providers; the `enable_experimental_browser_sign_in` flag is no longer required (stale entries are silently ignored)
+- Compaction quality improved
+- Refreshed user message styling and slash/teleport variants
+- `/teleport` to Vibe Code Web now carries the working diff and last commit, matching the legacy teleport
+- Reworded `/teleport` help and completion copy to say "Vibe Code Web"
+
+### Removed
+
+- Zed extension publishing job from the release workflow
+
+
+## [2.11.0] - 2026-05-25
+
+### Added
+
+- Load skills from `~/.agents/skills` so they can be shared across agents
+- Restore the textual theme selection system with an onboarding theme picker
+- Surface unauthenticated connectors in `/mcp` with `needs auth` / `needs setup` labels and start the OAuth flow from inside the CLI
+- Current date injected into the system prompt
+- `minimal` system prompt variant for eval and training
+
+### Changed
+
+- Refreshed manual API key onboarding screen to match the new onboarding panel layout
+- Newly discovered connectors are now disabled by default; existing user choices are preserved
+
+### Fixed
+
+- Preserve original line endings in ACP `search_replace`
+- Show MCP/connectors count as `enabled/total` in the banner
+- ACP grep tool displays the search path as a chip and no longer drops the filename
+
+
 ## [2.10.1] - 2026-05-20
 
 ### Added

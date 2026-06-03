@@ -16,7 +16,7 @@ from textual.worker import Worker
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ConnectorConfig
-from vibe.core.tools.connectors import ConnectorRegistry
+from vibe.core.tools.connectors import ConnectorAuthAction, ConnectorRegistry
 from vibe.core.tools.mcp.tools import MCPTool
 from vibe.core.tools.mcp_settings import updated_tool_list
 
@@ -66,7 +66,7 @@ _LIST_VIEW_HELP_TOOLS = (
     "↑↓ Navigate  Enter Show tools  D Disable  E Enable  R Refresh  Esc Close"
 )
 _LIST_VIEW_HELP_AUTH = (
-    "↑↓ Navigate  Enter Authenticate  D Disable  E Enable  R Refresh  Esc Close"
+    "↑↓ Navigate  Enter Connect  D Disable  E Enable  R Refresh  Esc Close"
 )
 _DETAIL_VIEW_HELP = (
     "↑↓ Navigate  D Disable  E Enable  Backspace Back  R Refresh  Esc Close"
@@ -246,7 +246,11 @@ class MCPApp(Container):
         option_id = option.id or ""
         if option_id.startswith("connector:") and self._connector_registry:
             name = option_id.removeprefix("connector:")
-            if not self._connector_registry.is_connected(name):
+            if (
+                not self._connector_registry.is_connected(name)
+                and self._connector_registry.get_auth_action(name)
+                == ConnectorAuthAction.OAUTH
+            ):
                 return _LIST_VIEW_HELP_AUTH
         return _LIST_VIEW_HELP_TOOLS
 
@@ -461,9 +465,7 @@ class MCPApp(Container):
             label.append(f"  {type_tag:<{max_type}}", style="dim")
             label.append(f"  {_tool_count_text(enabled, total)}", style="dim")
             if srv.disabled:
-                label.append("  ")
-                label.append("○", style="dim")
-                label.append(" disabled", style="dim")
+                _append_status(label, "○", "dim", "disabled")
             option_list.add_option(Option(label, id=f"server:{srv.name}"))
 
     def _list_connectors(self, option_list: OptionList, index: MCPToolIndex) -> None:
@@ -485,7 +487,7 @@ class MCPApp(Container):
         )
         for cname in ordered_connector_names:
             cfg = self._find_connector_config(cname)
-            is_disabled = cfg.disabled if cfg else False
+            is_disabled = cfg.disabled if cfg else True
             connected = (
                 self._connector_registry.is_connected(cname)
                 if self._connector_registry
@@ -495,18 +497,24 @@ class MCPApp(Container):
             label.append(f"  {cname:<{max_name}}")
             label.append(f"  {type_tag:<{type_width}}", style="dim")
             label.append(f"  {tool_texts[cname]:<{max_tools}}", style="dim")
+            auth_action = (
+                self._connector_registry.get_auth_action(cname)
+                if self._connector_registry
+                else ConnectorAuthAction.NONE
+            )
             if is_disabled:
-                label.append("  ")
-                label.append("○", style="dim")
-                label.append(" disabled", style="dim")
+                _append_status(label, "○", "dim", "disabled")
             elif connected:
-                label.append("  ")
-                label.append("●", style="green")
-                label.append(" connected", style="dim")
+                _append_status(label, "●", "green", "connected")
             else:
-                label.append("  ")
-                label.append("○", style="dim")
-                label.append(" not connected", style="dim")
+                match auth_action:
+                    case ConnectorAuthAction.OAUTH:
+                        text = "needs auth"
+                    case ConnectorAuthAction.CREDENTIALS_SETUP:
+                        text = "needs setup"
+                    case _:
+                        text = "error - try refreshing"
+                _append_status(label, "○", "dim", text)
             option_list.add_option(Option(label, id=f"connector:{cname}"))
 
     # ── detail view ──────────────────────────────────────────────────
@@ -537,13 +545,31 @@ class MCPApp(Container):
                 and self._connector_registry
                 and not self._connector_registry.is_connected(server_name)
             ):
-                self.post_message(
-                    self.ConnectorAuthRequested(
-                        connector_name=server_name,
-                        connector_registry=self._connector_registry,
-                        tool_manager=self._tool_manager,
-                    )
-                )
+                auth_action = self._connector_registry.get_auth_action(server_name)
+                match auth_action:
+                    case ConnectorAuthAction.CREDENTIALS_SETUP:
+                        option_list.add_option(
+                            Option(
+                                "Set up credentials in the Mistral dashboard, "
+                                "then press R to refresh.",
+                                disabled=True,
+                            )
+                        )
+                    case ConnectorAuthAction.OAUTH:
+                        self.post_message(
+                            self.ConnectorAuthRequested(
+                                connector_name=server_name,
+                                connector_registry=self._connector_registry,
+                                tool_manager=self._tool_manager,
+                            )
+                        )
+                    case _:
+                        option_list.add_option(
+                            Option(
+                                "Connector unavailable; press R to refresh.",
+                                disabled=True,
+                            )
+                        )
             else:
                 option_list.add_option(
                     Option("No tools discovered for this server", disabled=True)
@@ -567,6 +593,12 @@ class MCPApp(Container):
                 label.append("  (disabled)", style="dim italic")
             option_list.add_option(Option(label, id=f"tool:{tool_name}"))
         option_list.highlighted = 0
+
+
+def _append_status(label: Text, symbol: str, symbol_style: str, text: str) -> None:
+    label.append("  ")
+    label.append(symbol, style=symbol_style)
+    label.append(f" {text}", style="dim")
 
 
 def _tool_count_text(enabled: int, total: int | None = None) -> str:

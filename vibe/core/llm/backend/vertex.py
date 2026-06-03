@@ -96,9 +96,7 @@ class VertexAnthropicAdapter(AnthropicAdapter):
         }
         self._apply_thinking_config(
             payload,
-            model_name=model_name,
             messages=converted_messages,
-            temperature=temperature,
             max_tokens=max_tokens,
             thinking=thinking,
         )

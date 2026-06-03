@@ -14,7 +14,6 @@ import time
 from typing import Any, ClassVar, assert_never, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
-import webbrowser
 
 from pydantic import BaseModel
 from rich import print as rprint
@@ -23,6 +22,7 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalGroup, VerticalScroll
 from textual.driver import Driver
 from textual.events import AppBlur, AppFocus, MouseUp
+from textual.theme import BUILTIN_THEMES
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -43,6 +43,7 @@ from vibe.cli.plan_offer.decide_plan_offer import (
     resolve_api_key_for_plan,
 )
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway, WhoAmIPlanType
+from vibe.cli.terminal_detect import Terminal, detect_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.notifications import (
     NotificationContext,
@@ -72,13 +73,17 @@ from vibe.cli.textual_ui.widgets.loading import (
 )
 from vibe.cli.textual_ui.widgets.mcp_app import MCPApp, MCPSourceKind
 from vibe.cli.textual_ui.widgets.messages import (
+    VSCODE_EXTENSION_PROMO_WHATS_NEW_SUFFIX,
     AssistantMessage,
     BashOutputMessage,
     ErrorMessage,
     InterruptMessage,
+    SlashCommandMessage,
     StreamingMessageBase,
+    TeleportUserMessage,
     UserCommandMessage,
     UserMessage,
+    VscodeExtensionPromoMessage,
     WarningMessage,
     WhatsNewMessage,
 )
@@ -91,6 +96,7 @@ from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.widgets.rewind_app import RewindApp
 from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
+from vibe.cli.textual_ui.widgets.theme_picker import ThemePickerApp, sorted_theme_names
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
 from vibe.cli.textual_ui.widgets.tools import ToolResultMessage
 from vibe.cli.textual_ui.widgets.voice_app import VoiceApp
@@ -119,6 +125,12 @@ from vibe.cli.update_notifier import (
 from vibe.cli.update_notifier.update import do_update
 from vibe.cli.voice_manager import VoiceManager, VoiceManagerPort
 from vibe.cli.voice_manager.voice_manager_port import TranscribeState
+from vibe.cli.vscode_extension_promo import (
+    FileSystemVscodeExtensionPromoRepository,
+    VscodeExtensionPromo,
+    VscodeExtensionPromoState,
+    should_show_promo,
+)
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents import AgentProfile
 from vibe.core.audio_player.audio_player import AudioPlayer
@@ -128,7 +140,7 @@ from vibe.core.autocompletion.path_prompt import (
     build_title_segments,
 )
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
-from vibe.core.config import VibeConfig
+from vibe.core.config import DEFAULT_THEME, VibeConfig
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.hooks.models import HookStartEvent
 from vibe.core.log_reader import LogReader
@@ -147,16 +159,12 @@ from vibe.core.session.title_format import format_session_title
 from vibe.core.skills.manager import SkillManager
 from vibe.core.teleport.telemetry import send_teleport_early_failure_telemetry
 from vibe.core.teleport.types import (
-    TeleportAuthCompleteEvent,
-    TeleportAuthRequiredEvent,
     TeleportCheckingGitEvent,
     TeleportCompleteEvent,
-    TeleportFetchingUrlEvent,
     TeleportPushingEvent,
     TeleportPushRequiredEvent,
     TeleportPushResponseEvent,
     TeleportStartingWorkflowEvent,
-    TeleportWaitingForGitHubEvent,
 )
 from vibe.core.tools.builtins.ask_user_question import (
     AskUserQuestionArgs,
@@ -184,18 +192,25 @@ from vibe.core.utils import (
     is_dangerous_directory,
 )
 
+_VSCODE_FAMILY_TERMINALS = {Terminal.VSCODE, Terminal.VSCODE_INSIDERS, Terminal.CURSOR}
 
-def _compute_connectors_count(
+
+def _is_vscode_family_terminal() -> bool:
+    return detect_terminal() in _VSCODE_FAMILY_TERMINALS
+
+
+def _compute_connector_counts(
     config: VibeConfig, connector_registry: ConnectorRegistry | None
-) -> int:
+) -> tuple[int, int]:
     total = connector_registry.connector_count if connector_registry else 0
     if total == 0:
-        return 0
+        return (0, 0)
     disabled_names = {c.name for c in config.connectors if c.disabled}
     known_names = set(
         connector_registry.get_connector_names() if connector_registry else []
     )
-    return total - len(disabled_names & known_names)
+    enabled = total - len(disabled_names & known_names)
+    return (enabled, total)
 
 
 class BottomApp(StrEnum):
@@ -214,6 +229,7 @@ class BottomApp(StrEnum):
     ModelPicker = auto()
     ProxySetup = auto()
     Question = auto()
+    ThemePicker = auto()
     ThinkingPicker = auto()
     Rewind = auto()
     SessionPicker = auto()
@@ -358,6 +374,7 @@ class VibeApp(App):  # noqa: PLR0904
         terminal_notifier: NotificationPort | None = None,
         voice_manager: VoiceManagerPort | None = None,
         narrator_manager: NarratorManagerPort | None = None,
+        vscode_extension_promo: VscodeExtensionPromo | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -400,6 +417,12 @@ class VibeApp(App):  # noqa: PLR0904
         self._update_cache_repository = update_cache_repository
         self._current_version = current_version
         self._plan_offer_gateway = plan_offer_gateway
+        self._vscode_extension_promo = vscode_extension_promo
+        self._show_vscode_extension_promo = (
+            vscode_extension_promo is not None
+            and _is_vscode_family_terminal()
+            and should_show_promo(vscode_extension_promo.initial_state)
+        )
         self._configure_startup_options(startup)
         self._last_escape_time: float | None = None
         self._quit_manager = QuitManager(self)
@@ -464,13 +487,14 @@ class VibeApp(App):  # noqa: PLR0904
 
     def compose(self) -> ComposeResult:
         with ChatScroll(id="chat"):
+            connectors_enabled, connectors_total = _compute_connector_counts(
+                self.config, self.agent_loop.connector_registry
+            )
             self._banner = Banner(
                 config=self.config,
                 skill_manager=self.agent_loop.skill_manager,
-                mcp_registry=self.agent_loop.mcp_registry,
-                connectors_count=_compute_connectors_count(
-                    self.config, self.agent_loop.connector_registry
-                ),
+                connectors_enabled=connectors_enabled,
+                connectors_total=connectors_total,
             )
             yield self._banner
             yield VerticalGroup(id="messages")
@@ -498,7 +522,7 @@ class VibeApp(App):  # noqa: PLR0904
             yield ContextProgress()
 
     async def on_mount(self) -> None:
-        self.theme = "textual-ansi"
+        self._apply_theme(self.config.theme)
         self._terminal_notifier.restore()
 
         self._cached_messages_area = self.query_one("#messages")
@@ -638,6 +662,9 @@ class VibeApp(App):  # noqa: PLR0904
         if self._agent_running:
             await self._interrupt_agent_loop()
 
+        await self._dispatch_submitted_input(value)
+
+    async def _dispatch_submitted_input(self, value: str) -> None:
         if value.startswith("!"):
             self._bash_task = asyncio.create_task(self._handle_bash_command(value[1:]))
             return
@@ -853,6 +880,25 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         await self._switch_to_input_app()
 
+    async def on_theme_picker_app_theme_previewed(
+        self, message: ThemePickerApp.ThemePreviewed
+    ) -> None:
+        self._apply_theme(message.theme)
+
+    async def on_theme_picker_app_theme_selected(
+        self, message: ThemePickerApp.ThemeSelected
+    ) -> None:
+        self._apply_theme(message.theme)
+        self.config.theme = message.theme
+        VibeConfig.save_updates({"theme": message.theme})
+        await self._switch_to_input_app()
+
+    async def on_theme_picker_app_cancelled(
+        self, message: ThemePickerApp.Cancelled
+    ) -> None:
+        self._apply_theme(message.original_theme)
+        await self._switch_to_input_app()
+
     async def on_mcpapp_mcpclosed(self, _message: MCPApp.MCPClosed) -> None:
         await self._mount_and_scroll(UserCommandMessage("MCP servers closed."))
         await self._switch_to_input_app()
@@ -932,7 +978,7 @@ class VibeApp(App):  # noqa: PLR0904
             self.agent_loop.telemetry_client.send_slash_command_used(
                 cmd_name, "builtin"
             )
-            await self._mount_and_scroll(UserMessage(user_input))
+            await self._mount_and_scroll(SlashCommandMessage(user_input[1:]))
             handler = getattr(self, command.handler)
             if asyncio.iscoroutinefunction(handler):
                 await handler(cmd_args=cmd_args)
@@ -1486,7 +1532,7 @@ class VibeApp(App):  # noqa: PLR0904
         has_history = any(msg.role != Role.system for msg in self.agent_loop.messages)
         if not value:
             if show_message:
-                await self._mount_and_scroll(UserMessage("/teleport"))
+                await self._mount_and_scroll(SlashCommandMessage("teleport"))
             if not has_history:
                 send_teleport_early_failure_telemetry(
                     self.agent_loop.telemetry_client,
@@ -1502,7 +1548,7 @@ class VibeApp(App):  # noqa: PLR0904
                 )
                 return
         elif show_message:
-            await self._mount_and_scroll(UserMessage(value))
+            await self._mount_and_scroll(TeleportUserMessage(value))
         self.run_worker(self._teleport(value), exclusive=False)
 
     async def _teleport(self, prompt: str | None = None) -> None:
@@ -1553,15 +1599,6 @@ class VibeApp(App):  # noqa: PLR0904
                         teleport_msg.set_status("Syncing with remote...")
                     case TeleportStartingWorkflowEvent():
                         teleport_msg.set_status("Teleporting...")
-                    case TeleportWaitingForGitHubEvent(message=msg):
-                        teleport_msg.set_status(msg or "Connecting to GitHub...")
-                    case TeleportAuthRequiredEvent(oauth_url=url, message=msg):
-                        webbrowser.open(url)
-                        teleport_msg.set_status(msg or "Authorizing GitHub...")
-                    case TeleportAuthCompleteEvent():
-                        teleport_msg.set_status("GitHub authorized")
-                    case TeleportFetchingUrlEvent():
-                        teleport_msg.set_status("Finalizing...")
                     case TeleportCompleteEvent(url=url):
                         teleport_msg.set_complete(url)
         except TeleportError as e:
@@ -1750,6 +1787,11 @@ class VibeApp(App):  # noqa: PLR0904
         if self._current_bottom_app == BottomApp.ThinkingPicker:
             return
         await self._switch_to_thinking_picker_app()
+
+    async def _show_theme(self, **kwargs: Any) -> None:
+        if self._current_bottom_app == BottomApp.ThemePicker:
+            return
+        await self._switch_to_theme_picker_app()
 
     async def _show_proxy_setup(self, **kwargs: Any) -> None:
         if self._current_bottom_app == BottomApp.ProxySetup:
@@ -2017,13 +2059,14 @@ class VibeApp(App):  # noqa: PLR0904
             self._narrator_manager.sync()
 
             if self._banner:
+                ce, ct = _compute_connector_counts(
+                    base_config, self.agent_loop.connector_registry
+                )
                 self._banner.set_state(
                     base_config,
                     self.agent_loop.skill_manager,
-                    self.agent_loop.mcp_registry,
-                    connectors_count=_compute_connectors_count(
-                        base_config, self.agent_loop.connector_registry
-                    ),
+                    connectors_enabled=ce,
+                    connectors_total=ct,
                     plan_description=plan_title(self._plan_info),
                 )
             await self._mount_and_scroll(
@@ -2076,7 +2119,7 @@ class VibeApp(App):  # noqa: PLR0904
             messages_area = self._cached_messages_area or self.query_one("#messages")
             await messages_area.remove_children()
 
-            await messages_area.mount(UserMessage("/clear"))
+            await messages_area.mount(SlashCommandMessage("clear"))
             await self._mount_and_scroll(
                 UserCommandMessage("Conversation history cleared!")
             )
@@ -2140,32 +2183,26 @@ class VibeApp(App):  # noqa: PLR0904
         if not self.event_handler:
             return
 
-        old_tokens = self.agent_loop.stats.context_tokens
         old_session_id = self.agent_loop.session_id
         compact_msg = CompactMessage()
         self.event_handler.current_compact = compact_msg
         await self._mount_and_scroll(compact_msg)
 
         self._agent_task = asyncio.create_task(
-            self._run_compact(compact_msg, old_tokens, old_session_id, cmd_args.strip())
+            self._run_compact(compact_msg, old_session_id, cmd_args.strip())
         )
 
     async def _run_compact(
         self,
         compact_msg: CompactMessage,
-        old_tokens: int,
         old_session_id: str,
         extra_instructions: str = "",
     ) -> None:
         self._agent_running = True
         try:
             await self.agent_loop.compact(extra_instructions=extra_instructions)
-            new_tokens = self.agent_loop.stats.context_tokens
             compact_msg.set_complete(
-                old_tokens=old_tokens,
-                new_tokens=new_tokens,
-                old_session_id=old_session_id,
-                new_session_id=self.agent_loop.session_id,
+                old_session_id=old_session_id, new_session_id=self.agent_loop.session_id
             )
 
         except asyncio.CancelledError:
@@ -2287,6 +2324,23 @@ class VibeApp(App):  # noqa: PLR0904
             )
         )
 
+    async def _switch_to_theme_picker_app(self) -> None:
+        if self._current_bottom_app == BottomApp.ThemePicker:
+            return
+
+        await self._switch_from_input(
+            ThemePickerApp(
+                theme_names=sorted_theme_names(), current_theme=self.config.theme
+            )
+        )
+
+    def _apply_theme(self, theme: str) -> None:
+        if theme not in BUILTIN_THEMES:
+            logger.warning("Unknown theme=%s; falling back to %s", theme, DEFAULT_THEME)
+            self.theme = DEFAULT_THEME
+            return
+        self.theme = theme
+
     async def _switch_to_proxy_setup_app(self) -> None:
         if self._current_bottom_app == BottomApp.ProxySetup:
             return
@@ -2340,6 +2394,8 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(ConfigApp).focus()
                 case BottomApp.ModelPicker:
                     self.query_one(ModelPickerApp).focus()
+                case BottomApp.ThemePicker:
+                    self.query_one(ThemePickerApp).focus()
                 case BottomApp.ThinkingPicker:
                     self.query_one(ThinkingPickerApp).focus()
                 case BottomApp.ProxySetup:
@@ -2407,6 +2463,16 @@ class VibeApp(App):  # noqa: PLR0904
         try:
             model_picker = self.query_one(ModelPickerApp)
             model_picker.post_message(ModelPickerApp.Cancelled())
+        except Exception:
+            pass
+        self._last_escape_time = None
+
+    def _handle_theme_picker_app_escape(self) -> None:
+        try:
+            theme_picker = self.query_one(ThemePickerApp)
+            theme_picker.post_message(
+                ThemePickerApp.Cancelled(original_theme=self.config.theme)
+            )
         except Exception:
             pass
         self._last_escape_time = None
@@ -2661,6 +2727,8 @@ class VibeApp(App):  # noqa: PLR0904
             self._handle_question_app_escape()
         elif self._current_bottom_app == BottomApp.ModelPicker:
             self._handle_model_picker_app_escape()
+        elif self._current_bottom_app == BottomApp.ThemePicker:
+            self._handle_theme_picker_app_escape()
         elif self._current_bottom_app == BottomApp.ThinkingPicker:
             self._handle_thinking_picker_app_escape()
         elif self._current_bottom_app == BottomApp.SessionPicker:
@@ -2781,13 +2849,14 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _refresh_banner(self) -> None:
         if self._banner:
+            ce, ct = _compute_connector_counts(
+                self.config, self.agent_loop.connector_registry
+            )
             self._banner.set_state(
                 self.config,
                 self.agent_loop.skill_manager,
-                self.agent_loop.mcp_registry,
-                connectors_count=_compute_connectors_count(
-                    self.config, self.agent_loop.connector_registry
-                ),
+                connectors_enabled=ce,
+                connectors_total=ct,
                 plan_description=plan_title(self._plan_info),
             )
 
@@ -2812,13 +2881,18 @@ class VibeApp(App):  # noqa: PLR0904
         if self._chat_input_container:
             self._chat_input_container.switching_mode = True
 
+        loop = asyncio.get_running_loop()
+
         def schedule_switch() -> None:
             self._switch_agent_generation += 1
             my_gen = self._switch_agent_generation
 
             def switch_agent_sync() -> None:
                 try:
-                    asyncio.run(self.agent_loop.switch_agent(new_profile.name))
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.agent_loop.switch_agent(new_profile.name), loop
+                    )
+                    future.result()
                     self.agent_loop.set_approval_callback(self._approval_callback)
                     self.agent_loop.set_user_input_callback(self._user_input_callback)
                 finally:
@@ -2924,23 +2998,45 @@ class VibeApp(App):  # noqa: PLR0904
             )
             await self._mount_and_scroll(WarningMessage(warning, show_border=False))
 
+    async def _record_vscode_extension_promo_shown(self) -> None:
+        if self._vscode_extension_promo is None:
+            return
+        previous_count = (
+            self._vscode_extension_promo.initial_state.shown_count
+            if self._vscode_extension_promo.initial_state is not None
+            else 0
+        )
+        try:
+            await self._vscode_extension_promo.repository.set(
+                VscodeExtensionPromoState(shown_count=previous_count + 1)
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist VSCode extension promo shown count", exc_info=True
+            )
+
     async def _check_and_show_whats_new(self) -> None:
         if self._update_cache_repository is None:
+            await self._maybe_show_vscode_extension_promo()
             return
 
         if not await should_show_whats_new(
             self._current_version, self._update_cache_repository
         ):
+            await self._maybe_show_vscode_extension_promo()
             return
 
         content = load_whats_new_content()
         if content is not None:
-            whats_new_message = WhatsNewMessage(content)
+            body = content
             plan_offer = plan_offer_cta(
-                self._plan_info, console_base_url=self.config.console_base_url
+                self._plan_info, vibe_base_url=self.config.vibe_base_url
             )
             if plan_offer is not None:
-                whats_new_message = WhatsNewMessage(f"{content}\n\n{plan_offer}")
+                body = f"{body}\n\n{plan_offer}"
+            if self._show_vscode_extension_promo:
+                body = f"{body}{VSCODE_EXTENSION_PROMO_WHATS_NEW_SUFFIX}"
+            whats_new_message = WhatsNewMessage(body)
             if self._history_widget_indices:
                 whats_new_message.add_class("after-history")
             messages_area = self._cached_messages_area or self.query_one("#messages")
@@ -2950,7 +3046,25 @@ class VibeApp(App):  # noqa: PLR0904
             self._whats_new_message = whats_new_message
             if should_anchor:
                 chat.anchor()
+            if self._show_vscode_extension_promo:
+                self.run_worker(
+                    self._record_vscode_extension_promo_shown(), exclusive=False
+                )
+        else:
+            await self._maybe_show_vscode_extension_promo()
         await mark_version_as_seen(self._current_version, self._update_cache_repository)
+
+    async def _maybe_show_vscode_extension_promo(self) -> None:
+        if not self._show_vscode_extension_promo:
+            return
+        promo_message = VscodeExtensionPromoMessage()
+        messages_area = self._cached_messages_area or self.query_one("#messages")
+        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
+        should_anchor = chat.is_at_bottom
+        await chat.mount(promo_message, before=messages_area)
+        if should_anchor:
+            chat.anchor()
+        self.run_worker(self._record_vscode_extension_promo_shown(), exclusive=False)
 
     async def _resolve_plan(self) -> None:
         if self._plan_offer_gateway is None:
@@ -3130,6 +3244,11 @@ def run_textual_ui(
     update_notifier = PyPIUpdateGateway(project_name="mistral-vibe")
     update_cache_repository = FileSystemUpdateCacheRepository()
     plan_offer_gateway = HttpWhoAmIGateway(base_url=agent_loop.config.console_base_url)
+    vscode_extension_promo_repository = FileSystemVscodeExtensionPromoRepository()
+    vscode_extension_promo = VscodeExtensionPromo(
+        repository=vscode_extension_promo_repository,
+        initial_state=asyncio.run(vscode_extension_promo_repository.get()),
+    )
 
     with stderr_guard():
         app = VibeApp(
@@ -3138,6 +3257,7 @@ def run_textual_ui(
             update_notifier=update_notifier,
             update_cache_repository=update_cache_repository,
             plan_offer_gateway=plan_offer_gateway,
+            vscode_extension_promo=vscode_extension_promo,
         )
         session_id = app.run()
 

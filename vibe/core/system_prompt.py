@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 import html
 import os
 from pathlib import Path
@@ -168,6 +169,11 @@ def _get_os_system_prompt() -> str:
     return prompt
 
 
+def _format_current_date() -> str:
+    today = date.today()
+    return f"{today.isoformat()} ({today.strftime('%A')})"
+
+
 def _get_windows_system_prompt() -> str:
     return (
         "### COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
@@ -284,6 +290,10 @@ def _resolve_system_prompt(
     return prompt
 
 
+def _interpolate_prompt(prompt: str) -> str:
+    return Template(prompt).safe_substitute(current_date=_format_current_date())
+
+
 def _get_headless_section() -> str:
     return (
         "# Headless Mode\n\n"
@@ -306,7 +316,7 @@ def get_universal_system_prompt(  # noqa: PLR0912
     headless: bool = False,
     experiment_manager: ExperimentManager | None = None,
 ) -> str:
-    sections = [_resolve_system_prompt(config, experiment_manager)]
+    sections = [_interpolate_prompt(_resolve_system_prompt(config, experiment_manager))]
 
     if headless:
         sections.append(_get_headless_section())

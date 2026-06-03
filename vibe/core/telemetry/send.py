@@ -245,7 +245,6 @@ class TelemetryClient:
         self,
         *,
         nb_context_tokens_before: int,
-        nb_context_tokens_after: int,
         auto_compact_threshold: int,
         status: Literal["success", "failure", "cancelled"],
         session_id: str | None = None,
@@ -253,7 +252,6 @@ class TelemetryClient:
     ) -> None:
         payload = {
             "nb_context_tokens_before": nb_context_tokens_before,
-            "nb_context_tokens_after": nb_context_tokens_after,
             "auto_compact_threshold": auto_compact_threshold,
             "status": status,
         }
@@ -349,15 +347,10 @@ class TelemetryClient:
         )
 
     def send_teleport_completed(
-        self,
-        *,
-        push_required: bool,
-        github_auth_required: bool,
-        nb_session_messages: int,
+        self, *, push_required: bool, nb_session_messages: int
     ) -> None:
         payload: TeleportCompletedPayload = {
             "push_required": push_required,
-            "github_auth_required": github_auth_required,
             "nb_session_messages": nb_session_messages,
         }
         self.send_telemetry_event("vibe.teleport_completed", dict(payload))
@@ -368,14 +361,12 @@ class TelemetryClient:
         stage: TeleportFailureStage,
         error_class: str,
         push_required: bool,
-        github_auth_required: bool,
         nb_session_messages: int,
     ) -> None:
         payload: TeleportFailedPayload = {
             "stage": stage,
             "error_class": error_class,
             "push_required": push_required,
-            "github_auth_required": github_auth_required,
             "nb_session_messages": nb_session_messages,
         }
         self.send_telemetry_event("vibe.teleport_failed", dict(payload))

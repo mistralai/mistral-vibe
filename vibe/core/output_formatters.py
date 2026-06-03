@@ -6,15 +6,11 @@ import sys
 from typing import TextIO
 
 from vibe.core.teleport.types import (
-    TeleportAuthCompleteEvent,
-    TeleportAuthRequiredEvent,
     TeleportCheckingGitEvent,
     TeleportCompleteEvent,
-    TeleportFetchingUrlEvent,
     TeleportPushingEvent,
     TeleportPushRequiredEvent,
     TeleportStartingWorkflowEvent,
-    TeleportWaitingForGitHubEvent,
 )
 from vibe.core.types import AssistantEvent, BaseEvent, LLMMessage, OutputFormat
 
@@ -62,14 +58,6 @@ class TextOutputFormatter(OutputFormatter):
                 self._print("Syncing with remote...")
             case TeleportStartingWorkflowEvent():
                 self._print("Teleporting...")
-            case TeleportWaitingForGitHubEvent(message=msg):
-                self._print(msg or "Connecting to GitHub...")
-            case TeleportAuthRequiredEvent(oauth_url=url, message=msg):
-                self._print(msg or f"Open to authorize GitHub: {url}")
-            case TeleportAuthCompleteEvent():
-                self._print("GitHub authorized")
-            case TeleportFetchingUrlEvent():
-                self._print("Finalizing...")
             case TeleportCompleteEvent():
                 self._final_response = event.url
 
