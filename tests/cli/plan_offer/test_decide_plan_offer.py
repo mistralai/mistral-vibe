@@ -12,6 +12,7 @@ from vibe.cli.plan_offer.decide_plan_offer import (
     WhoAmIPlanType,
     decide_plan_offer,
     plan_offer_cta,
+    plan_title,
     resolve_api_key_for_plan,
 )
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIResponse
@@ -263,3 +264,20 @@ def test_teleport_eligibility_depends_on_chat_plan_and_current_key(
     response: WhoAmIResponse, expected: bool
 ) -> None:
     assert PlanInfo.from_response(response).is_teleport_eligible() is expected
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_title"),
+    [
+        (PlanInfo(plan_type=WhoAmIPlanType.API, plan_name="FREE"), "Free"),
+        (
+            PlanInfo(plan_type=WhoAmIPlanType.API, plan_name="Scale plan"),
+            "[API] Scale plan",
+        ),
+    ],
+    ids=["free-api-plan", "paid-api-plan"],
+)
+def test_plan_title_uses_current_api_plan_labels(
+    payload: PlanInfo, expected_title: str
+) -> None:
+    assert plan_title(payload) == expected_title

@@ -117,7 +117,7 @@ def plan_title(payload: PlanInfo | None) -> str | None:  # noqa: PLR0911
     if payload.is_chat_pro_plan():
         return "[Subscription] Pro"
     if payload.is_free_api_plan():
-        return "[API] Experiment plan"
+        return "Free"
     if payload.is_paid_api_plan():
         return "[API] Scale plan"
     if payload.is_free_mistral_code_plan():

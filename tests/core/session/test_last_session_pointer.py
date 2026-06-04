@@ -80,6 +80,36 @@ def test_record_ignores_empty_session_id(
     assert last_session_pointer.load(session_logging) is None
 
 
+def test_clear_matching_removes_matching_pointers_only(
+    session_logging: SessionLoggingConfig,
+) -> None:
+    pointer_dir = Path(session_logging.save_dir) / last_session_pointer.POINTER_DIR_NAME
+    pointer_dir.mkdir()
+    (pointer_dir / "ttys001").write_text("deleted-session\n", encoding="utf-8")
+    (pointer_dir / "ttys002").write_text("other-session\n", encoding="utf-8")
+    (pointer_dir / "ttys003").write_text("deleted-session\n", encoding="utf-8")
+    (pointer_dir / "nested").mkdir()
+
+    last_session_pointer.clear_matching(session_logging, "deleted-session")
+
+    assert not (pointer_dir / "ttys001").exists()
+    assert (pointer_dir / "ttys002").read_text(encoding="utf-8") == "other-session\n"
+    assert not (pointer_dir / "ttys003").exists()
+    assert (pointer_dir / "nested").is_dir()
+
+
+def test_clear_matching_skips_when_logging_disabled(tmp_path: Path) -> None:
+    disabled = SessionLoggingConfig(save_dir=str(tmp_path), enabled=False)
+    pointer_dir = tmp_path / last_session_pointer.POINTER_DIR_NAME
+    pointer_dir.mkdir()
+    pointer_path = pointer_dir / "ttys001"
+    pointer_path.write_text("deleted-session\n", encoding="utf-8")
+
+    last_session_pointer.clear_matching(disabled, "deleted-session")
+
+    assert pointer_path.exists()
+
+
 def test_current_tty_key_returns_none_when_ttyname_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -96,3 +96,37 @@ def load(config: SessionLoggingConfig) -> str | None:
         logger.debug("Failed to read last session pointer path=%s err=%s", path, e)
         return None
     return content or None
+
+
+def clear_matching(config: SessionLoggingConfig, session_id: str) -> None:
+    if not session_id or not config.enabled:
+        return
+
+    pointer_dir = _pointer_dir(config)
+    if not pointer_dir.is_dir():
+        return
+
+    try:
+        pointer_paths = list(pointer_dir.iterdir())
+    except OSError as e:
+        logger.debug(
+            "Failed to list last session pointers path=%s err=%s", pointer_dir, e
+        )
+        return
+
+    for path in pointer_paths:
+        if not path.is_file():
+            continue
+        try:
+            content = read_safe(path).text.strip()
+        except OSError as e:
+            logger.debug("Failed to read last session pointer path=%s err=%s", path, e)
+            continue
+
+        if content != session_id:
+            continue
+
+        try:
+            path.unlink()
+        except OSError as e:
+            logger.debug("Failed to clear last session pointer path=%s err=%s", path, e)

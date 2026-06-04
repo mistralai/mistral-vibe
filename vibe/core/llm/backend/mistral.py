@@ -19,6 +19,8 @@ from mistralai.client.models import (
     Function,
     FunctionCall as MistralFunctionCall,
     FunctionName,
+    ImageURL,
+    ImageURLChunk,
     SystemMessage,
     TextChunk,
     ThinkChunk,
@@ -31,6 +33,7 @@ from mistralai.client.models import (
 )
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 
+from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.types import (
     AvailableTool,
@@ -61,6 +64,17 @@ class MistralMapper:
             case Role.system:
                 return SystemMessage(role="system", content=msg.content or "")
             case Role.user:
+                if msg.images:
+                    user_parts: list[ContentChunk] = []
+                    if msg.content:
+                        user_parts.append(TextChunk(type="text", text=msg.content))
+                    user_parts.extend(
+                        ImageURLChunk(
+                            type="image_url", image_url=ImageURL(url=_to_data_uri(att))
+                        )
+                        for att in msg.images
+                    )
+                    return UserMessage(role="user", content=user_parts)
                 return UserMessage(role="user", content=msg.content)
             case Role.assistant:
                 content: AssistantMessageContent

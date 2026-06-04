@@ -26,15 +26,11 @@ from vibe.core.types import ToolResultEvent, ToolStreamEvent
 class WriteFileArgs(BaseModel):
     path: str
     content: str
-    overwrite: bool = Field(
-        default=False, description="Must be set to true to overwrite an existing file."
-    )
 
 
 class WriteFileResult(BaseModel):
     path: str
     bytes_written: int
-    file_existed: bool
     content: str
 
 
@@ -53,24 +49,22 @@ class WriteFile(
     ToolUIData[WriteFileArgs, WriteFileResult],
 ):
     description: ClassVar[str] = (
-        "Create or overwrite a UTF-8 file. Fails if file exists unless 'overwrite=True'."
+        "Create a UTF-8 file. Fails if the file already exists; use search_replace to edit."
     )
 
     @classmethod
     def format_call_display(cls, args: WriteFileArgs) -> ToolCallDisplay:
         tag = " (scratchpad)" if is_scratchpad_path(args.path) else ""
-        overwrite = " (overwrite)" if args.overwrite else ""
         return ToolCallDisplay(
-            summary=f"Writing {args.path}{overwrite}{tag}", content=args.content
+            summary=f"Writing {args.path}{tag}", content=args.content
         )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if isinstance(event.result, WriteFileResult):
-            action = "Overwritten" if event.result.file_existed else "Created"
             tag = " (scratchpad)" if is_scratchpad_path(event.result.path) else ""
             return ToolResultDisplay(
-                success=True, message=f"{action} {Path(event.result.path).name}{tag}"
+                success=True, message=f"Created {Path(event.result.path).name}{tag}"
             )
 
         return ToolResultDisplay(success=True, message="File written")
@@ -96,18 +90,15 @@ class WriteFile(
     async def run(
         self, args: WriteFileArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | WriteFileResult, None]:
-        file_path, file_existed, content_bytes = self._prepare_and_validate_path(args)
+        file_path, content_bytes = self._prepare_and_validate_path(args)
 
         await self._write_file(args, file_path)
 
         yield WriteFileResult(
-            path=str(file_path),
-            bytes_written=content_bytes,
-            file_existed=file_existed,
-            content=args.content,
+            path=str(file_path), bytes_written=content_bytes, content=args.content
         )
 
-    def _prepare_and_validate_path(self, args: WriteFileArgs) -> tuple[Path, bool, int]:
+    def _prepare_and_validate_path(self, args: WriteFileArgs) -> tuple[Path, int]:
         if not args.path.strip():
             raise ToolError("Path cannot be empty")
 
@@ -122,11 +113,9 @@ class WriteFile(
             file_path = Path.cwd() / file_path
         file_path = file_path.resolve()
 
-        file_existed = file_path.exists()
-
-        if file_existed and not args.overwrite:
+        if file_path.exists():
             raise ToolError(
-                f"File '{file_path}' exists. Set overwrite=True to replace."
+                f"File '{file_path}' already exists. Use search_replace to edit it."
             )
 
         if self.config.create_parent_dirs:
@@ -134,13 +123,17 @@ class WriteFile(
         elif not file_path.parent.exists():
             raise ToolError(f"Parent directory does not exist: {file_path.parent}")
 
-        return file_path, file_existed, content_bytes
+        return file_path, content_bytes
 
     async def _write_file(self, args: WriteFileArgs, file_path: Path) -> None:
         try:
             async with await anyio.Path(file_path).open(
-                mode="w", encoding="utf-8"
+                mode="x", encoding="utf-8"
             ) as f:
                 await f.write(args.content)
+        except FileExistsError as e:
+            raise ToolError(
+                f"File '{file_path}' already exists. Use search_replace to edit it."
+            ) from e
         except Exception as e:
             raise ToolError(f"Error writing {file_path}: {e}") from e

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 import tomllib
 from typing import cast
@@ -12,9 +13,12 @@ from textual.geometry import Size
 from textual.pilot import Pilot
 from textual.screen import Screen
 from textual.widget import Widget
-from textual.widgets import Input, Link
+from textual.widgets import Input, Link, Static
 
-from tests.browser_sign_in.stubs import build_browser_sign_in_service_factory
+from tests.browser_sign_in.stubs import (
+    build_browser_sign_in_service_factory,
+    build_sign_in_process,
+)
 from tests.conftest import build_test_vibe_config
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
@@ -33,8 +37,10 @@ from vibe.core.types import Backend
 from vibe.setup.auth import (
     BrowserSignInError,
     BrowserSignInErrorCode,
+    BrowserSignInEvent,
     BrowserSignInService,
     BrowserSignInStatus,
+    BrowserSignInStatusChanged,
 )
 from vibe.setup.auth.api_key_persistence import persist_api_key
 import vibe.setup.onboarding as onboarding_module
@@ -42,11 +48,19 @@ from vibe.setup.onboarding import OnboardingApp
 from vibe.setup.onboarding.context import OnboardingContext
 from vibe.setup.onboarding.screens.api_key import ApiKeyScreen
 from vibe.setup.onboarding.screens.auth_method import AuthMethodScreen
-from vibe.setup.onboarding.screens.browser_sign_in import BrowserSignInScreen
+from vibe.setup.onboarding.screens.browser_sign_in import (
+    SIGN_IN_URL_HELP_PREFIX,
+    BrowserSignInScreen,
+)
 from vibe.setup.onboarding.screens.theme_selection import THEMES, ThemeSelectionScreen
 
 CONSOLE_URL = "https://console.mistral.ai"
 BROWSER_AUTH_API_URL = "https://console.mistral.ai/api"
+TEST_NOW = datetime(2026, 3, 16, tzinfo=UTC)
+
+
+def _expected_browser_sign_in_url(process_id: str = "process-1") -> str:
+    return build_sign_in_process(TEST_NOW, process_id=process_id).sign_in_url
 
 
 async def _wait_for(
@@ -94,6 +108,8 @@ def _build_browser_onboarding_app(
     *,
     browser_sign_in_service_factory: Callable[[], BrowserSignInService] | None = None,
     browser_sign_in_success_delay: float = 0,
+    browser_sign_in_url_help_delay: float = 0,
+    copy_sign_in_url: Callable[[str], bool] | None = None,
 ) -> OnboardingApp:
     return OnboardingApp(
         config=_build_onboarding_config(
@@ -102,6 +118,8 @@ def _build_browser_onboarding_app(
         ),
         browser_sign_in_service_factory=browser_sign_in_service_factory,
         browser_sign_in_success_delay=browser_sign_in_success_delay,
+        browser_sign_in_url_help_delay=browser_sign_in_url_help_delay,
+        copy_sign_in_url=copy_sign_in_url,
     )
 
 
@@ -157,6 +175,14 @@ def _browser_sign_in_step_text(card: Widget) -> str:
     return f"{title.render()}\n{detail.render()}"
 
 
+def _browser_sign_in_hint(screen: Screen) -> str:
+    return str(screen.query_one("#browser-sign-in-hint", NoMarkupStatic).render())
+
+
+def _browser_sign_in_url_text(screen: Screen) -> str:
+    return str(screen.query_one("#browser-sign-in-url", Static).render())
+
+
 def _build_unexpected_browser_sign_in_service_factory(
     outcomes: list[str],
     *,
@@ -173,11 +199,13 @@ def _build_unexpected_browser_sign_in_service_factory(
             self._outcome = outcome
 
         async def authenticate(
-            self, status_callback: Callable[[BrowserSignInStatus], None] | None = None
+            self, event_callback: Callable[[BrowserSignInEvent], None] | None = None
         ) -> str:
             if self._outcome == "completed":
-                if status_callback is not None:
-                    status_callback(BrowserSignInStatus.COMPLETED)
+                if event_callback is not None:
+                    event_callback(
+                        BrowserSignInStatusChanged(status=BrowserSignInStatus.COMPLETED)
+                    )
                 return api_key
             if self._outcome == "runtime_error":
                 raise RuntimeError("boom")
@@ -328,15 +356,24 @@ async def test_ui_does_not_show_browser_opened_before_attempt_starts() -> None:
     authenticate_started = asyncio.Event()
     finish_authenticate = asyncio.Event()
     keep_authenticate_running = asyncio.Event()
+    copied_urls: list[str] = []
+
+    def copy_sign_in_url(url: str) -> bool:
+        copied_urls.append(url)
+        return True
 
     class DelayedBrowserSignInService:
         async def authenticate(
-            self, status_callback: Callable[[BrowserSignInStatus], None] | None = None
+            self, event_callback: Callable[[BrowserSignInEvent], None] | None = None
         ) -> str:
             authenticate_started.set()
             await finish_authenticate.wait()
-            if status_callback is not None:
-                status_callback(BrowserSignInStatus.OPENING_BROWSER)
+            if event_callback is not None:
+                event_callback(
+                    BrowserSignInStatusChanged(
+                        status=BrowserSignInStatus.OPENING_BROWSER
+                    )
+                )
             await keep_authenticate_running.wait()
             return "sk-never-reached"
 
@@ -346,7 +383,8 @@ async def test_ui_does_not_show_browser_opened_before_attempt_starts() -> None:
     app = _build_browser_onboarding_app(
         browser_sign_in_service_factory=lambda: cast(
             BrowserSignInService, DelayedBrowserSignInService()
-        )
+        ),
+        copy_sign_in_url=copy_sign_in_url,
     )
 
     async with app.run_test() as pilot:
@@ -358,6 +396,9 @@ async def test_ui_does_not_show_browser_opened_before_attempt_starts() -> None:
         assert "Open browser" in active_step_text
         assert "Getting things ready..." in active_step_text
         assert "Browser opened" not in active_step_text
+        assert _browser_sign_in_url_text(app.screen) == ""
+        await pilot.press("c")
+        assert copied_urls == []
 
         finish_authenticate.set()
         await _wait_for(
@@ -369,6 +410,274 @@ async def test_ui_does_not_show_browser_opened_before_attempt_starts() -> None:
             ),
             pilot,
         )
+
+
+@pytest.mark.asyncio
+async def test_ui_shows_browser_sign_in_url_copy_prompt_without_raw_url() -> None:
+    blocker = asyncio.Event()
+
+    async def wait_forever(_: float) -> None:
+        await blocker.wait()
+
+    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
+        outcomes=["completed"], sleep=wait_forever
+    )
+    app = _build_browser_onboarding_app(
+        browser_sign_in_service_factory=browser_sign_in_service_factory
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(
+            lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
+        )
+        url_text = _browser_sign_in_url_text(app.screen)
+        assert "If your browser did not open, copy this URL (press C)" in url_text
+        assert "process-1" not in url_text
+        assert _browser_sign_in_hint(app.screen) == (
+            "Press M to enter API key manually - Esc to cancel"
+        )
+
+
+@pytest.mark.asyncio
+async def test_ui_delays_browser_sign_in_url_help() -> None:
+    blocker = asyncio.Event()
+
+    async def wait_forever(_: float) -> None:
+        await blocker.wait()
+
+    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
+        outcomes=["completed"], sleep=wait_forever
+    )
+    app = _build_browser_onboarding_app(
+        browser_sign_in_service_factory=browser_sign_in_service_factory,
+        browser_sign_in_url_help_delay=0.3,
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(
+            lambda: (
+                "Waiting for authentication..."
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
+            ),
+            pilot,
+        )
+        assert _browser_sign_in_url_text(app.screen) == ""
+
+        await _wait_for(
+            lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
+        )
+        assert "process-1" not in _browser_sign_in_url_text(app.screen)
+
+
+@pytest.mark.asyncio
+async def test_ui_copies_browser_sign_in_url() -> None:
+    blocker = asyncio.Event()
+    copied_urls: list[str] = []
+
+    async def wait_forever(_: float) -> None:
+        await blocker.wait()
+
+    def copy_sign_in_url(url: str) -> bool:
+        copied_urls.append(url)
+        return True
+
+    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
+        outcomes=["completed"], sleep=wait_forever
+    )
+    app = _build_browser_onboarding_app(
+        browser_sign_in_service_factory=browser_sign_in_service_factory,
+        copy_sign_in_url=copy_sign_in_url,
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(
+            lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
+        )
+        await pilot.press("c")
+        assert "process-1" not in _browser_sign_in_url_text(app.screen)
+
+    assert copied_urls == [_expected_browser_sign_in_url()]
+
+
+@pytest.mark.asyncio
+async def test_ui_copies_browser_sign_in_url_when_help_text_is_clicked() -> None:
+    blocker = asyncio.Event()
+    copied_urls: list[str] = []
+
+    async def wait_forever(_: float) -> None:
+        await blocker.wait()
+
+    def copy_sign_in_url(url: str) -> bool:
+        copied_urls.append(url)
+        return True
+
+    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
+        outcomes=["completed"], sleep=wait_forever
+    )
+    app = _build_browser_onboarding_app(
+        browser_sign_in_service_factory=browser_sign_in_service_factory,
+        copy_sign_in_url=copy_sign_in_url,
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(
+            lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
+        )
+        url_widget = app.screen.query_one("#browser-sign-in-url", Static)
+        link_x = url_widget.styles.padding.left + len(SIGN_IN_URL_HELP_PREFIX) + 1
+        await pilot.click(url_widget, offset=(link_x, 0))
+
+    assert copied_urls == [_expected_browser_sign_in_url()]
+
+
+@pytest.mark.asyncio
+async def test_ui_reveals_browser_sign_in_url_when_copy_fails() -> None:
+    blocker = asyncio.Event()
+
+    async def wait_forever(_: float) -> None:
+        await blocker.wait()
+
+    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
+        outcomes=["completed"], sleep=wait_forever
+    )
+    app = _build_browser_onboarding_app(
+        browser_sign_in_service_factory=browser_sign_in_service_factory,
+        copy_sign_in_url=lambda _: False,
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(
+            lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
+        )
+        assert "process-1" not in _browser_sign_in_url_text(app.screen)
+
+        await pilot.press("c")
+
+        await _wait_for(
+            lambda: "process-1" in _browser_sign_in_url_text(app.screen), pilot
+        )
+        url_text = _browser_sign_in_url_text(app.screen)
+        assert "Copy failed. Open this URL manually:" in url_text
+
+
+@pytest.mark.asyncio
+async def test_ui_keeps_last_sign_in_url_copy_prompt_after_open_browser_failure() -> (
+    None
+):
+    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
+        outcomes=["completed"], open_browser=lambda _: False
+    )
+    app = _build_browser_onboarding_app(
+        browser_sign_in_service_factory=browser_sign_in_service_factory
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(
+            lambda: (
+                "Failed to open browser for sign-in."
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
+            ),
+            pilot,
+        )
+        assert _browser_sign_in_hint(app.screen) == (
+            "Press R to retry - Press M to enter API key manually - Esc to cancel"
+        )
+        url_text = _browser_sign_in_url_text(app.screen)
+        assert "If your browser did not open, copy this URL (press C)" in url_text
+        assert "process-1" not in url_text
+
+
+@pytest.mark.asyncio
+async def test_ui_copies_last_browser_sign_in_url_after_open_browser_failure() -> None:
+    copied_urls: list[str] = []
+
+    def copy_sign_in_url(url: str) -> bool:
+        copied_urls.append(url)
+        return True
+
+    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
+        outcomes=["completed"], open_browser=lambda _: False
+    )
+    app = _build_browser_onboarding_app(
+        browser_sign_in_service_factory=browser_sign_in_service_factory,
+        copy_sign_in_url=copy_sign_in_url,
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(
+            lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
+        )
+
+        await pilot.press("c")
+
+    assert copied_urls == [_expected_browser_sign_in_url()]
+
+
+@pytest.mark.asyncio
+async def test_ui_retry_hides_old_sign_in_url_and_uses_fresh_attempt_url() -> None:
+    blocker = asyncio.Event()
+    copied_urls: list[str] = []
+
+    async def wait_forever(_: float) -> None:
+        await blocker.wait()
+
+    def copy_sign_in_url(url: str) -> bool:
+        copied_urls.append(url)
+        return True
+
+    _, browser_sign_in_service_factory, _ = build_browser_sign_in_service_factory(
+        outcomes=["expired", "completed"], sleep=wait_forever
+    )
+    app = _build_browser_onboarding_app(
+        browser_sign_in_service_factory=browser_sign_in_service_factory,
+        copy_sign_in_url=copy_sign_in_url,
+    )
+
+    async with app.run_test() as pilot:
+        await _show_browser_sign_in(pilot)
+        await _wait_for(
+            lambda: (
+                "expired"
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
+            ),
+            pilot,
+        )
+        await _wait_for(
+            lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
+        )
+
+        await pilot.press("r")
+        await _wait_for(
+            lambda: (
+                "Waiting for authentication..."
+                in _browser_sign_in_step_text(
+                    _active_browser_sign_in_step_card(app.screen)
+                )
+                and "copy this URL" in _browser_sign_in_url_text(app.screen)
+            ),
+            pilot,
+        )
+        assert "process-2" not in _browser_sign_in_url_text(app.screen)
+        assert "process-1" not in _browser_sign_in_url_text(app.screen)
+        assert _browser_sign_in_hint(app.screen) == (
+            "Press M to enter API key manually - Esc to cancel"
+        )
+        await pilot.press("c")
+
+    assert copied_urls == [_expected_browser_sign_in_url(process_id="process-2")]
 
 
 @pytest.mark.asyncio

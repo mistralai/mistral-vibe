@@ -12,6 +12,7 @@ from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.config import ConnectorConfig, VibeConfig
 from vibe.core.tools.base import BaseToolConfig, ToolError
+from vibe.core.tools.connectors import compute_connector_counts
 from vibe.core.tools.connectors.connector_registry import (
     ConnectorAuthAction,
     ConnectorRegistry,
@@ -882,3 +883,84 @@ class TestAuthActionablediscovery:
         assert "linear" in registry.get_connector_names()
         assert registry.get_auth_action("linear") == ConnectorAuthAction.OAUTH
         assert registry.get_connector_id("linear") == "c-1"
+
+
+# ---------------------------------------------------------------------------
+# Banner connector counts
+# ---------------------------------------------------------------------------
+
+
+class TestComputeConnectorCounts:
+    def test_no_registry(self) -> None:
+        assert compute_connector_counts(build_test_vibe_config(), None) == (0, 0)
+
+    def test_empty_registry(self) -> None:
+        registry = FakeConnectorRegistry()
+        assert compute_connector_counts(build_test_vibe_config(), registry) == (0, 0)
+
+    def test_no_config_entry_is_disabled_by_default(self) -> None:
+        # Mirrors ToolManager: connectors without an explicit ConnectorConfig
+        # entry are disabled (their tools are not registered).
+        registry = FakeConnectorRegistry({
+            "alpha": [RemoteTool(name="search")],
+            "beta": [RemoteTool(name="list")],
+        })
+        assert compute_connector_counts(build_test_vibe_config(), registry) == (0, 2)
+
+    def test_explicitly_enabled_and_connected(self) -> None:
+        registry = FakeConnectorRegistry({
+            "alpha": [RemoteTool(name="search")],
+            "beta": [RemoteTool(name="list")],
+        })
+        config = build_test_vibe_config(
+            connectors=[
+                ConnectorConfig(name="alpha", disabled=False),
+                ConnectorConfig(name="beta", disabled=False),
+            ]
+        )
+        assert compute_connector_counts(config, registry) == (2, 2)
+
+    def test_auth_pending_not_counted(self) -> None:
+        # Empty tool list → FakeConnectorRegistry marks as not connected.
+        registry = FakeConnectorRegistry(
+            {"alpha": [RemoteTool(name="search")], "needs_auth": []},
+            auth_actions={"needs_auth": ConnectorAuthAction.OAUTH},
+        )
+        config = build_test_vibe_config(
+            connectors=[
+                ConnectorConfig(name="alpha", disabled=False),
+                ConnectorConfig(name="needs_auth", disabled=False),
+            ]
+        )
+        assert compute_connector_counts(config, registry) == (1, 2)
+
+    def test_disabled_not_counted(self) -> None:
+        registry = FakeConnectorRegistry({
+            "alpha": [RemoteTool(name="search")],
+            "beta": [RemoteTool(name="list")],
+        })
+        config = build_test_vibe_config(
+            connectors=[
+                ConnectorConfig(name="alpha", disabled=False),
+                ConnectorConfig(name="beta", disabled=True),
+            ]
+        )
+        assert compute_connector_counts(config, registry) == (1, 2)
+
+    def test_disabled_and_pending_combined(self) -> None:
+        registry = FakeConnectorRegistry(
+            {
+                "alpha": [RemoteTool(name="search")],
+                "beta": [RemoteTool(name="list")],
+                "needs_auth": [],
+            },
+            auth_actions={"needs_auth": ConnectorAuthAction.OAUTH},
+        )
+        config = build_test_vibe_config(
+            connectors=[
+                ConnectorConfig(name="alpha", disabled=False),
+                ConnectorConfig(name="beta", disabled=True),
+                ConnectorConfig(name="needs_auth", disabled=False),
+            ]
+        )
+        assert compute_connector_counts(config, registry) == (1, 3)

@@ -136,10 +136,15 @@ from vibe.core.agents import AgentProfile
 from vibe.core.audio_player.audio_player import AudioPlayer
 from vibe.core.audio_recorder import AudioRecorder
 from vibe.core.autocompletion.path_prompt import (
+    PathPromptPayload,
+    PathResource,
     build_path_prompt_payload,
     build_title_segments,
 )
-from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
+from vibe.core.autocompletion.path_prompt_adapter import (
+    extract_image_resources,
+    render_path_prompt_from_payload,
+)
 from vibe.core.config import DEFAULT_THEME, VibeConfig
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.hooks.models import HookStartEvent
@@ -147,6 +152,7 @@ from vibe.core.log_reader import LogReader
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.rewind import RewindError
+from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image
 from vibe.core.session.resume_sessions import (
     ResumeSessionInfo,
     list_local_resume_sessions,
@@ -172,15 +178,18 @@ from vibe.core.tools.builtins.ask_user_question import (
     Choice,
     Question,
 )
-from vibe.core.tools.connectors import ConnectorRegistry
+from vibe.core.tools.connectors import compute_connector_counts
 from vibe.core.tools.mcp_settings import persist_mcp_toggle
 from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.transcribe import make_transcribe_client
 from vibe.core.types import (
+    MAX_IMAGE_BYTES,
+    MAX_IMAGES_PER_MESSAGE,
     AgentStats,
     ApprovalResponse,
     BaseEvent,
     ContextTooLongError,
+    ImageAttachment,
     LLMMessage,
     RateLimitError,
     Role,
@@ -197,20 +206,6 @@ _VSCODE_FAMILY_TERMINALS = {Terminal.VSCODE, Terminal.VSCODE_INSIDERS, Terminal.
 
 def _is_vscode_family_terminal() -> bool:
     return detect_terminal() in _VSCODE_FAMILY_TERMINALS
-
-
-def _compute_connector_counts(
-    config: VibeConfig, connector_registry: ConnectorRegistry | None
-) -> tuple[int, int]:
-    total = connector_registry.connector_count if connector_registry else 0
-    if total == 0:
-        return (0, 0)
-    disabled_names = {c.name for c in config.connectors if c.disabled}
-    known_names = set(
-        connector_registry.get_connector_names() if connector_registry else []
-    )
-    enabled = total - len(disabled_names & known_names)
-    return (enabled, total)
 
 
 class BottomApp(StrEnum):
@@ -333,6 +328,12 @@ class StartupOptions:
     teleport_on_start: bool = False
     show_resume_picker: bool = False
     is_resuming_session: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ImageAttachmentRejection:
+    message: str
+    no_vision: bool = False
 
 
 class VibeApp(App):  # noqa: PLR0904
@@ -487,13 +488,13 @@ class VibeApp(App):  # noqa: PLR0904
 
     def compose(self) -> ComposeResult:
         with ChatScroll(id="chat"):
-            connectors_enabled, connectors_total = _compute_connector_counts(
+            connectors_connected, connectors_total = compute_connector_counts(
                 self.config, self.agent_loop.connector_registry
             )
             self._banner = Banner(
                 config=self.config,
                 skill_manager=self.agent_loop.skill_manager,
-                connectors_enabled=connectors_enabled,
+                connectors_connected=connectors_connected,
                 connectors_total=connectors_total,
             )
             yield self._banner
@@ -569,7 +570,7 @@ class VibeApp(App):  # noqa: PLR0904
             self.agent_loop.start_initialize_experiments()
 
         self.call_after_refresh(self._refresh_banner)
-        self._show_hook_config_issues_once()
+        self._show_config_issues()
 
         self.run_worker(self._watch_init_completion(), exclusive=False)
 
@@ -581,8 +582,11 @@ class VibeApp(App):  # noqa: PLR0904
         gc.collect()
         gc.freeze()
 
-    def _show_hook_config_issues_once(self) -> None:
-        for issue in self.agent_loop.hook_config_issues:
+    def _show_config_issues(self) -> None:
+        for issue in (
+            *self.agent_loop.hook_config_issues,
+            *self.agent_loop.skill_manager.config_issues,
+        ):
             self.notify(
                 f"{issue.file}\n{issue.message}",
                 severity="warning",
@@ -758,6 +762,83 @@ class VibeApp(App):  # noqa: PLR0904
         if self._loading_widget and self._loading_widget.parent:
             await self._loading_widget.remove()
             self._loading_widget = None
+
+    async def _resolve_turn_images(
+        self, payload: PathPromptPayload, prebuilt: list[ImageAttachment] | None
+    ) -> list[ImageAttachment] | None:
+        if prebuilt is not None:
+            return prebuilt
+        return await self._prepare_images_or_abort(payload)
+
+    async def _prepare_images_or_abort(
+        self, payload: PathPromptPayload
+    ) -> list[ImageAttachment] | None:
+        result = await self._build_image_attachments(payload)
+        if isinstance(result, _ImageAttachmentRejection):
+            await self._remove_loading_widget()
+            if result.no_vision:
+                await self._mount_and_scroll(
+                    ErrorMessage(result.message, show_border=False)
+                )
+            else:
+                await self._mount_and_scroll(
+                    ErrorMessage(result.message, collapsed=self._tools_collapsed)
+                )
+            return None
+        return result
+
+    async def _build_image_attachments(
+        self, payload: PathPromptPayload
+    ) -> list[ImageAttachment] | _ImageAttachmentRejection:
+        image_resources = extract_image_resources(payload)
+        if not image_resources:
+            return []
+
+        if len(image_resources) > MAX_IMAGES_PER_MESSAGE:
+            return _ImageAttachmentRejection(
+                f"Too many image attachments (got {len(image_resources)}, "
+                f"max {MAX_IMAGES_PER_MESSAGE})."
+            )
+
+        try:
+            active_model = self.agent_loop.config.get_active_model()
+        except ValueError:
+            active_model = None
+        if active_model is not None and not active_model.supports_images:
+            return _ImageAttachmentRejection(
+                f"Model `{active_model.alias}` does not support images. "
+                f"Switch with /model, remove the attachment, or ask me to enable the support for this model.",
+                no_vision=True,
+            )
+
+        attachments: list[ImageAttachment] = []
+        session_dir = self.agent_loop.session_logger.session_dir
+        for resource in image_resources:
+            result = self._snapshot_single_image(resource, session_dir)
+            if isinstance(result, str):
+                return _ImageAttachmentRejection(result)
+            attachments.append(result)
+        return attachments
+
+    def _snapshot_single_image(
+        self, resource: PathResource, session_dir: Path | None
+    ) -> ImageAttachment | str:
+        try:
+            size = resource.path.stat().st_size
+        except OSError as e:
+            return f"Cannot read image {resource.alias}: {e}"
+        if size > MAX_IMAGE_BYTES:
+            return (
+                f"Image `{resource.alias}` is "
+                f"{size / (1024 * 1024):.1f} MB; max is "
+                f"{MAX_IMAGE_BYTES // (1024 * 1024)} MB."
+            )
+        try:
+            return snapshot_image(
+                resource.path, alias=resource.alias, session_dir=session_dir
+            )
+        except ImageSnapshotError as e:
+            return f"Failed to attach image {resource.alias}: {e}"
 
     async def on_config_app_open_model_picker(
         self, _message: ConfigApp.OpenModelPicker
@@ -1203,10 +1284,20 @@ class VibeApp(App):  # noqa: PLR0904
             await self._handle_remote_user_message(message)
             return
 
+        prompt_payload = build_path_prompt_payload(message, base_dir=Path.cwd())
+        images = await self._prepare_images_or_abort(prompt_payload)
+        if images is None:
+            input_widget = self.query_one(ChatInputContainer)
+            if not input_widget.value:
+                input_widget.value = message
+            return
+
         # message_index is where the user message will land in agent_loop.messages
         # (checkpoint is created in agent_loop.act())
         message_index = len(self.agent_loop.messages)
-        user_message = UserMessage(message, message_index=message_index)
+        user_message = UserMessage(
+            message, message_index=message_index, images=images or None
+        )
 
         await self._mount_and_scroll(user_message)
         if self._feedback_bar_manager.should_show(self.agent_loop):
@@ -1217,7 +1308,12 @@ class VibeApp(App):  # noqa: PLR0904
             await self._remote_manager.stop_stream()
             await self._remove_loading_widget()
             self._agent_task = asyncio.create_task(
-                self._handle_agent_loop_turn(message, title_source=title_source)
+                self._handle_agent_loop_turn(
+                    message,
+                    title_source=title_source,
+                    prebuilt_images=images,
+                    prebuilt_payload=prompt_payload,
+                )
             )
 
     async def _handle_remote_user_message(self, message: str) -> None:
@@ -1419,7 +1515,12 @@ class VibeApp(App):  # noqa: PLR0904
                 )
 
     async def _handle_agent_loop_turn(
-        self, prompt: str, *, title_source: str | None = None
+        self,
+        prompt: str,
+        *,
+        title_source: str | None = None,
+        prebuilt_images: list[ImageAttachment] | None = None,
+        prebuilt_payload: PathPromptPayload | None = None,
     ) -> None:
         self._agent_running = True
 
@@ -1429,7 +1530,9 @@ class VibeApp(App):  # noqa: PLR0904
             await self._handle_agent_loop_init()
             await self._ensure_loading_widget()
             message_id = str(uuid4())
-            prompt_payload = build_path_prompt_payload(prompt, base_dir=Path.cwd())
+            prompt_payload = prebuilt_payload or build_path_prompt_payload(
+                prompt, base_dir=Path.cwd()
+            )
             if prompt_payload.all_resources:
                 context_types: dict[str, int] = {}
                 for r in prompt_payload.all_resources:
@@ -1446,7 +1549,12 @@ class VibeApp(App):  # noqa: PLR0904
                     file_extensions=file_ext_counts or None,
                     message_id=message_id,
                 )
-            rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
+            images = await self._resolve_turn_images(prompt_payload, prebuilt_images)
+            if images is None:
+                return
+            rendered_prompt = render_path_prompt_from_payload(
+                prompt_payload, skip_images=True
+            )
             auto_title: str | None = None
             if self.agent_loop.session_logger.needs_initial_auto_title():
                 auto_title = (
@@ -1461,7 +1569,10 @@ class VibeApp(App):  # noqa: PLR0904
             self._narrator_manager.on_turn_start(rendered_prompt)
             async with aclosing(
                 self.agent_loop.act(
-                    rendered_prompt, client_message_id=message_id, auto_title=auto_title
+                    rendered_prompt,
+                    client_message_id=message_id,
+                    auto_title=auto_title,
+                    images=images or None,
                 )
             ) as events:
                 await self._handle_agent_loop_events(events)
@@ -1752,7 +1863,7 @@ class VibeApp(App):  # noqa: PLR0904
                 tool_manager=self.agent_loop.tool_manager,
                 initial_server=name,
                 connector_registry=connector_registry,
-                get_connector_configs=lambda: self.agent_loop.config.connectors,
+                get_vibe_config=lambda: self.agent_loop.config,
                 refresh_callback=self._refresh_mcp_browser,
             )
         )
@@ -2059,21 +2170,37 @@ class VibeApp(App):  # noqa: PLR0904
             self._narrator_manager.sync()
 
             if self._banner:
-                ce, ct = _compute_connector_counts(
+                cc, ct = compute_connector_counts(
                     base_config, self.agent_loop.connector_registry
                 )
                 self._banner.set_state(
                     base_config,
                     self.agent_loop.skill_manager,
-                    connectors_enabled=ce,
+                    connectors_connected=cc,
                     connectors_total=ct,
                     plan_description=plan_title(self._plan_info),
                 )
+            self._show_config_issues()
             await self._mount_and_scroll(
                 UserCommandMessage(
                     "Configuration reloaded (includes agent instructions and skills)."
                 )
             )
+            stripped_count = (
+                self.agent_loop.count_history_images_unsupported_by_active_model()
+            )
+            if stripped_count > 0:
+                try:
+                    model_alias = self.agent_loop.config.get_active_model().alias
+                except ValueError:
+                    model_alias = "the active model"
+                noun = "image" if stripped_count == 1 else "images"
+                await self._mount_and_scroll(
+                    WarningMessage(
+                        f"{stripped_count} {noun} from earlier turns will be omitted "
+                        f"when sending to {model_alias} (no vision support)."
+                    )
+                )
         except Exception as e:
             await self._mount_and_scroll(
                 ErrorMessage(
@@ -2849,13 +2976,13 @@ class VibeApp(App):  # noqa: PLR0904
 
     def _refresh_banner(self) -> None:
         if self._banner:
-            ce, ct = _compute_connector_counts(
+            cc, ct = compute_connector_counts(
                 self.config, self.agent_loop.connector_registry
             )
             self._banner.set_state(
                 self.config,
                 self.agent_loop.skill_manager,
-                connectors_enabled=ce,
+                connectors_connected=cc,
                 connectors_total=ct,
                 plan_description=plan_title(self._plan_info),
             )

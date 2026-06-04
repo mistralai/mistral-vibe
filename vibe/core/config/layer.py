@@ -7,6 +7,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from vibe.core.config.patch import ConfigPatch
+from vibe.core.config.types import ConflictStrategy
+
 
 class RawConfig(BaseModel):
     """Permissive default schema that preserves all fields as extras."""
@@ -287,7 +290,12 @@ class ConfigLayer[S: BaseModel](ABC):
         """Return opaque token representing current backing store state."""
         raise NotImplementedError
 
-    async def apply(self, patch: Any, *, on_conflict: str = "cancel") -> None:
+    async def apply(
+        self,
+        patch: ConfigPatch,
+        *,
+        on_conflict: ConflictStrategy = ConflictStrategy.CANCEL,
+    ) -> None:
         """Persist a patch to this layer's backing store."""
         raise NotImplementedError
 

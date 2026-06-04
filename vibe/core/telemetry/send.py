@@ -193,13 +193,9 @@ class TelemetryClient:
         nb_files_modified = 0
         if status == "success" and result is not None:
             if tool_call.tool_name == "write_file":
-                file_existed = result.get("file_existed", False)
-                if file_existed:
-                    nb_files_modified = 1
-                else:
-                    nb_files_created = 1
-            elif tool_call.tool_name == "search_replace":
-                nb_files_modified = 1 if result.get("blocks_applied", 0) > 0 else 0
+                nb_files_created = 1
+            elif tool_call.tool_name == "edit":
+                nb_files_modified = 1
         return nb_files_created, nb_files_modified
 
     def send_tool_call_finished(

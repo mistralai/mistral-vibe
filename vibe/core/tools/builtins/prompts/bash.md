@@ -11,13 +11,13 @@ Use the `bash` tool to run one-off shell commands.
 **IMPORTANT: Use dedicated tools if available instead of these bash commands:**
 
 **File Operations - DO NOT USE:**
-- `cat filename` → Use `read_file(path="filename")`
-- `head -n 20 filename` → Use `read_file(path="filename", limit=20)`
-- `tail -n 20 filename` → Read with offset: `read_file(path="filename", offset=<line_number>, limit=20)`
-- `sed -n '100,200p' filename` → Use `read_file(path="filename", offset=99, limit=101)`
-- `less`, `more`, `vim`, `nano` → Use `read_file` with offset/limit for navigation
+- `cat filename` → Use `read(file_path="filename")`
+- `head -n 20 filename` → Use `read(file_path="filename", limit=20)`
+- `tail -n 20 filename` → Read with offset: `read(file_path="filename", offset=<line_number>, limit=20)`
+- `sed -n '100,200p' filename` → Use `read(file_path="filename", offset=100, limit=101)`
+- `less`, `more`, `vim`, `nano` → Use `read` with offset/limit for navigation
 - `echo "content" > file` → Use `write_file(path="file", content="content")`
-- `echo "content" >> file` → Read first, then `write_file` with overwrite=true
+- `echo "content" >> existing_file` → Read first, then use `search_replace` to append (write_file refuses to overwrite)
 
 **Search Operations - DO NOT USE:**
 - `grep -r "pattern" .` → Use `grep(pattern="pattern", path=".")`
@@ -26,9 +26,9 @@ Use the `bash` tool to run one-off shell commands.
 - `locate` → Use `grep` tool
 
 **File Modification - DO NOT USE:**
-- `sed -i 's/old/new/g' file` → Use `search_replace` tool
-- `awk` for file editing → Use `search_replace` tool
-- Any in-place file editing → Use `search_replace` tool
+- `sed -i 's/old/new/g' file` → Use `edit` tool
+- `awk` for file editing → Use `edit` tool
+- Any in-place file editing → Use `edit` tool
 
 **APPROPRIATE bash uses:**
 - System information: `pwd`, `whoami`, `date`, `uname -a`
@@ -51,9 +51,9 @@ bash("head -1000 large_file.txt")  # Inefficient
 RIGHT:
 ```python
 # First chunk
-read_file(path="large_file.txt", limit=1000)
-# If was_truncated=true, read next chunk
-read_file(path="large_file.txt", offset=1000, limit=1000)
+read(file_path="large_file.txt", limit=1000)
+# If output is truncated, read next chunk
+read(file_path="large_file.txt", offset=1001, limit=1000)
 ```
 
 **Example: Searching for patterns**

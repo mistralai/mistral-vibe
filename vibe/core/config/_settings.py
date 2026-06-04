@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import shlex
 import tomllib
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, ClassVar, Literal, get_args
 from urllib.parse import urljoin
 
 from dotenv import dotenv_values
@@ -30,7 +30,12 @@ from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE, SESSION_LOG_DIR
-from vibe.core.prompts import UtilityPrompt, load_prompt, load_system_prompt
+from vibe.core.prompts import (
+    SystemPrompt,
+    UtilityPrompt,
+    load_prompt,
+    load_system_prompt,
+)
 from vibe.core.types import Backend
 from vibe.core.utils import configure_ssl_context, get_server_url_from_api_base
 
@@ -362,6 +367,9 @@ def _default_alias_to_name(data: Any) -> Any:
 ThinkingLevel = Literal["off", "low", "medium", "high", "max"]
 THINKING_LEVELS: list[str] = list(get_args(ThinkingLevel))
 
+DEFAULT_AUTO_COMPACT_THRESHOLD = 200_000
+DEFAULT_API_TIMEOUT = 720.0
+
 
 class ModelConfig(BaseModel):
     name: str
@@ -371,8 +379,8 @@ class ModelConfig(BaseModel):
     input_price: float = 0.0  # Price per million input tokens
     output_price: float = 0.0  # Price per million output tokens
     thinking: ThinkingLevel = "off"
-    auto_compact_threshold: int = 200_000
-
+    supports_images: bool = False
+    auto_compact_threshold: int = DEFAULT_AUTO_COMPACT_THRESHOLD
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
 
 
@@ -417,12 +425,15 @@ class OtelSpanExporterConfig(BaseModel):
 
 
 MISTRAL_OTEL_PATH = "/telemetry"
-_DEFAULT_MISTRAL_SERVER_URL = "https://api.mistral.ai"
+DEFAULT_MISTRAL_SERVER_URL = "https://api.mistral.ai"
+
+DEFAULT_VIBE_CODE_WORKFLOW_ID = "__shared-nuage-workflow"
+DEFAULT_VIBE_CODE_TASK_QUEUE = "shared-vibe-nuage"
 
 DEFAULT_PROVIDERS = [
     ProviderConfig(
         name="mistral",
-        api_base=f"{_DEFAULT_MISTRAL_SERVER_URL}/v1",
+        api_base=f"{DEFAULT_MISTRAL_SERVER_URL}/v1",
         api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
         browser_auth_base_url=DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
         browser_auth_api_base_url=DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
@@ -435,16 +446,19 @@ DEFAULT_PROVIDERS = [
     ),
 ]
 
+DEFAULT_ACTIVE_MODEL_CONFIG = ModelConfig(
+    name="mistral-vibe-cli-latest",
+    provider="mistral",
+    alias="mistral-medium-3.5",
+    temperature=1.0,
+    input_price=1.5,
+    output_price=7.5,
+    thinking="high",
+    supports_images=True,
+)
+
 DEFAULT_MODELS = [
-    ModelConfig(
-        name="mistral-vibe-cli-latest",
-        provider="mistral",
-        alias="mistral-medium-3.5",
-        temperature=1.0,
-        input_price=1.5,
-        output_price=7.5,
-        thinking="high",
-    ),
+    DEFAULT_ACTIVE_MODEL_CONFIG,
     ModelConfig(
         name="devstral-small-latest",
         provider="mistral",
@@ -461,8 +475,6 @@ DEFAULT_MODELS = [
     ),
 ]
 
-DEFAULT_ACTIVE_MODEL = DEFAULT_MODELS[0].alias
-
 DEFAULT_TRANSCRIBE_PROVIDERS = [
     TranscribeProviderConfig(
         name="mistral",
@@ -471,13 +483,13 @@ DEFAULT_TRANSCRIBE_PROVIDERS = [
     )
 ]
 
-DEFAULT_TRANSCRIBE_MODELS = [
-    TranscribeModelConfig(
-        name="voxtral-mini-transcribe-realtime-2602",
-        provider="mistral",
-        alias="voxtral-realtime",
-    )
-]
+DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG = TranscribeModelConfig(
+    name="voxtral-mini-transcribe-realtime-2602",
+    provider="mistral",
+    alias="voxtral-realtime",
+)
+
+DEFAULT_TRANSCRIBE_MODELS = [DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG]
 
 DEFAULT_TTS_PROVIDERS = [
     TTSProviderConfig(
@@ -487,17 +499,17 @@ DEFAULT_TTS_PROVIDERS = [
     )
 ]
 
-DEFAULT_TTS_MODELS = [
-    TTSModelConfig(
-        name="voxtral-mini-tts-latest", provider="mistral", alias="voxtral-tts"
-    )
-]
+DEFAULT_ACTIVE_TTS_MODEL_CONFIG = TTSModelConfig(
+    name="voxtral-mini-tts-latest", provider="mistral", alias="voxtral-tts"
+)
+
+DEFAULT_TTS_MODELS = [DEFAULT_ACTIVE_TTS_MODEL_CONFIG]
 
 DEFAULT_THEME = "ansi-dark"
 
 
 class VibeConfig(BaseSettings):
-    active_model: str = DEFAULT_ACTIVE_MODEL
+    active_model: str = DEFAULT_ACTIVE_MODEL_CONFIG.alias
     vim_keybindings: bool = False
     theme: str = DEFAULT_THEME
     disable_welcome_banner_animation: bool = False
@@ -507,13 +519,13 @@ class VibeConfig(BaseSettings):
     context_warnings: bool = False
     voice_mode_enabled: bool = False
     narrator_enabled: bool = False
-    active_transcribe_model: str = "voxtral-realtime"
-    active_tts_model: str = "voxtral-tts"
+    active_transcribe_model: str = DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG.alias
+    active_tts_model: str = DEFAULT_ACTIVE_TTS_MODEL_CONFIG.alias
     bypass_tool_permissions: bool = False
     enable_telemetry: bool = True
     experiment_overrides: dict[str, str] = Field(default_factory=dict)
-    system_prompt_id: str = "cli"
-    compaction_prompt_id: str = "compact"
+    system_prompt_id: str = SystemPrompt.CLI
+    compaction_prompt_id: str = UtilityPrompt.COMPACT
     include_commit_signature: bool = True
     include_model_info: bool = True
     include_project_context: bool = True
@@ -522,16 +534,20 @@ class VibeConfig(BaseSettings):
     enable_auto_update: bool = True
     enable_notifications: bool = True
     enable_system_trust_store: bool = False
-    api_timeout: float = 720.0
-    auto_compact_threshold: int = 200_000
+    api_timeout: float = DEFAULT_API_TIMEOUT
+    auto_compact_threshold: int = DEFAULT_AUTO_COMPACT_THRESHOLD
 
     vibe_code_enabled: bool = Field(default=True, exclude=True)
-    vibe_code_base_url: str = Field(default="https://api.mistral.ai", exclude=True)
+    vibe_code_base_url: str = Field(default=DEFAULT_MISTRAL_SERVER_URL, exclude=True)
     vibe_code_sessions_base_url: str = Field(
         default="https://chat.mistral.ai", exclude=True
     )
-    vibe_code_workflow_id: str = Field(default="__shared-nuage-workflow", exclude=True)
-    vibe_code_api_key_env_var: str = Field(default="MISTRAL_API_KEY", exclude=True)
+    vibe_code_workflow_id: str = Field(
+        default=DEFAULT_VIBE_CODE_WORKFLOW_ID, exclude=True
+    )
+    vibe_code_api_key_env_var: str = Field(
+        default=DEFAULT_MISTRAL_API_ENV_KEY, exclude=True
+    )
     vibe_code_project_name: str | None = Field(default=None, exclude=True)
 
     # TODO(otel): remove exclude=True once the feature is publicly available
@@ -702,7 +718,7 @@ class VibeConfig(BaseSettings):
             api_key_env = DEFAULT_MISTRAL_API_ENV_KEY
 
         endpoint = urljoin(
-            f"{urljoin(server_url or _DEFAULT_MISTRAL_SERVER_URL, MISTRAL_OTEL_PATH).rstrip('/')}/",
+            f"{urljoin(server_url or DEFAULT_MISTRAL_SERVER_URL, MISTRAL_OTEL_PATH).rstrip('/')}/",
             traces_export_path,
         )
 
@@ -740,6 +756,9 @@ class VibeConfig(BaseSettings):
         if self.compaction_model is not None:
             return self.compaction_model
         return self.get_active_model()
+
+    def connectors_by_name(self) -> dict[str, ConnectorConfig]:
+        return {c.name: c for c in self.connectors}
 
     def get_mistral_provider(self) -> ProviderConfig | None:
         try:
@@ -964,14 +983,15 @@ class VibeConfig(BaseSettings):
                 entry["thinking"] = level
                 break
         else:
-            # Model comes from defaults; materialize the full list so we
+            # Model comes from defaults; materialize the identities so we
             # don't lose the other models.
             models = [
                 {
-                    "alias": m.alias,
                     "name": m.name,
                     "provider": m.provider,
+                    "alias": m.alias,
                     "thinking": level if m.alias == model.alias else m.thinking,
+                    **({"supports_images": True} if m.supports_images else {}),
                 }
                 for m in self.models
             ]
@@ -1057,12 +1077,63 @@ class VibeConfig(BaseSettings):
                 model["thinking"] = "high"
                 changed = True
 
+            if (
+                model.get("name") == "mistral-vibe-cli-latest"
+                and model.get("alias") == "mistral-medium-3.5"
+                and "supports_images" not in model
+            ):
+                model["supports_images"] = True
+                changed = True
+
         if data.get("active_model") == "devstral-2":
             data["active_model"] = "mistral-medium-3.5"
             changed = True
 
+        if cls._migrate_renamed_tools(data):
+            changed = True
+
         if changed:
             cls.dump_config(data)
+
+    # Old tool name -> new tool name. The new tools replaced these in-place, so
+    # existing user configs keyed by the old names need their settings moved over.
+    _RENAMED_TOOLS: ClassVar[dict[str, str]] = {
+        "read_file": "read",
+        "search_replace": "edit",
+    }
+    # Options on the old tool that have no equivalent on the new one; dropped on migrate.
+    _DROPPED_TOOL_OPTIONS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "edit": ("max_content_size", "create_backup")
+    }
+
+    @classmethod
+    def _migrate_renamed_tools(cls, data: dict[str, Any]) -> bool:
+        changed = False
+
+        tools = data.get("tools")
+        if isinstance(tools, dict):
+            for old, new in cls._RENAMED_TOOLS.items():
+                if old not in tools:
+                    continue
+                old_config = tools.pop(old)
+                changed = True
+                # Prefer an already-present new key; don't clobber it.
+                if new not in tools:
+                    if isinstance(old_config, dict):
+                        for dropped in cls._DROPPED_TOOL_OPTIONS.get(new, ()):
+                            old_config.pop(dropped, None)
+                    tools[new] = old_config
+
+        for list_key in ("enabled_tools", "disabled_tools"):
+            names = data.get(list_key)
+            if not isinstance(names, list):
+                continue
+            renamed = [cls._RENAMED_TOOLS.get(name, name) for name in names]
+            if renamed != names:
+                data[list_key] = renamed
+                changed = True
+
+        return changed
 
     @classmethod
     def load(cls, **overrides: Any) -> VibeConfig:

@@ -4,8 +4,11 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+from rich.markup import escape
+
 from vibe.core.hooks.models import HookMessageSeverity
 from vibe.core.logger import logger
+from vibe.core.types import ImageAttachment
 from vibe.core.utils.io import read_safe_async
 
 if TYPE_CHECKING:
@@ -62,12 +65,17 @@ class UserMessage(Static):
     SHOW_SEPARATOR: ClassVar[bool] = True
 
     def __init__(
-        self, content: str, pending: bool = False, message_index: int | None = None
+        self,
+        content: str,
+        pending: bool = False,
+        message_index: int | None = None,
+        images: list[ImageAttachment] | None = None,
     ) -> None:
         super().__init__()
         self.add_class("user-message")
         self._content = content
         self._pending = pending
+        self._images = images or []
         self.message_index: int | None = message_index
 
     def get_content(self) -> str:
@@ -80,10 +88,28 @@ class UserMessage(Static):
                     f"{self.PROMPT_CHAR} ", classes="user-message-prompt"
                 )
                 yield NoMarkupStatic(self._content, classes="user-message-content")
+            if self._images:
+                yield Static(
+                    self._format_attachments_footer(self._images),
+                    classes="user-message-attachments",
+                    markup=True,
+                )
             if self.SHOW_SEPARATOR:
                 yield ExpandingSeparator(classes="user-message-separator")
-        if self._pending:
-            self.add_class("pending")
+            if self._pending:
+                self.add_class("pending")
+
+    @staticmethod
+    def _format_attachments_footer(images: list[ImageAttachment]) -> str:
+        label = "attached image" if len(images) == 1 else "attached images"
+        # Use Textual [link="..."] markup with the URL quoted: Textual's
+        # markup parser stops at `:` inside an unquoted tag value, so a raw
+        # `file://...` URL would raise MarkupError. Textual auto-wires the
+        # click to webbrowser.open(url), opening the OS default viewer.
+        links = ", ".join(
+            f'[link="{att.path.as_uri()}"]{escape(att.alias)}[/link]' for att in images
+        )
+        return f"└ {label}: {links}"
 
     async def set_pending(self, pending: bool) -> None:
         if pending == self._pending:
@@ -429,19 +455,22 @@ class BashOutputMessage(SpinnerMixin, Static):
 
 
 class ErrorMessage(Static):
-    def __init__(self, error: str, collapsed: bool = False) -> None:
+    def __init__(
+        self, error: str, collapsed: bool = False, show_border: bool = True
+    ) -> None:
         super().__init__()
         self.add_class("error-message")
         self._error = error
         self.collapsed = collapsed
+        self._show_border = show_border
         self._content_widget: Static | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="error-container"):
-            yield ExpandingBorder(classes="error-border")
-            self._content_widget = NoMarkupStatic(
-                f"Error: {self._error}", classes="error-content"
-            )
+            if self._show_border:
+                yield ExpandingBorder(classes="error-border")
+            text = f"Error: {self._error}" if self._show_border else self._error
+            self._content_widget = NoMarkupStatic(text, classes="error-content")
             yield self._content_widget
 
     def set_collapsed(self, collapsed: bool) -> None:

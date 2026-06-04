@@ -309,6 +309,32 @@ class TestSetThinking:
         assert result["models"][0].get("thinking") is None
         assert result["models"][1]["thinking"] == "max"
 
+    def test_preserves_supports_images_when_materializing_defaults(
+        self, config_dir: Path
+    ) -> None:
+        config_file = config_dir / "config.toml"
+        data = {"active_model": "mistral-medium-3.5"}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        cfg = VibeConfig.load()
+        cfg.set_thinking("low")
+
+        reloaded = VibeConfig.load()
+        active = reloaded.get_active_model()
+        assert active.alias == "mistral-medium-3.5"
+        assert active.thinking == "low"
+        assert active.supports_images is True
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        active_entry = result["models"][0]
+        assert active_entry["supports_images"] is True
+        assert "temperature" not in active_entry
+        assert "input_price" not in active_entry
+        assert "output_price" not in active_entry
+        assert "auto_compact_threshold" not in active_entry
+        assert "supports_images" not in result["models"][1]
+
 
 class TestMigrateLeavesFindInBashAllowlist:
     def test_keeps_find_in_config_file(
@@ -658,6 +684,62 @@ class TestMigrateMistralVibeCliLatestDefaults:
         assert result["models"][0]["input_price"] == 1.5
         assert result["models"][0]["output_price"] == 7.5
         assert result["models"][0]["thinking"] == "high"
+
+    def test_backfills_supports_images_on_existing_mistral_medium_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "active_model": "mistral-medium-3.5",
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "mistral-medium-3.5",
+                    "temperature": 1.0,
+                    "input_price": 1.5,
+                    "output_price": 7.5,
+                    "thinking": "high",
+                }
+            ],
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["supports_images"] is True
+
+    def test_preserves_explicit_supports_images_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "models": [
+                {
+                    "name": "mistral-vibe-cli-latest",
+                    "provider": "mistral",
+                    "alias": "mistral-medium-3.5",
+                    "supports_images": False,
+                }
+            ]
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"][0]["supports_images"] is False
 
 
 class TestAutoCompactThresholdFallback:
@@ -1320,3 +1402,105 @@ class TestIsActiveModelMistral:
             active_model="llama-local",
         )
         assert cfg.is_active_model_mistral() is False
+
+
+class TestMigrateRenamedTools:
+    def test_renames_read_file_and_search_replace_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "tools": {
+                "read_file": {
+                    "permission": "always",
+                    "allowlist": ["src/**"],
+                    "max_read_bytes": 64000,
+                },
+                "search_replace": {
+                    "allowlist": ["src/**"],
+                    "max_content_size": 100000,
+                    "create_backup": True,
+                },
+            }
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        tools = result["tools"]
+        assert "read_file" not in tools
+        assert "search_replace" not in tools
+        assert tools["read"] == {
+            "permission": "always",
+            "allowlist": ["src/**"],
+            "max_read_bytes": 64000,
+        }
+        # Common options carry over; edit-incompatible options are dropped.
+        assert tools["edit"] == {"allowlist": ["src/**"]}
+
+    def test_prefers_existing_new_key_and_drops_legacy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "tools": {
+                "read_file": {"permission": "always"},
+                "read": {"permission": "ask"},
+            }
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert "read_file" not in result["tools"]
+        assert result["tools"]["read"] == {"permission": "ask"}
+
+    def test_renames_entries_in_enabled_and_disabled_lists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "enabled_tools": ["read_file", "grep"],
+            "disabled_tools": ["search_replace"],
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["enabled_tools"] == ["read", "grep"]
+        assert result["disabled_tools"] == ["edit"]
+
+    def test_noop_when_no_legacy_tool_names(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {"tools": {"read": {"permission": "always"}}}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["tools"] == {"read": {"permission": "always"}}

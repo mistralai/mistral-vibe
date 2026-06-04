@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar
 
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Center, CenterMiddle, Horizontal, VerticalScroll
+from textual.containers import (
+    Center,
+    CenterMiddle,
+    Horizontal,
+    Vertical,
+    VerticalScroll,
+)
 from textual.message import Message
 from textual.widgets import Static
 
@@ -18,34 +25,71 @@ class TrustDialogQuitException(Exception):
     pass
 
 
+class TrustDecision(Enum):
+    """User's choice from the trust dialog."""
+
+    TRUST_REPO = "trust_repo"
+    TRUST_CWD = "trust_cwd"
+    DECLINE = "decline"
+
+
 class TrustFolderDialog(CenterMiddle):
     can_focus = True
     can_focus_children = True
 
+    # Number keys 1-3 cover up to three options; extras no-op.
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("left", "move_left", "Left", show=False),
         Binding("right", "move_right", "Right", show=False),
         Binding("enter", "select", "Select", show=False),
-        Binding("1", "select_1", "Yes", show=False),
-        Binding("y", "select_1", "Yes", show=False),
-        Binding("2", "select_2", "No", show=False),
-        Binding("n", "select_2", "No", show=False),
+        Binding("1", "select_index(0)", show=False),
+        Binding("2", "select_index(1)", show=False),
+        Binding("3", "select_index(2)", show=False),
     ]
 
-    class Trusted(Message):
-        pass
-
-    class Untrusted(Message):
-        pass
+    class Decided(Message):
+        def __init__(self, decision: TrustDecision) -> None:
+            super().__init__()
+            self.decision = decision
 
     def __init__(
-        self, folder_path: Path, detected_files: list[str], **kwargs: Any
+        self,
+        cwd: Path,
+        repo_root: Path | None,
+        detected_files: list[str],
+        repo_detected_files: list[str] | None = None,
+        offer_repo_trust: bool = False,
+        repo_explicitly_untrusted: bool = False,
+        **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.folder_path = folder_path
+        self.cwd = cwd
+        # Hide the repo line when it would duplicate cwd.
+        self.repo_root = repo_root if repo_root and repo_root != cwd else None
+        self.offer_repo_trust = offer_repo_trust and self.repo_root is not None
+        self.repo_explicitly_untrusted = (
+            repo_explicitly_untrusted and self.repo_root is not None
+        )
         self.detected_files = detected_files
-        self.selected_option = 0
+        self.repo_detected_files = repo_detected_files or []
+        self._options: list[tuple[TrustDecision, str]] = self._build_options()
+        # Default to the safest option (rightmost: Decline).
+        self.selected_option = len(self._options) - 1
         self.option_widgets: list[Static] = []
+
+    @property
+    def _title(self) -> str:
+        if self.offer_repo_trust:
+            return "Trust folder or repository?"
+        return "Trust this folder?"
+
+    def _build_options(self) -> list[tuple[TrustDecision, str]]:
+        options: list[tuple[TrustDecision, str]] = []
+        if self.offer_repo_trust:
+            options.append((TrustDecision.TRUST_REPO, "Trust full repo"))
+        options.append((TrustDecision.TRUST_CWD, "Trust folder"))
+        options.append((TrustDecision.DECLINE, "Don't trust"))
+        return options
 
     def _compose_scroll_content(self) -> ComposeResult:
         why_content = (
@@ -61,26 +105,53 @@ class TrustFolderDialog(CenterMiddle):
             )
 
         if self.detected_files:
-            yield NoMarkupStatic(
-                "Detected configuration files\n", classes="trust-dialog-section-header"
-            )
-            file_list = "\n".join(f"\u2022 {f}" for f in self.detected_files)
             with Center(classes="trust-dialog-section-center"):
-                yield NoMarkupStatic(
-                    file_list,
-                    id="trust-dialog-files",
-                    classes="trust-dialog-section-content",
-                )
+                with Vertical(classes="trust-dialog-section-stack"):
+                    yield NoMarkupStatic(
+                        "Detected in current folder:",
+                        classes="trust-dialog-section-title",
+                    )
+                    yield NoMarkupStatic(
+                        "\n".join(f"\u2022 {f}" for f in self.detected_files),
+                        id="trust-dialog-files",
+                        classes="trust-dialog-section-content trust-dialog-file-list",
+                    )
+
+        if self.repo_detected_files:
+            with Center(classes="trust-dialog-section-center"):
+                with Vertical(classes="trust-dialog-section-stack"):
+                    yield NoMarkupStatic(
+                        "Detected in repository context:",
+                        classes="trust-dialog-section-title",
+                    )
+                    yield NoMarkupStatic(
+                        "\n".join(f"\u2022 {f}" for f in self.repo_detected_files),
+                        id="trust-dialog-files-repo",
+                        classes="trust-dialog-section-content trust-dialog-file-list",
+                    )
 
     def compose(self) -> ComposeResult:
         with CenterMiddle(id="trust-dialog-container"):
             with CenterMiddle(id="trust-dialog"):
-                yield NoMarkupStatic("Trust this folder?", id="trust-dialog-title")
+                yield NoMarkupStatic(self._title, id="trust-dialog-title")
+                path_classes = "trust-dialog-path"
+                if self.repo_root is not None:
+                    path_classes += " has-repo-root"
                 yield NoMarkupStatic(
-                    str(self.folder_path),
-                    id="trust-dialog-path",
-                    classes="trust-dialog-path",
+                    str(self.cwd), id="trust-dialog-path", classes=path_classes
                 )
+                if self.repo_explicitly_untrusted:
+                    yield NoMarkupStatic(
+                        f"\u26a0 git repository {self.repo_root} is marked untrusted",
+                        id="trust-dialog-repo-untrusted",
+                        classes="trust-dialog-repo-untrusted",
+                    )
+                elif self.repo_root is not None:
+                    yield NoMarkupStatic(
+                        f"\u21b3 git repository: {self.repo_root}",
+                        id="trust-dialog-repo-root",
+                        classes="trust-dialog-repo-root",
+                    )
 
                 with VerticalScroll(id="trust-dialog-content"):
                     yield from self._compose_scroll_content()
@@ -92,10 +163,9 @@ class TrustFolderDialog(CenterMiddle):
                 )
 
                 with Horizontal(id="trust-options-container"):
-                    options = ["Yes, trust this folder", "No, ignore config files"]
-                    for idx, text in enumerate(options):
+                    for idx, (_decision, label) in enumerate(self._options):
                         widget = NoMarkupStatic(
-                            f"  {idx + 1}. {text}", classes="trust-option"
+                            f"  {idx + 1}. {label}", classes="trust-option"
                         )
                         self.option_widgets.append(widget)
                         yield widget
@@ -111,25 +181,20 @@ class TrustFolderDialog(CenterMiddle):
                 )
 
     async def on_mount(self) -> None:
-        self.selected_option = 1  # Default to "No"
         self._update_options()
         self.focus()
 
     def _update_options(self) -> None:
-        options = ["Yes, trust this folder", "No, ignore config files"]
-
-        if len(self.option_widgets) != len(options):
+        if len(self.option_widgets) != len(self._options):
             return
 
-        for idx, (text, widget) in enumerate(
-            zip(options, self.option_widgets, strict=True)
+        for idx, ((_, label), widget) in enumerate(
+            zip(self._options, self.option_widgets, strict=True)
         ):
             is_selected = idx == self.selected_option
 
             cursor = "› " if is_selected else "  "
-            option_text = f"{cursor}{text}"
-
-            widget.update(option_text)
+            widget.update(f"{cursor}{label}")
 
             widget.remove_class("trust-cursor-selected")
             widget.remove_class("trust-option-selected")
@@ -140,30 +205,25 @@ class TrustFolderDialog(CenterMiddle):
                 widget.add_class("trust-option-selected")
 
     def action_move_left(self) -> None:
-        self.selected_option = (self.selected_option - 1) % 2
+        self.selected_option = (self.selected_option - 1) % len(self._options)
         self._update_options()
 
     def action_move_right(self) -> None:
-        self.selected_option = (self.selected_option + 1) % 2
+        self.selected_option = (self.selected_option + 1) % len(self._options)
         self._update_options()
 
     def action_select(self) -> None:
         self._handle_selection(self.selected_option)
 
-    def action_select_1(self) -> None:
-        self.selected_option = 0
-        self._handle_selection(0)
-
-    def action_select_2(self) -> None:
-        self.selected_option = 1
-        self._handle_selection(1)
+    def action_select_index(self, idx: int) -> None:
+        if not 0 <= idx < len(self._options):
+            return
+        self.selected_option = idx
+        self._handle_selection(idx)
 
     def _handle_selection(self, option: int) -> None:
-        match option:
-            case 0:
-                self.post_message(self.Trusted())
-            case 1:
-                self.post_message(self.Untrusted())
+        decision, _ = self._options[option]
+        self.post_message(self.Decided(decision))
 
     def on_blur(self, event: events.Blur) -> None:
         self.call_after_refresh(self.focus)
@@ -178,39 +238,69 @@ class TrustFolderApp(App):
     ]
 
     def __init__(
-        self, folder_path: Path, detected_files: list[str], **kwargs: Any
+        self,
+        cwd: Path,
+        repo_root: Path | None,
+        detected_files: list[str],
+        repo_detected_files: list[str] | None = None,
+        offer_repo_trust: bool = False,
+        repo_explicitly_untrusted: bool = False,
+        **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.folder_path = folder_path
+        self.cwd = cwd
+        self.repo_root = repo_root
+        self.offer_repo_trust = offer_repo_trust
+        self.repo_explicitly_untrusted = repo_explicitly_untrusted
         self.detected_files = detected_files
-        self._result: bool | None = None
+        self.repo_detected_files = repo_detected_files or []
+        self._result: TrustDecision | None = None
         self._quit_without_saving = False
 
     def on_mount(self) -> None:
         self.theme = "ansi-dark"
 
     def compose(self) -> ComposeResult:
-        yield TrustFolderDialog(self.folder_path, self.detected_files)
+        yield TrustFolderDialog(
+            self.cwd,
+            self.repo_root,
+            self.detected_files,
+            repo_detected_files=self.repo_detected_files,
+            offer_repo_trust=self.offer_repo_trust,
+            repo_explicitly_untrusted=self.repo_explicitly_untrusted,
+        )
 
     def action_quit_without_saving(self) -> None:
         self._quit_without_saving = True
         self.exit()
 
-    def on_trust_folder_dialog_trusted(self, _: TrustFolderDialog.Trusted) -> None:
-        self._result = True
+    def on_trust_folder_dialog_decided(
+        self, message: TrustFolderDialog.Decided
+    ) -> None:
+        self._result = message.decision
         self.exit()
 
-    def on_trust_folder_dialog_untrusted(self, _: TrustFolderDialog.Untrusted) -> None:
-        self._result = False
-        self.exit()
-
-    def run_trust_dialog(self) -> bool | None:
+    def run_trust_dialog(self) -> TrustDecision | None:
         self.run()
         if self._quit_without_saving:
             raise TrustDialogQuitException()
         return self._result
 
 
-def ask_trust_folder(folder_path: Path, detected_files: list[str]) -> bool | None:
-    app = TrustFolderApp(folder_path, detected_files)
+def ask_trust_folder(
+    cwd: Path,
+    repo_root: Path | None,
+    detected_files: list[str],
+    repo_detected_files: list[str] | None = None,
+    offer_repo_trust: bool = False,
+    repo_explicitly_untrusted: bool = False,
+) -> TrustDecision | None:
+    app = TrustFolderApp(
+        cwd,
+        repo_root,
+        detected_files,
+        repo_detected_files=repo_detected_files,
+        offer_repo_trust=offer_repo_trust,
+        repo_explicitly_untrusted=repo_explicitly_untrusted,
+    )
     return app.run_trust_dialog()

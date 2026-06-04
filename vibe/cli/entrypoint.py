@@ -9,8 +9,14 @@ from rich import print as rprint
 
 from vibe import __version__
 from vibe.core.config.harness_files import init_harness_files_manager
-from vibe.core.trusted_folders import find_trustable_files, trusted_folders_manager
+from vibe.core.trusted_folders import (
+    find_git_repo_ancestor,
+    find_repo_trustable_files_for_cwd,
+    find_trustable_files,
+    trusted_folders_manager,
+)
 from vibe.setup.trusted_folders.trust_folder_dialog import (
+    TrustDecision,
     TrustDialogQuitException,
     ask_trust_folder,
 )
@@ -148,28 +154,49 @@ def check_and_resolve_trusted_folder(cwd: Path) -> None:
     if cwd.resolve() == Path.home().resolve():
         return
 
+    if trusted_folders_manager.is_trusted(cwd) is True:
+        return
+    if trusted_folders_manager.is_explicitly_untrusted(cwd):
+        return
+
+    repo_root = find_git_repo_ancestor(cwd)
     detected_files = find_trustable_files(cwd)
-
-    if not detected_files:
+    repo_detected_files = find_repo_trustable_files_for_cwd(cwd, repo_root)
+    if not detected_files and not repo_detected_files:
         return
 
-    is_folder_trusted = trusted_folders_manager.is_trusted(cwd)
-
-    if is_folder_trusted is not None:
-        return
+    offer_repo_trust = (
+        repo_root is not None
+        and trusted_folders_manager.is_trusted(repo_root) is not True
+        and not trusted_folders_manager.is_explicitly_untrusted(repo_root)
+    )
+    repo_explicitly_untrusted = (
+        repo_root is not None
+        and trusted_folders_manager.is_explicitly_untrusted(repo_root)
+    )
 
     try:
-        is_folder_trusted = ask_trust_folder(cwd, detected_files)
+        decision = ask_trust_folder(
+            cwd,
+            repo_root,
+            detected_files,
+            repo_detected_files=repo_detected_files,
+            offer_repo_trust=offer_repo_trust,
+            repo_explicitly_untrusted=repo_explicitly_untrusted,
+        )
     except (KeyboardInterrupt, EOFError, TrustDialogQuitException):
         sys.exit(0)
     except Exception as e:
         rprint(f"[yellow]Error showing trust dialog: {e}[/]")
         return
 
-    if is_folder_trusted is True:
-        trusted_folders_manager.add_trusted(cwd)
-    elif is_folder_trusted is False:
-        trusted_folders_manager.add_untrusted(cwd)
+    match decision:
+        case TrustDecision.TRUST_REPO if repo_root is not None:
+            trusted_folders_manager.add_trusted(repo_root)
+        case TrustDecision.TRUST_CWD:
+            trusted_folders_manager.add_trusted(cwd)
+        case TrustDecision.DECLINE:
+            trusted_folders_manager.add_untrusted(cwd)
 
 
 def main() -> None:

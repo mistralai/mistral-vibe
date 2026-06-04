@@ -93,7 +93,7 @@ pip install mistral-vibe
 
 - **Interactive Chat**: A conversational AI agent that understands your requests and breaks down complex tasks.
 - **Powerful Toolset**: A suite of tools for file manipulation, code searching, version control, and command execution, right from the chat prompt.
-  - Read, write, and patch files (`read_file`, `write_file`, `search_replace`).
+  - Read, write, and patch files (`read`, `write_file`, `edit`).
   - Execute shell commands in a stateful terminal (`bash`).
   - Recursively search code with `grep` (with `ripgrep` support).
   - Manage a `todo` list to track the agent's work.
@@ -102,6 +102,7 @@ pip install mistral-vibe
 - **Project-Aware Context**: Vibe automatically scans your project's file structure and Git status to provide relevant context to the agent, improving its understanding of your codebase.
 - **Advanced CLI Experience**: Built with modern libraries for a smooth and efficient workflow.
   - Autocompletion for slash commands (`/`) and file paths (`@`).
+  - Image attachments via `@` mentions — `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` files are sent to vision-capable models (e.g. Mistral Medium 3.5) as native multimodal content.
   - Persistent command history.
   - Beautiful Themes.
 - **Highly Configurable**: Customize models, providers, tool permissions, and UI preferences through a simple `config.toml` file.
@@ -113,8 +114,8 @@ pip install mistral-vibe
 Vibe comes with several built-in agent profiles, each designed for different use cases:
 
 - **`default`**: Standard agent that requires approval for tool executions. Best for general use.
-- **`plan`**: Read-only agent for exploration and planning. Auto-approves safe tools like `grep` and `read_file`.
-- **`accept-edits`**: Auto-approves file edits only (`write_file`, `search_replace`). Useful for code refactoring.
+- **`plan`**: Read-only agent for exploration and planning. Auto-approves safe tools like `grep` and `read`.
+- **`accept-edits`**: Auto-approves file edits only (`write_file`, `edit`). Useful for code refactoring.
 - **`auto-approve`**: Auto-approves all tool executions. Use with caution.
 
 Use the `--agent` flag to select a different agent:
@@ -356,7 +357,7 @@ license: MIT
 compatibility: Python 3.12+
 user-invocable: true
 allowed-tools:
-  - read_file
+  - read
   - grep
   - ask_user_question
 ---
@@ -491,13 +492,13 @@ active_model = "mistral-medium-3.5"
 system_prompt_id = "redteam"
 
 # Disable some tools for this agent
-disabled_tools = ["search_replace", "write_file"]
+disabled_tools = ["edit", "write_file"]
 
 # Override tool permissions for this agent
 [tools.bash]
 permission = "always"
 
-[tools.read_file]
+[tools.read]
 permission = "always"
 ```
 

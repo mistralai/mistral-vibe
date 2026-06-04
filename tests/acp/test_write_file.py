@@ -77,7 +77,6 @@ class TestAcpWriteFileExecution:
         assert result.path == str(test_file)
         assert result.content == "Hello, world!"
         assert result.bytes_written == len(b"Hello, world!")
-        assert result.file_existed is False
         assert mock_client._write_text_file_called
 
         # Verify write_text_file was called correctly
@@ -87,7 +86,7 @@ class TestAcpWriteFileExecution:
         assert params["content"] == "Hello, world!"
 
     @pytest.mark.asyncio
-    async def test_run_success_overwrite(
+    async def test_run_existing_file_raises(
         self, mock_client: MockClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
@@ -100,23 +99,11 @@ class TestAcpWriteFileExecution:
 
         test_file = tmp_path / "existing_file.txt"
         test_file.touch()
-        # Simulate existing file by checking in the core tool logic
-        # The ACP tool doesn't check existence, it's handled by the core tool
-        args = WriteFileArgs(path=str(test_file), content="New content", overwrite=True)
-        result = await collect_result(tool.run(args))
+        args = WriteFileArgs(path=str(test_file), content="New content")
+        with pytest.raises(ToolError, match="already exists"):
+            await collect_result(tool.run(args))
 
-        assert isinstance(result, WriteFileResult)
-        assert result.path == str(test_file)
-        assert result.content == "New content"
-        assert result.bytes_written == len(b"New content")
-        assert result.file_existed is True
-        assert mock_client._write_text_file_called
-
-        # Verify write_text_file was called correctly
-        params = mock_client._last_write_params
-        assert params["session_id"] == "test_session"
-        assert params["path"] == str(test_file)
-        assert params["content"] == "New content"
+        assert not mock_client._write_text_file_called
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("input_newline", ["\r\n", "\r", "\n"])
@@ -305,9 +292,7 @@ class TestAcpWriteFileSessionUpdates:
         assert update.title == "write_file"
 
     def test_tool_result_session_update(self) -> None:
-        result = WriteFileResult(
-            path="/tmp/test.txt", content="Hello", bytes_written=5, file_existed=False
-        )
+        result = WriteFileResult(path="/tmp/test.txt", content="Hello", bytes_written=5)
 
         event = ToolResultEvent(
             tool_name="write_file",

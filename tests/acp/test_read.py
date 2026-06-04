@@ -6,12 +6,13 @@ from acp import ReadTextFileResponse
 import pytest
 
 from tests.mock.utils import collect_result
-from vibe.acp.tools.builtins.read_file import AcpReadFileState, ReadFile
+from vibe.acp.tools.builtins.read import AcpReadState, Read
 from vibe.core.tools.base import ToolError
-from vibe.core.tools.builtins.read_file import (
-    ReadFileArgs,
-    ReadFileResult,
-    ReadFileToolConfig,
+from vibe.core.tools.builtins.read import (
+    DEFAULT_LINE_LIMIT,
+    ReadArgs,
+    ReadConfig,
+    ReadResult,
 )
 
 
@@ -49,7 +50,7 @@ class MockClient:
         content = self._file_content
         if line is not None or limit is not None:
             lines = content.splitlines(keepends=True)
-            start_line = (line or 1) - 1  # Convert to 0-indexed
+            start_line = (line or 1) - 1
             end_line = start_line + limit if limit is not None else len(lines)
             lines = lines[start_line:end_line]
             content = "".join(lines)
@@ -66,45 +67,43 @@ def mock_client() -> MockClient:
 
 
 @pytest.fixture
-def acp_read_file_tool(
+def acp_read_tool(
     mock_client: MockClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> ReadFile:
+) -> Read:
     monkeypatch.chdir(tmp_path)
-    config = ReadFileToolConfig()
-    state = AcpReadFileState.model_construct(
+    config = ReadConfig()
+    state = AcpReadState.model_construct(
         client=mock_client,  # type: ignore[arg-type]
         session_id="test_session_123",
     )
-    return ReadFile(config_getter=lambda: config, state=state)
+    return Read(config_getter=lambda: config, state=state)
 
 
-class TestAcpReadFileBasic:
+class TestAcpReadBasic:
     def test_get_name(self) -> None:
-        assert ReadFile.get_name() == "read_file"
+        assert Read.get_name() == "read"
 
 
-class TestAcpReadFileExecution:
+class TestAcpReadExecution:
     @pytest.mark.asyncio
     async def test_run_success(
-        self, acp_read_file_tool: ReadFile, mock_client: MockClient, tmp_path: Path
+        self, acp_read_tool: Read, mock_client: MockClient, tmp_path: Path
     ) -> None:
         test_file = tmp_path / "test_file.txt"
         test_file.touch()
-        args = ReadFileArgs(path=str(test_file))
-        result = await collect_result(acp_read_file_tool.run(args))
+        args = ReadArgs(file_path=str(test_file))
+        result = await collect_result(acp_read_tool.run(args))
 
-        assert isinstance(result, ReadFileResult)
-        assert result.path == str(test_file)
-        assert result.content == "line 1\nline 2\nline 3"
-        assert result.lines_read == 3
+        assert isinstance(result, ReadResult)
+        assert result.file_path == str(test_file)
+        assert result.num_lines == 3
         assert mock_client._read_text_file_called
 
-        # Verify read_text_file was called correctly
         params = mock_client._last_read_params
         assert params["session_id"] == "test_session_123"
         assert params["path"] == str(test_file)
-        assert params["line"] is None  # offset=0 means no line specified
-        assert params["limit"] is None
+        assert params["line"] is None
+        assert params["limit"] == DEFAULT_LINE_LIMIT + 1
 
     @pytest.mark.asyncio
     async def test_run_with_offset(
@@ -113,21 +112,21 @@ class TestAcpReadFileExecution:
         monkeypatch.chdir(tmp_path)
         test_file = tmp_path / "test_file.txt"
         test_file.touch()
-        tool = ReadFile(
-            config_getter=lambda: ReadFileToolConfig(),
-            state=AcpReadFileState.model_construct(
+        tool = Read(
+            config_getter=lambda: ReadConfig(),
+            state=AcpReadState.model_construct(
                 client=mock_client, session_id="test_session"
             ),
         )
 
-        args = ReadFileArgs(path=str(test_file), offset=1)
+        args = ReadArgs(file_path=str(test_file), offset=2)
         result = await collect_result(tool.run(args))
 
-        assert result.lines_read == 2
-        assert result.content == "line 2\nline 3"
+        assert result.num_lines == 2
+        assert result.start_line == 2
 
         params = mock_client._last_read_params
-        assert params["line"] == 2  # offset=1 means line 2 (1-indexed)
+        assert params["line"] == 2
 
     @pytest.mark.asyncio
     async def test_run_with_limit(
@@ -136,21 +135,20 @@ class TestAcpReadFileExecution:
         monkeypatch.chdir(tmp_path)
         test_file = tmp_path / "test_file.txt"
         test_file.touch()
-        tool = ReadFile(
-            config_getter=lambda: ReadFileToolConfig(),
-            state=AcpReadFileState.model_construct(
+        tool = Read(
+            config_getter=lambda: ReadConfig(),
+            state=AcpReadState.model_construct(
                 client=mock_client, session_id="test_session"
             ),
         )
 
-        args = ReadFileArgs(path=str(test_file), limit=2)
+        args = ReadArgs(file_path=str(test_file), limit=2)
         result = await collect_result(tool.run(args))
 
-        assert result.lines_read == 2
-        assert result.content == "line 1\nline 2\n"
+        assert result.num_lines == 2
 
         params = mock_client._last_read_params
-        assert params["limit"] == 2
+        assert params["limit"] == 3
 
     @pytest.mark.asyncio
     async def test_run_with_offset_and_limit(
@@ -159,22 +157,22 @@ class TestAcpReadFileExecution:
         monkeypatch.chdir(tmp_path)
         test_file = tmp_path / "test_file.txt"
         test_file.touch()
-        tool = ReadFile(
-            config_getter=lambda: ReadFileToolConfig(),
-            state=AcpReadFileState.model_construct(
+        tool = Read(
+            config_getter=lambda: ReadConfig(),
+            state=AcpReadState.model_construct(
                 client=mock_client, session_id="test_session"
             ),
         )
 
-        args = ReadFileArgs(path=str(test_file), offset=1, limit=1)
+        args = ReadArgs(file_path=str(test_file), offset=2, limit=1)
         result = await collect_result(tool.run(args))
 
-        assert result.lines_read == 1
-        assert result.content == "line 2\n"
+        assert result.num_lines == 1
+        assert result.start_line == 2
 
         params = mock_client._last_read_params
         assert params["line"] == 2
-        assert params["limit"] == 1
+        assert params["limit"] == 2
 
     @pytest.mark.asyncio
     async def test_run_read_error(
@@ -184,14 +182,14 @@ class TestAcpReadFileExecution:
         mock_client._read_error = RuntimeError("File not found")
         test_file = tmp_path / "test.txt"
         test_file.touch()
-        tool = ReadFile(
-            config_getter=lambda: ReadFileToolConfig(),
-            state=AcpReadFileState.model_construct(
+        tool = Read(
+            config_getter=lambda: ReadConfig(),
+            state=AcpReadState.model_construct(
                 client=mock_client, session_id="test_session"
             ),
         )
 
-        args = ReadFileArgs(path=str(test_file))
+        args = ReadArgs(file_path=str(test_file))
         with pytest.raises(ToolError) as exc_info:
             await collect_result(tool.run(args))
 
@@ -204,14 +202,12 @@ class TestAcpReadFileExecution:
         monkeypatch.chdir(tmp_path)
         test_file = tmp_path / "test.txt"
         test_file.touch()
-        tool = ReadFile(
-            config_getter=lambda: ReadFileToolConfig(),
-            state=AcpReadFileState.model_construct(
-                client=None, session_id="test_session"
-            ),
+        tool = Read(
+            config_getter=lambda: ReadConfig(),
+            state=AcpReadState.model_construct(client=None, session_id="test_session"),
         )
 
-        args = ReadFileArgs(path=str(test_file))
+        args = ReadArgs(file_path=str(test_file))
         with pytest.raises(ToolError) as exc_info:
             await collect_result(tool.run(args))
 
@@ -228,12 +224,12 @@ class TestAcpReadFileExecution:
         test_file = tmp_path / "test.txt"
         test_file.touch()
         mock_client = MockClient()
-        tool = ReadFile(
-            config_getter=lambda: ReadFileToolConfig(),
-            state=AcpReadFileState.model_construct(client=mock_client, session_id=None),
+        tool = Read(
+            config_getter=lambda: ReadConfig(),
+            state=AcpReadState.model_construct(client=mock_client, session_id=None),
         )
 
-        args = ReadFileArgs(path=str(test_file))
+        args = ReadArgs(file_path=str(test_file))
         with pytest.raises(ToolError) as exc_info:
             await collect_result(tool.run(args))
 

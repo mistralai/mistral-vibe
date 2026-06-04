@@ -6,6 +6,7 @@ import re
 from typing import Any, ClassVar
 
 from vibe.core.config import ProviderConfig
+from vibe.core.llm.backend._image import to_base64 as _to_base64
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
 from vibe.core.types import (
     AvailableTool,
@@ -36,6 +37,18 @@ class AnthropicMapper:
                     user_content: list[dict[str, Any]] = []
                     if msg.content:
                         user_content.append({"type": "text", "text": msg.content})
+                    if msg.images:
+                        user_content.extend(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": att.mime_type,
+                                    "data": _to_base64(att),
+                                },
+                            }
+                            for att in msg.images
+                        )
                     converted.append({"role": "user", "content": user_content or ""})
                 case Role.assistant:
                     converted.append(self._convert_assistant_message(msg))

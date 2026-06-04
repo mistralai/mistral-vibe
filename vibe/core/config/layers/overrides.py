@@ -4,6 +4,8 @@ import copy
 from typing import Any
 
 from vibe.core.config.layer import ConfigLayer, RawConfig
+from vibe.core.config.patch import ConfigPatch
+from vibe.core.config.types import ConflictStrategy
 
 
 class OverridesLayer(ConfigLayer[RawConfig]):
@@ -23,5 +25,10 @@ class OverridesLayer(ConfigLayer[RawConfig]):
     async def _read_config(self) -> dict[str, Any]:
         return copy.deepcopy(self._data)
 
-    async def apply(self, patch: Any, *, on_conflict: str = "cancel") -> None:
+    async def apply(
+        self,
+        patch: ConfigPatch,
+        *,
+        on_conflict: ConflictStrategy = ConflictStrategy.CANCEL,
+    ) -> None:
         raise NotImplementedError("OverridesLayer.apply() is not implemented (M2)")

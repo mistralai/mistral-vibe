@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.config._settings import (
-    DEFAULT_ACTIVE_MODEL,
+    DEFAULT_ACTIVE_MODEL_CONFIG,
     DEFAULT_MODELS,
     DEFAULT_PROVIDERS,
     DEFAULT_VIBE_BASE_URL,
@@ -29,7 +29,7 @@ def _default_model_payloads() -> list[dict[str, Any]]:
 
 
 class _OnboardingSnapshot(BaseModel):
-    active_model: str = DEFAULT_ACTIVE_MODEL
+    active_model: str = DEFAULT_ACTIVE_MODEL_CONFIG.alias
     vibe_base_url: str = DEFAULT_VIBE_BASE_URL
     providers: list[Any] = Field(default_factory=_default_provider_payloads)
     models: list[Any] = Field(default_factory=_default_model_payloads)
@@ -168,7 +168,7 @@ def _resolve_provider(
 
     models = _validated_payloads(snapshot.models, ModelConfig)
 
-    for model_alias in (active_model, DEFAULT_ACTIVE_MODEL):
+    for model_alias in (active_model, DEFAULT_ACTIVE_MODEL_CONFIG.alias):
         for model in models:
             if model.alias != model_alias:
                 continue

@@ -6,6 +6,8 @@ import tomllib
 from typing import Any
 
 from vibe.core.config.layer import ConfigLayer, RawConfig
+from vibe.core.config.patch import ConfigPatch
+from vibe.core.config.types import ConflictStrategy
 from vibe.core.paths._vibe_home import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
 
@@ -64,7 +66,12 @@ class ProjectConfigLayer(ConfigLayer[RawConfig]):
 
         await super().revoke_trust()
 
-    async def apply(self, patch: Any, *, on_conflict: str = "cancel") -> None:
+    async def apply(
+        self,
+        patch: ConfigPatch,
+        *,
+        on_conflict: ConflictStrategy = ConflictStrategy.CANCEL,
+    ) -> None:
         raise NotImplementedError("ProjectConfigLayer.apply() is not implemented (M2)")
 
     async def _find_config_file(self) -> None:

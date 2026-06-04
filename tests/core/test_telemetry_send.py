@@ -28,9 +28,7 @@ def _make_resolved_tool_call(
     tool_name: str, args_dict: dict[str, Any]
 ) -> ResolvedToolCall:
     if tool_name == "write_file":
-        validated = WriteFileArgs(
-            path="foo.txt", content="x", overwrite=args_dict.get("overwrite", False)
-        )
+        validated = WriteFileArgs(path="foo.txt", content="x")
         cls: type[BaseTool] = WriteFile
     else:
         validated = FakeToolArgs()
@@ -169,12 +167,12 @@ class TestTelemetryClient:
 
         assert telemetry_events[0]["properties"]["message_id"] == "msg-123"
 
-    def test_send_tool_call_finished_nb_files_created_write_file_new(
+    def test_send_tool_call_finished_nb_files_created_write_file(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
         config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("write_file", {"overwrite": False})
+        tool_call = _make_resolved_tool_call("write_file", {})
 
         client.send_tool_call_finished(
             tool_call=tool_call,
@@ -182,30 +180,11 @@ class TestTelemetryClient:
             decision=None,
             agent_profile_name="default",
             model="mistral-large",
-            result={"file_existed": False},
+            result={},
         )
 
         assert telemetry_events[0]["properties"]["nb_files_created"] == 1
         assert telemetry_events[0]["properties"]["nb_files_modified"] == 0
-
-    def test_send_tool_call_finished_nb_files_modified_write_file_overwrite(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("write_file", {"overwrite": True})
-
-        client.send_tool_call_finished(
-            tool_call=tool_call,
-            status="success",
-            decision=None,
-            agent_profile_name="default",
-            model="mistral-large",
-            result={"file_existed": True},
-        )
-
-        assert telemetry_events[0]["properties"]["nb_files_created"] == 0
-        assert telemetry_events[0]["properties"]["nb_files_modified"] == 1
 
     def test_send_tool_call_finished_decision_none(
         self, telemetry_events: list[dict[str, Any]]

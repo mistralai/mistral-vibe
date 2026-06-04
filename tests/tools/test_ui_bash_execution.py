@@ -85,7 +85,7 @@ async def test_ui_shows_success_in_case_of_zero_code(vibe_app: VibeApp) -> None:
 async def test_ui_shows_failure_in_case_of_non_zero_code(vibe_app: VibeApp) -> None:
     async with vibe_app.run_test() as pilot:
         chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.value = "!bash -lc 'exit 7'"
+        chat_input.value = "!bash -c 'exit 7'"
 
         await pilot.press("enter")
         message = await _wait_for_bash_output_message(vibe_app, pilot)
@@ -127,7 +127,7 @@ async def test_ui_handles_utf8_output(vibe_app: VibeApp) -> None:
 async def test_ui_handles_non_utf8_stderr(vibe_app: VibeApp) -> None:
     async with vibe_app.run_test() as pilot:
         chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.value = "!bash -lc \"printf '\\\\xff\\\\xfe' 1>&2\""
+        chat_input.value = "!bash -c \"printf '\\\\xff\\\\xfe' 1>&2\""
 
         await pilot.press("enter")
         message = await _wait_for_bash_output_message(vibe_app, pilot)
@@ -198,7 +198,7 @@ async def test_ui_streams_output_incrementally(vibe_app: VibeApp) -> None:
     async with vibe_app.run_test() as pilot:
         chat_input = vibe_app.query_one(ChatInputContainer)
         # print lines with a small delay so streaming has a chance to show partial output
-        chat_input.value = "!bash -lc 'echo first; echo second'"
+        chat_input.value = "!bash -c 'echo first; echo second'"
 
         await pilot.press("enter")
         message = await _wait_for_bash_output_message(vibe_app, pilot)

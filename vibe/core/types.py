@@ -216,11 +216,25 @@ class ApprovalResponse(StrEnum):
     NO = "n"
 
 
+IMAGE_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+MAX_IMAGE_BYTES: int = 10 * 1024 * 1024
+MAX_IMAGES_PER_MESSAGE: int = 8
+
+
+class ImageAttachment(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    path: Path
+    alias: str
+    mime_type: str
+
+
 class LLMMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     role: Role
     content: Content | None = None
+    images: list[ImageAttachment] | None = None
     injected: bool = False
     reasoning_content: Content | None = None
     reasoning_state: list[str] | None = None
@@ -255,6 +269,7 @@ class LLMMessage(BaseModel):
             "tool_calls": getattr(v, "tool_calls", None),
             "name": getattr(v, "name", None),
             "tool_call_id": getattr(v, "tool_call_id", None),
+            "images": getattr(v, "images", None),
             "message_id": getattr(v, "message_id", None)
             or (str(uuid4()) if role != "tool" else None),
         }
@@ -317,6 +332,7 @@ class LLMMessage(BaseModel):
         return LLMMessage(
             role=self.role,
             content=content,
+            images=self.images if self.images is not None else other.images,
             reasoning_content=reasoning_content,
             reasoning_state=reasoning_state,
             reasoning_signature=reasoning_signature,

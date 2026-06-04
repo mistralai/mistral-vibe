@@ -29,7 +29,7 @@ compatibility: Requires git
 metadata:
   author: Test Author
   version: "1.0"
-allowed-tools: bash read_file
+allowed-tools: bash read
 ---
 
 Instructions here.
@@ -42,7 +42,7 @@ Instructions here.
         assert frontmatter["compatibility"] == "Requires git"
         assert frontmatter["metadata"]["author"] == "Test Author"
         assert frontmatter["metadata"]["version"] == "1.0"
-        assert frontmatter["allowed-tools"] == "bash read_file"
+        assert frontmatter["allowed-tools"] == "bash read"
         assert "Instructions here." in body
 
     def test_raises_error_for_missing_frontmatter(self) -> None:

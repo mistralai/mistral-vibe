@@ -25,7 +25,7 @@ class BannerState:
     models_count: int = 0
     mcp_servers_enabled: int = 0
     mcp_servers_total: int = 0
-    connectors_enabled: int = 0
+    connectors_connected: int = 0
     connectors_total: int = 0
     skills_count: int = 0
     plan_description: str | None = None
@@ -38,7 +38,7 @@ class Banner(Static):
         self,
         config: VibeConfig,
         skill_manager: SkillManager,
-        connectors_enabled: int = 0,
+        connectors_connected: int = 0,
         connectors_total: int = 0,
         **kwargs: Any,
     ) -> None:
@@ -47,7 +47,7 @@ class Banner(Static):
         self._initial_state = self._build_state(
             config=config,
             skill_manager=skill_manager,
-            connectors_enabled=connectors_enabled,
+            connectors_connected=connectors_connected,
             connectors_total=connectors_total,
             plan_description=None,
         )
@@ -91,14 +91,14 @@ class Banner(Static):
         self,
         config: VibeConfig,
         skill_manager: SkillManager,
-        connectors_enabled: int = 0,
+        connectors_connected: int = 0,
         connectors_total: int = 0,
         plan_description: str | None = None,
     ) -> None:
         self.state = self._build_state(
             config,
             skill_manager,
-            connectors_enabled,
+            connectors_connected,
             connectors_total,
             plan_description,
         )
@@ -107,7 +107,7 @@ class Banner(Static):
     def _build_state(
         config: VibeConfig,
         skill_manager: SkillManager,
-        connectors_enabled: int = 0,
+        connectors_connected: int = 0,
         connectors_total: int = 0,
         plan_description: str | None = None,
     ) -> BannerState:
@@ -120,7 +120,7 @@ class Banner(Static):
             models_count=len(config.models),
             mcp_servers_enabled=len(enabled_servers),
             mcp_servers_total=len(all_servers),
-            connectors_enabled=connectors_enabled,
+            connectors_connected=connectors_connected,
             connectors_total=connectors_total,
             skills_count=skill_manager.custom_skills_count,
             plan_description=plan_description,
@@ -130,13 +130,13 @@ class Banner(Static):
         parts = [_pluralize(self.state.models_count, "model")]
         # Format as x/y for MCP servers and connectors (only when enabled != total)
         if self.state.connectors_total > 0:
-            if self.state.connectors_enabled != self.state.connectors_total:
+            if self.state.connectors_connected != self.state.connectors_total:
                 connector_str = (
-                    f"{self.state.connectors_enabled}/{self.state.connectors_total} connector"
+                    f"{self.state.connectors_connected}/{self.state.connectors_total} connector"
                     + ("s" if self.state.connectors_total != 1 else "")
                 )
             else:
-                connector_str = _pluralize(self.state.connectors_enabled, "connector")
+                connector_str = _pluralize(self.state.connectors_connected, "connector")
             parts.append(connector_str)
         # Always show MCP servers count (even if 0/0)
         if self.state.mcp_servers_enabled != self.state.mcp_servers_total:

@@ -16,19 +16,41 @@ DEFAULT_MAX_EMBED_BYTES = 256 * 1024
 ResourceBlock = dict[str, str | None]
 
 
+def extract_image_resources(payload: PathPromptPayload) -> list[PathResource]:
+    return [r for r in payload.resources if r.kind == "image"]
+
+
+def render_path_prompt_from_payload(
+    payload: PathPromptPayload,
+    *,
+    max_embed_bytes: int | None = DEFAULT_MAX_EMBED_BYTES,
+    skip_images: bool = False,
+) -> str:
+    blocks = _path_prompt_to_content_blocks(
+        payload, max_embed_bytes=max_embed_bytes, skip_images=skip_images
+    )
+    return _content_blocks_to_prompt_text(blocks)
+
+
 def render_path_prompt(
     message: str,
     *,
     base_dir: Path,
     max_embed_bytes: int | None = DEFAULT_MAX_EMBED_BYTES,
+    skip_images: bool = False,
 ) -> str:
-    payload = build_path_prompt_payload(message, base_dir=base_dir)
-    blocks = _path_prompt_to_content_blocks(payload, max_embed_bytes=max_embed_bytes)
-    return _content_blocks_to_prompt_text(blocks)
+    return render_path_prompt_from_payload(
+        build_path_prompt_payload(message, base_dir=base_dir),
+        max_embed_bytes=max_embed_bytes,
+        skip_images=skip_images,
+    )
 
 
 def _path_prompt_to_content_blocks(
-    payload: PathPromptPayload, *, max_embed_bytes: int | None = DEFAULT_MAX_EMBED_BYTES
+    payload: PathPromptPayload,
+    *,
+    max_embed_bytes: int | None = DEFAULT_MAX_EMBED_BYTES,
+    skip_images: bool = False,
 ) -> list[ResourceBlock]:
     blocks: list[ResourceBlock] = [{"type": "text", "text": payload.prompt_text}]
 
@@ -45,6 +67,19 @@ def _path_prompt_to_content_blocks(
                         "name": resource.alias,
                     })
             case "folder":
+                blocks.append({
+                    "type": "resource_link",
+                    "uri": resource.path.as_uri(),
+                    "name": resource.alias,
+                })
+            case "image":
+                # Callers that carry images as `LLMMessage.images` sidecar
+                # attachments (e.g. the Textual TUI) pass skip_images=True to
+                # avoid duplicating them as text. Other callers (e.g. ACP,
+                # which has no sidecar plumbing yet) fall back to a
+                # resource_link so the model still sees the file reference.
+                if skip_images:
+                    continue
                 blocks.append({
                     "type": "resource_link",
                     "uri": resource.path.as_uri(),

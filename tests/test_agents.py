@@ -81,7 +81,7 @@ class TestDeepMerge:
 
     def test_lists_are_overridden_not_merged(self) -> None:
         """Lists should be replaced entirely, not merged element-by-element."""
-        base = {"tools": ["read_file", "grep", "bash"]}
+        base = {"tools": ["read", "grep", "bash"]}
         override = {"tools": ["write_file"]}
         result = _deep_merge(base, override)
         assert result == {"tools": ["write_file"]}
@@ -200,7 +200,7 @@ class TestAgentApplyToConfig:
 
         assert "ask_user_question" not in result.enabled_tools
         assert "grep" in result.enabled_tools
-        assert "read_file" in result.enabled_tools
+        assert "read" in result.enabled_tools
         assert "task" in result.enabled_tools
 
     def test_base_disabled_tools_filter_supports_glob_patterns(self) -> None:
@@ -349,20 +349,20 @@ class TestAgentProfileOverrides:
         assert "tools" in overrides
         tools = overrides["tools"]
         assert "write_file" in tools
-        assert "search_replace" in tools
+        assert "edit" in tools
         assert tools["write_file"]["permission"] == "never"
-        assert tools["search_replace"]["permission"] == "never"
+        assert tools["edit"]["permission"] == "never"
         assert len(tools["write_file"]["allowlist"]) > 0
-        assert len(tools["search_replace"]["allowlist"]) > 0
+        assert len(tools["edit"]["allowlist"]) > 0
 
     def test_accept_edits_agent_sets_tool_permissions(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.ACCEPT_EDITS].overrides
         assert "tools" in overrides
         tools_config = overrides["tools"]
         assert "write_file" in tools_config
-        assert "search_replace" in tools_config
+        assert "edit" in tools_config
         assert tools_config["write_file"]["permission"] == "always"
-        assert tools_config["search_replace"]["permission"] == "always"
+        assert tools_config["edit"]["permission"] == "always"
 
 
 class TestAgentManagerCycling:
@@ -460,9 +460,9 @@ class TestAgentSwitchAgent:
         plan_tool_names = set(agent.tool_manager.available_tools.keys())
         # Plan mode now has all tools available but with restricted permissions
         assert "write_file" in plan_tool_names
-        assert "search_replace" in plan_tool_names
+        assert "edit" in plan_tool_names
         assert "grep" in plan_tool_names
-        assert "read_file" in plan_tool_names
+        assert "read" in plan_tool_names
         assert agent.agent_profile.name == BuiltinAgentName.PLAN
 
         # Verify write tools have "never" base permission
@@ -522,9 +522,9 @@ class TestAcceptEditsAgent:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.ACCEPT_EDITS].overrides
         assert overrides["tools"]["write_file"]["permission"] == "always"
 
-    def test_accept_edits_config_sets_search_replace_always(self) -> None:
+    def test_accept_edits_config_sets_edit_always(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.ACCEPT_EDITS].overrides
-        assert overrides["tools"]["search_replace"]["permission"] == "always"
+        assert overrides["tools"]["edit"]["permission"] == "always"
 
     @pytest.mark.asyncio
     async def test_accept_edits_agent_auto_approves_write_file(self) -> None:
@@ -571,18 +571,18 @@ class TestPlanAgentToolRestriction:
 
         # Plan mode now has all tools available
         assert "grep" in tool_names
-        assert "read_file" in tool_names
+        assert "read" in tool_names
         assert "write_file" in tool_names
-        assert "search_replace" in tool_names
+        assert "edit" in tool_names
 
         # But write tools have restricted permissions
         write_config = agent.tool_manager.get_tool_config("write_file")
         assert write_config.permission == ToolPermission.NEVER
         assert len(write_config.allowlist) > 0
 
-        sr_config = agent.tool_manager.get_tool_config("search_replace")
-        assert sr_config.permission == ToolPermission.NEVER
-        assert len(sr_config.allowlist) > 0
+        edit_config = agent.tool_manager.get_tool_config("edit")
+        assert edit_config.permission == ToolPermission.NEVER
+        assert len(edit_config.allowlist) > 0
 
 
 class TestAgentManagerFiltering:

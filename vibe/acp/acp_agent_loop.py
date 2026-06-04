@@ -133,6 +133,7 @@ from vibe.core.proxy_setup import (
     unset_proxy_var,
 )
 from vibe.core.session.saved_sessions import (
+    delete_saved_session,
     update_saved_session_title,
     update_saved_session_title_at_path,
 )
@@ -187,6 +188,12 @@ logger = logging.getLogger("vibe")
 NON_INTERACTIVE_DISABLED_TOOLS = ["ask_user_question", "exit_plan_mode"]
 
 
+def _merge_non_interactive_disabled_tools(config: VibeConfig) -> None:
+    for tool in NON_INTERACTIVE_DISABLED_TOOLS:
+        if tool not in config.disabled_tools:
+            config.disabled_tools.append(tool)
+
+
 class ForkSessionParams(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
@@ -200,6 +207,14 @@ class SessionSetTitleRequest(BaseModel):
         validation_alias=AliasChoices("session_id", "sessionId"), min_length=1
     )
     title: str = Field(min_length=1)
+
+
+class SessionDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    session_id: str = Field(
+        validation_alias=AliasChoices("session_id", "sessionId"), min_length=1
+    )
 
 
 class TelemetrySendNotification(BaseModel):
@@ -496,7 +511,8 @@ class VibeAcpAgentLoop(AcpAgent):
                 "browser-auth-delegated": {
                     "attemptId": attempt.process_id,
                     "expiresAt": (
-                        attempt.expires_at.astimezone(UTC)
+                        attempt.expires_at
+                        .astimezone(UTC)
                         .isoformat()
                         .replace("+00:00", "Z")
                     ),
@@ -578,7 +594,8 @@ class VibeAcpAgentLoop(AcpAgent):
 
     def _load_config(self) -> VibeConfig:
         try:
-            config = VibeConfig.load(disabled_tools=NON_INTERACTIVE_DISABLED_TOOLS)
+            config = VibeConfig.load()
+            _merge_non_interactive_disabled_tools(config)
             config.tool_paths.extend(self._get_acp_tool_overrides())
             return config
         except MissingAPIKeyError as e:
@@ -648,6 +665,7 @@ class VibeAcpAgentLoop(AcpAgent):
     async def new_session(
         self,
         cwd: str,
+        additional_directories: list[str] | None = None,
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> NewSessionResponse:
@@ -689,9 +707,9 @@ class VibeAcpAgentLoop(AcpAgent):
             if self.client_capabilities.fs:
                 fs = self.client_capabilities.fs
                 if fs.read_text_file:
-                    overrides.append("read_file")
+                    overrides.append("read")
                 if fs.write_text_file:
-                    overrides.extend(["write_file", "search_replace"])
+                    overrides.extend(["write_file", "edit"])
 
         return [
             VIBE_ROOT / "acp" / "tools" / "builtins" / f"{override}.py"
@@ -781,6 +799,13 @@ class VibeAcpAgentLoop(AcpAgent):
                 return candidate
 
         return None
+
+    def _find_live_session_by_requested_session_id(
+        self, session_id: str
+    ) -> AcpSessionLoop | None:
+        return self.sessions.get(
+            session_id
+        ) or self._find_acp_session_by_vibe_session_id(session_id)
 
     def _load_session_logging_config(self) -> SessionLoggingConfig:
         try:
@@ -904,6 +929,7 @@ class VibeAcpAgentLoop(AcpAgent):
         self,
         cwd: str,
         session_id: str,
+        additional_directories: list[str] | None = None,
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> LoadSessionResponse | None:
@@ -969,10 +995,8 @@ class VibeAcpAgentLoop(AcpAgent):
         return True
 
     async def _reload_config(self, session: AcpSessionLoop) -> None:
-        new_config = VibeConfig.load(
-            tool_paths=session.agent_loop.config.tool_paths,
-            disabled_tools=NON_INTERACTIVE_DISABLED_TOOLS,
-        )
+        new_config = VibeConfig.load(tool_paths=session.agent_loop.config.tool_paths)
+        _merge_non_interactive_disabled_tools(new_config)
         await session.agent_loop.reload_with_initial_messages(base_config=new_config)
 
     async def _apply_model_change(self, session: AcpSessionLoop, model_id: str) -> bool:
@@ -1040,7 +1064,11 @@ class VibeAcpAgentLoop(AcpAgent):
 
     @override
     async def list_sessions(
-        self, cursor: str | None = None, cwd: str | None = None, **kwargs: Any
+        self,
+        additional_directories: list[str] | None = None,
+        cursor: str | None = None,
+        cwd: str | None = None,
+        **kwargs: Any,
     ) -> ListSessionsResponse:
         try:
             config = VibeConfig.load()
@@ -1190,7 +1218,7 @@ class VibeAcpAgentLoop(AcpAgent):
                     text_prompt = f"{text_prompt}{separator}{block_prompt}"
                 case "resource_link":
                     # NOTE: we currently keep more information than just the URI
-                    # making it more detailed than the output of the read_file tool.
+                    # making it more detailed than the output of the read tool.
                     # This is OK, but might be worth testing how it affect performance.
                     fields = {
                         "uri": block.uri,
@@ -1370,6 +1398,7 @@ class VibeAcpAgentLoop(AcpAgent):
         self,
         cwd: str,
         session_id: str,
+        additional_directories: list[str] | None = None,
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> ForkSessionResponse:
@@ -1414,6 +1443,7 @@ class VibeAcpAgentLoop(AcpAgent):
         self,
         cwd: str,
         session_id: str,
+        additional_directories: list[str] | None = None,
         mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None,
         **kwargs: Any,
     ) -> ResumeSessionResponse:
@@ -1431,6 +1461,20 @@ class VibeAcpAgentLoop(AcpAgent):
 
         await self.client.session_update(
             session_id=session_id, update=SessionInfoUpdate(**update_kwargs)
+        )
+
+    async def _delete_saved_session(self, session_id: str) -> None:
+        try:
+            await delete_saved_session(session_id, self._load_session_logging_config())
+        except ValueError as exc:
+            raise SessionNotFoundError(session_id) from exc
+
+    def _live_session_has_saved_history(self, session: AcpSessionLoop) -> bool:
+        logger = session.agent_loop.session_logger
+        return (
+            logger.enabled
+            and logger.session_dir is not None
+            and logger.metadata_filepath.exists()
         )
 
     async def _persist_live_session_title(
@@ -1457,6 +1501,40 @@ class VibeAcpAgentLoop(AcpAgent):
                 f"Invalid ACP session title request: {exc}"
             ) from exc
 
+    async def _handle_session_delete(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request = SessionDeleteRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP session delete request: {exc}"
+            ) from exc
+
+        live_session = self._find_live_session_by_requested_session_id(
+            request.session_id
+        )
+        if live_session is None:
+            await self._delete_saved_session(request.session_id)
+            return {}
+
+        saved_session_id = live_session.agent_loop.session_id
+        has_saved_history = self._live_session_has_saved_history(live_session)
+
+        await self.close_session(live_session.id)
+
+        if not has_saved_history:
+            return {}
+
+        try:
+            await delete_saved_session(
+                saved_session_id, self._load_session_logging_config()
+            )
+        except ValueError as exc:
+            raise InternalError(
+                f"Failed to delete saved session {saved_session_id}: {exc}"
+            ) from exc
+
+        return {}
+
     async def _handle_session_set_title(self, params: dict[str, Any]) -> dict[str, Any]:
         try:
             request = SessionSetTitleRequest.model_validate(params)
@@ -1465,9 +1543,9 @@ class VibeAcpAgentLoop(AcpAgent):
                 f"Invalid ACP session title request: {exc}"
             ) from exc
 
-        live_session = self.sessions.get(
+        live_session = self._find_live_session_by_requested_session_id(
             request.session_id
-        ) or self._find_acp_session_by_vibe_session_id(request.session_id)
+        )
         if live_session is None:
             try:
                 metadata = await update_saved_session_title(
@@ -1562,6 +1640,9 @@ class VibeAcpAgentLoop(AcpAgent):
 
         if method == "session/set_title":
             return await self._handle_session_set_title(params)
+
+        if method == "session/delete":
+            return await self._handle_session_delete(params)
 
         raise NotImplementedMethodError(method)
 
@@ -1681,10 +1762,8 @@ class VibeAcpAgentLoop(AcpAgent):
 
     async def _reload_session_config(self, session: AcpSessionLoop) -> None:
         """Reload config from disk and reinitialize the agent loop."""
-        new_config = VibeConfig.load(
-            tool_paths=session.agent_loop.config.tool_paths,
-            disabled_tools=NON_INTERACTIVE_DISABLED_TOOLS,
-        )
+        new_config = VibeConfig.load(tool_paths=session.agent_loop.config.tool_paths)
+        _merge_non_interactive_disabled_tools(new_config)
         await session.agent_loop.reload_with_initial_messages(base_config=new_config)
 
     async def _handle_reload(

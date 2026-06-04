@@ -8,7 +8,7 @@ from acp.schema import ToolCallProgress, ToolCallStart
 from pydantic import BaseModel
 
 from vibe.acp.tools.builtins.grep import Grep
-from vibe.acp.tools.builtins.read_file import ReadFile
+from vibe.acp.tools.builtins.read import Read
 from vibe.acp.tools.builtins.skill import Skill
 from vibe.acp.tools.builtins.task import Task
 from vibe.acp.tools.builtins.web_fetch import WebFetch
@@ -19,7 +19,7 @@ from vibe.acp.tools.session_update import (
     tool_result_session_update,
 )
 from vibe.core.tools.builtins.grep import GrepArgs, GrepResult
-from vibe.core.tools.builtins.read_file import ReadFileArgs, ReadFileResult
+from vibe.core.tools.builtins.read import ReadArgs, ReadResult
 from vibe.core.tools.builtins.skill import SkillArgs, SkillResult
 from vibe.core.tools.builtins.task import TaskArgs, TaskResult
 from vibe.core.tools.builtins.webfetch import WebFetchArgs, WebFetchResult
@@ -99,10 +99,10 @@ class TestGrepFieldMeta:
         assert update.field_meta == {"tool_name": "grep"}
 
 
-class TestReadFileFieldMeta:
+class TestReadFieldMeta:
     def test_call_location_has_offset_and_limit(self) -> None:
         event = _call_event(
-            "read_file", ReadFile, ReadFileArgs(path="/tmp/f.txt", offset=10, limit=50)
+            "read", Read, ReadArgs(file_path="/tmp/f.txt", offset=10, limit=50)
         )
         update = tool_call_session_update(event)
 
@@ -110,26 +110,26 @@ class TestReadFileFieldMeta:
         assert update.locations is not None
         loc = update.locations[0]
         assert loc.field_meta == {"type": "file_range", "offset": 10, "limit": 50}
-        assert update.field_meta == {"tool_name": "read_file"}
+        assert update.field_meta == {"tool_name": "read"}
 
-    def test_call_defaults_offset_zero_limit_none(self) -> None:
-        event = _call_event("read_file", ReadFile, ReadFileArgs(path="/tmp/f.txt"))
+    def test_call_defaults_offset_none_limit_default(self) -> None:
+        event = _call_event("read", Read, ReadArgs(file_path="/tmp/f.txt"))
         update = tool_call_session_update(event)
 
         assert isinstance(update, ToolCallStart)
         assert update.locations is not None
         loc = update.locations[0]
-        assert loc.field_meta == {"type": "file_range", "offset": 0, "limit": None}
+        assert loc.field_meta == {"type": "file_range", "offset": None, "limit": 2000}
 
-    def test_result_location_has_offset_and_lines_read(self) -> None:
-        result = ReadFileResult(
-            path="/tmp/f.txt",
-            content="line1\nline2\nline3\n",
-            lines_read=3,
-            was_truncated=False,
-            offset=10,
+    def test_result_location_has_start_line_and_num_lines(self) -> None:
+        result = ReadResult(
+            file_path="/tmp/f.txt",
+            content="     1→line1\n     2→line2\n     3→line3",
+            num_lines=3,
+            start_line=10,
+            total_lines=20,
         )
-        event = _result_event("read_file", ReadFile, result)
+        event = _result_event("read", Read, result)
         update = tool_result_session_update(event)
 
         assert isinstance(update, ToolCallProgress)
@@ -287,9 +287,7 @@ class TestWriteFileFieldMeta:
         assert update.locations[0].path == str(Path("out.txt").resolve())
 
     def test_result_location_is_resolved_path(self) -> None:
-        result = WriteFileResult(
-            path="out.txt", content="hello", bytes_written=5, file_existed=False
-        )
+        result = WriteFileResult(path="out.txt", content="hello", bytes_written=5)
         event = _result_event("write_file", WriteFile, result)
         update = tool_result_session_update(event)
 

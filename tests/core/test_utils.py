@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from vibe.core.utils import compact_complete_display, get_server_url_from_api_base
 import vibe.core.utils.io as io_utils
-from vibe.core.utils.io import decode_safe, read_safe, read_safe_async
+from vibe.core.utils.io import (
+    _FILE_WRITE_LOCKS,
+    decode_safe,
+    file_write_lock,
+    read_lines_safe,
+    read_lines_safe_async,
+    read_safe,
+    read_safe_async,
+)
 
 
 @pytest.mark.parametrize(
@@ -201,3 +210,127 @@ class TestReadSafeAsync:
         assert (await read_safe_async(f, raise_on_error=False)).text == "maf�\n"
         with pytest.raises(UnicodeDecodeError):
             await read_safe_async(f, raise_on_error=True)
+
+
+class TestReadLinesSafe:
+    def test_small_file_fully_read(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("a\nb\nc\n", encoding="utf-8")
+        got = read_lines_safe(f, limit=100, max_bytes=1024)
+        assert got.lines == ["a", "b", "c"]
+        assert got.total_lines == 3
+        assert got.was_truncated is False
+
+    def test_no_trailing_newline(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("a\nb", encoding="utf-8")
+        got = read_lines_safe(f, limit=100, max_bytes=1024)
+        assert got.lines == ["a", "b"]
+        assert got.total_lines == 2
+        assert got.was_truncated is False
+
+    def test_truncates_at_limit(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("".join(f"line {i}\n" for i in range(1, 101)), encoding="utf-8")
+        got = read_lines_safe(f, limit=10, max_bytes=1024)
+        assert got.lines == [f"line {i}" for i in range(1, 11)]
+        assert got.total_lines is None
+        assert got.was_truncated is True
+
+    def test_offset_skips_leading_lines(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("".join(f"line {i}\n" for i in range(1, 11)), encoding="utf-8")
+        got = read_lines_safe(f, start_line=3, limit=2, max_bytes=1024)
+        assert got.lines == ["line 3", "line 4"]
+        assert got.was_truncated is True
+
+    def test_offset_past_eof_reports_total(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("a\nb\n", encoding="utf-8")
+        got = read_lines_safe(f, start_line=100, limit=10, max_bytes=1024)
+        assert got.lines == []
+        assert got.total_lines == 2
+        assert got.was_truncated is False
+
+    def test_does_not_load_whole_file(self, tmp_path: Path) -> None:
+        f = tmp_path / "big.txt"
+        f.write_text("".join(f"line {i}\n" for i in range(1_000_000)), encoding="utf-8")
+        got = read_lines_safe(f, limit=5, max_bytes=1024)
+        assert got.lines == [f"line {i}" for i in range(5)]
+        assert got.total_lines is None
+        assert got.was_truncated is True
+
+    def test_oversized_single_line_returns_partial(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("x" * 5000 + "\n", encoding="utf-8")
+        got = read_lines_safe(f, limit=10, max_bytes=1024)
+        assert got.lines == ["x" * 1024]
+        assert got.was_truncated is True
+
+    def test_cumulative_byte_budget_truncates(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("".join("x" * 200 + "\n" for _ in range(50)), encoding="utf-8")
+        got = read_lines_safe(f, limit=50, max_bytes=1024)
+        assert 0 < len(got.lines) < 50
+        assert got.total_lines is None
+        assert got.was_truncated is True
+
+    def test_oversized_unselected_line_is_skipped(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("x" * 5000 + "\nkept\n", encoding="utf-8")
+        got = read_lines_safe(f, start_line=2, limit=10, max_bytes=1024)
+        assert got.lines == ["kept"]
+
+    @pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be", "utf-16"])
+    def test_utf16_is_decoded(self, tmp_path: Path, encoding: str) -> None:
+        f = tmp_path / "u16.txt"
+        f.write_bytes("héllo\nwörld\n".encode(encoding))
+        got = read_lines_safe(f, limit=10, max_bytes=4096)
+        assert got.lines[-1] == "wörld"
+        # A leading BOM may remain as U+FEFF on the first line.
+        assert got.lines[0].endswith("héllo")
+
+    @pytest.mark.asyncio
+    async def test_async_matches_sync(self, tmp_path: Path) -> None:
+        f = tmp_path / "f.txt"
+        f.write_text("a\nb\nc\n", encoding="utf-8")
+        got = await read_lines_safe_async(f, limit=2, max_bytes=1024)
+        assert got.lines == ["a", "b"]
+        assert got.was_truncated is True
+
+
+class TestFileWriteLock:
+    @pytest.mark.asyncio
+    async def test_same_lock_for_different_path_spellings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        path = tmp_path / "f.txt"
+        path.touch()
+        _FILE_WRITE_LOCKS.clear()
+
+        order: list[str] = []
+        held = asyncio.Event()
+        release = asyncio.Event()
+
+        async def first() -> None:
+            async with file_write_lock(path):
+                order.append("first-acquired")
+                held.set()
+                await release.wait()
+                order.append("first-released")
+
+        async def second() -> None:
+            await held.wait()
+            # Same file, different spelling — must contend on the same lock.
+            async with file_write_lock(Path("f.txt")):
+                order.append("second-acquired")
+
+        t1 = asyncio.create_task(first())
+        t2 = asyncio.create_task(second())
+        await held.wait()
+        await asyncio.sleep(0)
+        assert order == ["first-acquired"]
+        release.set()
+        await asyncio.gather(t1, t2)
+        assert order == ["first-acquired", "first-released", "second-acquired"]

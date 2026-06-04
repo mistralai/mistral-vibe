@@ -5,13 +5,14 @@ from pathlib import Path
 from typing import Literal
 
 from vibe.core.session.title_format import MentionSegment, TextSegment, TitleSegment
+from vibe.core.types import IMAGE_EXTENSIONS
 
 
 @dataclass(frozen=True, slots=True)
 class PathResource:
     path: Path
     alias: str
-    kind: Literal["file", "folder"]
+    kind: Literal["file", "folder", "image"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,14 +81,17 @@ def _extract_candidate(message: str, start: int) -> tuple[str | None, int]:
 
 
 def _is_path_char(char: str) -> bool:
-    return char.isalnum() or char in "._/\\-()[]{}"
+    return char.isalnum() or char in "._/\\-()[]{}~"
 
 
 def _to_resource(candidate: str, base_dir: Path) -> PathResource | None:
     if not candidate:
         return None
 
-    candidate_path = Path(candidate)
+    try:
+        candidate_path = Path(candidate).expanduser()
+    except RuntimeError:
+        return None
     resolved = (
         candidate_path if candidate_path.is_absolute() else base_dir / candidate_path
     )
@@ -96,7 +100,13 @@ def _to_resource(candidate: str, base_dir: Path) -> PathResource | None:
     if not resolved.exists():
         return None
 
-    kind = "folder" if resolved.is_dir() else "file"
+    kind: Literal["file", "folder", "image"]
+    if resolved.is_dir():
+        kind = "folder"
+    elif resolved.suffix.lower() in IMAGE_EXTENSIONS:
+        kind = "image"
+    else:
+        kind = "file"
     return PathResource(path=resolved, alias=candidate, kind=kind)
 
 

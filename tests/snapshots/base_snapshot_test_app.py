@@ -63,8 +63,9 @@ class BaseSnapshotTestApp(VibeApp):
             agent_loop=agent_loop, plan_offer_gateway=plan_offer_gateway, **kwargs
         )
 
-    async def on_mount(self) -> None:
-        await super().on_mount()
+    async def on_ready(self):
+        # on_ready is called once all the on_mount in the MRO chain have been called
+        # https://textual.textualize.io/api/events/#textual.events.Ready
         self._hide_chat_input_cursor()
 
     def _hide_chat_input_cursor(self) -> None:

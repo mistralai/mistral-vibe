@@ -18,6 +18,7 @@ from vibe.cli.clipboard import (
     _read_clipboard,
     copy_selection_to_clipboard,
     copy_text_to_clipboard,
+    try_copy_text_to_clipboard,
 )
 
 
@@ -204,6 +205,32 @@ def test_copy_text_to_clipboard_shows_failure_when_clipboard_unavailable(
     mock_app.notify.assert_called_once_with(
         "Failed to copy - clipboard not available", severity="warning", timeout=3
     )
+
+
+@patch("vibe.cli.clipboard._copy_to_clipboard")
+def test_try_copy_text_to_clipboard_returns_true_when_copy_succeeds(
+    mock_copy_to_clipboard: MagicMock,
+) -> None:
+    result = try_copy_text_to_clipboard("assistant text")
+
+    assert result is True
+    mock_copy_to_clipboard.assert_called_once_with("assistant text")
+
+
+@patch("vibe.cli.clipboard._copy_to_clipboard")
+def test_try_copy_text_to_clipboard_returns_false_when_clipboard_unavailable(
+    mock_copy_to_clipboard: MagicMock,
+) -> None:
+    mock_copy_to_clipboard.side_effect = RuntimeError("All clipboard strategies failed")
+
+    result = try_copy_text_to_clipboard("assistant text")
+
+    assert result is False
+    mock_copy_to_clipboard.assert_called_once_with("assistant text")
+
+
+def test_try_copy_text_to_clipboard_returns_false_for_empty_text() -> None:
+    assert try_copy_text_to_clipboard("") is False
 
 
 def test_copy_text_to_clipboard_returns_none_for_empty_text(

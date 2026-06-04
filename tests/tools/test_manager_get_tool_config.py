@@ -6,7 +6,7 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.tools.manager import ToolManager
+from vibe.core.tools.manager import NoSuchToolError, ToolManager
 
 
 @pytest.fixture
@@ -75,17 +75,16 @@ def test_partial_override_preserves_tool_defaults():
     vibe_config = build_test_vibe_config(
         system_prompt_id="tests",
         include_project_context=False,
-        tools={"read_file": {"max_read_bytes": 32000}},
+        tools={"read": {"sensitive_patterns": ["**/*.key"]}},
     )
     manager = ToolManager(lambda: vibe_config)
 
-    config = manager.get_tool_config("read_file")
+    config = manager.get_tool_config("read")
 
     assert (
         config.permission == ToolPermission.ALWAYS
-    )  # ReadFileToolConfig default, not BaseToolConfig.ASK
-    assert config.sensitive_patterns == ["**/.env", "**/.env.*"]  # type: ignore[attr-defined]
-    assert config.max_read_bytes == 32000  # type: ignore[attr-defined]
+    )  # ReadConfig default, not BaseToolConfig.ASK
+    assert config.sensitive_patterns == ["**/*.key"]  # type: ignore[attr-defined]
 
 
 class TestToolManagerFiltering:
@@ -98,10 +97,10 @@ class TestToolManagerFiltering:
         manager = ToolManager(lambda: vibe_config)
 
         tools = manager.available_tools
-        assert len(tools) < len(manager._available)
+        assert len(tools) < len(manager._all_tools)
         assert "bash" in tools
         assert "grep" in tools
-        assert "read_file" not in tools
+        assert "read" not in tools
         assert "write_file" not in tools
 
     def test_disabled_tools_excludes_disabled(self):
@@ -113,11 +112,11 @@ class TestToolManagerFiltering:
         manager = ToolManager(lambda: vibe_config)
 
         tools = manager.available_tools
-        assert len(tools) < len(manager._available)
+        assert len(tools) < len(manager._all_tools)
         assert "bash" not in tools
         assert "write_file" not in tools
         assert "grep" in tools
-        assert "read_file" in tools
+        assert "read" in tools
 
     def test_enabled_tools_takes_precedence_over_disabled(self):
         vibe_config = build_test_vibe_config(
@@ -136,12 +135,11 @@ class TestToolManagerFiltering:
         vibe_config = build_test_vibe_config(
             system_prompt_id="tests",
             include_project_context=False,
-            disabled_tools=["*_file"],  # Matches read_file, write_file
+            disabled_tools=["write_*"],  # Matches write_file
         )
         manager = ToolManager(lambda: vibe_config)
 
         tools = manager.available_tools
-        assert "read_file" not in tools
         assert "write_file" not in tools
         assert "bash" in tools
         assert "grep" in tools
@@ -158,6 +156,18 @@ class TestToolManagerFiltering:
         assert len(tools) == 2
         assert "bash" in tools
         assert "grep" in tools
+
+    def test_get_raises_for_disabled_tool(self):
+        vibe_config = build_test_vibe_config(
+            system_prompt_id="tests",
+            include_project_context=False,
+            disabled_tools=["bash"],
+        )
+        manager = ToolManager(lambda: vibe_config)
+
+        assert "bash" not in manager.available_tools
+        with pytest.raises(NoSuchToolError):
+            manager.get("bash")
 
     def test_case_insensitive_matching(self):
         vibe_config = build_test_vibe_config(
@@ -180,7 +190,7 @@ class TestToolManagerFiltering:
         tools = manager.available_tools
         assert "bash" in tools
         assert "grep" in tools
-        assert "read_file" in tools
+        assert "read" in tools
 
     def test_tool_paths_with_file_and_directory(self, tmp_path: Path):
         """Should handle a mix of file and directory paths in tool_paths."""

@@ -44,7 +44,7 @@ class TestBannerInitialState:
         banner = Banner(
             config=_make_mock_config(),
             skill_manager=skill_manager,
-            connectors_enabled=5,
+            connectors_connected=5,
             connectors_total=5,
         )
 
@@ -54,7 +54,7 @@ class TestBannerInitialState:
             banner._initial_state.mcp_servers_enabled == 0
         )  # No MCP servers configured
         assert banner._initial_state.mcp_servers_total == 0
-        assert banner._initial_state.connectors_enabled == 5
+        assert banner._initial_state.connectors_connected == 5
         assert banner._initial_state.connectors_total == 5
         assert banner._initial_state.skills_count == 0
 
@@ -64,7 +64,7 @@ class TestBannerInitialState:
 
         banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
 
-        assert banner._initial_state.connectors_enabled == 0
+        assert banner._initial_state.connectors_connected == 0
         assert banner._initial_state.connectors_total == 0
 
     def test_banner_shows_thinking_level(self) -> None:
@@ -88,7 +88,7 @@ class TestBannerInitialState:
             models_count=2,
             mcp_servers_enabled=1,
             mcp_servers_total=2,
-            connectors_enabled=3,
+            connectors_connected=3,
             connectors_total=3,
             skills_count=5,
         )
@@ -103,7 +103,7 @@ class TestBannerInitialState:
             models_count=2,
             mcp_servers_enabled=1,
             mcp_servers_total=2,
-            connectors_enabled=0,
+            connectors_connected=0,
             connectors_total=0,
             skills_count=5,
         )
@@ -222,9 +222,9 @@ class TestBannerConnectorsCount:
         banner = Banner(
             config=_make_mock_config(),
             skill_manager=skill_manager,
-            connectors_enabled=3,
+            connectors_connected=3,
             connectors_total=5,
         )
 
-        assert banner._initial_state.connectors_enabled == 3
+        assert banner._initial_state.connectors_connected == 3
         assert banner._initial_state.connectors_total == 5

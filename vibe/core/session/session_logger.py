@@ -302,7 +302,9 @@ class SessionLogger:
             if len(new_messages) == 0:
                 return
 
-            messages_data = [m.model_dump(exclude_none=True) for m in new_messages]
+            messages_data = [
+                m.model_dump(exclude_none=True, mode="json") for m in new_messages
+            ]
             await SessionLogger.persist_messages(messages_data, session_dir)
 
             # If message update succeeded, write metadata

@@ -11,18 +11,9 @@ from vibe.core.tools.builtins.bash import (
     BashToolConfig,
     _collect_outside_dirs,
 )
+from vibe.core.tools.builtins.edit import Edit, EditArgs, EditConfig
 from vibe.core.tools.builtins.grep import Grep, GrepArgs, GrepToolConfig
-from vibe.core.tools.builtins.read_file import (
-    ReadFile,
-    ReadFileArgs,
-    ReadFileState,
-    ReadFileToolConfig,
-)
-from vibe.core.tools.builtins.search_replace import (
-    SearchReplace,
-    SearchReplaceArgs,
-    SearchReplaceConfig,
-)
+from vibe.core.tools.builtins.read import Read, ReadArgs, ReadConfig, ReadState
 from vibe.core.tools.builtins.webfetch import WebFetch, WebFetchArgs, WebFetchConfig
 from vibe.core.tools.builtins.write_file import (
     WriteFile,
@@ -262,24 +253,24 @@ class TestBashGranularPermissions:
         assert len(outside) >= 1
 
 
-class TestReadFileGranularPermissions:
+class TestReadGranularPermissions:
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         self.workdir = tmp_path
 
-    def _read_file(self, **kwargs):
-        config = ReadFileToolConfig(**kwargs)
-        return ReadFile(config_getter=lambda: config, state=ReadFileState())
+    def _read(self, **kwargs):
+        config = ReadConfig(**kwargs)
+        return Read(config_getter=lambda: config, state=ReadState())
 
     def test_in_workdir_normal_file_returns_none(self):
         (self.workdir / "test.py").touch()
-        tool = self._read_file()
-        assert tool.resolve_permission(ReadFileArgs(path="test.py")) is None
+        tool = self._read()
+        assert tool.resolve_permission(ReadArgs(file_path="test.py")) is None
 
     def test_outside_workdir_returns_permission_context(self):
-        tool = self._read_file()
-        result = tool.resolve_permission(ReadFileArgs(path="/tmp/file.txt"))
+        tool = self._read()
+        result = tool.resolve_permission(ReadArgs(file_path="/tmp/file.txt"))
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ASK
         outside = [
@@ -291,8 +282,8 @@ class TestReadFileGranularPermissions:
 
     def test_sensitive_env_file_returns_permission_context(self):
         (self.workdir / ".env").touch()
-        tool = self._read_file()
-        result = tool.resolve_permission(ReadFileArgs(path=".env"))
+        tool = self._read()
+        result = tool.resolve_permission(ReadArgs(file_path=".env"))
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ASK
         sensitive = [
@@ -305,8 +296,8 @@ class TestReadFileGranularPermissions:
 
     def test_sensitive_env_local_file(self):
         (self.workdir / ".env.local").touch()
-        tool = self._read_file()
-        result = tool.resolve_permission(ReadFileArgs(path=".env.local"))
+        tool = self._read()
+        result = tool.resolve_permission(ReadArgs(file_path=".env.local"))
         assert isinstance(result, PermissionContext)
         sensitive = [
             rp
@@ -316,31 +307,31 @@ class TestReadFileGranularPermissions:
         assert len(sensitive) == 1
 
     def test_sensitive_outside_both_permissions(self):
-        tool = self._read_file()
-        result = tool.resolve_permission(ReadFileArgs(path="/tmp/.env"))
+        tool = self._read()
+        result = tool.resolve_permission(ReadArgs(file_path="/tmp/.env"))
         assert isinstance(result, PermissionContext)
         scopes = {rp.scope for rp in result.required_permissions}
         assert PermissionScope.FILE_PATTERN in scopes
         assert PermissionScope.OUTSIDE_DIRECTORY in scopes
 
     def test_denylisted_returns_never(self):
-        tool = self._read_file(denylist=["*/secret*"])
-        result = tool.resolve_permission(ReadFileArgs(path="secret.key"))
+        tool = self._read(denylist=["*/secret*"])
+        result = tool.resolve_permission(ReadArgs(file_path="secret.key"))
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.NEVER
 
     def test_allowlisted_returns_always(self):
-        tool = self._read_file(allowlist=["*/README*"])
+        tool = self._read(allowlist=["*/README*"])
         result = tool.resolve_permission(
-            ReadFileArgs(path=str(self.workdir / "README.md"))
+            ReadArgs(file_path=str(self.workdir / "README.md"))
         )
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ALWAYS
 
     def test_custom_sensitive_patterns(self):
         (self.workdir / "credentials.json").touch()
-        tool = self._read_file(sensitive_patterns=["*/credentials*"])
-        result = tool.resolve_permission(ReadFileArgs(path="credentials.json"))
+        tool = self._read(sensitive_patterns=["*/credentials*"])
+        result = tool.resolve_permission(ReadArgs(file_path="credentials.json"))
         assert isinstance(result, PermissionContext)
 
 
@@ -371,23 +362,21 @@ class TestWriteFileGranularPermissions:
     def test_sensitive_env_file_asks(self):
         (self.workdir / ".env").touch()
         tool = self._write_file()
-        result = tool.resolve_permission(
-            WriteFileArgs(path=".env", content="x", overwrite=True)
-        )
+        result = tool.resolve_permission(WriteFileArgs(path=".env", content="x"))
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ASK
 
 
-class TestSearchReplaceGranularPermissions:
+class TestEditGranularPermissions:
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
 
     def test_outside_workdir_returns_permission_context(self):
-        config = SearchReplaceConfig()
-        tool = SearchReplace(config_getter=lambda: config, state=BaseToolState())
+        config = EditConfig()
+        tool = Edit(config_getter=lambda: config, state=BaseToolState())
         result = tool.resolve_permission(
-            SearchReplaceArgs(file_path="/tmp/file.py", content="x")
+            EditArgs(file_path="/tmp/file.py", old_string="a", new_string="b")
         )
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ASK
@@ -546,10 +535,10 @@ class TestApprovalFlowSimulation:
         uncovered = [rp for rp in cmd_perms if not self._is_covered("bash", rp, rules)]
         assert len(uncovered) == 1
 
-    def test_read_file_sensitive_approved_covers_subsequent(self):
+    def test_read_sensitive_approved_covers_subsequent(self):
         rules = [
             ApprovedRule(
-                tool_name="read_file",
+                tool_name="read",
                 scope=PermissionScope.FILE_PATTERN,
                 session_pattern="*",
             )
@@ -558,9 +547,9 @@ class TestApprovalFlowSimulation:
             scope=PermissionScope.FILE_PATTERN,
             invocation_pattern=".env.production",
             session_pattern="*",
-            label="reading sensitive files (read_file)",
+            label="reading sensitive files (read)",
         )
-        assert self._is_covered("read_file", rp, rules)
+        assert self._is_covered("read", rp, rules)
 
     def test_different_tool_rule_doesnt_cover(self):
         rules = [

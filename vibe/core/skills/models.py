@@ -98,6 +98,11 @@ class SkillInfo(BaseModel):
         )
 
 
+class SkillConfigIssue(BaseModel):
+    file: Path
+    message: str
+
+
 class ParsedSkillCommand(BaseModel):
     name: str
     content: str

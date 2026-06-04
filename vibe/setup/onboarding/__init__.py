@@ -7,6 +7,7 @@ from typing import Any
 from rich import print as rprint
 from textual.app import App
 
+from vibe.cli.clipboard import try_copy_text_to_clipboard
 from vibe.core.config import VibeConfig
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.telemetry.types import EntrypointMetadata
@@ -19,7 +20,11 @@ from vibe.setup.onboarding.screens import (
     ThemeSelectionScreen,
     WelcomeScreen,
 )
-from vibe.setup.onboarding.screens.browser_sign_in import SUCCESS_EXIT_DELAY_SECONDS
+from vibe.setup.onboarding.screens.browser_sign_in import (
+    SIGN_IN_URL_HELP_DELAY_SECONDS,
+    SUCCESS_EXIT_DELAY_SECONDS,
+    CopySignInUrl,
+)
 
 
 class OnboardingApp(App[str | None]):
@@ -32,6 +37,8 @@ class OnboardingApp(App[str | None]):
         | None = None,
         entrypoint_metadata: EntrypointMetadata | None = None,
         browser_sign_in_success_delay: float = SUCCESS_EXIT_DELAY_SECONDS,
+        browser_sign_in_url_help_delay: float = SIGN_IN_URL_HELP_DELAY_SECONDS,
+        copy_sign_in_url: CopySignInUrl | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -45,6 +52,8 @@ class OnboardingApp(App[str | None]):
         self._vibe_base_url = config.vibe_base_url
         self._entrypoint_metadata = entrypoint_metadata
         self._browser_sign_in_success_delay = browser_sign_in_success_delay
+        self._browser_sign_in_url_help_delay = browser_sign_in_url_help_delay
+        self._copy_sign_in_url = copy_sign_in_url or self._copy_sign_in_url_to_clipboard
         self._browser_sign_in_service_factory = self._resolve_browser_sign_in_factory(
             browser_sign_in_service_factory
         )
@@ -72,8 +81,10 @@ class OnboardingApp(App[str | None]):
                 BrowserSignInScreen(
                     self._provider,
                     self._browser_sign_in_service_factory,
+                    copy_sign_in_url=self._copy_sign_in_url,
                     entrypoint_metadata=self._entrypoint_metadata,
                     success_exit_delay=self._browser_sign_in_success_delay,
+                    sign_in_url_help_delay=self._browser_sign_in_url_help_delay,
                 ),
                 "browser_sign_in",
             )
@@ -108,6 +119,9 @@ class OnboardingApp(App[str | None]):
             browser_sign_in_service_factory
             or self._build_browser_sign_in_service_factory()
         )
+
+    def _copy_sign_in_url_to_clipboard(self, text: str) -> bool:
+        return try_copy_text_to_clipboard(text)
 
 
 def run_onboarding(

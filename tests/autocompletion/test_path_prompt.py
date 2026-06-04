@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from vibe.core.autocompletion.path_prompt import (
     build_path_prompt_payload,
     build_title_segments,
@@ -20,6 +22,47 @@ def test_deduplicates_same_file_mentioned_twice(tmp_path: Path) -> None:
     assert len(payload.resources) == 1
     assert payload.resources[0].path == readme
     assert len(payload.all_resources) == 2
+
+
+class TestTildeExpansion:
+    def test_tilde_path_expands_and_attaches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        shot = tmp_path / "shot.png"
+        shot.write_bytes(b"\x89PNG")
+
+        payload = build_path_prompt_payload("look at @~/shot.png", base_dir=tmp_path)
+
+        assert len(payload.resources) == 1
+        resource = payload.resources[0]
+        assert resource.path == shot.resolve()
+        assert resource.alias == "~/shot.png"
+        assert resource.kind == "image"
+
+    def test_bare_tilde_attaches_home_as_folder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        payload = build_path_prompt_payload("go to @~", base_dir=tmp_path)
+
+        assert len(payload.resources) == 1
+        assert payload.resources[0].path == tmp_path.resolve()
+        assert payload.resources[0].kind == "folder"
+
+    def test_unknown_user_tilde_does_not_crash(self, tmp_path: Path) -> None:
+        payload = build_path_prompt_payload(
+            "see @~nonexistentuser1234/x.png", base_dir=tmp_path
+        )
+
+        assert payload.resources == []
+
+    def test_tilde_mid_token_without_anchor_stays_text(self, tmp_path: Path) -> None:
+        payload = build_path_prompt_payload("foo~bar baz", base_dir=tmp_path)
+
+        assert payload.resources == []
+        assert payload.prompt_text == "foo~bar baz"
 
 
 class TestBuildTitleSegments:

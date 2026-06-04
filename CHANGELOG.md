@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.14.0] - 2026-06-04
+
+### Added
+
+- Image attachments via `@`-mentions in the TUI for vision-capable models
+- Session deletion, exposed over ACP as the `session/delete` extension method
+- Browser sign-in now shows a copyable fallback URL when the browser does not open, so SSH and remote sessions can complete onboarding
+- Toast notification when a `SKILL.md` file fails to parse instead of silently dropping the skill
+- Trust prompt now proposes the git repository ancestor as a trust target
+- `EnvironmentLayer` in the layered configuration, populated from `VIBE_`-prefixed environment variables
+
+### Changed
+
+- New tool-call format for `read` and the file `edit` tool
+- `write_file` is now create-only and refuses to overwrite existing files
+- Bumped `agent-client-protocol` to 0.10.1
+
+### Fixed
+
+- LLM calls now retry on network errors and timeouts (connection, read, write, remote protocol, timeout)
+- Approval modal now sizes itself so the bottom of long tool-call payloads stays visible above the options block
+- Banner connector count and `/mcp` panel ordering now reflect which connectors are actually usable and the user's enable/disable choices
+- `disabled_tools` from runtime is merged with the TOML configuration instead of replacing it, and is enforced inside `ToolManager.get()`
+- `shift+backspace` and `shift+delete` now work in the chat input
+- Crash in the ACP `todo` plan-update handler when the model's tool call failed validation
+
+### Removed
+
+- Recursive search for nested harness files
+
+
 ## [2.13.0] - 2026-05-29
 
 ### Added

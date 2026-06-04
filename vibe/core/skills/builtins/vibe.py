@@ -126,6 +126,7 @@ input_price = 1.5
 output_price = 7.5
 thinking = "high"                 # "off", "low", "medium", "high", "max"
 auto_compact_threshold = 200000
+supports_images = true            # vision-capable; allows @-mentioned images
 
 [[models]]
 name = "devstral-small-latest"
@@ -147,7 +148,7 @@ alias = "local"
 tool_paths = ["/path/to/custom/tools"]
 
 # Enable only specific tools (glob and regex supported)
-enabled_tools = ["bash", "read_file", "grep"]
+enabled_tools = ["bash", "read", "grep"]
 
 # Disable specific tools
 disabled_tools = ["webfetch"]
@@ -163,7 +164,7 @@ prompt for user permission before running the command.
 
 #### File Tool Permission Resolution
 
-File-based tools (`read_file`, `grep`, `write_file`, `search_replace`) resolve
+File-based tools (`read`, `grep`, `write_file`, `edit`) resolve
 permissions in this order (first match wins):
 
 1. **Scratchpad** path → always allowed
@@ -366,7 +367,7 @@ fix the problems. After 3 failed retries the hook stops retrying.
 ### Pattern Matching
 
 Tool, skill, and agent names support three matching modes:
-- **Exact**: `"bash"`, `"read_file"`
+- **Exact**: `"bash"`, `"read"`
 - **Glob**: `"bash*"`, `"mcp_*"`
 - **Regex**: `"re:^serena_.*$"` (full match, case-insensitive)
 
@@ -409,7 +410,7 @@ There are two kinds of agents:
 
 ### Subagents
 
-- **explore**: Read-only codebase exploration subagent (grep + read_file only).
+- **explore**: Read-only codebase exploration subagent (grep + read only).
   Spawned by the model, not selectable by the user.
 
 Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
@@ -448,6 +449,40 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/teleport` - Teleport session to Vibe Code Web (only available when Vibe Code is enabled)
 - `/exit` - Exit the application
 
+## File Mentions (`@`)
+
+Type `@` in the chat input to autocomplete files and folders from the
+project tree. Pressing Tab/Enter inserts the chosen path. Behavior
+depends on the file kind:
+
+- **Text files** are read at submit and their contents are inlined into the
+  prompt text (up to ~256KB).
+- **Folders** are inserted as a resource link header (name + uri).
+- **Image files** (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) become image
+  attachments — sent alongside the prompt as native multimodal content for
+  vision-capable models.
+
+Image attachments:
+
+- Require `supports_images = true` on the active model in `config.toml`.
+  By default this is enabled only on `mistral-vibe-cli-latest`. Sending
+  images to a non-vision model raises a clear error and the message is
+  not added to the conversation.
+- Snapshotted into `<session_dir>/attachments/<sha1>.<ext>` so that
+  resumed sessions stay reproducible even if the source file is moved.
+- Capped at 10 MB per image and 8 images per message.
+- Out-of-project paths work via `@/abs/path/to.png` (the picker only
+  suggests project files, but the `@`-parser accepts absolute paths).
+  Drag-and-drop from Finder into Terminal, iTerm2, or Ghostty is
+  intercepted at paste time: if the pasted content is a single bare
+  path to an image file (raw, `\\ `-escaped, or quoted), the input
+  automatically prepends `@` (and quotes paths containing spaces).
+  Non-image paths are pasted verbatim so non-image use cases are not
+  affected.
+- Rendered in the chat bubble as a dim footer line linking each
+  attachment to its snapshot. Clicking opens the file with the OS
+  default image viewer.
+
 ## Skills System
 
 Skills are specialized instruction sets the model can load on demand.
@@ -460,7 +495,7 @@ Each skill is a directory containing a `SKILL.md` file with YAML frontmatter.
 name: my-skill
 description: What this skill does and when to use it.
 user-invocable: true
-allowed-tools: bash read_file
+allowed-tools: bash read
 ---
 
 # Skill Instructions
@@ -511,9 +546,12 @@ directories. The trust database is stored in `~/.vibe/trusted_folders.toml`.
 Project-local config (`.vibe/` directory) is only loaded when the current
 directory is explicitly trusted.
 
-Interactive mode prompts to trust unknown folders. Programmatic mode
-(`-p`/`--prompt`) never prompts: the folder is untrusted. Use `--trust` to
-trust cwd for the current invocation only (not persisted).
+Interactive mode prompts to trust unknown folders. The prompt targets the
+closest ancestor of the cwd (the cwd itself included) containing a `.git`
+entry; the search excludes the user's home directory and the filesystem
+root, and falls back to the cwd if no qualifying ancestor is found.
+Programmatic mode (`-p`/`--prompt`) never prompts: the folder is untrusted.
+Use `--trust` to trust cwd for the current invocation only (not persisted).
 
 ## Sensitive Files — DO NOT READ OR EDIT
 
@@ -523,7 +561,7 @@ NEVER read, display, or edit any of these files:
 
 If the user asks to set or change an API key, instruct them to edit the `.env`
 file themselves. Do not offer to read it, write it, or display its contents.
-Do not use tools (read_file, write_file, bash cat/echo, etc.) to access these files.
+Do not use tools (read, write_file, bash cat/echo, etc.) to access these files.
 
 ## How to Modify Configuration
 
@@ -535,7 +573,7 @@ To help the user modify their Vibe configuration:
    same directory (e.g. `cp ~/.vibe/config.toml ~/.vibe/config.toml.bak`). This
    applies to any config file you are about to modify (`config.toml`,
    `trusted_folders.toml`, agent TOML files, etc.)
-3. **Edit the TOML file**: Make changes using the search_replace or write_file tool
+3. **Edit the TOML file**: Make changes using the edit tool
 4. **Reload**: The user can run `/reload` to apply changes without restarting
 
 For API keys, tell the user to edit `~/.vibe/.env` directly — never read or

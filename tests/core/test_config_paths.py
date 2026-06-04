@@ -78,26 +78,13 @@ class TestProjectToolsDirs:
         mgr = HarnessFilesManager(sources=("user", "project"))
         assert mgr.project_tools_dirs == []
 
-    def test_finds_tools_dirs_recursively(
+    def test_does_not_find_nested_tools_dirs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
         (tmp_path / ".vibe" / "tools").mkdir(parents=True)
         (tmp_path / "sub" / ".vibe" / "tools").mkdir(parents=True)
-        mgr = HarnessFilesManager(sources=("user", "project"))
-        assert mgr.project_tools_dirs == [
-            tmp_path / ".vibe" / "tools",
-            tmp_path / "sub" / ".vibe" / "tools",
-        ]
-
-    def test_does_not_descend_into_ignored_dirs(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
-        (tmp_path / ".vibe" / "tools").mkdir(parents=True)
-        (tmp_path / ".git" / ".vibe" / "tools").mkdir(parents=True)
         mgr = HarnessFilesManager(sources=("user", "project"))
         assert mgr.project_tools_dirs == [tmp_path / ".vibe" / "tools"]
 
@@ -147,26 +134,13 @@ class TestProjectAgentsDirs:
         mgr = HarnessFilesManager(sources=("user", "project"))
         assert mgr.project_agents_dirs == []
 
-    def test_finds_agents_dirs_recursively(
+    def test_does_not_find_nested_agents_dirs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
         (tmp_path / ".vibe" / "agents").mkdir(parents=True)
         (tmp_path / "sub" / "deep" / ".vibe" / "agents").mkdir(parents=True)
-        mgr = HarnessFilesManager(sources=("user", "project"))
-        assert mgr.project_agents_dirs == [
-            tmp_path / ".vibe" / "agents",
-            tmp_path / "sub" / "deep" / ".vibe" / "agents",
-        ]
-
-    def test_does_not_descend_into_ignored_dirs(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
-        (tmp_path / ".vibe" / "agents").mkdir(parents=True)
-        (tmp_path / "__pycache__" / ".vibe" / "agents").mkdir(parents=True)
         mgr = HarnessFilesManager(sources=("user", "project"))
         assert mgr.project_agents_dirs == [tmp_path / ".vibe" / "agents"]
 
@@ -544,7 +518,7 @@ class TestProjectSkillsDirs:
         mgr = HarnessFilesManager(sources=("user", "project"))
         assert mgr.project_skills_dirs == []
 
-    def test_finds_skills_dirs_recursively_in_trusted_folder(
+    def test_does_not_find_nested_skills_dirs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
@@ -552,20 +526,6 @@ class TestProjectSkillsDirs:
         (tmp_path / ".vibe" / "skills").mkdir(parents=True)
         (tmp_path / "sub" / ".agents" / "skills").mkdir(parents=True)
         (tmp_path / "sub" / "deep" / ".vibe" / "skills").mkdir(parents=True)
-        mgr = HarnessFilesManager(sources=("user", "project"))
-        assert mgr.project_skills_dirs == [
-            tmp_path / ".vibe" / "skills",
-            tmp_path / "sub" / ".agents" / "skills",
-            tmp_path / "sub" / "deep" / ".vibe" / "skills",
-        ]
-
-    def test_does_not_descend_into_ignored_dirs(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
-        (tmp_path / ".vibe" / "skills").mkdir(parents=True)
-        (tmp_path / "node_modules" / ".vibe" / "skills").mkdir(parents=True)
         mgr = HarnessFilesManager(sources=("user", "project"))
         assert mgr.project_skills_dirs == [tmp_path / ".vibe" / "skills"]
 

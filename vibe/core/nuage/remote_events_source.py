@@ -40,7 +40,7 @@ class RemoteEventsSource:
         self._next_start_seq = 0
         self._client: WorkflowsClient | None = None
         self._translator = RemoteWorkflowEventTranslator(
-            available_tools=self._tool_manager._available,
+            available_tools=self._tool_manager._all_tools,
             stats=self.stats,
             merge_message=self._merge_message,
         )

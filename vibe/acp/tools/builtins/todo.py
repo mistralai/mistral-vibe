@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from typing import cast
-
 from acp.helpers import SessionUpdate
 from acp.schema import AgentPlanUpdate, PlanEntry, PlanEntryPriority, PlanEntryStatus
 
 from vibe import VIBE_ROOT
 from vibe.acp.tools.base import AcpToolState, BaseAcpTool
+from vibe.acp.tools.session_update import failed_tool_result
 from vibe.core.tools.builtins.todo import (
     Todo as CoreTodoTool,
     TodoArgs,
@@ -38,7 +37,11 @@ class Todo(CoreTodoTool, BaseAcpTool[AcpTodoState]):
 
     @classmethod
     def tool_result_session_update(cls, event: ToolResultEvent) -> SessionUpdate | None:
-        result = cast(TodoResult, event.result)
+        if failure := failed_tool_result(event, TodoResult):
+            return failure
+
+        result = event.result
+        assert isinstance(result, TodoResult)
         todos = [todo for todo in result.todos if todo.status != TodoStatus.CANCELLED]
         matched_status: dict[TodoStatus, PlanEntryStatus] = {
             TodoStatus.PENDING: "pending",

@@ -14,9 +14,9 @@ from vibe.core.config.harness_files._paths import (
 from vibe.core.paths import (
     AGENTS_MD_FILENAME,
     VIBE_HOME,
-    ConfigWalkResult,
+    LocalConfigDirs,
     dedup_paths,
-    walk_local_config_dirs,
+    find_local_config_dirs,
 )
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.utils.io import read_safe
@@ -60,19 +60,18 @@ class HarnessFilesManager:
         """Open project directories: trusted cwd (if any) plus ``--add-dir``
         paths.
 
-        ``--add-dir`` entries are coalesced (resolved + nested-collapse: adding
-        ``/x`` and ``/x/y`` is the same as just ``/x``). Add-dirs equal to or
-        nested inside the cwd are dropped — cwd already covers them. The cwd
-        itself, if trusted, is always kept as a starting point: when an add-dir
-        contains it, both survive (the add-dir contributes its own root-level
-        discovery; cwd preserves its walk-up semantics for AGENTS.md).
+        ``--add-dir`` entries are resolved and deduplicated; nested paths are
+        preserved because project config discovery is root-level only.
+        Add-dirs equal to the cwd are dropped (redundant). When an add-dir
+        contains the cwd, both survive (the add-dir contributes its own
+        root-level discovery; cwd preserves walk-up semantics for AGENTS.md).
         """
-        add_dirs = dedup_paths(self._additional_dirs, drop_nested=True)
+        add_dirs = dedup_paths(self._additional_dirs)
         workdir = self._trusted_workdir
         if workdir is None:
             return add_dirs
         w = workdir.resolve()
-        return [w, *(p for p in add_dirs if p != w and not p.is_relative_to(w))]
+        return [w, *(p for p in add_dirs if p != w)]
 
     @property
     def hook_files(self) -> list[Path]:
@@ -110,23 +109,23 @@ class HarnessFilesManager:
         d = GLOBAL_AGENTS_DIR.path
         return [d] if d.is_dir() else []
 
-    def _walk_project_roots(self) -> ConfigWalkResult:
-        result = ConfigWalkResult()
+    def _collect_project_roots(self) -> LocalConfigDirs:
+        result = LocalConfigDirs()
         for root in self.project_roots:
-            result |= walk_local_config_dirs(root)
+            result |= find_local_config_dirs(root)
         return result
 
     @property
     def project_tools_dirs(self) -> list[Path]:
-        return list(self._walk_project_roots().tools)
+        return list(self._collect_project_roots().tools)
 
     @property
     def project_skills_dirs(self) -> list[Path]:
-        return list(self._walk_project_roots().skills)
+        return list(self._collect_project_roots().skills)
 
     @property
     def project_agents_dirs(self) -> list[Path]:
-        return list(self._walk_project_roots().agents)
+        return list(self._collect_project_roots().agents)
 
     @property
     def user_config_file(self) -> Path:

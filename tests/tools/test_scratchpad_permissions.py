@@ -11,12 +11,7 @@ from vibe.core.tools.builtins.bash import (
     BashToolConfig,
     _collect_outside_dirs,
 )
-from vibe.core.tools.builtins.read_file import (
-    ReadFile,
-    ReadFileArgs,
-    ReadFileState,
-    ReadFileToolConfig,
-)
+from vibe.core.tools.builtins.read import Read, ReadArgs, ReadConfig, ReadState
 from vibe.core.tools.builtins.write_file import (
     WriteFile,
     WriteFileArgs,
@@ -41,13 +36,11 @@ class TestFileToolScratchpadPermissions:
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ALWAYS
 
-    def test_read_file_scratchpad_always_allowed(self):
+    def test_read_scratchpad_always_allowed(self):
         sp = scratchpad_mod.get_scratchpad_dir("test-session")
         assert sp is not None
-        tool = ReadFile(
-            config_getter=lambda: ReadFileToolConfig(), state=ReadFileState()
-        )
-        result = tool.resolve_permission(ReadFileArgs(path=str(sp / "notes.txt")))
+        tool = Read(config_getter=lambda: ReadConfig(), state=ReadState())
+        result = tool.resolve_permission(ReadArgs(file_path=str(sp / "notes.txt")))
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ALWAYS
 

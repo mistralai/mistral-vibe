@@ -292,6 +292,22 @@ Markdown {
     height: auto;
 }
 
+.user-message-row {
+    width: 100%;
+    height: auto;
+}
+
+.user-message-attachments {
+    width: 100%;
+    height: auto;
+    padding-left: 2;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
 .user-message-prompt {
     width: auto;
     height: auto;
@@ -934,7 +950,7 @@ StatusMessage {
 
 #approval-app {
     width: 100%;
-    height: auto;
+    /* height set by ApprovalApp._recompute_height; max-height below caps it */
     max-height: 70vh;
     background: transparent;
     border: solid $foreground-muted;
@@ -945,18 +961,16 @@ StatusMessage {
 #approval-options {
     width: 100%;
     height: auto;
-    dock: bottom;
 }
 
 #approval-content {
     width: 100%;
-    height: auto;
+    height: 1fr;
 }
 
 .approval-tool-info-scroll {
     width: 100%;
-    height: auto;
-    max-height: 50vh;
+    height: 1fr;
 }
 
 .approval-title {

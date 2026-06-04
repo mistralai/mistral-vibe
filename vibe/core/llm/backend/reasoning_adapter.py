@@ -5,6 +5,7 @@ import json
 from typing import Any, ClassVar
 
 from vibe.core.config import ProviderConfig
+from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
 from vibe.core.types import (
     AvailableTool,
@@ -26,6 +27,15 @@ class ReasoningAdapter(APIAdapter):
             case Role.system:
                 return {"role": "system", "content": msg.content or ""}
             case Role.user:
+                if msg.images:
+                    parts: list[dict[str, Any]] = []
+                    if msg.content:
+                        parts.append({"type": "text", "text": msg.content})
+                    parts.extend(
+                        {"type": "image_url", "image_url": {"url": _to_data_uri(att)}}
+                        for att in msg.images
+                    )
+                    return {"role": "user", "content": parts}
                 return {"role": "user", "content": msg.content or ""}
             case Role.assistant:
                 return self._convert_assistant_message(msg)

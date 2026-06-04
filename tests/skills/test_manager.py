@@ -115,7 +115,7 @@ class TestSkillManagerParsing:
             license="MIT",
             compatibility="Requires git",
             metadata={"author": "Test Author", "version": "1.0"},
-            allowed_tools="bash read_file",
+            allowed_tools="bash read",
         )
 
         config = build_test_vibe_config(
@@ -132,7 +132,7 @@ class TestSkillManagerParsing:
         assert skill.license == "MIT"
         assert skill.compatibility == "Requires git"
         assert skill.metadata == {"author": "Test Author", "version": "1.0"}
-        assert skill.allowed_tools == ["bash", "read_file"]
+        assert skill.allowed_tools == ["bash", "read"]
 
     def test_sets_correct_skill_path(self, skills_dir: Path) -> None:
         create_skill(skills_dir, "test-skill", "A test skill")
@@ -568,6 +568,47 @@ class TestParseSkillCommand:
         parsed = manager.parse_skill_command("/MY-SKILL")
         assert parsed is not None
         assert parsed.name == "my-skill"
+
+
+class TestSkillManagerConfigIssues:
+    def test_invalid_frontmatter_records_config_issue(self, skills_dir: Path) -> None:
+        broken_dir = skills_dir / "broken-skill"
+        broken_dir.mkdir()
+        (broken_dir / "SKILL.md").write_text("No frontmatter here")
+
+        config = build_test_vibe_config(
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+        )
+        manager = SkillManager(lambda: config)
+
+        assert len(manager.config_issues) == 1
+        issue = manager.config_issues[0]
+        assert issue.file == broken_dir / "SKILL.md"
+        assert "Failed to load" in issue.message
+
+    def test_multiple_invalid_skills_accumulate_issues(self, skills_dir: Path) -> None:
+        broken_dir_a = skills_dir / "broken-skill-a"
+        broken_dir_a.mkdir()
+        (broken_dir_a / "SKILL.md").write_text("not valid")
+        broken_dir = skills_dir / "broken-skill"
+        broken_dir.mkdir()
+        (broken_dir / "SKILL.md").write_text("not valid")
+        create_skill(skills_dir, "good-skill", "Works fine")
+
+        config = build_test_vibe_config(
+            system_prompt_id="tests",
+            include_project_context=False,
+            skill_paths=[skills_dir],
+        )
+        manager = SkillManager(lambda: config)
+
+        assert {
+            (i.file, i.message.startswith("Failed to load"))
+            for i in manager.config_issues
+        } == {(broken_dir_a / "SKILL.md", True), (broken_dir / "SKILL.md", True)}
+        assert "good-skill" in manager.available_skills
 
 
 class TestBuildSkillPrompt:

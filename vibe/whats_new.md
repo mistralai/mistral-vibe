@@ -1,5 +1,4 @@
-# What's new in v2.13.0
+# What's new in v2.14.0
 
-- **Custom compaction prompts**: Override the default `/compact` prompt by setting `compaction_prompt_id` and dropping a markdown file in `~/.vibe/prompts/` or `.vibe/prompts/`.
-- **Safer programmatic mode**: `-p` no longer auto-approves tool calls by default — pass `--auto-approve` to restore the previous behavior.
-- **Teleport Vibe Code Web**: `/teleport` now uses the new Vibe Code Web sessions.
+- **Image attachments**: Drop an image into the chat input — or `@`-mention it — and send it to vision-capable models.
+- **New read and edit tools**: `read` and `edit` replace `read_file` and `search_replace`. Your config has been migrated to these new tool names.

@@ -91,7 +91,8 @@ def _write_tls_material(tmp_path: Path) -> _TLSMaterial:
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Vibe test CA")])
     ca_cert = (
-        x509.CertificateBuilder()
+        x509
+        .CertificateBuilder()
         .subject_name(ca_name)
         .issuer_name(ca_name)
         .public_key(ca_key.public_key())
@@ -105,7 +106,8 @@ def _write_tls_material(tmp_path: Path) -> _TLSMaterial:
     server_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     server_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
     server_cert = (
-        x509.CertificateBuilder()
+        x509
+        .CertificateBuilder()
         .subject_name(server_name)
         .issuer_name(ca_cert.subject)
         .public_key(server_key.public_key())
