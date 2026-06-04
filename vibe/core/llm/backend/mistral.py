@@ -279,6 +279,18 @@ class MistralBackend:
             self._client = self._create_mistral_client()
         return self._client
 
+    def _prepare_messages(
+        self, messages: Sequence[LLMMessage], model: ModelConfig
+    ) -> list[ChatCompletionRequestMessage]:
+        if model.supports_images:
+            return [self._mapper.prepare_message(msg) for msg in messages]
+        return [
+            self._mapper.prepare_message(
+                msg.model_copy(update={"images": None}) if msg.images else msg
+            )
+            for msg in messages
+        ]
+
     async def complete(
         self,
         *,
@@ -298,7 +310,7 @@ class MistralBackend:
 
             response = await self._get_client().chat.complete_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+                messages=self._prepare_messages(messages, model),
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools
@@ -376,7 +388,7 @@ class MistralBackend:
 
             stream = await self._get_client().chat.stream_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+                messages=self._prepare_messages(messages, model),
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools

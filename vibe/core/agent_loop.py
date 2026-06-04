@@ -900,7 +900,9 @@ class AgentLoop:  # noqa: PLR0904
         if user_message.message_id is None:
             raise AgentLoopError("User message must have a message_id")
 
-        yield UserMessageEvent(content=user_msg, message_id=user_message.message_id)
+        yield UserMessageEvent(
+            content=user_msg, message_id=user_message.message_id, images=images or []
+        )
 
         if auto_title is not None and self.session_logger.set_initial_auto_title(
             auto_title

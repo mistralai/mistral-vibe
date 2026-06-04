@@ -26,6 +26,7 @@ from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.voice_manager.voice_manager_port import VoiceManagerPort
 from vibe.core.agents import AgentSafety
 from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
+from vibe.core.types import ImageAttachment
 
 SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
     AgentSafety.SAFE: "border-safe",
@@ -45,8 +46,9 @@ class ChatInputContainer(Vertical):
     REMOTE_BORDER_CLASS = "border-remote"
 
     class Submitted(Message):
-        def __init__(self, value: str) -> None:
+        def __init__(self, value: str, images: list[ImageAttachment] | None = None) -> None:
             self.value = value
+            self.images: list[ImageAttachment] = images or []
             super().__init__()
 
     def __init__(
@@ -58,6 +60,7 @@ class ChatInputContainer(Vertical):
         skill_entries_getter: Callable[[], list[tuple[str, str]]] | None = None,
         file_watcher_for_autocomplete_getter: Callable[[], bool] | None = None,
         voice_manager: VoiceManagerPort | None = None,
+        vision_supported_getter: Callable[[], bool] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -70,6 +73,7 @@ class ChatInputContainer(Vertical):
             file_watcher_for_autocomplete_getter
         )
         self._voice_manager = voice_manager
+        self._vision_supported_getter = vision_supported_getter
         self._custom_border_label: str | None = None
         self._custom_border_class: str | None = None
 
@@ -105,6 +109,7 @@ class ChatInputContainer(Vertical):
                 command_registry=self._command_registry,
                 id="input-body",
                 voice_manager=self._voice_manager,
+                vision_supported_getter=self._vision_supported_getter,
             )
 
             yield self._body
@@ -229,7 +234,7 @@ class ChatInputContainer(Vertical):
 
     def on_chat_input_body_submitted(self, event: ChatInputBody.Submitted) -> None:
         event.stop()
-        self.post_message(self.Submitted(event.value))
+        self.post_message(self.Submitted(event.value, images=event.images))
 
     @property
     def switching_mode(self) -> bool:

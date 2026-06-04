@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
@@ -7,9 +8,12 @@ from typing import Any, ClassVar
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.message import Message
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
+from vibe.cli.clipboard import get_clipboard_image_attachment, has_clipboard_image
+from vibe.core.types import ImageAttachment
 from vibe.cli.commands import CommandRegistry
 from vibe.cli.history_manager import HistoryManager
 from vibe.cli.textual_ui.recording.recording_indicator import RecordingIndicator
@@ -38,9 +42,19 @@ class _PromptSpinner(SpinnerMixin, Static):
 
 
 class ChatInputBody(VoiceManagerListener, Widget):
+    DEFAULT_CSS = """
+    ChatInputBody #image-hint {
+        height: 1;
+        padding-left: 2;
+        display: none;
+    }
+    """
+
+
     class Submitted(Message):
-        def __init__(self, value: str) -> None:
+        def __init__(self, value: str, images: list[ImageAttachment] | None = None) -> None:
             self.value = value
+            self.images: list[ImageAttachment] = images or []
             super().__init__()
 
     def __init__(
@@ -48,6 +62,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
         command_registry: CommandRegistry,
         history_file: Path | None = None,
         voice_manager: VoiceManagerPort | None = None,
+        vision_supported_getter: Callable[[], bool] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -56,7 +71,11 @@ class ChatInputBody(VoiceManagerListener, Widget):
         self._command_registry = command_registry
         self._switching_mode = False
         self._voice_manager = voice_manager
+        self._vision_supported_getter = vision_supported_getter
         self._recording_indicator: RecordingIndicator | None = None
+        self._pending_image: ImageAttachment | None = None
+        self._clipboard_has_image: bool = False
+        self._clipboard_poll_timer: Timer | None = None
 
         if history_file:
             self.history = HistoryManager(history_file)
@@ -76,16 +95,61 @@ class ChatInputBody(VoiceManagerListener, Widget):
                 voice_manager=self._voice_manager,
             )
             yield self.input_widget
+        yield Static("", id="image-hint")
 
     def on_mount(self) -> None:
         if self.input_widget:
             self.input_widget.focus()
         if self._voice_manager:
             self._voice_manager.add_listener(self)
+        self._clipboard_poll_timer = self.set_interval(1.5, self._poll_clipboard)
+
+    async def _poll_clipboard(self) -> None:
+        has_img = await asyncio.to_thread(has_clipboard_image)
+        if has_img != self._clipboard_has_image:
+            self._clipboard_has_image = has_img
+            self._update_image_hint()
+
+    async def on_chat_text_area_image_paste_requested(
+        self, _event: ChatTextArea.ImagePasteRequested
+    ) -> None:
+        if self._pending_image:
+            self._pending_image = None
+            self._update_image_hint()
+            return
+        if self._vision_supported_getter and not self._vision_supported_getter():
+            self.notify(
+                "Current model does not support images", severity="error", timeout=3
+            )
+            return
+        attachment = await asyncio.to_thread(get_clipboard_image_attachment)
+        if attachment:
+            self._pending_image = attachment
+            self._update_image_hint()
+        else:
+            self.notify("No image found in clipboard", severity="warning", timeout=2)
+
+    def _update_image_hint(self) -> None:
+        try:
+            hint = self.query_one("#image-hint", Static)
+        except Exception:
+            return
+        if self._pending_image:
+            hint.update(
+                "[$primary reverse bold] Image 1 [/]  [dim]· Ctrl+V to remove[/dim]"
+            )
+            hint.display = True
+        elif self._clipboard_has_image:
+            hint.update("[dim]Image in clipboard  ·  Ctrl+V to attach[/dim]")
+            hint.display = True
+        else:
+            hint.display = False
 
     def on_unmount(self) -> None:
         if self._voice_manager:
             self._voice_manager.remove_listener(self)
+        if self._clipboard_poll_timer:
+            self._clipboard_poll_timer.stop()
 
     def _parse_mode_and_text(self, text: str) -> tuple[InputMode, str]:
         if text.startswith("!"):
@@ -183,7 +247,11 @@ class ChatInputBody(VoiceManagerListener, Widget):
 
             self._notify_completion_reset()
 
-            self.post_message(self.Submitted(value))
+            images = [self._pending_image] if self._pending_image else []
+            self._pending_image = None
+            self._update_image_hint()
+
+            self.post_message(self.Submitted(value, images=images))
 
     @property
     def switching_mode(self) -> bool:

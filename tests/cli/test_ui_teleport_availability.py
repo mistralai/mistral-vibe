@@ -175,7 +175,9 @@ async def test_hidden_teleport_command_falls_through_as_user_text() -> None:
         )
 
         app._handle_teleport_command.assert_not_awaited()
-        app._handle_user_message.assert_awaited_once_with("/teleport")
+        app._handle_user_message.assert_awaited_once_with(
+            "/teleport", clipboard_images=[]
+        )
 
 
 @pytest.mark.asyncio
@@ -196,7 +198,9 @@ async def test_hidden_ampersand_teleport_shortcut_falls_through_as_user_text() -
         )
 
         app._handle_teleport_command.assert_not_awaited()
-        app._handle_user_message.assert_awaited_once_with("&continue")
+        app._handle_user_message.assert_awaited_once_with(
+            "&continue", clipboard_images=[]
+        )
 
 
 @pytest.mark.asyncio

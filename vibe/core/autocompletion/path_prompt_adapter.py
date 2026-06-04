@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Sequence
 import mimetypes
 from pathlib import Path
@@ -12,6 +13,14 @@ from vibe.core.autocompletion.path_prompt import (
 from vibe.core.utils.io import decode_safe
 
 DEFAULT_MAX_EMBED_BYTES = 256 * 1024
+DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB
+
+SUPPORTED_IMAGE_MIME_TYPES = frozenset({
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+})
 
 ResourceBlock = dict[str, str | None]
 
@@ -179,3 +188,5 @@ def _is_probably_text(path: PathResource, data: bytes) -> bool:
         or b == DEL_CODE
     )
     return (non_text / len(data)) < NON_PRINTABLE_MAX_PROPORTION
+
+

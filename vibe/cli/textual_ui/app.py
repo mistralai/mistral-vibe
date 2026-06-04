@@ -515,6 +515,7 @@ class VibeApp(App):  # noqa: PLR0904
                 skill_entries_getter=self._get_skill_entries,
                 file_watcher_for_autocomplete_getter=self._is_file_watcher_enabled,
                 voice_manager=self._voice_manager,
+                vision_supported_getter=self._is_vision_supported,
             )
 
         with Horizontal(id="bottom-bar"):
@@ -638,6 +639,12 @@ class VibeApp(App):  # noqa: PLR0904
     def _is_file_watcher_enabled(self) -> bool:
         return self.config.file_watcher_for_autocomplete
 
+    def _is_vision_supported(self) -> bool:
+        try:
+            return self.agent_loop.config.get_active_model().supports_images
+        except ValueError:
+            return True
+
     def on_key(self) -> None:
         if self._fatal_init_error:
             self.exit()
@@ -656,6 +663,8 @@ class VibeApp(App):  # noqa: PLR0904
         if not value:
             return
 
+        clipboard_images = event.images
+
         input_widget = self.query_one(ChatInputContainer)
         input_widget.value = ""
 
@@ -666,9 +675,11 @@ class VibeApp(App):  # noqa: PLR0904
         if self._agent_running:
             await self._interrupt_agent_loop()
 
-        await self._dispatch_submitted_input(value)
+        await self._dispatch_submitted_input(value, clipboard_images=clipboard_images)
 
-    async def _dispatch_submitted_input(self, value: str) -> None:
+    async def _dispatch_submitted_input(
+        self, value: str, clipboard_images: list[ImageAttachment] | None = None
+    ) -> None:
         if value.startswith("!"):
             self._bash_task = asyncio.create_task(self._handle_bash_command(value[1:]))
             return
@@ -683,7 +694,7 @@ class VibeApp(App):  # noqa: PLR0904
         if await self._handle_skill(value):
             return
 
-        await self._handle_user_message(value)
+        await self._handle_user_message(value, clipboard_images=clipboard_images)
 
     async def on_approval_app_approval_granted(
         self, message: ApprovalApp.ApprovalGranted
@@ -1278,25 +1289,31 @@ class VibeApp(App):  # noqa: PLR0904
         return "\n\n".join(sections)
 
     async def _handle_user_message(
-        self, message: str, *, title_source: str | None = None
+        self,
+        message: str,
+        *,
+        title_source: str | None = None,
+        clipboard_images: list[ImageAttachment] | None = None,
     ) -> None:
         if self._remote_manager.is_active:
             await self._handle_remote_user_message(message)
             return
 
         prompt_payload = build_path_prompt_payload(message, base_dir=Path.cwd())
-        images = await self._prepare_images_or_abort(prompt_payload)
-        if images is None:
+        inline_images = await self._prepare_images_or_abort(prompt_payload)
+        if inline_images is None:
             input_widget = self.query_one(ChatInputContainer)
             if not input_widget.value:
                 input_widget.value = message
             return
 
+        all_images = (inline_images or []) + (clipboard_images or [])
+
         # message_index is where the user message will land in agent_loop.messages
         # (checkpoint is created in agent_loop.act())
         message_index = len(self.agent_loop.messages)
         user_message = UserMessage(
-            message, message_index=message_index, images=images or None
+            message, message_index=message_index, images=all_images or None
         )
 
         await self._mount_and_scroll(user_message)
@@ -1311,7 +1328,7 @@ class VibeApp(App):  # noqa: PLR0904
                 self._handle_agent_loop_turn(
                     message,
                     title_source=title_source,
-                    prebuilt_images=images,
+                    prebuilt_images=all_images or None,
                     prebuilt_payload=prompt_payload,
                 )
             )

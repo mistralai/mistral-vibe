@@ -382,6 +382,7 @@ class BaseEvent(BaseModel, ABC):
 class UserMessageEvent(BaseEvent):
     content: str
     message_id: str
+    images: list[ImageAttachment] = Field(default_factory=list)
 
 
 class AssistantEvent(BaseEvent):

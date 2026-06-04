@@ -40,6 +40,7 @@ class ChatTextArea(TextArea):
         Binding("shift+backspace", "delete_left", "Delete character left", show=False),
         Binding("shift+delete", "delete_right", "Delete character right", show=False),
         Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
+        Binding("ctrl+v", "image_paste", "Attach Image", show=False, priority=True),
     ]
 
     DEFAULT_MODE: ClassVar[Literal[">"]] = ">"
@@ -65,6 +66,9 @@ class ChatTextArea(TextArea):
             self.mode = mode
             super().__init__()
 
+    class ImagePasteRequested(Message):
+        """Fired when ctrl+v is pressed, so the parent can try attaching a clipboard image."""
+
     def __init__(
         self,
         command_registry: CommandRegistry,
@@ -83,6 +87,9 @@ class ChatTextArea(TextArea):
         self._app_has_focus: bool = True
         self._voice_manager = voice_manager
         self._last_keystroke_time: float = 0.0
+
+    def action_image_paste(self) -> None:
+        self.post_message(self.ImagePasteRequested())
 
     def on_blur(self, event: events.Blur) -> None:
         if self._app_has_focus:

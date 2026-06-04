@@ -83,6 +83,11 @@ class UserMessage(Static):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="user-message-wrapper"):
+            if self._images:
+                badges = "  ".join(
+                    f"📎 Image {i + 1}" for i in range(len(self._images))
+                )
+                yield NonSelectableStatic(badges, classes="user-message-image-badges")
             with Horizontal(classes="user-message-container"):
                 yield NonSelectableStatic(
                     f"{self.PROMPT_CHAR} ", classes="user-message-prompt"

@@ -371,6 +371,9 @@ DEFAULT_AUTO_COMPACT_THRESHOLD = 200_000
 DEFAULT_API_TIMEOUT = 720.0
 
 
+_NON_VISION_MODEL_PATTERNS: tuple[str, ...] = ("devstral", "codestral")
+
+
 class ModelConfig(BaseModel):
     name: str
     provider: str
@@ -381,7 +384,14 @@ class ModelConfig(BaseModel):
     thinking: ThinkingLevel = "off"
     supports_images: bool = False
     auto_compact_threshold: int = DEFAULT_AUTO_COMPACT_THRESHOLD
+
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
+
+    @model_validator(mode="after")
+    def _infer_vision_support(self) -> "ModelConfig":
+        if any(p in self.name.lower() for p in _NON_VISION_MODEL_PATTERNS):
+            self.supports_images = False
+        return self
 
 
 class TranscribeModelConfig(BaseModel):
@@ -465,6 +475,7 @@ DEFAULT_MODELS = [
         alias="devstral-small",
         input_price=0.1,
         output_price=0.3,
+        supports_images=False,
     ),
     ModelConfig(
         name="devstral",
