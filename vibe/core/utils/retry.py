@@ -3,13 +3,26 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
 import functools
+import logging
 
 import httpx
+
+logger = logging.getLogger("vibe")
+
+_RETRYABLE_REQUEST_ERRORS: tuple[type[httpx.RequestError], ...] = (
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+)
 
 
 def _is_retryable_http_error(e: Exception) -> bool:
     if isinstance(e, httpx.HTTPStatusError):
         return e.response.status_code in {408, 409, 425, 429, 500, 502, 503, 504, 529}
+    if isinstance(e, _RETRYABLE_REQUEST_ERRORS):
+        return True
     return False
 
 
@@ -42,6 +55,14 @@ def async_retry[T, **P](
                     if attempt < tries - 1 and is_retryable(e):
                         current_delay = (delay_seconds * (backoff_factor**attempt)) + (
                             0.05 * attempt
+                        )
+                        logger.warning(
+                            "Retrying %s after error attempt=%d/%d delay=%.2fs error=%r",
+                            func.__qualname__,
+                            attempt + 1,
+                            tries,
+                            current_delay,
+                            e,
                         )
                         await asyncio.sleep(current_delay)
                         continue
@@ -81,19 +102,33 @@ def async_generator_retry[T, **P](
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> AsyncGenerator[T]:
             last_exc = None
             for attempt in range(tries):
+                generator = func(*args, **kwargs)
                 try:
-                    async for item in func(*args, **kwargs):
-                        yield item
+                    first_item = await anext(generator)
+                except StopAsyncIteration:
                     return
                 except Exception as e:
                     last_exc = e
+                    await generator.aclose()
                     if attempt < tries - 1 and is_retryable(e):
                         current_delay = (delay_seconds * (backoff_factor**attempt)) + (
                             0.05 * attempt
                         )
+                        logger.warning(
+                            "Retrying %s after error attempt=%d/%d delay=%.2fs error=%r",
+                            func.__qualname__,
+                            attempt + 1,
+                            tries,
+                            current_delay,
+                            e,
+                        )
                         await asyncio.sleep(current_delay)
                         continue
-                    raise e
+                    raise
+                yield first_item
+                async for item in generator:
+                    yield item
+                return
             raise RuntimeError(
                 f"Retries exhausted. Last error: {last_exc}"
             ) from last_exc

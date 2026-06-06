@@ -246,7 +246,7 @@ class TestConnectorMenuOrdering:
         )
 
         ordered = _sort_connector_names_for_menu(
-            registry.get_connector_names(), registry
+            registry.get_connector_names(), registry, set()
         )
 
         assert ordered == ["alpha", "beta", "zeta"]
@@ -261,10 +261,53 @@ class TestConnectorMenuOrdering:
         )
 
         ordered = _sort_connector_names_for_menu(
-            registry.get_connector_names(), registry
+            registry.get_connector_names(), registry, set()
         )
 
         assert ordered == ["alpha", "Beta", "Zeta"]
+
+    def test_disabled_connectors_sink_to_bottom(self) -> None:
+        registry = FakeConnectorRegistry(
+            connectors={
+                "alpha": [RemoteTool(name="lookup", description="Lookup")],
+                "beta": [RemoteTool(name="search", description="Search")],
+                "gamma": [],
+            }
+        )
+
+        # alpha is enabled+connected, beta is enabled+connected but disabled in
+        # config, gamma is enabled+disconnected. Expected: enabled-and-connected
+        # first, then enabled-but-disconnected, then disabled at the bottom.
+        ordered = _sort_connector_names_for_menu(
+            registry.get_connector_names(), registry, {"beta"}
+        )
+
+        assert ordered == ["alpha", "gamma", "beta"]
+
+    def test_full_ordering_enabled_then_connected_then_alpha(self) -> None:
+        registry = FakeConnectorRegistry(
+            connectors={
+                "d_disabled_connected": [RemoteTool(name="t", description="t")],
+                "b_enabled_disconnected": [],
+                "a_enabled_connected": [RemoteTool(name="t", description="t")],
+                "c_enabled_connected": [RemoteTool(name="t", description="t")],
+                "e_disabled_disconnected": [],
+            }
+        )
+
+        ordered = _sort_connector_names_for_menu(
+            registry.get_connector_names(),
+            registry,
+            {"d_disabled_connected", "e_disabled_disconnected"},
+        )
+
+        assert ordered == [
+            "a_enabled_connected",
+            "c_enabled_connected",
+            "b_enabled_disconnected",
+            "d_disabled_connected",
+            "e_disabled_disconnected",
+        ]
 
 
 class TestHelpBarChanges:

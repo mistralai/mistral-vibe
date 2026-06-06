@@ -11,7 +11,7 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
 )
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
-from vibe.cli.update_notifier import Update
+from vibe.cli.update_notifier import Update, UpdateCache
 
 
 class SnapshotTestAppWithUpdate(BaseSnapshotTestApp):
@@ -19,7 +19,13 @@ class SnapshotTestAppWithUpdate(BaseSnapshotTestApp):
         config = default_config()
         config.enable_update_checks = True
         update_notifier = FakeUpdateGateway(update=Update(latest_version="1000.2.0"))
-        update_cache_repository = FakeUpdateCacheRepository()
+        update_cache_repository = FakeUpdateCacheRepository(
+            UpdateCache(
+                latest_version="1.0.4",
+                stored_at_timestamp=0,
+                seen_whats_new_version=None,
+            )
+        )
         super().__init__(
             config=config,
             update_notifier=update_notifier,

@@ -458,7 +458,7 @@ async def test_tool_call_can_be_interrupted() -> None:
         ]),
     )
     # no dependency injection available => monkey patch
-    agent_loop.tool_manager._available["stub_tool"] = FakeTool
+    agent_loop.tool_manager._all_tools["stub_tool"] = FakeTool
     stub_tool_instance = agent_loop.tool_manager.get("stub_tool")
     assert isinstance(stub_tool_instance, FakeTool)
     stub_tool_instance._exception_to_raise = asyncio.CancelledError()

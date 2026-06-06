@@ -3,18 +3,18 @@ Screen {
     background: transparent 80%;
 }
 
+* {
+    scrollbar-size: 1 1;
+}
 
 #trust-dialog {
     max-width: 70;
-    overflow-y: scroll;
+    overflow-y: auto;
     border: round $border-blurred;
     background: transparent;
-    height:auto;
+    height: auto;
     max-height: 1fr;
-    padding: 1;
-    padding-left:5;
-    padding-right:5;
-    scrollbar-size: 1 1;
+    padding: 1 5;
 }
 
 #trust-dialog-content {
@@ -42,19 +42,43 @@ Screen {
     margin-bottom: 1;
 }
 
-.trust-dialog-section-header {
+#trust-dialog-path.has-repo-root {
+    margin-bottom: 0;
+}
+
+.trust-dialog-repo-root {
     width: 100%;
     height: auto;
-    color: $foreground;
+    color: $text-muted;
     text-align: center;
     text-wrap: wrap;
-    padding: 0 2;
+    text-style: italic;
+    margin-bottom: 1;
+
+    &:ansi {
+        text-style: italic dim;
+    }
+}
+
+.trust-dialog-repo-untrusted {
+    width: 100%;
+    height: auto;
+    color: $warning;
+    text-align: center;
+    text-wrap: wrap;
+    text-style: italic;
+    margin-bottom: 1;
 }
 
 .trust-dialog-section-center {
     width: 100%;
     height: auto;
     margin-bottom: 1;
+}
+
+.trust-dialog-section-stack {
+    width: 100%;
+    height: auto;
 }
 
 .trust-dialog-section-content {
@@ -64,6 +88,24 @@ Screen {
     color: $foreground;
     text-align: center;
     text-overflow: fold;
+}
+
+.trust-dialog-section-title {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    text-style: bold;
+    text-align: center;
+    margin-bottom: 0;
+
+    &:ansi {
+        text-style: bold dim;
+    }
+}
+
+.trust-dialog-file-list {
+    width: 100%;
+    text-align: center;
 }
 
 .trust-dialog-footer-warning {

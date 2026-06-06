@@ -45,7 +45,7 @@ async def test_ui_displays_messages_when_resuming_session(
                 id="tool_call_1",
                 index=0,
                 function=FunctionCall(
-                    name="read_file", arguments='{"path": "test.txt"}'
+                    name="read", arguments='{"file_path": "test.txt"}'
                 ),
             )
         ],
@@ -53,7 +53,7 @@ async def test_ui_displays_messages_when_resuming_session(
     tool_result_msg = LLMMessage(
         role=Role.tool,
         content="File content here",
-        name="read_file",
+        name="read",
         tool_call_id="tool_call_1",
     )
 
@@ -78,12 +78,12 @@ async def test_ui_displays_messages_when_resuming_session(
         # Verify tool call message is displayed
         tool_call_messages = app.query(ToolCallMessage)
         assert len(tool_call_messages) == 1
-        assert tool_call_messages[0]._tool_name == "read_file"
+        assert tool_call_messages[0]._tool_name == "read"
 
         # Verify tool result message is displayed
         tool_result_messages = app.query(ToolResultMessage)
         assert len(tool_result_messages) == 1
-        assert tool_result_messages[0].tool_name == "read_file"
+        assert tool_result_messages[0].tool_name == "read"
         assert tool_result_messages[0]._content == "File content here"
 
 

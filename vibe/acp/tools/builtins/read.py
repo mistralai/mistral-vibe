@@ -21,41 +21,59 @@ from vibe.acp.tools.session_update import (
     resolve_kind,
 )
 from vibe.core.tools.base import ToolError
-from vibe.core.tools.builtins.read_file import (
-    ReadFile as CoreReadFileTool,
-    ReadFileArgs,
-    ReadFileResult,
-    ReadFileState,
-    _ReadResult,
+from vibe.core.tools.builtins.read import (
+    Read as CoreReadTool,
+    ReadArgs,
+    ReadResult,
+    ReadState,
 )
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
-ReadFileResult = ReadFileResult
 
-
-class AcpReadFileState(ReadFileState, AcpToolState):
+class AcpReadState(ReadState, AcpToolState):
     pass
 
 
-class ReadFile(
-    CoreReadFileTool,
-    BaseAcpTool[AcpReadFileState],
+class Read(
+    CoreReadTool,
+    BaseAcpTool[AcpReadState],
     ToolCallSessionUpdateProtocol,
     ToolResultSessionUpdateProtocol,
 ):
-    state: AcpReadFileState
-    prompt_path = VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "read_file.md"
+    state: AcpReadState
+    prompt_path = VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "read.md"
 
     @classmethod
-    def _get_tool_state_class(cls) -> type[AcpReadFileState]:
-        return AcpReadFileState
+    def _get_tool_state_class(cls) -> type[AcpReadState]:
+        return AcpReadState
+
+    async def _read_file(
+        self, args: ReadArgs, file_path: Path
+    ) -> tuple[list[str], int | None, bool]:
+        client, session_id = self._load_state()
+
+        line = args.offset
+        limit = args.limit
+
+        try:
+            response = await client.read_text_file(
+                session_id=session_id, path=str(file_path), line=line, limit=limit + 1
+            )
+        except Exception as e:
+            raise ToolError(f"Error reading {file_path}: {e}") from e
+
+        lines = response.content.splitlines()
+        total_lines = 0 if not response.content else None
+        was_truncated = len(lines) > limit
+        lines = lines[:limit]
+        return lines, total_lines, was_truncated
 
     @classmethod
     def tool_call_session_update(cls, event: ToolCallEvent) -> SessionUpdate | None:
-        if not isinstance(event.args, ReadFileArgs):
-            return fallback_tool_call(event, "read_file")
+        if not isinstance(event.args, ReadArgs):
+            return fallback_tool_call(event, "read")
 
-        resolved = str(Path(event.args.path).resolve())
+        resolved = str(Path(event.args.file_path).resolve())
 
         return ToolCallStart(
             session_update="tool_call",
@@ -78,19 +96,19 @@ class ReadFile(
 
     @classmethod
     def tool_result_session_update(cls, event: ToolResultEvent) -> SessionUpdate | None:
-        if failure := failed_tool_result(event, ReadFileResult):
+        if failure := failed_tool_result(event, ReadResult):
             return failure
 
         result = event.result
-        assert isinstance(result, ReadFileResult)
-        resolved = str(Path(result.path).resolve())
+        assert isinstance(result, ReadResult)
+        resolved = str(Path(result.file_path).resolve())
         locations = [
             ToolCallLocation(
                 path=resolved,
                 field_meta={
                     "type": "file_range",
-                    "offset": result.offset,
-                    "limit": result.lines_read,
+                    "offset": result.start_line,
+                    "limit": result.num_lines,
                 },
             )
         ]
@@ -111,27 +129,4 @@ class ReadFile(
             raw_output=result.model_dump_json(),
             locations=locations,
             field_meta={"tool_name": event.tool_name},
-        )
-
-    async def _read_file(self, args: ReadFileArgs, file_path: Path) -> _ReadResult:
-        client, session_id = self._load_state()
-
-        line = args.offset + 1 if args.offset > 0 else None
-        limit = args.limit
-
-        try:
-            response = await client.read_text_file(
-                session_id=session_id, path=str(file_path), line=line, limit=limit
-            )
-        except Exception as e:
-            raise ToolError(f"Error reading {file_path}: {e}") from e
-
-        content_lines = response.content.splitlines(keepends=True)
-        lines_read = len(content_lines)
-        bytes_read = sum(len(line.encode("utf-8")) for line in content_lines)
-
-        was_truncated = args.limit is not None and lines_read >= args.limit
-
-        return _ReadResult(
-            lines=content_lines, bytes_read=bytes_read, was_truncated=was_truncated
         )

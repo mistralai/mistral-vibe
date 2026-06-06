@@ -9,6 +9,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
@@ -87,13 +88,24 @@ class ApprovalApp(Container):
         self.required_permissions = required_permissions or []
         self.selected_option = 0
         self.content_container: Vertical | None = None
-        self.title_widget: Static | None = None
+        self.title_widget = NoMarkupStatic(
+            self._build_title(), classes="approval-title"
+        )
         self.tool_info_container: Vertical | None = None
         self.option_widgets: list[Static] = []
         self.help_widget: Static | None = None
         self._mount_time: float = 0.0
 
     def compose(self) -> ComposeResult:
+        with Vertical(id="approval-content"):
+            yield self.title_widget
+
+            with VerticalScroll(classes="approval-tool-info-scroll"):
+                self.tool_info_container = Vertical(
+                    classes="approval-tool-info-container"
+                )
+                yield self.tool_info_container
+
         with Vertical(id="approval-options"):
             yield NoMarkupStatic("")
             for _ in range(self.NUM_OPTIONS):
@@ -104,17 +116,6 @@ class ApprovalApp(Container):
                 "↑↓ navigate  Enter select  ESC reject", classes="approval-help"
             )
             yield self.help_widget
-
-        with Vertical(id="approval-content"):
-            title = self._build_title()
-            self.title_widget = NoMarkupStatic(title, classes="approval-title")
-            yield self.title_widget
-
-            with VerticalScroll(classes="approval-tool-info-scroll"):
-                self.tool_info_container = Vertical(
-                    classes="approval-tool-info-container"
-                )
-                yield self.tool_info_container
 
     def _build_title(self) -> str:
         if self.required_permissions:
@@ -127,6 +128,33 @@ class ApprovalApp(Container):
         await self._update_tool_info()
         self._update_options()
         self.focus()
+        self._recompute_height()
+        self.screen.screen_layout_refresh_signal.subscribe(
+            self, lambda _screen: self._recompute_height()
+        )
+
+    def _recompute_height(self) -> None:
+        """Manual sizing: the scroll uses `1fr`, so `height: auto` cannot shrink to fit."""
+        options = self.query_one("#approval-options", Vertical)
+        scroll = self.query_one(".approval-tool-info-scroll", VerticalScroll)
+
+        natural_height = (
+            options.outer_size.height
+            + self.title_widget.outer_size.height
+            + scroll.virtual_size.height
+            + self.gutter.height
+        )
+
+        # Cap the natural height if greater than max_height
+        if max_height := self.styles.max_height:
+            viewport = self.app.size
+            parent_size = (
+                self.parent.size if isinstance(self.parent, Widget) else viewport
+            )
+            resolved_max_height = int(max_height.resolve(parent_size, viewport))
+            natural_height = min(natural_height, resolved_max_height)
+
+        self.styles.height = natural_height
 
     def is_within_grace_period(self) -> bool:
         return (time.monotonic() - self._mount_time) < _INPUT_GRACE_PERIOD_S

@@ -43,16 +43,14 @@ class TestPlanAgentWriteFileResolvePermission:
         assert ctx is not None
         assert ctx.permission == ToolPermission.ALWAYS
 
-    def test_search_replace_to_non_plan_path_denied_in_plan_mode(self) -> None:
+    def test_edit_to_non_plan_path_denied_in_plan_mode(self) -> None:
         config = build_test_vibe_config()
         agent = build_test_agent_loop(config=config, agent_name=BuiltinAgentName.PLAN)
 
-        tool = agent.tool_manager.get("search_replace")
-        from vibe.core.tools.builtins.search_replace import SearchReplaceArgs
+        tool = agent.tool_manager.get("edit")
+        from vibe.core.tools.builtins.edit import EditArgs
 
-        args = SearchReplaceArgs(
-            file_path="/some/file.py", content="<<<< SEARCH\na\n====\nb\n>>>> REPLACE"
-        )
+        args = EditArgs(file_path="/some/file.py", old_string="a", new_string="b")
 
         ctx = tool.resolve_permission(args)
 
@@ -61,7 +59,7 @@ class TestPlanAgentWriteFileResolvePermission:
 
 
 class TestAcceptEditsAgentResolvePermission:
-    """Accept-edits agent sets write_file/search_replace to ALWAYS.
+    """Accept-edits agent sets write_file/edit to ALWAYS.
     resolve_permission must reflect this.
     """
 

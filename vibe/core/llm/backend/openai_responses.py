@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypedDict, cast
 
 from pydantic import TypeAdapter
 
+from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
 from vibe.core.types import (
     AvailableTool,
@@ -434,7 +435,20 @@ class OpenAIResponsesAdapter(APIAdapter):
                     input_items.append({"role": "system", "content": msg.content or ""})
 
                 case Role.user:
-                    input_items.append({"role": "user", "content": msg.content or ""})
+                    if msg.images:
+                        parts: list[dict[str, Any]] = []
+                        if msg.content:
+                            parts.append({"type": "input_text", "text": msg.content})
+                        parts.extend(
+                            {"type": "input_image", "image_url": _to_data_uri(att)}
+                            for att in msg.images
+                        )
+                        input_items.append({"role": "user", "content": parts})
+                    else:
+                        input_items.append({
+                            "role": "user",
+                            "content": msg.content or "",
+                        })
 
                 case Role.assistant:
                     for encrypted_content in msg.reasoning_state or []:

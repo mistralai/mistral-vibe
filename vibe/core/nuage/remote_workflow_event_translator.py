@@ -822,11 +822,7 @@ class RemoteWorkflowEventTranslator:
             if not ui_state.operations:
                 return {}
             op = ui_state.operations[0]
-            return {
-                "path": op.uri,
-                "content": op.content,
-                "overwrite": op.type == "replace",
-            }
+            return {"path": op.uri, "content": op.content}
         if isinstance(ui_state, CommandUIState):
             return {"command": ui_state.command}
         if isinstance(ui_state, GenericToolUIState):
@@ -853,7 +849,6 @@ class RemoteWorkflowEventTranslator:
         return {
             "path": op.uri,
             "bytes_written": len(op.content.encode()),
-            "file_existed": op.type == "replace",
             "content": op.content,
         }, None
 

@@ -13,6 +13,7 @@ from vibe.core.config.layer import (
     TrustNotResolvedError,
     UntrustedLayerError,
 )
+from vibe.core.config.patch import ConfigPatch
 
 
 class StubLayer(ConfigLayer[BaseModel]):
@@ -401,7 +402,7 @@ async def test_get_fingerprint_not_implemented() -> None:
 async def test_apply_not_implemented() -> None:
     layer = StubLayer()
     with pytest.raises(NotImplementedError):
-        await layer.apply({"op": "set"})
+        await layer.apply(ConfigPatch(fingerprint="fp-1"))
 
 
 @pytest.mark.asyncio

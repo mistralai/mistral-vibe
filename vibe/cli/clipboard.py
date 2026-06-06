@@ -154,16 +154,27 @@ def copy_text_to_clipboard(
     if not text:
         return None
 
-    try:
-        _copy_to_clipboard(text)
+    if try_copy_text_to_clipboard(text):
         if show_toast:
             app.notify(success_message, severity="information", timeout=2, markup=False)
         return text
+
+    app.notify(
+        "Failed to copy - clipboard not available", severity="warning", timeout=3
+    )
+    return None
+
+
+def try_copy_text_to_clipboard(text: str) -> bool:
+    if not text:
+        return False
+
+    try:
+        _copy_to_clipboard(text)
     except Exception:
-        app.notify(
-            "Failed to copy - clipboard not available", severity="warning", timeout=3
-        )
-        return None
+        return False
+
+    return True
 
 
 def copy_selection_to_clipboard(app: App, show_toast: bool = True) -> str | None:

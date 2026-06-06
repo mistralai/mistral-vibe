@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from typing import ClassVar, Literal
 
+from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Center, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.timer import Timer
+from textual.widgets import Static
 from textual.worker import Worker
 
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
@@ -20,10 +22,13 @@ from vibe.core.config import ProviderConfig
 from vibe.core.logger import logger
 from vibe.core.telemetry.types import EntrypointMetadata
 from vibe.setup.auth import (
+    BrowserSignInAttemptStarted,
     BrowserSignInError,
     BrowserSignInErrorCode,
+    BrowserSignInEvent,
     BrowserSignInService,
     BrowserSignInStatus,
+    BrowserSignInStatusChanged,
 )
 from vibe.setup.auth.api_key_persistence import (
     persist_api_key,
@@ -35,7 +40,12 @@ from vibe.setup.onboarding.gradient_text import GRADIENT_COLORS, append_gradient
 PENDING_HINT = "Press M to enter API key manually - Esc to cancel"
 ERROR_HINT = "Press R to retry - Press M to enter API key manually - Esc to cancel"
 SUCCESS_HINT = "Finishing setup..."
+SIGN_IN_URL_HELP_PREFIX = "If your browser did not open, "
+SIGN_IN_URL_COPY_LABEL = "copy this URL"
+SIGN_IN_URL_HELP_SUFFIX = " (press C)."
+SIGN_IN_URL_REVEAL_PREFIX = "Copy failed. Open this URL manually:"
 SUCCESS_EXIT_DELAY_SECONDS: float = 2.0
+SIGN_IN_URL_HELP_DELAY_SECONDS: float = 4.0
 WAITING_FOR_AUTHENTICATION_MESSAGE = "Waiting for authentication..."
 STEP_DESCRIPTIONS = [
     ("Open browser", "Your browser should open automatically", "Browser opened"),
@@ -49,6 +59,9 @@ UNEXPECTED_ERROR_MESSAGE = (
 ERROR_MESSAGES = {
     BrowserSignInErrorCode.POLL_FAILED: "We couldn't complete sign-in. Please try again."
 }
+COPY_URL_SUCCESS_MESSAGE = "Sign-in URL copied to clipboard"
+
+CopySignInUrl = Callable[[str], bool]
 
 
 class BrowserSignInStep(IntEnum):
@@ -61,9 +74,21 @@ class BrowserSignInStep(IntEnum):
 class BrowserSignInViewState:
     step: BrowserSignInStep
     message: str
-    hint: str
     variant: Literal["pending", "error", "success"]
     running: bool
+    sign_in_url: str | None = None
+    show_sign_in_url_help: bool = False
+    reveal_sign_in_url: bool = False
+
+    @property
+    def hint(self) -> str:
+        if self.variant == "success":
+            return SUCCESS_HINT
+
+        if self.variant == "error":
+            return ERROR_HINT
+
+        return PENDING_HINT
 
 
 @dataclass(frozen=True)
@@ -79,7 +104,6 @@ class BrowserSignInScreen(OnboardingScreen):
         BrowserSignInViewState(
             step=BrowserSignInStep.OPEN,
             message="Getting things ready...",
-            hint=PENDING_HINT,
             variant="pending",
             running=False,
         ),
@@ -88,6 +112,7 @@ class BrowserSignInScreen(OnboardingScreen):
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("r", "retry", "Retry", show=False),
+        Binding("c", "copy_url", "Copy URL", show=False),
         Binding("m", "manual", "Manual", show=False),
         Binding("ctrl+c", "cancel", "Cancel", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
@@ -98,28 +123,33 @@ class BrowserSignInScreen(OnboardingScreen):
         provider: ProviderConfig,
         browser_sign_in_factory: Callable[[], BrowserSignInService],
         *,
+        copy_sign_in_url: CopySignInUrl,
         entrypoint_metadata: EntrypointMetadata | None = None,
         success_exit_delay: float = SUCCESS_EXIT_DELAY_SECONDS,
+        sign_in_url_help_delay: float = SIGN_IN_URL_HELP_DELAY_SECONDS,
     ) -> None:
         super().__init__()
         self.provider = provider
         self._browser_sign_in_factory = browser_sign_in_factory
+        self._copy_sign_in_url = copy_sign_in_url
         self._entrypoint_metadata = entrypoint_metadata
         self._success_exit_delay = success_exit_delay
+        self._sign_in_url_help_delay = sign_in_url_help_delay
         self._attempt_number = 0
         self._active_attempt_number: int | None = None
         self._worker: Worker[None] | None = None
         self._gradient_offset = 0
         self._gradient_timer: Timer | None = None
+        self._sign_in_url_help_timer: Timer | None = None
         self._initial_state = BrowserSignInViewState(
             step=BrowserSignInStep.OPEN,
             message="Getting things ready...",
-            hint=PENDING_HINT,
             variant="pending",
             running=False,
         )
         self._step_widgets: list[BrowserSignInStepWidgets] = []
         self._title_widget: NoMarkupStatic
+        self._url_widget: Static
         self._hint_widget: NoMarkupStatic
 
     def compose(self) -> ComposeResult:
@@ -141,6 +171,7 @@ class BrowserSignInScreen(OnboardingScreen):
                     )
                     with Vertical(id="browser-sign-in-steps"):
                         yield from self._compose_step_rows()
+                    yield Static("", id="browser-sign-in-url")
                     yield NoMarkupStatic("", id="browser-sign-in-hint")
 
     def _compose_step_rows(self) -> ComposeResult:
@@ -159,6 +190,7 @@ class BrowserSignInScreen(OnboardingScreen):
                     yield detail
 
     def on_mount(self) -> None:
+        self._url_widget = self.query_one("#browser-sign-in-url", Static)
         self._hint_widget = self.query_one("#browser-sign-in-hint", NoMarkupStatic)
         self.state = self._initial_state
         self.watch_state(self.state)
@@ -187,6 +219,23 @@ class BrowserSignInScreen(OnboardingScreen):
         self._cancel_current_attempt()
         super().action_cancel()
 
+    def action_copy_url(self) -> None:
+        if self.state.variant == "success" or self.state.sign_in_url is None:
+            return
+
+        if self._copy_sign_in_url(self.state.sign_in_url):
+            self.app.notify(
+                COPY_URL_SUCCESS_MESSAGE,
+                severity="information",
+                timeout=2,
+                markup=False,
+            )
+            return
+
+        self.state = replace(
+            self.state, show_sign_in_url_help=True, reveal_sign_in_url=True
+        )
+
     def _start_browser_sign_in(self) -> None:
         self._attempt_number += 1
         attempt_number = self._attempt_number
@@ -194,9 +243,11 @@ class BrowserSignInScreen(OnboardingScreen):
         self.state = BrowserSignInViewState(
             step=BrowserSignInStep.OPEN,
             message="Getting things ready...",
-            hint=PENDING_HINT,
             variant="pending",
             running=True,
+            sign_in_url=None,
+            show_sign_in_url_help=False,
+            reveal_sign_in_url=False,
         )
         self._worker = self.run_worker(
             self._authenticate_in_browser(attempt_number),
@@ -211,7 +262,7 @@ class BrowserSignInScreen(OnboardingScreen):
         try:
             browser_sign_in = self._browser_sign_in_factory()
             api_key = await browser_sign_in.authenticate(
-                lambda status: self._on_status(attempt_number, status)
+                lambda event: self._on_event(attempt_number, event)
             )
         except asyncio.CancelledError:
             return
@@ -255,18 +306,21 @@ class BrowserSignInScreen(OnboardingScreen):
             api_key,
             entrypoint_metadata=self._entrypoint_metadata,
         )
+        self._cancel_sign_in_url_help_timer()
         if result != "completed":
             self._active_attempt_number = None
             self._worker = None
             self.app.exit(result)
             return
 
-        self.state = BrowserSignInViewState(
+        self.state = replace(
+            self.state,
             step=BrowserSignInStep.FINISH,
             message="Sign-in complete",
-            hint=SUCCESS_HINT,
             variant="success",
             running=True,
+            show_sign_in_url_help=False,
+            reveal_sign_in_url=False,
         )
         if self._success_exit_delay > 0:
             await asyncio.sleep(self._success_exit_delay)
@@ -274,32 +328,55 @@ class BrowserSignInScreen(OnboardingScreen):
         self._worker = None
         self.app.exit(result)
 
+    def _on_event(self, attempt_number: int, event: BrowserSignInEvent) -> None:
+        if isinstance(event, BrowserSignInAttemptStarted):
+            self._on_attempt_started(attempt_number, event)
+            return
+
+        if isinstance(event, BrowserSignInStatusChanged):
+            self._on_status(attempt_number, event.status)
+
+    def _on_attempt_started(
+        self, attempt_number: int, event: BrowserSignInAttemptStarted
+    ) -> None:
+        if not self._is_attempt_active(attempt_number):
+            return
+
+        self._cancel_sign_in_url_help_timer()
+        self.state = replace(
+            self.state,
+            sign_in_url=event.sign_in_url,
+            show_sign_in_url_help=False,
+            reveal_sign_in_url=False,
+        )
+        self._schedule_sign_in_url_help(attempt_number, event.sign_in_url)
+
     def _on_status(self, attempt_number: int, status: BrowserSignInStatus) -> None:
         if not self._is_attempt_active(attempt_number):
             return
 
         match status:
             case BrowserSignInStatus.OPENING_BROWSER:
-                state = BrowserSignInViewState(
+                state = replace(
+                    self.state,
                     step=BrowserSignInStep.OPEN,
                     message="Opening your browser...",
-                    hint=PENDING_HINT,
                     variant="pending",
                     running=True,
                 )
             case BrowserSignInStatus.WAITING_FOR_BROWSER_SIGN_IN:
-                state = BrowserSignInViewState(
+                state = replace(
+                    self.state,
                     step=BrowserSignInStep.CONFIRM,
                     message="Waiting for you to finish signing in...",
-                    hint=PENDING_HINT,
                     variant="pending",
                     running=True,
                 )
             case BrowserSignInStatus.EXCHANGING | BrowserSignInStatus.COMPLETED:
-                state = BrowserSignInViewState(
+                state = replace(
+                    self.state,
                     step=BrowserSignInStep.FINISH,
                     message="Finishing setup...",
-                    hint=PENDING_HINT,
                     variant="pending",
                     running=True,
                 )
@@ -313,6 +390,7 @@ class BrowserSignInScreen(OnboardingScreen):
             return
 
         self._hint_widget.update(state.hint)
+        self._url_widget.update(self._build_url_text(state))
 
         for index, (widgets, (title, pending_detail, done_detail)) in enumerate(
             zip(self._step_widgets, STEP_DESCRIPTIONS, strict=True)
@@ -369,7 +447,8 @@ class BrowserSignInScreen(OnboardingScreen):
             self.state.variant == "pending"
             and self.state.step == BrowserSignInStep.CONFIRM
         ):
-            self.watch_state(self.state)
+            widgets = self._step_widgets[self.state.step]
+            self._update_active_step_detail(widgets.detail, self.state)
 
     async def _close_browser_sign_in(
         self, browser_sign_in: BrowserSignInService | None
@@ -387,23 +466,66 @@ class BrowserSignInScreen(OnboardingScreen):
     def _show_error(self, message: str) -> None:
         self._active_attempt_number = None
         self._worker = None
-        self.state = BrowserSignInViewState(
-            step=self.state.step,
+        self._cancel_sign_in_url_help_timer()
+        self.state = replace(
+            self.state,
             message=message,
-            hint=ERROR_HINT,
             variant="error",
             running=False,
+            show_sign_in_url_help=self.state.sign_in_url is not None,
+            reveal_sign_in_url=False,
         )
+
+    def _build_url_text(self, state: BrowserSignInViewState) -> str:
+        if (
+            state.variant == "success"
+            or state.sign_in_url is None
+            or not state.show_sign_in_url_help
+        ):
+            return ""
+
+        help_text = (
+            f"{escape(SIGN_IN_URL_HELP_PREFIX)}"
+            f"[@click='screen.copy_url']{escape(SIGN_IN_URL_COPY_LABEL)}[/]"
+            f"{escape(SIGN_IN_URL_HELP_SUFFIX)}"
+        )
+        if not state.reveal_sign_in_url:
+            return help_text
+
+        return (
+            f"{help_text} {escape(SIGN_IN_URL_REVEAL_PREFIX)} "
+            f"{escape(state.sign_in_url)}"
+        )
+
+    def _schedule_sign_in_url_help(self, attempt_number: int, sign_in_url: str) -> None:
+        if self._sign_in_url_help_delay <= 0:
+            self._show_sign_in_url_help(attempt_number, sign_in_url)
+            return
+
+        self._sign_in_url_help_timer = self.set_timer(
+            self._sign_in_url_help_delay,
+            lambda: self._show_sign_in_url_help(attempt_number, sign_in_url),
+        )
+
+    def _show_sign_in_url_help(self, attempt_number: int, sign_in_url: str) -> None:
+        self._sign_in_url_help_timer = None
+        if not self._is_attempt_active(attempt_number):
+            return
+
+        if self.state.sign_in_url != sign_in_url:
+            return
+
+        self.state = replace(self.state, show_sign_in_url_help=True)
+
+    def _cancel_sign_in_url_help_timer(self) -> None:
+        if self._sign_in_url_help_timer is not None:
+            self._sign_in_url_help_timer.stop()
+            self._sign_in_url_help_timer = None
 
     def _cancel_current_attempt(self) -> None:
         self._active_attempt_number = None
-        self.state = BrowserSignInViewState(
-            step=self.state.step,
-            message=self.state.message,
-            hint=self.state.hint,
-            variant=self.state.variant,
-            running=False,
-        )
+        self._cancel_sign_in_url_help_timer()
+        self.state = replace(self.state, running=False)
         if self._worker is not None:
             self._worker.cancel()
             self._worker = None

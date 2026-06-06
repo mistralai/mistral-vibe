@@ -10,6 +10,7 @@ from vibe.core.config._settings import (
     DEFAULT_TRANSCRIBE_PROVIDERS,
     DEFAULT_TTS_MODELS,
     DEFAULT_TTS_PROVIDERS,
+    DEFAULT_VIBE_BASE_URL,
     THINKING_LEVELS,
     ConnectorConfig,
     ExperimentsConfig,
@@ -64,6 +65,7 @@ from vibe.core.config.schema import (
     WithShallowMerge,
     WithUnionMerge,
 )
+from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.prompts import MissingPromptFileError
 
 __all__ = [
@@ -76,6 +78,7 @@ __all__ = [
     "DEFAULT_TRANSCRIBE_PROVIDERS",
     "DEFAULT_TTS_MODELS",
     "DEFAULT_TTS_PROVIDERS",
+    "DEFAULT_VIBE_BASE_URL",
     "THINKING_LEVELS",
     "AppendToList",
     "ConfigDefinitionError",
@@ -118,6 +121,7 @@ __all__ = [
     "TrustResolutionError",
     "UntrustedLayerError",
     "VibeConfig",
+    "VibeConfigSchema",
     "WithConcatMerge",
     "WithConflictMerge",
     "WithReplaceMerge",

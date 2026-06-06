@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.config.patch import ConfigPatch
 
 
 @pytest.mark.asyncio
@@ -23,7 +24,7 @@ async def test_always_trusted() -> None:
 async def test_apply_raises_not_implemented() -> None:
     layer = OverridesLayer(data={})
     with pytest.raises(NotImplementedError, match="M2"):
-        await layer.apply({"op": "set"})
+        await layer.apply(ConfigPatch(fingerprint="fp-1"))
 
 
 @pytest.mark.asyncio

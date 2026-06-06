@@ -25,23 +25,24 @@ async def _act_and_collect(agent_loop, prompt: str) -> list[BaseEvent]:
 
 
 def _write_file_tool_call(
-    path: str, content: str, *, call_id: str = "call_1", overwrite: bool = False
+    path: str, content: str, *, call_id: str = "call_1"
 ) -> ToolCall:
-    args = json.dumps({"path": path, "content": content, "overwrite": overwrite})
+    args = json.dumps({"path": path, "content": content})
     return ToolCall(
         id=call_id, index=0, function=FunctionCall(name="write_file", arguments=args)
     )
 
 
-def _search_replace_tool_call(
-    file_path: str, search: str, replace: str, *, call_id: str = "call_1"
+def _edit_tool_call(
+    file_path: str, old_string: str, new_string: str, *, call_id: str = "call_1"
 ) -> ToolCall:
-    content = f"<<<<<<< SEARCH\n{search}\n=======\n{replace}\n>>>>>>> REPLACE"
-    args = json.dumps({"file_path": file_path, "content": content})
+    args = json.dumps({
+        "file_path": file_path,
+        "old_string": old_string,
+        "new_string": new_string,
+    })
     return ToolCall(
-        id=call_id,
-        index=0,
-        function=FunctionCall(name="search_replace", arguments=args),
+        id=call_id, index=0, function=FunctionCall(name="edit", arguments=args)
     )
 
 
@@ -54,10 +55,10 @@ def _bash_tool_call(command: str, *, call_id: str = "call_1") -> ToolCall:
 
 def _make_agent_loop(backend: FakeBackend):
     config = build_test_vibe_config(
-        enabled_tools=["write_file", "search_replace", "bash"],
+        enabled_tools=["write_file", "edit", "bash"],
         tools={
             "write_file": {"permission": "always"},
-            "search_replace": {"permission": "always"},
+            "edit": {"permission": "always"},
             "bash": {"permission": "always"},
         },
         system_prompt_id="tests",
@@ -98,10 +99,10 @@ class TestRewindIntegration:
 
         assert not target.exists()
 
-    async def test_search_replace_rewind_restores_previous_version(
+    async def test_edit_rewind_restores_previous_version(
         self, tmp_working_directory: Path
     ) -> None:
-        """Edit a pre-existing file with search_replace, rewind restores original."""
+        """Edit a pre-existing file with edit, rewind restores original."""
         target = tmp_working_directory / "config.yaml"
         target.write_text("key: original\n", encoding="utf-8")
 
@@ -110,9 +111,7 @@ class TestRewindIntegration:
                 mock_llm_chunk(
                     content="Updating config.",
                     tool_calls=[
-                        _search_replace_tool_call(
-                            str(target), "key: original", "key: modified"
-                        )
+                        _edit_tool_call(str(target), "key: original", "key: modified")
                     ],
                 )
             ],
@@ -129,11 +128,11 @@ class TestRewindIntegration:
 
         assert target.read_text() == "key: original\n"
 
-    async def test_write_then_search_replace_rewind_to_middle(
+    async def test_write_then_edit_rewind_to_middle(
         self, tmp_working_directory: Path
     ) -> None:
         """Turn 1 creates a file with write_file, turn 2 patches it with
-        search_replace. Rewind to turn 2 restores the turn 1 version.
+        edit. Rewind to turn 2 restores the turn 1 version.
         """
         target = tmp_working_directory / "app.py"
 
@@ -148,12 +147,12 @@ class TestRewindIntegration:
                 )
             ],
             [mock_llm_chunk(content="Created.")],
-            # Turn 2: patch with search_replace
+            # Turn 2: patch with edit
             [
                 mock_llm_chunk(
                     content="Updating.",
                     tool_calls=[
-                        _search_replace_tool_call(
+                        _edit_tool_call(
                             str(target),
                             "    pass",
                             '    print("hello")',
@@ -222,9 +221,7 @@ class TestRewindIntegration:
                 mock_llm_chunk(
                     content="v2.",
                     tool_calls=[
-                        _write_file_tool_call(
-                            str(target), "v2", call_id="call_2", overwrite=True
-                        )
+                        _edit_tool_call(str(target), "v1", "v2", call_id="call_2")
                     ],
                 )
             ],
@@ -234,9 +231,7 @@ class TestRewindIntegration:
                 mock_llm_chunk(
                     content="v2bis.",
                     tool_calls=[
-                        _write_file_tool_call(
-                            str(target), "v2bis", call_id="call_3", overwrite=True
-                        )
+                        _edit_tool_call(str(target), "v1", "v2bis", call_id="call_3")
                     ],
                 )
             ],

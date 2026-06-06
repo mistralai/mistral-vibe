@@ -151,7 +151,7 @@ def make_plan_agent_reminder(
     has_exit_plan_mode: bool = True,
 ) -> str:
     instructions = [
-        "Research the user's query using read-only tools (grep, read_file, etc.)"
+        "Research the user's query using read-only tools (grep, read, etc.)"
     ]
     if has_ask_user_question:
         instructions.append(
@@ -171,7 +171,7 @@ def make_plan_agent_reminder(
     return f"""<{VIBE_WARNING_TAG}>Plan mode is active. You MUST NOT make any edits (except to the plan file below, or in your scratchpad), run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received.
 
 ## Plan File Info
-Create or edit your plan at {plan_file_path} using the write_file and search_replace tools.
+Create or edit your plan at {plan_file_path} using the write_file and edit tools.
 Build your plan incrementally by writing to or editing this file.
 This is the only file you are allowed to edit. Make sure to create it early and edit as soon as you internally update your plan.
 
@@ -184,7 +184,7 @@ PLAN_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Plan mode has ended. If you have a pla
 CHAT_AGENT_REMINDER = f"""<{VIBE_WARNING_TAG}>Chat mode is active. The user wants to have a conversation -- ask questions, get explanations, or discuss code and architecture. You MUST NOT make any edits, run any non-readonly tools, or otherwise make any changes to the system. This supersedes any other instructions you have received. Instead, you should:
 1. Answer the user's questions directly and comprehensively
 2. Explain code, concepts, or architecture as requested
-3. Use read-only tools (grep, read_file) to look up relevant code when needed
+3. Use read-only tools (grep, read) to look up relevant code when needed
 4. Focus on being informative and conversational -- your response IS the deliverable, not a precursor to action</{VIBE_WARNING_TAG}>"""
 
 CHAT_AGENT_EXIT = f"""<{VIBE_WARNING_TAG}>Chat mode has ended. You can now use editing tools and make changes to the system.</{VIBE_WARNING_TAG}>"""

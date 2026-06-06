@@ -58,6 +58,13 @@ class NuageRequest(BaseModel):
     context: NuageContext
 
 
+class TeleportSession(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    metadata: dict[str, object]
+    messages: list[dict[str, object]]
+
+
 class NuageResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

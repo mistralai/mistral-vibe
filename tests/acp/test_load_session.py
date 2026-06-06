@@ -238,8 +238,8 @@ class TestLoadSession:
                         "id": "call_123",
                         "type": "function",
                         "function": {
-                            "name": "read_file",
-                            "arguments": '{"path": "/tmp/test.txt"}',
+                            "name": "read",
+                            "arguments": '{"file_path": "/tmp/test.txt"}',
                         },
                     }
                 ],
@@ -254,7 +254,7 @@ class TestLoadSession:
             u for u in client._session_updates if isinstance(u.update, ToolCallStart)
         ]
         assert len(tool_call_starts) == 1
-        assert tool_call_starts[0].update.title == "read_file"
+        assert tool_call_starts[0].update.title == "read"
         assert tool_call_starts[0].update.tool_call_id == "call_123"
 
         tool_results = [

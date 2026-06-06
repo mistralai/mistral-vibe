@@ -4,7 +4,9 @@ from typing import Any
 
 from vibe.core.config.builder import ConfigBuilder
 from vibe.core.config.layer import ConfigLayer, RawConfig
+from vibe.core.config.patch import ConfigPatch
 from vibe.core.config.schema import ConfigSchema
+from vibe.core.config.types import ConflictStrategy
 
 
 class ConfigOrchestrator[S: ConfigSchema]:
@@ -39,7 +41,12 @@ class ConfigOrchestrator[S: ConfigSchema]:
         """Force-reload all layers and atomically replace the config snapshot."""
         self._config = await self._builder.build(force_load=True)
 
-    async def apply_patch(self, patch: Any) -> None:
+    async def apply_patch(
+        self,
+        patch: ConfigPatch,
+        *,
+        on_conflict: ConflictStrategy = ConflictStrategy.CANCEL,
+    ) -> None:
         raise NotImplementedError("apply_patch() is not implemented (M2)")
 
     async def subscribe(self, callback: Any) -> None:

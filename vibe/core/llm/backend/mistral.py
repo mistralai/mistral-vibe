@@ -19,6 +19,8 @@ from mistralai.client.models import (
     Function,
     FunctionCall as MistralFunctionCall,
     FunctionName,
+    ImageURL,
+    ImageURLChunk,
     SystemMessage,
     TextChunk,
     ThinkChunk,
@@ -31,6 +33,7 @@ from mistralai.client.models import (
 )
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 
+from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.types import (
     AvailableTool,
@@ -61,6 +64,17 @@ class MistralMapper:
             case Role.system:
                 return SystemMessage(role="system", content=msg.content or "")
             case Role.user:
+                if msg.images:
+                    user_parts: list[ContentChunk] = []
+                    if msg.content:
+                        user_parts.append(TextChunk(type="text", text=msg.content))
+                    user_parts.extend(
+                        ImageURLChunk(
+                            type="image_url", image_url=ImageURL(url=_to_data_uri(att))
+                        )
+                        for att in msg.images
+                    )
+                    return UserMessage(role="user", content=user_parts)
                 return UserMessage(role="user", content=msg.content)
             case Role.assistant:
                 content: AssistantMessageContent
@@ -426,29 +440,3 @@ class MistralBackend:
                 has_tools=bool(tools),
                 tool_choice=tool_choice,
             ) from e
-
-    async def count_tokens(
-        self,
-        *,
-        model: ModelConfig,
-        messages: Sequence[LLMMessage],
-        temperature: float = 0.0,
-        tools: list[AvailableTool] | None = None,
-        tool_choice: StrToolChoice | AvailableTool | None = None,
-        extra_headers: dict[str, str] | None = None,
-        metadata: dict[str, str] | None = None,
-    ) -> int:
-        result = await self.complete(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            tools=tools,
-            max_tokens=1,
-            tool_choice=tool_choice,
-            extra_headers=extra_headers,
-            metadata=metadata,
-        )
-        if result.usage is None:
-            raise ValueError("Missing usage in non streaming completion")
-
-        return result.usage.prompt_tokens

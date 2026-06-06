@@ -14,6 +14,10 @@ from vibe.cli.textual_ui.external_editor import ExternalEditor
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
+from vibe.cli.textual_ui.widgets.chat_input.paste_path import (
+    maybe_prepend_at_for_image_path,
+    rewrite_bare_image_paths_in_text,
+)
 from vibe.cli.textual_ui.widgets.vscode_compat import patch_vscode_space
 from vibe.cli.voice_manager.voice_manager_port import (
     RecordingStartError,
@@ -33,6 +37,8 @@ class ChatTextArea(TextArea):
             show=False,
             priority=True,
         ),
+        Binding("shift+backspace", "delete_left", "Delete character left", show=False),
+        Binding("shift+delete", "delete_right", "Delete character right", show=False),
         Binding("ctrl+g", "open_external_editor", "External Editor", show=False),
     ]
 
@@ -91,6 +97,17 @@ class ChatTextArea(TextArea):
     def on_click(self, event: events.Click) -> None:
         self._mark_cursor_moved_if_needed()
 
+    async def _on_paste(self, event: events.Paste) -> None:
+        # Best-effort: terminals that emit bracketed paste sequences will
+        # land here, and we can rewrite event.text directly. event.stop()
+        # prevents App.on_event from auto-forwarding the Paste back to the
+        # focused widget (which would otherwise dispatch this handler a
+        # second time and double-insert). TextArea._on_paste in the same
+        # MRO still runs inside this dispatch cycle and performs the
+        # single insertion using the mutated text.
+        event.text = maybe_prepend_at_for_image_path(event.text)
+        event.stop()
+
     def action_insert_newline(self) -> None:
         self.insert("\n")
 
@@ -106,6 +123,19 @@ class ChatTextArea(TextArea):
             self.insert(result)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        # Fallback for terminals that deliver drag-n-drop as a bulk text
+        # edit rather than a Paste event (so _on_paste never fires).
+        # Scan the full text for any bare absolute image path token and
+        # rewrite it to @<path>. Idempotent: tokens already preceded by
+        # `@` are skipped, so this is safe to run on every change.
+        current = self.text
+        rewritten = rewrite_bare_image_paths_in_text(current)
+        if rewritten != current:
+            self.text = rewritten
+            last_line = rewritten.rsplit("\n", 1)[-1]
+            self.move_cursor((rewritten.count("\n"), len(last_line)))
+            return
+
         if not self._navigating_history and self.text != self._last_text:
             self._original_text = ""
             self._cursor_pos_after_load = None
@@ -268,7 +298,10 @@ class ChatTextArea(TextArea):
             event.stop()
             return
 
-        if event.key == "backspace" and self._should_reset_mode_on_backspace():
+        if (
+            event.key in {"backspace", "shift+backspace"}
+            and self._should_reset_mode_on_backspace()
+        ):
             self._set_mode(self.DEFAULT_MODE)
             event.prevent_default()
             event.stop()

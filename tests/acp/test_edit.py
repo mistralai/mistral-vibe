@@ -6,21 +6,10 @@ from acp import ReadTextFileResponse
 import pytest
 
 from tests.mock.utils import collect_result
-from vibe.acp.tools.builtins.search_replace import AcpSearchReplaceState, SearchReplace
+from vibe.acp.tools.builtins.edit import AcpEditState, Edit
 from vibe.core.tools.base import ToolError
-from vibe.core.tools.builtins.search_replace import (
-    SearchReplaceArgs,
-    SearchReplaceConfig,
-    SearchReplaceResult,
-)
+from vibe.core.tools.builtins.edit import EditArgs, EditConfig, EditResult
 from vibe.core.types import ToolCallEvent, ToolResultEvent
-
-
-def _make_block(search: str, replace: str) -> str:
-    head = "<" * 7 + " SEARCH"
-    sep = "=" * 7
-    tail = ">" * 7 + " REPLACE"
-    return f"{head}\n{search}\n{sep}\n{replace}\n{tail}"
 
 
 class MockClient:
@@ -82,52 +71,45 @@ def mock_client() -> MockClient:
 
 
 @pytest.fixture
-def acp_search_replace_tool(
+def acp_edit_tool(
     mock_client: MockClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> SearchReplace:
+) -> Edit:
     monkeypatch.chdir(tmp_path)
-    config = SearchReplaceConfig()
-    state = AcpSearchReplaceState.model_construct(
+    config = EditConfig()
+    state = AcpEditState.model_construct(
         client=mock_client, session_id="test_session_123"
     )
-    return SearchReplace(config_getter=lambda: config, state=state)
+    return Edit(config_getter=lambda: config, state=state)
 
 
-class TestAcpSearchReplaceBasic:
+class TestAcpEditBasic:
     def test_get_name(self) -> None:
-        assert SearchReplace.get_name() == "search_replace"
+        assert Edit.get_name() == "edit"
 
 
-class TestAcpSearchReplaceExecution:
+class TestAcpEditExecution:
     @pytest.mark.asyncio
     async def test_run_success(
-        self,
-        acp_search_replace_tool: SearchReplace,
-        mock_client: MockClient,
-        tmp_path: Path,
+        self, acp_edit_tool: Edit, mock_client: MockClient, tmp_path: Path
     ) -> None:
         test_file = tmp_path / "test_file.txt"
         test_file.write_text("original line 1\noriginal line 2\noriginal line 3")
-        search_replace_content = (
-            "<<<<<<< SEARCH\noriginal line 2\n=======\nmodified line 2\n>>>>>>> REPLACE"
+        args = EditArgs(
+            file_path=str(test_file),
+            old_string="original line 2",
+            new_string="modified line 2",
         )
-        args = SearchReplaceArgs(
-            file_path=str(test_file), content=search_replace_content
-        )
-        result = await collect_result(acp_search_replace_tool.run(args))
+        result = await collect_result(acp_edit_tool.run(args))
 
-        assert isinstance(result, SearchReplaceResult)
+        assert isinstance(result, EditResult)
         assert result.file == str(test_file)
-        assert result.blocks_applied == 1
         assert mock_client._read_text_file_called
         assert mock_client._write_text_file_called
 
-        # Verify read_text_file was called correctly
         read_params = mock_client._last_read_params
         assert read_params["session_id"] == "test_session_123"
         assert read_params["path"] == str(test_file)
 
-        # Verify write_text_file was called correctly
         write_params = mock_client._last_write_params
         assert write_params["session_id"] == "test_session_123"
         assert write_params["path"] == str(test_file)
@@ -135,32 +117,6 @@ class TestAcpSearchReplaceExecution:
             write_params["content"]
             == "original line 1\nmodified line 2\noriginal line 3"
         )
-
-    @pytest.mark.asyncio
-    async def test_run_with_backup(
-        self, mock_client: MockClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        config = SearchReplaceConfig(create_backup=True)
-        tool = SearchReplace(
-            config_getter=lambda: config,
-            state=AcpSearchReplaceState.model_construct(
-                client=mock_client, session_id="test_session"
-            ),
-        )
-
-        test_file = tmp_path / "test_file.txt"
-        test_file.write_text("original line 1\noriginal line 2\noriginal line 3")
-        search_replace_content = (
-            "<<<<<<< SEARCH\noriginal line 1\n=======\nmodified line 1\n>>>>>>> REPLACE"
-        )
-        args = SearchReplaceArgs(
-            file_path=str(test_file), content=search_replace_content
-        )
-        result = await collect_result(tool.run(args))
-
-        assert result.blocks_applied == 1
-        assert sum(w["path"].endswith(".bak") for w in mock_client._write_calls) == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("newline", ["\r\n", "\r", "\n"])
@@ -178,18 +134,19 @@ class TestAcpSearchReplaceExecution:
             "original line 3",
         ])
 
-        tool = SearchReplace(
-            config_getter=lambda: SearchReplaceConfig(),
-            state=AcpSearchReplaceState.model_construct(
+        tool = Edit(
+            config_getter=lambda: EditConfig(),
+            state=AcpEditState.model_construct(
                 client=mock_client, session_id="test_session"
             ),
         )
 
         test_file = tmp_path / "test_file.txt"
         test_file.touch()
-        args = SearchReplaceArgs(
+        args = EditArgs(
             file_path=str(test_file),
-            content=_make_block("original line 2", "modified line 2"),
+            old_string="original line 2",
+            new_string="modified line 2",
         )
         await collect_result(tool.run(args))
 
@@ -200,61 +157,26 @@ class TestAcpSearchReplaceExecution:
         ])
 
     @pytest.mark.asyncio
-    async def test_run_backup_preserves_crlf_byte_for_byte(
-        self, mock_client: MockClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        original = "original line 1\r\noriginal line 2\r\noriginal line 3"
-        mock_client._file_content = original
-
-        tool = SearchReplace(
-            config_getter=lambda: SearchReplaceConfig(create_backup=True),
-            state=AcpSearchReplaceState.model_construct(
-                client=mock_client, session_id="test_session"
-            ),
-        )
-
-        test_file = tmp_path / "test_file.txt"
-        test_file.touch()
-        args = SearchReplaceArgs(
-            file_path=str(test_file),
-            content=_make_block("original line 1", "modified line 1"),
-        )
-        await collect_result(tool.run(args))
-
-        backup_calls = [
-            w for w in mock_client._write_calls if w["path"].endswith(".bak")
-        ]
-        assert len(backup_calls) == 1
-        assert backup_calls[0]["content"] == original
-
-    @pytest.mark.asyncio
     async def test_run_read_error(
         self, mock_client: MockClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(tmp_path)
         mock_client._read_error = RuntimeError("File not found")
 
-        tool = SearchReplace(
-            config_getter=lambda: SearchReplaceConfig(),
-            state=AcpSearchReplaceState.model_construct(
+        tool = Edit(
+            config_getter=lambda: EditConfig(),
+            state=AcpEditState.model_construct(
                 client=mock_client, session_id="test_session"
             ),
         )
 
         test_file = tmp_path / "test.txt"
         test_file.touch()
-        search_replace_content = "<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE"
-        args = SearchReplaceArgs(
-            file_path=str(test_file), content=search_replace_content
-        )
+        args = EditArgs(file_path=str(test_file), old_string="old", new_string="new")
         with pytest.raises(ToolError) as exc_info:
             await collect_result(tool.run(args))
 
-        assert (
-            str(exc_info.value)
-            == f"Unexpected error reading {test_file}: File not found"
-        )
+        assert str(exc_info.value) == f"Error reading {test_file}: File not found"
 
     @pytest.mark.asyncio
     async def test_run_write_error(
@@ -264,19 +186,16 @@ class TestAcpSearchReplaceExecution:
         mock_client._write_error = RuntimeError("Permission denied")
         test_file = tmp_path / "test.txt"
         test_file.touch()
-        mock_client._file_content = "old"  # Update mock to return correct content
+        mock_client._file_content = "old"
 
-        tool = SearchReplace(
-            config_getter=lambda: SearchReplaceConfig(),
-            state=AcpSearchReplaceState.model_construct(
+        tool = Edit(
+            config_getter=lambda: EditConfig(),
+            state=AcpEditState.model_construct(
                 client=mock_client, session_id="test_session"
             ),
         )
 
-        search_replace_content = "<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE"
-        args = SearchReplaceArgs(
-            file_path=str(test_file), content=search_replace_content
-        )
+        args = EditArgs(file_path=str(test_file), old_string="old", new_string="new")
         with pytest.raises(ToolError) as exc_info:
             await collect_result(tool.run(args))
 
@@ -309,38 +228,30 @@ class TestAcpSearchReplaceExecution:
         monkeypatch.chdir(tmp_path)
         test_file = tmp_path / "test.txt"
         test_file.touch()
-        tool = SearchReplace(
-            config_getter=lambda: SearchReplaceConfig(),
-            state=AcpSearchReplaceState.model_construct(
-                client=client, session_id=session_id
-            ),
+        tool = Edit(
+            config_getter=lambda: EditConfig(),
+            state=AcpEditState.model_construct(client=client, session_id=session_id),
         )
 
-        search_replace_content = "<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE"
-        args = SearchReplaceArgs(
-            file_path=str(test_file), content=search_replace_content
-        )
+        args = EditArgs(file_path=str(test_file), old_string="old", new_string="new")
         with pytest.raises(ToolError) as exc_info:
             await collect_result(tool.run(args))
 
         assert str(exc_info.value) == expected_error
 
 
-class TestAcpSearchReplaceSessionUpdates:
+class TestAcpEditSessionUpdates:
     def test_tool_call_session_update(self) -> None:
-        search_replace_content = (
-            "<<<<<<< SEARCH\nold text\n=======\nnew text\n>>>>>>> REPLACE"
-        )
         event = ToolCallEvent(
-            tool_name="search_replace",
+            tool_name="edit",
             tool_call_id="test_call_123",
-            args=SearchReplaceArgs(
-                file_path="/tmp/test.txt", content=search_replace_content
+            args=EditArgs(
+                file_path="/tmp/test.txt", old_string="old text", new_string="new text"
             ),
-            tool_class=SearchReplace,
+            tool_class=Edit,
         )
 
-        update = SearchReplace.tool_call_session_update(event)
+        update = Edit.tool_call_session_update(event)
         assert update is not None
         assert update.session_update == "tool_call"
         assert update.tool_call_id == "test_call_123"
@@ -362,40 +273,37 @@ class TestAcpSearchReplaceSessionUpdates:
             pass
 
         event = ToolCallEvent.model_construct(
-            tool_name="search_replace",
+            tool_name="edit",
             tool_call_id="test_call_123",
             args=InvalidArgs(),  # type: ignore[arg-type]
-            tool_class=SearchReplace,
+            tool_class=Edit,
         )
 
-        update = SearchReplace.tool_call_session_update(event)
+        update = Edit.tool_call_session_update(event)
         assert update is not None
-        assert update.title == "search_replace"
+        assert update.title == "edit"
 
     def test_tool_result_session_update(self) -> None:
-        search_replace_content = (
-            "<<<<<<< SEARCH\nold text\n=======\nnew text\n>>>>>>> REPLACE"
-        )
-        result = SearchReplaceResult(
+        result = EditResult(
             file="/tmp/test.txt",
-            blocks_applied=1,
-            lines_changed=1,
-            content=search_replace_content,
-            warnings=[],
+            message="The file has been updated successfully.",
+            old_string="old text",
+            new_string="new text",
         )
 
         event = ToolResultEvent(
-            tool_name="search_replace",
+            tool_name="edit",
             tool_call_id="test_call_123",
             result=result,
-            tool_class=SearchReplace,
+            tool_class=Edit,
         )
 
-        update = SearchReplace.tool_result_session_update(event)
+        update = Edit.tool_result_session_update(event)
         assert update is not None
         assert update.session_update == "tool_call_update"
         assert update.tool_call_id == "test_call_123"
         assert update.status == "completed"
+        assert update.kind == "edit"
         assert update.content is not None
         assert isinstance(update.content, list)
         assert len(update.content) == 1
@@ -412,12 +320,12 @@ class TestAcpSearchReplaceSessionUpdates:
             pass
 
         event = ToolResultEvent.model_construct(
-            tool_name="search_replace",
+            tool_name="edit",
             tool_call_id="test_call_123",
             result=InvalidResult(),  # type: ignore[arg-type]
-            tool_class=SearchReplace,
+            tool_class=Edit,
         )
 
-        update = SearchReplace.tool_result_session_update(event)
+        update = Edit.tool_result_session_update(event)
         assert update is not None
         assert update.status == "failed"

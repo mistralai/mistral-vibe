@@ -62,7 +62,7 @@ class TestPermissionStore:
             label="npm install *",
         )
 
-        assert not store.covers("read_file", rp)
+        assert not store.covers("read", rp)
 
     def test_tool_permission_round_trip(self):
         store = PermissionStore()

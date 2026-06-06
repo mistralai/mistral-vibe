@@ -344,13 +344,13 @@ class TestProjectPromptsDirsAdditionalDirs:
 
 
 class TestProjectRootsNestedDedup:
-    def test_nested_add_dirs_collapse(self, tmp_path: Path) -> None:
+    def test_nested_add_dirs_preserved(self, tmp_path: Path) -> None:
         outer = (tmp_path / "outer").resolve()
         inner = outer / "inner"
         inner.mkdir(parents=True)
 
         mgr = HarnessFilesManager(sources=("user",), _additional_dirs=(outer, inner))
-        assert mgr.project_roots == [outer]
+        assert mgr.project_roots == [outer, inner]
 
     def test_add_dir_containing_cwd_keeps_both(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -380,10 +380,13 @@ class TestProjectRootsNestedDedup:
         outer = (tmp_path / "outer").resolve()
         inner = outer / "inner"
         inner.mkdir(parents=True)
+        skills_dir = inner / ".vibe" / "skills"
+        skills_dir.mkdir(parents=True)
         monkeypatch.chdir(outer)
         trusted_folders_manager.trust_for_session(outer)
 
         mgr = HarnessFilesManager(
             sources=("user", "project"), _additional_dirs=(inner,)
         )
-        assert mgr.project_roots == [outer]
+        assert mgr.project_roots == [outer, inner]
+        assert skills_dir in mgr.project_skills_dirs

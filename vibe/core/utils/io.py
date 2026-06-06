@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
+from collections.abc import AsyncIterator, Iterator
+import contextlib
+from contextlib import asynccontextmanager
 import locale
 import os
 from pathlib import Path
+import shutil
+import time
 from typing import NamedTuple
 
 import anyio
@@ -106,3 +111,106 @@ async def read_safe_async(
     """Async :func:`read_safe` (``anyio``)."""
     raw = await anyio.Path(path).read_bytes()
     return decode_safe(raw, raise_on_error=raise_on_error)
+
+
+class BoundedReadResult(NamedTuple):
+    r"""A bounded slice of a file's lines plus truncation metadata.
+
+    ``lines`` are decoded and ``\n``-normalized, without trailing newlines.
+    ``total_lines`` is ``None`` when the read stopped early at the line or byte
+    budget (the true total is unknown without scanning the rest of the file);
+    otherwise it is the number of lines in the file. ``was_truncated`` is true
+    when the read stopped before reaching end of file.
+    """
+
+    lines: list[str]
+    total_lines: int | None
+    was_truncated: bool
+
+
+def read_lines_safe(
+    path: Path, *, start_line: int = 1, limit: int, max_bytes: int
+) -> BoundedReadResult:
+    r"""Read up to ``limit`` lines from ``start_line`` (1-indexed) bounded by bytes.
+
+    Streams the file line-by-line in binary and stops once ``limit`` lines or
+    ``max_bytes`` of selected content have been collected, so large files are
+    never loaded whole. The collected bytes are decoded once via
+    :func:`decode_safe`, which also normalizes ``\r\n``/``\r`` to ``\n``.
+    """
+    raw_lines: list[bytes] = []
+    bytes_read = 0
+    line_number = 0
+    was_truncated = True
+
+    with path.open("rb") as f:
+        while raw_line := f.readline():
+            line_number += 1
+            if line_number < start_line:
+                continue
+            if len(raw_lines) >= limit:
+                break
+            if bytes_read + len(raw_line) > max_bytes:
+                remaining = max_bytes - bytes_read
+                if remaining > 0:
+                    raw_lines.append(raw_line[:remaining])
+                break
+            raw_lines.append(raw_line)
+            bytes_read += len(raw_line)
+        else:
+            was_truncated = False
+
+    total_lines = None if was_truncated else line_number
+    lines = decode_safe(b"".join(raw_lines)).text.splitlines()
+    return BoundedReadResult(lines, total_lines, was_truncated)
+
+
+async def read_lines_safe_async(
+    path: Path, *, start_line: int = 1, limit: int, max_bytes: int
+) -> BoundedReadResult:
+    """Async :func:`read_lines_safe` (runs the blocking read in a thread)."""
+    return await asyncio.to_thread(
+        read_lines_safe, path, start_line=start_line, limit=limit, max_bytes=max_bytes
+    )
+
+
+_FILE_WRITE_LOCKS: dict[str, asyncio.Lock] = {}
+_FILE_WRITE_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _get_lock(path: Path) -> asyncio.Lock:
+    global _FILE_WRITE_LOCK_LOOP
+    loop = asyncio.get_running_loop()
+    if _FILE_WRITE_LOCK_LOOP is not loop:
+        _FILE_WRITE_LOCKS.clear()
+        _FILE_WRITE_LOCK_LOOP = loop
+    key = str(path.resolve())
+    lock = _FILE_WRITE_LOCKS.get(key)
+    if lock is None:
+        lock = _FILE_WRITE_LOCKS[key] = asyncio.Lock()
+    return lock
+
+
+@asynccontextmanager
+async def file_write_lock(path: Path) -> AsyncIterator[None]:
+    async with _get_lock(path):
+        yield
+
+
+async def atomic_replace(
+    path: Path, content: str, *, encoding: str = "utf-8", newline: str | None = None
+) -> None:
+    target = Path(path)
+    tmp = target.parent / f".{target.name}.tmp.{os.getpid()}.{time.time_ns()}"
+    try:
+        async with await anyio.Path(tmp).open(
+            mode="w", encoding=encoding, newline=newline
+        ) as f:
+            await f.write(content)
+        with contextlib.suppress(FileNotFoundError):
+            shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+        raise

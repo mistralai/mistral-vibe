@@ -7,6 +7,7 @@ import pytest
 
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.patch import ConfigPatch
 from vibe.core.config.schema import ConfigSchema, WithReplaceMerge
 
 
@@ -76,7 +77,7 @@ async def test_origin_of_missing_key_returns_none() -> None:
 async def test_apply_patch_raises_not_implemented() -> None:
     orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[])
     with pytest.raises(NotImplementedError, match="M2"):
-        await orch.apply_patch({})
+        await orch.apply_patch(ConfigPatch(fingerprint="fp-1"))
 
 
 @pytest.mark.asyncio

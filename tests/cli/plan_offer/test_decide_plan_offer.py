@@ -11,6 +11,8 @@ from vibe.cli.plan_offer.decide_plan_offer import (
     PlanInfo,
     WhoAmIPlanType,
     decide_plan_offer,
+    plan_offer_cta,
+    plan_title,
     resolve_api_key_for_plan,
 )
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIResponse
@@ -175,6 +177,47 @@ def test_resolve_api_key_for_plan_with_missing_env_var() -> None:
 
 
 @pytest.mark.parametrize(
+    ("plan_info", "expected_cta"),
+    [
+        (
+            PlanInfo(
+                plan_type=WhoAmIPlanType.CHAT,
+                plan_name="INDIVIDUAL",
+                prompt_switching_to_pro_plan=True,
+            ),
+            "### Switch to your [Vibe Pro API key](https://chat.mistral.ai/code/extensions?focus=key)",
+        ),
+        (
+            PlanInfo(
+                plan_type=WhoAmIPlanType.API,
+                plan_name="FREE",
+                prompt_switching_to_pro_plan=False,
+            ),
+            "### Unlock more with Vibe - [Upgrade to Vibe Pro](https://chat.mistral.ai/code/extensions?focus=key)",
+        ),
+    ],
+    ids=["switch-to-vibe-pro-key", "upgrade-to-vibe-pro"],
+)
+def test_plan_offer_cta_routes_users_to_vibe_api_key_extensions(
+    plan_info: PlanInfo, expected_cta: str
+) -> None:
+    assert plan_offer_cta(plan_info) == expected_cta
+
+
+def test_plan_offer_cta_uses_configured_vibe_url() -> None:
+    plan_info = PlanInfo(
+        plan_type=WhoAmIPlanType.CHAT,
+        plan_name="INDIVIDUAL",
+        prompt_switching_to_pro_plan=True,
+    )
+
+    assert (
+        plan_offer_cta(plan_info, vibe_base_url="https://vibe.example.com/")
+        == "### Switch to your [Vibe Pro API key](https://vibe.example.com/code/extensions?focus=key)"
+    )
+
+
+@pytest.mark.parametrize(
     ("response", "expected"),
     [
         (
@@ -221,3 +264,20 @@ def test_teleport_eligibility_depends_on_chat_plan_and_current_key(
     response: WhoAmIResponse, expected: bool
 ) -> None:
     assert PlanInfo.from_response(response).is_teleport_eligible() is expected
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_title"),
+    [
+        (PlanInfo(plan_type=WhoAmIPlanType.API, plan_name="FREE"), "Free"),
+        (
+            PlanInfo(plan_type=WhoAmIPlanType.API, plan_name="Scale plan"),
+            "[API] Scale plan",
+        ),
+    ],
+    ids=["free-api-plan", "paid-api-plan"],
+)
+def test_plan_title_uses_current_api_plan_labels(
+    payload: PlanInfo, expected_title: str
+) -> None:
+    assert plan_title(payload) == expected_title

@@ -15,7 +15,7 @@ from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import ConnectorConfig
+from vibe.core.config import ConnectorConfig, VibeConfig
 from vibe.core.tools.connectors import ConnectorAuthAction, ConnectorRegistry
 from vibe.core.tools.mcp.tools import MCPTool
 from vibe.core.tools.mcp_settings import updated_tool_list
@@ -123,19 +123,19 @@ class MCPApp(Container):
         tool_manager: ToolManager,
         initial_server: str = "",
         connector_registry: ConnectorRegistry | None = None,
-        get_connector_configs: Callable[[], list[ConnectorConfig]] | None = None,
+        get_vibe_config: Callable[[], VibeConfig] | None = None,
         refresh_callback: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         super().__init__(id="mcp-app")
         self._mcp_servers = mcp_servers
         self._connector_registry = connector_registry
-        self._get_connector_configs = get_connector_configs or (lambda: [])
+        self._get_vibe_config = get_vibe_config
         connector_names = (
             connector_registry.get_connector_names() if connector_registry else []
         )
         self._connector_names = connector_names
         self._sorted_connector_names = _sort_connector_names_for_menu(
-            connector_names, connector_registry
+            connector_names, connector_registry, self._current_disabled_names()
         )
         self._tool_manager = tool_manager
         self._index = collect_mcp_tool_index(mcp_servers, tool_manager, connector_names)
@@ -163,7 +163,9 @@ class MCPApp(Container):
         if self._connector_registry:
             self._connector_names = self._connector_registry.get_connector_names()
             self._sorted_connector_names = _sort_connector_names_for_menu(
-                self._connector_names, self._connector_registry
+                self._connector_names,
+                self._connector_registry,
+                self._current_disabled_names(),
             )
         self._rebuild_preserving_scroll()
 
@@ -259,9 +261,22 @@ class MCPApp(Container):
             text = f"{self._status_message}  {text}"
         self.query_one("#mcp-help", NoMarkupStatic).update(text)
 
+    def _connector_configs(self) -> list[ConnectorConfig]:
+        return self._get_vibe_config().connectors if self._get_vibe_config else []
+
     def _find_connector_config(self, name: str) -> ConnectorConfig | None:
-        """Look up a connector config by name from the live VibeConfig source."""
-        return next((c for c in self._get_connector_configs() if c.name == name), None)
+        return next((c for c in self._connector_configs() if c.name == name), None)
+
+    def _current_disabled_names(self) -> set[str]:
+        config = self._get_vibe_config() if self._get_vibe_config else None
+        if config is None:
+            return set(self._connector_names)
+        by_name = config.connectors_by_name()
+        return {
+            n
+            for n in self._connector_names
+            if (cfg := by_name.get(n)) is None or cfg.disabled
+        }
 
     def action_disable(self) -> None:
         self._set_highlighted_disabled(disabled=True)
@@ -290,7 +305,7 @@ class MCPApp(Container):
             cfg = self._find_connector_config(name)
             if cfg is None:
                 cfg = ConnectorConfig(name=name, disabled=disabled)
-                self._get_connector_configs().append(cfg)
+                self._connector_configs().append(cfg)
             else:
                 cfg.disabled = disabled
 
@@ -342,7 +357,7 @@ class MCPApp(Container):
                 cfg = ConnectorConfig(
                     name=server_name, disabled_tools=[remote_name] if disabled else []
                 )
-                self._get_connector_configs().append(cfg)
+                self._connector_configs().append(cfg)
             else:
                 cfg.disabled_tools = updated_tool_list(
                     cfg.disabled_tools, remote_name, disabled
@@ -365,6 +380,11 @@ class MCPApp(Container):
 
         self._index = collect_mcp_tool_index(
             self._mcp_servers, self._tool_manager, self._connector_names
+        )
+        self._sorted_connector_names = _sort_connector_names_for_menu(
+            self._connector_names,
+            self._connector_registry,
+            self._current_disabled_names(),
         )
         self._refresh_view(self._viewing_server, kind=self._viewing_kind)
 
@@ -612,12 +632,15 @@ def _tool_count_text(enabled: int, total: int | None = None) -> str:
 
 
 def _sort_connector_names_for_menu(
-    connector_names: Sequence[str], connector_registry: ConnectorRegistry | None
+    connector_names: Sequence[str],
+    connector_registry: ConnectorRegistry | None,
+    disabled_names: set[str],
 ) -> list[str]:
-    return sorted(
-        connector_names,
-        key=lambda name: (
-            not connector_registry.is_connected(name) if connector_registry else True,
-            name.lower(),
-        ),
-    )
+    def key(name: str) -> tuple[bool, bool, str]:
+        is_disabled = name in disabled_names
+        is_connected = (
+            connector_registry.is_connected(name) if connector_registry else False
+        )
+        return (is_disabled, not is_connected, name.lower())
+
+    return sorted(connector_names, key=key)

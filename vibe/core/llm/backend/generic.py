@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import httpx
 
+from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.anthropic import AnthropicAdapter
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
 from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
@@ -79,6 +80,22 @@ class OpenAIAdapter(APIAdapter):
             msg_dict["reasoning_content"] = msg_dict.pop(field_name)
         return msg_dict
 
+    def _user_with_images_to_parts(
+        self, msg_dict: dict[str, Any], source: LLMMessage
+    ) -> dict[str, Any]:
+        if source.role != Role.user or not source.images:
+            return msg_dict
+        parts: list[dict[str, Any]] = []
+        text = msg_dict.get("content")
+        if isinstance(text, str) and text:
+            parts.append({"type": "text", "text": text})
+        parts.extend(
+            {"type": "image_url", "image_url": {"url": _to_data_uri(att)}}
+            for att in source.images
+        )
+        msg_dict["content"] = parts
+        return msg_dict
+
     def prepare_request(
         self,
         *,
@@ -95,17 +112,21 @@ class OpenAIAdapter(APIAdapter):
     ) -> PreparedRequest:
         field_name = provider.reasoning_field_name
         converted_messages = [
-            self._reasoning_to_api(
-                msg.model_dump(
-                    exclude_none=True,
-                    exclude={
-                        "message_id",
-                        "reasoning_message_id",
-                        "reasoning_state",
-                        "injected",
-                    },
+            self._user_with_images_to_parts(
+                self._reasoning_to_api(
+                    msg.model_dump(
+                        exclude_none=True,
+                        exclude={
+                            "message_id",
+                            "reasoning_message_id",
+                            "reasoning_state",
+                            "injected",
+                            "images",
+                        },
+                    ),
+                    field_name,
                 ),
-                field_name,
+                msg,
             )
             for msg in messages
         ]
@@ -415,35 +436,6 @@ class GenericBackend:
                 if value == "[DONE]":
                     return
                 yield json.loads(value.strip())
-
-    async def count_tokens(
-        self,
-        *,
-        model: ModelConfig,
-        messages: Sequence[LLMMessage],
-        temperature: float = 0.0,
-        tools: list[AvailableTool] | None = None,
-        tool_choice: StrToolChoice | AvailableTool | None = None,
-        extra_headers: dict[str, str] | None = None,
-        metadata: dict[str, str] | None = None,
-    ) -> int:
-        probe_messages = list(messages)
-        if not probe_messages or probe_messages[-1].role != Role.user:
-            probe_messages.append(LLMMessage(role=Role.user, content=""))
-
-        result = await self.complete(
-            model=model,
-            messages=probe_messages,
-            temperature=temperature,
-            tools=tools,
-            max_tokens=16,  # Minimal amount for openrouter with openai models
-            tool_choice=tool_choice,
-            extra_headers=extra_headers,
-        )
-        if result.usage is None:
-            raise ValueError("Missing usage in non streaming completion")
-
-        return result.usage.prompt_tokens
 
     async def close(self) -> None:
         if self._owns_client and self._client:

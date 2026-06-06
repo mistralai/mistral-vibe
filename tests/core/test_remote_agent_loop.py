@@ -413,7 +413,6 @@ def test_working_task_promoted_to_real_tool_call_does_not_create_duplicate_row()
             "output": {
                 "path": "/workspace/hello.py",
                 "bytes_written": 22,
-                "file_existed": False,
                 "content": 'print("Hello, World!")',
             },
         },
@@ -456,7 +455,6 @@ def test_idle_boundary_waits_for_open_tool_results() -> None:
             "output": {
                 "path": "/workspace/hello_world.js",
                 "bytes_written": 29,
-                "file_existed": False,
                 "content": "console.log('Hello, World!');",
             },
         },
@@ -731,7 +729,7 @@ def test_working_completed_with_tool_call_id_emits_error_result() -> None:
         "working",
         {
             "title": "Executing write_file",
-            "content": "Error: File exists. Set overwrite=True.",
+            "content": "Error: Permission denied.",
             "toolUIState": {
                 "type": "file",
                 "toolCallId": "call-write-err",

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,9 +22,12 @@ from vibe.core.tools.mcp import (
     _mcp_stderr_capture,
     _parse_call_result,
     _stderr_logger_thread,
+    call_tool_http,
     call_tool_stdio,
     create_mcp_http_proxy_tool_class,
     create_mcp_stdio_proxy_tool_class,
+    create_vibe_mcp_http_client,
+    list_tools_http,
     list_tools_stdio,
 )
 
@@ -131,6 +136,130 @@ class TestParseCallResult:
         result = _parse_call_result("server", "tool", mock_result)
 
         assert result.text == "line1\nline2"
+
+
+class TestMCPHttpClient:
+    def test_create_vibe_mcp_http_client_uses_vibe_ssl_context(self):
+        headers = {"Authorization": "Bearer token"}
+        ssl_context = object()
+        fake_client = object()
+        with (
+            patch(
+                "vibe.core.tools.mcp.tools.build_ssl_context", return_value=ssl_context
+            ),
+            patch(
+                "vibe.core.tools.mcp.tools.httpx.AsyncClient", return_value=fake_client
+            ) as async_client,
+        ):
+            client = create_vibe_mcp_http_client(headers)
+
+        assert client is fake_client
+        kwargs = async_client.call_args.kwargs
+        assert kwargs["follow_redirects"] is True
+        assert kwargs["headers"] == headers
+        assert kwargs["verify"] is ssl_context
+        assert kwargs["timeout"].connect == 30.0
+        assert kwargs["timeout"].read == 300.0
+
+    @pytest.mark.asyncio
+    async def test_list_tools_http_uses_vibe_mcp_http_client(self):
+        fake_client = _FakeHttpClient()
+        captured: dict[str, Any] = {}
+
+        @contextlib.asynccontextmanager
+        async def fake_stream(url: str, *, http_client: Any):
+            captured["url"] = url
+            captured["http_client"] = http_client
+            yield object(), object(), lambda: None
+
+        with (
+            patch(
+                "vibe.core.tools.mcp.tools.create_vibe_mcp_http_client",
+                return_value=fake_client,
+            ) as create_client,
+            patch("vibe.core.tools.mcp.tools.streamable_http_client", fake_stream),
+            patch("vibe.core.tools.mcp.tools.ClientSession", _FakeMCPClientSession),
+        ):
+            tools = await list_tools_http(
+                "https://mcp.example.com",
+                headers={"Authorization": "Bearer token"},
+                startup_timeout_sec=42.0,
+            )
+
+        create_client.assert_called_once_with({"Authorization": "Bearer token"})
+        assert fake_client.entered is True
+        assert fake_client.closed is True
+        assert captured["url"] == "https://mcp.example.com"
+        assert captured["http_client"] is fake_client
+        assert [tool.name for tool in tools] == ["remote_tool"]
+
+    @pytest.mark.asyncio
+    async def test_call_tool_http_uses_vibe_mcp_http_client(self):
+        fake_client = _FakeHttpClient()
+        captured: dict[str, Any] = {}
+
+        @contextlib.asynccontextmanager
+        async def fake_stream(url: str, *, http_client: Any):
+            captured["url"] = url
+            captured["http_client"] = http_client
+            yield object(), object(), lambda: None
+
+        with (
+            patch(
+                "vibe.core.tools.mcp.tools.create_vibe_mcp_http_client",
+                return_value=fake_client,
+            ) as create_client,
+            patch("vibe.core.tools.mcp.tools.streamable_http_client", fake_stream),
+            patch("vibe.core.tools.mcp.tools.ClientSession", _FakeMCPClientSession),
+        ):
+            result = await call_tool_http(
+                "https://mcp.example.com",
+                "remote_tool",
+                {"query": "hello"},
+                headers={"Authorization": "Bearer token"},
+                startup_timeout_sec=42.0,
+                tool_timeout_sec=12.0,
+            )
+
+        create_client.assert_called_once_with({"Authorization": "Bearer token"})
+        assert fake_client.entered is True
+        assert fake_client.closed is True
+        assert captured["url"] == "https://mcp.example.com"
+        assert captured["http_client"] is fake_client
+        assert result.structured == {"ok": True}
+
+
+class _FakeHttpClient:
+    def __init__(self) -> None:
+        self.entered = False
+        self.closed = False
+
+    async def __aenter__(self) -> _FakeHttpClient:
+        self.entered = True
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        self.closed = True
+
+
+class _FakeMCPClientSession:
+    def __init__(self, *_: Any, **__: Any) -> None:
+        pass
+
+    async def __aenter__(self) -> _FakeMCPClientSession:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        pass
+
+    async def initialize(self) -> None:
+        pass
+
+    async def list_tools(self) -> SimpleNamespace:
+        return SimpleNamespace(tools=[{"name": "remote_tool"}])
+
+    async def call_tool(self, *_: Any, **__: Any) -> SimpleNamespace:
+        return SimpleNamespace(structuredContent={"ok": True}, content=None)
 
 
 class TestMCPStderrCapture:

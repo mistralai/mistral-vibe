@@ -12,9 +12,10 @@ from vibe.core.utils.concurrency import (
     ConversationLimitException,
     run_sync,
 )
-from vibe.core.utils.display import compact_reduction_display
+from vibe.core.utils.display import compact_complete_display
 from vibe.core.utils.http import (
     build_ssl_context,
+    configure_ssl_context,
     get_server_url_from_api_base,
     get_user_agent,
 )
@@ -55,7 +56,8 @@ __all__ = [
     "async_generator_retry",
     "async_retry",
     "build_ssl_context",
-    "compact_reduction_display",
+    "compact_complete_display",
+    "configure_ssl_context",
     "get_platform_display_name",
     "get_platform_id",
     "get_server_url_from_api_base",

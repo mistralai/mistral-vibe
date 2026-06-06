@@ -47,8 +47,8 @@ jobs:
                         labels.push('CLI');
                       } else if (component === 'ACP') {
                         labels.push('ACP');
-                      } else if (component === 'Both') {
-                        labels.push('CLI', 'ACP');
+                      } else if (component === 'VS Code extension') {
+                        labels.push('VS Code extension');
                       }
 
                       if (labels.length > 0) {

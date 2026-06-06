@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from vibe.core.paths._agents_home import AGENTS_HOME
-from vibe.core.paths._local_config_walk import (
-    WALK_MAX_DEPTH,
-    ConfigWalkResult,
+from vibe.core.paths._local_config_files import (
+    LocalConfigDirs,
     dedup_paths,
-    walk_local_config_dirs,
+    find_local_config_dirs,
 )
 from vibe.core.paths._vibe_home import (
     CACHE_FILE,
@@ -35,9 +34,8 @@ __all__ = [
     "SESSION_LOG_DIR",
     "TRUSTED_FOLDERS_FILE",
     "VIBE_HOME",
-    "WALK_MAX_DEPTH",
-    "ConfigWalkResult",
     "GlobalPath",
+    "LocalConfigDirs",
     "dedup_paths",
-    "walk_local_config_dirs",
+    "find_local_config_dirs",
 ]

@@ -335,8 +335,8 @@ async def test_mistral_metadata_header_call_type_per_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_compact_emits_summary_recount_and_next_turn_metadata() -> None:
-    """Compact emits summary, token-count, then user-turn backend metadata in order."""
+async def test_auto_compact_emits_summary_and_next_turn_metadata() -> None:
+    """Compact emits summary then user-turn backend metadata in order."""
     backend = FakeBackend([
         [mock_llm_chunk(content="<summary>")],
         [mock_llm_chunk(content="<final>")],
@@ -358,32 +358,24 @@ async def test_auto_compact_emits_summary_recount_and_next_turn_metadata() -> No
 
     [_ async for _ in agent.act("Hello")]
 
-    assert len(backend.requests_metadata) == 3
-    assert len(backend.requests_extra_headers) == 3
+    assert len(backend.requests_metadata) == 2
+    assert len(backend.requests_extra_headers) == 2
     compact_metadata = backend.requests_metadata[0]
-    recount_metadata = backend.requests_metadata[1]
-    user_turn_metadata = backend.requests_metadata[2]
+    user_turn_metadata = backend.requests_metadata[1]
     assert compact_metadata is not None
-    assert recount_metadata is not None
     assert user_turn_metadata is not None
     assert compact_metadata["call_type"] == "secondary_call"
     assert compact_metadata["session_id"] == original_session_id
     assert "parent_session_id" not in compact_metadata
-    assert recount_metadata["call_type"] == "secondary_call"
-    assert recount_metadata["session_id"] == agent.session_id
-    assert recount_metadata["parent_session_id"] == original_session_id
     assert user_turn_metadata["call_type"] == "main_call"
     assert user_turn_metadata["session_id"] == agent.session_id
     assert user_turn_metadata["parent_session_id"] == original_session_id
 
     compact_headers = backend.requests_extra_headers[0]
-    recount_headers = backend.requests_extra_headers[1]
-    user_turn_headers = backend.requests_extra_headers[2]
+    user_turn_headers = backend.requests_extra_headers[1]
     assert compact_headers is not None
-    assert recount_headers is not None
     assert user_turn_headers is not None
     assert compact_headers["x-affinity"] == original_session_id
-    assert recount_headers["x-affinity"] == agent.session_id
     assert user_turn_headers["x-affinity"] == agent.session_id
 
 

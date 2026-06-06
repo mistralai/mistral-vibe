@@ -326,8 +326,22 @@ ThemeSelectionScreen #enter-hint {
     width: 100%;
     color: $foreground-muted;
     text-align: center;
+    margin-top: 2;
+    padding-left: 2;
+}
+
+#browser-sign-in-url {
+    width: 100%;
+    height: auto;
+    color: $foreground-muted;
+    link-style: none;
+    link-style-hover: none;
     margin-top: 1;
     padding-left: 2;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 /* =============================================================================

@@ -481,6 +481,54 @@ class TestACloseCancelsExperimentsTask:
             assert not task.cancelled()
 
 
+class TestCycleAgentDuringInit:
+    @pytest.mark.asyncio
+    async def test_shift_tab_during_experiments_init_does_not_crash(self) -> None:
+        """Regression: shift+tab during init crashed with
+        RuntimeError("await wasn't used with future").
+
+        _cycle_agent ran switch_agent via asyncio.run() in a thread worker,
+        creating a second event loop.  wait_until_ready then tried to await
+        _experiments_task (owned by the main Textual loop) from that new loop.
+
+        The fix uses asyncio.run_coroutine_threadsafe() to schedule on the
+        main loop instead.  This test presses shift+tab while experiments
+        are still initializing and asserts the worker completes without error.
+        """
+        from tests.conftest import build_test_vibe_app
+
+        gate = asyncio.Event()
+
+        async def slow_init() -> None:
+            await gate.wait()
+
+        agent_loop = build_test_agent_loop()
+        app = build_test_vibe_app(agent_loop=agent_loop)
+
+        async with app.run_test() as pilot:
+            with patch.object(
+                agent_loop, "initialize_experiments", side_effect=slow_init
+            ):
+                agent_loop._experiments_task = None  # reset so start_ re-fires
+                agent_loop.start_initialize_experiments()
+
+                assert agent_loop._experiments_task is not None
+                assert not agent_loop._experiments_task.done()
+
+                # Press shift+tab while experiments are still running.
+                await pilot.press("shift+tab")
+                await pilot.pause(0.05)
+
+                # Unblock experiments so switch_agent can complete.
+                gate.set()
+
+                # wait_for_complete raises WorkerFailed if the thread worker
+                # crashed — which is exactly what happened before the fix.
+                await pilot.app.workers.wait_for_complete()
+
+            assert agent_loop.agent_profile.name == "plan"
+
+
 class TestActGatesOnExperiments:
     @pytest.mark.asyncio
     async def test_act_awaits_experiments_before_llm_call(self) -> None:

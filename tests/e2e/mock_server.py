@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import ssl
 import threading
 import time
 from typing import TypedDict, cast
@@ -84,11 +85,21 @@ class StreamingMockServer:
             ),
         ]
 
-    def __init__(self, *, chunk_factory: ChunkFactory | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        chunk_factory: ChunkFactory | None = None,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
         self.requests: list[ChatCompletionsRequestPayload] = []
         self._lock = threading.Lock()
         self._chunk_factory = chunk_factory
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
+        self._scheme = "https" if ssl_context is not None else "http"
+        if ssl_context is not None:
+            self._server.socket = ssl_context.wrap_socket(
+                self._server.socket, server_side=True
+            )
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
     def _build_handler(self) -> type[BaseHTTPRequestHandler]:
@@ -138,7 +149,7 @@ class StreamingMockServer:
 
     @property
     def api_base(self) -> str:
-        return f"http://127.0.0.1:{self._server.server_port}/v1"
+        return f"{self._scheme}://127.0.0.1:{self._server.server_port}/v1"
 
     def start(self) -> None:
         self._thread.start()

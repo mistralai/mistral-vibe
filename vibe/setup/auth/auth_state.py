@@ -128,6 +128,7 @@ def assess_auth_state(
         return _auth_state(
             AuthStateKind.VIBE_HOME_ENV_FILE_OVERRIDES_PROCESS_ENV,
             can_use_active_provider=True,
+            sign_out_available=True,
             env_key=env_key,
         )
 

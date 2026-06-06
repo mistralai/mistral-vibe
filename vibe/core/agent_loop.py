@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Generator
+from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 import contextlib
 import copy
 from enum import StrEnum, auto
@@ -106,6 +106,7 @@ from vibe.core.types import (
     CompactEndEvent,
     CompactStartEvent,
     ContextTooLongError,
+    ImageAttachment,
     LLMChunk,
     LLMMessage,
     LLMUsage,
@@ -169,6 +170,10 @@ class AgentLoopStateError(AgentLoopError):
 
 class AgentLoopLLMResponseError(AgentLoopError):
     """Raised when LLM response is malformed or missing expected data."""
+
+
+class ImagesNotSupportedError(AgentLoopError):
+    """Raised when the active model does not support image attachments."""
 
 
 class TeleportError(AgentLoopError):
@@ -649,16 +654,24 @@ class AgentLoop:  # noqa: PLR0904
         client_message_id: str | None = None,
         *,
         auto_title: str | None = None,
+        images: list[ImageAttachment] | None = None,
     ) -> AsyncGenerator[BaseEvent, None]:
+        try:
+            active_model = self.config.get_active_model()
+            model_name = active_model.name
+        except ValueError:
+            active_model = None
+            model_name = None
+        if images and active_model is not None and not active_model.supports_images:
+            raise ImagesNotSupportedError(active_model.alias)
         self._clean_message_history()
         self.rewind_manager.create_checkpoint()
-        try:
-            model_name = self.config.get_active_model().name
-        except ValueError:
-            model_name = None
         async with agent_span(model=model_name, session_id=self.session_id):
             async for event in self._conversation_loop(
-                msg, client_message_id=client_message_id, auto_title=auto_title
+                msg,
+                client_message_id=client_message_id,
+                auto_title=auto_title,
+                images=images,
             ):
                 yield event
 
@@ -810,7 +823,6 @@ class AgentLoop:  # noqa: PLR0904
                 )
 
                 compact_status: Literal["success", "failure", "cancelled"] = "success"
-                new_tokens = self.stats.context_tokens
                 try:
                     summary = await self.compact()
                 except asyncio.CancelledError:
@@ -820,10 +832,8 @@ class AgentLoop:  # noqa: PLR0904
                     compact_status = "failure"
                     raise
                 finally:
-                    new_tokens = self.stats.context_tokens
                     self.telemetry_client.send_auto_compact_triggered(
                         nb_context_tokens_before=old_tokens,
-                        nb_context_tokens_after=new_tokens,
                         auto_compact_threshold=threshold,
                         status=compact_status,
                         session_id=old_session_id,
@@ -832,8 +842,6 @@ class AgentLoop:  # noqa: PLR0904
 
                 yield CompactEndEvent(
                     tool_call_id=tool_call_id,
-                    old_context_tokens=old_tokens,
-                    new_context_tokens=new_tokens,
                     summary_length=len(summary),
                     old_session_id=old_session_id,
                     new_session_id=self.session_id,
@@ -877,9 +885,13 @@ class AgentLoop:  # noqa: PLR0904
         client_message_id: str | None = None,
         *,
         auto_title: str | None = None,
+        images: list[ImageAttachment] | None = None,
     ) -> AsyncGenerator[BaseEvent]:
         user_message = LLMMessage(
-            role=Role.user, content=user_msg, message_id=client_message_id
+            role=Role.user,
+            content=user_msg,
+            message_id=client_message_id,
+            images=images or None,
         )
         self.messages.append(user_message)
         self.stats.steps += 1
@@ -1322,6 +1334,25 @@ class AgentLoop:  # noqa: PLR0904
             tool_call_id=tool_call.call_id,
         )
 
+    def _messages_for_backend(self, active_model: ModelConfig) -> Sequence[LLMMessage]:
+        if active_model.supports_images:
+            return self.messages
+        if not any(m.images for m in self.messages):
+            return self.messages
+        return [
+            m.model_copy(update={"images": None}) if m.images else m
+            for m in self.messages
+        ]
+
+    def count_history_images_unsupported_by_active_model(self) -> int:
+        try:
+            active_model = self.config.get_active_model()
+        except ValueError:
+            return 0
+        if active_model.supports_images:
+            return 0
+        return sum(1 for m in self.messages if m.images)
+
     async def _chat(
         self, max_tokens: int | None = None, model_override: ModelConfig | None = None
     ) -> LLMChunk:
@@ -1348,7 +1379,7 @@ class AgentLoop:  # noqa: PLR0904
             start_time = time.perf_counter()
             result = await self.backend.complete(
                 model=active_model,
-                messages=self.messages,
+                messages=self._messages_for_backend(active_model),
                 temperature=active_model.temperature,
                 tools=available_tools,
                 tool_choice=tool_choice,
@@ -1413,7 +1444,7 @@ class AgentLoop:  # noqa: PLR0904
             chunk_agg: LLMChunk | None = None
             async for chunk in self.backend.complete_streaming(
                 model=active_model,
-                messages=self.messages,
+                messages=self._messages_for_backend(active_model),
                 temperature=active_model.temperature,
                 tools=available_tools,
                 tool_choice=tool_choice,
@@ -1724,21 +1755,16 @@ class AgentLoop:  # noqa: PLR0904
 
             system_message = self.messages[0]
             wrapped_summary = f"{summary_prefix}\n{summary_content}"
-            summary_message = LLMMessage(role=Role.user, content=wrapped_summary)
+            summary_message = LLMMessage(
+                role=Role.user, content=wrapped_summary, injected=True
+            )
             self.messages.reset([system_message, *prior_user_messages, summary_message])
 
-            active_model = self.config.get_active_model()
             await self._reset_session()
 
-            actual_context_tokens = await self.backend.count_tokens(
-                model=active_model,
-                messages=self.messages,
-                tools=self.format_handler.get_available_tools(self.tool_manager),
-                extra_headers=self._get_extra_headers(),
-                metadata=self._build_backend_metadata().model_dump(exclude_none=True),
-            )
-
-            self.stats.context_tokens = actual_context_tokens
+            # Context size is unknown without an API call; reset to 0. The next
+            # LLM turn recomputes it accurately from real usage (_update_stats).
+            self.stats.context_tokens = 0
             await self.session_logger.save_interaction(
                 self.messages,
                 self.stats,

@@ -94,7 +94,7 @@ class AgentProfile:
         )
 
 
-CHAT_AGENT_TOOLS = ["grep", "read_file", "ask_user_question", "task"]
+CHAT_AGENT_TOOLS = ["grep", "read", "ask_user_question", "task"]
 
 
 def _plan_overrides() -> dict[str, Any]:
@@ -102,7 +102,7 @@ def _plan_overrides() -> dict[str, Any]:
     return {
         "tools": {
             "write_file": {"permission": "never", "allowlist": [plans_pattern]},
-            "search_replace": {"permission": "never", "allowlist": [plans_pattern]},
+            "edit": {"permission": "never", "allowlist": [plans_pattern]},
         }
     }
 
@@ -137,7 +137,7 @@ ACCEPT_EDITS = AgentProfile(
         "base_disabled": ["exit_plan_mode"],
         "tools": {
             "write_file": {"permission": "always"},
-            "search_replace": {"permission": "always"},
+            "edit": {"permission": "always"},
         },
     },
 )
@@ -155,7 +155,7 @@ EXPLORE = AgentProfile(
     description="Read-only subagent for codebase exploration",
     safety=AgentSafety.SAFE,
     agent_type=AgentType.SUBAGENT,
-    overrides={"enabled_tools": ["grep", "read_file"], "system_prompt_id": "explore"},
+    overrides={"enabled_tools": ["grep", "read"], "system_prompt_id": "explore"},
 )
 
 LEAN = AgentProfile(

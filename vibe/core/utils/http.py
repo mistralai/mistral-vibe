@@ -6,14 +6,28 @@ import re
 import ssl
 
 import certifi
+import truststore
 
 from vibe import __version__
 from vibe.core.types import Backend
 
+_use_system_trust_store = False
+
+
+def configure_ssl_context(*, enable_system_trust_store: bool) -> None:
+    global _use_system_trust_store
+    if _use_system_trust_store == enable_system_trust_store:
+        return
+    _use_system_trust_store = enable_system_trust_store
+    build_ssl_context.cache_clear()
+
 
 @functools.lru_cache(maxsize=1)
 def build_ssl_context() -> ssl.SSLContext:
-    ctx = ssl.create_default_context(cafile=certifi.where())
+    if _use_system_trust_store:
+        ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    else:
+        ctx = ssl.create_default_context(cafile=certifi.where())
 
     # Custom certs are additive so private-CA users don't lose public roots.
     ssl_cert_file = os.getenv("SSL_CERT_FILE")

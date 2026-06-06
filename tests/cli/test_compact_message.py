@@ -12,14 +12,12 @@ class TestCompactMessage:
         message.post_message = MagicMock()
 
         message.set_complete(
-            old_tokens=177_017,
-            new_tokens=23_263,
             old_session_id="11111111-1111-1111-1111-111111111111",
             new_session_id="22222222-2222-2222-2222-222222222222",
         )
 
         assert message.get_content() == (
-            "Compaction complete: 177,017 → 23,263 tokens (-87.%)\n"
+            "Compaction completed.\n"
             "session: "
             f"{shorten_session_id('11111111-1111-1111-1111-111111111111')} "
             "(before compaction) → "

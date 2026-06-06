@@ -6,6 +6,7 @@ import pytest
 
 from vibe.core.config.layer import LayerImplementationError
 from vibe.core.config.layers.user import UserConfigLayer
+from vibe.core.config.patch import ConfigPatch
 
 
 @pytest.mark.asyncio
@@ -43,7 +44,7 @@ async def test_apply_raises_not_implemented(tmp_working_directory: Path) -> None
     path = tmp_working_directory / "config.toml"
     layer = UserConfigLayer(path=path, name="user-toml")
     with pytest.raises(NotImplementedError, match="M2"):
-        await layer.apply({"op": "set"})
+        await layer.apply(ConfigPatch(fingerprint="fp-1"))
 
 
 @pytest.mark.asyncio

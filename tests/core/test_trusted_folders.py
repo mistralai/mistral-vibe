@@ -10,6 +10,8 @@ import tomli_w
 from vibe.core.paths import AGENTS_MD_FILENAME, TRUSTED_FOLDERS_FILE
 from vibe.core.trusted_folders import (
     TrustedFoldersManager,
+    find_git_repo_ancestor,
+    find_repo_trustable_files_for_cwd,
     find_trustable_files,
     has_agents_md_file,
 )
@@ -291,15 +293,46 @@ class TestFindTrustRoot:
         # child should find parent (closest), not tmp_path
         assert manager.find_trust_root(child) == parent.resolve()
 
-    def test_ignores_untrusted_ancestors(self, tmp_path: Path) -> None:
+    def test_returns_none_when_closer_ancestor_is_untrusted(
+        self, tmp_path: Path
+    ) -> None:
         parent = tmp_path / "parent"
         child = parent / "child"
         child.mkdir(parents=True)
         manager = TrustedFoldersManager()
         manager.add_untrusted(parent)
         manager.add_trusted(tmp_path)
-        # find_trust_root skips untrusted, finds tmp_path
-        assert manager.find_trust_root(child) == tmp_path.resolve()
+        # The closer untrusted ancestor blocks the higher trusted one.
+        assert manager.find_trust_root(child) is None
+
+    def test_returns_none_when_path_itself_is_untrusted(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        manager.add_untrusted(tmp_path)
+        assert manager.find_trust_root(tmp_path) is None
+
+
+class TestIsExplicitlyUntrusted:
+    def test_returns_true_for_path_in_untrusted_list(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        manager.add_untrusted(tmp_path)
+        assert manager.is_explicitly_untrusted(tmp_path) is True
+
+    def test_returns_false_for_unknown_path(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        assert manager.is_explicitly_untrusted(tmp_path) is False
+
+    def test_does_not_walk_ancestors(self, tmp_path: Path) -> None:
+        child = tmp_path / "child"
+        child.mkdir()
+        manager = TrustedFoldersManager()
+        manager.add_untrusted(tmp_path)
+        # parent is untrusted, but child itself is not in the list
+        assert manager.is_explicitly_untrusted(child) is False
+
+    def test_returns_false_for_trusted_path(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        manager.add_trusted(tmp_path)
+        assert manager.is_explicitly_untrusted(tmp_path) is False
 
 
 class TestHasAgentsMdFile:
@@ -351,37 +384,132 @@ class TestFindTrustableFiles:
         (tmp_path / "other.txt").write_text("", encoding="utf-8")
         assert find_trustable_files(tmp_path) == []
 
-    def test_detects_vibe_config_in_subfolder(self, tmp_path: Path) -> None:
+    def test_ignores_vibe_config_in_subfolder(self, tmp_path: Path) -> None:
         (tmp_path / "sub" / ".vibe" / "skills").mkdir(parents=True)
-        result = find_trustable_files(tmp_path)
-        assert "sub/.vibe/" in result
+        assert find_trustable_files(tmp_path) == []
 
-    def test_detects_agents_skills_in_subfolder(self, tmp_path: Path) -> None:
+    def test_ignores_agents_skills_in_subfolder(self, tmp_path: Path) -> None:
         (tmp_path / "deep" / "nested" / ".agents" / "skills").mkdir(parents=True)
-        result = find_trustable_files(tmp_path)
-        assert "deep/nested/.agents/" in result
+        assert find_trustable_files(tmp_path) == []
 
-    def test_returns_empty_when_config_only_inside_ignored_dir(
-        self, tmp_path: Path
-    ) -> None:
+    def test_returns_empty_when_config_only_in_subfolder(self, tmp_path: Path) -> None:
         (tmp_path / "node_modules" / ".vibe" / "skills").mkdir(parents=True)
         assert find_trustable_files(tmp_path) == []
 
-    def test_detects_nested_vibe_dir(self, tmp_path: Path) -> None:
-        (tmp_path / "pkg" / ".vibe" / "tools").mkdir(parents=True)
-        result = find_trustable_files(tmp_path)
-        assert "pkg/.vibe/" in result
-
-    def test_detects_multiple_files(self, tmp_path: Path) -> None:
+    def test_detects_multiple_files_at_root(self, tmp_path: Path) -> None:
         (tmp_path / ".vibe" / "skills").mkdir(parents=True)
+        (tmp_path / ".agents" / "skills").mkdir(parents=True)
         (tmp_path / "AGENTS.md").write_text("# Agent", encoding="utf-8")
-        (tmp_path / "sub" / ".agents" / "skills").mkdir(parents=True)
         result = find_trustable_files(tmp_path)
         assert ".vibe/" in result
+        assert ".agents/" in result
         assert "AGENTS.md" in result
-        assert "sub/.agents/" in result
 
     def test_no_duplicates_for_root_vibe_dir(self, tmp_path: Path) -> None:
         (tmp_path / ".vibe" / "tools").mkdir(parents=True)
         result = find_trustable_files(tmp_path)
         assert result.count(".vibe/") == 1
+
+
+def _make_git_repo(path: Path) -> None:
+    git_dir = path / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+
+class TestFindRepoTrustableFilesForCwd:
+    def test_returns_empty_when_repo_root_is_none(self, tmp_path: Path) -> None:
+        assert find_repo_trustable_files_for_cwd(tmp_path, None) == []
+
+    def test_returns_empty_when_repo_root_is_not_ancestor(self, tmp_path: Path) -> None:
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _make_git_repo(repo)
+        assert find_repo_trustable_files_for_cwd(cwd, repo) == []
+
+    def test_includes_root_trustable_files(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _make_git_repo(repo)
+        (repo / ".vibe" / "skills").mkdir(parents=True)
+        (repo / ".agents" / "skills").mkdir(parents=True)
+        (repo / "AGENTS.md").write_text("# Agent", encoding="utf-8")
+        cwd = repo / "src" / "pkg"
+        cwd.mkdir(parents=True)
+
+        assert find_repo_trustable_files_for_cwd(cwd, repo) == [
+            ".agents/",
+            ".vibe/",
+            "AGENTS.md",
+        ]
+
+    def test_includes_agents_md_between_cwd_and_repo_root(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _make_git_repo(repo)
+        cwd = repo / "src" / "pkg" / "deep"
+        cwd.mkdir(parents=True)
+        (repo / "src" / "AGENTS.md").write_text("# Source", encoding="utf-8")
+        (repo / "src" / "pkg" / "AGENTS.md").write_text("# Package", encoding="utf-8")
+        (cwd / "AGENTS.md").write_text("# Cwd", encoding="utf-8")
+
+        assert find_repo_trustable_files_for_cwd(cwd, repo) == [
+            "src/AGENTS.md",
+            "src/pkg/AGENTS.md",
+        ]
+
+
+class TestFindGitRepoAncestor:
+    def test_returns_path_when_directly_contains_git(self, tmp_path: Path) -> None:
+        _make_git_repo(tmp_path)
+        assert find_git_repo_ancestor(tmp_path) == tmp_path.resolve()
+
+    def test_ignores_git_file_pointer(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").write_text("gitdir: /elsewhere", encoding="utf-8")
+        # Not a directory, so not treated as a repo root.
+        assert find_git_repo_ancestor(tmp_path) is None
+
+    def test_ignores_empty_git_directory(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").mkdir()
+        # Missing HEAD, so not a real repo.
+        assert find_git_repo_ancestor(tmp_path) is None
+
+    def test_returns_closest_ancestor_with_git(self, tmp_path: Path) -> None:
+        _make_git_repo(tmp_path)
+        nested = tmp_path / "a" / "b" / "c"
+        nested.mkdir(parents=True)
+        assert find_git_repo_ancestor(nested) == tmp_path.resolve()
+
+    def test_returns_innermost_when_multiple_git_repos(self, tmp_path: Path) -> None:
+        _make_git_repo(tmp_path)
+        inner = tmp_path / "sub"
+        inner.mkdir()
+        _make_git_repo(inner)
+        child = inner / "deep"
+        child.mkdir()
+        assert find_git_repo_ancestor(child) == inner.resolve()
+
+    def test_returns_none_when_no_git_anywhere(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path.parent))
+        assert find_git_repo_ancestor(tmp_path / "a") is None
+
+    def test_excludes_home_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        _make_git_repo(home)
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+        sub = home / "project"
+        sub.mkdir()
+        assert find_git_repo_ancestor(sub) is None
+
+    def test_terminates_at_filesystem_root_without_git(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path / "nope"))
+        assert find_git_repo_ancestor(tmp_path) is None

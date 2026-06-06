@@ -101,6 +101,13 @@ def vibe_home_grep_ask(tmp_path: Path) -> Path:
     return _create_vibe_home_dir(tmp_path, {"tools": {"grep": {"permission": "ask"}}})
 
 
+@pytest.fixture
+def acp_project_dir(tmp_path: Path) -> Path:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    return project_dir
+
+
 class JsonRpcRequest(BaseModel):
     jsonrpc: str = "2.0"
     id: int | str
@@ -358,7 +365,10 @@ def parse_conversation(message_texts: list[str]) -> list[JsonRpcMessage]:
     return parsed_messages
 
 
-async def initialize_session(acp_agent_loop_process: asyncio.subprocess.Process) -> str:
+async def initialize_session(
+    acp_agent_loop_process: asyncio.subprocess.Process,
+    session_cwd: Path = PLAYGROUND_DIR,
+) -> str:
     await send_json_rpc(
         acp_agent_loop_process,
         InitializeJsonRpcRequest(id=1, params=InitializeRequest(protocol_version=1)),
@@ -371,7 +381,7 @@ async def initialize_session(acp_agent_loop_process: asyncio.subprocess.Process)
     await send_json_rpc(
         acp_agent_loop_process,
         NewSessionJsonRpcRequest(
-            id=2, params=NewSessionRequest(cwd=str(PLAYGROUND_DIR), mcp_servers=[])
+            id=2, params=NewSessionRequest(cwd=str(session_cwd), mcp_servers=[])
         ),
     )
     session_response = await read_response_for_id(acp_agent_loop_process, expected_id=2)
@@ -551,9 +561,9 @@ class TestSessionUpdates:
 
 
 async def start_session_with_request_permission(
-    process: asyncio.subprocess.Process, prompt: str
+    process: asyncio.subprocess.Process, prompt: str, cwd: Path = PLAYGROUND_DIR
 ) -> RequestPermissionJsonRpcRequest:
-    session_id = await initialize_session(process)
+    session_id = await initialize_session(process, session_cwd=cwd)
     await send_json_rpc(
         process,
         PromptJsonRpcRequest(
@@ -580,7 +590,7 @@ async def start_session_with_request_permission(
 class TestToolCallStructure:
     @pytest.mark.asyncio
     async def test_tool_call_request_permission_structure(
-        self, vibe_home_grep_ask: Path
+        self, vibe_home_grep_ask: Path, acp_project_dir: Path
     ) -> None:
         custom_results = [
             mock_llm_chunk(
@@ -600,7 +610,7 @@ class TestToolCallStructure:
         async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_grep_ask
         ):
-            session_id = await initialize_session(process)
+            session_id = await initialize_session(process, session_cwd=acp_project_dir)
             await send_json_rpc(
                 process,
                 PromptJsonRpcRequest(
@@ -638,8 +648,9 @@ class TestToolCallStructure:
 
     @pytest.mark.asyncio
     async def test_tool_call_update_approved_structure(
-        self, vibe_home_grep_ask: Path
+        self, vibe_home_grep_ask: Path, acp_project_dir: Path
     ) -> None:
+        (acp_project_dir / "fixture.txt").write_text("auth\n", encoding="utf-8")
         custom_results = [
             mock_llm_chunk(
                 tool_calls=[
@@ -661,7 +672,9 @@ class TestToolCallStructure:
             mock_env=mock_env, vibe_home=vibe_home_grep_ask
         ):
             permission_request = await start_session_with_request_permission(
-                process, "Search for files containing the pattern 'auth'"
+                process,
+                "Search for files containing the pattern 'auth'",
+                cwd=acp_project_dir,
             )
             assert permission_request.params is not None
             selected_option_id = ToolOption.ALLOW_ONCE
@@ -698,7 +711,7 @@ class TestToolCallStructure:
 
     @pytest.mark.asyncio
     async def test_tool_call_update_rejected_structure(
-        self, vibe_home_grep_ask: Path
+        self, vibe_home_grep_ask: Path, acp_project_dir: Path
     ) -> None:
         custom_results = [
             mock_llm_chunk(
@@ -723,7 +736,9 @@ class TestToolCallStructure:
             mock_env=mock_env, vibe_home=vibe_home_grep_ask
         ):
             permission_request = await start_session_with_request_permission(
-                process, "Search for files containing the pattern 'auth'"
+                process,
+                "Search for files containing the pattern 'auth'",
+                cwd=acp_project_dir,
             )
             assert permission_request.params is not None
             selected_option_id = ToolOption.REJECT_ONCE
@@ -760,7 +775,7 @@ class TestToolCallStructure:
 
     @pytest.mark.asyncio
     async def test_permission_options_include_granular_labels_for_bash(
-        self, vibe_home_dir: Path
+        self, vibe_home_dir: Path, acp_project_dir: Path
     ) -> None:
         """Bash 'npm install foo' should produce granular labels in permission options."""
         custom_results = [
@@ -782,7 +797,7 @@ class TestToolCallStructure:
             mock_env=mock_env, vibe_home=vibe_home_dir
         ):
             permission_request = await start_session_with_request_permission(
-                process, "Run npm install foo"
+                process, "Run npm install foo", cwd=acp_project_dir
             )
             assert permission_request.params is not None
 
@@ -799,7 +814,7 @@ class TestToolCallStructure:
     @pytest.mark.skip(reason="Long running tool call updates are not implemented yet")
     @pytest.mark.asyncio
     async def test_tool_call_in_progress_update_structure(
-        self, vibe_home_grep_ask: Path
+        self, vibe_home_grep_ask: Path, acp_project_dir: Path
     ) -> None:
         custom_results = [
             mock_llm_chunk(
@@ -821,7 +836,7 @@ class TestToolCallStructure:
         async for process in get_acp_agent_loop_process(
             mock_env=mock_env, vibe_home=vibe_home_grep_ask
         ):
-            session_id = await initialize_session(process)
+            session_id = await initialize_session(process, session_cwd=acp_project_dir)
             await send_json_rpc(
                 process,
                 PromptJsonRpcRequest(
@@ -856,7 +871,7 @@ class TestToolCallStructure:
 
     @pytest.mark.asyncio
     async def test_tool_call_result_update_failure_structure(
-        self, vibe_home_grep_ask: Path
+        self, vibe_home_grep_ask: Path, acp_project_dir: Path
     ) -> None:
         custom_results = [
             mock_llm_chunk(
@@ -883,6 +898,7 @@ class TestToolCallStructure:
             permission_request = await start_session_with_request_permission(
                 process,
                 "Search for files containing the pattern 'auth' in /nonexistent",
+                cwd=acp_project_dir,
             )
             assert permission_request.params is not None
             selected_option_id = ToolOption.ALLOW_ONCE
@@ -934,8 +950,7 @@ class TestCancellationStructure:
                     ToolCall(
                         function=FunctionCall(
                             name="write_file",
-                            arguments='{"path":"test.txt","content":"hello, world!"'
-                            ',"overwrite":false}',
+                            arguments='{"path":"test.txt","content":"hello, world!"}',
                         ),
                         type="function",
                         index=0,

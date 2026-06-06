@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 from pathlib import Path
+import re
 
 from pydantic import BaseModel
 from textual.app import ComposeResult
@@ -11,15 +12,18 @@ from textual.widgets import Markdown, Static
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.tools.builtins.ask_user_question import AskUserQuestionResult
 from vibe.core.tools.builtins.bash import BashArgs, BashResult
+from vibe.core.tools.builtins.edit import EditArgs, EditResult
 from vibe.core.tools.builtins.grep import GrepArgs, GrepResult
-from vibe.core.tools.builtins.read_file import ReadFileArgs, ReadFileResult
-from vibe.core.tools.builtins.search_replace import (
-    SEARCH_REPLACE_BLOCK_RE,
-    SearchReplaceArgs,
-    SearchReplaceResult,
-)
+from vibe.core.tools.builtins.read import ReadArgs, ReadResult
 from vibe.core.tools.builtins.todo import TodoArgs, TodoResult
 from vibe.core.tools.builtins.write_file import WriteFileArgs, WriteFileResult
+
+_LINE_NUMBER_PREFIX = re.compile(r"^ *\d+→")
+
+
+def _strip_line_numbers(content: str) -> str:
+    """Remove the model-facing ``   12→`` line-number prefixes for CLI display."""
+    return "\n".join(_LINE_NUMBER_PREFIX.sub("", line) for line in content.split("\n"))
 
 
 def _truncate_lines(content: str, max_lines: int) -> tuple[str, str | None]:
@@ -29,24 +33,6 @@ def _truncate_lines(content: str, max_lines: int) -> tuple[str, str | None]:
         return "\n".join(lines), None
     remaining = len(lines) - max_lines
     return "\n".join(lines[:max_lines]), f"… ({remaining} more lines)"
-
-
-def parse_search_replace_to_diff(content: str) -> list[str]:
-    """Parse SEARCH/REPLACE blocks and generate unified diff lines."""
-    all_diff_lines: list[str] = []
-    matches = SEARCH_REPLACE_BLOCK_RE.findall(content)
-    if not matches:
-        return [content[:500]] if content else []
-
-    for i, (search_text, replace_text) in enumerate(matches):
-        if i > 0:
-            all_diff_lines.append("")  # Separator between blocks
-        search_lines = search_text.strip("\n").split("\n")
-        replace_lines = replace_text.strip("\n").split("\n")
-        diff = difflib.unified_diff(search_lines, replace_lines, lineterm="", n=2)
-        all_diff_lines.extend(list(diff)[2:])  # Skip file headers
-
-    return all_diff_lines
 
 
 def render_diff_line(line: str) -> Static:
@@ -193,28 +179,35 @@ class WriteFileResultWidget(ToolResultWidget[WriteFileResult]):
         yield from self._footer()
 
 
-class SearchReplaceApprovalWidget(ToolApprovalWidget[SearchReplaceArgs]):
+class EditApprovalWidget(ToolApprovalWidget[EditArgs]):
     def compose(self) -> ComposeResult:
         yield NoMarkupStatic(
             f"File: {self.args.file_path}", classes="approval-description"
         )
         yield NoMarkupStatic("")
 
-        diff_lines = parse_search_replace_to_diff(self.args.content)
-        for line in diff_lines:
+        old_lines = self.args.old_string.split("\n")
+        new_lines = self.args.new_string.split("\n")
+        diff = list(difflib.unified_diff(old_lines, new_lines, lineterm="", n=2))[2:]
+        for line in diff:
             yield render_diff_line(line)
 
+        if self.args.replace_all:
+            yield NoMarkupStatic("(replace_all)", classes="approval-description")
 
-class SearchReplaceResultWidget(ToolResultWidget[SearchReplaceResult]):
+
+class EditResultWidget(ToolResultWidget[EditResult]):
     def compose(self) -> ComposeResult:
         if not self.result:
             yield from self._footer()
             return
         for warning in self.warnings:
             yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
-        if self.result.content:
-            for line in parse_search_replace_to_diff(self.result.content):
-                yield render_diff_line(line)
+        old_lines = self.result.old_string.split("\n")
+        new_lines = self.result.new_string.split("\n")
+        diff = list(difflib.unified_diff(old_lines, new_lines, lineterm="", n=2))[2:]
+        for line in diff:
+            yield render_diff_line(line)
         yield from self._footer()
 
 
@@ -260,10 +253,12 @@ class TodoResultWidget(ToolResultWidget[TodoResult]):
         return icons.get(status, "☐")
 
 
-class ReadFileApprovalWidget(ToolApprovalWidget[ReadFileArgs]):
+class ReadApprovalWidget(ToolApprovalWidget[ReadArgs]):
     def compose(self) -> ComposeResult:
-        yield NoMarkupStatic(f"path: {self.args.path}", classes="approval-description")
-        if self.args.offset > 0:
+        yield NoMarkupStatic(
+            f"file_path: {self.args.file_path}", classes="approval-description"
+        )
+        if self.args.offset is not None:
             yield NoMarkupStatic(
                 f"offset: {self.args.offset}", classes="approval-description"
             )
@@ -273,23 +268,24 @@ class ReadFileApprovalWidget(ToolApprovalWidget[ReadFileArgs]):
             )
 
 
-class ReadFileResultWidget(ToolResultWidget[ReadFileResult]):
+class ReadResultWidget(ToolResultWidget[ReadResult]):
     def compose(self) -> ComposeResult:
         if self.collapsed:
             yield from self._footer()
             return
         if self.result:
             yield NoMarkupStatic(
-                f"Path: {self.result.path}", classes="tool-result-detail"
+                f"Path: {self.result.file_path}", classes="tool-result-detail"
             )
         for warning in self.warnings:
             yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
         truncation_info = None
         if self.result and self.result.content:
             yield NoMarkupStatic("")
-            ext = Path(self.result.path).suffix.lstrip(".") or "text"
-            content, truncation_info = _truncate_lines(self.result.content, 10)
-            yield Markdown(f"```{ext}\n{content}\n```")
+            content, truncation_info = _truncate_lines(
+                _strip_line_numbers(self.result.content), 10
+            )
+            yield NoMarkupStatic(content, classes="tool-result-detail")
         yield from self._footer(truncation_info)
 
 
@@ -337,18 +333,18 @@ class AskUserQuestionResultWidget(ToolResultWidget[AskUserQuestionResult]):
 
 APPROVAL_WIDGETS: dict[str, type[ToolApprovalWidget]] = {
     "bash": BashApprovalWidget,
-    "read_file": ReadFileApprovalWidget,
+    "read": ReadApprovalWidget,
     "write_file": WriteFileApprovalWidget,
-    "search_replace": SearchReplaceApprovalWidget,
+    "edit": EditApprovalWidget,
     "grep": GrepApprovalWidget,
     "todo": TodoApprovalWidget,
 }
 
 RESULT_WIDGETS: dict[str, type[ToolResultWidget]] = {
     "bash": BashResultWidget,
-    "read_file": ReadFileResultWidget,
+    "read": ReadResultWidget,
     "write_file": WriteFileResultWidget,
-    "search_replace": SearchReplaceResultWidget,
+    "edit": EditResultWidget,
     "grep": GrepResultWidget,
     "todo": TodoResultWidget,
     "ask_user_question": AskUserQuestionResultWidget,

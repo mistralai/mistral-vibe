@@ -87,7 +87,7 @@ class ToolManager:
         self._lock = threading.Lock()
         self._mcp_integrated = False
 
-        self._available: dict[str, type[BaseTool]] = {
+        self._all_tools: dict[str, type[BaseTool]] = {
             cls.get_name(): cls for cls in self._iter_tool_classes(self._search_paths)
         }
         if not defer_mcp:
@@ -190,14 +190,14 @@ class ToolManager:
     @property
     def registered_tools(self) -> dict[str, type[BaseTool]]:
         with self._lock:
-            return dict(self._available)
+            return dict(self._all_tools)
 
     @property
     def available_tools(self) -> dict[str, type[BaseTool]]:
         with self._lock:
             runtime_available = {
                 name: cls
-                for name, cls in self._available.items()
+                for name, cls in self._all_tools.items()
                 if self._is_tool_available(cls)
             }
 
@@ -254,20 +254,15 @@ class ToolManager:
             elif srv.disabled_tools:
                 per_source_disabled[key] = set(srv.disabled_tools)
 
-        # Track connector names that have explicit config entries
-        configured_connectors = {cfg.name for cfg in self._config.connectors}
-
         for cfg in self._config.connectors:
-            key = (cfg.name, True)
-            if cfg.disabled:
-                disabled_sources.add(key)
-            elif cfg.disabled_tools:
-                per_source_disabled[key] = set(cfg.disabled_tools)
+            if cfg.disabled_tools and not cfg.disabled:
+                per_source_disabled[(cfg.name, True)] = set(cfg.disabled_tools)
 
-        # Disable connectors discovered but not in config (new connectors)
         if self._connector_registry is not None:
+            by_name = self._config.connectors_by_name()
             for name in self._connector_registry.get_connector_names():
-                if name not in configured_connectors:
+                cfg = by_name.get(name)
+                if cfg is None or cfg.disabled:
                     disabled_sources.add((name, True))
 
         return disabled_sources, per_source_disabled
@@ -314,7 +309,7 @@ class ToolManager:
             return
 
         with self._lock:
-            self._available = {**self._available, **mcp_tools}
+            self._all_tools = {**self._all_tools, **mcp_tools}
         self._mcp_integrated = True
         logger.info(
             "MCP integration registered %d tools (via registry)", len(mcp_tools)
@@ -324,22 +319,22 @@ class ToolManager:
         """Remove stale connector tool classes and cached instances."""
         stale_keys = [
             name
-            for name, cls in self._available.items()
+            for name, cls in self._all_tools.items()
             if issubclass(cls, MCPTool) and cls.is_connector()
         ]
         for key in stale_keys:
-            self._available.pop(key, None)
+            self._all_tools.pop(key, None)
             self._instances.pop(key, None)
 
     def _purge_mcp_state(self) -> None:
         """Remove stale MCP tool classes and cached instances."""
         stale_keys = [
             name
-            for name, cls in self._available.items()
+            for name, cls in self._all_tools.items()
             if issubclass(cls, MCPTool) and not cls.is_connector()
         ]
         for key in stale_keys:
-            self._available.pop(key, None)
+            self._all_tools.pop(key, None)
             self._instances.pop(key, None)
 
     def integrate_connectors(self) -> None:
@@ -364,7 +359,7 @@ class ToolManager:
 
         with self._lock:
             self._purge_connector_state()
-            self._available.update(connector_tools)
+            self._all_tools.update(connector_tools)
         logger.info(f"Connector integration registered {len(connector_tools)} tools")
 
     async def refresh_remote_tools_async(self) -> None:
@@ -414,7 +409,7 @@ class ToolManager:
 
     def get_tool_config(self, tool_name: str) -> BaseToolConfig:
         with self._lock:
-            tool_class = self._available.get(tool_name)
+            tool_class = self._all_tools.get(tool_name)
 
         if tool_class:
             config_class = tool_class._get_tool_config_class()
@@ -444,12 +439,13 @@ class ToolManager:
         if tool_name in self._instances:
             return self._instances[tool_name]
 
-        with self._lock:
-            if tool_name not in self._available:
-                raise NoSuchToolError(
-                    f"Unknown tool: {tool_name}. Available: {list(self._available.keys())}"
-                )
-            tool_class = self._available[tool_name]
+        available = self.available_tools
+        if tool_name not in available:
+            raise NoSuchToolError(
+                f"Unknown or disabled tool: {tool_name}. "
+                f"Available: {list(available.keys())}"
+            )
+        tool_class = available[tool_name]
         self._instances[tool_name] = tool_class.from_config(
             lambda: self.get_tool_config(tool_name)
         )
