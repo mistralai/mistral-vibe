@@ -35,7 +35,12 @@ if TYPE_CHECKING:
     from vibe.core.telemetry.types import EntrypointMetadata
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
     from vibe.core.tools.permissions import PermissionContext, PermissionStore
-    from vibe.core.types import ApprovalCallback, SwitchAgentCallback, UserInputCallback
+    from vibe.core.types import (
+        ApprovalCallback,
+        BeforeToolCallback,
+        SwitchAgentCallback,
+        UserInputCallback,
+    )
 
 ARGS_COUNT = 4
 
@@ -56,6 +61,7 @@ class InvokeContext:
     skill_manager: SkillManager | None = field(default=None)
     scratchpad_dir: Path | None = field(default=None)
     permission_store: PermissionStore | None = field(default=None)
+    before_tool_callback: BeforeToolCallback | None = field(default=None)
 
 
 class ToolError(Exception):

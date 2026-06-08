@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from vibe.cli.terminal_detect import detect_terminal
 from vibe.core.agents.manager import AgentManager
+from vibe.core.logger import logger
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
 from vibe.core.compaction import collect_prior_user_messages
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
@@ -106,6 +107,7 @@ from vibe.core.types import (
     ApprovalResponse,
     AssistantEvent,
     BaseEvent,
+    BeforeToolCallback,
     CompactEndEvent,
     CompactStartEvent,
     ContextTooLongError,
@@ -340,6 +342,7 @@ class AgentLoop:  # noqa: PLR0904
         except ValueError:
             pass
 
+        self.before_tool_callback: BeforeToolCallback | None = None
         self._current_user_message_id: str | None = None
         self._is_user_prompt_call: bool = False
         self._pending_injected_messages: list[LLMMessage] = []
@@ -1161,6 +1164,17 @@ class AgentLoop:  # noqa: PLR0904
 
             start_time = time.perf_counter()
             result_model = None
+            invoke_args = dict(tool_call.args_dict)  # defensive copy
+            if self.before_tool_callback is not None:
+                try:
+                    modified = await self.before_tool_callback(
+                        tool_call.tool_name, invoke_args
+                    )
+                    if modified is not None:
+                        invoke_args = modified
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("before_tool_callback raised: %s", exc)
+            final_args = {**tool_call.args_dict, **(invoke_args or {})}
             async for item in tool_instance.invoke(
                 ctx=InvokeContext(
                     tool_call_id=tool_call.call_id,
@@ -1175,8 +1189,9 @@ class AgentLoop:  # noqa: PLR0904
                     skill_manager=self.skill_manager,
                     scratchpad_dir=self.scratchpad_dir,
                     permission_store=self._permission_store,
+                    before_tool_callback=self.before_tool_callback,
                 ),
-                **tool_call.args_dict,
+                **final_args,
             ):
                 if isinstance(item, ToolStreamEvent):
                     yield item
@@ -1699,6 +1714,15 @@ class AgentLoop:  # noqa: PLR0904
             len(source_messages),
         )
         return [m.model_copy(deep=True) for m in source_messages[:next_turn_index]]
+
+    def set_before_tool_callback(self, callback: BeforeToolCallback) -> None:
+        """Register a callback invoked before every tool call.
+
+        The callback receives ``(tool_name, args_dict)`` and may return a
+        modified ``args_dict`` to rewrite tool arguments (e.g. rewrite a bash
+        command before execution), or ``None`` to leave the arguments unchanged.
+        """
+        self.before_tool_callback = callback
 
     @requires_init
     async def clear_history(self) -> None:
