@@ -126,6 +126,7 @@ input_price = 1.5
 output_price = 7.5
 thinking = "high"                 # "off", "low", "medium", "high", "max"
 auto_compact_threshold = 200000
+max_output_tokens = 49152         # optional cap for each model response
 supports_images = true            # vision-capable; allows @-mentioned images
 
 [[models]]

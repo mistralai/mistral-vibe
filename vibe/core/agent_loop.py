@@ -1362,6 +1362,9 @@ class AgentLoop:  # noqa: PLR0904
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
         tool_choice = self.format_handler.get_tool_choice()
+        request_max_tokens = (
+            max_tokens if max_tokens is not None else active_model.max_output_tokens
+        )
 
         last_user_message = self._last_user_message()
         self.telemetry_client.send_request_sent(
@@ -1384,7 +1387,7 @@ class AgentLoop:  # noqa: PLR0904
                 tools=available_tools,
                 tool_choice=tool_choice,
                 extra_headers=self._get_extra_headers(provider),
-                max_tokens=max_tokens,
+                max_tokens=request_max_tokens,
                 metadata=backend_metadata.model_dump(exclude_none=True),
             )
             end_time = time.perf_counter()
@@ -1425,6 +1428,9 @@ class AgentLoop:  # noqa: PLR0904
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
         tool_choice = self.format_handler.get_tool_choice()
+        request_max_tokens = (
+            max_tokens if max_tokens is not None else active_model.max_output_tokens
+        )
 
         last_user_message = self._last_user_message()
         self.telemetry_client.send_request_sent(
@@ -1449,7 +1455,7 @@ class AgentLoop:  # noqa: PLR0904
                 tools=available_tools,
                 tool_choice=tool_choice,
                 extra_headers=self._get_extra_headers(),
-                max_tokens=max_tokens,
+                max_tokens=request_max_tokens,
                 metadata=backend_metadata.model_dump(exclude_none=True),
             ):
                 if chunk.correlation_id:
