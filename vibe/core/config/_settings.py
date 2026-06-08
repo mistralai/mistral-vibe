@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 from collections.abc import MutableMapping
 from enum import StrEnum, auto
@@ -107,7 +106,15 @@ class TomlFileSettingsSource(PydanticBaseSettingsSource):
         return self.toml_data.get(field_name), field_name, False
 
     def __call__(self) -> dict[str, Any]:
-        return self.toml_data
+        data = dict(self.toml_data)
+        # FIX: Allow appending custom models to the default list instead of just replacing it
+        if 'custom_models' in data:
+            custom = data.pop('custom_models')
+            if isinstance(custom, list):
+                if 'models' not in data:
+                    data['models'] = []
+                data['models'].extend(custom)
+        return data
 
 
 def _remove_none_values(value: Any) -> Any:
@@ -127,7 +134,8 @@ def _remove_none_values(value: Any) -> Any:
 
 
 def _to_toml_document(value: Any) -> dict[str, Any]:
-    jsonable = to_jsonable_python(value, fallback=str)
+
+jsonable = to_jsonable_python(value, fallback=str)
     if not isinstance(jsonable, dict):
         return {}
     return _remove_none_values(jsonable)
@@ -272,7 +280,8 @@ class _MCPHttpFields(BaseModel):
     headers: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "Additional HTTP headers when using 'http' transport (e.g., Authorization or X-API-Key)."
+
+"Additional HTTP headers when using 'http' transport (e.g., Authorization or X-API-Key)."
         ),
     )
     api_key_env: str = Field(
@@ -431,7 +440,8 @@ DEFAULT_VIBE_CODE_WORKFLOW_ID = "__shared-nuage-workflow"
 DEFAULT_VIBE_CODE_TASK_QUEUE = "shared-vibe-nuage"
 
 DEFAULT_PROVIDERS = [
-    ProviderConfig(
+
+ProviderConfig(
         name="mistral",
         api_base=f"{DEFAULT_MISTRAL_SERVER_URL}/v1",
         api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
@@ -581,7 +591,8 @@ class VibeConfig(BaseSettings):
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
     experiments: ExperimentsConfig = Field(default_factory=ExperimentsConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
-    tools: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+tools: dict[str, dict[str, Any]] = Field(default_factory=dict)
     tool_paths: list[Path] = Field(
         default_factory=list,
         description=(
@@ -700,7 +711,8 @@ class VibeConfig(BaseSettings):
         # Otherwise endpoint and API key are derived from the active provider if it's Mistral,
         # or the first Mistral provider.
         traces_export_path = DEFAULT_TRACES_EXPORT_PATH.lstrip("/")
-        if self.otel_endpoint:
+
+if self.otel_endpoint:
             return OtelSpanExporterConfig(
                 endpoint=urljoin(
                     f"{self.otel_endpoint.rstrip('/')}/", traces_export_path
@@ -816,7 +828,8 @@ class VibeConfig(BaseSettings):
             if provider.name == model.provider:
                 return provider
         raise ValueError(
-            f"TTS provider '{model.provider}' for TTS model '{model.name}' not found in configuration."
+
+f"TTS provider '{model.provider}' for TTS model '{model.name}' not found in configuration."
         )
 
     @classmethod
@@ -949,7 +962,8 @@ class VibeConfig(BaseSettings):
     @model_validator(mode="after")
     def _validate_tts_model_uniqueness(self) -> VibeConfig:
         seen_aliases: set[str] = set()
-        for model in self.tts_models:
+
+for model in self.tts_models:
             if model.alias in seen_aliases:
                 raise ValueError(
                     f"Duplicate TTS model alias found: '{model.alias}'. Aliases must be unique."
@@ -1074,7 +1088,8 @@ class VibeConfig(BaseSettings):
                 model["input_price"] = 1.5
                 model["output_price"] = 7.5
                 model["thinking"] = "high"
-                changed = True
+
+changed = True
 
             if (
                 model.get("name") == "mistral-vibe-cli-latest"
@@ -1155,3 +1170,4 @@ class VibeConfig(BaseSettings):
             config_dict["tools"] = tool_defaults
 
         return config_dict
+
