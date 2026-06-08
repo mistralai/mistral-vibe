@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from pathlib import Path
 import sys
 
@@ -10,10 +11,16 @@ import tomli_w
 
 from vibe import __version__
 from vibe.cli.textual_ui.app import StartupOptions, run_textual_ui
+from vibe.cli.update_notifier import (
+    FileSystemUpdateCacheRepository,
+    UpdateCacheRepository,
+    get_pending_update_from_cache,
+    mark_update_as_dismissed,
+)
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
 from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.hooks.config import load_hooks_from_fs
+from vibe.core.hooks.config import HookConfigResult, load_hooks_from_fs
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.programmatic import run_programmatic
@@ -26,6 +33,7 @@ from vibe.core.trusted_folders import find_trustable_files, trusted_folders_mana
 from vibe.core.types import LLMMessage, OutputFormat, Role
 from vibe.core.utils import ConversationLimitException
 from vibe.setup.onboarding import run_onboarding
+from vibe.setup.update_prompt import UpdatePromptResult, ask_update_prompt
 
 
 def _build_cli_entrypoint_metadata() -> EntrypointMetadata:
@@ -183,6 +191,94 @@ def _resume_previous_session(
     )
 
 
+def _run_programmatic_mode(
+    args: argparse.Namespace,
+    config: VibeConfig,
+    initial_agent_name: str,
+    hook_config_result: HookConfigResult,
+    loaded_session: tuple[list[LLMMessage], Path] | None,
+    stdin_prompt: str | None,
+) -> None:
+    warn_if_workdir_trust_is_unset()
+    config.disabled_tools = [
+        *config.disabled_tools,
+        "ask_user_question",
+        "exit_plan_mode",
+    ]
+    programmatic_prompt = args.prompt or stdin_prompt
+    if not programmatic_prompt:
+        print("Error: No prompt provided for programmatic mode", file=sys.stderr)
+        sys.exit(1)
+    output_format = OutputFormat(args.output if hasattr(args, "output") else "text")
+
+    try:
+        final_response = run_programmatic(
+            config=config,
+            prompt=programmatic_prompt or "",
+            max_turns=args.max_turns,
+            max_price=args.max_price,
+            max_session_tokens=args.max_tokens,
+            output_format=output_format,
+            previous_messages=loaded_session[0] if loaded_session else None,
+            agent_name=initial_agent_name,
+            teleport=args.teleport and config.vibe_code_enabled,
+            headless=True,
+            hook_config_result=hook_config_result,
+        )
+        if final_response:
+            print(final_response)
+        sys.exit(0)
+    except ConversationLimitException as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)
+    except TeleportError as e:
+        print(f"Teleport error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (RuntimeError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _maybe_run_startup_update_prompt(
+    config: VibeConfig, repository: UpdateCacheRepository
+) -> None:
+    if not config.enable_update_checks:
+        return
+
+    try:
+        latest_version = asyncio.run(
+            get_pending_update_from_cache(repository, __version__)
+        )
+    except OSError as exc:
+        logger.debug("Failed to read pending update from cache", exc_info=exc)
+        return
+
+    if latest_version is None:
+        return
+
+    result = ask_update_prompt(__version__, latest_version, theme=config.theme)
+
+    match result:
+        case UpdatePromptResult.CONTINUE:
+            try:
+                asyncio.run(mark_update_as_dismissed(repository, latest_version))
+            except OSError as exc:
+                logger.debug("Failed to persist dismissed update", exc_info=exc)
+            return
+        case UpdatePromptResult.QUIT:
+            sys.exit(0)
+        case UpdatePromptResult.UPDATED:
+            rprint(
+                f"[green]✔ Vibe was updated from {__version__} to "
+                f"{latest_version}.[/]\n  Run [bold]vibe[/] to start using the "
+                "new version."
+            )
+            sys.exit(0)
+        case UpdatePromptResult.UPDATE_FAILED:
+            rprint("[red]✗ Vibe could not be updated automatically.[/]")
+            sys.exit(1)
+
+
 def run_cli(args: argparse.Namespace) -> None:
     load_dotenv_values()
     bootstrap_config_files()
@@ -194,6 +290,11 @@ def run_cli(args: argparse.Namespace) -> None:
     try:
         is_interactive = args.prompt is None
         config = load_config_or_exit(interactive=is_interactive)
+        update_cache_repository = FileSystemUpdateCacheRepository()
+
+        if is_interactive:
+            _maybe_run_startup_update_prompt(config, update_cache_repository)
+
         initial_agent_name = get_initial_agent_name(args, config)
         hook_config_result = load_hooks_from_fs(config)
         setup_tracing(config)
@@ -204,50 +305,7 @@ def run_cli(args: argparse.Namespace) -> None:
         loaded_session = load_session(args, config)
 
         stdin_prompt = get_prompt_from_stdin()
-        if args.prompt is not None:
-            warn_if_workdir_trust_is_unset()
-            config.disabled_tools = [
-                *config.disabled_tools,
-                "ask_user_question",
-                "exit_plan_mode",
-            ]
-            programmatic_prompt = args.prompt or stdin_prompt
-            if not programmatic_prompt:
-                print(
-                    "Error: No prompt provided for programmatic mode", file=sys.stderr
-                )
-                sys.exit(1)
-            output_format = OutputFormat(
-                args.output if hasattr(args, "output") else "text"
-            )
-
-            try:
-                final_response = run_programmatic(
-                    config=config,
-                    prompt=programmatic_prompt or "",
-                    max_turns=args.max_turns,
-                    max_price=args.max_price,
-                    max_session_tokens=args.max_tokens,
-                    output_format=output_format,
-                    previous_messages=loaded_session[0] if loaded_session else None,
-                    agent_name=initial_agent_name,
-                    teleport=args.teleport and config.vibe_code_enabled,
-                    headless=True,
-                    hook_config_result=hook_config_result,
-                )
-                if final_response:
-                    print(final_response)
-                sys.exit(0)
-            except ConversationLimitException as e:
-                print(e, file=sys.stderr)
-                sys.exit(1)
-            except TeleportError as e:
-                print(f"Teleport error: {e}", file=sys.stderr)
-                sys.exit(1)
-            except (RuntimeError, ValueError) as e:
-                print(f"Error: {e}", file=sys.stderr)
-                sys.exit(1)
-        else:
+        if is_interactive:
             try:
                 agent_loop = AgentLoop(
                     config,
@@ -266,12 +324,22 @@ def run_cli(args: argparse.Namespace) -> None:
 
             run_textual_ui(
                 agent_loop=agent_loop,
+                update_cache_repository=update_cache_repository,
                 startup=StartupOptions(
                     initial_prompt=args.initial_prompt or stdin_prompt,
                     teleport_on_start=args.teleport,
                     show_resume_picker=args.resume is True,
                     is_resuming_session=loaded_session is not None,
                 ),
+            )
+        else:
+            _run_programmatic_mode(
+                args=args,
+                config=config,
+                initial_agent_name=initial_agent_name,
+                hook_config_result=hook_config_result,
+                loaded_session=loaded_session,
+                stdin_prompt=stdin_prompt,
             )
 
     except (KeyboardInterrupt, EOFError):

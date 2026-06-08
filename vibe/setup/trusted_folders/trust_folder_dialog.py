@@ -281,7 +281,7 @@ class TrustFolderApp(App):
         self.exit()
 
     def run_trust_dialog(self) -> TrustDecision | None:
-        self.run()
+        self.run(inline=True)
         if self._quit_without_saving:
             raise TrustDialogQuitException()
         return self._result

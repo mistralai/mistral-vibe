@@ -15,7 +15,11 @@ from vibe.core.telemetry.build_metadata import (
     build_request_metadata,
 )
 from vibe.core.telemetry.send import TelemetryClient
-from vibe.core.telemetry.types import EntrypointMetadata, TelemetryRequestMetadata
+from vibe.core.telemetry.types import (
+    AttachmentKind,
+    EntrypointMetadata,
+    TelemetryRequestMetadata,
+)
 from vibe.core.tools.base import BaseTool, ToolPermission
 from vibe.core.types import Backend
 from vibe.core.utils import get_user_agent
@@ -694,6 +698,43 @@ class TestTelemetryClient:
         assert properties["call_source"] == "vibe_code"
         assert properties["call_type"] == "main_call"
         assert properties["message_id"] is None
+        assert properties["attachment_counts"] == {}
+
+    def test_send_request_sent_payload_with_attachments(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_request_sent(
+            model="codestral",
+            nb_context_chars=1234,
+            nb_context_messages=5,
+            nb_prompt_chars=42,
+            call_type="main_call",
+            attachment_counts={AttachmentKind.IMAGE: 2},
+        )
+
+        assert len(telemetry_events) == 1
+        properties = telemetry_events[0]["properties"]
+        assert properties["attachment_counts"] == {"image": 2}
+
+    def test_send_request_sent_payload_drops_zero_counts(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_request_sent(
+            model="codestral",
+            nb_context_chars=1234,
+            nb_context_messages=5,
+            nb_prompt_chars=42,
+            call_type="main_call",
+            attachment_counts={AttachmentKind.IMAGE: 0},
+        )
+
+        assert telemetry_events[0]["properties"]["attachment_counts"] == {}
 
     def test_send_user_rating_feedback_payload(
         self, telemetry_events: list[dict[str, Any]]

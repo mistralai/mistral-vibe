@@ -11,6 +11,7 @@ from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import ModelConfig, VibeConfig
+from vibe.core.middleware import TurnLimitMiddleware
 
 
 @pytest.fixture
@@ -399,3 +400,131 @@ class TestACPSetConfigOptionThinking:
         )
 
         assert response is None
+
+
+class TestACPSetConfigOptionMaxTurns:
+    @pytest.mark.asyncio
+    async def test_set_config_option_max_turns_success(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="max_turns", value="100"
+        )
+
+        assert response is not None
+        assert acp_session.agent_loop._max_turns == 100
+        turn_limits = [
+            m
+            for m in acp_session.agent_loop.middleware_pipeline.middlewares
+            if isinstance(m, TurnLimitMiddleware)
+        ]
+        assert len(turn_limits) == 1
+        assert turn_limits[0].max_turns == 100
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_max_turns_string_value(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="max_turns", value="50"
+        )
+
+        assert response is not None
+        assert acp_session.agent_loop._max_turns == 50
+        turn_limits = [
+            m
+            for m in acp_session.agent_loop.middleware_pipeline.middlewares
+            if isinstance(m, TurnLimitMiddleware)
+        ]
+        assert len(turn_limits) == 1
+        assert turn_limits[0].max_turns == 50
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_max_turns_invalid_string_returns_none(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+        initial_max_turns = acp_session.agent_loop._max_turns
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="max_turns", value="abc"
+        )
+
+        assert response is None
+        assert acp_session.agent_loop._max_turns == initial_max_turns
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_max_turns_bool_returns_none(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+        initial_max_turns = acp_session.agent_loop._max_turns
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="max_turns", value=True
+        )
+
+        assert response is None
+        assert acp_session.agent_loop._max_turns == initial_max_turns
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_max_turns_repeated_set(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+
+        await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="max_turns", value="100"
+        )
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="max_turns", value="200"
+        )
+
+        assert response is not None
+        assert acp_session.agent_loop._max_turns == 200
+        turn_limits = [
+            m
+            for m in acp_session.agent_loop.middleware_pipeline.middlewares
+            if isinstance(m, TurnLimitMiddleware)
+        ]
+        assert len(turn_limits) == 1
+        assert turn_limits[0].max_turns == 200

@@ -17,7 +17,7 @@ Use the `bash` tool to run one-off shell commands.
 - `sed -n '100,200p' filename` → Use `read(file_path="filename", offset=100, limit=101)`
 - `less`, `more`, `vim`, `nano` → Use `read` with offset/limit for navigation
 - `echo "content" > file` → Use `write_file(path="file", content="content")`
-- `echo "content" >> existing_file` → Read first, then use `search_replace` to append (write_file refuses to overwrite)
+- `echo "content" >> existing_file` → Read first, then use `edit` to append (write_file refuses to overwrite)
 
 **Search Operations - DO NOT USE:**
 - `grep -r "pattern" .` → Use `grep(pattern="pattern", path=".")`

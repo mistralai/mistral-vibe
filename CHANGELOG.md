@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.14.1] - 2026-06-08
+
+### Added
+
+- `/teleport` slash command exposed over ACP, mirroring the TUI command for IDE integrations
+- Startup prompt to install a pending Vibe update before continuing the session
+
+### Fixed
+
+- JetBrains IDEs no longer trigger a preemptive auth prompt over ACP and no longer drop terminal arguments
+- Initial ACP slash-command advertisement is delayed so Zed registers commands like `/help` instead of rejecting them
+- Built-in tool prompts no longer reference the removed `search_replace` name and now point to `edit`
+
+
 ## [2.14.0] - 2026-06-04
 
 ### Added

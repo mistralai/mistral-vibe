@@ -34,14 +34,34 @@ def _get_fake_client(acp_agent_loop: VibeAcpAgentLoop) -> FakeClient:
     return acp_agent_loop.client
 
 
+async def _wait_for_available_commands(acp_agent_loop: VibeAcpAgentLoop) -> None:
+    for _ in range(50):
+        updates = _get_fake_client(acp_agent_loop)._session_updates
+        if any(isinstance(u.update, AvailableCommandsUpdate) for u in updates):
+            return
+        await asyncio.sleep(0.01)
+    raise TimeoutError("available commands update was not sent")
+
+
 class TestAvailableCommandsUpdate:
+    @pytest.mark.asyncio
+    async def test_initial_available_commands_are_delayed_until_after_new_session(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+
+        updates = _get_fake_client(acp_agent_loop)._session_updates
+        assert not any(isinstance(u.update, AvailableCommandsUpdate) for u in updates)
+
+        await _wait_for_available_commands(acp_agent_loop)
+
     @pytest.mark.asyncio
     async def test_available_commands_sent_on_new_session(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
 
-        await asyncio.sleep(0)
+        await _wait_for_available_commands(acp_agent_loop)
 
         updates = _get_fake_client(acp_agent_loop)._session_updates
         available_commands_updates = [
@@ -62,7 +82,7 @@ class TestAvailableCommandsUpdate:
     ) -> None:
         await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
 
-        await asyncio.sleep(0)
+        await _wait_for_available_commands(acp_agent_loop)
 
         updates = _get_fake_client(acp_agent_loop)._session_updates
         available_commands_updates = [

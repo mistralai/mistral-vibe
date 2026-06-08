@@ -54,7 +54,6 @@ def get_base_config() -> dict[str, Any]:
                 "alias": "devstral-latest",
             }
         ],
-        "enable_auto_update": False,
         "enable_telemetry": False,
     }
 

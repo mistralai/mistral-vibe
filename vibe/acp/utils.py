@@ -7,6 +7,7 @@ from acp.schema import (
     AgentMessageChunk,
     AgentThoughtChunk,
     ContentToolCallContent,
+    Implementation,
     ModelInfo,
     PermissionOption,
     PermissionOptionKind,
@@ -107,6 +108,10 @@ def is_valid_acp_mode(profiles: list[AgentProfile], mode_name: str) -> bool:
     return any(
         p.name == mode_name and p.agent_type == AgentType.AGENT for p in profiles
     )
+
+
+def is_jetbrains_client(client_info: Implementation | None) -> bool:
+    return bool(client_info and client_info.name.startswith("JetBrains."))
 
 
 def build_mode_state(

@@ -7,7 +7,7 @@ Use `write_file` to create a new file.
 **BEHAVIOR:**
 
 - `write_file` can ONLY create new files.
-- If the file already exists, the tool returns an error. Use `search_replace` to edit existing files.
+- If the file already exists, the tool returns an error. Use `edit` to modify existing files.
 - Parent directories are created automatically if they don't exist.
 
 **BEST PRACTICES:**

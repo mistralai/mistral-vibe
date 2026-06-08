@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
-from acp.schema import AgentMessageChunk, AvailableCommandsUpdate, TextContentBlock
+from acp.schema import (
+    AgentMessageChunk,
+    AllowedOutcome,
+    AvailableCommandsUpdate,
+    DeniedOutcome,
+    RequestPermissionResponse,
+    TextContentBlock,
+    ToolCallProgress,
+    ToolCallStart,
+)
 import pytest
 
 from tests.acp.conftest import _create_acp_agent
@@ -14,8 +25,20 @@ from tests.skills.conftest import create_skill
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
+from vibe.acp.teleport import TELEPORT_PUSH_OPTION_ID
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.config import SessionLoggingConfig
+from vibe.core.teleport.errors import ServiceTeleportError
+from vibe.core.teleport.teleport import TeleportService
+from vibe.core.teleport.types import (
+    TeleportCheckingGitEvent,
+    TeleportCompleteEvent,
+    TeleportPushingEvent,
+    TeleportPushRequiredEvent,
+    TeleportPushResponseEvent,
+    TeleportStartingWorkflowEvent,
+)
+from vibe.core.types import LLMMessage, Role
 
 
 def _get_client(agent: VibeAcpAgentLoop) -> FakeClient:
@@ -32,12 +55,35 @@ def _get_message_texts(agent: VibeAcpAgentLoop) -> list[str]:
     ]
 
 
+def _get_tool_updates(
+    agent: VibeAcpAgentLoop,
+) -> list[ToolCallStart | ToolCallProgress]:
+    return [
+        u.update
+        for u in _get_client(agent)._session_updates
+        if isinstance(u.update, (ToolCallStart, ToolCallProgress))
+    ]
+
+
+def _set_teleport_service(agent_loop: AgentLoop, service: object) -> None:
+    agent_loop._teleport_service = cast(TeleportService, service)
+
+
 async def _new_session_and_clear(agent: VibeAcpAgentLoop) -> str:
     """Create a new session, drain the startup updates, return session_id."""
     resp = await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
-    await asyncio.sleep(0)  # let background tasks (available_commands) complete
+    await _wait_for_available_commands(agent)
     _get_client(agent)._session_updates.clear()
     return resp.session_id
+
+
+async def _wait_for_available_commands(agent: VibeAcpAgentLoop) -> None:
+    for _ in range(50):
+        updates = _get_client(agent)._session_updates
+        if any(isinstance(u.update, AvailableCommandsUpdate) for u in updates):
+            return
+        await asyncio.sleep(0.01)
+    raise TimeoutError("available commands update was not sent")
 
 
 async def _prompt(agent: VibeAcpAgentLoop, session_id: str, text: str):
@@ -51,6 +97,7 @@ def _make_patched_agent_loop(
     *,
     skill_paths: list[Path] | None = None,
     session_logging: SessionLoggingConfig | None = None,
+    vibe_code_enabled: bool | None = None,
 ) -> type[AgentLoop]:
     """Create a PatchedAgentLoop class that injects config overrides."""
     config_updates: dict = {}
@@ -58,6 +105,8 @@ def _make_patched_agent_loop(
         config_updates["skill_paths"] = skill_paths
     if session_logging is not None:
         config_updates["session_logging"] = session_logging
+    if vibe_code_enabled is not None:
+        config_updates["vibe_code_enabled"] = vibe_code_enabled
 
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
@@ -71,6 +120,13 @@ def _make_patched_agent_loop(
 @pytest.fixture
 def acp_agent_loop(backend: FakeBackend) -> VibeAcpAgentLoop:
     patched = _make_patched_agent_loop(backend)
+    patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=patched).start()
+    return _create_acp_agent()
+
+
+@pytest.fixture
+def acp_agent_loop_vibe_code_disabled(backend: FakeBackend) -> VibeAcpAgentLoop:
+    patched = _make_patched_agent_loop(backend, vibe_code_enabled=False)
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=patched).start()
     return _create_acp_agent()
 
@@ -159,6 +215,264 @@ class TestHandleCompact:
             mock_compact.assert_called_once()
 
 
+class TestHandleTeleport:
+    @pytest.mark.asyncio
+    async def test_available_commands_includes_teleport(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        await acp_agent_loop.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+        await _wait_for_available_commands(acp_agent_loop)
+
+        available = [
+            u
+            for u in _get_client(acp_agent_loop)._session_updates
+            if isinstance(u.update, AvailableCommandsUpdate)
+        ]
+        cmd_names = [c.name for c in available[0].update.available_commands]
+
+        assert "teleport" in cmd_names
+
+    @pytest.mark.asyncio
+    async def test_teleport_hidden_when_vibe_code_disabled(
+        self, acp_agent_loop_vibe_code_disabled: VibeAcpAgentLoop
+    ) -> None:
+        agent = acp_agent_loop_vibe_code_disabled
+        await agent.new_session(cwd=str(Path.cwd()), mcp_servers=[])
+        await _wait_for_available_commands(agent)
+
+        available = [
+            u
+            for u in _get_client(agent)._session_updates
+            if isinstance(u.update, AvailableCommandsUpdate)
+        ]
+        cmd_names = [c.name for c in available[0].update.available_commands]
+
+        assert "teleport" not in cmd_names
+
+    @pytest.mark.asyncio
+    async def test_teleport_without_history_replies_with_no_history(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_id = await _new_session_and_clear(acp_agent_loop)
+
+        response = await _prompt(acp_agent_loop, session_id, "/teleport")
+
+        assert response.stop_reason == "end_turn"
+        assert response.field_meta == {
+            "tool_name": "teleport",
+            "teleport": {"status": "no_history"},
+        }
+        assert _get_message_texts(acp_agent_loop) == [
+            "No conversation history to teleport."
+        ]
+        assert _get_tool_updates(acp_agent_loop) == []
+
+    @pytest.mark.asyncio
+    async def test_teleport_sends_tool_updates_and_structured_url(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        class FakeTeleportService:
+            prompts: list[str]
+
+            def __init__(self) -> None:
+                self.prompts = []
+
+            async def __aenter__(self) -> FakeTeleportService:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def execute(self, prompt: str) -> AsyncGenerator[object, object]:
+                self.prompts.append(prompt)
+                yield TeleportCheckingGitEvent()
+                yield TeleportStartingWorkflowEvent()
+                yield TeleportCompleteEvent(url="https://chat.example.com/code/1/2")
+
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        session = acp_agent_loop.sessions[session_id]
+        session.agent_loop.messages.append(
+            LLMMessage(role=Role.user, content="continue this task")
+        )
+        service = FakeTeleportService()
+        _set_teleport_service(session.agent_loop, service)
+
+        response = await _prompt(acp_agent_loop, session_id, "/teleport ignored")
+
+        assert response.stop_reason == "end_turn"
+        assert response.field_meta == {
+            "tool_name": "teleport",
+            "teleport": {
+                "status": "completed",
+                "url": "https://chat.example.com/code/1/2",
+            },
+        }
+        assert service.prompts == ["continue this task (continue)"]
+        assert _get_message_texts(acp_agent_loop) == []
+
+        tool_updates = _get_tool_updates(acp_agent_loop)
+        assert isinstance(tool_updates[0], ToolCallStart)
+        assert tool_updates[0].title == "Teleporting session to Vibe Code Web..."
+        assert tool_updates[-1].status == "completed"
+        assert tool_updates[-1].title == "Teleported to Vibe Code Web"
+        assert [update.field_meta for update in tool_updates] == [
+            {"tool_name": "teleport", "teleport": {"status": "starting"}},
+            {"tool_name": "teleport", "teleport": {"status": "preparing_workspace"}},
+            {"tool_name": "teleport", "teleport": {"status": "starting_workflow"}},
+            {
+                "tool_name": "teleport",
+                "teleport": {
+                    "status": "completed",
+                    "url": "https://chat.example.com/code/1/2",
+                },
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_teleport_push_required_requests_permission(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        class FakeTeleportService:
+            response: TeleportPushResponseEvent | None
+
+            def __init__(self) -> None:
+                self.response = None
+
+            async def __aenter__(self) -> FakeTeleportService:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def execute(self, prompt: str) -> AsyncGenerator[object, object]:
+                yield TeleportCheckingGitEvent()
+                response = yield TeleportPushRequiredEvent(
+                    unpushed_count=2, branch_not_pushed=False
+                )
+                self.response = cast(TeleportPushResponseEvent, response)
+                yield TeleportPushingEvent()
+                yield TeleportCompleteEvent(url="https://chat.example.com/code/1/2")
+
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        session = acp_agent_loop.sessions[session_id]
+        session.agent_loop.messages.append(
+            LLMMessage(role=Role.user, content="ship it")
+        )
+        service = FakeTeleportService()
+        _set_teleport_service(session.agent_loop, service)
+
+        client = _get_client(acp_agent_loop)
+        client.request_permission = AsyncMock(
+            return_value=RequestPermissionResponse(
+                outcome=AllowedOutcome(
+                    outcome="selected", option_id=TELEPORT_PUSH_OPTION_ID
+                )
+            )
+        )
+
+        response = await _prompt(acp_agent_loop, session_id, "/teleport")
+
+        assert response.field_meta == {
+            "tool_name": "teleport",
+            "teleport": {
+                "status": "completed",
+                "url": "https://chat.example.com/code/1/2",
+            },
+        }
+        assert service.response == TeleportPushResponseEvent(approved=True)
+        request_permission = cast(AsyncMock, client.request_permission)
+        request_permission.assert_awaited_once()
+        await_args = request_permission.await_args
+        assert await_args is not None
+        kwargs = await_args.kwargs
+        assert (
+            kwargs["tool_call"].title
+            == "You have 2 unpushed commits. Push to continue?"
+        )
+        assert kwargs["tool_call"].field_meta == {
+            "tool_name": "teleport",
+            "teleport": {
+                "status": "push_required",
+                "unpushedCount": 2,
+                "branchNotPushed": False,
+            },
+        }
+        assert [option.name for option in kwargs["options"]] == [
+            "Push and continue",
+            "Cancel",
+        ]
+        assert [update.field_meta for update in _get_tool_updates(acp_agent_loop)] == [
+            {"tool_name": "teleport", "teleport": {"status": "starting"}},
+            {"tool_name": "teleport", "teleport": {"status": "preparing_workspace"}},
+            {
+                "tool_name": "teleport",
+                "teleport": {
+                    "status": "push_required",
+                    "unpushedCount": 2,
+                    "branchNotPushed": False,
+                },
+            },
+            {"tool_name": "teleport", "teleport": {"status": "syncing_remote"}},
+            {
+                "tool_name": "teleport",
+                "teleport": {
+                    "status": "completed",
+                    "url": "https://chat.example.com/code/1/2",
+                },
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_teleport_push_denied_marks_tool_call_failed(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        class FakeTeleportService:
+            async def __aenter__(self) -> FakeTeleportService:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def execute(self, prompt: str) -> AsyncGenerator[object, object]:
+                response = yield TeleportPushRequiredEvent()
+                if (
+                    not isinstance(response, TeleportPushResponseEvent)
+                    or not response.approved
+                ):
+                    raise ServiceTeleportError(
+                        "Teleport cancelled: changes not pushed."
+                    )
+
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        session = acp_agent_loop.sessions[session_id]
+        session.agent_loop.messages.append(
+            LLMMessage(role=Role.user, content="ship it")
+        )
+        _set_teleport_service(session.agent_loop, FakeTeleportService())
+
+        client = _get_client(acp_agent_loop)
+        client.request_permission = AsyncMock(
+            return_value=RequestPermissionResponse(
+                outcome=DeniedOutcome(outcome="cancelled")
+            )
+        )
+
+        response = await _prompt(acp_agent_loop, session_id, "/teleport")
+
+        assert response.field_meta == {
+            "tool_name": "teleport",
+            "teleport": {"status": "failed"},
+        }
+        failed = _get_tool_updates(acp_agent_loop)[-1]
+        assert failed.status == "failed"
+        assert failed.title == "Teleport failed"
+        assert failed.raw_output == "Teleport cancelled: changes not pushed."
+        assert failed.field_meta == {
+            "tool_name": "teleport",
+            "teleport": {"status": "failed"},
+        }
+
+
 class TestHandleReload:
     @pytest.mark.asyncio
     async def test_reload_calls_reload_with_initial_messages(
@@ -213,6 +527,19 @@ class TestCommandFallthrough:
         texts = _get_message_texts(acp_agent_loop)
         assert any("Hi" in t for t in texts)
 
+    @pytest.mark.asyncio
+    async def test_ampersand_message_reaches_agent(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        response = await _prompt(acp_agent_loop, session_id, "&fix from here")
+
+        assert response.stop_reason == "end_turn"
+        assert response.field_meta is None
+        assert _get_tool_updates(acp_agent_loop) == []
+        texts = _get_message_texts(acp_agent_loop)
+        assert any("Hi" in t for t in texts)
+
 
 class TestAvailableCommandsWithSkills:
     @pytest.mark.asyncio
@@ -224,7 +551,7 @@ class TestAvailableCommandsWithSkills:
         await acp_agent_loop_with_skills.new_session(
             cwd=str(Path.cwd()), mcp_servers=[]
         )
-        await asyncio.sleep(0)
+        await _wait_for_available_commands(acp_agent_loop_with_skills)
 
         updates = _get_client(acp_agent_loop_with_skills)._session_updates
         available = [
@@ -247,7 +574,7 @@ class TestAvailableCommandsWithSkills:
         await acp_agent_loop_with_skills.new_session(
             cwd=str(Path.cwd()), mcp_servers=[]
         )
-        await asyncio.sleep(0)
+        await _wait_for_available_commands(acp_agent_loop_with_skills)
 
         updates = _get_client(acp_agent_loop_with_skills)._session_updates
         available = [

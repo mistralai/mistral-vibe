@@ -12,7 +12,12 @@ from vibe.cli.update_notifier import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
-from vibe.cli.update_notifier.update import UpdateError, get_update_if_available
+from vibe.cli.update_notifier.update import (
+    UpdateError,
+    get_pending_update_from_cache,
+    get_update_if_available,
+    mark_update_as_dismissed,
+)
 
 
 @pytest.fixture
@@ -300,3 +305,136 @@ async def test_updates_cache_timestamp_with_current_version_when_gateway_errors(
     assert update_cache_repository.update_cache is not None
     assert update_cache_repository.update_cache.latest_version == "1.0.0"
     assert update_cache_repository.update_cache.stored_at_timestamp == current_timestamp
+
+
+@pytest.mark.asyncio
+async def test_get_pending_update_from_cache_returns_none_when_cache_is_empty() -> None:
+    repository = FakeUpdateCacheRepository()
+
+    assert await get_pending_update_from_cache(repository, "1.0.0") is None
+
+
+@pytest.mark.asyncio
+async def test_get_pending_update_from_cache_returns_none_when_cached_version_equals_current() -> (
+    None
+):
+    repository = FakeUpdateCacheRepository(
+        update_cache=UpdateCache(latest_version="1.0.0", stored_at_timestamp=0)
+    )
+
+    assert await get_pending_update_from_cache(repository, "1.0.0") is None
+
+
+@pytest.mark.asyncio
+async def test_get_pending_update_from_cache_returns_none_when_cached_version_is_older() -> (
+    None
+):
+    repository = FakeUpdateCacheRepository(
+        update_cache=UpdateCache(latest_version="0.9.0", stored_at_timestamp=0)
+    )
+
+    assert await get_pending_update_from_cache(repository, "1.0.0") is None
+
+
+@pytest.mark.asyncio
+async def test_get_pending_update_from_cache_returns_version_when_newer_exists() -> (
+    None
+):
+    repository = FakeUpdateCacheRepository(
+        update_cache=UpdateCache(latest_version="1.2.3", stored_at_timestamp=0)
+    )
+
+    assert await get_pending_update_from_cache(repository, "1.0.0") == "1.2.3"
+
+
+@pytest.mark.asyncio
+async def test_get_pending_update_from_cache_returns_none_when_current_is_invalid() -> (
+    None
+):
+    repository = FakeUpdateCacheRepository(
+        update_cache=UpdateCache(latest_version="1.2.3", stored_at_timestamp=0)
+    )
+
+    assert await get_pending_update_from_cache(repository, "not-a-version") is None
+
+
+@pytest.mark.asyncio
+async def test_get_pending_update_from_cache_returns_none_when_dismissed() -> None:
+    repository = FakeUpdateCacheRepository(
+        update_cache=UpdateCache(
+            latest_version="1.2.3", stored_at_timestamp=0, dismissed_version="1.2.3"
+        )
+    )
+
+    assert await get_pending_update_from_cache(repository, "1.0.0") is None
+
+
+@pytest.mark.asyncio
+async def test_get_pending_update_from_cache_returns_version_when_dismissed_is_older() -> (
+    None
+):
+    repository = FakeUpdateCacheRepository(
+        update_cache=UpdateCache(
+            latest_version="1.3.0", stored_at_timestamp=0, dismissed_version="1.2.3"
+        )
+    )
+
+    assert await get_pending_update_from_cache(repository, "1.0.0") == "1.3.0"
+
+
+@pytest.mark.asyncio
+async def test_mark_update_as_dismissed_persists_version_and_preserves_other_fields() -> (
+    None
+):
+    repository = FakeUpdateCacheRepository(
+        update_cache=UpdateCache(
+            latest_version="1.2.3",
+            stored_at_timestamp=42,
+            seen_whats_new_version="1.0.0",
+        )
+    )
+
+    await mark_update_as_dismissed(repository, "1.2.3")
+
+    assert repository.update_cache is not None
+    assert repository.update_cache.latest_version == "1.2.3"
+    assert repository.update_cache.stored_at_timestamp == 42
+    assert repository.update_cache.seen_whats_new_version == "1.0.0"
+    assert repository.update_cache.dismissed_version == "1.2.3"
+
+
+@pytest.mark.asyncio
+async def test_mark_update_as_dismissed_is_a_noop_when_cache_is_empty() -> None:
+    repository = FakeUpdateCacheRepository()
+
+    await mark_update_as_dismissed(repository, "1.2.3")
+
+    assert repository.update_cache is None
+
+
+@pytest.mark.asyncio
+async def test_writing_cache_preserves_seen_whats_new_and_dismissed_version(
+    current_timestamp: int,
+) -> None:
+    update_notifier = FakeUpdateGateway(update=Update(latest_version="1.0.2"))
+    timestamp_two_days_ago = current_timestamp - 48 * 60 * 60
+    update_cache_repository = FakeUpdateCacheRepository(
+        update_cache=UpdateCache(
+            latest_version="1.0.1",
+            stored_at_timestamp=timestamp_two_days_ago,
+            seen_whats_new_version="1.0.0",
+            dismissed_version="1.0.1",
+        )
+    )
+
+    await get_update_if_available(
+        update_notifier,
+        current_version="1.0.0",
+        update_cache_repository=update_cache_repository,
+        get_current_timestamp=lambda: current_timestamp,
+    )
+
+    assert update_cache_repository.update_cache is not None
+    assert update_cache_repository.update_cache.latest_version == "1.0.2"
+    assert update_cache_repository.update_cache.seen_whats_new_version == "1.0.0"
+    assert update_cache_repository.update_cache.dismissed_version == "1.0.1"

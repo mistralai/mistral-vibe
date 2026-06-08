@@ -72,7 +72,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from vibe import VIBE_ROOT, __version__
 from vibe.acp.acp_logger import acp_message_observer
-from vibe.acp.commands import AcpCommandRegistry
+from vibe.acp.commands import AcpCommandAvailabilityContext, AcpCommandRegistry
 from vibe.acp.exceptions import (
     ConfigurationError,
     ContextTooLongError,
@@ -86,6 +86,7 @@ from vibe.acp.exceptions import (
     UnauthenticatedError,
 )
 from vibe.acp.session import AcpSessionLoop
+from vibe.acp.teleport import handle_teleport_command
 from vibe.acp.title import acp_blocks_to_title_segments
 from vibe.acp.tools.base import BaseAcpTool
 from vibe.acp.tools.events import ToolTerminalOpenedEvent
@@ -109,6 +110,7 @@ from vibe.acp.utils import (
     create_tool_result_replay,
     create_user_message_replay,
     get_proxy_help_text,
+    is_jetbrains_client,
     is_valid_acp_mode,
     make_thinking_response,
 )
@@ -186,6 +188,7 @@ from vibe.setup.onboarding.context import OnboardingContext
 logger = logging.getLogger("vibe")
 
 NON_INTERACTIVE_DISABLED_TOOLS = ["ask_user_question", "exit_plan_mode"]
+INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS = 0.1
 
 
 def _merge_non_interactive_disabled_tools(config: VibeConfig) -> None:
@@ -354,6 +357,7 @@ class VibeAcpAgentLoop(AcpAgent):
             id="vibe-setup",
             name="Register your API Key",
             description="Register your API Key inside Mistral Vibe",
+            args=args,
             field_meta={
                 "terminal-auth": {
                     "command": command,
@@ -447,6 +451,12 @@ class VibeAcpAgentLoop(AcpAgent):
                 auth_methods.append(delegated_browser_auth_method)
         if supports_terminal_auth:
             auth_methods.append(self._build_terminal_auth_method(command, args))
+
+        # JetBrains preemptively shows the auth UI as soon as `authMethods` is
+        # non-empty; suppress methods for already-authenticated JetBrains clients.
+        _, auth_state = self._assess_current_auth_state()
+        if is_jetbrains_client(self.client_info) and auth_state.can_use_active_provider:
+            auth_methods = []
 
         response = InitializeResponse(
             agent_capabilities=AgentCapabilities(
@@ -606,7 +616,11 @@ class VibeAcpAgentLoop(AcpAgent):
     async def _create_acp_session(
         self, session_id: str, agent_loop: AgentLoop
     ) -> AcpSessionLoop:
-        command_registry = AcpCommandRegistry()
+        command_registry = AcpCommandRegistry(
+            availability_context=AcpCommandAvailabilityContext(
+                vibe_code_enabled=agent_loop.base_config.vibe_code_enabled
+            )
+        )
         session = AcpSessionLoop(
             id=session_id, agent_loop=agent_loop, command_registry=command_registry
         )
@@ -620,10 +634,16 @@ class VibeAcpAgentLoop(AcpAgent):
         if not agent_loop.bypass_tool_permissions:
             agent_loop.set_approval_callback(self._create_approval_callback(session.id))
 
-        session.spawn(self._send_available_commands(session))
+        session.spawn(self._send_initial_available_commands(session))
         session.spawn(self._warm_up_agent_loop(agent_loop))
 
         return session
+
+    async def _send_initial_available_commands(self, session: AcpSessionLoop) -> None:
+        # Zed can drop session/update notifications sent before it registers
+        # the session returned by session/new, so delay initial command discovery.
+        await asyncio.sleep(INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS)
+        await self._send_available_commands(session)
 
     async def _warm_up_agent_loop(self, agent_loop: AgentLoop) -> None:
         """Proactively await deferred init so `vibe.ready` telemetry is emitted
@@ -1052,6 +1072,14 @@ class VibeAcpAgentLoop(AcpAgent):
                 success = await self._apply_thinking_change(
                     session, cast(ThinkingLevel, value)
                 )
+            case "max_turns" if isinstance(value, str):
+                try:
+                    max_turns = int(value)
+                except ValueError:
+                    success = False
+                else:
+                    session.agent_loop.set_max_turns(max_turns)
+                    success = True
             case _:
                 success = False
 
@@ -1700,6 +1728,11 @@ class VibeAcpAgentLoop(AcpAgent):
             ),
         )
         return PromptResponse(stop_reason="end_turn", user_message_id=message_id)
+
+    async def _handle_teleport(
+        self, session: AcpSessionLoop, text_prompt: str, message_id: str
+    ) -> PromptResponse:
+        return await handle_teleport_command(self.client, session, message_id)
 
     async def _handle_help(
         self, session: AcpSessionLoop, text_prompt: str, message_id: str

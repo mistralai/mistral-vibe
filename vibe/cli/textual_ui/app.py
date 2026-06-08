@@ -112,7 +112,6 @@ from vibe.cli.textual_ui.windowing import (
     sync_backfill_state,
 )
 from vibe.cli.update_notifier import (
-    FileSystemUpdateCacheRepository,
     PyPIUpdateGateway,
     UpdateCacheRepository,
     UpdateError,
@@ -122,7 +121,6 @@ from vibe.cli.update_notifier import (
     mark_version_as_seen,
     should_show_whats_new,
 )
-from vibe.cli.update_notifier.update import do_update
 from vibe.cli.voice_manager import VoiceManager, VoiceManagerPort
 from vibe.cli.voice_manager.voice_manager_port import TranscribeState
 from vibe.cli.vscode_extension_promo import (
@@ -3270,48 +3268,19 @@ class VibeApp(App):  # noqa: PLR0904
         asyncio.create_task(self._check_update(), name="version-update-check")
 
     async def _check_update(self) -> None:
-        try:
-            if self._update_notifier is None or self._update_cache_repository is None:
-                return
+        if self._update_notifier is None or self._update_cache_repository is None:
+            return
 
-            update_availability = await get_update_if_available(
+        try:
+            await get_update_if_available(
                 update_notifier=self._update_notifier,
                 current_version=self._current_version,
                 update_cache_repository=self._update_cache_repository,
             )
-        except UpdateError as error:
-            self.notify(
-                error.message,
-                title="Update check failed",
-                severity="warning",
-                timeout=10,
-            )
-            return
+        except UpdateError as exc:
+            logger.warning("Update check failed", exc_info=exc)
         except Exception as exc:
-            logger.debug("Version update check failed", exc_info=exc)
-            return
-
-        if update_availability is None or not update_availability.should_notify:
-            return
-
-        update_message_prefix = (
-            f"{self._current_version} => {update_availability.latest_version}"
-        )
-
-        if self.config.enable_auto_update and await do_update():
-            self.notify(
-                f"{update_message_prefix}\nVibe was updated successfully. Please restart to use the new version.",
-                title="Update successful",
-                severity="information",
-                timeout=float("inf"),
-            )
-            return
-
-        message = f"{update_message_prefix}\nPlease update mistral-vibe with your package manager"
-
-        self.notify(
-            message, title="Update available", severity="information", timeout=10
-        )
+            logger.debug("Update check failed", exc_info=exc)
 
     def action_copy_selection(self) -> None:
         copied_text = copy_selection_to_clipboard(self, show_toast=False)
@@ -3364,12 +3333,13 @@ class VibeApp(App):  # noqa: PLR0904
 
 
 def run_textual_ui(
-    agent_loop: AgentLoop, startup: StartupOptions | None = None
+    agent_loop: AgentLoop,
+    update_cache_repository: UpdateCacheRepository,
+    startup: StartupOptions | None = None,
 ) -> None:
     from vibe.cli.stderr_guard import stderr_guard
 
     update_notifier = PyPIUpdateGateway(project_name="mistral-vibe")
-    update_cache_repository = FileSystemUpdateCacheRepository()
     plan_offer_gateway = HttpWhoAmIGateway(base_url=agent_loop.config.console_base_url)
     vscode_extension_promo_repository = FileSystemVscodeExtensionPromoRepository()
     vscode_extension_promo = VscodeExtensionPromo(

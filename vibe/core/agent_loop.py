@@ -67,7 +67,10 @@ from vibe.core.session.session_logger import SessionLogger
 from vibe.core.session.session_migration import migrate_sessions_entrypoint
 from vibe.core.skills.manager import SkillManager
 from vibe.core.system_prompt import get_universal_system_prompt
-from vibe.core.telemetry.build_metadata import build_request_metadata
+from vibe.core.telemetry.build_metadata import (
+    build_attachment_counts,
+    build_request_metadata,
+)
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import (
     EntrypointMetadata,
@@ -748,6 +751,10 @@ class AgentLoop:  # noqa: PLR0904
             None,
         )
 
+    def set_max_turns(self, max_turns: int) -> None:
+        self._max_turns = max_turns
+        self._setup_middleware()
+
     def _setup_middleware(self) -> None:
         """Configure middleware pipeline for this conversation."""
         self.middleware_pipeline.clear()
@@ -1373,6 +1380,9 @@ class AgentLoop:  # noqa: PLR0904
             else 0,
             call_type=backend_metadata.call_type,
             message_id=backend_metadata.message_id,
+            attachment_counts=build_attachment_counts(
+                last_user_message, supports_images=active_model.supports_images
+            ),
         )
 
         try:
@@ -1436,6 +1446,9 @@ class AgentLoop:  # noqa: PLR0904
             else 0,
             call_type=backend_metadata.call_type,
             message_id=backend_metadata.message_id,
+            attachment_counts=build_attachment_counts(
+                last_user_message, supports_images=active_model.supports_images
+            ),
         )
 
         try:

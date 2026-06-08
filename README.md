@@ -644,14 +644,12 @@ Each path is implicitly trusted (no trust prompt) and contributes its `AGENTS.md
 
 ### Update Settings
 
-#### Auto-Update
+Vibe checks PyPI at most once per day during a session. When a newer version is found, the next launch shows an update prompt before opening the chat, offering to either update immediately (via `uv tool upgrade mistral-vibe` or `brew upgrade mistral-vibe`) or continue with the current version.
 
-Vibe includes an automatic update feature that keeps your installation current. This is enabled by default.
-
-To disable auto-updates, add this to your `config.toml`:
+To disable the daily check entirely, add this to your `config.toml`:
 
 ```toml
-enable_auto_update = false
+enable_update_checks = false
 ```
 
 ### Notification Settings

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Literal, TypedDict
 
 from pydantic import BaseModel
+
+
+class AttachmentKind(StrEnum):
+    IMAGE = "image"
 
 
 class ClientMetadata(BaseModel):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import time
 
 from vibe import VIBE_ROOT
@@ -40,11 +41,5 @@ async def mark_version_as_seen(version: str, repository: UpdateCacheRepository) 
                 seen_whats_new_version=version,
             )
         )
-    else:
-        await repository.set(
-            UpdateCache(
-                latest_version=cache.latest_version,
-                stored_at_timestamp=cache.stored_at_timestamp,
-                seen_whats_new_version=version,
-            )
-        )
+        return
+    await repository.set(replace(cache, seen_whats_new_version=version))

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, replace
 import time
 
 from packaging.version import InvalidVersion, Version
@@ -74,9 +75,46 @@ async def _write_update_cache(
     version: str,
     get_current_timestamp: Callable[[], int],
 ) -> None:
+    previous = await repository.get()
+    timestamp = get_current_timestamp()
+    if previous is None:
+        await repository.set(
+            UpdateCache(latest_version=version, stored_at_timestamp=timestamp)
+        )
+        return
     await repository.set(
-        UpdateCache(latest_version=version, stored_at_timestamp=get_current_timestamp())
+        replace(previous, latest_version=version, stored_at_timestamp=timestamp)
     )
+
+
+async def get_pending_update_from_cache(
+    repository: UpdateCacheRepository, current_version: str
+) -> str | None:
+    current = _parse_version(current_version)
+    if current is None:
+        return None
+
+    cache = await repository.get()
+    if cache is None:
+        return None
+
+    latest = _parse_version(cache.latest_version)
+    if latest is None or latest <= current:
+        return None
+
+    if cache.dismissed_version == cache.latest_version:
+        return None
+
+    return cache.latest_version
+
+
+async def mark_update_as_dismissed(
+    repository: UpdateCacheRepository, version: str
+) -> None:
+    cache = await repository.get()
+    if cache is None:
+        return
+    await repository.set(replace(cache, dismissed_version=version))
 
 
 async def get_update_if_available(
@@ -85,7 +123,8 @@ async def get_update_if_available(
     update_cache_repository: UpdateCacheRepository,
     get_current_timestamp: Callable[[], int] = lambda: int(time.time()),
 ) -> UpdateAvailability | None:
-    if not (current := _parse_version(current_version)):
+    current = _parse_version(current_version)
+    if current is None:
         return None
 
     if update_cache := await update_cache_repository.get():
@@ -133,7 +172,24 @@ async def do_update() -> bool:
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL,
         )
-        await process.wait()
+        try:
+            await process.wait()
+        except asyncio.CancelledError:
+            await _terminate(process)
+            raise
         if process.returncode == 0:
             return True
     return False
+
+
+async def _terminate(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    with suppress(ProcessLookupError):
+        process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2.0)
+    except TimeoutError:
+        with suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()

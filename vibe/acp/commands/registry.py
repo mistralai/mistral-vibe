@@ -7,6 +7,19 @@ type OnCommandsChanged = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True)
+class AcpCommandAvailabilityContext:
+    """Context used to decide whether a command should be advertised."""
+
+    vibe_code_enabled: bool = False
+
+    def is_teleport_available(self) -> bool:
+        return self.vibe_code_enabled
+
+
+type CommandAvailability = Callable[[AcpCommandAvailabilityContext], bool]
+
+
+@dataclass(frozen=True)
 class AcpCommand:
     """Command advertised to ACP clients via available_commands_update."""
 
@@ -14,18 +27,31 @@ class AcpCommand:
     description: str
     handler: str
     input_hint: str | None = None
+    is_available: CommandAvailability | None = None
 
 
 @dataclass
 class AcpCommandRegistry:
     """Registry of ACP commands. Notifies listeners when commands change."""
 
+    availability_context: AcpCommandAvailabilityContext = field(
+        default_factory=AcpCommandAvailabilityContext
+    )
     _commands: dict[str, AcpCommand] = field(default_factory=dict)
     _on_changed: OnCommandsChanged | None = None
 
     def __post_init__(self) -> None:
         if not self._commands:
-            self._commands = _build_commands()
+            self._commands = {
+                name: command
+                for name, command in _build_commands().items()
+                if self._is_available(command)
+            }
+
+    def _is_available(self, command: AcpCommand) -> bool:
+        if command.is_available is None:
+            return True
+        return command.is_available(self.availability_context)
 
     def set_on_changed(self, callback: OnCommandsChanged) -> None:
         self._on_changed = callback
@@ -64,6 +90,12 @@ def _build_commands() -> dict[str, AcpCommand]:
             name="log",
             description="Show path to current session log directory",
             handler="_handle_log",
+        ),
+        "teleport": AcpCommand(
+            name="teleport",
+            description="Teleport session to Vibe Code Web",
+            handler="_handle_teleport",
+            is_available=AcpCommandAvailabilityContext.is_teleport_available,
         ),
         "proxy-setup": AcpCommand(
             name="proxy-setup",

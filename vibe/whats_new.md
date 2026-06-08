@@ -1,4 +1,3 @@
-# What's new in v2.14.0
+# What's new in v2.14.1
 
-- **Image attachments**: Drop an image into the chat input — or `@`-mention it — and send it to vision-capable models.
-- **New read and edit tools**: `read` and `edit` replace `read_file` and `search_replace`. Your config has been migrated to these new tool names.
+- **Update prompt at startup**: Vibe now asks you to install a pending update before starting the session, instead of just notifying you.

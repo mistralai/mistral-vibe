@@ -4,11 +4,13 @@ from typing import Any, cast
 
 from vibe.core.telemetry.types import (
     AgentEntrypoint,
+    AttachmentKind,
     EntrypointMetadata,
     TelemetryBaseMetadata,
     TelemetryCallType,
     TelemetryRequestMetadata,
 )
+from vibe.core.types import LLMMessage
 
 
 def build_base_metadata(
@@ -50,6 +52,17 @@ def build_request_metadata(
         message_id=message_id,
         **entrypoint_payload,
     )
+
+
+def build_attachment_counts(
+    message: LLMMessage | None, *, supports_images: bool
+) -> dict[AttachmentKind, int]:
+    if message is None:
+        return {}
+    counts: dict[AttachmentKind, int] = {}
+    if supports_images and message.images:
+        counts[AttachmentKind.IMAGE] = len(message.images)
+    return counts
 
 
 def build_entrypoint_metadata(

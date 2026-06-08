@@ -43,9 +43,14 @@ def build_acp_agent_loop(*, provider: ProviderConfig | None = None) -> VibeAcpAg
     )
 
 
+@pytest.fixture
+def unauthenticated_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+
 class TestACPInitialize:
     @pytest.mark.asyncio
-    async def test_initialize(self) -> None:
+    async def test_initialize(self, unauthenticated_env: None) -> None:
         acp_agent_loop = build_acp_agent_loop()
         response = await acp_agent_loop.initialize(protocol_version=PROTOCOL_VERSION)
 
@@ -62,7 +67,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.14.0"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.14.1"
         )
 
         assert response.auth_methods is not None
@@ -73,7 +78,9 @@ class TestACPInitialize:
         assert auth_method.description == BROWSER_AUTH_DESCRIPTION
 
     @pytest.mark.asyncio
-    async def test_initialize_with_terminal_auth(self) -> None:
+    async def test_initialize_with_terminal_auth(
+        self, unauthenticated_env: None
+    ) -> None:
         """Test initialize with terminal-auth capabilities to check it was included."""
         acp_agent_loop = build_acp_agent_loop()
         client_capabilities = ClientCapabilities(field_meta={"terminal-auth": True})
@@ -94,7 +101,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.14.0"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.14.1"
         )
 
         assert response.auth_methods is not None
@@ -109,6 +116,8 @@ class TestACPInitialize:
         assert auth_method.id == "vibe-setup"
         assert auth_method.name == "Register your API Key"
         assert auth_method.description == "Register your API Key inside Mistral Vibe"
+        assert auth_method.args is not None
+        assert auth_method.args[-1:] == ["--setup"]
         assert auth_method.field_meta is not None
         assert "terminal-auth" in auth_method.field_meta
         terminal_auth_meta = auth_method.field_meta["terminal-auth"]
@@ -118,7 +127,9 @@ class TestACPInitialize:
         assert terminal_auth_meta["label"] == "Mistral Vibe Setup"
 
     @pytest.mark.asyncio
-    async def test_initialize_with_delegated_browser_auth(self) -> None:
+    async def test_initialize_with_delegated_browser_auth(
+        self, unauthenticated_env: None
+    ) -> None:
         acp_agent_loop = build_acp_agent_loop()
         client_capabilities = ClientCapabilities(
             field_meta={"browser-auth-delegated": True}
@@ -156,3 +167,43 @@ class TestACPInitialize:
         response = await acp_agent_loop.initialize(protocol_version=PROTOCOL_VERSION)
 
         assert response.auth_methods == []
+
+    @pytest.mark.asyncio
+    async def test_initialize_omits_auth_methods_for_authenticated_jetbrains_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MISTRAL_API_KEY", "test-api-key")
+        acp_agent_loop = build_acp_agent_loop()
+        client_capabilities = ClientCapabilities(
+            field_meta={"terminal-auth": True, "browser-auth-delegated": True}
+        )
+        client_info = Implementation(name="JetBrains.PyCharm", version="2026.1.2")
+
+        response = await acp_agent_loop.initialize(
+            protocol_version=PROTOCOL_VERSION,
+            client_capabilities=client_capabilities,
+            client_info=client_info,
+        )
+
+        assert response.auth_methods == []
+
+    @pytest.mark.asyncio
+    async def test_initialize_keeps_auth_methods_for_authenticated_non_jetbrains_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MISTRAL_API_KEY", "test-api-key")
+        acp_agent_loop = build_acp_agent_loop()
+        client_capabilities = ClientCapabilities(field_meta={"terminal-auth": True})
+        client_info = Implementation(name="zed", version="0.999.0")
+
+        response = await acp_agent_loop.initialize(
+            protocol_version=PROTOCOL_VERSION,
+            client_capabilities=client_capabilities,
+            client_info=client_info,
+        )
+
+        assert response.auth_methods is not None
+        assert {method.id for method in response.auth_methods} == {
+            "browser-auth",
+            "vibe-setup",
+        }

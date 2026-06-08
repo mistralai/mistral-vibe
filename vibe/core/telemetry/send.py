@@ -15,6 +15,7 @@ from vibe.core.logger import logger
 from vibe.core.telemetry.build_metadata import build_base_metadata
 from vibe.core.telemetry.types import (
     AgentEntrypoint,
+    AttachmentKind,
     EntrypointMetadata,
     TelemetryCallType,
     TeleportCompletedPayload,
@@ -303,6 +304,7 @@ class TelemetryClient:
         nb_prompt_chars: int,
         call_type: TelemetryCallType,
         message_id: str | None = None,
+        attachment_counts: dict[AttachmentKind, int] | None = None,
     ) -> None:
         payload = {
             "model": model,
@@ -312,6 +314,11 @@ class TelemetryClient:
             "call_source": "vibe_code",
             "call_type": call_type,
             "message_id": message_id,
+            "attachment_counts": {
+                kind.value: count
+                for kind, count in (attachment_counts or {}).items()
+                if count > 0
+            },
         }
         self.send_telemetry_event("vibe.request_sent", payload)
 
