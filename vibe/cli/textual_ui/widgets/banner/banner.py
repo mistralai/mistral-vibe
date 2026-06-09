@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalGroup
 from textual.reactive import reactive
 from textual.widgets import Static
 
@@ -54,7 +54,7 @@ class Banner(Static):
         self._animated = not config.disable_welcome_banner_animation
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="banner-container"):
+        with VerticalGroup(id="banner-container"):
             yield PetitChat(animate=self._animated)
 
             with Vertical(id="banner-info"):
