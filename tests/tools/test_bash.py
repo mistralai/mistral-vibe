@@ -309,3 +309,48 @@ class TestDenylistWordBoundary:
         bash_tool = self._make_bash(allowlist=["cat"])
         result = bash_tool.resolve_permission(BashArgs(command="catalog"))
         assert result is not None and result.permission is not ToolPermission.ALWAYS
+
+
+def test_default_allowlist_includes_read_only_commands():
+    """Test that common read-only commands are in the default allowlist."""
+    from vibe.core.tools.builtins.bash import _get_default_allowlist
+    
+    allowlist = _get_default_allowlist()
+    
+    # Read-only commands that should be in the default allowlist
+    read_only_commands = ["awk", "grep", "cut", "sort", "tr", "uniq"]
+    
+    for cmd in read_only_commands:
+        assert cmd in allowlist, f"Read-only command '{cmd}' should be in default allowlist"
+
+
+def test_new_read_only_commands_are_allowlisted():
+    """Test that newly added read-only commands are automatically allowed."""
+    config = BashToolConfig()  # Use default config
+    bash_tool = Bash(config_getter=lambda: config, state=BaseToolState())
+    
+    # Test that grep and awk commands are allowed by default
+    grep_permission = bash_tool.resolve_permission(BashArgs(command="grep pattern file.txt"))
+    awk_permission = bash_tool.resolve_permission(BashArgs(command="awk '{print $1}' file.txt"))
+    cut_permission = bash_tool.resolve_permission(BashArgs(command="cut -d',' -f1 file.csv"))
+    sort_permission = bash_tool.resolve_permission(BashArgs(command="sort file.txt"))
+    tr_permission = bash_tool.resolve_permission(BashArgs(command="tr 'a' 'b' < file.txt"))
+    uniq_permission = bash_tool.resolve_permission(BashArgs(command="uniq file.txt"))
+    
+    assert isinstance(grep_permission, PermissionContext)
+    assert grep_permission.permission is ToolPermission.ALWAYS
+    
+    assert isinstance(awk_permission, PermissionContext)
+    assert awk_permission.permission is ToolPermission.ALWAYS
+    
+    assert isinstance(cut_permission, PermissionContext)
+    assert cut_permission.permission is ToolPermission.ALWAYS
+    
+    assert isinstance(sort_permission, PermissionContext)
+    assert sort_permission.permission is ToolPermission.ALWAYS
+    
+    assert isinstance(tr_permission, PermissionContext)
+    assert tr_permission.permission is ToolPermission.ALWAYS
+    
+    assert isinstance(uniq_permission, PermissionContext)
+    assert uniq_permission.permission is ToolPermission.ALWAYS

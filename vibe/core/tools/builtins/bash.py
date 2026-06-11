@@ -103,15 +103,21 @@ def _get_default_allowlist() -> list[str]:
         return common + ["dir", "findstr", "more", "type", "ver", "where"]
     else:
         return common + [
+            "awk",
             "cat",
+            "cut",
             "file",
             "find",
+            "grep",
             "head",
             "ls",
             "pwd",
+            "sort",
             "stat",
             "tail",
+            "tr",
             "uname",
+            "uniq",
             "wc",
             "which",
         ]
