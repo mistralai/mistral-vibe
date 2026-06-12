@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from vibe.core.paths._local_config_files import LocalConfigDirs, find_local_config_dirs
 
 
@@ -86,6 +88,21 @@ class TestConfigDirs:
         resolved = tmp_path.resolve()
         assert resolved / ".vibe" in result.config_dirs
         assert resolved / ".agents" in result.config_dirs
+
+    def test_unreadable_config_dirs_do_not_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_is_dir(self: Path) -> bool:
+            raise PermissionError(13, "Permission denied")
+
+        def fake_is_file(self: Path) -> bool:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "is_dir", fake_is_dir)
+        monkeypatch.setattr(Path, "is_file", fake_is_file)
+
+        result = find_local_config_dirs(tmp_path)
+        assert result == LocalConfigDirs()
 
 
 class TestLocalConfigDirsOr:

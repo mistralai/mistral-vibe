@@ -351,6 +351,19 @@ class TestHasAgentsMdFile:
     def test_agents_md_filename_constant(self) -> None:
         assert AGENTS_MD_FILENAME == "AGENTS.md"
 
+    def test_unreadable_agents_md_does_not_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        denied = (tmp_path / "AGENTS.md").resolve()
+
+        def fake_is_file(self: Path) -> bool:
+            if self.resolve() == denied:
+                raise PermissionError(13, "Permission denied")
+            return False
+
+        monkeypatch.setattr(Path, "is_file", fake_is_file)
+        assert has_agents_md_file(tmp_path) is False
+
 
 class TestFindTrustableFiles:
     def test_returns_empty_for_clean_directory(self, tmp_path: Path) -> None:
@@ -513,3 +526,24 @@ class TestFindGitRepoAncestor:
     ) -> None:
         monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path / "nope"))
         assert find_git_repo_ancestor(tmp_path) is None
+
+    def test_unreadable_ancestor_git_head_does_not_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ancestor = tmp_path / "mnt" / "vast"
+        (ancestor / ".git").mkdir(parents=True)
+        cwd = ancestor / "project"
+        cwd.mkdir()
+
+        real_is_file = Path.is_file
+        denied = (ancestor / ".git" / "HEAD").resolve()
+
+        def fake_is_file(self: Path) -> bool:
+            if self.resolve() == denied:
+                raise PermissionError(13, "Permission denied")
+            return real_is_file(self)
+
+        monkeypatch.setattr(Path, "is_file", fake_is_file)
+        monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path / "home"))
+
+        assert find_git_repo_ancestor(cwd) is None

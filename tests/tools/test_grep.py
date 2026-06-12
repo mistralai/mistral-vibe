@@ -94,6 +94,19 @@ async def test_returns_empty_on_no_matches(grep, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_preserves_accents_when_matching_latin1_encoded_file(grep, tmp_path):
+    (tmp_path / "menu.txt").write_bytes("café au lait\nthé glacé\n".encode("latin-1"))
+
+    result = await collect_result(
+        grep.run(GrepArgs(pattern="caf"))  # typos:disable-line
+    )
+
+    assert result.match_count == 1
+    assert "\ufffd" not in result.matches
+    assert "café au lait" in result.matches
+
+
+@pytest.mark.asyncio
 async def test_fails_with_empty_pattern(grep):
     with pytest.raises(ToolError) as err:
         await collect_result(grep.run(GrepArgs(pattern="")))

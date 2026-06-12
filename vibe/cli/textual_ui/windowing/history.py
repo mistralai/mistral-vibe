@@ -34,7 +34,6 @@ def build_history_widgets(
     tool_call_map: dict[str, str],
     *,
     start_index: int,
-    tools_collapsed: bool,
     history_widget_indices: WeakKeyDictionary[Widget, int],
 ) -> list[Widget]:
     widgets: list[Widget] = []
@@ -76,9 +75,7 @@ def build_history_widgets(
                 tool_name = msg.name or tool_call_map.get(
                     msg.tool_call_id or "", "tool"
                 )
-                widget = ToolResultMessage(
-                    tool_name=tool_name, content=msg.content, collapsed=tools_collapsed
-                )
+                widget = ToolResultMessage(tool_name=tool_name, content=msg.content)
                 widgets.append(widget)
                 history_widget_indices[widget] = history_index
 

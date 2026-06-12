@@ -9,6 +9,7 @@ import threading
 
 from vibe.core.logger import logger
 from vibe.core.paths import LOG_FILE
+from vibe.core.utils.io import decode_safe
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,13 +120,13 @@ class LogReader:
                         skipped += 1
                         continue
                     relative_position += 1
-                    yield line.decode("utf-8", errors="replace"), relative_position
+                    yield decode_safe(line).text, relative_position
 
             if remainder:
                 if skipped < adjusted_skip:
                     return
                 relative_position += 1
-                yield remainder.decode("utf-8", errors="replace"), relative_position
+                yield decode_safe(remainder).text, relative_position
 
     def set_consumer(self, consumer: LogConsumer | None) -> None:
         self._consumer = consumer
@@ -188,11 +189,12 @@ class LogReader:
             if current_size == self._last_position:
                 return
 
-            with self._log_file.open("r") as f:
+            with self._log_file.open("rb") as f:
                 f.seek(self._last_position)
-                new_content = f.read()
+                new_bytes = f.read()
                 self._last_position = f.tell()
 
+            new_content = decode_safe(new_bytes).text
             lines = new_content.splitlines()
             self._new_lines_count += len(lines)
 

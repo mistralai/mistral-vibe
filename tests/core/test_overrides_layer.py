@@ -80,6 +80,10 @@ async def test_live_reference_picks_up_caller_mutation() -> None:
     data: dict[str, object] = {"key": "original"}
     layer = OverridesLayer(data=data)
     await layer.load()
+    fp1 = layer.fingerprint
     data["key"] = "updated"
     result = await layer.load(force=True)
+    fp2 = layer.fingerprint
+
     assert result.model_extra == {"key": "updated"}
+    assert fp1 != fp2

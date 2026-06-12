@@ -5,6 +5,7 @@ import tomllib
 
 import tomli_w
 
+from vibe.core.logger import logger
 from vibe.core.paths import (
     AGENTS_MD_FILENAME,
     TRUSTED_FOLDERS_FILE,
@@ -13,12 +14,21 @@ from vibe.core.paths import (
 
 
 def has_agents_md_file(path: Path) -> bool:
-    return (path / AGENTS_MD_FILENAME).is_file()
+    agents_md = path / AGENTS_MD_FILENAME
+    try:
+        return agents_md.is_file()
+    except OSError as e:
+        logger.warning("Skipping unreadable path=%s: %s", agents_md, e)
+        return False
 
 
 def _is_git_repo_root(path: Path) -> bool:
     git_dir = path / ".git"
-    return git_dir.is_dir() and (git_dir / "HEAD").is_file()
+    try:
+        return git_dir.is_dir() and (git_dir / "HEAD").is_file()
+    except OSError as e:
+        logger.warning("Skipping unreadable git dir=%s: %s", git_dir, e)
+        return False
 
 
 def find_git_repo_ancestor(path: Path) -> Path | None:

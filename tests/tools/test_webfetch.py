@@ -6,7 +6,13 @@ import respx
 
 from tests.mock.utils import collect_result
 from vibe.core.tools.base import BaseToolState, ToolError
-from vibe.core.tools.builtins.webfetch import WebFetch, WebFetchArgs, WebFetchConfig
+from vibe.core.tools.builtins.webfetch import (
+    WebFetch,
+    WebFetchArgs,
+    WebFetchConfig,
+    WebFetchResult,
+)
+from vibe.core.types import ToolResultEvent
 
 
 @pytest.fixture
@@ -254,3 +260,58 @@ async def test_over_max_timeout_rejected(webfetch):
 
 def test_get_status_text():
     assert WebFetch.get_status_text() == "Fetching URL"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_decodes_response_using_declared_iso_8859_1_charset(webfetch):
+    body = "<html><body><p>café au lait</p></body></html>".encode("latin-1")
+    respx.get("https://example.com").mock(
+        return_value=httpx.Response(
+            200, content=body, headers={"Content-Type": "text/html; charset=iso-8859-1"}
+        )
+    )
+
+    result = await collect_result(webfetch.run(WebFetchArgs(url="https://example.com")))
+
+    assert "\ufffd" not in result.content
+    assert "café au lait" in result.content
+    assert "caf au lait" not in result.content  # typos:disable-line
+
+
+def _fetch_result_event(result: WebFetchResult) -> ToolResultEvent:
+    return ToolResultEvent(
+        tool_name="web_fetch", tool_call_id="t1", tool_class=WebFetch, result=result
+    )
+
+
+def test_get_result_display_includes_url():
+    url = "https://docs.slack.dev/reference/methods/oauth.v2.user.access"
+    event = _fetch_result_event(
+        WebFetchResult(
+            url=url, content="x" * 14837, content_type="text/html; charset=utf-8"
+        )
+    )
+
+    display = WebFetch.get_result_display(event)
+
+    assert display.success is True
+    assert url in display.message
+    assert "14,837 chars" in display.message
+    assert "text/html" in display.message
+    assert "charset" not in display.message
+
+
+def test_get_result_display_marks_truncated():
+    event = _fetch_result_event(
+        WebFetchResult(
+            url="https://example.com",
+            content="x" * 100,
+            content_type="text/plain",
+            was_truncated=True,
+        )
+    )
+
+    display = WebFetch.get_result_display(event)
+
+    assert "[truncated]" in display.message

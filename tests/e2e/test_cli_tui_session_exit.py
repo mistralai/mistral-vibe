@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import io
+import json
+import os
 from pathlib import Path
 import re
 import time
@@ -12,12 +14,14 @@ import pytest
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     ansi_tolerant_pattern,
+    poll_until,
     send_ctrl_c_until_quit_confirmation,
     strip_ansi,
     wait_for_main_screen,
     wait_for_request_count,
 )
 from tests.e2e.mock_server import StreamingMockServer
+from vibe.core.utils.io import read_safe
 
 
 def _usage_by_run_factory(
@@ -40,6 +44,47 @@ def _usage_by_run_factory(
             ),
         ),
     ]
+
+
+def _saved_session_has_usage(
+    vibe_home: Path, expected_prompt_tokens: int, expected_completion_tokens: int
+) -> bool:
+    session_log_dir = vibe_home / "logs" / "session"
+    if not session_log_dir.exists():
+        return False
+
+    for metadata_path in session_log_dir.glob("session_*/meta.json"):
+        try:
+            metadata = json.loads(read_safe(metadata_path).text)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        stats = metadata.get("stats", {})
+        if not isinstance(stats, dict):
+            continue
+        if (
+            stats.get("session_prompt_tokens") == expected_prompt_tokens
+            and stats.get("session_completion_tokens") == expected_completion_tokens
+        ):
+            return True
+
+    return False
+
+
+def _wait_for_saved_session_usage(
+    expected_prompt_tokens: int, expected_completion_tokens: int
+) -> None:
+    vibe_home = Path(os.environ["VIBE_HOME"])
+    poll_until(
+        lambda: _saved_session_has_usage(
+            vibe_home, expected_prompt_tokens, expected_completion_tokens
+        ),
+        timeout=10,
+        message=(
+            "Timed out waiting for saved session usage "
+            f"input={expected_prompt_tokens} output={expected_completion_tokens}."
+        ),
+    )
 
 
 def _finish_turn(
@@ -103,6 +148,9 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
             expected_request_count=1,
             request_count_getter=lambda: len(streaming_mock_server.requests),
         )
+        _wait_for_saved_session_usage(
+            expected_prompt_tokens=11, expected_completion_tokens=7
+        )
 
         send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
         child.expect(pexpect.EOF, timeout=10)
@@ -129,6 +177,9 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
             expected_reply="Reply 2",
             expected_request_count=2,
             request_count_getter=lambda: len(streaming_mock_server.requests),
+        )
+        _wait_for_saved_session_usage(
+            expected_prompt_tokens=2, expected_completion_tokens=1
         )
 
         send_ctrl_c_until_quit_confirmation(resumed_child, resumed_captured, timeout=5)

@@ -204,6 +204,9 @@ class VibeConfigSchema(ConfigSchema):
     experiment_overrides: Annotated[dict[str, str], WithReplaceMerge()] = Field(
         default_factory=dict
     )
+    applied_migrations: Annotated[list[str], WithConcatMerge()] = Field(
+        default_factory=list
+    )
     vim_keybindings: Annotated[bool, WithReplaceMerge()] = False
     disable_welcome_banner_animation: Annotated[bool, WithReplaceMerge()] = False
     autocopy_to_clipboard: Annotated[bool, WithReplaceMerge()] = True

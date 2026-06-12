@@ -90,6 +90,7 @@ class LoadingWidget(SpinnerMixin, Static):
         self._last_elapsed: int = -1
         self._paused_total: float = 0.0
         self._pause_start: float | None = None
+        self._queued_count: int = 0
 
     def _get_easter_egg(self) -> str | None:
         EASTER_EGG_PROBABILITY = 0.10
@@ -136,6 +137,22 @@ class LoadingWidget(SpinnerMixin, Static):
         self.status = self._apply_easter_egg(status)
         if self._status_widget:
             self._status_widget.update(self._build_status_text())
+
+    def set_queue_count(self, count: int) -> None:
+        if count == self._queued_count:
+            return
+        self._queued_count = count
+        if self.hint_widget is not None:
+            self.hint_widget.update(self._format_hint(max(self._last_elapsed, 0)))
+
+    def _format_hint(self, elapsed: int) -> str:
+        elapsed_str = _format_elapsed(elapsed)
+        if self._queued_count > 0:
+            return (
+                f"({elapsed_str} Esc to interrupt · "
+                "Ctrl+C to cancel last queued message)"
+            )
+        return f"({elapsed_str} Esc/Ctrl+C to interrupt)"
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="loading-container"):
@@ -215,9 +232,7 @@ class LoadingWidget(SpinnerMixin, Static):
             elapsed = int(time() - self.start_time - paused)
             if elapsed != self._last_elapsed:
                 self._last_elapsed = elapsed
-                self.hint_widget.update(
-                    f"({_format_elapsed(elapsed)} Esc/Ctrl+C to interrupt)"
-                )
+                self.hint_widget.update(self._format_hint(elapsed))
 
 
 @contextmanager

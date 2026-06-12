@@ -5,7 +5,9 @@ from typing import Any
 from pydantic import BaseModel, create_model
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
+from vibe.core.config.types import LayerConfigSnapshot
 
 
 class _EnvBase(BaseSettings):
@@ -37,8 +39,10 @@ class EnvironmentLayer(ConfigLayer[RawConfig]):
     async def _check_trust(self) -> bool:
         return True
 
-    async def _read_config(self) -> dict[str, Any]:
-        return self._settings_class().model_dump(exclude_unset=True)
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+        data = self._settings_class().model_dump(exclude_unset=True)
+        fingerprint = create_dict_fingerprint(data)
+        return LayerConfigSnapshot(data=data, fingerprint=fingerprint)
 
     async def apply(self, patch: Any, *, on_conflict: str = "cancel") -> None:
         raise NotImplementedError("EnvironmentLayer.apply() is not implemented (M2)")

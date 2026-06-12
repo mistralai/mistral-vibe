@@ -16,6 +16,7 @@ from vibe.core.config.schema import (
     WithShallowMerge,
     WithUnionMerge,
 )
+from vibe.core.config.types import LayerConfigSnapshot
 from vibe.core.utils.merge import MergeConflictError
 
 
@@ -27,8 +28,8 @@ class FakeLayer(ConfigLayer[RawConfig]):
     async def _check_trust(self) -> bool:
         return True
 
-    async def _read_config(self) -> dict[str, Any]:
-        return dict(self._data)
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+        return LayerConfigSnapshot(data=dict(self._data), fingerprint="fp")
 
 
 class UntrustedFakeLayer(FakeLayer):

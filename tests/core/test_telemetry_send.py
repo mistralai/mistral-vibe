@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from pydantic import BaseModel
 import pytest
 
 from tests.conftest import build_test_vibe_config
@@ -14,7 +16,7 @@ from vibe.core.telemetry.build_metadata import (
     build_base_metadata,
     build_request_metadata,
 )
-from vibe.core.telemetry.send import TelemetryClient
+from vibe.core.telemetry.send import TelemetryClient, _extract_file_extension
 from vibe.core.telemetry.types import (
     AttachmentKind,
     EntrypointMetadata,
@@ -25,18 +27,35 @@ from vibe.core.types import Backend
 from vibe.core.utils import get_user_agent
 
 _original_send_telemetry_event = TelemetryClient.send_telemetry_event
+from vibe.core.tools.builtins.edit import Edit, EditArgs
+from vibe.core.tools.builtins.read import Read, ReadArgs
 from vibe.core.tools.builtins.write_file import WriteFile, WriteFileArgs
 
 
 def _make_resolved_tool_call(
     tool_name: str, args_dict: dict[str, Any]
 ) -> ResolvedToolCall:
-    if tool_name == "write_file":
-        validated = WriteFileArgs(path="foo.txt", content="x")
-        cls: type[BaseTool] = WriteFile
-    else:
-        validated = FakeToolArgs()
-        cls = FakeTool
+    validated: BaseModel
+    cls: type[BaseTool]
+    match tool_name:
+        case "write_file":
+            validated = WriteFileArgs(
+                path=args_dict.get("path", "foo.txt"), content="x"
+            )
+            cls = WriteFile
+        case "edit":
+            validated = EditArgs(
+                file_path=args_dict.get("file_path", "foo.txt"),
+                old_string="a",
+                new_string="b",
+            )
+            cls = Edit
+        case "read":
+            validated = ReadArgs(file_path=args_dict.get("file_path", "foo.txt"))
+            cls = Read
+        case _:
+            validated = FakeToolArgs()
+            cls = FakeTool
     return ResolvedToolCall(
         tool_name=tool_name, tool_class=cls, validated_args=validated, call_id="call_1"
     )
@@ -48,6 +67,37 @@ def _run_telemetry_tasks() -> None:
         loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
+
+
+class TestExtractFileExtension:
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("/tmp/foo.py", ".py"),
+            ("foo.TSX", ".tsx"),
+            ("/tmp/Makefile", None),
+            ("/tmp/.bashrc", None),
+            ("archive.tar.gz", ".gz"),
+            ("", None),
+        ],
+    )
+    def test_string_inputs(self, path: str, expected: str | None) -> None:
+        assert _extract_file_extension(path) == expected
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            (Path("/tmp/foo.py"), ".py"),
+            (Path("foo.TSX"), ".tsx"),
+            (Path("/tmp/Makefile"), None),
+        ],
+    )
+    def test_path_inputs(self, path: Path, expected: str | None) -> None:
+        assert _extract_file_extension(path) == expected
+
+    @pytest.mark.parametrize("path", [None, 42, ["foo.py"], {"path": "foo.py"}])
+    def test_non_path_like_inputs_return_none(self, path: object) -> None:
+        assert _extract_file_extension(path) is None
 
 
 class TestTelemetryClient:
@@ -151,6 +201,7 @@ class TestTelemetryClient:
         assert properties["model"] == "mistral-large"
         assert properties["nb_files_created"] == 0
         assert properties["nb_files_modified"] == 0
+        assert properties["file_extension"] is None
         assert properties["message_id"] is None
 
     def test_send_tool_call_finished_with_message_id(
@@ -176,7 +227,7 @@ class TestTelemetryClient:
     ) -> None:
         config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("write_file", {})
+        tool_call = _make_resolved_tool_call("write_file", {"path": "/tmp/foo.PY"})
 
         client.send_tool_call_finished(
             tool_call=tool_call,
@@ -189,6 +240,86 @@ class TestTelemetryClient:
 
         assert telemetry_events[0]["properties"]["nb_files_created"] == 1
         assert telemetry_events[0]["properties"]["nb_files_modified"] == 0
+        assert telemetry_events[0]["properties"]["file_extension"] == ".py"
+
+    def test_send_tool_call_finished_file_extension_edit(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        tool_call = _make_resolved_tool_call(
+            "edit", {"file_path": "/tmp/component.tsx"}
+        )
+
+        client.send_tool_call_finished(
+            tool_call=tool_call,
+            status="success",
+            decision=None,
+            agent_profile_name="default",
+            model="mistral-large",
+            result={},
+        )
+
+        assert telemetry_events[0]["properties"]["nb_files_modified"] == 1
+        assert telemetry_events[0]["properties"]["nb_files_created"] == 0
+        assert telemetry_events[0]["properties"]["file_extension"] == ".tsx"
+
+    def test_send_tool_call_finished_file_extension_read(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        tool_call = _make_resolved_tool_call("read", {"file_path": "/tmp/lib.rs"})
+
+        client.send_tool_call_finished(
+            tool_call=tool_call,
+            status="success",
+            decision=None,
+            agent_profile_name="default",
+            model="mistral-large",
+            result={},
+        )
+
+        assert telemetry_events[0]["properties"]["nb_files_created"] == 0
+        assert telemetry_events[0]["properties"]["nb_files_modified"] == 0
+        assert telemetry_events[0]["properties"]["file_extension"] == ".rs"
+
+    def test_send_tool_call_finished_file_extension_none_when_no_suffix(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        tool_call = _make_resolved_tool_call("write_file", {"path": "/tmp/Makefile"})
+
+        client.send_tool_call_finished(
+            tool_call=tool_call,
+            status="success",
+            decision=None,
+            agent_profile_name="default",
+            model="mistral-large",
+            result={},
+        )
+
+        assert telemetry_events[0]["properties"]["file_extension"] is None
+
+    def test_send_tool_call_finished_file_extension_none_on_failure(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        tool_call = _make_resolved_tool_call("write_file", {"path": "/tmp/foo.py"})
+
+        client.send_tool_call_finished(
+            tool_call=tool_call,
+            status="failure",
+            decision=None,
+            agent_profile_name="default",
+            model="mistral-large",
+            result={},
+        )
+
+        assert telemetry_events[0]["properties"]["nb_files_created"] == 0
+        assert telemetry_events[0]["properties"]["file_extension"] is None
 
     def test_send_tool_call_finished_decision_none(
         self, telemetry_events: list[dict[str, Any]]
@@ -376,6 +507,40 @@ class TestTelemetryClient:
             "error_class": "ServiceTeleportError",
             "push_required": True,
             "nb_session_messages": 4,
+        }
+
+    def test_send_remote_resume_requested_payload(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+        client.send_remote_resume_requested(session_id="remote-123")
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.remote_resume_requested"
+        assert telemetry_events[0]["properties"] == {"session_id": "remote-123"}
+
+    def test_send_teleport_failed_payload_includes_error_details(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_teleport_failed(
+            stage="workflow_start",
+            error_class="ServiceTeleportError",
+            push_required=False,
+            nb_session_messages=4,
+            error_details={"failure_kind": "http_error", "http_status_code": 502},
+        )
+
+        assert telemetry_events[0]["event_name"] == "vibe.teleport_failed"
+        assert telemetry_events[0]["properties"] == {
+            "stage": "workflow_start",
+            "error_class": "ServiceTeleportError",
+            "push_required": False,
+            "nb_session_messages": 4,
+            "failure_kind": "http_error",
+            "http_status_code": 502,
         }
 
     def test_send_new_session_payload(

@@ -42,6 +42,7 @@ class WebSearchArgs(BaseModel):
 
 
 class WebSearchResult(BaseModel):
+    query: str
     answer: str
     sources: list[WebSearchSource] = Field(default_factory=list)
 
@@ -103,7 +104,7 @@ class WebSearch(
                     store=False,
                 )
 
-                yield self._parse_response(response)
+                yield self._parse_response(response, args.query)
 
         except SDKError as exc:
             raise ToolError(f"Mistral API error: {exc}") from exc
@@ -133,12 +134,18 @@ class WebSearch(
             return DEFAULT_MISTRAL_API_ENV_KEY
         return provider.api_key_env_var or DEFAULT_MISTRAL_API_ENV_KEY
 
-    def _parse_response(self, response: ConversationResponse) -> WebSearchResult:
+    def _parse_response(
+        self, response: ConversationResponse, query: str
+    ) -> WebSearchResult:
         text_parts: list[str] = []
         sources: dict[str, WebSearchSource] = {}
 
         for entry in response.outputs:
             if not isinstance(entry, MessageOutputEntry):
+                continue
+            # content is a plain string for short answers, else a list of chunks.
+            if isinstance(entry.content, str):
+                text_parts.append(entry.content)
                 continue
             for chunk in entry.content:
                 if isinstance(chunk, TextChunk):
@@ -153,7 +160,9 @@ class WebSearch(
         if not answer:
             raise ToolError("No text in agent response.")
 
-        return WebSearchResult(answer=answer, sources=list(sources.values()))
+        return WebSearchResult(
+            query=query, answer=answer, sources=list(sources.values())
+        )
 
     @classmethod
     def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
@@ -161,7 +170,7 @@ class WebSearch(
             return ToolCallDisplay(summary="websearch")
         if not isinstance(event.args, WebSearchArgs):
             return ToolCallDisplay(summary="websearch")
-        return ToolCallDisplay(summary=f"Searching the web: '{event.args.query}'")
+        return ToolCallDisplay(summary=f"Searching the web: {event.args.query!r}")
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -169,9 +178,10 @@ class WebSearch(
             return ToolResultDisplay(
                 success=False, message=event.error or event.skip_reason or "No result"
             )
-        return ToolResultDisplay(
-            success=True, message=f"{len(event.result.sources)} sources found"
-        )
+        source_count = len(event.result.sources)
+        plural = "" if source_count == 1 else "s"
+        message = f"Searched {event.result.query!r} ({source_count} source{plural})"
+        return ToolResultDisplay(success=True, message=message)
 
     @classmethod
     def get_status_text(cls) -> str:

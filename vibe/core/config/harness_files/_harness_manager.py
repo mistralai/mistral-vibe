@@ -75,10 +75,11 @@ class HarnessFilesManager:
 
     @property
     def hook_files(self) -> list[Path]:
-        files: list[Path] = []
+        files: list[Path] = [
+            root / ".vibe" / "hooks.toml" for root in self.project_roots
+        ]
         if "user" in self.sources:
             files.append(VIBE_HOME.path / "hooks.toml")
-        files.extend(root / ".vibe" / "hooks.toml" for root in self.project_roots)
         return files
 
     @property

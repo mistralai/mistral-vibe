@@ -9,6 +9,7 @@ from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
     BaseToolState,
+    CancellableToolResult,
     InvokeContext,
     ToolError,
     ToolPermission,
@@ -64,11 +65,8 @@ class Answer(BaseModel):
     )
 
 
-class AskUserQuestionResult(BaseModel):
+class AskUserQuestionResult(CancellableToolResult):
     answers: list[Answer] = Field(description="List of answers")
-    cancelled: bool = Field(
-        default=False, description="True if user cancelled without answering"
-    )
 
 
 class AskUserQuestionConfig(BaseToolConfig):

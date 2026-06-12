@@ -4,6 +4,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from textual.widget import Widget
+
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.loading import DEFAULT_LOADING_STATUS
 from vibe.cli.textual_ui.widgets.messages import (
@@ -22,6 +24,7 @@ from vibe.core.hooks.models import (
     HookRunEndEvent,
     HookRunStartEvent,
     HookStartEvent,
+    HookType,
 )
 from vibe.core.tools.ui import ToolUIDataAdapter
 from vibe.core.types import (
@@ -63,33 +66,77 @@ class EventHandler:
         self.current_streaming_message: AssistantMessage | None = None
         self.current_streaming_reasoning: ReasoningMessage | None = None
         self.plan_file_message: PlanFileMessage | None = None
-        self._hook_run_container: HookRunContainer | None = None
+        # Keyed by "agent_turn", "before_tool:{call_id}", "after_tool:{call_id}"
+        self._hook_containers: dict[str, HookRunContainer] = {}
+        # Per-tool-call anchor for correct widget ordering during concurrent calls.
+        self._tool_call_anchors: dict[str, Widget] = {}
 
     async def _handle_hook_event(
         self, event: HookEvent, loading_widget: LoadingWidget | None = None
     ) -> None:
         match event:
             case HookRunStartEvent():
-                self._hook_run_container = HookRunContainer()
-                await self.mount_callback(self._hook_run_container)
+                await self._handle_hook_run_start(event)
             case HookRunEndEvent():
-                if self._hook_run_container and not self._hook_run_container.display:
-                    await self._hook_run_container.remove()
-                self._hook_run_container = None
+                await self._handle_hook_run_end(event)
             case HookStartEvent():
                 await self.finalize_streaming()
                 if loading_widget:
                     loading_widget.set_status(f"Running hook {event.hook_name}")
             case HookEndEvent():
-                if event.content and self._hook_run_container is not None:
-                    widget = HookSystemMessageLine(
-                        hook_name=event.hook_name,
-                        content=event.content,
-                        severity=event.status,
-                    )
-                    await self._hook_run_container.add_message(widget)
+                if event.content:
+                    key = self._hook_container_key(event.scope, event.tool_call_id)
+                    container = self._hook_containers.get(key)
+                    if container is not None:
+                        widget = HookSystemMessageLine(
+                            hook_name=event.hook_name,
+                            content=event.content,
+                            severity=event.status,
+                        )
+                        await container.add_message(widget)
+                        if event.scope == HookType.BEFORE_TOOL and event.tool_call_id:
+                            tool_call = self.tool_calls.get(event.tool_call_id)
+                            if tool_call is not None:
+                                tool_call.add_class("no-gap")
                 if loading_widget:
                     loading_widget.set_status(DEFAULT_LOADING_STATUS)
+
+    @staticmethod
+    def _hook_container_key(scope: HookType, tool_call_id: str | None) -> str:
+        if scope == HookType.POST_AGENT_TURN:
+            return "agent_turn"
+        return f"{scope.value}:{tool_call_id or ''}"
+
+    async def _handle_hook_run_start(self, event: HookRunStartEvent) -> None:
+        container = HookRunContainer()
+        key = self._hook_container_key(event.scope, event.tool_call_id)
+        self._hook_containers[key] = container
+
+        if event.scope == HookType.BEFORE_TOOL:
+            container.add_class("hook-before-tool")
+
+        anchor = self._tool_call_anchors.get(event.tool_call_id or "")
+        if event.scope == HookType.BEFORE_TOOL and anchor is not None:
+            # Mount *above* the tool call widget so it reads as a precondition.
+            await self.mount_callback(container, before=anchor)
+        elif event.scope == HookType.AFTER_TOOL and anchor is not None:
+            await self.mount_callback(container, after=anchor)
+        else:
+            await self.mount_callback(container)
+
+    async def _handle_hook_run_end(self, event: HookRunEndEvent) -> None:
+        key = self._hook_container_key(event.scope, event.tool_call_id)
+        container = self._hook_containers.pop(key, None)
+        if container is None:
+            return
+        if container.display:
+            # BEFORE_TOOL containers mount *above* the call widget, so they
+            # must not become the anchor — the result still needs to land
+            # after the call widget, not after the hook container.
+            if event.scope != HookType.BEFORE_TOOL and event.tool_call_id:
+                self._tool_call_anchors[event.tool_call_id] = container
+        else:
+            await container.remove()
 
     async def handle_event(  # noqa: PLR0912
         self, event: BaseEvent, loading_widget: LoadingWidget | None = None
@@ -167,6 +214,7 @@ class EventHandler:
             tool_call = ToolCallMessage(event)
             if tool_call_id:
                 self.tool_calls[tool_call_id] = tool_call
+                self._tool_call_anchors[tool_call_id] = tool_call
             await self.mount_callback(tool_call)
 
         if loading_widget and event.tool_class:
@@ -176,17 +224,19 @@ class EventHandler:
         return tool_call
 
     async def _handle_tool_result(self, event: ToolResultEvent) -> None:
-        tools_collapsed = self.get_tools_collapsed()
+        tool_call_id = event.tool_call_id
+        call_widget = self.tool_calls.get(tool_call_id) if tool_call_id else None
+        anchor = (
+            self._tool_call_anchors.get(tool_call_id) if tool_call_id else None
+        ) or call_widget
 
-        call_widget = (
-            self.tool_calls.get(event.tool_call_id) if event.tool_call_id else None
-        )
+        tool_result = ToolResultMessage(event, call_widget)
+        await self.mount_callback(tool_result, after=anchor)
 
-        tool_result = ToolResultMessage(event, call_widget, collapsed=tools_collapsed)
-        await self.mount_callback(tool_result, after=call_widget)
-
-        if event.tool_call_id and event.tool_call_id in self.tool_calls:
-            del self.tool_calls[event.tool_call_id]
+        if tool_call_id:
+            self._tool_call_anchors[tool_call_id] = tool_result
+            if tool_call_id in self.tool_calls:
+                del self.tool_calls[tool_call_id]
 
     async def _handle_tool_stream(self, event: ToolStreamEvent) -> None:
         tool_call = self.tool_calls.get(event.tool_call_id)
@@ -249,6 +299,8 @@ class EventHandler:
         for tool_call in self.tool_calls.values():
             tool_call.stop_spinning(success=success)
         self.tool_calls.clear()
+        self._tool_call_anchors.clear()
+        self._hook_containers.clear()
 
     def stop_current_compact(self) -> None:
         if self.current_compact:

@@ -9,6 +9,7 @@ from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.patch import ConfigPatch
 from vibe.core.config.schema import ConfigSchema, WithReplaceMerge
+from vibe.core.config.types import LayerConfigSnapshot
 
 
 class FakeLayer(ConfigLayer[RawConfig]):
@@ -19,8 +20,8 @@ class FakeLayer(ConfigLayer[RawConfig]):
     async def _check_trust(self) -> bool:
         return True
 
-    async def _read_config(self) -> dict[str, Any]:
-        return dict(self._data)
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+        return LayerConfigSnapshot(data=dict(self._data), fingerprint="fp")
 
 
 class SimpleSchema(ConfigSchema):

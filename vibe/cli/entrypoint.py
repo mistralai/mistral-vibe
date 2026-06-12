@@ -52,7 +52,7 @@ def parse_arguments() -> argparse.Namespace:
         metavar="TEXT",
         help="Run in programmatic mode: send prompt, output response, and exit. "
         "Tool approval follows the selected --agent (or 'default_agent' config); "
-        "pass --agent auto-approve for the previous YOLO behavior.",
+        "pass --auto-approve to allow all tool calls.",
     )
     parser.add_argument(
         "--max-turns",
@@ -94,15 +94,21 @@ def parse_arguments() -> argparse.Namespace:
         "for human-readable (default), 'json' for all messages at end, "
         "'streaming' for newline-delimited JSON per message.",
     )
-    parser.add_argument(
+    agent_group = parser.add_mutually_exclusive_group()
+    agent_group.add_argument(
         "--agent",
         metavar="NAME",
         default=None,
         help="Agent to use (builtin: default, plan, accept-edits, auto-approve, "
         "or custom from ~/.vibe/agents/NAME.toml). Defaults to the "
         "'default_agent' config setting in both interactive and programmatic "
-        "(-p/--prompt) mode. Pass --agent auto-approve for non-interactive "
-        "automation that needs tools to run without approval.",
+        "(-p/--prompt) mode.",
+    )
+    agent_group.add_argument(
+        "--auto-approve",
+        action="store_true",
+        help="Shortcut for --agent auto-approve. Approves all tool calls without "
+        "prompting.",
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
     parser.add_argument(

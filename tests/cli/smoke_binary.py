@@ -268,8 +268,16 @@ def test_installed_bundle_launches(binary_dir: Path, binary_name: str) -> None:
         env = _isolated_env(vibe_home)
         env["PATH"] = f"{install_dir}{os.pathsep}{env.get('PATH', '')}"
 
+        command = binary_name
+        if platform.system() == "Windows":
+            # subprocess on Windows does not resolve executables through a PATH
+            # value supplied only via env, so resolve it against that PATH first.
+            if (resolved := shutil.which(binary_name, path=env["PATH"])) is None:
+                _fail(f"installed binary not found on PATH: {binary_name}")
+            command = resolved
+
         result = subprocess.run(
-            [binary_name, "--version"],
+            [command, "--version"],
             capture_output=True,
             cwd=workdir,
             env=env,

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, Literal, cast
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -22,6 +23,14 @@ _SECONDS_PER_MINUTE = 60
 _SECONDS_PER_HOUR = 3600
 _SECONDS_PER_DAY = 86400
 _SECONDS_PER_WEEK = 604800
+_DELETE_FEEDBACK_STYLE = "bold"
+_DeleteStateKind = Literal["confirmation", "feedback", "pending"]
+
+
+@dataclass(frozen=True)
+class _DeleteState:
+    kind: _DeleteStateKind
+    option_id: str
 
 
 def _format_relative_time(iso_time: str | None) -> str:
@@ -68,7 +77,8 @@ class SessionPickerApp(Container):
     can_focus_children = True
 
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("escape", "cancel", "Cancel", show=False)
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("d,D", "request_delete", "Delete", show=False),
     ]
 
     class SessionSelected(Message):
@@ -87,39 +97,176 @@ class SessionPickerApp(Container):
     class Cancelled(Message):
         pass
 
+    class SessionDeleteRequested(Message):
+        option_id: str
+        source: ResumeSessionSource
+        session_id: str
+
+        def __init__(
+            self, option_id: str, source: ResumeSessionSource, session_id: str
+        ) -> None:
+            self.option_id = option_id
+            self.source = source
+            self.session_id = session_id
+            super().__init__()
+
     def __init__(
         self,
         sessions: list[ResumeSessionInfo],
         latest_messages: dict[str, str],
+        current_session_id: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(id="sessionpicker-app", **kwargs)
         self._sessions = sessions
         self._latest_messages = latest_messages
+        self._current_session_id = current_session_id
+        self._delete_state: _DeleteState | None = None
+
+    @property
+    def has_sessions(self) -> bool:
+        return bool(self._sessions)
+
+    def _option_list(self) -> OptionList:
+        return self.query_one(OptionList)
+
+    def _session_by_option_id(self, option_id: str | None) -> ResumeSessionInfo | None:
+        if option_id is None:
+            return None
+
+        return next(
+            (session for session in self._sessions if session.option_id == option_id),
+            None,
+        )
+
+    def _highlighted_option_id(self) -> str | None:
+        option = self._option_list().highlighted_option
+        if option is None or option.id is None:
+            return None
+
+        return str(option.id)
+
+    def _highlighted_session(self) -> ResumeSessionInfo | None:
+        return self._session_by_option_id(self._highlighted_option_id())
+
+    def _session_message(self, session: ResumeSessionInfo) -> str:
+        return self._latest_messages.get(session.option_id, "(empty session)")
+
+    def _normal_option_text(self, session: ResumeSessionInfo) -> Text:
+        return _build_option_text(session, self._session_message(session))
+
+    def _delete_confirmation_option_text(self, session: ResumeSessionInfo) -> Text:
+        text = _build_option_text(session, "")
+        text.append("Press D again to delete")
+        return text
+
+    def _delete_feedback_option_text(self, session: ResumeSessionInfo) -> Text:
+        text = _build_option_text(session, "")
+        text.append(
+            self._delete_feedback_message(session), style=_DELETE_FEEDBACK_STYLE
+        )
+        return text
+
+    def _delete_feedback_message(self, session: ResumeSessionInfo) -> str:
+        if session.session_id == self._current_session_id:
+            return "Can't delete current session"
+
+        if not session.can_delete:
+            return "Can't delete remote session"
+
+        return "Can't delete session"
+
+    def _delete_pending_option_text(self, session: ResumeSessionInfo) -> Text:
+        text = _build_option_text(session, "")
+        text.append("Deleting...")
+        return text
+
+    def _restore_option_text(self, session: ResumeSessionInfo) -> None:
+        self._option_list().replace_option_prompt(
+            session.option_id, self._normal_option_text(session)
+        )
+
+    def _delete_state_matches(
+        self, option_id: str, kind: _DeleteStateKind | None = None
+    ) -> bool:
+        if self._delete_state is None or self._delete_state.option_id != option_id:
+            return False
+        if kind is not None and self._delete_state.kind != kind:
+            return False
+        return True
+
+    def _delete_is_pending(self) -> bool:
+        return self._delete_state is not None and self._delete_state.kind == "pending"
+
+    def _clear_delete_state(self) -> None:
+        state = self._delete_state
+        if state is None:
+            return
+
+        self._delete_state = None
+        if session := self._session_by_option_id(state.option_id):
+            self._restore_option_text(session)
+
+    def _show_delete_state(
+        self, session: ResumeSessionInfo, kind: _DeleteStateKind, prompt: Text
+    ) -> None:
+        self._clear_delete_state()
+        self._delete_state = _DeleteState(kind=kind, option_id=session.option_id)
+        self._option_list().replace_option_prompt(session.option_id, prompt)
+
+    def remove_session(self, option_id: str) -> bool:
+        session = self._session_by_option_id(option_id)
+        if session is None:
+            return False
+
+        self._sessions = [s for s in self._sessions if s.option_id != option_id]
+        self._latest_messages.pop(option_id, None)
+        if self._delete_state_matches(option_id):
+            self._delete_state = None
+        self._option_list().remove_option(option_id)
+        return True
+
+    def clear_pending_delete(self, option_id: str) -> bool:
+        if not self._delete_state_matches(option_id, "pending"):
+            return False
+
+        self._clear_delete_state()
+        return True
 
     def compose(self) -> ComposeResult:
         options = [
-            Option(
-                _build_option_text(
-                    session,
-                    self._latest_messages.get(session.option_id, "(empty session)"),
-                ),
-                id=session.option_id,
-            )
+            Option(self._normal_option_text(session), id=session.option_id)
             for session in self._sessions
         ]
         with Vertical(id="sessionpicker-content"):
             yield OptionList(*options, id="sessionpicker-options")
             yield NoMarkupStatic(
-                "↑↓ Navigate  Enter Select  Esc Cancel", classes="sessionpicker-help"
+                "↑↓ Navigate  Enter Select  D Delete  Esc Cancel",
+                classes="sessionpicker-help",
             )
 
     def on_mount(self) -> None:
         self.query_one(OptionList).focus()
 
+    def on_option_list_option_highlighted(
+        self, event: OptionList.OptionHighlighted
+    ) -> None:
+        if self._delete_is_pending():
+            return
+
+        option_id = str(event.option.id) if event.option.id is not None else None
+        if self._delete_state is not None and self._delete_state.option_id != option_id:
+            self._clear_delete_state()
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if self._delete_is_pending():
+            return
+
         if event.option.id:
             option_id = event.option.id
+            if self._delete_state_matches(option_id, "confirmation"):
+                return
+
             source, _, session_id = option_id.partition(":")
             self.post_message(
                 self.SessionSelected(
@@ -130,4 +277,42 @@ class SessionPickerApp(Container):
             )
 
     def action_cancel(self) -> None:
+        if self._delete_is_pending():
+            return
+
+        if self._delete_state is not None:
+            self._clear_delete_state()
+            return
+
         self.post_message(self.Cancelled())
+
+    def action_request_delete(self) -> None:
+        if self._delete_is_pending():
+            return
+
+        session = self._highlighted_session()
+        if session is None:
+            return
+
+        if session.session_id == self._current_session_id or not session.can_delete:
+            self._show_delete_state(
+                session, "feedback", self._delete_feedback_option_text(session)
+            )
+            return
+
+        if self._delete_state_matches(session.option_id, "confirmation"):
+            self._show_delete_state(
+                session, "pending", self._delete_pending_option_text(session)
+            )
+            self.post_message(
+                self.SessionDeleteRequested(
+                    option_id=session.option_id,
+                    source=session.source,
+                    session_id=session.session_id,
+                )
+            )
+            return
+
+        self._show_delete_state(
+            session, "confirmation", self._delete_confirmation_option_text(session)
+        )

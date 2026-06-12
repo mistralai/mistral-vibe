@@ -49,11 +49,16 @@ TeleportFailureStage = Literal[
 ]
 
 
+class TeleportFailureDetails(TypedDict, total=False):
+    failure_kind: str
+    http_status_code: int
+
+
 class TeleportCompletedPayload(TypedDict):
     push_required: bool
     nb_session_messages: int
 
 
-class TeleportFailedPayload(TeleportCompletedPayload):
+class TeleportFailedPayload(TeleportCompletedPayload, TeleportFailureDetails):
     stage: TeleportFailureStage
     error_class: str

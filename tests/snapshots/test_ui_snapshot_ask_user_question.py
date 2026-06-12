@@ -48,7 +48,7 @@ class AskUserQuestionResultApp(BaseSnapshotTestApp):
         )
 
         messages_area = self.query_one("#messages")
-        tool_result = ToolResultMessage(event, collapsed=True)
+        tool_result = ToolResultMessage(event)
         await messages_area.mount(tool_result)
 
 

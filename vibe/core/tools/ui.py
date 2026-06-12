@@ -13,12 +13,14 @@ if TYPE_CHECKING:
 class ToolCallDisplay(BaseModel):
     summary: str  # Brief description: "Writing file.txt", "Patching code.py"
     content: str | None = None  # Optional content preview
+    suffix: str = ""  # e.g. "(scratchpad)"
 
 
 class ToolResultDisplay(BaseModel):
     success: bool
     message: str
     warnings: list[str] = Field(default_factory=list)
+    suffix: str = ""  # e.g. "(truncated)"
 
 
 class ToolUIData[TArgs: BaseModel, TResult: BaseModel](ABC):

@@ -244,7 +244,6 @@ def test_get_result_display() -> None:
 
     assert isinstance(display, ToolResultDisplay)
     assert display.success is True
-    assert "10 lines" in display.message
     assert "foo.py" in display.message
 
 
@@ -261,7 +260,7 @@ def test_get_result_display_truncated() -> None:
     )
     display = Read.get_result_display(event)
 
-    assert "truncated" in display.message
+    assert "truncated" in display.suffix
 
 
 def test_get_result_display_truncated_via_flag() -> None:
@@ -278,7 +277,7 @@ def test_get_result_display_truncated_via_flag() -> None:
     )
     display = Read.get_result_display(event)
 
-    assert "truncated" in display.message
+    assert "truncated" in display.suffix
 
 
 @pytest.fixture()

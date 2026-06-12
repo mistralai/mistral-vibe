@@ -50,6 +50,7 @@ class AgentStats(BaseModel):
     session_completion_tokens: int = 0
     tool_calls_agreed: int = 0
     tool_calls_rejected: int = 0
+    tool_calls_hook_denied: int = 0
     tool_calls_failed: int = 0
     tool_calls_succeeded: int = 0
 
@@ -357,11 +358,27 @@ class LLMUsage(BaseModel):
         )
 
 
+class StopReason(StrEnum):
+    REFUSAL = "refusal"
+
+
+class StopInfo(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+    reason: str | None = None
+    category: str | None = None
+    explanation: str | None = None
+
+    @property
+    def is_refusal(self) -> bool:
+        return self.reason == StopReason.REFUSAL
+
+
 class LLMChunk(BaseModel):
     model_config = ConfigDict(frozen=True)
     message: LLMMessage
     usage: LLMUsage | None = None
     correlation_id: str | None = None
+    stop: StopInfo | None = None
 
     def __add__(self, other: LLMChunk) -> LLMChunk:
         if self.usage is None and other.usage is None:
@@ -372,6 +389,7 @@ class LLMChunk(BaseModel):
             message=self.message + other.message,
             usage=new_usage,
             correlation_id=other.correlation_id or self.correlation_id,
+            stop=other.stop or self.stop,
         )
 
 
@@ -587,3 +605,27 @@ class ContextTooLongError(Exception):
             "The conversation context exceeds the model's maximum limit. "
             "Use /rewind to undo recent actions, then /compact to summarize the conversation."
         )
+
+
+class RefusalError(Exception):
+    def __init__(
+        self,
+        provider: str,
+        model: str,
+        category: str | None = None,
+        explanation: str | None = None,
+    ) -> None:
+        self.provider = provider
+        self.model = model
+        self.category = category
+        self.explanation = explanation
+        super().__init__(self._fmt())
+
+    def _fmt(self) -> str:
+        lead = "The model declined to respond to this request and stopped early."
+        if self.category:
+            lead += f" (category: {self.category})"
+        detail = self.explanation or (
+            "Try rephrasing your request or starting a new conversation."
+        )
+        return f"{lead} {detail}"

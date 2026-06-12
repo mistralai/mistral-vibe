@@ -3,9 +3,10 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.patch import ConfigPatch
-from vibe.core.config.types import ConflictStrategy
+from vibe.core.config.types import ConflictStrategy, LayerConfigSnapshot
 
 
 class OverridesLayer(ConfigLayer[RawConfig]):
@@ -22,8 +23,10 @@ class OverridesLayer(ConfigLayer[RawConfig]):
     async def _check_trust(self) -> bool:
         return True
 
-    async def _read_config(self) -> dict[str, Any]:
-        return copy.deepcopy(self._data)
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+        data = copy.deepcopy(self._data)
+        fingerprint = create_dict_fingerprint(data)
+        return LayerConfigSnapshot(data=data, fingerprint=fingerprint)
 
     async def apply(
         self,

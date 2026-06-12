@@ -101,6 +101,7 @@ class TestCommandRegistry:
         assert result is not None
         _, cmd, _ = result
         assert cmd.handler == "_show_session_picker"
+        assert cmd.description == "Browse, resume, or delete saved sessions"
 
     def test_rename_command_registration(self) -> None:
         registry = CommandRegistry()
@@ -143,3 +144,47 @@ class TestCommandRegistry:
         assert cmd_name == "loop"
         assert cmd.handler == "_loop_command"
         assert cmd_args == "30s ping"
+
+    def test_exit_command_accepts_bare_synonyms(self) -> None:
+        registry = CommandRegistry()
+        for alias in ["/exit", "exit", "quit", ":q", ":quit"]:
+            assert registry.get_command_name(alias) == "exit", alias
+            result = registry.parse_command(alias)
+            assert result is not None, alias
+            cmd_name, cmd, _ = result
+            assert cmd_name == "exit"
+            assert cmd.handler == "_exit_app"
+            assert cmd.exits is True
+
+    def test_bare_exit_synonym_with_trailing_text_is_not_a_command(self) -> None:
+        registry = CommandRegistry()
+        assert registry.parse_command("exit the function early") is None
+        assert registry.parse_command("quit your job") is None
+
+    def test_bare_exit_synonym_in_multiline_message_is_not_a_command(self) -> None:
+        registry = CommandRegistry()
+        assert registry.parse_command("exit\nplease refactor this module") is None
+
+    def test_slash_exit_still_parses_with_trailing_text(self) -> None:
+        registry = CommandRegistry()
+        result = registry.parse_command("/exit now")
+        assert result is not None
+        cmd_name, _, cmd_args = result
+        assert cmd_name == "exit"
+        assert cmd_args == "now"
+
+    def test_exit_command_synonyms_are_case_insensitive(self) -> None:
+        registry = CommandRegistry()
+        for alias in ["EXIT", "Quit", "  exit  ", ":Q"]:
+            assert registry.get_command_name(alias) == "exit", alias
+
+    def test_exit_synonyms_excluded_when_command_disabled(self) -> None:
+        registry = CommandRegistry(excluded_commands=["exit"])
+        for alias in ["/exit", "exit", "quit", ":q", ":quit"]:
+            assert registry.get_command_name(alias) is None, alias
+
+    def test_help_text_lists_exit_synonyms(self) -> None:
+        registry = CommandRegistry()
+        help_text = registry.get_help_text()
+        for alias in ["`/exit`", "`exit`", "`quit`", "`:q`", "`:quit`"]:
+            assert alias in help_text, alias

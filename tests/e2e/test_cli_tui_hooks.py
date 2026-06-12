@@ -85,3 +85,7 @@ def test_spawn_cli_runs_configured_hook_after_turn(
     assert invocation["hook_event_name"] == "post_agent_turn"
     assert isinstance(invocation["cwd"], str) and invocation["cwd"]
     assert isinstance(invocation["session_id"], str) and invocation["session_id"]
+    # New in the discriminated-union payload: top-level sessions have no
+    # parent. Tool hook invocations in this test never fire (no tool calls
+    # in the mock response), so we only assert the post_agent_turn shape.
+    assert invocation.get("parent_session_id") is None

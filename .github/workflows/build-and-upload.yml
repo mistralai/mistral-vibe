@@ -74,34 +74,17 @@ jobs:
 
       - name: Install Python (Linux)
         if: ${{ matrix.os == 'linux' }}
-        run: |
-          uv python install 3.12
-          # Install patchelf >= 0.18 (yum/EPEL8 ships 0.12 which lacks --clear-execstack)
-          PATCHELF_VERSION=0.18.0
-          curl -sL "https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-$(uname -m).tar.gz" \
-            | tar xz -C /usr/local
-          # python-build-standalone ships libpython with GNU_STACK RWE (executable stack)
-          # which is rejected by hardened Linux kernels — clear it with patchelf
-          find "$(uv python dir)" -name 'libpython*.so*' -exec patchelf --clear-execstack {} \;
+        shell: bash
+        run: bash ./scripts/ci/setup-linux-pyinstaller-build.sh
 
-      - name: Sync dependencies
-        run: uv sync --no-dev --group build
-
-      - name: Build ACP with PyInstaller
-        run: uv run --no-dev --group build pyinstaller vibe-acp.spec
-
-      - name: Build CLI with PyInstaller
-        run: uv run --no-dev --group build pyinstaller vibe.spec
+      - name: Build PyInstaller binaries
+        shell: bash
+        run: bash ./scripts/ci/build-pyinstaller-binaries.sh vibe-acp.spec vibe.spec
 
       - name: Clear executable stack on bundled libraries
         if: ${{ matrix.os == 'linux' }}
-        run: |
-          find dist/vibe-acp-dir/_internal -name '*.so*' -type f -print0 \
-            | xargs -0 -I{} patchelf --clear-execstack {}
-          patchelf --clear-execstack dist/vibe-acp-dir/vibe-acp || true
-          find dist/vibe-dir/_internal -name '*.so*' -type f -print0 \
-            | xargs -0 -I{} patchelf --clear-execstack {}
-          patchelf --clear-execstack dist/vibe-dir/vibe || true
+        shell: bash
+        run: bash ./scripts/ci/clear-linux-execstack.sh dist/vibe-acp-dir dist/vibe-dir
 
       - name: Get package version
         id: get_version
@@ -192,6 +175,12 @@ jobs:
 
       - name: Run ACP smoke tests
         run: ${{ matrix.container && 'python3.11' || 'python' }} tests/acp/smoke_binary.py dist/vibe-acp-dir
+
+      - name: Run CLI smoke tests
+        shell: bash
+        env:
+          PYTHON_BIN: ${{ matrix.container && 'python3.11' || 'python' }}
+        run: bash ./scripts/ci/smoke-pyinstaller-cli.sh dist/vibe-dir
 
   attach-to-release:
     needs: [build-and-upload, smoke-test]

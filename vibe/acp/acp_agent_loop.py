@@ -81,6 +81,7 @@ from vibe.acp.exceptions import (
     InvalidRequestError,
     NotImplementedMethodError,
     RateLimitError,
+    RefusalError,
     SessionLoadError,
     SessionNotFoundError,
     UnauthenticatedError,
@@ -157,6 +158,7 @@ from vibe.core.types import (
     LLMMessage,
     RateLimitError as CoreRateLimitError,
     ReasoningEvent,
+    RefusalError as CoreRefusalError,
     Role,
     SessionTitleUpdatedEvent,
     ToolCallEvent,
@@ -1183,6 +1185,9 @@ class VibeAcpAgentLoop(AcpAgent):
 
         except CoreContextTooLongError as e:
             raise ContextTooLongError.from_core(e) from e
+
+        except CoreRefusalError as e:
+            raise RefusalError.from_core(e) from e
 
         except ConversationLimitException as e:
             raise ConversationLimitError(str(e)) from e

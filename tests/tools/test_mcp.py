@@ -186,7 +186,9 @@ class TestMCPHttpClient:
                 startup_timeout_sec=42.0,
             )
 
-        create_client.assert_called_once_with({"Authorization": "Bearer token"})
+        create_client.assert_called_once_with(
+            {"Authorization": "Bearer token"}, auth=None
+        )
         assert fake_client.entered is True
         assert fake_client.closed is True
         assert captured["url"] == "https://mcp.example.com"
@@ -221,7 +223,9 @@ class TestMCPHttpClient:
                 tool_timeout_sec=12.0,
             )
 
-        create_client.assert_called_once_with({"Authorization": "Bearer token"})
+        create_client.assert_called_once_with(
+            {"Authorization": "Bearer token"}, auth=None
+        )
         assert fake_client.entered is True
         assert fake_client.closed is True
         assert captured["url"] == "https://mcp.example.com"

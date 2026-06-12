@@ -151,6 +151,7 @@ class TestWebSearchFieldMeta:
 
     def test_result_locations_are_source_urls_with_titles(self) -> None:
         result = WebSearchResult(
+            query="python",
             answer="found it",
             sources=[
                 WebSearchSource(title="Docs", url="https://docs.python.org"),

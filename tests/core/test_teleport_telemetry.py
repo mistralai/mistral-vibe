@@ -87,7 +87,10 @@ class TestTeleportAgentLoopTelemetry:
             ) -> AsyncGenerator[object, object]:
                 yield TeleportCheckingGitEvent()
                 yield TeleportStartingWorkflowEvent()
-                raise ServiceTeleportError("Workflow api-key-123 could not be started.")
+                raise ServiceTeleportError(
+                    "Workflow api-key-123 could not be started.",
+                    telemetry_details={"http_status_code": 502},
+                )
 
         agent_loop.messages.append(LLMMessage(role=Role.user, content="hello"))
         _set_teleport_service(agent_loop, FakeTeleportService())
@@ -103,6 +106,7 @@ class TestTeleportAgentLoopTelemetry:
             "error_class": "ServiceTeleportError",
             "push_required": False,
             "nb_session_messages": 1,
+            "http_status_code": 502,
             "session_id": agent_loop.session_id,
         }
         assert "api-key-123" not in str(telemetry_events[-1]["properties"])

@@ -227,6 +227,25 @@ async def test_rewind_skips_command_messages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rewind_edits_uncommitted_user_message() -> None:
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await app._mount_and_scroll(UserMessage("first", message_index=1))
+        await pilot.pause(0.1)
+
+        await pilot.press("alt+up")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause(0.1)
+        await pilot.press("enter")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause(0.1)
+
+        chat_input = app.query_one(ChatInputContainer)
+        assert app._rewind_mode is False
+        assert chat_input.value == "first"
+
+
+@pytest.mark.asyncio
 async def test_rewind_does_not_activate_while_agent_running() -> None:
     app = _make_app()
     async with app.run_test() as pilot:

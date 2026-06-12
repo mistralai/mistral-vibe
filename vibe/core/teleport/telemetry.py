@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vibe.core.telemetry.send import TelemetryClient
-from vibe.core.telemetry.types import TeleportFailureStage
+from vibe.core.telemetry.types import TeleportFailureDetails, TeleportFailureStage
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.types import (
     TeleportCheckingGitEvent,
@@ -38,6 +38,7 @@ class TeleportTelemetryTracker:
     push_required: bool = False
     success: bool = False
     error_class: str | None = None
+    error_details: TeleportFailureDetails | None = None
 
     def record_event(self, event: TeleportYieldEvent) -> None:
         match event:
@@ -55,6 +56,7 @@ class TeleportTelemetryTracker:
 
     def record_service_error(self, error: ServiceTeleportError) -> None:
         self.error_class = type(error).__name__
+        self.error_details = error.telemetry_details
 
     def record_cancelled(self) -> None:
         self.stage = "cancelled"
@@ -77,4 +79,5 @@ class TeleportTelemetryTracker:
             error_class=self.error_class,
             push_required=self.push_required,
             nb_session_messages=self.nb_session_messages,
+            error_details=self.error_details,
         )

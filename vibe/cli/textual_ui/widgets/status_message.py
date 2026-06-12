@@ -6,8 +6,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static
 
-from vibe.cli.textual_ui.widgets.messages import NonSelectableStatic
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.no_markup_static import (
+    NoMarkupStatic,
+    NonSelectableStatic,
+)
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 

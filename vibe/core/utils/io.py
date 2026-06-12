@@ -4,10 +4,12 @@ import asyncio
 from collections.abc import AsyncIterator, Iterator
 import contextlib
 from contextlib import asynccontextmanager
+from functools import lru_cache
 import locale
 import os
 from pathlib import Path
 import shutil
+import sys
 import time
 from typing import NamedTuple
 
@@ -59,18 +61,34 @@ def _encoding_from_best_match(raw: bytes) -> str | None:
     return match.encoding
 
 
-def _get_candidate_encodings(raw: bytes) -> Iterator[str]:
+@lru_cache(maxsize=1)
+def _windows_oem_encoding() -> str | None:
+    # Windows console output is OEM (cp850), not ANSI (cp1252 from locale).
+    # Only correct for subprocess/console output (see ``decode_safe``'s
+    # ``from_subprocess``); file reads must not use it.
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+
+
+def _get_candidate_encodings(
+    raw: bytes, preferred_encoding: str | None = None
+) -> Iterator[str]:
     """Yield candidate encodings lazily — expensive detection runs only if needed."""
     seen: set[str] = set()
-    yield "utf-8"
-    if (bom := _encodings_from_bom(raw)) and bom not in seen:
-        yield bom
-    if (
-        locale_encoding := locale.getpreferredencoding(False)
-    ) and locale_encoding not in seen:
-        yield locale_encoding
-    if (best := _encoding_from_best_match(raw)) and best not in seen:
-        yield best
+
+    def _emit(encoding: str | None) -> Iterator[str]:
+        if encoding and (key := encoding.lower()) not in seen:
+            seen.add(key)
+            yield encoding
+
+    yield from _emit("utf-8")
+    yield from _emit(_encodings_from_bom(raw))
+    yield from _emit(preferred_encoding)
+    yield from _emit(locale.getpreferredencoding(False))
+    yield from _emit(_encoding_from_best_match(raw))
 
 
 def normalize_newlines(text: str) -> tuple[str, str]:
@@ -79,14 +97,18 @@ def normalize_newlines(text: str) -> tuple[str, str]:
     return text.replace("\r\n", "\n").replace("\r", "\n"), newline
 
 
-def decode_safe(raw: bytes, *, raise_on_error: bool = False) -> ReadSafeResult:
+def decode_safe(
+    raw: bytes, *, raise_on_error: bool = False, from_subprocess: bool = False
+) -> ReadSafeResult:
     """Decode ``raw`` like :func:`read_safe` after ``read_bytes``.
 
-    Tries UTF-8, locale, BOM, charset-normalizer, then UTF-8 (strict or replace).
-    ``UnicodeDecodeError`` can only occur in that last step when
-    ``raise_on_error`` is true.
+    Tries UTF-8, BOM, locale, charset-normalizer, then UTF-8 (strict or
+    replace). ``UnicodeDecodeError`` can only occur in that last step when
+    ``raise_on_error`` is true. Set ``from_subprocess`` when decoding console
+    output so the Windows OEM code page is preferred over the ANSI locale.
     """
-    for encoding in _get_candidate_encodings(raw):
+    preferred = _windows_oem_encoding() if from_subprocess else None
+    for encoding in _get_candidate_encodings(raw, preferred):
         try:
             text = raw.decode(encoding)
             break

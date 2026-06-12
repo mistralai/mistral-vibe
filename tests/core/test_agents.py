@@ -111,8 +111,25 @@ class TestAgentManager:
             include_prompt_detail=False,
             disabled_agents=["plan"],
         )
-        with pytest.raises(ValueError, match="not available"):
+        with pytest.raises(ValueError, match="disabled_agents") as exc_info:
             AgentManager(lambda: config, initial_agent="plan")
+        message = str(exc_info.value)
+        assert "default_agent" not in message
+        assert message.startswith("Agent 'plan'")
+
+    def test_explicit_agent_excluded_by_enabled_agents_does_not_blame_default(
+        self,
+    ) -> None:
+        config = build_test_vibe_config(
+            include_project_context=False,
+            include_prompt_detail=False,
+            enabled_agents=["default"],
+        )
+        with pytest.raises(ValueError, match="enabled_agents") as exc_info:
+            AgentManager(lambda: config, initial_agent="plan")
+        message = str(exc_info.value)
+        assert "default_agent" not in message
+        assert message.startswith("Agent 'plan'")
 
     def test_initial_agent_raises_when_agent_does_not_exist(self) -> None:
         config = build_test_vibe_config(
@@ -120,3 +137,55 @@ class TestAgentManager:
         )
         with pytest.raises(ValueError, match="not found"):
             AgentManager(lambda: config, initial_agent="nonexistent-agent")
+
+    def test_default_agent_excluded_by_enabled_agents_raises_config_contradiction(
+        self,
+    ) -> None:
+        config = build_test_vibe_config(
+            include_project_context=False,
+            include_prompt_detail=False,
+            enabled_agents=["plan"],
+        )
+        with pytest.raises(ValueError, match="enabled_agents") as exc_info:
+            AgentManager(lambda: config)
+        message = str(exc_info.value)
+        assert "default" in message
+        assert "default_agent" in message
+
+    def test_default_agent_excluded_by_disabled_agents_raises_config_contradiction(
+        self,
+    ) -> None:
+        config = build_test_vibe_config(
+            include_project_context=False,
+            include_prompt_detail=False,
+            disabled_agents=["default"],
+        )
+        with pytest.raises(ValueError, match="disabled_agents") as exc_info:
+            AgentManager(lambda: config)
+        assert "default_agent" in str(exc_info.value)
+
+    def test_disabled_agents_ignored_entirely_when_enabled_agents_set(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config = build_test_vibe_config(
+            include_project_context=False,
+            include_prompt_detail=False,
+            enabled_agents=["plan"],
+            disabled_agents=["plan"],
+        )
+        with caplog.at_level("WARNING"):
+            manager = AgentManager(lambda: config, initial_agent="plan")
+        assert manager.active_profile.name == "plan"
+        assert caplog.text == ""
+
+    def test_install_required_agent_reports_install_not_disabled_agents(self) -> None:
+        # 'lean' is install_required and enabled but not installed: the message
+        # must point to installation, not blame disabled_agents.
+        config = build_test_vibe_config(
+            include_project_context=False,
+            include_prompt_detail=False,
+            enabled_agents=["lean"],
+        )
+        with pytest.raises(ValueError, match="requires installation") as exc_info:
+            AgentManager(lambda: config, initial_agent="lean")
+        assert "disabled_agents" not in str(exc_info.value)

@@ -20,6 +20,22 @@ class TestBuiltinSkills:
     def test_vibe_skill_has_inline_prompt(self) -> None:
         assert BUILTIN_SKILLS["vibe"].prompt
 
+    def test_vibe_skill_pins_readme_url_to_running_version(self) -> None:
+        from vibe import __version__
+
+        prompt = BUILTIN_SKILLS["vibe"].prompt
+        assert "__VIBE_VERSION__" not in prompt
+        assert (
+            f"https://github.com/mistralai/mistral-vibe/blob/v{__version__}/README.md"
+            in prompt
+        )
+
+    def test_vibe_skill_references_user_docs_url(self) -> None:
+        assert (
+            "https://docs.mistral.ai/vibe/code/overview"
+            in BUILTIN_SKILLS["vibe"].prompt
+        )
+
     def test_discovers_builtin_skills(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("vibe.core.skills.manager.BUILTIN_SKILLS", BUILTIN_SKILLS)
         config = build_test_vibe_config(

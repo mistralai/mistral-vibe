@@ -15,9 +15,17 @@ from vibe.core.types import (
     LLMMessage,
     LLMUsage,
     Role,
+    StopInfo,
     StrToolChoice,
     ToolCall,
 )
+
+
+def _parse_stop_info(reason: str | None, raw: Any) -> StopInfo | None:
+    if reason is None and not isinstance(raw, dict):
+        return None
+    details = raw if isinstance(raw, dict) else {}
+    return StopInfo.model_validate({"reason": reason, **details})
 
 
 class AnthropicMapper:
@@ -190,6 +198,7 @@ class AnthropicMapper:
                 tool_calls=tool_calls if tool_calls else None,
             ),
             usage=usage,
+            stop=_parse_stop_info(data.get("stop_reason"), data.get("stop_details")),
         )
 
     def parse_streaming_event(
@@ -608,12 +617,17 @@ class AnthropicAdapter(APIAdapter):
         return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
 
     def _parse_message_delta(self, data: dict[str, Any]) -> LLMChunk:
+        delta = data.get("delta", {})
         usage_data = data.get("usage", {})
-        if not usage_data:
-            return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
+        usage = (
+            LLMUsage(
+                prompt_tokens=0, completion_tokens=usage_data.get("output_tokens", 0)
+            )
+            if usage_data
+            else None
+        )
         return LLMChunk(
             message=LLMMessage(role=Role.assistant, content=None),
-            usage=LLMUsage(
-                prompt_tokens=0, completion_tokens=usage_data.get("output_tokens", 0)
-            ),
+            usage=usage,
+            stop=_parse_stop_info(delta.get("stop_reason"), delta.get("stop_details")),
         )

@@ -52,7 +52,6 @@ def test_resumed_user_message_with_images_renders_footer(tmp_path: Path) -> None
         [msg],
         tool_call_map={},
         start_index=0,
-        tools_collapsed=False,
         history_widget_indices=WeakKeyDictionary(),
     )
 
@@ -70,7 +69,6 @@ def test_resumed_user_message_with_images_only_still_mounts(tmp_path: Path) -> N
         [msg],
         tool_call_map={},
         start_index=0,
-        tools_collapsed=False,
         history_widget_indices=WeakKeyDictionary(),
     )
 

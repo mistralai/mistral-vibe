@@ -7,8 +7,10 @@ from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import VibeConfig
 
 
-def _make_args(*, agent: str | None, prompt: str | None) -> argparse.Namespace:
-    return argparse.Namespace(agent=agent, prompt=prompt)
+def _make_args(
+    *, agent: str | None, prompt: str | None, auto_approve: bool = False
+) -> argparse.Namespace:
+    return argparse.Namespace(agent=agent, prompt=prompt, auto_approve=auto_approve)
 
 
 def test_uses_args_agent_when_provided() -> None:
@@ -51,3 +53,10 @@ def test_programmatic_mode_keeps_explicit_agent_arg() -> None:
     args = _make_args(agent="accept-edits", prompt="hello")
 
     assert get_initial_agent_name(args, config) == "accept-edits"
+
+
+def test_auto_approve_flag_selects_auto_approve_agent() -> None:
+    config = VibeConfig.model_construct(default_agent=BuiltinAgentName.PLAN)
+    args = _make_args(agent=None, prompt="hello", auto_approve=True)
+
+    assert get_initial_agent_name(args, config) == BuiltinAgentName.AUTO_APPROVE

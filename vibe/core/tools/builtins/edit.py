@@ -80,18 +80,21 @@ class Edit(
 
     @classmethod
     def format_call_display(cls, args: EditArgs) -> ToolCallDisplay:
-        tag = " (scratchpad)" if is_scratchpad_path(args.file_path) else ""
+        suffix = "(scratchpad)" if is_scratchpad_path(args.file_path) else ""
         return ToolCallDisplay(
-            summary=f"Editing {Path(args.file_path).name}{tag}",
+            summary=f"Editing {Path(args.file_path).name}",
             content=f"old_string: {args.old_string!r}\nnew_string: {args.new_string!r}",
+            suffix=suffix,
         )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if isinstance(event.result, EditResult):
-            tag = " (scratchpad)" if is_scratchpad_path(event.result.file) else ""
+            suffix = "(scratchpad)" if is_scratchpad_path(event.result.file) else ""
             return ToolResultDisplay(
-                success=True, message=f"Edited {Path(event.result.file).name}{tag}"
+                success=True,
+                message=f"Edited {Path(event.result.file).name}",
+                suffix=suffix,
             )
         return ToolResultDisplay(
             success=False, message=event.error or event.skip_reason or "No result"

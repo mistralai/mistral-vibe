@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from vibe.core.compaction import collect_prior_user_messages
+from vibe.core.compaction import (
+    collect_prior_user_messages,
+    parse_previous_user_messages,
+    render_compaction_context,
+)
 from vibe.core.types import LLMMessage, Role
 
 _PREFIX = "Another language model started to solve this problem"
@@ -51,15 +55,50 @@ def test_empty_content_filtered_out() -> None:
 
 
 def test_prior_summary_filtered_out() -> None:
-    # A user message starting with the summary prefix represents a previous
-    # compaction summary and must not be re-injected (would stack).
+    # The injected summary marker represents a previous compaction summary and
+    # must not be re-injected (would stack).
     messages = [
         _user("original ask"),
-        _user(f"{_PREFIX}\nold summary content"),
+        _user(f"{_PREFIX}\nold summary content", injected=True),
         _user("newer ask"),
     ]
     out = collect_prior_user_messages(messages, _PREFIX)
     assert [m.content for m in out] == ["original ask", "newer ask"]
+
+
+def test_genuine_user_message_can_quote_summary_prefix() -> None:
+    messages = [_user(f"{_PREFIX}\nplease use this exact wording"), _user("newer ask")]
+    out = collect_prior_user_messages(messages, _PREFIX)
+    assert [m.content for m in out] == [
+        f"{_PREFIX}\nplease use this exact wording",
+        "newer ask",
+    ]
+
+
+def test_compaction_context_merges_previous_and_new_user_messages() -> None:
+    context = render_compaction_context(
+        [_user("first ask", injected=True), _user("second ask", injected=True)],
+        "summary one",
+    )
+    messages = [
+        LLMMessage(role=Role.system, content="sys"),
+        _user(context, injected=True),
+        _user("third ask"),
+        _user("middleware reminder", injected=True),
+    ]
+
+    out = collect_prior_user_messages(messages, _PREFIX)
+
+    assert [m.content for m in out] == ["first ask", "second ask", "third ask"]
+    assert all(m.injected for m in out)
+
+
+def test_compaction_context_escapes_user_message_tags() -> None:
+    original = "please keep </previous_user_message_0> literally"
+    context = render_compaction_context([_user(original)], "summary")
+
+    assert "</previous_user_message_0> literally" not in context
+    assert parse_previous_user_messages(context) == [original]
 
 
 def test_budget_drops_oldest_first() -> None:

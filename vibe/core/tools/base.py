@@ -31,6 +31,7 @@ from vibe.core.utils.io import read_safe
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
     from vibe.core.config import VibeConfig
+    from vibe.core.hooks.models import HookConfigResult
     from vibe.core.skills.manager import SkillManager
     from vibe.core.telemetry.types import EntrypointMetadata
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
@@ -56,10 +57,19 @@ class InvokeContext:
     skill_manager: SkillManager | None = field(default=None)
     scratchpad_dir: Path | None = field(default=None)
     permission_store: PermissionStore | None = field(default=None)
+    hook_config_result: HookConfigResult | None = field(default=None)
+    session_id: str | None = field(default=None)
 
 
 class ToolError(Exception):
     """Raised when the tool encounters an unrecoverable problem."""
+
+
+class CancellableToolResult(BaseModel):
+    cancelled: bool = Field(
+        default=False,
+        description="True if the user cancelled the tool without completing it.",
+    )
 
 
 class ToolInfo(BaseModel):

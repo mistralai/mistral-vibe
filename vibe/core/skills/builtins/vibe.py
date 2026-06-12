@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from vibe import __version__
 from vibe.core.skills.models import SkillInfo
 
-SKILL = SkillInfo(
-    name="vibe",
-    description="Understand the Vibe CLI application internals: configuration, VIBE_HOME structure, available parameters, agents, skills, tools, and how to inspect or update the user's setup. Use this skill when the user asks about how Vibe works, wants to configure it, or when you need to understand the runtime environment.",
-    user_invocable=False,
-    prompt="""# Vibe CLI Self-Awareness
+_PROMPT_TEMPLATE = """# Vibe CLI Self-Awareness
 
 You are running inside **Mistral Vibe**, a CLI coding agent built by Mistral AI.
 This skill gives you full knowledge of the application internals so you can help
 the user understand, configure, and troubleshoot their Vibe installation.
+
+## Going Deeper
+
+For facts not covered here, fetch the README pinned to the running version:
+https://github.com/mistralai/mistral-vibe/blob/v__VIBE_VERSION__/README.md
+(do not use `main` — it may not match what is installed). Point the user at
+https://docs.mistral.ai/vibe/code/overview for human-readable docs.
 
 ## VIBE_HOME
 
@@ -50,6 +54,34 @@ When in a trusted folder, Vibe also looks for project-local configuration:
 - `.vibe/agents/` - Project-specific agents
 - `.vibe/prompts/` - Project-specific prompts
 - `.agents/skills/` - Standard agent skills directory
+
+## Lifecycle: Exit, Update, Version, Resume
+
+### Exit
+
+Chat input (case-insensitive): `/exit`, `exit`, `quit`, `:q`, `:quit`.
+Keyboard: `Ctrl+C` / `Ctrl+D` — press twice within ~1s to quit. For `Ctrl+C`,
+the first press instead interrupts the running job or clears the input if either
+is present. `Ctrl+Z` suspends on POSIX (resume with `fg`).
+
+### Update
+
+Vibe never updates silently. With `enable_update_checks = true` (default), it
+polls PyPI for `mistral-vibe` daily and prompts on the next launch when a
+newer release exists; accepting runs `uv tool upgrade mistral-vibe`, then
+`brew upgrade mistral-vibe` as a fallback. Disable via `enable_update_checks
+= false`. Initial install: `uv tool install mistral-vibe`.
+
+### Version
+
+`vibe --version` (or `-v`) prints it and exits. Not shown anywhere in-session.
+
+### Resume
+
+- `vibe -c` / `--continue`: most recent session in this terminal (TTY-scoped;
+  falls back to latest in cwd).
+- `vibe --resume [SESSION_ID]`: specific session; without an id, opens a picker.
+- In-session: `/resume` (alias `/continue`).
 
 ## Configuration (config.toml)
 
@@ -203,13 +235,12 @@ disabled_agents = ["auto-approve"]
 # Opt-in builtin agents (only affects agents with install_required=True, e.g. lean)
 installed_agents = ["lean"]
 
-# Agent profile to use when --agent is not passed in interactive mode
+# Agent profile to use when --agent is not passed
 # (default: "default"). Valid values: "default", "plan", "accept-edits",
 # "auto-approve", "lean" (only when listed in installed_agents), or any
 # custom agent name from ~/.vibe/agents/ or .vibe/agents/. Subagents
-# (e.g. "explore") are rejected. Ignored in programmatic mode
-# (-p/--prompt), which falls back to "auto-approve" when --agent is not
-# provided.
+# (e.g. "explore") are rejected. Applies in both interactive and programmatic
+# (-p/--prompt) mode.
 default_agent = "plan"
 ```
 
@@ -277,91 +308,168 @@ vibe_base_url = "https://chat.mistral.ai"
 
 ### Hooks (Experimental)
 
-Hooks let users run shell commands automatically at specific points during a
-session. The feature is **experimental** and must be enabled first:
+Hooks let users run shell commands automatically at lifecycle events.
+**Experimental**, enabled with `enable_experimental_hooks = true` in
+`config.toml` or `VIBE_ENABLE_EXPERIMENTAL_HOOKS=true`.
 
-```toml
-# In config.toml
-enable_experimental_hooks = true
-```
+#### Config and hook types
 
-Or via the environment variable `VIBE_ENABLE_EXPERIMENTAL_HOOKS=true`.
+Hooks live in `hooks.toml` files (separate from `config.toml`), discovered in
+this order:
 
-#### Hook Configuration Files
+1. `<project>/.vibe/hooks.toml` — loaded first, only when the folder is
+   trusted.
+2. `~/.vibe/hooks.toml` — loaded second.
 
-Hooks are defined in `hooks.toml` files (separate from `config.toml`):
-
-1. **User-level**: `~/.vibe/hooks.toml` (always loaded when hooks are enabled)
-2. **Project-level**: `<project>/.vibe/hooks.toml` (only loaded if the folder is trusted)
-
-Both files are merged; if a hook name appears in both, the first one wins and
-a warning is shown for the duplicate.
-
-#### hooks.toml Format
+A duplicate `name` across the two files is reported as a config issue and the
+project entry wins. Config-load errors (invalid TOML, missing required
+fields) surface in the TUI as warnings and the offending hook is skipped.
 
 ```toml
 [[hooks]]
-name = "lint"                     # Unique hook name (required)
-type = "post_agent_turn"          # Hook type (required, see below)
-command = "eslint --quiet ."      # Shell command to execute (required)
-timeout = 30.0                    # Seconds before the hook is killed (default: 30)
-description = "Run ESLint"        # Optional human-readable description
+name = "lint"                       # Required: unique within the file.
+type = "post_agent_turn"            # Required: post_agent_turn | before_tool | after_tool.
+command = "eslint --quiet ."        # Required: shell command run in cwd.
+timeout = 60.0                      # Default: 60s for all hooks.
+description = "Run ESLint"          # Optional.
 
 [[hooks]]
-name = "typecheck"
-type = "post_agent_turn"
-command = "npx tsc --noEmit"
-timeout = 60.0
-description = "Run TypeScript type checking"
+name = "deny-rm-rf"
+type = "before_tool"
+match = "bash"                      # Tool-name matcher (tool hooks only, default "*").
+strict = true                       # Tool hooks only: escalate any failure to deny/clear.
+command = "uv run python /path/to/guard-bash"
 ```
-
-#### Available Hook Types
 
 | Type | When it runs |
 |---|---|
-| `post_agent_turn` | After the agent finishes a turn (no more pending tool calls) |
+| `post_agent_turn` | Once per turn, after the agent finishes responding (no pending tool calls). |
+| `before_tool` | Per tool call, before the user permission prompt. |
+| `after_tool` | Per tool call, **iff the tool body actually ran**. `tool_status` is `success`, `failure`, or `cancelled`. Does not fire when the tool never executed (`before_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started). |
 
-#### How Hooks Execute
+**Matcher syntax** (same as `enabled_tools`): fnmatch glob by default
+(`"bash"`, `"read_*"`, case-insensitive), or a regex full-match when the
+pattern starts with `re:` (`"re:(read_file|grep)"`). `match` is forbidden on
+`post_agent_turn`.
 
-- Each hook runs as a **shell subprocess** in the current working directory.
-- The hook receives a **JSON object on stdin** with context:
-  ```json
-  {
-    "session_id": "...",
-    "transcript_path": "/path/to/session/log.jsonl",
-    "cwd": "/current/working/dir",
-    "hook_event_name": "post_agent_turn"
-  }
-  ```
-- If the hook exceeds its `timeout`, the entire process tree is killed.
+**Tool name conventions** for matchers:
+- Built-in tools use their bare name (`bash`, `read_file`, …); see the Tools
+  section above for the full list.
+- MCP tools: `{server-name}_{raw-tool-name}` (e.g. `linear_create-issue`).
+- Connector tools: `connector_{normalized-name}_{remote-tool-name}` (e.g.
+  `connector_Google_Drive_search_files`).
+- Subagents all route through `task`. Match with `match = "task"` and read
+  `tool_input.agent` to discriminate by subagent.
 
-#### Exit Code Semantics
+Subagent invocations inherit the parent's hook config. Their hook events are
+logged to the subagent's session log and don't propagate to the parent's UI.
 
-| Exit Code | Behavior |
-|---|---|
-| `0` | Success — hook output is shown as an info message |
-| `2` | **Retry** — hook's stdout is injected as a new user message, and the agent gets another turn to fix the issue (max 3 retries per hook in a row per user message) |
-| Any other | Warning — hook output is shown as a warning message |
+#### Wire protocol
 
-The retry mechanism (exit code 2) is powerful: the hook can tell the agent what
-went wrong, and the agent will attempt to fix it automatically. For example, a
-linter hook can output the lint errors, and the agent will try to resolve them.
+Every hook is spawned in `cwd` and receives a JSON object on **stdin**
+discriminated by `hook_event_name`:
 
-#### Example: Post-Turn Linting Hook
+```json
+// post_agent_turn
+{"hook_event_name": "post_agent_turn", "session_id": "...",
+ "parent_session_id": null, "transcript_path": "...", "cwd": "..."}
 
-```toml
-# .vibe/hooks.toml
-[[hooks]]
-name = "ruff-check"
-type = "post_agent_turn"
-command = "uv run ruff check --quiet ."
-timeout = 30.0
-description = "Check for lint errors after each turn"
+// before_tool
+{"hook_event_name": "before_tool", "session_id": "...", "parent_session_id": null,
+ "transcript_path": "...", "cwd": "...",
+ "tool_name": "bash", "tool_call_id": "call_42",
+ "tool_input": {"command": "ls"}}
+
+// after_tool
+{"hook_event_name": "after_tool", "session_id": "...", "parent_session_id": null,
+ "transcript_path": "...", "cwd": "...",
+ "tool_name": "bash", "tool_call_id": "call_42",
+ "tool_input": {"command": "ls"},
+ "tool_status": "success",         // success | failure | cancelled
+ "tool_output": {"stdout": "..."},  // structured result (success/cancelled); null otherwise
+ "tool_output_text": "...",         // current text the LLM will see; mutable by prior hooks
+ "tool_error": null,                // populated on failure/skipped
+ "duration_ms": 42.5}
 ```
 
-If the linter finds issues and exits with code 2, its stdout (the error
-messages) is fed back to the agent as a user message, prompting the agent to
-fix the problems. After 3 failed retries the hook stops retrying.
+`parent_session_id` is set when running inside a subagent. Exceeding
+`timeout` kills the whole process tree.
+
+A hook signals back via its **exit code** and **stdout** (stderr is reserved
+for diagnostics — Vibe never parses it for control):
+
+| Exit | Stdout | Behavior |
+|---|---|---|
+| `0` | empty | Pass through (no action). |
+| `0` | valid structured-response JSON object (schema below) | Act per the JSON fields. |
+| `0` | anything else (free-form text, broken JSON, scalar/array, schema mismatch) | Failure path (see below). The parse error is in the message. |
+| non-zero / timeout / spawn failure | — | Failure path. Reason taken from stderr, then stdout, then the exit code. |
+
+Structured-response schema:
+
+```json
+{
+  "decision": "allow" | "deny",          // optional; default "allow"
+  "reason": "string",                     // required when decision == "deny"
+  "system_message": "string",             // optional UI note
+  "hook_specific_output": {
+    "tool_input": { ... },                // before_tool only
+    "additional_context": "string"        // after_tool only
+  }
+}
+```
+
+Unknown fields are tolerated at every level. Fields that aren't meaningful
+for the current hook type are silently ignored.
+
+**Don't self-name in `system_message` or `reason`** — the UI prefixes
+hook-end-event content with `[hook-name]` automatically, and `before_tool`
+denials are wrapped as ``Tool 'X' was denied by hook 'Y': {reason}`` before
+the LLM sees them. A hook that writes ``"reason": "guard: refused..."``
+will produce ``hook 'guard': guard: refused...`` downstream.
+
+`decision: "deny"` per hook type:
+
+| Hook | Effect of `decision: "deny"` |
+|---|---|
+| `before_tool` | Deny the tool call; `reason` is the tool error returned to the LLM. First deny short-circuits the remaining `before_tool` hooks for this call. |
+| `after_tool` | Replace `tool_output_text` with `reason`. Pipeline continues; subsequent hooks see the replacement. |
+| `post_agent_turn` | Inject `reason` as a retry user message. Capped at 3 retries per hook per user turn. |
+
+Event-specific payloads:
+
+- `hook_specific_output.tool_input` (`before_tool`): full replacement of the
+  model's arguments. Vibe re-validates against the tool's schema **after each
+  rewriting hook** — the first invalid rewrite aborts the chain and
+  synthesizes a denial attributing the failure to that hook. Rewrites
+  compose: hook N receives `tool_input` as rewritten by hooks 1..N-1.
+- `hook_specific_output.additional_context` (`after_tool`): text appended
+  (with `\n`) to the current `tool_output_text`. Composes with a same-hook
+  `decision: "deny"`: deny replaces first, then `additional_context` is
+  appended to the replacement.
+
+**Failure path.** Any failure (non-zero exit, timeout, spawn failure,
+non-conforming stdout) emits a UI warning and lets the gated action proceed
+(fail open). With `strict = true` on a tool hook:
+
+| Hook | Strict failure escalates to |
+|---|---|
+| `before_tool` | Deny the tool call with the failure reason. |
+| `after_tool` | Clear `tool_output_text` (replace with empty). |
+
+`strict` is forbidden on `post_agent_turn`.
+
+#### Execution semantics
+
+- Hooks of the same type fire sequentially in load order (project file first,
+  then user file; declaration order within each file).
+- Tool calls within a single LLM turn run **concurrently**; each call's hook
+  chain runs serially but the chains run in parallel across calls. Hooks
+  that touch shared state (filesystem, env) must coordinate themselves.
+- `before_tool` rewrites take effect everywhere downstream: the user
+  permission prompt sees the rewritten arguments, the tool runs with them,
+  and the assistant message is patched so subsequent LLM turns reflect what
+  actually ran.
 
 ### Pattern Matching
 
@@ -374,8 +482,10 @@ Tool, skill, and agent names support three matching modes:
 
 ```
 vibe [PROMPT]                       # Start interactive session with optional prompt
-vibe -p TEXT / --prompt TEXT         # Programmatic mode (auto-approve, one-shot, exit)
+vibe -p TEXT / --prompt TEXT         # Programmatic mode using `default_agent`, one-shot, exit
+vibe -p TEXT --auto-approve          # Programmatic mode with all tool calls approved
 vibe --agent NAME                   # Select agent profile (falls back to `default_agent` config)
+vibe --auto-approve                  # Shortcut for `--agent auto-approve`
 vibe --workdir DIR                  # Change working directory
 vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
 vibe --trust                        # Trust cwd for this invocation only (not persisted)
@@ -429,7 +539,9 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/status` - Display agent statistics
 - `/voice` - Configure voice settings
 - `/mcp` - Display available MCP servers (pass a server name to list its tools)
-- `/resume` (or `/continue`) - Browse and resume past sessions
+- `/resume` (or `/continue`) - Browse and resume past sessions. In the picker,
+  press `D` twice to delete a local saved session. The active session cannot be
+  deleted from this picker.
 - `/rewind` - Rewind to a previous message
 - `/loop <interval> <prompt>` - Schedule a recurring prompt (e.g. `/loop 30s ping`).
   Intervals: `Ns/Nm/Nh/Nd`, minimum 30s, max 50 loops/session.
@@ -481,6 +593,16 @@ Image attachments:
 - Rendered in the chat bubble as a dim footer line linking each
   attachment to its snapshot. Clicking opens the file with the OS
   default image viewer.
+
+## Input Queue
+
+Messages submitted while the agent or a `!`-bash command is running are
+queued instead of cancelling the in-flight work, and drain in FIFO order
+once the job finishes. Prompts (plain, `/skill ...`, `@`-mentions) and
+`!bash` commands can be queued; slash commands and `&teleport` are
+rejected with a toast. **Ctrl+C** pops the last queued item (LIFO);
+**Esc** interrupts the running job and pauses the queue; pressing Enter
+(empty or not) on a paused queue resumes draining.
 
 ## Skills System
 
@@ -579,5 +701,22 @@ For API keys, tell the user to edit `~/.vibe/.env` directly — never read or
 write that file yourself.
 
 For project-specific configuration, create/edit `.vibe/config.toml` in the
-project root (the folder must be trusted first).""",
+project root (the folder must be trusted first)."""
+
+
+SKILL = SkillInfo(
+    name="vibe",
+    description="""Authoritative reference for Mistral Vibe — the CLI agent you (the model) are running inside.
+
+LOAD when the user:
+- asks anything about Vibe itself, even by indirect name ("this CLI", "this tool", "you");
+- wants to change, inspect, or reset their setup;
+- asks why the agent did or did not act;
+- asks how to make the CLI do X, where X lives, or what a flag/command/setting does;
+- asks any meta question about your own behavior;
+- is unsure whether a command, flag, env var, or file is in scope — this skill is the source of truth.
+
+SCOPE: config under `~/.vibe/` and project-local `.vibe/`; `VIBE_*` and `LOG_*` env vars; models and providers; agents and subagents; skills; tools and their permission model; every slash command and CLI flag; hooks; MCP servers; connectors; trusted folders; `@`-file mentions; logs; themes; voice.""",
+    user_invocable=False,
+    prompt=_PROMPT_TEMPLATE.replace("__VIBE_VERSION__", __version__),
 )

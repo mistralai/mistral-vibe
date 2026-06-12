@@ -15,7 +15,14 @@ from mistralai.client.models import SpeechOutputFormat
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
     DEFAULT_TRACES_EXPORT_PATH,
 )
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    field_validator,
+    model_validator,
+)
 from pydantic.fields import FieldInfo
 from pydantic_core import to_jsonable_python
 from pydantic_settings import (
@@ -267,13 +274,21 @@ class _MCPBase(BaseModel):
         return normalized[:256]
 
 
-class _MCPHttpFields(BaseModel):
-    url: str = Field(description="Base URL of the MCP HTTP server")
+_LEGACY_STATIC_AUTH_KEYS = (
+    "headers",
+    "api_key_env",
+    "api_key_header",
+    "api_key_format",
+)
+
+
+class MCPStaticAuth(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["static"] = "static"
     headers: dict[str, str] = Field(
         default_factory=dict,
-        description=(
-            "Additional HTTP headers when using 'http' transport (e.g., Authorization or X-API-Key)."
-        ),
+        description=("Additional HTTP headers (e.g., Authorization or X-API-Key)."),
     )
     api_key_env: str = Field(
         default="",
@@ -308,12 +323,75 @@ class _MCPHttpFields(BaseModel):
         return hdrs
 
 
+class MCPOAuth(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["oauth"]
+    scopes: list[str] = Field(
+        description="OAuth scopes to request. Pass an empty list to accept the AS default."
+    )
+    client_id: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Pre-registered OAuth public client_id (PKCE). Mutually exclusive with client_metadata_url.",
+    )
+    client_metadata_url: HttpUrl | None = Field(
+        default=None,
+        description="RFC 9728 client-metadata-document URL. Mutually exclusive with client_id.",
+    )
+    redirect_port: int = Field(
+        default=47823,
+        ge=1024,
+        le=65535,
+        description="Loopback port for the OAuth callback handler.",
+    )
+
+    @model_validator(mode="after")
+    def _check_client_identity(self) -> MCPOAuth:
+        if self.client_id and self.client_metadata_url:
+            raise ValueError("client_id and client_metadata_url are mutually exclusive")
+        return self
+
+
+MCPAuth = Annotated[MCPStaticAuth | MCPOAuth, Field(discriminator="type")]
+
+
+def _promote_legacy_auth(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    legacy_present = [k for k in _LEGACY_STATIC_AUTH_KEYS if k in data]
+    if not legacy_present:
+        return data
+    if "auth" in data:
+        raise ValueError(
+            "cannot mix top-level "
+            f"{', '.join(_LEGACY_STATIC_AUTH_KEYS)} with an explicit [auth] block; "
+            'move legacy keys into [auth] (type = "static")'
+        )
+    data["auth"] = {"type": "static", **{k: data.pop(k) for k in legacy_present}}
+    return data
+
+
+class _MCPHttpFields(BaseModel):
+    url: str = Field(description="Base URL of the MCP HTTP server")
+    auth: MCPAuth = Field(default_factory=MCPStaticAuth)
+
+    def http_headers(self) -> dict[str, str]:
+        if isinstance(self.auth, MCPStaticAuth):
+            return self.auth.http_headers()
+        return {}
+
+
 class MCPHttp(_MCPBase, _MCPHttpFields):
     transport: Literal["http"]
+
+    _promote_legacy_auth = model_validator(mode="before")(_promote_legacy_auth)
 
 
 class MCPStreamableHttp(_MCPBase, _MCPHttpFields):
     transport: Literal["streamable-http"]
+
+    _promote_legacy_auth = model_validator(mode="before")(_promote_legacy_auth)
 
 
 class MCPStdio(_MCPBase):
@@ -524,6 +602,7 @@ class VibeConfig(BaseSettings):
     bypass_tool_permissions: bool = False
     enable_telemetry: bool = True
     experiment_overrides: dict[str, str] = Field(default_factory=dict)
+    applied_migrations: list[str] = Field(default_factory=list, exclude=True)
     system_prompt_id: str = SystemPrompt.CLI
     compaction_prompt_id: str = UtilityPrompt.COMPACT
     include_commit_signature: bool = True
@@ -1062,6 +1141,17 @@ class VibeConfig(BaseSettings):
             stripped = [_strip_bash_pattern_wildcard(p) for p in allowlist]
             deduped = sorted(set(stripped))
             bash_tools["allowlist"] = deduped
+            allowlist = deduped
+            changed = True
+
+        applied: list[str] = data.get("applied_migrations", [])
+        if allowlist is not None and cls._BASH_READ_ONLY_MIGRATION not in applied:
+            from vibe.core.tools.builtins.bash import default_read_only_commands
+
+            bash_tools["allowlist"] = sorted(
+                set(allowlist) | set(default_read_only_commands())
+            )
+            data["applied_migrations"] = [*applied, cls._BASH_READ_ONLY_MIGRATION]
             changed = True
 
         for model in data.get("models", []):
@@ -1093,6 +1183,10 @@ class VibeConfig(BaseSettings):
 
         if changed:
             cls.dump_config(data)
+
+    # One-shot id: syncs an existing bash allowlist up to the current default
+    # read-only commands once, so users keep the ability to remove any of them.
+    _BASH_READ_ONLY_MIGRATION: ClassVar[str] = "bash_read_only_defaults_v1"
 
     # Old tool name -> new tool name. The new tools replaced these in-place, so
     # existing user configs keyed by the old names need their settings moved over.

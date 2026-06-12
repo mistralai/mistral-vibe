@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.14.1"
+version = "2.15.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -155,6 +155,7 @@ required-version = ">=0.8.0"
 
 [dependency-groups]
 dev = [
+    "cryptography>=44.0.0",
     "debugpy>=1.8.19",
     "pre-commit>=4.2.0",
     "pyinstrument>=5.1.2",

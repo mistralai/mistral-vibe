@@ -6,6 +6,7 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from vibe.core.telemetry.types import TeleportFailureDetails
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.utils.http import build_ssl_context
 
@@ -129,9 +130,27 @@ class NuageClient:
             json=request.model_dump(mode="json", by_alias=True, exclude_none=True),
         )
         if not response.is_success:
-            raise ServiceTeleportError(f"Vibe Code Nuage start failed: {response.text}")
+            raise ServiceTeleportError(
+                f"Vibe Code Web start failed "
+                f"(status {response.status_code}): {response.text}",
+                telemetry_details=TeleportFailureDetails(
+                    failure_kind="http_error", http_status_code=response.status_code
+                ),
+            )
 
         try:
             return NuageResponse.model_validate(response.json())
-        except (ValueError, ValidationError) as e:
-            raise ServiceTeleportError("Vibe Code Nuage response was invalid") from e
+        except ValidationError as e:
+            raise ServiceTeleportError(
+                "Vibe Code Web response was invalid",
+                telemetry_details=TeleportFailureDetails(
+                    failure_kind="invalid_schema", http_status_code=response.status_code
+                ),
+            ) from e
+        except ValueError as e:
+            raise ServiceTeleportError(
+                "Vibe Code Web response was not valid JSON",
+                telemetry_details=TeleportFailureDetails(
+                    failure_kind="invalid_json", http_status_code=response.status_code
+                ),
+            ) from e

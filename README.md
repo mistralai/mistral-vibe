@@ -136,9 +136,9 @@ Valid values are `default`, `plan`, `accept-edits`, `auto-approve`,
 custom agent file in `~/.vibe/agents/` or the project's `.vibe/agents/`
 directory. Subagents such as `explore` are not accepted.
 
-> Note: `default_agent` only applies to interactive sessions. In
-> programmatic mode (`-p` / `--prompt`), Vibe falls back to `auto-approve`
-> when `--agent` is not provided, so `default_agent` is ignored.
+> Note: `default_agent` applies in both interactive and programmatic
+> (`-p` / `--prompt`) sessions. Pass `--auto-approve` when a run should
+> approve all tool calls without prompting.
 
 ### Subagents and Task Delegation
 
@@ -237,6 +237,7 @@ Simply run `vibe` to enter the interactive chat loop.
 - **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.
 - **Debug Console**: Press `Ctrl+\` to toggle the debug console.
 - **Agent Selection**: Press `Shift+Tab` to cycle through agents (default, plan, ...).
+- **Exit**: Type `/exit`, `exit`, `quit`, `:q`, or `:quit` in the input box, or press `Ctrl+C` / `Ctrl+D` twice within ~1 second.
 
 You can start Vibe with a prompt using the following command:
 
@@ -260,7 +261,13 @@ You can run Vibe non-interactively by piping input or using the `--prompt` flag.
 vibe --prompt "Refactor the main function in cli/main.py to be more modular."
 ```
 
-By default, it uses `auto-approve` mode.
+By default, it uses your configured `default_agent` (`default` unless changed).
+To approve all tool calls without prompting, pass `--auto-approve` (also
+available for interactive sessions):
+
+```bash
+vibe --prompt "Refactor the main function in cli/main.py to be more modular." --auto-approve
+```
 
 #### Programmatic Mode Options
 
@@ -269,6 +276,8 @@ When using `--prompt`, you can specify additional options:
 - **`--max-turns N`**: Limit the maximum number of assistant turns. The session will stop after N turns.
 - **`--max-price DOLLARS`**: Set a maximum cost limit in dollars. The session will be interrupted if the cost exceeds this limit.
 - **`--max-tokens N`**: Set a maximum cumulative LLM token budget for the session, counting both prompt and completion tokens. The session will be interrupted if usage exceeds this limit.
+- **`--agent NAME`**: Select the agent profile for this run.
+- **`--auto-approve`**: Shortcut for `--agent auto-approve`. Approves all tool calls without prompting, including in interactive sessions.
 - **`--enabled-tools TOOL`**: Enable specific tools. In programmatic mode, this disables all other tools. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
 - **`--output FORMAT`**: Set the output format. Options:
   - `text` (default): Human-readable text output
@@ -605,6 +614,76 @@ startup_timeout_sec = 15
 tool_timeout_sec = 120
 ```
 
+### Hooks (Experimental)
+
+Hooks wire arbitrary shell commands into Vibe's lifecycle to gate, audit, or rewrite agent behavior. **Experimental**, gated behind:
+
+```toml
+# config.toml
+enable_experimental_hooks = true   # or env VIBE_ENABLE_EXPERIMENTAL_HOOKS=true
+```
+
+Declared in `<project>/.vibe/hooks.toml` (project, loaded first; trusted only) and `~/.vibe/hooks.toml` (user-global, loaded second; duplicates by `name` lose to the project entry):
+
+```toml
+[[hooks]]
+name = "deny-rm-rf"
+type = "before_tool"
+match = "bash"                       # tool-name matcher (fnmatch glob + `re:` regex escape, case-insensitive)
+command = "uv run python /path/to/guard-bash"
+timeout = 60.0                       # seconds; default 60 for all hooks
+strict = false                       # tool hooks only: turn failures into denials (before) / text-clears (after)
+description = "Reject dangerous shell commands."
+```
+
+Subagents inherit the parent's hook config so policies apply transitively.
+
+#### Common ground
+
+Every hook is spawned with a JSON invocation on **stdin** (UTF-8) containing the session context: `session_id`, `parent_session_id`, `transcript_path`, `cwd`, plus `hook_event_name` discriminating the hook type. Tool hooks add tool-specific fields (below).
+
+Every hook signals back via its **exit code** and **stdout**. The contract on stdout is strict: either empty (do nothing), or a JSON object matching the schema below. Use **stderr** for diagnostics / debug logs.
+
+- **Exit `0`, empty stdout** — passthrough.
+- **Exit `0`, valid JSON object on stdout** — structured response. Universal top-level fields:
+  - `system_message` (string, optional) — shown to the user in the UI.
+  - `decision` (`"allow"` | `"deny"`, optional, default `"allow"`) — the effect of `"deny"` depends on the hook type.
+  - `reason` (string, optional) — accompanies `decision: "deny"`.
+  - Event-specific payload under `hook_specific_output`.
+- **Exit `0`, non-empty but non-conforming stdout** (free-form text, broken JSON, JSON scalar/array, schema mismatch) — treated as a hook failure with the parse error as the message. Warning by default; escalated to deny / clear under `strict = true` on a tool hook.
+- **Any non-zero exit / timeout / spawn failure** — same failure path. Diagnostic taken from stderr (falling back to stdout, then the exit code).
+
+Unknown JSON fields are tolerated at every level (forward-compatible). Fields that aren't meaningful for the current hook type are silently ignored.
+
+#### `post_agent_turn`
+
+Fires after every assistant turn that ends without pending tool calls.
+
+- **Receives** (in addition to the session context): no extra fields.
+- **Can return**:
+  - `decision: "deny"` + `reason` — `reason` is injected as a new user message asking for a retry. Capped at **3 retries per hook per user turn**; further denies become terminal warnings.
+  - `system_message` — UI-only.
+
+#### `before_tool`
+
+Fires per tool call, **before** the user permission prompt. First deny short-circuits remaining `before_tool` hooks for that call.
+
+- **Receives** (in addition to the session context): `tool_name`, `tool_call_id`, `tool_input` (the model's raw arguments).
+- **Can return**:
+  - `decision: "deny"` + `reason` — denies the tool call; `reason` becomes the tool error the LLM sees.
+  - `hook_specific_output.tool_input` (object) — **full replacement** of the model's arguments. Re-validated against the tool's schema (validation failure → synthesized denial). Rewrites compose left-to-right across hooks. The rewritten arguments are also what the permission prompt displays, what the tool runs with, and what subsequent LLM turns see on the assistant message.
+  - `system_message` — UI-only.
+
+#### `after_tool`
+
+Fires per tool call **if and only if the tool body actually ran**. `tool_status` is `success`, `failure`, or `cancelled` (cancellation during the tool body — cancellation is shielded so audit hooks still run). Does not fire when the tool never executed: `before_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started.
+
+- **Receives** (in addition to the session context): `tool_name`, `tool_call_id`, `tool_input` (post-rewrite), `tool_status`, `tool_output` (structured result dict; null on failure), `tool_output_text` (the running text the LLM will see, mutable by prior hooks), `tool_error`, `duration_ms`.
+- **Can return**:
+  - `decision: "deny"` + `reason` — replaces `tool_output_text` with `reason`. Pipeline continues; subsequent hooks see the replacement.
+  - `hook_specific_output.additional_context` (string) — **appended** (with a `\n` separator) to `tool_output_text`. Composes with a same-hook deny: deny replaces first, then `additional_context` is appended to the replacement.
+  - `system_message` — UI-only.
+
 ### Session Management
 
 #### Session Continuation and Resumption
@@ -612,11 +691,16 @@ tool_timeout_sec = 120
 Vibe supports continuing from previous sessions:
 
 - **`--continue`** or **`-c`**: Continue from the most recent saved session
+- **`--resume`**: Open an interactive session picker
 - **`--resume SESSION_ID`**: Resume a specific session by ID (supports partial matching)
+- **`/resume`** or **`/continue`**: Open the session picker from inside Vibe; press `D` twice to delete a local saved session. The active session cannot be deleted from this picker.
 
 ```bash
 # Continue from last session
 vibe --continue
+
+# Open session picker
+vibe --resume
 
 # Resume specific session
 vibe --resume abc123

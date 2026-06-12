@@ -21,7 +21,17 @@ from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.telemetry.types import EntrypointMetadata
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
-from vibe.core.types import Backend, FunctionCall, Role, ToolCall
+from vibe.core.types import (
+    Backend,
+    FunctionCall,
+    LLMChunk,
+    LLMMessage,
+    LLMUsage,
+    RefusalError,
+    Role,
+    StopInfo,
+    ToolCall,
+)
 
 
 def _two_model_vibe_config(active_model: str) -> VibeConfig:
@@ -417,3 +427,79 @@ async def test_provider_extra_headers_are_forwarded() -> None:
     assert headers is not None
     assert headers["X-Custom-Auth"] == "token123"
     assert headers["X-Org-Id"] == "org-456"
+
+
+def _refusal_chunk() -> LLMChunk:
+    return LLMChunk(
+        message=LLMMessage(role=Role.assistant, content=""),
+        usage=LLMUsage(prompt_tokens=10, completion_tokens=2),
+        stop=StopInfo(reason="refusal"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_refusal_stop_reason_raises_refusal_error(vibe_config: VibeConfig):
+    backend = FakeBackend([_refusal_chunk()])
+    agent = build_test_agent_loop(config=vibe_config, backend=backend)
+
+    with pytest.raises(RefusalError):
+        [_ async for _ in agent.act("Hello")]
+
+
+@pytest.mark.asyncio
+async def test_refusal_stop_reason_raises_refusal_error_streaming(
+    vibe_config: VibeConfig,
+):
+    backend = FakeBackend([_refusal_chunk()])
+    agent = build_test_agent_loop(
+        config=vibe_config, backend=backend, enable_streaming=True
+    )
+
+    with pytest.raises(RefusalError):
+        [_ async for _ in agent.act("Hello")]
+
+
+def _refusal_chunk_with_details() -> LLMChunk:
+    return LLMChunk(
+        message=LLMMessage(role=Role.assistant, content=""),
+        usage=LLMUsage(prompt_tokens=10, completion_tokens=2),
+        stop=StopInfo(
+            reason="refusal",
+            category="cyber",
+            explanation="This request was declined for safety reasons.",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_refusal_error_carries_category_and_explanation(vibe_config: VibeConfig):
+    backend = FakeBackend([_refusal_chunk_with_details()])
+    agent = build_test_agent_loop(config=vibe_config, backend=backend)
+
+    with pytest.raises(RefusalError) as exc_info:
+        [_ async for _ in agent.act("Hello")]
+
+    err = exc_info.value
+    assert err.category == "cyber"
+    assert err.explanation == "This request was declined for safety reasons."
+    assert "This request was declined for safety reasons." in str(err)
+    assert "cyber" in str(err)
+
+
+@pytest.mark.asyncio
+async def test_refusal_error_carries_category_and_explanation_streaming(
+    vibe_config: VibeConfig,
+):
+    backend = FakeBackend([_refusal_chunk_with_details()])
+    agent = build_test_agent_loop(
+        config=vibe_config, backend=backend, enable_streaming=True
+    )
+
+    with pytest.raises(RefusalError) as exc_info:
+        [_ async for _ in agent.act("Hello")]
+
+    err = exc_info.value
+    assert err.category == "cyber"
+    assert err.explanation == "This request was declined for safety reasons."
+    assert "This request was declined for safety reasons." in str(err)
+    assert "cyber" in str(err)

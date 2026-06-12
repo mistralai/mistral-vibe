@@ -174,8 +174,13 @@ async def test_start_raises_for_unsuccessful_response() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         nuage = NuageClient("https://chat.example.com", "api-key", client=client)
-        with pytest.raises(ServiceTeleportError, match="Nuage start"):
+        with pytest.raises(ServiceTeleportError, match="status 401") as exc_info:
             await nuage.start(_request())
+
+    assert exc_info.value.telemetry_details == {
+        "failure_kind": "http_error",
+        "http_status_code": 401,
+    }
 
 
 @pytest.mark.asyncio
@@ -185,5 +190,30 @@ async def test_start_raises_for_invalid_response() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         nuage = NuageClient("https://chat.example.com", "api-key", client=client)
-        with pytest.raises(ServiceTeleportError, match="response was invalid"):
+        with pytest.raises(
+            ServiceTeleportError, match="response was invalid"
+        ) as exc_info:
             await nuage.start(_request())
+
+    assert exc_info.value.telemetry_details == {
+        "failure_kind": "invalid_schema",
+        "http_status_code": 200,
+    }
+
+
+@pytest.mark.asyncio
+async def test_start_raises_for_invalid_json_response() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, text="not-json", headers={"content-type": "text/plain"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+        with pytest.raises(ServiceTeleportError, match="not valid JSON") as exc_info:
+            await nuage.start(_request())
+
+    assert exc_info.value.telemetry_details == {
+        "failure_kind": "invalid_json",
+        "http_status_code": 200,
+    }

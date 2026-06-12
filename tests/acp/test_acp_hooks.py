@@ -127,7 +127,7 @@ class TestAcpHooksLoading:
         assert result.hooks[0].name == "lint"
         assert result.hooks[0].type == HookType.POST_AGENT_TURN
         assert result.hooks[0].command == "eslint ."
-        assert result.hooks[0].timeout == 30.0
+        assert result.hooks[0].timeout == 60.0
         assert result.issues == []
 
     async def test_new_session_hooks_enabled_invalid_toml(
@@ -167,5 +167,5 @@ class TestAcpHooksLoading:
         assert result.hooks[0].name == "lint"
         assert result.hooks[0].type == HookType.POST_AGENT_TURN
         assert result.hooks[0].command == "eslint ."
-        assert result.hooks[0].timeout == 30.0
+        assert result.hooks[0].timeout == 60.0
         assert result.issues == []

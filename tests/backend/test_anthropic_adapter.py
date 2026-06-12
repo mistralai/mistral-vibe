@@ -498,6 +498,83 @@ class TestAdapterParseResponse:
         assert chunk.message.content == "Hello!"
         assert chunk.usage.prompt_tokens == 10
 
+    def test_non_streaming_captures_refusal_stop_reason(self, adapter, provider):
+        data = {
+            "content": [],
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+            "stop_reason": "refusal",
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.reason == "refusal"
+
+    def test_streaming_message_delta_captures_refusal_stop_reason(
+        self, adapter, provider
+    ):
+        data = {
+            "type": "message_delta",
+            "delta": {"stop_reason": "refusal", "stop_sequence": None},
+            "usage": {"output_tokens": 7},
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.reason == "refusal"
+        assert chunk.usage.completion_tokens == 7
+
+    def test_streaming_message_delta_end_turn_stop_reason(self, adapter, provider):
+        data = {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": 3},
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.reason == "end_turn"
+
+    def test_non_streaming_captures_refusal_stop_details(self, adapter, provider):
+        data = {
+            "content": [],
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+            "stop_reason": "refusal",
+            "stop_details": {
+                "type": "refusal",
+                "category": "cyber",
+                "explanation": "This request was declined.",
+            },
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.category == "cyber"
+        assert chunk.stop.explanation == "This request was declined."
+
+    def test_non_streaming_without_stop_details_is_none(self, adapter, provider):
+        data = {
+            "content": [],
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+            "stop_reason": "end_turn",
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.category is None
+        assert chunk.stop.explanation is None
+
+    def test_streaming_message_delta_captures_refusal_stop_details(
+        self, adapter, provider
+    ):
+        data = {
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": "refusal",
+                "stop_sequence": None,
+                "stop_details": {"type": "refusal", "category": "bio"},
+            },
+            "usage": {"output_tokens": 7},
+        }
+        chunk = adapter.parse_response(data, provider)
+        assert chunk.stop is not None
+        assert chunk.stop.category == "bio"
+        assert chunk.stop.explanation is None
+
     def test_streaming_text_delta(self, adapter, provider):
         data = {
             "type": "content_block_delta",

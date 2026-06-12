@@ -269,17 +269,13 @@ class ChatTextArea(TextArea):
                 case CompletionResult.SUBMIT:
                     event.prevent_default()
                     event.stop()
-                    value = self.get_full_text().strip()
-                    if value:
-                        self.post_message(self.Submitted(value))
+                    self.post_message(self.Submitted(self.get_full_text().strip()))
                     return
 
         if event.key == "enter":
             event.prevent_default()
             event.stop()
-            value = self.get_full_text().strip()
-            if value:
-                self.post_message(self.Submitted(value))
+            self.post_message(self.Submitted(self.get_full_text().strip()))
             return
 
         if event.key == "shift+enter":

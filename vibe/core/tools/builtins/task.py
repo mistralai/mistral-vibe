@@ -137,7 +137,10 @@ class Task(
             is_subagent=True,
             defer_heavy_init=True,
             permission_store=ctx.permission_store,
+            hook_config_result=ctx.hook_config_result,
         )
+        if ctx.session_id:
+            subagent_loop.parent_session_id = ctx.session_id
 
         if ctx and ctx.approval_callback:
             subagent_loop.set_approval_callback(ctx.approval_callback)

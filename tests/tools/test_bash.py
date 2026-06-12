@@ -69,12 +69,15 @@ async def test_truncates_output_to_max_bytes(bash):
 
 
 @pytest.mark.asyncio
-async def test_decodes_non_utf8_bytes(bash):
-    result = await collect_result(bash.run(BashArgs(command="printf '\\xff\\xfe'")))
+async def test_cat_preserves_accents_from_latin1_encoded_file(bash, tmp_path):
+    file = tmp_path / "menu.txt"
+    file.write_bytes("café au lait\nthé glacé\n".encode("latin-1"))
 
-    # accept both possible encodings, as some shells emit escaped bytes as literal strings
-    assert result.stdout in {"��", "\xff\xfe", r"\xff\xfe"}
-    assert result.stderr == ""
+    result = await collect_result(bash.run(BashArgs(command=f"cat {file.name}")))
+
+    assert result.returncode == 0
+    assert "\ufffd" not in result.stdout
+    assert result.stdout == "café au lait\nthé glacé\n"
 
 
 @pytest.mark.parametrize("predicate", ["-exec", "-execdir", "-ok", "-okdir"])
@@ -309,3 +312,94 @@ class TestDenylistWordBoundary:
         bash_tool = self._make_bash(allowlist=["cat"])
         result = bash_tool.resolve_permission(BashArgs(command="catalog"))
         assert result is not None and result.permission is not ToolPermission.ALWAYS
+
+
+def test_default_allowlist_includes_read_only_commands():
+    """Test that common read-only commands are in the default allowlist."""
+    from vibe.core.tools.builtins.bash import _get_default_allowlist
+
+    allowlist = _get_default_allowlist()
+
+    # Read-only commands that should be in the default allowlist
+    read_only_commands = [
+        "grep",
+        "cut",
+        "sort",
+        "tr",
+        "uniq",
+        "basename",
+        "comm",
+        "date",
+        "diff",
+        "dirname",
+        "du",
+        "fmt",
+        "fold",
+        "join",
+        "less",
+        "md5sum",
+        "more",
+        "nl",
+        "od",
+        "paste",
+        "readlink",
+        "sha1sum",
+        "sha256sum",
+        "shasum",
+        "stat",
+        "sum",
+        "tac",
+        "which",
+    ]
+
+    for cmd in read_only_commands:
+        assert cmd in allowlist, (
+            f"Read-only command '{cmd}' should be in default allowlist"
+        )
+
+
+def test_new_read_only_commands_are_allowlisted():
+    """Test that newly added read-only commands are automatically allowed."""
+    config = BashToolConfig()  # Use default config
+    bash_tool = Bash(config_getter=lambda: config, state=BaseToolState())
+
+    # Test that newly added read-only commands are allowed by default
+    test_commands = [
+        "grep pattern file.txt",
+        "cut -d',' -f1 file.csv",
+        "sort file.txt",
+        "tr 'a' 'b' < file.txt",
+        "uniq file.txt",
+        "basename /path/to/file",
+        "comm file1.txt file2.txt",
+        "date",
+        "diff file1.txt file2.txt",
+        "dirname /path/to/file",
+        "du -sh .",
+        "fmt file.txt",
+        "fold -w 80 file.txt",
+        "join -t',' file1.csv file2.csv",
+        "less file.txt",
+        "md5sum file.txt",
+        "more file.txt",
+        "nl file.txt",
+        "od -c file.bin",
+        "paste file1.txt file2.txt",
+        "readlink -f /path/to/link",
+        "sha1sum file.txt",
+        "sha256sum file.txt",
+        "shasum file.txt",
+        "stat file.txt",
+        "sum file.txt",
+        "tac file.txt",
+        "which python",
+    ]
+
+    for cmd in test_commands:
+        permission = bash_tool.resolve_permission(BashArgs(command=cmd))
+        assert isinstance(permission, PermissionContext), (
+            f"Permission should be PermissionContext for '{cmd}'"
+        )
+        assert permission.permission is ToolPermission.ALWAYS, (
+            f"Command '{cmd}' should be always allowed"
+        )

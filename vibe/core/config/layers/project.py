@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import tomllib
-from typing import Any
 
+from vibe.core.config.fingerprint import capture_stable_file
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.patch import ConfigPatch
-from vibe.core.config.types import ConflictStrategy
+from vibe.core.config.types import (
+    EMPTY_CONFIG_SNAPSHOT,
+    ConflictStrategy,
+    LayerConfigSnapshot,
+)
 from vibe.core.paths._vibe_home import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
 
@@ -37,11 +41,14 @@ class ProjectConfigLayer(ConfigLayer[RawConfig]):
 
         return bool(trusted_folders_manager.is_trusted(self._config_file_path.parent))
 
-    async def _read_config(self) -> dict[str, Any]:
-        if self._config_file_path is None:
-            return {}
-        with self._config_file_path.open("rb") as f:
-            return tomllib.load(f)
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+        if self._config_file_path is None or not self._config_file_path.exists():
+            return EMPTY_CONFIG_SNAPSHOT
+
+        with capture_stable_file(self._config_file_path) as (file, fingerprint):
+            data = tomllib.load(file)
+
+        return LayerConfigSnapshot(data=data, fingerprint=fingerprint)
 
     async def _on_trust_changed(self, old: bool | None, new: bool | None) -> None:
         if new is None or self._config_file_path is None:

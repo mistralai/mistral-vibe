@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from rich.markup import escape
 
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from vibe.cli.textual_ui.app import ChatScroll
 
 
+from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
@@ -24,21 +25,16 @@ from textual.widgets import Markdown, Static
 from textual.widgets._markdown import MarkdownStream
 from watchfiles import awatch
 
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.collapsible import (
+    ClickWithoutDragMixin,
+    CollapsibleSection,
+    lines_label,
+)
+from vibe.cli.textual_ui.widgets.no_markup_static import (
+    NoMarkupStatic,
+    NonSelectableStatic,
+)
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
-
-
-class NonSelectableStatic(NoMarkupStatic):
-    @property
-    def text_selection(self) -> None:
-        return None
-
-    @text_selection.setter
-    def text_selection(self, value: Any) -> None:
-        pass
-
-    def get_selection(self, selection: Any) -> None:
-        return None
 
 
 class ExpandingBorder(NonSelectableStatic):
@@ -81,6 +77,10 @@ class UserMessage(Static):
     def get_content(self) -> str:
         return self._content
 
+    @property
+    def pending(self) -> bool:
+        return self._pending
+
     def compose(self) -> ComposeResult:
         with Vertical(classes="user-message-wrapper"):
             with Horizontal(classes="user-message-container"):
@@ -122,6 +122,41 @@ class UserMessage(Static):
             return
 
         self.remove_class("pending")
+
+    def set_show_separator(self, show: bool) -> None:
+        self.set_class(not show, "no-separator")
+
+    def set_follows_previous(self, follows: bool) -> None:
+        self.set_class(follows, "follows-user")
+
+
+class QueueHeaderMessage(Static):
+    DEFAULT_LABEL = "» Queued"
+    PAUSED_LABEL = "» Queued — press Enter to send, type to add"
+
+    def __init__(self, *, paused: bool = False) -> None:
+        super().__init__()
+        self.add_class("queue-header-message")
+        self._paused = paused
+        self._label_widget: NoMarkupStatic | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="queue-header-container"):
+            self._label_widget = NoMarkupStatic(
+                self._current_label(), classes="queue-header-content"
+            )
+            yield self._label_widget
+            yield ExpandingSeparator(classes="queue-header-separator")
+
+    def set_paused(self, paused: bool) -> None:
+        if paused == self._paused:
+            return
+        self._paused = paused
+        if self._label_widget is not None:
+            self._label_widget.update(self._current_label())
+
+    def _current_label(self) -> str:
+        return self.PAUSED_LABEL if self._paused else self.DEFAULT_LABEL
 
 
 class SlashCommandMessage(UserMessage):
@@ -225,7 +260,7 @@ class AssistantMessage(StreamingMessageBase):
         yield markdown
 
 
-class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
+class ReasoningMessage(ClickWithoutDragMixin, SpinnerMixin, StreamingMessageBase):
     SPINNER_TYPE = SpinnerType.PULSE
     SPINNING_TEXT = "Thinking"
     COMPLETED_TEXT = "Thought"
@@ -236,11 +271,13 @@ class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
         self.collapsed = collapsed
         self._indicator_widget: Static | None = None
         self._triangle_widget: Static | None = None
+        self._header_widget: Horizontal | None = None
         self.init_spinner()
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="reasoning-message-wrapper"):
-            with Horizontal(classes="reasoning-message-header"):
+            self._header_widget = Horizontal(classes="reasoning-message-header")
+            with self._header_widget:
                 self._indicator_widget = NonSelectableStatic(
                     self._spinner.current_frame(), classes="reasoning-indicator"
                 )
@@ -264,7 +301,17 @@ class ReasoningMessage(SpinnerMixin, StreamingMessageBase):
     def on_resize(self) -> None:
         self.refresh_spinner()
 
-    async def on_click(self) -> None:
+    def stop_spinning(self, success: bool = True) -> None:
+        super().stop_spinning(success)
+        if self._indicator_widget:
+            self._indicator_widget.update("■")
+
+    def _is_click_on_toggle(self, event: events.Click) -> bool:
+        return self._is_click_within(event, self._header_widget)
+
+    async def on_click(self, event: events.Click) -> None:
+        if self._click_is_passive(event):
+            return
         await self._toggle_collapsed()
 
     async def _toggle_collapsed(self) -> None:
@@ -348,8 +395,9 @@ class InterruptMessage(Static):
             )
 
 
-class BashOutputMessage(SpinnerMixin, Static):
+class BashOutputMessage(ClickWithoutDragMixin, SpinnerMixin, Static):
     SPINNER_TYPE = SpinnerType.PULSE
+    PREVIEW_LINES = 20
 
     def __init__(
         self,
@@ -368,18 +416,59 @@ class BashOutputMessage(SpinnerMixin, Static):
         self._output = output.rstrip("\n")
         self._exit_code = exit_code
         self._pending = pending
+        self._queued = False
         self._output_widget: NoMarkupStatic | None = None
+        self._overflow_widget: NoMarkupStatic | None = None
+        self._section: CollapsibleSection | None = None
         self._output_container: Horizontal | None = None
         self._prompt_widget: NonSelectableStatic | None = None
         self._indicator_widget: Static | None = None
 
+    QUEUED_PROMPT = "! "
+
+    def _preview_text(self) -> str:
+        return "\n".join(self._output.splitlines()[: self.PREVIEW_LINES])
+
+    def _overflow_text(self) -> str:
+        return "\n".join(self._output.splitlines()[self.PREVIEW_LINES :])
+
+    def _overflow_count(self) -> int:
+        return max(0, len(self._output.splitlines()) - self.PREVIEW_LINES)
+
+    def _refresh_output_widgets(self) -> None:
+        count = self._overflow_count()
+        if self._output_widget:
+            self._output_widget.update(self._preview_text())
+        if self._overflow_widget:
+            self._overflow_widget.update(self._overflow_text())
+        if self._section:
+            self._section.display = count > 0
+            self._section.set_collapsed_label(lines_label(count, prefix="+"))
+
     def _update_spinner_frame(self) -> None:
-        if not self._is_spinning or not self._prompt_widget:
+        if not self._is_spinning or not self._prompt_widget or self._queued:
             return
         self._prompt_widget.update(f"{self._spinner.next_frame()} ")
 
     def on_mount(self) -> None:
+        if self._pending and not self._queued:
+            self.start_spinner_timer()
+
+    def set_queued(self, queued: bool) -> None:
+        if queued == self._queued:
+            return
+        self._queued = queued
+        if queued:
+            self.add_class("queued")
+            self.stop_spinning()
+            if self._prompt_widget is not None:
+                self._prompt_widget.update(self.QUEUED_PROMPT)
+            return
+        self.remove_class("queued")
         if self._pending:
+            if self._prompt_widget is not None:
+                self._prompt_widget.update(f"{self._spinner.current_frame()} ")
+            self._is_spinning = True
             self.start_spinner_timer()
 
     def compose(self) -> ComposeResult:
@@ -398,21 +487,42 @@ class BashOutputMessage(SpinnerMixin, Static):
             yield self._prompt_widget
             yield NoMarkupStatic(self._command, classes="bash-command")
         if not self._pending:
+            count = self._overflow_count()
+            self._output_widget = NoMarkupStatic(
+                self._preview_text(), classes="bash-output"
+            )
+            self._overflow_widget = NoMarkupStatic(
+                self._overflow_text(), classes="bash-output"
+            )
+            self._section = CollapsibleSection(
+                self._overflow_widget, collapsed_label=lines_label(count, prefix="+")
+            )
+            self._section.display = count > 0
             self._output_container = Horizontal(classes="bash-output-container")
             with self._output_container:
                 yield ExpandingBorder(classes="bash-output-border")
-                self._output_widget = NoMarkupStatic(
-                    self._output, classes="bash-output"
-                )
-                yield self._output_widget
+                with Vertical(classes="bash-output-body"):
+                    yield self._output_widget
+                    yield self._section
+
+    async def on_click(self, event: events.Click) -> None:
+        if self._click_is_passive(event):
+            return
+        if self._section and self._overflow_count() > 0:
+            self._section.toggle()
 
     async def _ensure_output_container(self) -> None:
         if self._output_container is not None:
             return
         self._output_widget = NoMarkupStatic("", classes="bash-output")
+        self._overflow_widget = NoMarkupStatic("", classes="bash-output")
+        self._section = CollapsibleSection(
+            self._overflow_widget, collapsed_label=lines_label(0, prefix="+")
+        )
+        self._section.display = False
         self._output_container = Horizontal(
             ExpandingBorder(classes="bash-output-border"),
-            self._output_widget,
+            Vertical(self._output_widget, self._section, classes="bash-output-body"),
             classes="bash-output-container",
         )
         await self.mount(self._output_container)
@@ -420,8 +530,7 @@ class BashOutputMessage(SpinnerMixin, Static):
     async def append_output(self, text: str) -> None:
         await self._ensure_output_container()
         self._output += text
-        if self._output_widget:
-            self._output_widget.update(self._output.rstrip("\n"))
+        self._refresh_output_widgets()
 
     async def finish(self, exit_code: int, *, interrupted: bool = False) -> None:
         self._exit_code = exit_code
@@ -450,8 +559,7 @@ class BashOutputMessage(SpinnerMixin, Static):
         if not self._output:
             self._output = "(no output)"
         await self._ensure_output_container()
-        if self._output_widget:
-            self._output_widget.update(self._output.rstrip("\n"))
+        self._refresh_output_widgets()
 
 
 class ErrorMessage(Static):

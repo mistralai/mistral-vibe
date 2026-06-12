@@ -199,7 +199,7 @@ class Read(
 
     @classmethod
     def format_call_display(cls, args: ReadArgs) -> ToolCallDisplay:
-        tag = " (scratchpad)" if is_scratchpad_path(args.file_path) else ""
+        suffix = "(scratchpad)" if is_scratchpad_path(args.file_path) else ""
         summary = f"Reading {args.file_path}"
         extras: list[str] = []
         if args.offset:
@@ -208,7 +208,7 @@ class Read(
             extras.append(f"limit {args.limit} lines")
         if extras:
             summary += f" ({', '.join(extras)})"
-        return ToolCallDisplay(summary=f"{summary}{tag}")
+        return ToolCallDisplay(summary=summary, suffix=suffix)
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -218,17 +218,20 @@ class Read(
             )
 
         path_obj = Path(event.result.file_path)
-        tag = " (scratchpad)" if is_scratchpad_path(event.result.file_path) else ""
-        word = "line" if event.result.num_lines == 1 else "lines"
-        message = f"Read {event.result.num_lines} {word} from {path_obj.name}{tag}"
+        message = f"Read from {path_obj.name}"
+        suffix_parts: list[str] = []
+        if is_scratchpad_path(event.result.file_path):
+            suffix_parts.append("(scratchpad)")
         if event.result.was_truncated or (
             event.result.total_lines is not None
             and event.result.start_line + event.result.num_lines - 1
             < event.result.total_lines
         ):
-            message += " (truncated)"
+            suffix_parts.append("(truncated)")
 
-        return ToolResultDisplay(success=True, message=message)
+        return ToolResultDisplay(
+            success=True, message=message, suffix=" ".join(suffix_parts)
+        )
 
     @classmethod
     def get_status_text(cls) -> str:

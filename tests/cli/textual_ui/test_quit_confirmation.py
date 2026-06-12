@@ -92,11 +92,12 @@ class TestActionInterruptOrQuit:
         mock_container.value = ""
         with (
             patch.object(app, "_get_chat_input", return_value=mock_container),
-            patch.object(app, "_try_interrupt", return_value=False),
+            patch.object(app, "_try_interrupt_no_job_steps", return_value=False),
+            patch.object(app, "_try_interrupt_running_job", return_value=False),
             patch.object(app._quit_manager, "request_confirmation") as mock_confirm,
         ):
             app.action_interrupt_or_quit()
-        mock_confirm.assert_called_once_with("Ctrl+C")
+        mock_confirm.assert_called_once_with("Ctrl+C", "")
 
     def test_quits_on_confirmed(self, app: VibeApp) -> None:
         app._quit_manager._confirm_time = time.monotonic()
@@ -111,7 +112,9 @@ class TestActionInterruptOrQuit:
     def test_interrupts_before_requesting_confirmation(self, app: VibeApp) -> None:
         with (
             patch.object(app, "_get_chat_input", return_value=None),
-            patch.object(app, "_try_interrupt", return_value=True) as mock_interrupt,
+            patch.object(
+                app, "_try_interrupt_no_job_steps", return_value=True
+            ) as mock_interrupt,
             patch.object(app._quit_manager, "request_confirmation") as mock_confirm,
         ):
             app.action_interrupt_or_quit()
@@ -123,11 +126,12 @@ class TestActionInterruptOrQuit:
     ) -> None:
         with (
             patch.object(app, "_get_chat_input", return_value=None),
-            patch.object(app, "_try_interrupt", return_value=False),
+            patch.object(app, "_try_interrupt_no_job_steps", return_value=False),
+            patch.object(app, "_try_interrupt_running_job", return_value=False),
             patch.object(app._quit_manager, "request_confirmation") as mock_confirm,
         ):
             app.action_interrupt_or_quit()
-        mock_confirm.assert_called_once_with("Ctrl+C")
+        mock_confirm.assert_called_once_with("Ctrl+C", "")
 
 
 class TestActionDeleteRightOrQuit:
@@ -148,7 +152,7 @@ class TestActionDeleteRightOrQuit:
             patch.object(app._quit_manager, "request_confirmation") as mock_confirm,
         ):
             app.action_delete_right_or_quit()
-        mock_confirm.assert_called_once_with("Ctrl+D")
+        mock_confirm.assert_called_once_with("Ctrl+D", "")
 
     def test_quits_on_confirmed(self, app: VibeApp) -> None:
         app._quit_manager._confirm_time = time.monotonic()
@@ -166,4 +170,15 @@ class TestActionDeleteRightOrQuit:
             patch.object(app._quit_manager, "request_confirmation") as mock_confirm,
         ):
             app.action_delete_right_or_quit()
-        mock_confirm.assert_called_once_with("Ctrl+D")
+        mock_confirm.assert_called_once_with("Ctrl+D", "")
+
+    def test_shows_queue_warning_when_queue_non_empty(self, app: VibeApp) -> None:
+        app._input_queue.append_prompt("queued")
+        with (
+            patch.object(app, "_get_chat_input", return_value=None),
+            patch.object(app._quit_manager, "request_confirmation") as mock_confirm,
+        ):
+            app.action_delete_right_or_quit()
+        mock_confirm.assert_called_once_with(
+            "Ctrl+D", "1 queued message will be discarded"
+        )

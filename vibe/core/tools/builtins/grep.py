@@ -22,7 +22,7 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import kill_async_subprocess
-from vibe.core.utils.io import read_safe
+from vibe.core.utils.io import decode_safe, read_safe
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -295,10 +295,14 @@ class Grep(
                 )
 
             stdout = (
-                stdout_bytes.decode("utf-8", errors="ignore") if stdout_bytes else ""
+                decode_safe(stdout_bytes, from_subprocess=True).text
+                if stdout_bytes
+                else ""
             )
             stderr = (
-                stderr_bytes.decode("utf-8", errors="ignore") if stderr_bytes else ""
+                decode_safe(stderr_bytes, from_subprocess=True).text
+                if stderr_bytes
+                else ""
             )
 
             if proc.returncode not in {0, 1}:
@@ -350,14 +354,9 @@ class Grep(
             )
 
         message = f"Found {event.result.match_count} matches"
-        if event.result.was_truncated:
-            message += " (truncated)"
+        suffix = "(truncated)" if event.result.was_truncated else ""
 
-        warnings = []
-        if event.result.was_truncated:
-            warnings.append("Output was truncated due to size/match limits")
-
-        return ToolResultDisplay(success=True, message=message, warnings=warnings)
+        return ToolResultDisplay(success=True, message=message, suffix=suffix)
 
     @classmethod
     def get_status_text(cls) -> str:

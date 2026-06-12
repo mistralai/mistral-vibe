@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin
 
@@ -20,6 +21,7 @@ from vibe.core.telemetry.types import (
     TelemetryCallType,
     TeleportCompletedPayload,
     TeleportFailedPayload,
+    TeleportFailureDetails,
     TeleportFailureStage,
 )
 from vibe.core.utils import get_server_url_from_api_base, get_user_agent
@@ -54,6 +56,13 @@ def get_mistral_provider_and_api_key(
     if api_key is None:
         return None
     return provider, api_key
+
+
+def _extract_file_extension(path: object) -> str | None:
+    if not isinstance(path, (str, Path)):
+        return None
+    suffix = Path(path).suffix.lower()
+    return suffix or None
 
 
 class TelemetryClient:
@@ -189,15 +198,27 @@ class TelemetryClient:
         tool_call: ResolvedToolCall,
         status: Literal["success", "failure", "skipped"],
         result: dict[str, Any] | None = None,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, str | None]:
         nb_files_created = 0
         nb_files_modified = 0
+        file_extension: str | None = None
         if status == "success" and result is not None:
-            if tool_call.tool_name == "write_file":
-                nb_files_created = 1
-            elif tool_call.tool_name == "edit":
-                nb_files_modified = 1
-        return nb_files_created, nb_files_modified
+            match tool_call.tool_name:
+                case "write_file":
+                    nb_files_created = 1
+                    file_extension = _extract_file_extension(
+                        tool_call.args_dict.get("path")
+                    )
+                case "edit":
+                    nb_files_modified = 1
+                    file_extension = _extract_file_extension(
+                        tool_call.args_dict.get("file_path")
+                    )
+                case "read":
+                    file_extension = _extract_file_extension(
+                        tool_call.args_dict.get("file_path")
+                    )
+        return nb_files_created, nb_files_modified, file_extension
 
     def send_tool_call_finished(
         self,
@@ -213,8 +234,8 @@ class TelemetryClient:
         verdict_value = decision.verdict.value if decision else None
         approval_type_value = decision.approval_type.value if decision else None
 
-        nb_files_created, nb_files_modified = self._calculate_file_metrics(
-            tool_call, status, result
+        nb_files_created, nb_files_modified, file_extension = (
+            self._calculate_file_metrics(tool_call, status, result)
         )
 
         payload = {
@@ -226,6 +247,7 @@ class TelemetryClient:
             "model": model,
             "nb_files_created": nb_files_created,
             "nb_files_modified": nb_files_modified,
+            "file_extension": file_extension,
             "message_id": message_id,
         }
         self.send_telemetry_event("vibe.tool_call_finished", payload)
@@ -349,6 +371,11 @@ class TelemetryClient:
             correlation_id=self.last_correlation_id,
         )
 
+    def send_remote_resume_requested(self, *, session_id: str) -> None:
+        self.send_telemetry_event(
+            "vibe.remote_resume_requested", {"session_id": session_id}
+        )
+
     def send_teleport_completed(
         self, *, push_required: bool, nb_session_messages: int
     ) -> None:
@@ -365,11 +392,13 @@ class TelemetryClient:
         error_class: str,
         push_required: bool,
         nb_session_messages: int,
+        error_details: TeleportFailureDetails | None = None,
     ) -> None:
-        payload: TeleportFailedPayload = {
-            "stage": stage,
-            "error_class": error_class,
-            "push_required": push_required,
-            "nb_session_messages": nb_session_messages,
-        }
+        payload = TeleportFailedPayload(
+            stage=stage,
+            error_class=error_class,
+            push_required=push_required,
+            nb_session_messages=nb_session_messages,
+            **(error_details or {}),
+        )
         self.send_telemetry_event("vibe.teleport_failed", dict(payload))

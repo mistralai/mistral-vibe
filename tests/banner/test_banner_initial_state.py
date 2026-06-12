@@ -228,3 +228,67 @@ class TestBannerConnectorsCount:
 
         assert banner._initial_state.connectors_connected == 3
         assert banner._initial_state.connectors_total == 5
+
+
+class TestBannerHooksCount:
+    def test_hooks_count_passed_through(self) -> None:
+        skill_manager = Mock(spec=SkillManager)
+        skill_manager.custom_skills_count = 0
+
+        banner = Banner(
+            config=_make_mock_config(), skill_manager=skill_manager, hooks_count=4
+        )
+
+        assert banner._initial_state.hooks_count == 4
+
+    def test_hooks_count_defaults_to_zero(self) -> None:
+        skill_manager = Mock(spec=SkillManager)
+        skill_manager.custom_skills_count = 0
+
+        banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
+
+        assert banner._initial_state.hooks_count == 0
+
+    def test_format_meta_counts_shows_hooks_when_present(self) -> None:
+        skill_manager = Mock(spec=SkillManager)
+        skill_manager.custom_skills_count = 0
+
+        banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
+        banner.state = BannerState(models_count=1, skills_count=0, hooks_count=3)
+
+        result = banner._format_meta_counts()
+        assert "3 hooks" in result
+
+    def test_format_meta_counts_singular_hook(self) -> None:
+        skill_manager = Mock(spec=SkillManager)
+        skill_manager.custom_skills_count = 0
+
+        banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
+        banner.state = BannerState(models_count=1, skills_count=0, hooks_count=1)
+
+        result = banner._format_meta_counts()
+        assert "1 hook" in result
+        assert "1 hooks" not in result
+
+    def test_format_meta_counts_hides_hooks_when_zero(self) -> None:
+        skill_manager = Mock(spec=SkillManager)
+        skill_manager.custom_skills_count = 0
+
+        banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
+        banner.state = BannerState(models_count=1, skills_count=0, hooks_count=0)
+
+        result = banner._format_meta_counts()
+        assert "hook" not in result
+
+    def test_set_state_updates_hooks_count(self) -> None:
+        skill_manager = Mock(spec=SkillManager)
+        skill_manager.custom_skills_count = 0
+
+        banner = Banner(
+            config=_make_mock_config(), skill_manager=skill_manager, hooks_count=0
+        )
+        banner.set_state(
+            config=_make_mock_config(), skill_manager=skill_manager, hooks_count=7
+        )
+
+        assert banner.state.hooks_count == 7

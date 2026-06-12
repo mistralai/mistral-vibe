@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 import json
+from typing import cast
 
 from pydantic import BaseModel
 import pytest
@@ -13,6 +15,7 @@ from tests.stubs.fake_tool import FakeTool
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import VibeConfig
+from vibe.core.hooks.manager import HooksManager
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.builtins.todo import TodoItem
 from vibe.core.types import (
@@ -478,6 +481,150 @@ async def test_tool_call_can_be_interrupted() -> None:
     # Agent loop should stop after cancellation — no second LLM turn
     assistant_events = [e for e in events if isinstance(e, AssistantEvent)]
     assert len(assistant_events) == 1
+
+
+class _RecordingHooksManager:
+    def __init__(self) -> None:
+        self.invoked: list[str] = []
+
+    def reset_retry_count(self) -> None:
+        return
+
+    async def run(self, invocation: object) -> AsyncGenerator[object, None]:
+        self.invoked.append(str(getattr(invocation, "hook_event_name", "")))
+        return
+        yield
+
+
+def _install_recording_hooks(agent_loop: AgentLoop) -> _RecordingHooksManager:
+    recorder = _RecordingHooksManager()
+    agent_loop._hooks_manager = cast(HooksManager, recorder)
+    return recorder
+
+
+@pytest.mark.asyncio
+async def test_after_tool_does_not_fire_when_cancel_lands_before_tool_execution() -> (
+    None
+):
+    async def approval_callback(
+        _tool_name: str, _args: BaseModel, _tool_call_id: str, _rp: list | None = None
+    ) -> tuple[ApprovalResponse, str | None]:
+        raise asyncio.CancelledError()
+
+    agent_loop = make_agent_loop(
+        auto_approve=False,
+        todo_permission=ToolPermission.ASK,
+        approval_callback=approval_callback,
+        backend=FakeBackend([
+            [
+                mock_llm_chunk(
+                    content="Let me check your todos.",
+                    tool_calls=[make_todo_tool_call("call_cancel_pre")],
+                )
+            ],
+            [mock_llm_chunk(content="Cancelled.")],
+        ]),
+    )
+    recorder = _install_recording_hooks(agent_loop)
+
+    events = await act_and_collect_events(agent_loop, "What's my todo list?")
+
+    tool_result = next((e for e in events if isinstance(e, ToolResultEvent)), None)
+    assert tool_result is not None
+    assert tool_result.cancelled is True
+
+    assert "before_tool" in recorder.invoked
+    assert "after_tool" not in recorder.invoked
+
+
+@pytest.mark.asyncio
+async def test_after_tool_does_not_fire_when_user_denies_at_approval_prompt() -> None:
+    async def approval_callback(
+        _tool_name: str, _args: BaseModel, _tool_call_id: str, _rp: list | None = None
+    ) -> tuple[ApprovalResponse, str | None]:
+        return (ApprovalResponse.NO, "do not run this please")
+
+    agent_loop = make_agent_loop(
+        auto_approve=False,
+        todo_permission=ToolPermission.ASK,
+        approval_callback=approval_callback,
+        backend=FakeBackend([
+            [
+                mock_llm_chunk(
+                    content="Let me check your todos.",
+                    tool_calls=[make_todo_tool_call("call_user_deny")],
+                )
+            ],
+            [mock_llm_chunk(content="OK, skipping.")],
+        ]),
+    )
+    recorder = _install_recording_hooks(agent_loop)
+
+    events = await act_and_collect_events(agent_loop, "What's my todo list?")
+
+    tool_result = next((e for e in events if isinstance(e, ToolResultEvent)), None)
+    assert tool_result is not None
+    assert tool_result.skipped is True
+    assert tool_result.skip_reason == "do not run this please"
+
+    assert "before_tool" in recorder.invoked
+    assert "after_tool" not in recorder.invoked
+
+
+@pytest.mark.asyncio
+async def test_after_tool_does_not_fire_when_permission_is_never() -> None:
+    agent_loop = make_agent_loop(
+        auto_approve=False,
+        todo_permission=ToolPermission.NEVER,
+        backend=FakeBackend([
+            [
+                mock_llm_chunk(
+                    content="Let me check your todos.",
+                    tool_calls=[make_todo_tool_call("call_never")],
+                )
+            ],
+            [mock_llm_chunk(content="OK.")],
+        ]),
+    )
+    recorder = _install_recording_hooks(agent_loop)
+
+    events = await act_and_collect_events(agent_loop, "What's my todo list?")
+
+    tool_result = next((e for e in events if isinstance(e, ToolResultEvent)), None)
+    assert tool_result is not None
+    assert tool_result.skipped is True
+
+    assert "before_tool" in recorder.invoked
+    assert "after_tool" not in recorder.invoked
+
+
+@pytest.mark.asyncio
+async def test_after_tool_fires_when_cancel_lands_during_tool_execution() -> None:
+    tool_call = ToolCall(
+        id="call_cancel_mid",
+        index=0,
+        function=FunctionCall(name="stub_tool", arguments="{}"),
+    )
+    config = build_test_vibe_config(enabled_tools=["stub_tool"])
+    agent_loop = build_test_agent_loop(
+        config=config,
+        agent_name=BuiltinAgentName.AUTO_APPROVE,
+        backend=FakeBackend([
+            [mock_llm_chunk(content="Calling.", tool_calls=[tool_call])],
+            [mock_llm_chunk(content="Done.")],
+        ]),
+    )
+    agent_loop.tool_manager._all_tools["stub_tool"] = FakeTool
+    stub_tool_instance = agent_loop.tool_manager.get("stub_tool")
+    assert isinstance(stub_tool_instance, FakeTool)
+    stub_tool_instance._exception_to_raise = asyncio.CancelledError()
+
+    recorder = _install_recording_hooks(agent_loop)
+
+    async for _ev in agent_loop.act("Execute tool"):
+        pass
+
+    assert "after_tool" in recorder.invoked
 
 
 @pytest.mark.asyncio

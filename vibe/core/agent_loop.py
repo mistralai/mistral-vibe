@@ -20,9 +20,10 @@ from opentelemetry import trace
 from pydantic import BaseModel
 
 from vibe.cli.terminal_detect import detect_terminal
+from vibe.core.agent_loop_hooks import AgentLoopHooksMixin
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
-from vibe.core.compaction import collect_prior_user_messages
+from vibe.core.compaction import collect_prior_user_messages, render_compaction_context
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.experiments import ExperimentManager
 from vibe.core.experiments.client import RemoteEvalClient
@@ -31,7 +32,7 @@ from vibe.core.experiments.session import (
     initialize_experiments as session_initialize_experiments,
 )
 from vibe.core.hooks.manager import HooksManager
-from vibe.core.hooks.models import HookConfigResult, HookType, HookUserMessage
+from vibe.core.hooks.models import HookConfigResult, HookEvent
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 from vibe.core.llm.exceptions import BackendError
 from vibe.core.llm.format import (
@@ -82,6 +83,7 @@ from vibe.core.teleport.telemetry import TeleportTelemetryTracker
 from vibe.core.teleport.types import TeleportCompleteEvent
 from vibe.core.tools.base import (
     BaseTool,
+    CancellableToolResult,
     InvokeContext,
     ToolError,
     ToolPermission,
@@ -118,6 +120,7 @@ from vibe.core.types import (
     PlanReviewRequestedEvent,
     RateLimitError,
     ReasoningEvent,
+    RefusalError,
     Role,
     SessionTitleUpdatedEvent,
     ToolCall,
@@ -128,7 +131,6 @@ from vibe.core.types import (
     UserMessageEvent,
 )
 from vibe.core.utils import (
-    CANCELLATION_TAG,
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
     VIBE_WARNING_TAG,
@@ -181,6 +183,16 @@ class ImagesNotSupportedError(AgentLoopError):
 
 class TeleportError(AgentLoopError):
     """Raised when teleport to Vibe Code fails."""
+
+
+def _refusal_error(provider: str, model: str, chunk: LLMChunk) -> RefusalError:
+    stop = chunk.stop
+    return RefusalError(
+        provider,
+        model,
+        category=stop.category if stop else None,
+        explanation=stop.explanation if stop else None,
+    )
 
 
 def _should_raise_rate_limit_error(e: Exception) -> bool:
@@ -238,7 +250,7 @@ def requires_init(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-class AgentLoop:  # noqa: PLR0904
+class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def __init__(  # noqa: PLR0913, PLR0915
         self,
         config: VibeConfig,
@@ -366,6 +378,7 @@ class AgentLoop:  # noqa: PLR0904
         self.hook_config_issues = (
             hook_config_result.issues if hook_config_result else []
         )
+        self.hooks_count = len(hook_config_result.hooks) if hook_config_result else 0
         self.rewind_manager = RewindManager(
             messages=self.messages,
             save_messages=self._save_messages,
@@ -638,15 +651,30 @@ class AgentLoop:  # noqa: PLR0904
 
     @requires_init
     async def inject_user_context(
-        self, content: str, *, as_message: bool = False
+        self,
+        content: str,
+        *,
+        as_message: bool = False,
+        images: list[ImageAttachment] | None = None,
+        client_message_id: str | None = None,
     ) -> None:
         if as_message:
             self.messages.append(
-                LLMMessage(role=Role.user, content=content, message_id=str(uuid4()))
+                LLMMessage(
+                    role=Role.user,
+                    content=content,
+                    message_id=client_message_id or str(uuid4()),
+                    images=images or None,
+                )
             )
         else:
             self.messages.append(
-                LLMMessage(role=Role.user, content=content, injected=True)
+                LLMMessage(
+                    role=Role.user,
+                    content=content,
+                    injected=True,
+                    images=images or None,
+                )
             )
         await self._save_messages()
 
@@ -886,7 +914,7 @@ class AgentLoop:  # noqa: PLR0904
         headers["x-affinity"] = self.session_id
         return headers
 
-    async def _conversation_loop(  # noqa: PLR0912
+    async def _conversation_loop(
         self,
         user_msg: str,
         client_message_id: str | None = None,
@@ -940,7 +968,9 @@ class AgentLoop:  # noqa: PLR0904
                     if is_user_cancellation_event(event):
                         user_cancelled = True
                     yield event
-                    await self._save_messages()
+                # Per-turn save so the on-disk log stays fresh; after the
+                # inner loop so before_tool rewrites land in the snapshot.
+                await self._save_messages()
                 self._is_user_prompt_call = False
 
                 last_message = self.messages[-1]
@@ -952,23 +982,12 @@ class AgentLoop:  # noqa: PLR0904
                 if user_cancelled:
                     return
 
-                if should_break_loop and self._hooks_manager:
-                    hook_retry: HookUserMessage | None = None
-                    async for hook_event in self._hooks_manager.run(
-                        HookType.POST_AGENT_TURN, self.session_id, self.session_logger
-                    ):
-                        if isinstance(hook_event, HookUserMessage):
-                            hook_retry = hook_event
-                        else:
-                            yield hook_event
-                    if hook_retry is not None:
-                        self.messages.append(
-                            LLMMessage(
-                                role=Role.user,
-                                content=hook_retry.content,
-                                injected=True,
-                            )
-                        )
+                if should_break_loop:
+                    retry_msg, hook_events = await self._dispatch_post_turn_hooks()
+                    for hook_event in hook_events:
+                        yield hook_event
+                    if retry_msg is not None:
+                        self.messages.append(retry_msg)
                         should_break_loop = False
 
         finally:
@@ -1088,6 +1107,25 @@ class AgentLoop:  # noqa: PLR0904
             message_id=llm_result.message.message_id,
         )
 
+    async def _handle_tool_calls(
+        self, resolved: ResolvedMessage
+    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent]:
+        async for event in self._emit_failed_tool_events(resolved.failed_calls):
+            yield event
+        if not resolved.tool_calls:
+            return
+
+        for tool_call in resolved.tool_calls:
+            yield ToolCallEvent(
+                tool_name=tool_call.tool_name,
+                tool_class=tool_call.tool_class,
+                args=tool_call.validated_args,
+                tool_call_id=tool_call.call_id,
+            )
+
+        async for event in self._run_tools_concurrently(resolved.tool_calls):
+            yield event
+
     async def _emit_failed_tool_events(
         self, failed_calls: list[FailedToolCall]
     ) -> AsyncGenerator[ToolResultEvent]:
@@ -1106,158 +1144,12 @@ class AgentLoop:  # noqa: PLR0904
                 )
             )
 
-    async def _process_one_tool_call(
-        self, tool_call: ResolvedToolCall
-    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent]:
-        async with tool_span(
-            tool_name=tool_call.tool_name,
-            call_id=tool_call.call_id,
-            arguments=tool_call.validated_args.model_dump_json(),
-        ) as span:
-            async for event in self._execute_tool_call(span, tool_call):
-                yield event
-
-    async def _execute_tool_call(
-        self, span: trace.Span, tool_call: ResolvedToolCall
-    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent]:
-        try:
-            tool_instance = self.tool_manager.get(tool_call.tool_name)
-        except Exception as exc:
-            error_msg = f"Error getting tool '{tool_call.tool_name}': {exc}"
-            yield self._tool_failure_event(tool_call, error_msg, span=span)
-            return
-
-        decision: ToolDecision | None = None
-        try:
-            decision = await self._should_execute_tool(
-                tool_instance, tool_call.validated_args, tool_call.call_id
-            )
-
-            if decision.verdict == ToolExecutionResponse.SKIP:
-                self.stats.tool_calls_rejected += 1
-                skip_reason = decision.feedback or str(
-                    get_user_cancellation_message(
-                        CancellationReason.TOOL_SKIPPED, tool_call.tool_name
-                    )
-                )
-                yield ToolResultEvent(
-                    tool_name=tool_call.tool_name,
-                    tool_class=tool_call.tool_class,
-                    skipped=True,
-                    skip_reason=skip_reason,
-                    cancelled=f"<{CANCELLATION_TAG}>" in skip_reason,
-                    tool_call_id=tool_call.call_id,
-                )
-                self._handle_tool_response(
-                    tool_call, skip_reason, "skipped", decision, span=span
-                )
-                return
-
-            self.stats.tool_calls_agreed += 1
-
-            snapshot = tool_instance.get_file_snapshot(tool_call.validated_args)
-            if snapshot is not None:
-                self.rewind_manager.add_snapshot(snapshot)
-
-            start_time = time.perf_counter()
-            result_model = None
-            async for item in tool_instance.invoke(
-                ctx=InvokeContext(
-                    tool_call_id=tool_call.call_id,
-                    agent_manager=self.agent_manager,
-                    session_dir=self.session_logger.session_dir,
-                    entrypoint_metadata=self.entrypoint_metadata,
-                    approval_callback=self.approval_callback,
-                    user_input_callback=self.user_input_callback,
-                    sampling_callback=self._sampling_handler,
-                    plan_file_path=self._plan_session.plan_file_path,
-                    switch_agent_callback=self.switch_agent,
-                    skill_manager=self.skill_manager,
-                    scratchpad_dir=self.scratchpad_dir,
-                    permission_store=self._permission_store,
-                ),
-                **tool_call.args_dict,
-            ):
-                if isinstance(item, ToolStreamEvent):
-                    yield item
-                else:
-                    result_model = item
-
-            duration = time.perf_counter() - start_time
-            if result_model is None:
-                raise ToolError("Tool did not yield a result")
-
-            result_dict = result_model.model_dump()
-            text = "\n".join(f"{k}: {v}" for k, v in result_dict.items())
-            extra = tool_instance.get_result_extra(result_model)
-            if extra:
-                text += "\n\n" + extra
-            self._handle_tool_response(
-                tool_call, text, "success", decision, result_dict, span=span
-            )
-            yield ToolResultEvent(
-                tool_name=tool_call.tool_name,
-                tool_class=tool_call.tool_class,
-                result=result_model,
-                cancelled=getattr(result_model, "cancelled", False),
-                duration=duration,
-                tool_call_id=tool_call.call_id,
-            )
-            self.stats.tool_calls_succeeded += 1
-
-        except asyncio.CancelledError:
-            cancel = str(
-                get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
-            )
-            self.stats.tool_calls_failed += 1
-            yield self._tool_failure_event(
-                tool_call, cancel, decision, cancelled=True, span=span
-            )
-            raise
-
-        except Exception as exc:
-            error_msg = f"<{TOOL_ERROR_TAG}>{tool_instance.get_name()} failed: {exc}</{TOOL_ERROR_TAG}>"
-            if isinstance(exc, ToolPermissionError):
-                self.stats.tool_calls_agreed -= 1
-                self.stats.tool_calls_rejected += 1
-            else:
-                self.stats.tool_calls_failed += 1
-            yield self._tool_failure_event(tool_call, error_msg, decision, span=span)
-
-    async def _handle_tool_calls(
-        self, resolved: ResolvedMessage
-    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent]:
-        async for event in self._emit_failed_tool_events(resolved.failed_calls):
-            yield event
-        if not resolved.tool_calls:
-            return
-
-        for tool_call in resolved.tool_calls:
-            yield ToolCallEvent(
-                tool_name=tool_call.tool_name,
-                tool_class=tool_call.tool_class,
-                args=tool_call.validated_args,
-                tool_call_id=tool_call.call_id,
-            )
-
-        async for event in self._run_tools_concurrently(resolved.tool_calls):
-            yield event
-
-    async def _execute_tool_to_queue(
-        self,
-        tc: ResolvedToolCall,
-        queue: asyncio.Queue[ToolCallEvent | ToolResultEvent | ToolStreamEvent | None],
-    ) -> None:
-        """Run a single tool call, sending events to the queue."""
-        async for event in self._process_one_tool_call(tc):
-            await queue.put(event)
-
     async def _run_tools_concurrently(
         self, tool_calls: list[ResolvedToolCall]
-    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent]:
+    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent]:
         """Execute multiple tool calls concurrently, yielding events as they arrive."""
         queue: asyncio.Queue[
-            ToolCallEvent | ToolResultEvent | ToolStreamEvent | None
+            ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent | None
         ] = asyncio.Queue()
 
         tasks = [
@@ -1295,6 +1187,280 @@ class AgentLoop:  # noqa: PLR0904
                 monitor.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await monitor
+
+    async def _execute_tool_to_queue(
+        self,
+        tc: ResolvedToolCall,
+        queue: asyncio.Queue[
+            ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent | None
+        ],
+    ) -> None:
+        """Run a single tool call, sending events to the queue."""
+        async for event in self._process_one_tool_call(tc):
+            await queue.put(event)
+
+    async def _process_one_tool_call(
+        self, tool_call: ResolvedToolCall
+    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
+        async with tool_span(
+            tool_name=tool_call.tool_name,
+            call_id=tool_call.call_id,
+            arguments=tool_call.validated_args.model_dump_json(),
+        ) as span:
+            async for event in self._execute_tool_call(span, tool_call):
+                yield event
+
+    async def _execute_tool_call(
+        self, span: trace.Span, tool_call: ResolvedToolCall
+    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
+        try:
+            tool_instance = self.tool_manager.get(tool_call.tool_name)
+        except Exception as exc:
+            error_msg = f"Error getting tool '{tool_call.tool_name}': {exc}"
+            yield self._tool_failure_event(tool_call, error_msg, span=span)
+            return
+
+        try:
+            tool_input = self._serialize_tool_input(tool_call)
+        except Exception as exc:
+            error_msg = (
+                f"<{TOOL_ERROR_TAG}>Failed to serialize tool input for "
+                f"'{tool_call.tool_name}': {exc}</{TOOL_ERROR_TAG}>"
+            )
+            self.stats.tool_calls_failed += 1
+            yield ToolResultEvent(
+                tool_name=tool_call.tool_name,
+                tool_class=tool_call.tool_class,
+                error=error_msg,
+                tool_call_id=tool_call.call_id,
+            )
+            self._handle_tool_response(tool_call, error_msg, "failure", span=span)
+            return
+
+        events, resolution = await self._run_before_tool_pipeline(
+            tool_call, tool_input, span=span
+        )
+        for ev in events:
+            yield ev
+        if resolution.denial_event is not None:
+            yield resolution.denial_event
+            return
+        tool_call = resolution.tool_call
+        tool_input = resolution.tool_input
+
+        decision: ToolDecision | None = None
+        tool_started = False
+        try:
+            decision = await self._should_execute_tool(
+                tool_instance, tool_call.validated_args, tool_call.call_id
+            )
+
+            if decision.verdict == ToolExecutionResponse.SKIP:
+                async for ev in self._handle_tool_skip(tool_call, decision, span=span):
+                    yield ev
+                return
+
+            tool_started = True
+            async for ev in self._invoke_tool(
+                tool_call, tool_instance, tool_input, decision, span=span
+            ):
+                yield ev
+
+        except asyncio.CancelledError:
+            cancel = str(
+                get_user_cancellation_message(CancellationReason.TOOL_INTERRUPTED)
+            )
+            self.stats.tool_calls_failed += 1
+            yield ToolResultEvent(
+                tool_name=tool_call.tool_name,
+                tool_class=tool_call.tool_class,
+                error=cancel,
+                cancelled=True,
+                tool_call_id=tool_call.call_id,
+            )
+            async for ev in self._finalize_cancelled_tool(
+                tool_call,
+                tool_input,
+                decision,
+                cancel,
+                span=span,
+                tool_started=tool_started,
+            ):
+                yield ev
+            raise
+
+        except Exception as exc:
+            error_msg = f"<{TOOL_ERROR_TAG}>{tool_instance.get_name()} failed: {exc}</{TOOL_ERROR_TAG}>"
+            if isinstance(exc, ToolPermissionError):
+                self.stats.tool_calls_agreed -= 1
+                self.stats.tool_calls_rejected += 1
+            else:
+                self.stats.tool_calls_failed += 1
+            yield ToolResultEvent(
+                tool_name=tool_call.tool_name,
+                tool_class=tool_call.tool_class,
+                error=error_msg,
+                tool_call_id=tool_call.call_id,
+            )
+            async for ev in self._run_after_tool_and_finalize(
+                tool_call,
+                tool_input=tool_input,
+                tool_status="failure",
+                response_status="failure",
+                decision=decision,
+                span=span,
+                tool_error=str(exc),
+                initial_text=error_msg,
+            ):
+                yield ev
+
+    async def _invoke_tool(
+        self,
+        tool_call: ResolvedToolCall,
+        tool_instance: BaseTool,
+        tool_input: dict[str, Any],
+        decision: ToolDecision,
+        *,
+        span: trace.Span,
+    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
+        self.stats.tool_calls_agreed += 1
+
+        snapshot = tool_instance.get_file_snapshot(tool_call.validated_args)
+        if snapshot is not None:
+            self.rewind_manager.add_snapshot(snapshot)
+
+        start_time = time.perf_counter()
+        result_model = None
+        async for item in tool_instance.invoke(
+            ctx=InvokeContext(
+                tool_call_id=tool_call.call_id,
+                agent_manager=self.agent_manager,
+                session_dir=self.session_logger.session_dir,
+                entrypoint_metadata=self.entrypoint_metadata,
+                approval_callback=self.approval_callback,
+                user_input_callback=self.user_input_callback,
+                sampling_callback=self._sampling_handler,
+                plan_file_path=self._plan_session.plan_file_path,
+                switch_agent_callback=self.switch_agent,
+                skill_manager=self.skill_manager,
+                scratchpad_dir=self.scratchpad_dir,
+                permission_store=self._permission_store,
+                hook_config_result=self._hook_config_result,
+                session_id=self.session_id,
+            ),
+            **tool_call.args_dict,
+        ):
+            if isinstance(item, ToolStreamEvent):
+                yield item
+            else:
+                result_model = item
+
+        duration = time.perf_counter() - start_time
+        if result_model is None:
+            raise ToolError("Tool did not yield a result")
+
+        result_dict = result_model.model_dump()
+        text = "\n".join(f"{k}: {v}" for k, v in result_dict.items())
+        extra = tool_instance.get_result_extra(result_model)
+        if extra:
+            text += "\n\n" + extra
+
+        result_cancelled = (
+            isinstance(result_model, CancellableToolResult) and result_model.cancelled
+        )
+        yield ToolResultEvent(
+            tool_name=tool_call.tool_name,
+            tool_class=tool_call.tool_class,
+            result=result_model,
+            cancelled=result_cancelled,
+            duration=duration,
+            tool_call_id=tool_call.call_id,
+        )
+        async for ev in self._run_after_tool_and_finalize(
+            tool_call,
+            tool_input=tool_input,
+            tool_status="cancelled" if result_cancelled else "success",
+            response_status="success",
+            decision=decision,
+            span=span,
+            tool_output=result_dict,
+            duration_ms=duration * 1000.0,
+            initial_text=text,
+        ):
+            yield ev
+        self.stats.tool_calls_succeeded += 1
+
+    async def _should_execute_tool(
+        self, tool: BaseTool, args: BaseModel, tool_call_id: str
+    ) -> ToolDecision:
+        if self.bypass_tool_permissions:
+            return ToolDecision(
+                verdict=ToolExecutionResponse.EXECUTE,
+                approval_type=ToolPermission.ALWAYS,
+            )
+
+        async with self._permission_store.lock:
+            tool_name = tool.get_name()
+            ctx = tool.resolve_permission(args)
+
+            if ctx is None:
+                config_perm = self.tool_manager.get_tool_config(tool_name).permission
+                ctx = PermissionContext(permission=config_perm)
+
+            match ctx.permission:
+                case ToolPermission.ALWAYS:
+                    return ToolDecision(
+                        verdict=ToolExecutionResponse.EXECUTE,
+                        approval_type=ToolPermission.ALWAYS,
+                    )
+                case ToolPermission.NEVER:
+                    return ToolDecision(
+                        verdict=ToolExecutionResponse.SKIP,
+                        approval_type=ToolPermission.NEVER,
+                        feedback=ctx.reason
+                        or f"Tool '{tool_name}' is permanently disabled",
+                    )
+                case _:
+                    uncovered = [
+                        rp
+                        for rp in ctx.required_permissions
+                        if not self._permission_store.covers(tool_name, rp)
+                    ]
+                    if ctx.required_permissions and not uncovered:
+                        return ToolDecision(
+                            verdict=ToolExecutionResponse.EXECUTE,
+                            approval_type=ToolPermission.ALWAYS,
+                        )
+                    return await self._ask_approval(
+                        tool_name, args, tool_call_id, uncovered
+                    )
+
+    async def _ask_approval(
+        self,
+        tool_name: str,
+        args: BaseModel,
+        tool_call_id: str,
+        required_permissions: list[RequiredPermission],
+    ) -> ToolDecision:
+        if not self.approval_callback:
+            return ToolDecision(
+                verdict=ToolExecutionResponse.SKIP,
+                approval_type=ToolPermission.ASK,
+                feedback="Tool execution not permitted.",
+            )
+        response, feedback = await self.approval_callback(
+            tool_name, args, tool_call_id, required_permissions
+        )
+
+        match response:
+            case ApprovalResponse.YES:
+                verdict = ToolExecutionResponse.EXECUTE
+            case _:
+                verdict = ToolExecutionResponse.SKIP
+
+        return ToolDecision(
+            verdict=verdict, approval_type=ToolPermission.ASK, feedback=feedback
+        )
 
     def _handle_tool_response(
         self,
@@ -1412,9 +1578,15 @@ class AgentLoop:  # noqa: PLR0904
                 result.message
             )
             self.messages.append(processed_message)
-            return LLMChunk(message=processed_message, usage=result.usage)
+            if result.stop and result.stop.is_refusal:
+                raise _refusal_error(provider.name, active_model.name, result)
+            return LLMChunk(
+                message=processed_message, usage=result.usage, stop=result.stop
+            )
 
         except Exception as e:
+            if isinstance(e, RefusalError):
+                raise
             if _should_raise_rate_limit_error(e):
                 raise RateLimitError(provider.name, active_model.name) from e
             if _is_context_too_long_error(e):
@@ -1470,7 +1642,9 @@ class AgentLoop:  # noqa: PLR0904
                 processed_message = self.format_handler.process_api_response_message(
                     chunk.message
                 )
-                processed_chunk = LLMChunk(message=processed_message, usage=chunk.usage)
+                processed_chunk = LLMChunk(
+                    message=processed_message, usage=chunk.usage, stop=chunk.stop
+                )
                 chunk_agg = (
                     processed_chunk
                     if chunk_agg is None
@@ -1487,8 +1661,12 @@ class AgentLoop:  # noqa: PLR0904
             self._update_stats(usage=usage, time_seconds=end_time - start_time)
 
             self.messages.append(chunk_agg.message)
+            if chunk_agg.stop and chunk_agg.stop.is_refusal:
+                raise _refusal_error(provider.name, active_model.name, chunk_agg)
 
         except Exception as e:
+            if isinstance(e, RefusalError):
+                raise
             if _should_raise_rate_limit_error(e):
                 raise RateLimitError(provider.name, active_model.name) from e
             if _is_context_too_long_error(e):
@@ -1509,78 +1687,6 @@ class AgentLoop:  # noqa: PLR0904
         self.stats.context_tokens = usage.prompt_tokens + usage.completion_tokens
         if time_seconds > 0 and usage.completion_tokens > 0:
             self.stats.tokens_per_second = usage.completion_tokens / time_seconds
-
-    async def _should_execute_tool(
-        self, tool: BaseTool, args: BaseModel, tool_call_id: str
-    ) -> ToolDecision:
-        if self.bypass_tool_permissions:
-            return ToolDecision(
-                verdict=ToolExecutionResponse.EXECUTE,
-                approval_type=ToolPermission.ALWAYS,
-            )
-
-        async with self._permission_store.lock:
-            tool_name = tool.get_name()
-            ctx = tool.resolve_permission(args)
-
-            if ctx is None:
-                config_perm = self.tool_manager.get_tool_config(tool_name).permission
-                ctx = PermissionContext(permission=config_perm)
-
-            match ctx.permission:
-                case ToolPermission.ALWAYS:
-                    return ToolDecision(
-                        verdict=ToolExecutionResponse.EXECUTE,
-                        approval_type=ToolPermission.ALWAYS,
-                    )
-                case ToolPermission.NEVER:
-                    return ToolDecision(
-                        verdict=ToolExecutionResponse.SKIP,
-                        approval_type=ToolPermission.NEVER,
-                        feedback=ctx.reason
-                        or f"Tool '{tool_name}' is permanently disabled",
-                    )
-                case _:
-                    uncovered = [
-                        rp
-                        for rp in ctx.required_permissions
-                        if not self._permission_store.covers(tool_name, rp)
-                    ]
-                    if ctx.required_permissions and not uncovered:
-                        return ToolDecision(
-                            verdict=ToolExecutionResponse.EXECUTE,
-                            approval_type=ToolPermission.ALWAYS,
-                        )
-                    return await self._ask_approval(
-                        tool_name, args, tool_call_id, uncovered
-                    )
-
-    async def _ask_approval(
-        self,
-        tool_name: str,
-        args: BaseModel,
-        tool_call_id: str,
-        required_permissions: list[RequiredPermission],
-    ) -> ToolDecision:
-        if not self.approval_callback:
-            return ToolDecision(
-                verdict=ToolExecutionResponse.SKIP,
-                approval_type=ToolPermission.ASK,
-                feedback="Tool execution not permitted.",
-            )
-        response, feedback = await self.approval_callback(
-            tool_name, args, tool_call_id, required_permissions
-        )
-
-        match response:
-            case ApprovalResponse.YES:
-                verdict = ToolExecutionResponse.EXECUTE
-            case _:
-                verdict = ToolExecutionResponse.SKIP
-
-        return ToolDecision(
-            verdict=verdict, approval_type=ToolPermission.ASK, feedback=feedback
-        )
 
     def _clean_message_history(self) -> None:
         ACCEPTABLE_HISTORY_SIZE = 2
@@ -1767,11 +1873,13 @@ class AgentLoop:  # noqa: PLR0904
                 summary_content = "(no summary available)"
 
             system_message = self.messages[0]
-            wrapped_summary = f"{summary_prefix}\n{summary_content}"
-            summary_message = LLMMessage(
-                role=Role.user, content=wrapped_summary, injected=True
+            compaction_context = render_compaction_context(
+                prior_user_messages, summary_content
             )
-            self.messages.reset([system_message, *prior_user_messages, summary_message])
+            compaction_context_message = LLMMessage(
+                role=Role.user, content=compaction_context, injected=True
+            )
+            self.messages.reset([system_message, compaction_context_message])
 
             await self._reset_session()
 

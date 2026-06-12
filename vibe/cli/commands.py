@@ -102,7 +102,7 @@ class CommandRegistry:
                 handler="_compact_history",
             ),
             "exit": Command(
-                aliases=frozenset(["/exit"]),
+                aliases=frozenset(["/exit", "exit", "quit", ":q", ":quit"]),
                 description="Exit the application",
                 handler="_exit_app",
                 exits=True,
@@ -125,7 +125,7 @@ class CommandRegistry:
             ),
             "resume": Command(
                 aliases=frozenset(["/resume", "/continue"]),
-                description="Browse and resume past sessions",
+                description="Browse, resume, or delete saved sessions",
                 handler="_show_session_picker",
             ),
             "rename": Command(
@@ -228,6 +228,11 @@ class CommandRegistry:
         cmd_args = parts[1] if len(parts) > 1 else ""
         cmd_name = self.get_command_name(cmd_word)
         if cmd_name is None:
+            return None
+
+        # Bare aliases (e.g. `exit`) match only as the whole input, else a
+        # message starting with one would be swallowed instead of sent.
+        if not cmd_word.startswith("/") and cmd_args:
             return None
 
         command = self.commands[cmd_name]

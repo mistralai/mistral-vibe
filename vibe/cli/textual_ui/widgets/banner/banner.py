@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalGroup
 from textual.reactive import reactive
 from textual.widgets import Static
 
@@ -28,6 +28,7 @@ class BannerState:
     connectors_connected: int = 0
     connectors_total: int = 0
     skills_count: int = 0
+    hooks_count: int = 0
     plan_description: str | None = None
 
 
@@ -40,6 +41,7 @@ class Banner(Static):
         skill_manager: SkillManager,
         connectors_connected: int = 0,
         connectors_total: int = 0,
+        hooks_count: int = 0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -49,12 +51,13 @@ class Banner(Static):
             skill_manager=skill_manager,
             connectors_connected=connectors_connected,
             connectors_total=connectors_total,
+            hooks_count=hooks_count,
             plan_description=None,
         )
         self._animated = not config.disable_welcome_banner_animation
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="banner-container"):
+        with VerticalGroup(id="banner-container"):
             yield PetitChat(animate=self._animated)
 
             with Vertical(id="banner-info"):
@@ -93,6 +96,7 @@ class Banner(Static):
         skill_manager: SkillManager,
         connectors_connected: int = 0,
         connectors_total: int = 0,
+        hooks_count: int = 0,
         plan_description: str | None = None,
     ) -> None:
         self.state = self._build_state(
@@ -100,6 +104,7 @@ class Banner(Static):
             skill_manager,
             connectors_connected,
             connectors_total,
+            hooks_count,
             plan_description,
         )
 
@@ -109,6 +114,7 @@ class Banner(Static):
         skill_manager: SkillManager,
         connectors_connected: int = 0,
         connectors_total: int = 0,
+        hooks_count: int = 0,
         plan_description: str | None = None,
     ) -> BannerState:
         all_servers = config.mcp_servers
@@ -123,6 +129,7 @@ class Banner(Static):
             connectors_connected=connectors_connected,
             connectors_total=connectors_total,
             skills_count=skill_manager.custom_skills_count,
+            hooks_count=hooks_count,
             plan_description=plan_description,
         )
 
@@ -148,6 +155,8 @@ class Banner(Static):
             mcp_str = _pluralize(self.state.mcp_servers_enabled, "MCP server")
         parts.append(mcp_str)
         parts.append(_pluralize(self.state.skills_count, "skill"))
+        if self.state.hooks_count > 0:
+            parts.append(_pluralize(self.state.hooks_count, "hook"))
         return " · ".join(parts)
 
     def _format_plan(self) -> str:

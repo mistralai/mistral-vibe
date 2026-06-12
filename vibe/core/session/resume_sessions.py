@@ -14,6 +14,10 @@ from vibe.core.session.session_loader import SessionLoader
 ResumeSessionSource = Literal["local", "remote"]
 
 
+def can_delete_resume_session_source(source: ResumeSessionSource) -> bool:
+    return source == "local"
+
+
 def short_session_id(session_id: str, source: ResumeSessionSource = "local") -> str:
     return shorten_session_id(session_id, from_end=source == "remote")
 
@@ -36,6 +40,10 @@ class ResumeSessionInfo:
     @property
     def option_id(self) -> str:
         return f"{self.source}:{self.session_id}"
+
+    @property
+    def can_delete(self) -> bool:
+        return can_delete_resume_session_source(self.source)
 
 
 def list_local_resume_sessions(

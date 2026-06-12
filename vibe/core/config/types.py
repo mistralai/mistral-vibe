@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum, auto
+from typing import Annotated, Any
+
+from pydantic import BaseModel, ConfigDict, StringConstraints
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,7 +18,7 @@ class ConflictStrategy(StrEnum):
 
 
 class ConcurrencyConflictError(Exception):
-    """Raised when backing store was modified externally between load and apply."""
+    """Raised when a backing store is modified externally during an optimistic config operation."""
 
     def __init__(self, expected_fp: str, actual_fp: str) -> None:
         super().__init__(
@@ -23,3 +26,26 @@ class ConcurrencyConflictError(Exception):
         )
         self.expected_fp = expected_fp
         self.actual_fp = actual_fp
+
+
+class LayerConfigSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    data: dict[str, Any]
+    fingerprint: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+MISSING_CONFIG_FILE_FINGERPRINT = "vibe:missing-config-file"
+EMPTY_CONFIG_SNAPSHOT = LayerConfigSnapshot(
+    data={}, fingerprint=MISSING_CONFIG_FILE_FINGERPRINT
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigChangeEvent:
+    """Emitted after a successfully applied change."""
+
+    changed_keys: frozenset[str]
+    before: dict[str, Any]
+    after: dict[str, Any]
+    reason: str

@@ -129,3 +129,30 @@ async def test_skill_without_args_does_not_prepend_invocation_line(
             vibe_app_with_skills, pilot, "Do the thing."
         )
         assert "/my-skill" not in message._content
+
+
+@pytest.mark.asyncio
+async def test_popped_queued_skill_does_not_fire_telemetry(
+    vibe_app_with_skills: VibeApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with vibe_app_with_skills.run_test() as pilot:
+        events: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            vibe_app_with_skills.agent_loop.telemetry_client,
+            "send_slash_command_used",
+            lambda name, kind: events.append((name, kind)),
+        )
+
+        chat_input = vibe_app_with_skills.query_one(ChatInputContainer)
+        vibe_app_with_skills._agent_running = True
+        try:
+            chat_input.post_message(ChatInputContainer.Submitted("/my-skill"))
+            await pilot.pause(0.1)
+            assert len(vibe_app_with_skills._input_queue) == 1
+
+            await pilot.press("ctrl+c")
+            await pilot.pause(0.1)
+            assert len(vibe_app_with_skills._input_queue) == 0
+            assert events == []
+        finally:
+            vibe_app_with_skills._agent_running = False

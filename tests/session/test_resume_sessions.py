@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from vibe.core.session.resume_sessions import (
+    ResumeSessionInfo,
+    can_delete_resume_session_source,
     list_remote_resume_sessions,
     short_session_id,
 )
@@ -43,6 +45,25 @@ class TestShortSessionId:
 
     def test_empty_string(self) -> None:
         assert short_session_id("") == ""
+
+
+class TestCanDeleteResumeSession:
+    def test_local_source_can_delete(self) -> None:
+        assert can_delete_resume_session_source("local") is True
+
+    def test_remote_source_cannot_delete(self) -> None:
+        assert can_delete_resume_session_source("remote") is False
+
+    def test_session_info_can_delete_matches_source(self) -> None:
+        session = ResumeSessionInfo(
+            session_id="session-a",
+            source="local",
+            cwd="/test",
+            title=None,
+            end_time=None,
+        )
+
+        assert session.can_delete is True
 
 
 class TestListRemoteResumeSessions:

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import tomllib
-from typing import Any
 
+from vibe.core.config.fingerprint import capture_stable_file
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.patch import ConfigPatch
-from vibe.core.config.types import ConflictStrategy
+from vibe.core.config.types import (
+    EMPTY_CONFIG_SNAPSHOT,
+    ConflictStrategy,
+    LayerConfigSnapshot,
+)
 from vibe.core.paths._vibe_home import VIBE_HOME
 
 
@@ -24,11 +28,14 @@ class UserConfigLayer(ConfigLayer[RawConfig]):
     async def _check_trust(self) -> bool:
         return True
 
-    async def _read_config(self) -> dict[str, Any]:
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
         if not self._path.exists():
-            return {}
-        with self._path.open("rb") as f:
-            return tomllib.load(f)
+            return EMPTY_CONFIG_SNAPSHOT
+
+        with capture_stable_file(self._path) as (file, fingerprint):
+            data = tomllib.load(file)
+
+        return LayerConfigSnapshot(data=data, fingerprint=fingerprint)
 
     async def apply(
         self,

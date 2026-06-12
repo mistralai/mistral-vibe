@@ -130,6 +130,29 @@ async def tool_span(
         yield span
 
 
+@asynccontextmanager
+async def hook_span(
+    *,
+    hook_name: str,
+    hook_type: str,
+    tool_name: str | None = None,
+    tool_call_id: str | None = None,
+) -> AsyncGenerator[trace.Span]:
+    attributes: dict[str, Any] = {
+        "vibe.hook.name": hook_name,
+        "vibe.hook.type": hook_type,
+    }
+    if tool_name is not None:
+        attributes[gen_ai_attributes.GEN_AI_TOOL_NAME] = tool_name
+    if tool_call_id is not None:
+        attributes[gen_ai_attributes.GEN_AI_TOOL_CALL_ID] = tool_call_id
+    if conv_id := baggage.get_baggage(gen_ai_attributes.GEN_AI_CONVERSATION_ID):
+        attributes[gen_ai_attributes.GEN_AI_CONVERSATION_ID] = conv_id
+
+    async with _safe_span(f"hook {hook_type} {hook_name}", attributes) as span:
+        yield span
+
+
 def set_tool_result(span: trace.Span, result: str) -> None:
     try:
         span.set_attribute(gen_ai_attributes.GEN_AI_TOOL_CALL_RESULT, result)

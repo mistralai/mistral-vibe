@@ -179,8 +179,7 @@ async def test_auto_compact_observer_does_not_see_summary_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compact_replaces_messages_with_summary() -> None:
-    """After compact, messages list contains only system + summary."""
+async def test_compact_replaces_messages_with_context() -> None:
     backend = FakeBackend([
         [mock_llm_chunk(content="<summary>")],
         [mock_llm_chunk(content="<final>")],
@@ -191,7 +190,7 @@ async def test_compact_replaces_messages_with_summary() -> None:
 
     [_ async for _ in agent.act("Hello")]
 
-    # After compact + final response: system, summary, final
+    # After compact + final response: system, compaction context, final.
     assert agent.messages[0].role == Role.system
     assert agent.messages[-1].role == Role.assistant
     assert agent.messages[-1].content == "<final>"
@@ -305,6 +304,7 @@ async def test_compact_without_extra_instructions_has_no_additional_section() ->
 
 @pytest.mark.asyncio
 async def test_compact_message_shape_preserves_prior_user_messages() -> None:
+    from vibe.core.compaction import parse_previous_user_messages
     from vibe.core.prompts import UtilityPrompt
 
     summary_prefix = UtilityPrompt.COMPACT_SUMMARY_PREFIX.read()
@@ -319,7 +319,11 @@ async def test_compact_message_shape_preserves_prior_user_messages() -> None:
     )
     agent.messages.append(LLMMessage(role=Role.assistant, content="ack"))
     agent.messages.append(
-        LLMMessage(role=Role.user, content=f"{summary_prefix}\nprior summary blob")
+        LLMMessage(
+            role=Role.user,
+            content=f"{summary_prefix}\nprior summary blob",
+            injected=True,
+        )
     )
     agent.messages.append(LLMMessage(role=Role.user, content="follow-up ask"))
     agent.stats.context_tokens = 100
@@ -327,13 +331,46 @@ async def test_compact_message_shape_preserves_prior_user_messages() -> None:
     await agent.compact()
 
     final = list(agent.messages)
-    assert len(final) == 4  # [system, prior_user_1, prior_user_2, wrapped_summary]
+    assert len(final) == 2  # [system, compaction_context]
     assert final[0] is system_message_before
-    assert [m.role for m in final[1:]] == [Role.user, Role.user, Role.user]
-    assert final[1].content == "first real ask"
-    assert final[2].content == "follow-up ask"
+    assert final[1].role == Role.user
+    assert final[1].injected is True
+    assert parse_previous_user_messages(final[1].content or "") == [
+        "first real ask",
+        "follow-up ask",
+    ]
+    assert "Here are some of the most recent previous user messages" in (
+        final[1].content or ""
+    )
+    assert "<compaction_summary>" in (final[1].content or "")
+    assert "fresh summary body" in (final[1].content or "")
     # Injected and prior-summary user messages must be filtered out.
     assert all("middleware ping" not in (m.content or "") for m in final)
     assert sum("prior summary blob" in (m.content or "") for m in final) == 0
-    # Final message is the wrapped summary the next agent will read first.
-    assert final[-1].content == f"{summary_prefix}\nfresh summary body"
+
+
+@pytest.mark.asyncio
+async def test_compact_preserves_user_messages_across_repeated_compactions() -> None:
+    from vibe.core.compaction import parse_previous_user_messages
+
+    backend = FakeBackend([
+        [mock_llm_chunk(content="summary one")],
+        [mock_llm_chunk(content="summary two")],
+    ])
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+
+    agent.messages.append(LLMMessage(role=Role.user, content="first ask"))
+    agent.stats.context_tokens = 100
+    await agent.compact()
+
+    agent.messages.append(LLMMessage(role=Role.user, content="second ask"))
+    agent.stats.context_tokens = 100
+    await agent.compact()
+
+    final = list(agent.messages)
+    assert len(final) == 2
+    assert parse_previous_user_messages(final[1].content or "") == [
+        "first ask",
+        "second ask",
+    ]

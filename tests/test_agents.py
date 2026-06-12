@@ -595,7 +595,7 @@ class TestAgentManagerFiltering:
         manager = AgentManager(lambda: config)
 
         agents = manager.available_agents
-        assert len(agents) < len(manager._available)
+        assert len(agents) < len(manager._discovered)
         assert "default" in agents
         assert "plan" in agents
         assert "auto-approve" not in agents
@@ -610,7 +610,7 @@ class TestAgentManagerFiltering:
         manager = AgentManager(lambda: config)
 
         agents = manager.available_agents
-        assert len(agents) < len(manager._available)
+        assert len(agents) < len(manager._discovered)
         assert "default" in agents
         assert "plan" in agents
         assert "auto-approve" not in agents

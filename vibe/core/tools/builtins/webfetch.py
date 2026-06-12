@@ -191,9 +191,7 @@ class WebFetch(
 
         content_type = response.headers.get("Content-Type", "text/plain")
 
-        content = response.content.decode("utf-8", errors="ignore")
-
-        return content, content_type
+        return response.text, content_type
 
     async def _do_fetch(
         self, url: str, timeout: int, headers: dict[str, str]
@@ -239,9 +237,8 @@ class WebFetch(
             )
 
         content_len = len(event.result.content)
-        message = (
-            f"Fetched {content_len:,} chars ({event.result.content_type.split(';')[0]})"
-        )
+        content_type = event.result.content_type.split(";")[0]
+        message = f"Fetched {event.result.url} ({content_len:,} chars, {content_type})"
         if event.result.was_truncated:
             message += " [truncated]"
 

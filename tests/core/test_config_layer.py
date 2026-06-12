@@ -14,6 +14,7 @@ from vibe.core.config.layer import (
     UntrustedLayerError,
 )
 from vibe.core.config.patch import ConfigPatch
+from vibe.core.config.types import ConcurrencyConflictError, LayerConfigSnapshot
 
 
 class StubLayer(ConfigLayer[BaseModel]):
@@ -38,9 +39,11 @@ class StubLayer(ConfigLayer[BaseModel]):
     async def _check_trust(self) -> bool:
         return self._stub_trusted
 
-    async def _read_config(self) -> dict[str, Any]:
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
         self.read_count += 1
-        return dict(self._data)
+        return LayerConfigSnapshot(
+            data=dict(self._data), fingerprint=f"fp-{self.read_count}"
+        )
 
 
 class ObservableStubLayer(StubLayer):
@@ -59,7 +62,7 @@ class SampleSchema(BaseModel):
     count: int = 0
 
 
-def test_abstract_read_config_enforced() -> None:
+def test_abstract_build_config_snapshot_enforced() -> None:
     class IncompleteLayer(ConfigLayer[BaseModel]):
         pass
 
@@ -72,11 +75,21 @@ def test_repr() -> None:
     assert repr(layer) == "StubLayer(name='my-layer')"
 
 
+def test_layer_config_snapshot_strips_fingerprint() -> None:
+    snapshot = LayerConfigSnapshot(data={}, fingerprint=" fp ")
+    assert snapshot.fingerprint == "fp"
+
+
+def test_layer_config_snapshot_rejects_empty_fingerprint() -> None:
+    with pytest.raises(ValidationError):
+        LayerConfigSnapshot(data={}, fingerprint=" ")
+
+
 @pytest.mark.asyncio
 async def test_default_check_trust_returns_false() -> None:
     class DefaultTrustLayer(ConfigLayer[BaseModel]):
-        async def _read_config(self) -> dict[str, Any]:
-            return {}
+        async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+            return LayerConfigSnapshot(data={}, fingerprint="fp")
 
     layer = DefaultTrustLayer(name="default")
     result = await layer.resolve_trust()
@@ -224,6 +237,7 @@ async def test_load_returns_data() -> None:
     result = await layer.load()
     assert isinstance(result, RawConfig)
     assert result.model_extra == {"key": "value"}
+    assert layer.fingerprint == "fp-1"
 
 
 @pytest.mark.asyncio
@@ -233,6 +247,10 @@ async def test_load_auto_resolves_trust() -> None:
     result = await layer.load()
     assert layer.is_trusted is True
     assert result.model_extra == {"a": 1}
+    assert layer.fingerprint == "fp-1"
+
+    await layer.resolve_trust()
+    assert layer.fingerprint == "fp-1"
 
 
 @pytest.mark.asyncio
@@ -251,6 +269,7 @@ async def test_load_force_bypasses_cache() -> None:
     assert layer.read_count == 1
     await layer.load(force=True)
     assert layer.read_count == 2
+    assert layer.fingerprint == "fp-2"
 
 
 @pytest.mark.asyncio
@@ -312,6 +331,7 @@ async def test_resolve_trust_clears_data_on_revocation() -> None:
     layer._stub_trusted = False
     await layer.resolve_trust()
     assert layer.is_trusted is False
+    assert layer.fingerprint is None
 
     # Re-trust and update backing data while revoked
     layer._stub_trusted = True
@@ -335,15 +355,28 @@ async def test_load_returns_deep_copy() -> None:
 
 
 @pytest.mark.asyncio
-async def test_read_config_failure_wrapped() -> None:
+async def test_build_config_snapshot_failure_wrapped() -> None:
     class BrokenReadLayer(StubLayer):
-        async def _read_config(self) -> dict[str, Any]:
+        async def _build_config_snapshot(self) -> LayerConfigSnapshot:
             raise OSError("config file missing")
 
     layer = BrokenReadLayer()
-    with pytest.raises(LayerImplementationError, match="_read_config") as exc_info:
+    with pytest.raises(
+        LayerImplementationError, match="_build_config_snapshot"
+    ) as exc_info:
         await layer.load()
     assert isinstance(exc_info.value.__cause__, IOError)
+
+
+@pytest.mark.asyncio
+async def test_build_config_snapshot_concurrency_conflict_propagates() -> None:
+    class ConflictingReadLayer(StubLayer):
+        async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+            raise ConcurrencyConflictError(expected_fp="before", actual_fp="after")
+
+    layer = ConflictingReadLayer()
+    with pytest.raises(ConcurrencyConflictError):
+        await layer.load()
 
 
 @pytest.mark.asyncio
@@ -364,10 +397,13 @@ async def test_custom_schema_validates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalid_data_raises_validation_error() -> None:
+async def test_invalid_data_raises_layer_implementation_error() -> None:
     layer = StubLayer(output_schema=SampleSchema, data={"count": "bad"})
-    with pytest.raises(ValidationError):
+    with pytest.raises(
+        LayerImplementationError, match="_build_config_snapshot"
+    ) as exc_info:
         await layer.load()
+    assert isinstance(exc_info.value.__cause__, ValidationError)
 
 
 @pytest.mark.asyncio
@@ -380,10 +416,12 @@ async def test_concurrent_loads_serialize() -> None:
         async def _check_trust(self) -> bool:
             return True
 
-        async def _read_config(self) -> dict[str, Any]:
+        async def _build_config_snapshot(self) -> LayerConfigSnapshot:
             self.read_count += 1
             await asyncio.sleep(0.05)
-            return {"v": self.read_count}
+            return LayerConfigSnapshot(
+                data={"v": self.read_count}, fingerprint=f"fp-{self.read_count}"
+            )
 
     layer = SlowLayer()
     results = await asyncio.gather(layer.load(), layer.load(), layer.load())
@@ -392,10 +430,9 @@ async def test_concurrent_loads_serialize() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_fingerprint_not_implemented() -> None:
+async def test_fingerprint_returns_none_before_load() -> None:
     layer = StubLayer()
-    with pytest.raises(NotImplementedError):
-        await layer.get_fingerprint()
+    assert layer.fingerprint is None
 
 
 @pytest.mark.asyncio
@@ -459,8 +496,8 @@ class FakeLocalUserLayer(ConfigLayer[UserConfigSchema]):
     async def _check_trust(self) -> bool:
         return True
 
-    async def _read_config(self) -> dict[str, Any]:
-        return dict(self._data)
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+        return LayerConfigSnapshot(data=dict(self._data), fingerprint="user-fp")
 
 
 @pytest.mark.asyncio
@@ -504,8 +541,8 @@ class FakeLocalProjectLayer(ConfigLayer[BaseModel]):
         else:
             self._trust_store.pop(self._project_path, None)
 
-    async def _read_config(self) -> dict[str, Any]:
-        return dict(self._data)
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+        return LayerConfigSnapshot(data=dict(self._data), fingerprint="project-fp")
 
 
 @pytest.mark.asyncio

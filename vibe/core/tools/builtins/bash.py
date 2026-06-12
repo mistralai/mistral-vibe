@@ -5,7 +5,6 @@ from collections.abc import AsyncGenerator
 from functools import lru_cache
 import os
 from pathlib import Path
-import sys
 from typing import ClassVar, Literal, final
 
 from pydantic import BaseModel, Field
@@ -31,6 +30,7 @@ from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import is_path_within_workdir
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows, kill_async_subprocess
+from vibe.core.utils.io import decode_safe
 
 
 @lru_cache(maxsize=1)
@@ -64,15 +64,6 @@ def _extract_commands(command: str) -> list[str]:
     return commands
 
 
-def _get_subprocess_encoding() -> str:
-    if sys.platform == "win32":
-        # Windows console uses OEM code page (e.g., cp850, cp1252)
-        import ctypes
-
-        return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
-    return "utf-8"
-
-
 def _get_shell_executable() -> str | None:
     if is_windows():
         return None
@@ -96,25 +87,57 @@ def _get_base_env() -> dict[str, str]:
     return base_env
 
 
+_READ_ONLY_COMMANDS_WINDOWS = ["dir", "findstr", "more", "type", "ver", "where"]
+_READ_ONLY_COMMANDS_POSIX = [
+    "basename",
+    "cat",
+    "comm",
+    "cut",
+    "date",
+    "diff",
+    "dirname",
+    "du",
+    "file",
+    "find",
+    "fmt",
+    "fold",
+    "grep",
+    "head",
+    "join",
+    "less",
+    "ls",
+    "md5sum",
+    "more",
+    "nl",
+    "od",
+    "paste",
+    "pwd",
+    "readlink",
+    "sha1sum",
+    "sha256sum",
+    "shasum",
+    "sort",
+    "stat",
+    "sum",
+    "tac",
+    "tail",
+    "tr",
+    "uname",
+    "uniq",
+    "wc",
+    "which",
+]
+
+
+def default_read_only_commands() -> list[str]:
+    return list(
+        _READ_ONLY_COMMANDS_WINDOWS if is_windows() else _READ_ONLY_COMMANDS_POSIX
+    )
+
+
 def _get_default_allowlist() -> list[str]:
     common = ["cd", "echo", "git diff", "git log", "git status", "tree", "whoami"]
-
-    if is_windows():
-        return common + ["dir", "findstr", "more", "type", "ver", "where"]
-    else:
-        return common + [
-            "cat",
-            "file",
-            "find",
-            "head",
-            "ls",
-            "pwd",
-            "stat",
-            "tail",
-            "uname",
-            "wc",
-            "which",
-        ]
+    return common + default_read_only_commands()
 
 
 def _get_default_denylist() -> list[str]:
@@ -508,14 +531,13 @@ class Bash(
                 await kill_async_subprocess(proc)
                 raise self._build_timeout_error(args.command, timeout)
 
-            encoding = _get_subprocess_encoding()
             stdout = (
-                stdout_bytes.decode(encoding, errors="replace")[:max_bytes]
+                decode_safe(stdout_bytes, from_subprocess=True).text[:max_bytes]
                 if stdout_bytes
                 else ""
             )
             stderr = (
-                stderr_bytes.decode(encoding, errors="replace")[:max_bytes]
+                decode_safe(stderr_bytes, from_subprocess=True).text[:max_bytes]
                 if stderr_bytes
                 else ""
             )

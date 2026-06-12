@@ -8,7 +8,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from vibe.core.config.patch import ConfigPatch
-from vibe.core.config.types import ConflictStrategy
+from vibe.core.config.types import (
+    ConcurrencyConflictError,
+    ConflictStrategy,
+    LayerConfigSnapshot,
+)
 
 
 class RawConfig(BaseModel):
@@ -70,6 +74,7 @@ class LayerImplementationError(ConfigLayerError):
 class _LayerState[S: BaseModel]:
     is_trusted: bool | None = None
     data: S | None = None
+    fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,8 +128,8 @@ class ConfigLayer[S: BaseModel](ABC):
         return False
 
     @abstractmethod
-    async def _read_config(self) -> dict[str, Any]:
-        """Read and return sparse dict from this layer's backing store.
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+        """Read and return sparse config with its backing-store fingerprint.
 
         Subclasses only need to implement the raw read logic; caching
         is handled by the base.
@@ -161,7 +166,9 @@ class ConfigLayer[S: BaseModel](ABC):
         """Serialize all state mutations through a single lock."""
         async with self._lock:
             state = _LayerState(
-                is_trusted=self._state.is_trusted, data=self._state.data
+                is_trusted=self._state.is_trusted,
+                data=self._state.data,
+                fingerprint=self._state.fingerprint,
             )
 
             match action:
@@ -191,7 +198,9 @@ class ConfigLayer[S: BaseModel](ABC):
 
         await self._notify_trust_change(state.is_trusted, True)
 
-        return _LayerState(is_trusted=True, data=state.data)
+        return _LayerState(
+            is_trusted=True, data=state.data, fingerprint=state.fingerprint
+        )
 
     async def _handle_revoke_trust(self, state: _LayerState[S]) -> _LayerState[S]:
         if state.is_trusted is None:
@@ -202,7 +211,7 @@ class ConfigLayer[S: BaseModel](ABC):
 
         await self._notify_trust_change(state.is_trusted, False)
 
-        return _LayerState(is_trusted=False, data=None)
+        return _LayerState(is_trusted=False, data=None, fingerprint=None)
 
     async def _handle_resolve_trust(self, state: _LayerState[S]) -> _LayerState[S]:
         is_trusted = await self._resolve_check_trust()
@@ -210,7 +219,9 @@ class ConfigLayer[S: BaseModel](ABC):
         await self._notify_trust_change(state.is_trusted, is_trusted)
 
         return _LayerState(
-            is_trusted=is_trusted, data=state.data if is_trusted else None
+            is_trusted=is_trusted,
+            data=state.data if is_trusted else None,
+            fingerprint=state.fingerprint if is_trusted else None,
         )
 
     async def _handle_load(self, state: _LayerState[S], force: bool) -> _LayerState[S]:
@@ -222,23 +233,31 @@ class ConfigLayer[S: BaseModel](ABC):
         await self._notify_trust_change(state.is_trusted, is_trusted)
 
         if not is_trusted:
-            return _LayerState(is_trusted=is_trusted, data=None)
+            return _LayerState(is_trusted=is_trusted, data=None, fingerprint=None)
 
-        next_state = _LayerState(is_trusted=is_trusted, data=state.data)
+        next_state = _LayerState(
+            is_trusted=is_trusted, data=state.data, fingerprint=state.fingerprint
+        )
 
         if next_state.data is None or force:
             try:
-                raw = await self._read_config()
+                snapshot = await self._build_config_snapshot()
+                next_state = _LayerState(
+                    is_trusted=next_state.is_trusted,
+                    data=self.validate_output(snapshot.data),
+                    fingerprint=snapshot.fingerprint,
+                )
+            except ConcurrencyConflictError:
+                raise
             except Exception as e:
-                raise LayerImplementationError(self.name, "_read_config") from e
-            next_state = _LayerState(
-                is_trusted=next_state.is_trusted, data=self.validate_output(raw)
-            )
+                raise LayerImplementationError(
+                    self.name, "_build_config_snapshot"
+                ) from e
 
         return next_state
 
     async def _handle_invalidate_cache(self, state: _LayerState[S]) -> _LayerState[S]:
-        return _LayerState(is_trusted=state.is_trusted, data=None)
+        return _LayerState(is_trusted=state.is_trusted, data=None, fingerprint=None)
 
     # --- Public ---
 
@@ -286,9 +305,10 @@ class ConfigLayer[S: BaseModel](ABC):
 
         return state.data.model_copy(deep=True)
 
-    async def get_fingerprint(self) -> str:
-        """Return opaque token representing current backing store state."""
-        raise NotImplementedError
+    @property
+    def fingerprint(self) -> str | None:
+        """Cached opaque fingerprint token for this layer. ``None`` if unresolved."""
+        return self._state.fingerprint
 
     async def apply(
         self,

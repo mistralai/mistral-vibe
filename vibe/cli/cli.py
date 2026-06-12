@@ -5,6 +5,7 @@ import asyncio
 from pathlib import Path
 import sys
 
+from pydantic import ValidationError
 from rich import print as rprint
 from rich.console import Console
 import tomli_w
@@ -18,6 +19,7 @@ from vibe.cli.update_notifier import (
     mark_update_as_dismissed,
 )
 from vibe.core.agent_loop import AgentLoop, TeleportError
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.hooks.config import HookConfigResult, load_hooks_from_fs
@@ -46,6 +48,9 @@ def _build_cli_entrypoint_metadata() -> EntrypointMetadata:
 
 
 def get_initial_agent_name(args: argparse.Namespace, config: VibeConfig) -> str:
+    if args.auto_approve:
+        return BuiltinAgentName.AUTO_APPROVE
+
     return args.agent or config.default_agent
 
 
@@ -64,6 +69,14 @@ def get_prompt_from_stdin() -> str | None:
     return None
 
 
+def _format_config_validation_error(exc: ValidationError) -> str:
+    lines = [f"Invalid configuration ({exc.error_count()} error(s)):"]
+    for err in exc.errors(include_url=False):
+        loc = ".".join(str(part) for part in err["loc"]) or "<root>"
+        lines.append(f"  - {loc}: {err['msg']}")
+    return "\n".join(lines)
+
+
 def load_config_or_exit(*, interactive: bool) -> VibeConfig:
     try:
         return VibeConfig.load()
@@ -77,6 +90,9 @@ def load_config_or_exit(*, interactive: bool) -> VibeConfig:
             sys.exit(1)
         run_onboarding(entrypoint_metadata=_build_cli_entrypoint_metadata())
         return VibeConfig.load()
+    except ValidationError as e:
+        rprint(f"[yellow]{_format_config_validation_error(e)}[/]")
+        sys.exit(1)
     except ValueError as e:
         rprint(f"[yellow]{e}[/]")
         sys.exit(1)

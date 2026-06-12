@@ -22,6 +22,7 @@ from vibe.core.config import MissingAPIKeyError
 from vibe.core.types import (
     ContextTooLongError as CoreContextTooLongError,
     RateLimitError as CoreRateLimitError,
+    RefusalError as CoreRefusalError,
 )
 
 # JSON-RPC 2.0 standard codes
@@ -35,6 +36,7 @@ RATE_LIMITED = -31001
 CONFIGURATION_ERROR = -31002
 CONVERSATION_LIMIT = -31003
 CONTEXT_TOO_LONG = -31004
+REFUSAL = -31005
 
 
 class VibeRequestError(RequestError):
@@ -117,6 +119,36 @@ class ContextTooLongError(VibeRequestError):
     @classmethod
     def from_core(cls, exc: CoreContextTooLongError) -> ContextTooLongError:
         return cls(exc.provider, exc.model)
+
+
+class RefusalError(VibeRequestError):
+    code = REFUSAL
+
+    def __init__(
+        self,
+        provider: str,
+        model: str,
+        category: str | None = None,
+        explanation: str | None = None,
+    ) -> None:
+        category_suffix = f" (category: {category})" if category else ""
+        detail = explanation or (
+            "Try rephrasing your request or starting a new conversation."
+        )
+        super().__init__(
+            message=f"The model declined to respond for {provider} "
+            f"(model: {model}){category_suffix}. {detail}",
+            data={
+                "provider": provider,
+                "model": model,
+                "category": category,
+                "explanation": explanation,
+            },
+        )
+
+    @classmethod
+    def from_core(cls, exc: CoreRefusalError) -> RefusalError:
+        return cls(exc.provider, exc.model, exc.category, exc.explanation)
 
 
 class ConfigurationError(VibeRequestError):

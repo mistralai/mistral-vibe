@@ -27,6 +27,7 @@ from vibe.core.tools.mcp_sampling import MCPSamplingHandler
 from vibe.core.tools.ui import ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.io import decode_safe
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -41,7 +42,7 @@ _MCP_DEFAULT_SSE_READ_TIMEOUT = 300.0
 def _stderr_logger_thread(read_fd: int) -> None:
     with open(read_fd, "rb") as f:
         for line in iter(f.readline, b""):
-            decoded = line.decode("utf-8", errors="replace").rstrip()
+            decoded = decode_safe(line, from_subprocess=True).text.rstrip()
             if decoded:
                 logger.debug(f"[MCP stderr] {decoded}")
 
@@ -175,10 +176,13 @@ def _parse_call_result(server: str, tool: str, result_obj: Any) -> MCPToolResult
     return MCPToolResult(server=server, tool=tool, text=text, structured=None)
 
 
-def create_vibe_mcp_http_client(headers: dict[str, str] | None) -> httpx.AsyncClient:
+def create_vibe_mcp_http_client(
+    headers: dict[str, str] | None, *, auth: httpx.Auth | None = None
+) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         follow_redirects=True,
         headers=headers,
+        auth=auth,
         timeout=httpx.Timeout(_MCP_DEFAULT_TIMEOUT, read=_MCP_DEFAULT_SSE_READ_TIMEOUT),
         verify=build_ssl_context(),
     )
@@ -188,10 +192,11 @@ async def list_tools_http(
     url: str,
     *,
     headers: dict[str, str] | None = None,
+    auth: httpx.Auth | None = None,
     startup_timeout_sec: float | None = None,
 ) -> list[RemoteTool]:
     timeout = timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
-    async with create_vibe_mcp_http_client(headers) as http_client:
+    async with create_vibe_mcp_http_client(headers, auth=auth) as http_client:
         async with streamable_http_client(url, http_client=http_client) as (
             read,
             write,
@@ -211,6 +216,7 @@ async def call_tool_http(
     arguments: dict[str, Any],
     *,
     headers: dict[str, str] | None = None,
+    auth: httpx.Auth | None = None,
     startup_timeout_sec: float | None = None,
     tool_timeout_sec: float | None = None,
     sampling_callback: MCPSamplingHandler | None = None,
@@ -219,7 +225,7 @@ async def call_tool_http(
         timedelta(seconds=startup_timeout_sec) if startup_timeout_sec else None
     )
     call_timeout = timedelta(seconds=tool_timeout_sec) if tool_timeout_sec else None
-    async with create_vibe_mcp_http_client(headers) as http_client:
+    async with create_vibe_mcp_http_client(headers, auth=auth) as http_client:
         async with streamable_http_client(url, http_client=http_client) as (
             read,
             write,
@@ -245,6 +251,7 @@ def create_mcp_http_proxy_tool_class(
     alias: str | None = None,
     server_hint: str | None = None,
     headers: dict[str, str] | None = None,
+    auth: httpx.Auth | None = None,
     startup_timeout_sec: float | None = None,
     tool_timeout_sec: float | None = None,
     sampling_enabled: bool = True,
@@ -271,6 +278,10 @@ def create_mcp_http_proxy_tool_class(
         _remote_name: ClassVar[str] = remote.name
         _input_schema: ClassVar[dict[str, Any]] = remote.input_schema
         _headers: ClassVar[dict[str, str]] = dict(headers or {})
+        # TODO(VIBE-3057+): concurrent refresh coordinated by per-alias
+        # asyncio.Lock in MCPRegistry (PR 4 / project decision #6) — this
+        # object is shared across all calls on this proxy class.
+        _auth: ClassVar[httpx.Auth | None] = auth
         _startup_timeout_sec: ClassVar[float | None] = startup_timeout_sec
         _tool_timeout_sec: ClassVar[float | None] = tool_timeout_sec
         _sampling_enabled: ClassVar[bool] = sampling_enabled
@@ -296,6 +307,7 @@ def create_mcp_http_proxy_tool_class(
                     self._remote_name,
                     payload,
                     headers=self._headers,
+                    auth=self._auth,
                     startup_timeout_sec=self._startup_timeout_sec,
                     tool_timeout_sec=self._tool_timeout_sec,
                     sampling_callback=sampling_callback,

@@ -5,6 +5,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _safe_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def dedup_paths(paths: Iterable[Path]) -> list[Path]:
     """Resolve and dedup paths, preserving first-occurrence order."""
     resolved = [p.resolve() for p in paths]
@@ -49,26 +63,28 @@ def find_local_config_dirs(root: Path) -> LocalConfigDirs:
     agents: list[Path] = []
 
     vibe_dir = resolved / _VIBE_DIR
-    if vibe_dir.is_dir():
+    if _safe_is_dir(vibe_dir):
         has_content = False
-        if (candidate := resolved / _TOOLS_SUBDIR).is_dir():
+        if _safe_is_dir(candidate := resolved / _TOOLS_SUBDIR):
             tools.append(candidate)
             has_content = True
-        if (candidate := resolved / _VIBE_SKILLS_SUBDIR).is_dir():
+        if _safe_is_dir(candidate := resolved / _VIBE_SKILLS_SUBDIR):
             skills.append(candidate)
             has_content = True
-        if (candidate := resolved / _AGENTS_SUBDIR).is_dir():
+        if _safe_is_dir(candidate := resolved / _AGENTS_SUBDIR):
             agents.append(candidate)
             has_content = True
         if (
             has_content
-            or (vibe_dir / "prompts").is_dir()
-            or (vibe_dir / "config.toml").is_file()
+            or _safe_is_dir(vibe_dir / "prompts")
+            or _safe_is_file(vibe_dir / "config.toml")
         ):
             config_dirs.append(vibe_dir)
 
     agents_dir = resolved / _AGENTS_DIR
-    if agents_dir.is_dir() and (candidate := resolved / _AGENTS_SKILLS_SUBDIR).is_dir():
+    if _safe_is_dir(agents_dir) and _safe_is_dir(
+        candidate := resolved / _AGENTS_SKILLS_SUBDIR
+    ):
         skills.append(candidate)
         config_dirs.append(agents_dir)
 

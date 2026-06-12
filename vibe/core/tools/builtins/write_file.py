@@ -54,17 +54,19 @@ class WriteFile(
 
     @classmethod
     def format_call_display(cls, args: WriteFileArgs) -> ToolCallDisplay:
-        tag = " (scratchpad)" if is_scratchpad_path(args.path) else ""
+        suffix = "(scratchpad)" if is_scratchpad_path(args.path) else ""
         return ToolCallDisplay(
-            summary=f"Writing {args.path}{tag}", content=args.content
+            summary=f"Writing {args.path}", content=args.content, suffix=suffix
         )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if isinstance(event.result, WriteFileResult):
-            tag = " (scratchpad)" if is_scratchpad_path(event.result.path) else ""
+            suffix = "(scratchpad)" if is_scratchpad_path(event.result.path) else ""
             return ToolResultDisplay(
-                success=True, message=f"Created {Path(event.result.path).name}{tag}"
+                success=True,
+                message=f"Created {Path(event.result.path).name}",
+                suffix=suffix,
             )
 
         return ToolResultDisplay(success=True, message="File written")

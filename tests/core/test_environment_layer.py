@@ -44,5 +44,25 @@ async def test_no_vars_set_returns_empty() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fingerprint_changes_when_env_changes() -> None:
+    with patch.dict(os.environ, {"VIBE_ACTIVE_MODEL": "first-model"}, clear=True):
+        layer = EnvironmentLayer(schema=VibeConfigSchema)
+        data1 = await layer.load()
+        fp1 = layer.fingerprint
+
+        os.environ["VIBE_ACTIVE_MODEL"] = "second-model"
+        data2 = await layer.load(force=True)
+        fp2 = layer.fingerprint
+
+    assert data1.model_dump() == {"active_model": "first-model"}
+    assert data2.model_dump() == {"active_model": "second-model"}
+    assert isinstance(fp1, str)
+    assert fp1
+    assert isinstance(fp2, str)
+    assert fp2
+    assert fp1 != fp2
+
+
+@pytest.mark.asyncio
 async def test_always_trusted() -> None:
     assert await EnvironmentLayer(schema=VibeConfigSchema).resolve_trust() is True

@@ -106,6 +106,28 @@ class TestReadSafe:
         with pytest.raises(FileNotFoundError):
             read_safe(tmp_path / "nope.txt")
 
+    def test_from_subprocess_prefers_oem_over_locale_ansi(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # \x82 is invalid UTF-8 and decodes differently across single-byte
+        # encodings: cp1252 (Windows ANSI) -> "‚" (low-9 quote);
+        # cp850 (Windows OEM) -> "é". Subprocess output prefers OEM over the
+        # ANSI locale; file reads (from_subprocess=False) must not.
+        raw = "café\n".encode("cp850")
+        monkeypatch.setattr(
+            io_utils.locale, "getpreferredencoding", lambda _do_setlocale: "cp1252"
+        )
+        monkeypatch.setattr(io_utils, "_encoding_from_best_match", lambda _raw: None)
+        monkeypatch.setattr(io_utils, "_windows_oem_encoding", lambda: "cp850")
+
+        from_file = decode_safe(raw)
+        assert from_file.encoding == "cp1252"
+        assert from_file.text == raw.decode("cp1252")
+
+        from_subprocess = decode_safe(raw, from_subprocess=True)
+        assert from_subprocess.encoding == "cp850"
+        assert from_subprocess.text == "café\n"
+
 
 class TestReadSafeNewlines:
     def test_lf(self, tmp_path: Path) -> None:

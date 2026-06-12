@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.15.0] - 2026-06-12
+
+### Added
+
+- **[Experimental]** `before_tool` and `after_tool` hooks: shell scripts declared in `hooks.toml` that fire around every tool call; hooks can deny the call, rewrite tool inputs, or append context to the output — enable with `enable_experimental_hooks = true`
+- Message queue: messages typed while the agent or a `!bash` command is running are queued and shown above the input; Esc pauses the queue, Ctrl+C drops the last queued message (LIFO), Enter flushes the queue when paused
+- Tool result output is now collapsed by default to keep responses scannable
+- Common read-only shell commands (`ls`, `cat`, `pwd`, etc.) are allowed without approval by default
+- Session deletion available directly from the resume picker
+- `[mcp_servers.auth]` block in config for per-server MCP authentication
+- Collapsed web tool output now shows the URL and search query at a glance
+- `max_turns` support exposed over ACP via `set_config_option`
+
+### Changed
+
+- Compaction now re-injects prior user messages so the agent retains the original task goals across context resets
+- **[Breaking — experimental hooks]** `post_agent_turn` retries no longer use exit code `2`; hooks must now exit `0` and return `{"decision": "deny", "reason": "..."}` on stdout to trigger a retry — exit code `2` is treated as a failure
+- Model refusal stop reason is now surfaced to the user instead of stopping silently
+
+### Fixed
+
+- CLI UI no longer goes blank during app switches
+- User messages are preserved correctly across repeated compactions
+- Non-UTF-8 input is handled gracefully across all CLI surfaces
+- `--resume` now shows history when launched from a dangerous directory
+- Startup no longer crashes in unowned folders or when a git ancestor is unreadable
+- Plain-string answers from `web_search` are handled without crashing
+- NaN SGR mouse reports no longer leak into the chat input
+
+
 ## [2.14.1] - 2026-06-08
 
 ### Added

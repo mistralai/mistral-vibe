@@ -183,7 +183,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
 
             self._notify_completion_reset()
 
-            self.post_message(self.Submitted(value))
+        self.post_message(self.Submitted(value))
 
     @property
     def switching_mode(self) -> bool:

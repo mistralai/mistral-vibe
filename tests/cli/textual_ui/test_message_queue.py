@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.cli.textual_ui.message_queue import MessageQueue, QueuedItemKind
+from vibe.cli.textual_ui.message_queue import MessageQueue, QueuedItem, QueuedItemKind
 
 
 def test_empty_queue_is_falsy() -> None:
@@ -36,6 +36,17 @@ def test_pop_last_returns_newest() -> None:
     assert popped is not None
     assert popped.content == "c"
     assert [item.content for item in queue.items] == ["a", "b"]
+
+
+def test_pop_last_resumes_when_queue_becomes_empty() -> None:
+    queue = MessageQueue()
+    queue.append_prompt("a")
+    queue.pause()
+
+    queue.pop_last()
+
+    assert not queue
+    assert not queue.paused
 
 
 def test_pop_first_returns_oldest() -> None:
@@ -74,11 +85,9 @@ def test_pause_and_resume() -> None:
 
 def test_pause_is_idempotent() -> None:
     queue = MessageQueue()
-    calls = []
-    queue.set_change_listener(lambda: calls.append(None))
     queue.pause()
     queue.pause()
-    assert len(calls) == 1
+    assert queue.paused
 
 
 def test_clear_resets_state() -> None:
@@ -90,34 +99,30 @@ def test_clear_resets_state() -> None:
     assert not queue.paused
 
 
-def test_change_listener_fires_on_mutations() -> None:
+def test_prepend_prompts_inserts_at_head_preserving_order() -> None:
     queue = MessageQueue()
-    calls: list[None] = []
-    queue.set_change_listener(lambda: calls.append(None))
-
-    queue.append_prompt("a")
-    assert len(calls) == 1
-
-    queue.append_bash("ls")
-    assert len(calls) == 2
-
-    queue.pop_last()
-    assert len(calls) == 3
-
-    queue.pause()
-    assert len(calls) == 4
-
-    queue.resume()
-    assert len(calls) == 5
+    queue.append_prompt("x")
+    queue.append_prompt("y")
+    queue.prepend_prompts([
+        QueuedItem(QueuedItemKind.PROMPT, "a"),
+        QueuedItem(QueuedItemKind.PROMPT, "b"),
+    ])
+    assert [item.content for item in queue.items] == ["a", "b", "x", "y"]
 
 
-def test_change_listener_can_be_cleared() -> None:
+def test_prepend_prompts_empty_is_noop() -> None:
     queue = MessageQueue()
-    calls: list[None] = []
-    queue.set_change_listener(lambda: calls.append(None))
-    queue.set_change_listener(None)
-    queue.append_prompt("a")
-    assert calls == []
+    queue.append_prompt("x")
+    queue.prepend_prompts([])
+    assert [item.content for item in queue.items] == ["x"]
+
+
+def test_append_prompt_with_skill_name() -> None:
+    queue = MessageQueue()
+    queue.append_prompt("expanded prompt", skill_name="my-skill")
+    item = queue.items[0]
+    assert item.skill_name == "my-skill"
+    assert item.content == "expanded prompt"
 
 
 def test_items_returns_copy() -> None:

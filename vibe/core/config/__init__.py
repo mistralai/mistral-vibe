@@ -15,7 +15,9 @@ from vibe.core.config._settings import (
     ConnectorConfig,
     ExperimentsConfig,
     MCPHttp,
+    MCPOAuth,
     MCPServer,
+    MCPStaticAuth,
     MCPStdio,
     MCPStreamableHttp,
     MissingAPIKeyError,
@@ -65,6 +67,7 @@ from vibe.core.config.schema import (
     WithShallowMerge,
     WithUnionMerge,
 )
+from vibe.core.config.types import MISSING_CONFIG_FILE_FINGERPRINT, LayerConfigSnapshot
 from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.prompts import MissingPromptFileError
 
@@ -79,6 +82,7 @@ __all__ = [
     "DEFAULT_TTS_MODELS",
     "DEFAULT_TTS_PROVIDERS",
     "DEFAULT_VIBE_BASE_URL",
+    "MISSING_CONFIG_FILE_FINGERPRINT",
     "THINKING_LEVELS",
     "AppendToList",
     "ConfigDefinitionError",
@@ -92,9 +96,12 @@ __all__ = [
     "DuplicateMergeMetadataError",
     "EmptyLayerError",
     "ExperimentsConfig",
+    "LayerConfigSnapshot",
     "LayerImplementationError",
     "MCPHttp",
+    "MCPOAuth",
     "MCPServer",
+    "MCPStaticAuth",
     "MCPStdio",
     "MCPStreamableHttp",
     "MergeFieldMetadata",

@@ -99,6 +99,12 @@ class MCPRegistry:
             logger.warning("MCP server '%s' missing url for http transport", srv.name)
             return {}
 
+        if srv.auth.type == "oauth":
+            logger.warning(
+                "OAuth support for MCP servers is not yet enabled; coming in a future release"
+            )
+            return {}
+
         headers = srv.http_headers()
         try:
             remotes = await list_tools_http(

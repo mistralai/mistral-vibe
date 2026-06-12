@@ -18,9 +18,15 @@ from tests.conftest import build_test_vibe_config
 from tests.mock.utils import collect_result
 from vibe.core.config import ProviderConfig, VibeConfig
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
-from vibe.core.tools.builtins.websearch import WebSearch, WebSearchArgs, WebSearchConfig
+from vibe.core.tools.builtins.websearch import (
+    WebSearch,
+    WebSearchArgs,
+    WebSearchConfig,
+    WebSearchResult,
+    WebSearchSource,
+)
 from vibe.core.tools.manager import ToolManager
-from vibe.core.types import Backend
+from vibe.core.types import Backend, ToolResultEvent
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
@@ -81,8 +87,17 @@ def test_parse_text_chunks(websearch):
     response = _make_response(
         content=[TextChunk(text="Hello "), TextChunk(text="world")]
     )
-    result = websearch._parse_response(response)
+    result = websearch._parse_response(response, "test query")
+    assert result.query == "test query"
     assert result.answer == "Hello world"
+    assert result.sources == []
+
+
+def test_parse_plain_string_content(websearch):
+    # Short answers come back as a plain string, not a list of chunks.
+    response = _make_response(outputs=[MessageOutputEntry(content="2 + 2 = 4.")])
+    result = websearch._parse_response(response, "2 plus 2")
+    assert result.answer == "2 + 2 = 4."
     assert result.sources == []
 
 
@@ -97,7 +112,7 @@ def test_parse_sources_deduped(websearch):
             ToolReferenceChunk(tool="web_search", title="Site B", url="https://b.com"),
         ]
     )
-    result = websearch._parse_response(response)
+    result = websearch._parse_response(response, "test query")
     assert result.answer == "Answer"
     assert len(result.sources) == 2
     assert result.sources[0].url == "https://a.com"
@@ -112,27 +127,27 @@ def test_parse_skips_source_without_url(websearch):
             ToolReferenceChunk(tool="web_search", title="No URL"),
         ]
     )
-    result = websearch._parse_response(response)
+    result = websearch._parse_response(response, "test query")
     assert result.sources == []
 
 
 def test_parse_empty_text_raises(websearch):
     response = _make_response(content=[])
     with pytest.raises(ToolError, match="No text in agent response"):
-        websearch._parse_response(response)
+        websearch._parse_response(response, "test query")
 
 
 def test_parse_whitespace_only_raises(websearch):
     response = _make_response(content=[TextChunk(text="   ")])
     with pytest.raises(ToolError, match="No text in agent response"):
-        websearch._parse_response(response)
+        websearch._parse_response(response, "test query")
 
 
 def test_parse_skips_non_message_entries(websearch):
     response = _make_response(
         outputs=[MessageOutputEntry(content=[TextChunk(text="Answer")])]
     )
-    result = websearch._parse_response(response)
+    result = websearch._parse_response(response, "test query")
     assert result.answer == "Answer"
 
 
@@ -227,6 +242,7 @@ async def test_run_returns_parsed_result(websearch):
                     websearch.run(WebSearchArgs(query="test query"))
                 )
 
+    assert result.query == "test query"
     assert result.answer == "The answer"
     assert len(result.sources) == 1
     assert result.sources[0].url == "https://example.com"
@@ -376,3 +392,36 @@ def test_tool_manager_websearch_availability_falls_back_without_mistral_provider
 
 def test_get_status_text():
     assert WebSearch.get_status_text() == "Searching the web"
+
+
+def test_get_result_display_includes_query_and_pluralizes_sources():
+    result = WebSearchResult(
+        query="python async",
+        answer="answer",
+        sources=[
+            WebSearchSource(title="Docs", url="https://docs.python.org"),
+            WebSearchSource(title="Blog", url="https://blog.example.com"),
+        ],
+    )
+    event = ToolResultEvent(
+        tool_name="web_search", tool_call_id="t1", tool_class=WebSearch, result=result
+    )
+
+    display = WebSearch.get_result_display(event)
+
+    assert display.success is True
+    assert "python async" in display.message
+    assert "2 sources" in display.message
+
+
+def test_get_result_display_uses_singular_for_one_source():
+    result = WebSearchResult(
+        query="python",
+        answer="answer",
+        sources=[WebSearchSource(title="Docs", url="https://docs.python.org")],
+    )
+    event = ToolResultEvent(
+        tool_name="web_search", tool_call_id="t1", tool_class=WebSearch, result=result
+    )
+
+    assert "1 source)" in WebSearch.get_result_display(event).message

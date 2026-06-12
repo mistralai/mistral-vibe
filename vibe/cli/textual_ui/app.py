@@ -45,6 +45,7 @@ from vibe.cli.plan_offer.decide_plan_offer import (
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway, WhoAmIPlanType
 from vibe.cli.terminal_detect import Terminal, detect_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
+from vibe.cli.textual_ui.message_queue import MessageQueue, QueueController, QueuePorts
 from vibe.cli.textual_ui.notifications import (
     NotificationContext,
     NotificationPort,
@@ -57,7 +58,17 @@ from vibe.cli.textual_ui.session_exit import print_session_resume_message
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
+from vibe.cli.textual_ui.widgets.chat_input.input_kinds import (
+    Bash,
+    EmptyBash,
+    Prompt,
+    Skill,
+    SlashCommand,
+    Teleport,
+    classify,
+)
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
+from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.connector_auth_app import ConnectorAuthApp
@@ -98,7 +109,6 @@ from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.cli.textual_ui.widgets.theme_picker import ThemePickerApp, sorted_theme_names
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
-from vibe.cli.textual_ui.widgets.tools import ToolResultMessage
 from vibe.cli.textual_ui.widgets.voice_app import VoiceApp
 from vibe.cli.textual_ui.windowing import (
     HISTORY_RESUME_TAIL_MESSAGES,
@@ -143,7 +153,7 @@ from vibe.core.autocompletion.path_prompt_adapter import (
     extract_image_resources,
     render_path_prompt_from_payload,
 )
-from vibe.core.config import DEFAULT_THEME, VibeConfig
+from vibe.core.config import DEFAULT_THEME, ModelConfig, VibeConfig
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.hooks.models import HookStartEvent
 from vibe.core.log_reader import LogReader
@@ -153,11 +163,15 @@ from vibe.core.rewind import RewindError
 from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image
 from vibe.core.session.resume_sessions import (
     ResumeSessionInfo,
+    can_delete_resume_session_source,
     list_local_resume_sessions,
     list_remote_resume_sessions,
     short_session_id,
 )
-from vibe.core.session.saved_sessions import update_saved_session_title_at_path
+from vibe.core.session.saved_sessions import (
+    delete_saved_session,
+    update_saved_session_title_at_path,
+)
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.session.title_format import format_session_title
 from vibe.core.skills.manager import SkillManager
@@ -190,6 +204,7 @@ from vibe.core.types import (
     ImageAttachment,
     LLMMessage,
     RateLimitError,
+    RefusalError,
     Role,
     WaitingForInputEvent,
 )
@@ -328,6 +343,10 @@ class StartupOptions:
     is_resuming_session: bool = False
 
 
+_REJECT_HINT_BUSY = "wait for the current job to finish."
+_REJECT_HINT_PAUSED = "clear the queue first or remove this input."
+
+
 @dataclass(frozen=True, slots=True)
 class _ImageAttachmentRejection:
     message: str
@@ -362,6 +381,14 @@ class VibeApp(App):  # noqa: PLR0904
         Binding("ctrl+n", "rewind_next", "Rewind Next", show=False, priority=True),
     ]
 
+    def get_driver_class(self) -> type[Driver]:
+        """Patch the platform driver to strip malformed mouse reports from input."""
+        from vibe.cli.textual_ui.terminal_input_filter import patch_driver_parser
+
+        driver_class = super().get_driver_class()
+        patch_driver_parser(driver_class)
+        return driver_class
+
     def __init__(
         self,
         agent_loop: AgentLoop,
@@ -391,6 +418,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._interrupt_requested = False
         self._agent_task: asyncio.Task | None = None
         self._bash_task: asyncio.Task | None = None
+        self._queue = QueueController(self._build_queue_ports())
         self._remote_manager = RemoteSessionManager()
 
         self._loading_widget: LoadingWidget | None = None
@@ -466,6 +494,81 @@ class VibeApp(App):  # noqa: PLR0904
         return self.agent_loop.config
 
     @property
+    def _input_queue(self) -> MessageQueue:
+        return self._queue.queue
+
+    def _build_queue_ports(self) -> QueuePorts:
+        return QueuePorts(
+            mount_and_scroll=self._mount_and_scroll,
+            agent_running=lambda: self._agent_running,
+            bash_task=lambda: self._bash_task,
+            active_model=self._active_model_or_none,
+            remote_is_active=lambda: self._remote_manager.is_active,
+            remote_stop_stream=lambda: self._remote_manager.stop_stream(),
+            remove_loading_widget=self._remove_loading_widget,
+            set_loading_queue_count=self._set_loading_queue_count,
+            inject_user_context=self.agent_loop.inject_user_context,
+            next_message_index=lambda: len(self.agent_loop.messages),
+            start_agent_turn=self._start_queued_agent_turn,
+            await_agent_turn=self._await_agent_turn,
+            run_bash=self._start_queued_bash,
+            handle_user_message=self._handle_user_message,
+            maybe_show_feedback_bar=self._maybe_show_feedback_bar,
+            send_skill_telemetry=self._send_skill_telemetry,
+            send_at_mention_telemetry=self._send_at_mention_telemetry,
+            render_payload=lambda payload: render_path_prompt_from_payload(
+                payload, skip_images=True
+            ),
+        )
+
+    def _active_model_or_none(self) -> ModelConfig | None:
+        try:
+            return self.agent_loop.config.get_active_model()
+        except ValueError:
+            return None
+
+    def _set_loading_queue_count(self, count: int) -> None:
+        if self._loading_widget is not None:
+            self._loading_widget.set_queue_count(count)
+
+    def _maybe_show_feedback_bar(self) -> None:
+        if self._feedback_bar_manager.should_show(self.agent_loop):
+            self._feedback_bar.show()
+            self._feedback_bar_manager.record_feedback_asked()
+
+    def _start_queued_agent_turn(
+        self,
+        content: str,
+        *,
+        prebuilt_images: list[ImageAttachment] | None = None,
+        prebuilt_payload: PathPromptPayload | None = None,
+    ) -> asyncio.Task:
+        self._agent_task = asyncio.create_task(
+            self._handle_agent_loop_turn(
+                content,
+                prebuilt_images=prebuilt_images,
+                prebuilt_payload=prebuilt_payload,
+            )
+        )
+        return self._agent_task
+
+    async def _await_agent_turn(self) -> None:
+        agent_task = self._agent_task
+        if agent_task is None:
+            return
+        await agent_task
+
+    def _start_queued_bash(
+        self, command: str, *, existing_widget: BashOutputMessage | None = None
+    ) -> asyncio.Task:
+        self._bash_task = asyncio.create_task(
+            self._handle_bash_command(
+                command, existing_widget=existing_widget, start_drain_on_finish=False
+            )
+        )
+        return self._bash_task
+
+    @property
     def _connectors_enabled(self) -> bool:
         return self.agent_loop.connector_registry is not None
 
@@ -494,6 +597,7 @@ class VibeApp(App):  # noqa: PLR0904
                 skill_manager=self.agent_loop.skill_manager,
                 connectors_connected=connectors_connected,
                 connectors_total=connectors_total,
+                hooks_count=self.agent_loop.hooks_count,
             )
             yield self._banner
             yield VerticalGroup(id="messages")
@@ -520,13 +624,27 @@ class VibeApp(App):  # noqa: PLR0904
             yield NoMarkupStatic(id="spacer")
             yield ContextProgress()
 
+    @property
+    def _messages_area(self) -> Widget:
+        if self._cached_messages_area is None:
+            self._cached_messages_area = self.query_one("#messages")
+        return self._cached_messages_area
+
+    @property
+    def _chat_widget(self) -> ChatScroll:
+        if self._cached_chat is None:
+            self._cached_chat = self.query_one("#chat", ChatScroll)
+        return self._cached_chat
+
+    @property
+    def _loading_area(self) -> Widget:
+        if self._cached_loading_area is None:
+            self._cached_loading_area = self.query_one("#loading-area-content")
+        return self._cached_loading_area
+
     async def on_mount(self) -> None:
         self._apply_theme(self.config.theme)
         self._terminal_notifier.restore()
-
-        self._cached_messages_area = self.query_one("#messages")
-        self._cached_chat = self.query_one("#chat", ChatScroll)
-        self._cached_loading_area = self.query_one("#loading-area-content")
         self._feedback_bar = self.query_one(FeedbackBar)
         self._feedback_bar_manager = FeedbackBarManager()
 
@@ -643,6 +761,12 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_chat_input_container_submitted(
         self, event: ChatInputContainer.Submitted
     ) -> None:
+        value = event.value.strip()
+        input_widget = self.query_one(ChatInputContainer)
+
+        if not value and not self._input_queue.paused:
+            return
+
         if self._banner:
             self._banner.freeze_animation()
 
@@ -650,38 +774,104 @@ class VibeApp(App):  # noqa: PLR0904
             await self._whats_new_message.remove()
             self._whats_new_message = None
 
-        value = event.value.strip()
-        if not value:
+        if self._input_queue.paused:
+            if not await self._handle_paused_submit(value):
+                self._restore_input_if_empty(input_widget, value)
             return
 
-        input_widget = self.query_one(ChatInputContainer)
-        input_widget.value = ""
+        if self._is_busy():
+            if not await self._handle_queue_submit(
+                value, reject_hint=_REJECT_HINT_BUSY
+            ):
+                self._restore_input_if_empty(input_widget, value)
+            return
 
-        if self._bash_task and not self._bash_task.done():
-            self._bash_task.cancel()
-            self._bash_task = None
+        await self._dispatch_idle_input(value)
 
+    @staticmethod
+    def _restore_input_if_empty(input_widget: ChatInputContainer, value: str) -> None:
+        if not input_widget.value:
+            input_widget.value = value
+
+    async def _empty_bash_error(self) -> None:
+        await self._mount_and_scroll(
+            ErrorMessage(
+                "No command provided after '!'", collapsed=self._tools_collapsed
+            )
+        )
+
+    def _warn_not_queueable(self, message: str) -> None:
+        self.notify(message, severity="warning", markup=False)
+
+    async def _dispatch_idle_input(self, value: str) -> None:
+        match classify(value, commands=self.commands, expand_skill=self._expand_skill):
+            case Teleport(target=target):
+                await self._handle_teleport_command(target)
+            case SlashCommand():
+                await self._handle_command(value)
+            case Skill(expanded_prompt=expanded):
+                await self._handle_user_message(expanded, title_source=value)
+            case Bash(command=command):
+                self._bash_task = asyncio.create_task(
+                    self._handle_bash_command(command)
+                )
+                self._queue.notify_busy_changed()
+            case EmptyBash():
+                await self._empty_bash_error()
+            case Prompt(text=text):
+                await self._handle_user_message(text)
+
+    async def _handle_paused_submit(self, value: str) -> bool:
+        if value and not await self._handle_queue_submit(
+            value, reject_hint=_REJECT_HINT_PAUSED
+        ):
+            return False
+        self._queue.set_paused(False)
+        self._queue.start_drain_if_needed()
+        return True
+
+    async def _handle_queue_submit(self, value: str, *, reject_hint: str) -> bool:
+        match classify(value, commands=self.commands, expand_skill=self._expand_skill):
+            case Teleport():
+                self._warn_not_queueable(f"Teleport cannot be queued — {reject_hint}")
+                return False
+            case SlashCommand():
+                self._warn_not_queueable(
+                    f"Slash commands cannot be queued — {reject_hint}"
+                )
+                return False
+            case Skill(expanded_prompt=expanded, name=name):
+                return await self._enqueue_prompt_with_resources(
+                    expanded, skill_name=name
+                )
+            case Bash(command=command):
+                await self._queue.enqueue_bash(command)
+            case EmptyBash():
+                await self._empty_bash_error()
+            case Prompt(text=text):
+                return await self._enqueue_prompt_with_resources(text)
+        return True
+
+    async def _enqueue_prompt_with_resources(
+        self, content: str, *, skill_name: str | None = None
+    ) -> bool:
+        payload = build_path_prompt_payload(content, base_dir=Path.cwd())
+        images = await self._prepare_images_or_abort(payload)
+        if images is None:
+            return False
+        await self._queue.enqueue_prompt(
+            content, skill_name=skill_name, images=images, payload=payload
+        )
+        return True
+
+    def _is_busy(self) -> bool:
         if self._agent_running:
-            await self._interrupt_agent_loop()
-
-        await self._dispatch_submitted_input(value)
-
-    async def _dispatch_submitted_input(self, value: str) -> None:
-        if value.startswith("!"):
-            self._bash_task = asyncio.create_task(self._handle_bash_command(value[1:]))
-            return
-
-        if value.startswith("&") and self.commands.has_command("teleport"):
-            await self._handle_teleport_command(value[1:])
-            return
-
-        if await self._handle_command(value):
-            return
-
-        if await self._handle_skill(value):
-            return
-
-        await self._handle_user_message(value)
+            return True
+        if self._bash_task is not None and not self._bash_task.done():
+            return True
+        if self._queue.draining:
+            return True
+        return False
 
     async def on_approval_app_approval_granted(
         self, message: ApprovalApp.ApprovalGranted
@@ -867,12 +1057,10 @@ class VibeApp(App):  # noqa: PLR0904
             self._loading_widget.set_status(status)
             return
 
-        loading_area = self._cached_loading_area
-        if loading_area is None:
-            try:
-                loading_area = self.query_one("#loading-area-content")
-            except Exception:
-                return
+        try:
+            loading_area = self._loading_area
+        except Exception:
+            return
         loading = LoadingWidget(status=status, show_hint=show_hint)
         self._loading_widget = loading
         await loading_area.mount(loading)
@@ -1036,8 +1224,7 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_compact_message_completed(
         self, message: CompactMessage.Completed
     ) -> None:
-        messages_area = self._cached_messages_area or self.query_one("#messages")
-        children = list(messages_area.children)
+        children = list(self._messages_area.children)
 
         try:
             compact_index = children.index(message.compact_widget)
@@ -1057,7 +1244,13 @@ class VibeApp(App):  # noqa: PLR0904
             self.agent_loop.telemetry_client.send_slash_command_used(
                 cmd_name, "builtin"
             )
-            await self._mount_and_scroll(SlashCommandMessage(user_input[1:]))
+            command_text = user_input.strip()
+            display = (
+                command_text.removeprefix("/")
+                if command_text.startswith("/")
+                else cmd_name
+            )
+            await self._mount_and_scroll(SlashCommandMessage(display))
             handler = getattr(self, command.handler)
             if asyncio.iscoroutinefunction(handler):
                 await handler(cmd_args=cmd_args)
@@ -1075,19 +1268,42 @@ class VibeApp(App):  # noqa: PLR0904
             if info.user_invocable
         ]
 
-    async def _handle_skill(self, user_input: str) -> bool:
+    def _expand_skill(self, user_input: str) -> Skill | None:
         if not self.agent_loop:
-            return False
-
+            return None
         skill = self.agent_loop.skill_manager.parse_skill_command(user_input)
-
         if skill is None:
-            return False
+            return None
+        return Skill(
+            expanded_prompt=SkillManager.build_skill_prompt(user_input, skill),
+            name=skill.name,
+        )
 
-        self.agent_loop.telemetry_client.send_slash_command_used(skill.name, "skill")
-        prompt = SkillManager.build_skill_prompt(user_input, skill)
-        await self._handle_user_message(prompt, title_source=user_input)
-        return True
+    def _send_skill_telemetry(self, name: str | None) -> None:
+        if name is None:
+            return
+        self.agent_loop.telemetry_client.send_slash_command_used(name, "skill")
+
+    def _send_at_mention_telemetry(
+        self, payload: PathPromptPayload, message_id: str
+    ) -> None:
+        if not payload.all_resources:
+            return
+        context_types: dict[str, int] = {}
+        for r in payload.all_resources:
+            context_types[r.kind] = context_types.get(r.kind, 0) + 1
+        file_ext_counts: dict[str, int] = {}
+        for r in payload.all_resources:
+            if r.kind == "file" and r.path.suffix:
+                file_ext_counts[r.path.suffix] = (
+                    file_ext_counts.get(r.path.suffix, 0) + 1
+                )
+        self.agent_loop.telemetry_client.send_at_mention_inserted(
+            nb_mentions=len(payload.all_resources),
+            context_types=context_types,
+            file_extensions=file_ext_counts or None,
+            message_id=message_id,
+        )
 
     @staticmethod
     async def _bash_read_stream(
@@ -1123,7 +1339,28 @@ class VibeApp(App):  # noqa: PLR0904
             pass
         await proc.wait()
 
-    async def _handle_bash_command(self, command: str) -> None:
+    async def _handle_bash_command(
+        self,
+        command: str,
+        *,
+        existing_widget: BashOutputMessage | None = None,
+        start_drain_on_finish: bool = True,
+    ) -> None:
+        try:
+            await self._handle_bash_command_inner(
+                command, existing_widget=existing_widget
+            )
+        finally:
+            current = asyncio.current_task()
+            if self._bash_task is current:
+                self._bash_task = None
+            self._queue.notify_busy_changed()
+            if start_drain_on_finish:
+                self._queue.start_drain_if_needed()
+
+    async def _handle_bash_command_inner(
+        self, command: str, *, existing_widget: BashOutputMessage | None = None
+    ) -> None:
         if not command:
             await self._mount_and_scroll(
                 ErrorMessage(
@@ -1132,8 +1369,11 @@ class VibeApp(App):  # noqa: PLR0904
             )
             return
 
-        bash_msg = BashOutputMessage(command, str(Path.cwd()), pending=True)
-        await self._mount_and_scroll(bash_msg)
+        if existing_widget is not None:
+            bash_msg = existing_widget
+        else:
+            bash_msg = BashOutputMessage(command, str(Path.cwd()), pending=True)
+            await self._mount_and_scroll(bash_msg)
         await self._ensure_loading_widget("Running command")
         bash_loading_widget = self._loading_widget
 
@@ -1297,6 +1537,12 @@ class VibeApp(App):  # noqa: PLR0904
             message, message_index=message_index, images=images or None
         )
 
+        messages_area = self._cached_messages_area or self.query_one("#messages")
+        last_child = messages_area.children[-1] if messages_area.children else None
+        if isinstance(last_child, UserMessage):
+            last_child.set_show_separator(False)
+            user_message.set_follows_previous(True)
+
         await self._mount_and_scroll(user_message)
         if self._feedback_bar_manager.should_show(self.agent_loop):
             self._feedback_bar.show()
@@ -1313,6 +1559,7 @@ class VibeApp(App):  # noqa: PLR0904
                     prebuilt_payload=prompt_payload,
                 )
             )
+            self._queue.notify_busy_changed()
 
     async def _handle_remote_user_message(self, message: str) -> None:
         warning = self._remote_manager.validate_input()
@@ -1354,7 +1601,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._history_widget_indices = WeakKeyDictionary()
 
     async def _resume_history_from_messages(self) -> None:
-        messages_area = self._cached_messages_area or self.query_one("#messages")
+        messages_area = self._messages_area
         if not should_resume_history(list(messages_area.children)):
             return
 
@@ -1369,8 +1616,7 @@ class VibeApp(App):  # noqa: PLR0904
             plan.tool_call_map,
             start_index=plan.tail_start_index,
         )
-        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-        self.call_after_refresh(chat.anchor)
+        self.call_after_refresh(self._chat_widget.anchor)
         self._tool_call_map = plan.tool_call_map
         self._windowing.set_backfill(plan.backfill_messages)
         await self._load_more.set_visible(
@@ -1393,7 +1639,6 @@ class VibeApp(App):  # noqa: PLR0904
             batch=batch,
             tool_call_map=tool_call_map,
             start_index=start_index,
-            tools_collapsed=self._tools_collapsed,
             history_widget_indices=self._history_widget_indices,
         )
 
@@ -1531,22 +1776,7 @@ class VibeApp(App):  # noqa: PLR0904
             prompt_payload = prebuilt_payload or build_path_prompt_payload(
                 prompt, base_dir=Path.cwd()
             )
-            if prompt_payload.all_resources:
-                context_types: dict[str, int] = {}
-                for r in prompt_payload.all_resources:
-                    context_types[r.kind] = context_types.get(r.kind, 0) + 1
-                file_ext_counts: dict[str, int] = {}
-                for r in prompt_payload.all_resources:
-                    if r.kind == "file" and r.path.suffix:
-                        file_ext_counts[r.path.suffix] = (
-                            file_ext_counts.get(r.path.suffix, 0) + 1
-                        )
-                self.agent_loop.telemetry_client.send_at_mention_inserted(
-                    nb_mentions=len(prompt_payload.all_resources),
-                    context_types=context_types,
-                    file_extensions=file_ext_counts or None,
-                    message_id=message_id,
-                )
+            self._send_at_mention_telemetry(prompt_payload, message_id)
             images = await self._resolve_turn_images(prompt_payload, prebuilt_images)
             if images is None:
                 return
@@ -1602,6 +1832,8 @@ class VibeApp(App):  # noqa: PLR0904
             self._loading_widget = None
             if self.event_handler:
                 await self.event_handler.finalize_streaming()
+            self._queue.notify_busy_changed()
+            self._queue.start_drain_if_needed()
             await self._refresh_windowing_from_history()
             self._terminal_notifier.notify(NotificationContext.COMPLETE)
 
@@ -1610,6 +1842,8 @@ class VibeApp(App):  # noqa: PLR0904
             return self._rate_limit_message()
         if isinstance(e, ContextTooLongError):
             return self._context_too_long_message()
+        if isinstance(e, RefusalError):
+            return self._refusal_message(e)
         return str(e)
 
     def _rate_limit_message(self) -> str:
@@ -1631,6 +1865,16 @@ class VibeApp(App):  # noqa: PLR0904
             "2. Then use /compact to summarize the remaining conversation\n\n"
             "This will free up context space so you can continue working."
         )
+
+    def _refusal_message(self, e: RefusalError) -> str:
+        lead = "The model declined to respond and stopped early (refusal)."
+        if e.category:
+            lead += f"\nCategory: {e.category}."
+        detail = e.explanation or (
+            "This can happen with certain prompts or content. "
+            "Try rephrasing your request or starting a new conversation."
+        )
+        return f"{lead}\n\n{detail}"
 
     async def _teleport_command(self, **kwargs: Any) -> None:
         await self._handle_teleport_command(show_message=False)
@@ -1661,11 +1905,8 @@ class VibeApp(App):  # noqa: PLR0904
         self.run_worker(self._teleport(value), exclusive=False)
 
     async def _teleport(self, prompt: str | None = None) -> None:
-        loading_area = self._cached_loading_area or self.query_one(
-            "#loading-area-content"
-        )
         loading = LoadingWidget()
-        await loading_area.mount(loading)
+        await self._loading_area.mount(loading)
 
         teleport_msg = TeleportMessage()
         await self._mount_and_scroll(teleport_msg)
@@ -1699,7 +1940,7 @@ class VibeApp(App):  # noqa: PLR0904
                         response = await self._ask_push_approval(
                             count, branch_not_pushed
                         )
-                        await loading_area.mount(loading)
+                        await self._loading_area.mount(loading)
                         teleport_msg.set_status("Teleporting...")
                         next_event = await gen.asend(response)
                         if isinstance(next_event, TeleportPushingEvent):
@@ -1777,10 +2018,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self.event_handler.finalize_streaming()
 
         self._agent_running = False
-        loading_area = self._cached_loading_area or self.query_one(
-            "#loading-area-content"
-        )
-        await loading_area.remove_children()
+        await self._loading_area.remove_children()
         self._loading_widget = None
 
         await self._mount_and_scroll(InterruptMessage())
@@ -1792,8 +2030,7 @@ class VibeApp(App):  # noqa: PLR0904
         await self._mount_and_scroll(UserCommandMessage(help_text))
 
     def _get_last_assistant_message_text(self) -> str | None:
-        messages_area = self._cached_messages_area or self.query_one("#messages")
-        for child in reversed(messages_area.children):
+        for child in reversed(self._messages_area.children):
             if not isinstance(child, AssistantMessage):
                 continue
             if not (content := child.get_content().strip()):
@@ -2012,7 +2249,11 @@ class VibeApp(App):  # noqa: PLR0904
                     f"{session.title or 'Remote workflow'} ({(session.status or 'RUNNING').lower()})"
                 )
 
-        picker = SessionPickerApp(sessions=sessions, latest_messages=latest_messages)
+        picker = SessionPickerApp(
+            sessions=sessions,
+            latest_messages=latest_messages,
+            current_session_id=self.agent_loop.session_id,
+        )
         await self._switch_from_input(picker)
 
     async def on_session_picker_app_session_selected(
@@ -2039,6 +2280,66 @@ class VibeApp(App):  # noqa: PLR0904
                     f"Failed to load session: {e}", collapsed=self._tools_collapsed
                 )
             )
+
+    async def on_session_picker_app_session_delete_requested(
+        self, event: SessionPickerApp.SessionDeleteRequested
+    ) -> None:
+        if not can_delete_resume_session_source(event.source):
+            self._clear_pending_session_delete(event.option_id)
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Deleting remote sessions is not supported.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        if event.source == "local" and event.session_id == self.agent_loop.session_id:
+            self._clear_pending_session_delete(event.option_id)
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Deleting the current session is not supported.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        try:
+            await delete_saved_session(event.session_id, self.config.session_logging)
+        except Exception as e:
+            self._clear_pending_session_delete(event.option_id)
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to delete session: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            return
+
+        try:
+            picker = self.query_one(SessionPickerApp)
+        except Exception:
+            picker = None
+
+        if picker is not None:
+            picker.remove_session(event.option_id)
+
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                f"Deleted session `{short_session_id(event.session_id)}`."
+            )
+        )
+
+        if picker is not None and not picker.has_sessions:
+            await self._switch_to_input_app()
+            await self._mount_and_scroll(
+                UserCommandMessage("No saved sessions left for this directory.")
+            )
+
+    def _clear_pending_session_delete(self, option_id: str) -> None:
+        try:
+            self.query_one(SessionPickerApp).clear_pending_delete(option_id)
+        except Exception:
+            pass
 
     async def on_session_picker_app_cancelled(
         self, event: SessionPickerApp.Cancelled
@@ -2084,8 +2385,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._reset_ui_state()
         await self._load_more.hide()
 
-        messages_area = self._cached_messages_area or self.query_one("#messages")
-        await messages_area.remove_children()
+        await self._messages_area.remove_children()
 
         if self.event_handler:
             self.event_handler.is_remote = False
@@ -2098,6 +2398,9 @@ class VibeApp(App):  # noqa: PLR0904
         )
 
     async def _resume_remote_session(self, session: ResumeSessionInfo) -> None:
+        self.agent_loop.telemetry_client.send_remote_resume_requested(
+            session_id=session.session_id
+        )
         await self._remote_manager.attach(
             session_id=session.session_id, config=self.config
         )
@@ -2110,8 +2413,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._reset_ui_state()
         await self._load_more.hide()
 
-        messages_area = self._cached_messages_area or self.query_one("#messages")
-        await messages_area.remove_children()
+        await self._messages_area.remove_children()
 
         if self.event_handler:
             self.event_handler.is_remote = True
@@ -2176,6 +2478,7 @@ class VibeApp(App):  # noqa: PLR0904
                     self.agent_loop.skill_manager,
                     connectors_connected=cc,
                     connectors_total=ct,
+                    hooks_count=self.agent_loop.hooks_count,
                     plan_description=plan_title(self._plan_info),
                 )
             self._show_config_issues()
@@ -2241,15 +2544,13 @@ class VibeApp(App):  # noqa: PLR0904
             await self.agent_loop.clear_history()
             if self.event_handler:
                 await self.event_handler.finalize_streaming()
-            messages_area = self._cached_messages_area or self.query_one("#messages")
-            await messages_area.remove_children()
+            await self._messages_area.remove_children()
 
-            await messages_area.mount(SlashCommandMessage("clear"))
+            await self._messages_area.mount(SlashCommandMessage("clear"))
             await self._mount_and_scroll(
                 UserCommandMessage("Conversation history cleared!")
             )
-            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-            chat.scroll_home(animate=False)
+            self._chat_widget.scroll_home(animate=False)
 
         except Exception as e:
             await self._mount_and_scroll(
@@ -2396,17 +2697,20 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _switch_from_input(self, widget: Widget, scroll: bool = False) -> None:
         bottom_container = self.query_one("#bottom-app-container")
-        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
+        chat = self._chat_widget
         should_scroll = scroll and chat.is_at_bottom
 
-        if self._chat_input_container:
-            self._chat_input_container.display = False
-            self._chat_input_container.disabled = True
+        with self.batch_update():
+            if self._chat_input_container:
+                self._chat_input_container.display = False
+                self._chat_input_container.disabled = True
 
-        self._feedback_bar.hide()
+            self._feedback_bar.hide()
 
-        self._current_bottom_app = BottomApp[type(widget).__name__.removesuffix("App")]
-        await bottom_container.mount(widget)
+            self._current_bottom_app = BottomApp[
+                type(widget).__name__.removesuffix("App")
+            ]
+            await bottom_container.mount(widget)
 
         self.call_after_refresh(widget.focus)
         if should_scroll:
@@ -2506,9 +2810,8 @@ class VibeApp(App):  # noqa: PLR0904
 
         if self._chat_input_container:
             self.call_after_refresh(self._chat_input_container.focus_input)
-            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-            if chat.is_at_bottom:
-                self.call_after_refresh(chat.anchor)
+            if self._chat_widget.is_at_bottom:
+                self.call_after_refresh(self._chat_widget.anchor)
 
     def _focus_current_bottom_app(self) -> None:
         try:
@@ -2613,7 +2916,7 @@ class VibeApp(App):  # noqa: PLR0904
     def _handle_session_picker_app_escape(self) -> None:
         try:
             session_picker = self.query_one(SessionPickerApp)
-            session_picker.post_message(SessionPickerApp.Cancelled())
+            session_picker.action_cancel()
         except Exception:
             pass
         self._last_escape_time = None
@@ -2626,10 +2929,9 @@ class VibeApp(App):  # noqa: PLR0904
         Only includes messages with a valid message_index (i.e. real user
         messages, not slash-command echo messages).
         """
-        messages_area = self._cached_messages_area or self.query_one("#messages")
         return [
             child
-            for child in messages_area.children
+            for child in self._messages_area.children
             if isinstance(child, UserMessage) and child.message_index is not None
         ]
 
@@ -2677,8 +2979,7 @@ class VibeApp(App):  # noqa: PLR0904
                     await self._select_rewind_widget(user_widgets[idx - 1])
                     return
         # No load more or already first message: scroll to top
-        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-        self.call_after_refresh(chat.scroll_home, animate=False)
+        self.call_after_refresh(self._chat_widget.scroll_home, animate=False)
 
     def action_rewind_next(self) -> None:
         if not self._rewind_mode:
@@ -2717,7 +3018,7 @@ class VibeApp(App):  # noqa: PLR0904
             widget.get_content(), has_file_changes=has_file_changes
         )
 
-        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
+        chat = self._chat_widget
         self.call_after_refresh(chat.scroll_to_widget, widget, animate=False, top=True)
 
     async def _switch_to_rewind_app(
@@ -2780,30 +3081,33 @@ class VibeApp(App):  # noqa: PLR0904
         if msg_index is None:
             return
 
-        try:
-            (
-                message_content,
-                restore_errors,
-            ) = await self.agent_loop.rewind_manager.rewind_to_message(
-                msg_index, restore_files=restore_files
-            )
-        except RewindError as exc:
-            self.notify(str(exc), severity="error")
-            return
+        if msg_index < len(self.agent_loop.messages):
+            try:
+                (
+                    message_content,
+                    restore_errors,
+                ) = await self.agent_loop.rewind_manager.rewind_to_message(
+                    msg_index, restore_files=restore_files
+                )
+            except RewindError as exc:
+                self.notify(str(exc), severity="error")
+                return
+        else:
+            message_content = target_widget.get_content()
+            restore_errors = []
 
         for error in restore_errors:
             self.notify(error, severity="warning")
 
         # Remove UI widgets from the selected message onward
-        messages_area = self._cached_messages_area or self.query_one("#messages")
-        children = list(messages_area.children)
+        children = list(self._messages_area.children)
         try:
             target_idx = children.index(target_widget)
         except ValueError:
             target_idx = len(children)
         to_remove = children[target_idx:]
         if to_remove:
-            await messages_area.remove_children(to_remove)
+            await self._messages_area.remove_children(to_remove)
 
         self._clear_rewind_state()
 
@@ -2871,7 +3175,7 @@ class VibeApp(App):  # noqa: PLR0904
             return False
         return True
 
-    def _try_interrupt(self) -> bool:
+    def _try_interrupt_no_job_steps(self) -> bool:
         if self._voice_manager.transcribe_state != TranscribeState.IDLE:
             self._voice_manager.cancel_recording()
             return True
@@ -2895,6 +3199,9 @@ class VibeApp(App):  # noqa: PLR0904
             self._narrator_manager.cancel()
             return True
 
+        return False
+
+    def _try_interrupt_running_job(self) -> bool:
         interrupted = False
         if self._bash_task and not self._bash_task.done():
             self._bash_task.cancel()
@@ -2902,11 +3209,23 @@ class VibeApp(App):  # noqa: PLR0904
         if self._agent_running:
             self._handle_agent_running_escape()
             interrupted = True
+        return interrupted
+
+    def _try_interrupt(self) -> bool:
+        if self._try_interrupt_no_job_steps():
+            return True
+
+        interrupted = self._try_interrupt_running_job()
+        if interrupted and self._input_queue:
+            self._queue.set_paused(True)
+
+        if not interrupted and self._input_queue:
+            self._queue.set_paused(True)
+            interrupted = True
 
         self._last_escape_time = time.monotonic()
-        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-        if chat.is_at_bottom:
-            self.call_after_refresh(chat.anchor)
+        if self._chat_widget.is_at_bottom:
+            self.call_after_refresh(self._chat_widget.anchor)
         self._focus_current_bottom_app()
         return interrupted
 
@@ -2922,7 +3241,7 @@ class VibeApp(App):  # noqa: PLR0904
             if (batch := self._windowing.next_load_more_batch()) is None:
                 await self._load_more.hide()
                 return
-            messages_area = self._cached_messages_area or self.query_one("#messages")
+            messages_area = self._messages_area
             if self._tool_call_map is None:
                 self._tool_call_map = {}
             if self._load_more.widget:
@@ -2948,15 +3267,8 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def action_toggle_tool(self) -> None:
         self._tools_collapsed = not self._tools_collapsed
-
-        for result in self.query(ToolResultMessage):
-            await result.set_collapsed(self._tools_collapsed)
-
-        try:
-            for error_msg in self.query(ErrorMessage):
-                error_msg.set_collapsed(self._tools_collapsed)
-        except Exception:
-            pass
+        for section in self.query(CollapsibleSection):
+            section.set_collapsed(self._tools_collapsed)
 
     def action_cycle_mode(self) -> None:
         if self._current_bottom_app != BottomApp.Input:
@@ -2982,6 +3294,7 @@ class VibeApp(App):  # noqa: PLR0904
                 self.agent_loop.skill_manager,
                 connectors_connected=cc,
                 connectors_total=ct,
+                hooks_count=self.agent_loop.hooks_count,
                 plan_description=plan_title(self._plan_info),
             )
 
@@ -3051,16 +3364,24 @@ class VibeApp(App):  # noqa: PLR0904
         return None
 
     def action_interrupt_or_quit(self) -> None:
+        # Ctrl+C priority ladder: clear input → second-press quit → bottom-app/voice/etc
+        # no-op steps → pop last queued item (LIFO) → cancel running job → request quit.
         if (container := self._get_chat_input()) and container.value:
             container.value = ""
             return
-
         if self._quit_manager.is_confirmed("Ctrl+C"):
             self._force_quit()
             return
-        if self._try_interrupt():
+        if self._try_interrupt_no_job_steps():
             return
-        self._quit_manager.request_confirmation("Ctrl+C")
+        if self._input_queue:
+            self.run_worker(self._queue.pop_last(), exclusive=False)
+            return
+        if self._try_interrupt_running_job():
+            return
+        self._quit_manager.request_confirmation(
+            "Ctrl+C", self._queue.quit_warning_extra()
+        )
 
     def action_delete_right_or_quit(self) -> None:
         if (container := self._get_chat_input()) and container.value:
@@ -3071,7 +3392,9 @@ class VibeApp(App):  # noqa: PLR0904
         if self._quit_manager.is_confirmed("Ctrl+D"):
             self._force_quit()
             return
-        self._quit_manager.request_confirmation("Ctrl+D")
+        self._quit_manager.request_confirmation(
+            "Ctrl+D", self._queue.quit_warning_extra()
+        )
 
     def _emit_session_closed_for_active_session(self) -> None:
         self.agent_loop.emit_session_closed_telemetry()
@@ -3103,15 +3426,13 @@ class VibeApp(App):  # noqa: PLR0904
 
     def action_scroll_chat_up(self) -> None:
         try:
-            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-            chat.scroll_relative(y=-5, animate=False)
+            self._chat_widget.scroll_relative(y=-5, animate=False)
         except Exception:
             pass
 
     def action_scroll_chat_down(self) -> None:
         try:
-            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-            chat.scroll_relative(y=5, animate=False)
+            self._chat_widget.scroll_relative(y=5, animate=False)
         except Exception:
             pass
 
@@ -3164,10 +3485,9 @@ class VibeApp(App):  # noqa: PLR0904
             whats_new_message = WhatsNewMessage(body)
             if self._history_widget_indices:
                 whats_new_message.add_class("after-history")
-            messages_area = self._cached_messages_area or self.query_one("#messages")
-            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
+            chat = self._chat_widget
             should_anchor = chat.is_at_bottom
-            await chat.mount(whats_new_message, after=messages_area)
+            await chat.mount(whats_new_message, after=self._messages_area)
             self._whats_new_message = whats_new_message
             if should_anchor:
                 chat.anchor()
@@ -3183,10 +3503,9 @@ class VibeApp(App):  # noqa: PLR0904
         if not self._show_vscode_extension_promo:
             return
         promo_message = VscodeExtensionPromoMessage()
-        messages_area = self._cached_messages_area or self.query_one("#messages")
-        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
+        chat = self._chat_widget
         should_anchor = chat.is_at_bottom
-        await chat.mount(promo_message, before=messages_area)
+        await chat.mount(promo_message, before=self._messages_area)
         if should_anchor:
             chat.anchor()
         self.run_worker(self._record_vscode_extension_promo_shown(), exclusive=False)
@@ -3214,17 +3533,23 @@ class VibeApp(App):  # noqa: PLR0904
             self._refresh_command_registry()
 
     async def _mount_and_scroll(
-        self, widget: Widget, after: Widget | None = None
+        self, widget: Widget, after: Widget | None = None, before: Widget | None = None
     ) -> None:
-        messages_area = self._cached_messages_area or self.query_one("#messages")
-        chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-
+        messages_area = self._messages_area
         is_user_initiated = isinstance(widget, (UserMessage, UserCommandMessage))
-        should_anchor = is_user_initiated or chat.is_at_bottom
+        should_anchor = is_user_initiated or self._chat_widget.is_at_bottom
+
+        pin_anchor: Widget | None = None
+        if after is None:
+            pin_anchor = self._queue.pin_target(messages_area)
 
         with self.batch_update():
-            if after is not None and after.parent is messages_area:
+            if before is not None and before.parent is messages_area:
+                await messages_area.mount(widget, before=before)
+            elif after is not None and after.parent is messages_area:
                 await messages_area.mount(widget, after=after)
+            elif pin_anchor is not None:
+                await messages_area.mount(widget, before=pin_anchor)
             else:
                 await messages_area.mount(widget)
             if isinstance(widget, StreamingMessageBase):
@@ -3232,24 +3557,22 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.call_after_refresh(self._try_prune)
         if should_anchor:
-            chat.anchor()
+            self._chat_widget.anchor()
 
     async def _try_prune(self) -> None:
-        messages_area = self._cached_messages_area or self.query_one("#messages")
         pruned = await prune_oldest_children(
-            messages_area, PRUNE_LOW_MARK, PRUNE_HIGH_MARK
+            self._messages_area, PRUNE_LOW_MARK, PRUNE_HIGH_MARK
         )
         if self._load_more.widget and not self._load_more.widget.parent:
             self._load_more.widget = None
         if pruned:
-            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-            if chat.is_at_bottom:
-                self.call_later(chat.anchor)
+            if self._chat_widget.is_at_bottom:
+                self.call_later(self._chat_widget.anchor)
 
     async def _refresh_windowing_from_history(self) -> None:
         if self._load_more.widget is None:
             return
-        messages_area = self._cached_messages_area or self.query_one("#messages")
+        messages_area = self._messages_area
         has_backfill, tool_call_map = sync_backfill_state(
             history_messages=non_system_history_messages(self.agent_loop.messages),
             messages_children=list(messages_area.children),

@@ -342,7 +342,10 @@ class TestMigrateLeavesFindInBashAllowlist:
     ) -> None:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
-        data = {"tools": {"bash": {"allowlist": ["echo", "ls"]}}}
+        data = {
+            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "tools": {"bash": {"allowlist": ["echo", "ls"]}},
+        }
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
 
@@ -359,7 +362,10 @@ class TestMigrateLeavesFindInBashAllowlist:
     ) -> None:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
-        data = {"tools": {"bash": {"allowlist": ["echo", "find", "ls"]}}}
+        data = {
+            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "tools": {"bash": {"allowlist": ["echo", "find", "ls"]}},
+        }
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
 
@@ -396,7 +402,8 @@ class TestMigrateStripsBashAllowlistWildcardSuffix:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
         data = {
-            "tools": {"bash": {"allowlist": ["git commit *", "npm install *", "echo"]}}
+            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "tools": {"bash": {"allowlist": ["git commit *", "npm install *", "echo"]}},
         }
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
@@ -420,7 +427,8 @@ class TestMigrateStripsBashAllowlistWildcardSuffix:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
         data = {
-            "tools": {"bash": {"allowlist": ["git commit *", "git commit", "find"]}}
+            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "tools": {"bash": {"allowlist": ["git commit *", "git commit", "find"]}},
         }
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
@@ -438,7 +446,10 @@ class TestMigrateStripsBashAllowlistWildcardSuffix:
     ) -> None:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
-        data = {"tools": {"bash": {"allowlist": ["echo", "find", "ls"]}}}
+        data = {
+            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "tools": {"bash": {"allowlist": ["echo", "find", "ls"]}},
+        }
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
 
@@ -449,6 +460,68 @@ class TestMigrateStripsBashAllowlistWildcardSuffix:
         with config_file.open("rb") as f:
             result = tomllib.load(f)
         assert result["tools"]["bash"]["allowlist"] == ["echo", "find", "ls"]
+
+
+class TestMigrateBashReadOnlyDefaults:
+    def test_merges_read_only_commands_into_existing_allowlist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from vibe.core.tools.builtins.bash import default_read_only_commands
+
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {"tools": {"bash": {"allowlist": ["echo", "git commit"]}}}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        allowlist = result["tools"]["bash"]["allowlist"]
+        assert "git commit" in allowlist
+        for cmd in default_read_only_commands():
+            assert cmd in allowlist
+        assert VibeConfig._BASH_READ_ONLY_MIGRATION in result["applied_migrations"]
+
+    def test_does_not_readd_removed_command_after_migration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "tools": {"bash": {"allowlist": ["echo", "find"]}},
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["tools"]["bash"]["allowlist"] == ["echo", "find"]
+
+    def test_noop_when_no_bash_allowlist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {"active_model": "test"}
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result == {"active_model": "test"}
 
 
 class TestMigrateMistralVibeCliLatestDefaults:

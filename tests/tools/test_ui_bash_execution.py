@@ -209,26 +209,34 @@ async def test_ui_streams_output_incrementally(vibe_app: VibeApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ui_cancels_running_command_on_new_submit(vibe_app: VibeApp) -> None:
-    """Submitting new input while a bang command is running should cancel it."""
+async def test_ui_queues_bash_submitted_while_command_running(
+    vibe_app: VibeApp,
+) -> None:
+    """Submitting new bash while a bang command is running should queue, not cancel."""
     async with vibe_app.run_test() as pilot:
         chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.value = "!sleep 30"
+        chat_input.value = "!sleep 0.5"
 
         await pilot.press("enter")
         await _wait_for_pending_bash_message(vibe_app, pilot)
         assert vibe_app._bash_task is not None
         assert not vibe_app._bash_task.done()
 
-        # submit a new command which should cancel the first one
         chat_input.value = "!echo done"
         await pilot.press("enter")
 
-        # wait until we have two messages and the second is finished
-        deadline = time.monotonic() + 2.0
+        # The second command should be queued, not cancelled
+        assert len(vibe_app._input_queue) == 1
+
+        # Wait for both to complete (first runs, drain runs second)
+        deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             all_msgs = list(vibe_app.query(BashOutputMessage))
-            if len(all_msgs) == 2 and not all_msgs[1]._pending:
+            if (
+                len(all_msgs) == 2
+                and not all_msgs[0]._pending
+                and not all_msgs[1]._pending
+            ):
                 break
             await pilot.pause(0.05)
 

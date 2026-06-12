@@ -9,6 +9,8 @@ import subprocess
 import pyperclip
 from textual.app import App
 
+from vibe.core.utils.io import decode_safe
+
 
 def _copy_osc52(text: str) -> None:
     encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
@@ -68,21 +70,26 @@ def _paste_pyperclip() -> str:
 
 
 def _paste_pbpaste() -> str:
-    return subprocess.run(["pbpaste"], capture_output=True, check=True).stdout.decode(
-        "utf-8"
-    )
+    return decode_safe(
+        subprocess.run(["pbpaste"], capture_output=True, check=True).stdout,
+        from_subprocess=True,
+    ).text
 
 
 def _paste_xclip() -> str:
-    return subprocess.run(
-        ["xclip", "-selection", "clipboard", "-o"], capture_output=True, check=True
-    ).stdout.decode("utf-8")
+    return decode_safe(
+        subprocess.run(
+            ["xclip", "-selection", "clipboard", "-o"], capture_output=True, check=True
+        ).stdout,
+        from_subprocess=True,
+    ).text
 
 
 def _paste_wl_paste() -> str:
-    return subprocess.run(["wl-paste"], capture_output=True, check=True).stdout.decode(
-        "utf-8"
-    )
+    return decode_safe(
+        subprocess.run(["wl-paste"], capture_output=True, check=True).stdout,
+        from_subprocess=True,
+    ).text
 
 
 _PASTE_CMD_STRATEGIES: list[tuple[str, Callable[[], str]]] = [

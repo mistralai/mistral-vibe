@@ -146,6 +146,35 @@ async def test_ui_displays_multiple_user_assistant_turns(
 
 
 @pytest.mark.asyncio
+async def test_ui_displays_messages_when_resuming_in_dangerous_directory(
+    monkeypatch: pytest.MonkeyPatch, vibe_config: VibeConfig
+) -> None:
+    monkeypatch.setattr(
+        "vibe.cli.textual_ui.app.is_dangerous_directory",
+        lambda: (True, "You are in the home directory"),
+    )
+
+    agent_loop = build_test_agent_loop(config=vibe_config)
+    agent_loop.messages.extend([
+        LLMMessage(role=Role.user, content="Hello from a previous run"),
+        LLMMessage(role=Role.assistant, content="Welcome back!"),
+    ])
+
+    app = build_test_vibe_app(agent_loop=agent_loop)
+
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+
+        user_messages = app.query(UserMessage)
+        assistant_messages = app.query(AssistantMessage)
+
+        assert len(user_messages) == 1
+        assert user_messages[0]._content == "Hello from a previous run"
+        assert len(assistant_messages) == 1
+        assert assistant_messages[0]._content == "Welcome back!"
+
+
+@pytest.mark.asyncio
 async def test_ui_rebuilds_history_when_whats_new_is_shown(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
