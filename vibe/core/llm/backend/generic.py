@@ -417,7 +417,7 @@ class GenericBackend:
                 await response.aread()
             response.raise_for_status()
             async for line in response.aiter_lines():
-                if line.strip() == "":
+                if line.strip() == "" or line.strip().startswith(":"):
                     continue
 
                 DELIM_CHAR = ":"
