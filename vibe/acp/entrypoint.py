@@ -81,11 +81,13 @@ def main() -> None:
 
     from vibe.acp.acp_agent_loop import run_acp_server
     from vibe.core.config import VibeConfig, load_dotenv_values
+    from vibe.core.proxy_setup import sanitize_no_proxy
     from vibe.core.tracing import setup_tracing
     from vibe.setup.onboarding import run_onboarding
 
     environ_before_dotenv_load = os.environ.copy()
     load_dotenv_values()
+    sanitize_no_proxy()
     bootstrap_config_files()
     args = parse_arguments()
     if args.setup:

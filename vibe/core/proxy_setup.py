@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+import os
+import re
+
 from dotenv import dotenv_values, set_key, unset_key
 
 from vibe.core.paths import GLOBAL_ENV_FILE
+
+_BRACKETED_IPV6 = re.compile(r"^\[.*\]$")
+
+
+def sanitize_no_proxy() -> None:
+    for key in ("NO_PROXY", "no_proxy"):
+        value = os.environ.get(key)
+        if not value:
+            continue
+        cleaned = ",".join(
+            e for e in value.split(",") if not _BRACKETED_IPV6.match(e.strip())
+        )
+        os.environ[key] = cleaned
+
 
 SUPPORTED_PROXY_VARS: dict[str, str] = {
     "HTTP_PROXY": "Proxy URL for HTTP requests",
