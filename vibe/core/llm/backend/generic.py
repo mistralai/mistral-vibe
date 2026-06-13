@@ -411,31 +411,43 @@ class GenericBackend:
     ) -> AsyncGenerator[dict[str, Any]]:
         client = self._get_client()
         async with client.stream(
-            method="POST", url=url, content=data, headers=headers
+            method="POST",
+            url=url,
+            content=data,
+            headers=headers,
         ) as response:
             if not response.is_success:
                 await response.aread()
-            response.raise_for_status()
+                response.raise_for_status()
+
+            content_type = (response.headers.get("content-type") or "").lower()
+
+            # Fallback: some OpenAI-compatible providers return a single JSON body
+            # instead of SSE even when the caller expected streaming.
+            if "text/event-stream" not in content_type:
+                raw = await response.aread()
+                if not raw:
+                    raise ValueError("Expected response body but received empty body")
+                yield json.loads(raw.decode("utf-8"))
+                return
+
             async for line in response.aiter_lines():
-                if line.strip() == "":
+                if not line or line.strip() == "":
                     continue
 
-                DELIM_CHAR = ":"
-                if f"{DELIM_CHAR} " not in line:
-                    raise ValueError(
-                        f"Stream chunk improperly formatted. "
-                        f"Expected `key{DELIM_CHAR} value`, received `{line}`"
-                    )
-                delim_index = line.find(DELIM_CHAR)
-                key = line[0:delim_index]
-                value = line[delim_index + 2 :]
-
-                if key != "data":
-                    # This might be the case with openrouter, so we just ignore it
+                # Ignore comments/heartbeat frames
+                if line.startswith(":"):
                     continue
+
+                if not line.startswith("data:"):
+                    # Be permissive for non-data SSE fields like event:, id:, retry:
+                    continue
+
+                value = line[len("data:") :].lstrip()
                 if value == "[DONE]":
                     return
-                yield json.loads(value.strip())
+
+                yield json.loads(value)
 
     async def close(self) -> None:
         if self._owns_client and self._client:
