@@ -41,6 +41,7 @@ class OpenAIAdapter(APIAdapter):
         tools: list[AvailableTool] | None,
         max_tokens: int | None,
         tool_choice: StrToolChoice | AvailableTool | None,
+        thinking: str = "off",
     ) -> dict[str, Any]:
         payload = {
             "model": model_name,
@@ -48,6 +49,8 @@ class OpenAIAdapter(APIAdapter):
             "temperature": temperature,
         }
 
+        if thinking != "off":
+            payload["reasoning_effort"] = thinking
         if tools:
             payload["tools"] = [tool.model_dump(exclude_none=True) for tool in tools]
         if tool_choice:
@@ -133,7 +136,13 @@ class OpenAIAdapter(APIAdapter):
         ]
 
         payload = self.build_payload(
-            model_name, converted_messages, temperature, tools, max_tokens, tool_choice
+            model_name,
+            converted_messages,
+            temperature,
+            tools,
+            max_tokens,
+            tool_choice,
+            thinking,
         )
 
         if enable_streaming:

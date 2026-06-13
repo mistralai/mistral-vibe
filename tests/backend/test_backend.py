@@ -38,7 +38,7 @@ from tests.backend.data.mistral import (
 )
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
-from vibe.core.llm.backend.generic import GenericBackend
+from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
 from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper
 from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
 from vibe.core.llm.types import BackendLike
@@ -581,6 +581,39 @@ class TestMistralMapperPrepareMessage:
         msg = LLMMessage(role=Role.assistant, content="Hello!")
         result = mapper.prepare_message(msg)
         assert result.content == "Hello!"
+
+
+class TestGenericBackendReasoningEffort:
+    """Tests that GenericBackend includes reasoning_effort in the HTTP payload."""
+
+    @pytest.mark.parametrize(
+        ("thinking", "expect_in_payload"),
+        [
+            ("off", False),
+            ("low", True),
+            ("medium", True),
+            ("high", True),
+        ],
+    )
+    def test_build_payload_reasoning_effort(
+        self,
+        thinking: str,
+        expect_in_payload: bool,
+    ) -> None:
+        adapter = OpenAIAdapter()
+        payload = adapter.build_payload(
+            model_name="test-model",
+            converted_messages=[{"role": "user", "content": "hi"}],
+            temperature=0.7,
+            tools=None,
+            max_tokens=None,
+            tool_choice=None,
+            thinking=thinking,
+        )
+        if expect_in_payload:
+            assert payload["reasoning_effort"] == thinking
+        else:
+            assert "reasoning_effort" not in payload
 
 
 class TestMistralBackendReasoningEffort:
