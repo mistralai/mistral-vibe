@@ -854,8 +854,9 @@ class VibeAcpAgentLoop(AcpAgent):
     def _build_usage_update(self, session: AcpSessionLoop) -> UsageUpdate:
         stats = session.agent_loop.stats
         active_model = session.agent_loop.config.get_active_model()
+        currency = session.agent_loop.config.cost_currency.upper()
         cost = (
-            Cost(amount=stats.session_cost, currency="USD")
+            Cost(amount=stats.session_cost, currency=currency)
             if stats.input_price_per_million > 0 or stats.output_price_per_million > 0
             else None
         )

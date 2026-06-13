@@ -213,6 +213,7 @@ from vibe.core.utils import (
     get_user_cancellation_message,
     is_dangerous_directory,
 )
+from vibe.core.utils.display import format_cost
 
 _VSCODE_FAMILY_TERMINALS = {Terminal.VSCODE, Terminal.VSCODE_INSIDERS, Terminal.CURSOR}
 
@@ -2112,7 +2113,7 @@ class VibeApp(App):  # noqa: PLR0904
 - **Session Completion Tokens**: {stats.session_completion_tokens:,}
 - **Session Total LLM Tokens**: {stats.session_total_llm_tokens:,}
 - **Last Turn Tokens**: {stats.last_turn_total_tokens:,}
-- **Cost**: ${stats.session_cost:.4f}
+- **Cost**: {format_cost(stats.session_cost, self.config.cost_currency)}
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
