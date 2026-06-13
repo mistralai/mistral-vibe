@@ -182,11 +182,16 @@ class ChatInputContainer(Vertical):
         widget = self.input_widget
         if not widget:
             return
-        cursor = widget.cursor_screen_offset
         my_region = self.region
-        # Place popup bottom edge just above the cursor row
         popup_height = self._compute_line_count(suggestions) + 2  # +2 for solid border
-        offset = (cursor.x - my_region.x, cursor.y - popup_height - my_region.y)
+        # Anchor the popup bottom to the top of the input box so multi-line
+        # text above the cursor is never obscured.
+        try:
+            input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
+            anchor_y = input_box.region.y
+        except Exception:
+            anchor_y = widget.cursor_screen_offset.y
+        offset = (0, anchor_y - popup_height - my_region.y)
         popup.styles.offset = offset
 
     def _format_insertion(self, replacement: str, suffix: str) -> str:
