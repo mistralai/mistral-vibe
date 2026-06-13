@@ -29,8 +29,8 @@ class Question(BaseModel):
     question: str = Field(description="The question text")
     header: str = Field(
         default="",
-        description="Short header for the question (1-2 words, e.g. 'Auth', 'Database')",
-        max_length=12,
+        description="Short chip/tag label for the question (max 20 chars)",
+        max_length=20,
     )
     options: list[Choice] = Field(
         description="Available options (2-4, not including 'Other'). An 'Other' option for free text is automatically added.",
