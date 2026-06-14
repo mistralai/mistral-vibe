@@ -84,7 +84,7 @@ def _get_shell_executable(config: BashToolConfig | None = None) -> str | None:
 
     # 3. Try to find bash.exe directly in PATH (e.g., WSL, Cygwin, MSYS2)
     if bash_path := which("bash.exe"):
-        return bash_path
+        return bash_path.replace("\\", "/")
 
     # 4. Try to find git.exe in PATH and derive bash.exe location
     if git_path := which("git.exe"):
@@ -92,28 +92,28 @@ def _get_shell_executable(config: BashToolConfig | None = None) -> str | None:
         bin_dir = git_dir.parent / "bin"  # e.g., C:\Program Files\Git\bin
         bash_path = bin_dir / "bash.exe"
         if bash_path.exists():
-            return str(bash_path)
+            return str(bash_path).replace("\\", "/")
 
     # 5. Check for WSL (wsl.exe)
     if wsl_path := which("wsl.exe"):
-        return f"{wsl_path} bash"  # Use WSL's Bash
+        return f"{wsl_path.replace('\\', '/')} bash"  # Use WSL's Bash
 
     # 6. Fall back to common Bash installation paths
     common_bash_paths = [
         # Git for Windows (64-bit)
-        "C:\\Program Files\\Git\\bin\\bash.exe",
+        "C:/Program Files/Git/bin/bash.exe",
         # Git for Windows (32-bit)
-        "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+        "C:/Program Files (x86)/Git/bin/bash.exe",
         # Cygwin
-        "C:\\cygwin64\\bin\\bash.exe",
-        "C:\\cygwin\\bin\\bash.exe",
+        "C:/cygwin64/bin/bash.exe",
+        "C:/cygwin/bin/bash.exe",
         # MSYS2
-        "C:\\msys64\\usr\\bin\\bash.exe",
-        "C:\\msys32\\usr\\bin\\bash.exe",
+        "C:/msys64/usr/bin/bash.exe",
+        "C:/msys32/usr/bin/bash.exe",
     ]
 
     for path in common_bash_paths:
-        if Path(path).exists():
+        if Path(path.replace("/", "\\")).exists():
             return path
 
     # 7. Fall back to cmd.exe

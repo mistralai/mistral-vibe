@@ -422,7 +422,8 @@ class TestGetShellExecutable:
         mock_is_windows.return_value = True
         mock_which.side_effect = lambda cmd: "C:\\bash.exe" if cmd == "bash.exe" else None
         from vibe.core.tools.builtins.bash import _get_shell_executable
-        assert _get_shell_executable() == "C:\\bash.exe"
+
+        assert _get_shell_executable() == "C:/bash.exe"
 
     @patch("vibe.core.tools.builtins.bash.is_windows")
     @patch("vibe.core.tools.builtins.bash.which")
@@ -431,7 +432,8 @@ class TestGetShellExecutable:
         mock_is_windows.return_value = True
         mock_which.side_effect = lambda cmd: "C:\\Program Files\\Git\\cmd\\git.exe" if cmd == "git.exe" else None
         from vibe.core.tools.builtins.bash import _get_shell_executable
-        assert _get_shell_executable() == "C:\\Program Files\\Git\\bin\\bash.exe"
+
+        assert _get_shell_executable() == "C:/Program Files/Git/bin/bash.exe"
 
     @patch("vibe.core.tools.builtins.bash.is_windows")
     @patch("vibe.core.tools.builtins.bash.which")
@@ -440,7 +442,8 @@ class TestGetShellExecutable:
         mock_is_windows.return_value = True
         mock_which.side_effect = lambda cmd: None if cmd == "bash.exe" else ("C:\\wsl.exe" if cmd == "wsl.exe" else None)
         from vibe.core.tools.builtins.bash import _get_shell_executable
-        assert _get_shell_executable() == "C:\\wsl.exe bash"
+
+        assert _get_shell_executable() == "C:/wsl.exe bash"
 
     @patch("vibe.core.tools.builtins.bash.is_windows")
     @patch("vibe.core.tools.builtins.bash.which")
@@ -449,10 +452,11 @@ class TestGetShellExecutable:
         """Test that common Bash paths are checked as fallbacks."""
         mock_is_windows.return_value = True
         mock_which.return_value = None
-        # Mock Path.exists to return True for the 5th path (C:\msys32\usr\bin\bash.exe)
+        # Mock Path.exists to return True for the 5th path (C:/msys32/usr/bin/bash.exe)
         mock_path.return_value.exists.side_effect = [False, False, False, False, False, True]
         from vibe.core.tools.builtins.bash import _get_shell_executable
-        assert _get_shell_executable() == "C:\\msys32\\usr\\bin\\bash.exe"
+
+        assert _get_shell_executable() == "C:/msys32/usr/bin/bash.exe"
 
     @patch("vibe.core.tools.builtins.bash.is_windows")
     @patch("vibe.core.tools.builtins.bash.which")
