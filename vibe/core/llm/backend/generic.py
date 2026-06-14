@@ -421,6 +421,9 @@ class GenericBackend:
                 if line.strip() == "":
                     continue
 
+                if line.startswith(":"):
+                    continue
+
                 DELIM_CHAR = ":"
                 if f"{DELIM_CHAR} " not in line:
                     raise ValueError(
