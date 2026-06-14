@@ -158,6 +158,8 @@ class OpenAIAdapter(APIAdapter):
                 return LLMMessage.model_validate(msg_dict)
             if "delta" in choice:
                 msg_dict = self._reasoning_from_api(choice["delta"], field_name)
+                if msg_dict.get("role") is None:
+                    msg_dict["role"] = Role.assistant
                 return LLMMessage.model_validate(msg_dict)
             raise ValueError("Invalid response data: missing message or delta")
 
@@ -166,6 +168,8 @@ class OpenAIAdapter(APIAdapter):
             return LLMMessage.model_validate(msg_dict)
         if "delta" in data:
             msg_dict = self._reasoning_from_api(data["delta"], field_name)
+            if msg_dict.get("role") is None:
+                msg_dict["role"] = Role.assistant
             return LLMMessage.model_validate(msg_dict)
 
         return None
