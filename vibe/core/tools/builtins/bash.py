@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 from functools import lru_cache
 import os
 from pathlib import Path
+from shutil import which
 from typing import ClassVar, Literal, final
 
 from pydantic import BaseModel, Field
@@ -64,10 +65,59 @@ def _extract_commands(command: str) -> list[str]:
     return commands
 
 
-def _get_shell_executable() -> str | None:
-    if is_windows():
-        return None
-    return os.environ.get("SHELL")
+def _get_shell_executable(config: BashToolConfig | None = None) -> str | None:
+    """Get the preferred shell executable for running commands.
+
+    On POSIX: Uses $SHELL or defaults to system shell.
+    On Windows: Prioritizes Bash (Git Bash, WSL, Cygwin, MSYS2) over cmd.exe.
+    """
+    if not is_windows():
+        return os.environ.get("SHELL")
+
+    # 1. Check for VIBE_SHELL environment variable override
+    if vibe_shell := os.environ.get("VIBE_SHELL"):
+        return vibe_shell
+
+    # 2. Check config override
+    if config and config.preferred_shell:
+        return config.preferred_shell
+
+    # 3. Try to find bash.exe directly in PATH (e.g., WSL, Cygwin, MSYS2)
+    if bash_path := which("bash.exe"):
+        return bash_path
+
+    # 4. Try to find git.exe in PATH and derive bash.exe location
+    if git_path := which("git.exe"):
+        git_dir = Path(git_path).parent  # e.g., C:\Program Files\Git\cmd
+        bin_dir = git_dir.parent / "bin"  # e.g., C:\Program Files\Git\bin
+        bash_path = bin_dir / "bash.exe"
+        if bash_path.exists():
+            return str(bash_path)
+
+    # 5. Check for WSL (wsl.exe)
+    if wsl_path := which("wsl.exe"):
+        return f"{wsl_path} bash"  # Use WSL's Bash
+
+    # 6. Fall back to common Bash installation paths
+    common_bash_paths = [
+        # Git for Windows (64-bit)
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+        # Git for Windows (32-bit)
+        "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+        # Cygwin
+        "C:\\cygwin64\\bin\\bash.exe",
+        "C:\\cygwin\\bin\\bash.exe",
+        # MSYS2
+        "C:\\msys64\\usr\\bin\\bash.exe",
+        "C:\\msys32\\usr\\bin\\bash.exe",
+    ]
+
+    for path in common_bash_paths:
+        if Path(path).exists():
+            return path
+
+    # 7. Fall back to cmd.exe
+    return None
 
 
 def _get_base_env() -> dict[str, str]:
@@ -263,6 +313,10 @@ class BashToolConfig(BaseToolConfig):
     sensitive_patterns: list[str] = Field(
         default=["sudo"],
         description="Command prefixes that always ASK regardless of arity approval.",
+    )
+    preferred_shell: str | None = Field(
+        default=None,
+        description="Preferred shell executable (e.g., 'bash.exe' or 'C:\\Program Files\\Git\\bin\\bash.exe').",
     )
 
 
@@ -519,7 +573,7 @@ class Bash(
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.DEVNULL,
                 env=_get_base_env(),
-                executable=_get_shell_executable(),
+                executable=_get_shell_executable(self.config),
                 **kwargs,
             )
 

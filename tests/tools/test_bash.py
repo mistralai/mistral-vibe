@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import pytest
+from unittest.mock import MagicMock, patch
 
 from tests.mock.utils import collect_result
 from vibe.core.tools.base import BaseToolState, ToolError, ToolPermission
@@ -12,6 +14,11 @@ from vibe.core.tools.permissions import PermissionContext
 def bash(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = BashToolConfig()
+    # Mock _get_shell_executable to return None for existing tests (use cmd.exe)
+    monkeypatch.setattr(
+        "vibe.core.tools.builtins.bash._get_shell_executable",
+        lambda config=None: None
+    )
     return Bash(config_getter=lambda: config, state=BaseToolState())
 
 
@@ -36,13 +43,13 @@ async def test_fails_cat_command_with_missing_file(bash):
 
 
 @pytest.mark.asyncio
-async def test_uses_effective_workdir(tmp_path, monkeypatch):
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Skipped on Windows due to shell path format differences (Bash vs. cmd.exe)"
+)
+async def test_uses_effective_workdir(bash, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    config = BashToolConfig()
-    bash_tool = Bash(config_getter=lambda: config, state=BaseToolState())
-
-    result = await collect_result(bash_tool.run(BashArgs(command="pwd")))
-
+    result = await collect_result(bash.run(BashArgs(command="pwd")))
     assert result.stdout.strip() == str(tmp_path)
 
 
@@ -403,3 +410,76 @@ def test_new_read_only_commands_are_allowlisted():
         assert permission.permission is ToolPermission.ALWAYS, (
             f"Command '{cmd}' should be always allowed"
         )
+
+
+class TestGetShellExecutable:
+    """Tests for _get_shell_executable() function."""
+
+    @patch("vibe.core.tools.builtins.bash.is_windows")
+    @patch("vibe.core.tools.builtins.bash.which")
+    def test_returns_bash_if_in_path(self, mock_which, mock_is_windows):
+        """Test that bash.exe is returned if found in PATH."""
+        mock_is_windows.return_value = True
+        mock_which.side_effect = lambda cmd: "C:\\bash.exe" if cmd == "bash.exe" else None
+        from vibe.core.tools.builtins.bash import _get_shell_executable
+        assert _get_shell_executable() == "C:\\bash.exe"
+
+    @patch("vibe.core.tools.builtins.bash.is_windows")
+    @patch("vibe.core.tools.builtins.bash.which")
+    def test_derives_bash_from_git(self, mock_which, mock_is_windows):
+        """Test that bash.exe is derived from git.exe's location."""
+        mock_is_windows.return_value = True
+        mock_which.side_effect = lambda cmd: "C:\\Program Files\\Git\\cmd\\git.exe" if cmd == "git.exe" else None
+        from vibe.core.tools.builtins.bash import _get_shell_executable
+        assert _get_shell_executable() == "C:\\Program Files\\Git\\bin\\bash.exe"
+
+    @patch("vibe.core.tools.builtins.bash.is_windows")
+    @patch("vibe.core.tools.builtins.bash.which")
+    def test_uses_wsl_if_available(self, mock_which, mock_is_windows):
+        """Test that WSL's bash is used if wsl.exe is in PATH."""
+        mock_is_windows.return_value = True
+        mock_which.side_effect = lambda cmd: None if cmd == "bash.exe" else ("C:\\wsl.exe" if cmd == "wsl.exe" else None)
+        from vibe.core.tools.builtins.bash import _get_shell_executable
+        assert _get_shell_executable() == "C:\\wsl.exe bash"
+
+    @patch("vibe.core.tools.builtins.bash.is_windows")
+    @patch("vibe.core.tools.builtins.bash.which")
+    @patch("vibe.core.tools.builtins.bash.Path")
+    def test_falls_back_to_common_paths(self, mock_path, mock_which, mock_is_windows):
+        """Test that common Bash paths are checked as fallbacks."""
+        mock_is_windows.return_value = True
+        mock_which.return_value = None
+        # Mock Path.exists to return True for the 5th path (C:\msys32\usr\bin\bash.exe)
+        mock_path.return_value.exists.side_effect = [False, False, False, False, False, True]
+        from vibe.core.tools.builtins.bash import _get_shell_executable
+        assert _get_shell_executable() == "C:\\msys32\\usr\\bin\\bash.exe"
+
+    @patch("vibe.core.tools.builtins.bash.is_windows")
+    @patch("vibe.core.tools.builtins.bash.which")
+    @patch("vibe.core.tools.builtins.bash.Path")
+    def test_falls_back_to_cmd(self, mock_path, mock_which, mock_is_windows):
+        """Test that None is returned if no Bash is found (fallback to cmd.exe)."""
+        mock_is_windows.return_value = True
+        mock_which.return_value = None
+        mock_path.return_value.exists.return_value = False
+        from vibe.core.tools.builtins.bash import _get_shell_executable
+        assert _get_shell_executable() is None
+
+    @patch("vibe.core.tools.builtins.bash.is_windows")
+    @patch("vibe.core.tools.builtins.bash.which")
+    @patch.dict("os.environ", {"VIBE_SHELL": "C:\\custom\\bash.exe"})
+    def test_respects_vibe_shell_env_var(self, mock_which, mock_is_windows):
+        """Test that VIBE_SHELL environment variable is respected."""
+        mock_is_windows.return_value = True
+        from vibe.core.tools.builtins.bash import _get_shell_executable
+        assert _get_shell_executable() == "C:\\custom\\bash.exe"
+
+    @patch("vibe.core.tools.builtins.bash.is_windows")
+    @patch("vibe.core.tools.builtins.bash.which")
+    def test_respects_config_preferred_shell(self, mock_which, mock_is_windows):
+        """Test that config.preferred_shell is respected."""
+        mock_is_windows.return_value = True
+        mock_which.return_value = None
+        from vibe.core.tools.builtins.bash import BashToolConfig, _get_shell_executable
+        config = BashToolConfig(preferred_shell="C:\\custom\\bash.exe")
+        assert _get_shell_executable(config) == "C:\\custom\\bash.exe"
