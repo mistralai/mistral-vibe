@@ -225,6 +225,13 @@ from vibe.core.utils import (
 _VSCODE_FAMILY_TERMINALS = {Terminal.VSCODE, Terminal.VSCODE_INSIDERS, Terminal.CURSOR}
 
 
+def _safe_cwd() -> Path:
+    try:
+        return _safe_cwd()
+    except FileNotFoundError:
+        return Path.home()
+
+
 def _is_vscode_family_terminal() -> bool:
     return detect_terminal() in _VSCODE_FAMILY_TERMINALS
 
@@ -632,7 +639,7 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
         with Horizontal(id="bottom-bar"):
-            yield PathDisplay(self.config.displayed_workdir or Path.cwd())
+            yield PathDisplay(self.config.displayed_workdir or _safe_cwd())
             yield NoMarkupStatic(id="spacer")
             yield ContextProgress()
 
@@ -867,7 +874,7 @@ class VibeApp(App):  # noqa: PLR0904
     async def _enqueue_prompt_with_resources(
         self, content: str, *, skill_name: str | None = None
     ) -> bool:
-        payload = build_path_prompt_payload(content, base_dir=Path.cwd())
+        payload = build_path_prompt_payload(content, base_dir=_safe_cwd())
         images = await self._prepare_images_or_abort(payload)
         if images is None:
             return False
@@ -1394,7 +1401,7 @@ class VibeApp(App):  # noqa: PLR0904
         if existing_widget is not None:
             bash_msg = existing_widget
         else:
-            bash_msg = BashOutputMessage(command, str(Path.cwd()), pending=True)
+            bash_msg = BashOutputMessage(command, str(_safe_cwd()), pending=True)
             await self._mount_and_scroll(bash_msg)
         await self._ensure_loading_widget("Running command")
         bash_loading_widget = self._loading_widget
@@ -1430,7 +1437,7 @@ class VibeApp(App):  # noqa: PLR0904
                 await self.agent_loop.inject_user_context(
                     self._format_manual_command_context(
                         command=command,
-                        cwd=str(Path.cwd()),
+                        cwd=str(_safe_cwd()),
                         stdout=stdout,
                         stderr=stderr,
                         status="timed out after 30 seconds",
@@ -1445,7 +1452,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self.agent_loop.inject_user_context(
                 self._format_manual_command_context(
                     command=command,
-                    cwd=str(Path.cwd()),
+                    cwd=str(_safe_cwd()),
                     exit_code=exit_code,
                     stdout=stdout,
                     stderr=stderr,
@@ -1459,7 +1466,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self.agent_loop.inject_user_context(
                 self._format_manual_command_context(
                     command=command,
-                    cwd=str(Path.cwd()),
+                    cwd=str(_safe_cwd()),
                     stdout=stdout,
                     stderr=stderr,
                     status="interrupted by user",
@@ -1476,7 +1483,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self.agent_loop.inject_user_context(
                 self._format_manual_command_context(
                     command=command,
-                    cwd=str(Path.cwd()),
+                    cwd=str(_safe_cwd()),
                     stdout=stdout,
                     stderr=stderr,
                     status=f"failed before completion: {e}",
@@ -1544,7 +1551,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self._handle_remote_user_message(message)
             return
 
-        prompt_payload = build_path_prompt_payload(message, base_dir=Path.cwd())
+        prompt_payload = build_path_prompt_payload(message, base_dir=_safe_cwd())
         images = await self._prepare_images_or_abort(prompt_payload)
         if images is None:
             input_widget = self.query_one(ChatInputContainer)
@@ -1796,7 +1803,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self._ensure_loading_widget()
             message_id = str(uuid4())
             prompt_payload = prebuilt_payload or build_path_prompt_payload(
-                prompt, base_dir=Path.cwd()
+                prompt, base_dir=_safe_cwd()
             )
             self._send_at_mention_telemetry(prompt_payload, message_id)
             images = await self._resolve_turn_images(prompt_payload, prebuilt_images)
@@ -1810,7 +1817,7 @@ class VibeApp(App):  # noqa: PLR0904
                 auto_title = (
                     format_session_title(
                         build_title_segments(
-                            title_source or prompt, base_dir=Path.cwd()
+                            title_source or prompt, base_dir=_safe_cwd()
                         )
                     )
                     or None
@@ -2217,7 +2224,7 @@ class VibeApp(App):  # noqa: PLR0904
         )
 
     async def _show_session_picker(self, **kwargs: Any) -> None:
-        cwd = str(Path.cwd())
+        cwd = str(_safe_cwd())
         local_sessions = (
             list_local_resume_sessions(self.config, cwd)
             if self.config.session_logging.enabled
