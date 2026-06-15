@@ -82,6 +82,7 @@ def enable(yes: bool = False) -> None:
         config_doc = tomlkit.document()
 
     config_doc["enable_experimental_hooks"] = True
+    _register_bonsai_servers(config_doc)
     config_path.write_text(tomlkit.dumps(config_doc), encoding="utf-8")
     print(f"✓ enable_experimental_hooks = true written to {config_path}")
 
@@ -94,6 +95,9 @@ def enable(yes: bool = False) -> None:
         "  bonsai    — nudges toward AST tools on .py/.ts/.tsx files\n"
         "  temper    — blocks large/critical commits without review (/temper)\n"
         "  cairn     — nudges toward better commit messages (/cairn-commit)\n"
+        "\nBonsai MCP servers registered (started on first use):\n"
+        "  bonsai-py — uvx bonsai-python\n"
+        "  bonsai-ts — npx --yes bonsai-ts@latest\n"
         "\nBypass any gate: append # aether:skip to your bash command.\n"
         "Disable: vibe --disable-aether\n"
     )
@@ -146,6 +150,58 @@ def status() -> None:
     print(f"Hook registered:      {'✓' if hook_registered else '✗'}")
     print(f"Experimental hooks:   {'✓' if experimental_on else '✗'}")
     print(f"Status:               {'enabled' if active else 'disabled'}")
+
+
+_BONSAI_SERVERS = [
+    {
+        "name": "bonsai-py",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": ["bonsai-python"],
+        "prompt": "AST-aware Python refactoring tools (pyfindrefs, pyrename, pymove, pysignature, pygrep, pycallers, pyfindunused)",
+    },
+    {
+        "name": "bonsai-ts",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["--yes", "bonsai-ts@latest"],
+        "prompt": "AST-aware TypeScript/JavaScript refactoring tools (tsfindrefs, tsrename, tsmove, tsmovesymbol, tssignature)",
+    },
+]
+
+
+def _register_bonsai_servers(config_doc: dict) -> None:  # type: ignore[type-arg]
+    import tomlkit
+
+    existing_raw = list(config_doc.get("mcp_servers") or [])
+    existing_names = {s.get("name") for s in existing_raw}
+
+    to_add = [s for s in _BONSAI_SERVERS if s["name"] not in existing_names]
+    if not to_add:
+        return
+
+    # Rebuild as a proper AoT — avoids the invalid-TOML bug where appending
+    # a table() to an existing inline [] produces `mcp_servers = [key = val ...]`.
+    aot = tomlkit.aot()
+    for entry_data in [*existing_raw, *to_add]:
+        entry = tomlkit.table()
+        for k, v in dict(entry_data).items():
+            if isinstance(v, list):
+                arr = tomlkit.array()
+                for item in v:
+                    arr.append(item)
+                entry.add(k, arr)
+            else:
+                entry.add(k, v)
+        aot.append(entry)
+
+    # Remove the old inline [] key, then add the AoT at the same logical slot
+    if "mcp_servers" in config_doc:
+        del config_doc["mcp_servers"]
+    config_doc["mcp_servers"] = aot  # type: ignore[index]
+
+    for spec in to_add:
+        print(f"✓ MCP server registered: {spec['name']}")
 
 
 def _write_skills() -> None:
