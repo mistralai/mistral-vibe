@@ -101,6 +101,27 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 In Cursor / Pyright, the "Add import" quick fix is missing — use the workspace snippets `acpschema`, `acphelpers`, `vibetypes`, `vibeconfig` to insert the import line, then rename the symbol.
 
 
+## Aether discipline hooks
+
+`vibe/core/hooks/aether/` contains four discipline gates that fire as a single `BEFORE_TOOL` hook on every bash call. Enable for a user with `vibe --enable-aether`; this writes to `~/.vibe/hooks.toml` and sets `enable_experimental_hooks = true` in `~/.vibe/config.toml`.
+
+| Gate | Triggers on | Blocks when |
+|------|-------------|-------------|
+| **whetstone** | `git commit`, `git push` | A plan in `.claude/plans/` is newer than `CRITIQUE.md` |
+| **bonsai** | Any bash command | `grep`/`sed`/`awk`/`mv` targets a `.py`/`.ts`/`.tsx` file |
+| **temper** | `git commit`, `git push`, `git rebase` | Staged diff > 10 files or 200 lines, or touches auth/migration/secret files |
+| **cairn** | `git commit -m` | Commit message is < 10 chars or matches a weak pattern (wip, fix, update…) |
+
+Companion skills installed to `~/.vibe/skills/`: `/autocritic` (clears whetstone), `/temper` (clears temper gate via `.vibe/.temper_ok`), `/cairn-commit` (generates a conventional commit message).
+
+Bypass any gate by appending `# aether:skip` (all gates) or `# <gate>:skip` (single gate) to the bash command at runtime.
+
+When modifying `vibe/core/hooks/aether/`:
+- Each gate module exports a single `evaluate(command: str, cwd: str) -> dict | None` function — return `None` to pass, return `{"decision": "deny", "reason": "..."}` to block.
+- `runner.py` calls all four gates in sequence and short-circuits on the first denial.
+- All gates fail-open: exceptions inside `evaluate` are swallowed by the runner; never let a gate crash a user session.
+- `install.py` is the only module that writes to disk (`~/.vibe/`); all gate modules are pure read-only.
+
 ## Autoimprovement
 
 - Suggest to add new rules to AGENTS.md based on user input or PR comments, when a change request could be generalized as a rule.

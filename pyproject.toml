@@ -139,11 +139,13 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 include = ["vibe/"]
+artifacts = ["vibe/core/hooks/aether/skills/**"]
 
 
 [project.scripts]
 vibe = "vibe.cli.entrypoint:main"
 vibe-acp = "vibe.acp.entrypoint:main"
+vibe-aether = "vibe.core.hooks.aether.runner:main"
 
 
 [tool.uv]

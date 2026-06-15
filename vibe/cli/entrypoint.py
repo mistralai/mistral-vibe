@@ -137,6 +137,24 @@ def parse_arguments() -> argparse.Namespace:
     # Feature flag for teleport, not exposed to the user yet
     parser.add_argument("--teleport", action="store_true", help=argparse.SUPPRESS)
 
+    aether_group = parser.add_mutually_exclusive_group()
+    aether_group.add_argument(
+        "--enable-aether",
+        action="store_true",
+        help="Register aether discipline hooks (whetstone/bonsai/temper/cairn) "
+        "in ~/.vibe/hooks.toml and exit.",
+    )
+    aether_group.add_argument(
+        "--disable-aether",
+        action="store_true",
+        help="Remove aether discipline hooks from ~/.vibe/hooks.toml and exit.",
+    )
+    aether_group.add_argument(
+        "--aether-status",
+        action="store_true",
+        help="Show whether aether discipline hooks are enabled and exit.",
+    )
+
     continuation_group = parser.add_mutually_exclusive_group()
     continuation_group.add_argument(
         "-c",
@@ -207,6 +225,21 @@ def check_and_resolve_trusted_folder(cwd: Path) -> None:
 
 def main() -> None:
     args = parse_arguments()
+
+    if args.enable_aether:
+        from vibe.core.hooks.aether.install import enable
+        enable()
+        return
+
+    if args.disable_aether:
+        from vibe.core.hooks.aether.install import disable
+        disable()
+        return
+
+    if args.aether_status:
+        from vibe.core.hooks.aether.install import status
+        status()
+        return
 
     if args.workdir:
         workdir = args.workdir.expanduser().resolve()
