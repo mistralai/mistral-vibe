@@ -718,6 +718,13 @@ class VibeApp(App):  # noqa: PLR0904
                 await self._ensure_loading_widget("Initializing", show_hint=False)
                 init_widget = self._loading_widget
             await self.agent_loop.wait_until_ready()
+            for srv_name, err in self.agent_loop.tool_manager.pop_mcp_errors().items():
+                self.notify(
+                    f"MCP server '{srv_name}' failed to connect: {err}",
+                    severity="warning",
+                    markup=False,
+                    timeout=10,
+                )
         except Exception as e:
             await self._mount_and_scroll(
                 ErrorMessage(

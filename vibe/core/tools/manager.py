@@ -451,5 +451,9 @@ class ToolManager:
         )
         return self._instances[tool_name]
 
+    def pop_mcp_errors(self) -> dict[str, str]:
+        """Return and clear pending MCP discovery errors (server name → error message)."""
+        return self._mcp_registry.pop_failed()
+
     def reset_all(self) -> None:
         self._instances.clear()
