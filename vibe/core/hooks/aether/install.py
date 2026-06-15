@@ -89,6 +89,9 @@ def enable(yes: bool = False) -> None:
     # --- skills ---
     _write_skills()
 
+    # --- AGENTS.md ---
+    _write_agents_md()
+
     print(
         "\n✓ Aether enabled. Active gates:\n"
         "  whetstone — blocks commits when plan is uncritiqued (/autocritic)\n"
@@ -129,6 +132,8 @@ def disable() -> None:
     else:
         print("Aether hook not found — nothing changed.")
 
+    _remove_agents_md_section()
+
 
 def status() -> None:
     import tomlkit
@@ -168,6 +173,67 @@ _BONSAI_SERVERS = [
         "prompt": "AST-aware TypeScript/JavaScript refactoring tools (tsfindrefs, tsrename, tsmove, tsmovesymbol, tssignature)",
     },
 ]
+
+
+_AGENTS_MD_START = "<!-- aether:bonsai-start -->"
+_AGENTS_MD_END = "<!-- aether:bonsai-end -->"
+_AGENTS_MD_SECTION = """\
+<!-- aether:bonsai-start -->
+## AST refactoring tools (bonsai)
+
+You have two MCP servers available for safe, AST-aware code changes on Python
+and TypeScript/JavaScript files. Prefer these over shell text tools — they
+track imports, re-exports, and type references that grep/sed/mv silently miss.
+
+### When to use bonsai instead of bash
+
+| Task | Use instead of | Tool |
+|------|---------------|------|
+| Rename a symbol (function, class, variable) | `sed` / manual edit | `pyrename` (Python) · `tsrename` (TS/JS) |
+| Move a file and rewrite its imports | `mv` | `pymove` (Python) · `tsmove` (TS/JS) |
+| Move a symbol to another module | manual cut-paste | `pymovesymbol` · `tsmovesymbol` |
+| Find all references to a symbol | `grep` | `pyfindrefs` · `tsfindrefs` |
+| Change a function's signature everywhere | manual search | `pysignature` · `tssignature` |
+| Find dead / unreferenced code | manual audit | `pyfindunused` |
+| Search with AST context | `grep` | `pygrep` |
+
+Always run mutating tools with `dry_run=true` first, review the diff, then re-run
+without the flag to apply.
+<!-- aether:bonsai-end -->"""
+
+
+def _agents_md_path() -> Path:
+    return _vibe_home() / "AGENTS.md"
+
+
+def _write_agents_md() -> None:
+    path = _agents_md_path()
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+
+    if _AGENTS_MD_START in existing:
+        return  # already present
+
+    separator = "\n\n" if existing.strip() else ""
+    path.write_text(existing + separator + _AGENTS_MD_SECTION + "\n", encoding="utf-8")
+    print(f"✓ Bonsai tool guidance written to {path}")
+
+
+def _remove_agents_md_section() -> None:
+    path = _agents_md_path()
+    if not path.exists():
+        return
+
+    text = path.read_text(encoding="utf-8")
+    start = text.find(_AGENTS_MD_START)
+    end = text.find(_AGENTS_MD_END)
+    if start == -1 or end == -1:
+        return
+
+    before = text[:start].rstrip("\n")
+    after = text[end + len(_AGENTS_MD_END):].lstrip("\n")
+    cleaned = (before + ("\n" if after else "") + after)
+    path.write_text(cleaned, encoding="utf-8")
+    print(f"✓ Bonsai tool guidance removed from {path}")
 
 
 def _register_bonsai_servers(config_doc: dict) -> None:  # type: ignore[type-arg]
