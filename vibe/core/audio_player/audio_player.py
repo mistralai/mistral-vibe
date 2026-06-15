@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import array as _array
 from collections.abc import Callable
 import threading
 from typing import TYPE_CHECKING
@@ -22,6 +23,37 @@ try:
         from sounddevice import CallbackFlags, RawOutputStream
 except OSError:
     sd = None  # type: ignore[assignment]
+
+def _resample_pcm(pcm_data: bytes, channels: int, src_rate: int, dst_rate: int) -> bytes:
+    """Resample 16-bit signed PCM using linear interpolation (no numpy)."""
+    if src_rate == dst_rate:
+        return pcm_data
+    src = _array.array("h", pcm_data)
+    src_frames = len(src) // channels
+    dst_frames = int(src_frames * dst_rate / src_rate)
+    dst = _array.array("h", [0] * (dst_frames * channels))
+    for i in range(dst_frames):
+        src_pos = i * src_rate / dst_rate
+        src_idx = int(src_pos)
+        frac = src_pos - src_idx
+        next_idx = min(src_idx + 1, src_frames - 1)
+        for ch in range(channels):
+            a = src[src_idx * channels + ch]
+            b = src[next_idx * channels + ch]
+            dst[i * channels + ch] = int(a + frac * (b - a))
+    return dst.tobytes()
+
+
+def _device_sample_rate() -> int:
+    """Return the default output device's native sample rate, or 0 on failure."""
+    if sd is None:
+        return 0
+    try:
+        info = sd.query_devices(kind="output")
+        return int(info["default_samplerate"])
+    except Exception:
+        return 0
+
 
 DEFAULT_BLOCKSIZE = 4096
 DTYPE = "int16"
@@ -69,6 +101,10 @@ class AudioPlayer:
                     raise UnsupportedAudioFormatError(
                         f"Unsupported audio format: {audio_format}"
                     )
+            device_rate = _device_sample_rate()
+            if device_rate and device_rate != sample_rate:
+                pcm_data = _resample_pcm(pcm_data, channels, sample_rate, device_rate)
+                sample_rate = device_rate
             self._audio_data = pcm_data
             self._position = 0
             self._frame_size = channels * DEFAULT_SAMPLE_WIDTH
