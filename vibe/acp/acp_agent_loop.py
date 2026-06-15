@@ -74,6 +74,7 @@ from vibe import VIBE_ROOT, __version__
 from vibe.acp.acp_logger import acp_message_observer
 from vibe.acp.commands import AcpCommandAvailabilityContext, AcpCommandRegistry
 from vibe.acp.exceptions import (
+    CompactionError,
     ConfigurationError,
     ContextTooLongError,
     ConversationLimitError,
@@ -115,7 +116,7 @@ from vibe.acp.utils import (
     is_valid_acp_mode,
     make_thinking_response,
 )
-from vibe.core.agent_loop import AgentLoop
+from vibe.core.agent_loop import AgentLoop, CompactionFailedError
 from vibe.core.agents.models import CHAT as CHAT_AGENT, BuiltinAgentName
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.config import (
@@ -159,6 +160,7 @@ from vibe.core.types import (
     RateLimitError as CoreRateLimitError,
     ReasoningEvent,
     RefusalError as CoreRefusalError,
+    ResponseTooLongError as CoreResponseTooLongError,
     Role,
     SessionTitleUpdatedEvent,
     ToolCallEvent,
@@ -518,16 +520,12 @@ class VibeAcpAgentLoop(AcpAgent):
         self._pending_browser_sign_in_attempts[attempt.process_id] = (
             PendingBrowserSignInAttempt(attempt=attempt, provider=provider)
         )
+        expires_at = attempt.expires_at.astimezone(UTC)
         return AuthenticateResponse(
             field_meta={
                 "browser-auth-delegated": {
                     "attemptId": attempt.process_id,
-                    "expiresAt": (
-                        attempt.expires_at
-                        .astimezone(UTC)
-                        .isoformat()
-                        .replace("+00:00", "Z")
-                    ),
+                    "expiresAt": expires_at.isoformat().replace("+00:00", "Z"),
                     "signInUrl": attempt.sign_in_url,
                 }
             }
@@ -607,6 +605,7 @@ class VibeAcpAgentLoop(AcpAgent):
     def _load_config(self) -> VibeConfig:
         try:
             config = VibeConfig.load()
+            self._apply_client_project_name(config)
             _merge_non_interactive_disabled_tools(config)
             config.tool_paths.extend(self._get_acp_tool_overrides())
             return config
@@ -614,6 +613,23 @@ class VibeAcpAgentLoop(AcpAgent):
             raise UnauthenticatedError.from_missing_api_key(e) from e
         except Exception as e:
             raise ConfigurationError(str(e)) from e
+
+    def _resolve_project_name(self) -> str | None:
+        if self.client_info is None:
+            return None
+
+        title = self.client_info.title
+        if title is None:
+            return None
+
+        normalized_title = title.strip()
+        return normalized_title or None
+
+    def _apply_client_project_name(self, config: VibeConfig) -> None:
+        if config.vibe_code_project_name is not None:
+            return
+
+        config.vibe_code_project_name = self._resolve_project_name()
 
     async def _create_acp_session(
         self, session_id: str, agent_loop: AgentLoop
@@ -1018,6 +1034,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
     async def _reload_config(self, session: AcpSessionLoop) -> None:
         new_config = VibeConfig.load(tool_paths=session.agent_loop.config.tool_paths)
+        self._apply_client_project_name(new_config)
         _merge_non_interactive_disabled_tools(new_config)
         await session.agent_loop.reload_with_initial_messages(base_config=new_config)
 
@@ -1186,8 +1203,19 @@ class VibeAcpAgentLoop(AcpAgent):
         except CoreContextTooLongError as e:
             raise ContextTooLongError.from_core(e) from e
 
+        except CoreResponseTooLongError:
+            self._send_usage_update(session)
+            return PromptResponse(
+                stop_reason="max_tokens",
+                usage=self._build_usage(session),
+                user_message_id=resolved_message_id,
+            )
+
         except CoreRefusalError as e:
             raise RefusalError.from_core(e) from e
+
+        except CompactionFailedError as e:
+            raise CompactionError.from_core(e) from e
 
         except ConversationLimitException as e:
             raise ConversationLimitError(str(e)) from e
@@ -1784,7 +1812,10 @@ class VibeAcpAgentLoop(AcpAgent):
             update=create_compact_start_session_update(start_event),
         )
 
-        await session.agent_loop.compact(extra_instructions=cmd_args.strip())
+        try:
+            await session.agent_loop.compact(extra_instructions=cmd_args.strip())
+        except CompactionFailedError as e:
+            raise CompactionError.from_core(e) from e
 
         end_event = CompactEndEvent(
             summary_length=0,
@@ -1801,6 +1832,7 @@ class VibeAcpAgentLoop(AcpAgent):
     async def _reload_session_config(self, session: AcpSessionLoop) -> None:
         """Reload config from disk and reinitialize the agent loop."""
         new_config = VibeConfig.load(tool_paths=session.agent_loop.config.tool_paths)
+        self._apply_client_project_name(new_config)
         _merge_non_interactive_disabled_tools(new_config)
         await session.agent_loop.reload_with_initial_messages(base_config=new_config)
 

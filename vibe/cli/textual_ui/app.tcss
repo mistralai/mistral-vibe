@@ -41,6 +41,15 @@ TextArea > .text-area--cursor {
     align: left middle;
 }
 
+#clipboard-notice {
+    width: auto;
+    height: 1;
+    color: $text-muted;
+    &:ansi {
+        text-style: dim;
+    }
+}
+
 #bottom-app-container,
 #input-container {
     height: auto;
@@ -807,38 +816,49 @@ StatusMessage {
     color: $warning;
 }
 
-.diff-header {
-    height: auto;
-    color: $text-muted;
-    text-style: bold;
-
-    &:ansi {
-        text-style: dim;
-    }
-}
-
 .diff-removed {
     height: auto;
-    color: $error;
+
+    &:dark {
+        background: $error 10%;
+    }
+
+    &:light {
+        background: $error 20%;
+    }
+
+    &:ansi {
+        background: initial;
+    }
 }
 
 .diff-added {
     height: auto;
-    color: $success;
+
+    &:dark {
+        background: $success 10%;
+    }
+
+    &:light {
+        background: $success 20%;
+    }
+
+    &:ansi {
+        background: initial;
+    }
 }
 
-.diff-range {
-    height: auto;
-    color: $primary;
-}
-
-.diff-context {
+.diff-gap {
     height: auto;
     color: $text-muted;
 
     &:ansi {
         text-style: dim;
     }
+}
+
+.diff-context {
+    height: auto;
 }
 
 .todo-empty,
@@ -1378,6 +1398,14 @@ NarratorStatus {
 
 #sessionpicker-options:focus {
     border: none;
+}
+
+.sessionpicker-header {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 .sessionpicker-help {

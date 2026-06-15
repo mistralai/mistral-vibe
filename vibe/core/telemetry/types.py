@@ -15,6 +15,21 @@ class ClientMetadata(BaseModel):
     version: str
 
 
+class TerminalEmulator(StrEnum):
+    VSCODE = "vscode"
+    VSCODE_INSIDERS = "vscode_insiders"
+    CURSOR = "cursor"
+    JETBRAINS = "jetbrains"
+    ITERM2 = "iterm2"
+    WEZTERM = "wezterm"
+    GHOSTTY = "ghostty"
+    ALACRITTY = "alacritty"
+    KITTY = "kitty"
+    HYPER = "hyper"
+    WINDOWS_TERMINAL = "windows_terminal"
+    UNKNOWN = "unknown"
+
+
 AgentEntrypoint = Literal["cli", "acp", "programmatic", "unknown"]
 
 

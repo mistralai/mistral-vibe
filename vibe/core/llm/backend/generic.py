@@ -24,6 +24,7 @@ from vibe.core.types import (
 )
 from vibe.core.utils import async_generator_retry, async_retry
 from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.sse import iter_sse_lines
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
@@ -416,7 +417,7 @@ class GenericBackend:
             if not response.is_success:
                 await response.aread()
             response.raise_for_status()
-            async for line in response.aiter_lines():
+            async for line in iter_sse_lines(response):
                 if line.strip() == "":
                     continue
 

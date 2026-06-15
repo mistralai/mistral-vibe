@@ -28,6 +28,7 @@ from vibe.core.utils.platform import (
     is_windows,
 )
 from vibe.core.utils.retry import async_generator_retry, async_retry
+from vibe.core.utils.sse import iter_sse_lines
 from vibe.core.utils.tags import (
     CANCELLATION_TAG,
     KNOWN_TAGS,
@@ -66,6 +67,7 @@ __all__ = [
     "is_dangerous_directory",
     "is_user_cancellation_event",
     "is_windows",
+    "iter_sse_lines",
     "kill_async_subprocess",
     "name_matches",
     "run_sync",

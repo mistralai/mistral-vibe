@@ -607,6 +607,15 @@ class ContextTooLongError(Exception):
         )
 
 
+class ResponseTooLongError(Exception):
+    def __init__(self, provider: str, model: str) -> None:
+        self.provider = provider
+        self.model = model
+        super().__init__(
+            "The model's response exceeded the maximum output token limit."
+        )
+
+
 class RefusalError(Exception):
     def __init__(
         self,

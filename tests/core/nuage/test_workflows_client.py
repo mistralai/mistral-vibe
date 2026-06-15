@@ -67,7 +67,7 @@ class TestIterSSEEvents:
         payload = _valid_event_payload()
         lines = [f"data: {json.dumps(payload)}"]
         response = AsyncMock()
-        response.aiter_lines = _async_line_iter(lines)
+        response.aiter_bytes = _async_byte_iter(lines)
 
         events = [e async for e in client._iter_sse_events(response)]
         assert len(events) == 1
@@ -79,7 +79,7 @@ class TestIterSSEEvents:
         payload = _valid_event_payload()
         lines = ["", ": this is a comment", f"data: {json.dumps(payload)}", ""]
         response = AsyncMock()
-        response.aiter_lines = _async_line_iter(lines)
+        response.aiter_bytes = _async_byte_iter(lines)
 
         events = [e async for e in client._iter_sse_events(response)]
         assert len(events) == 1
@@ -90,7 +90,7 @@ class TestIterSSEEvents:
         payload = {"error": "server broke"}
         lines = ["event: error", f"data: {json.dumps(payload)}"]
         response = AsyncMock()
-        response.aiter_lines = _async_line_iter(lines)
+        response.aiter_bytes = _async_byte_iter(lines)
 
         with pytest.raises(WorkflowsException) as exc_info:
             _ = [e async for e in client._iter_sse_events(response)]
@@ -106,7 +106,7 @@ class TestIterSSEEvents:
             f"data: {json.dumps(payload)}",
         ]
         response = AsyncMock()
-        response.aiter_lines = _async_line_iter(lines)
+        response.aiter_bytes = _async_byte_iter(lines)
 
         with patch.object(
             client, "_parse_sse_data", wraps=client._parse_sse_data
@@ -122,7 +122,7 @@ class TestIterSSEEvents:
         payload = _valid_event_payload()
         lines = ["id: 123", "retry: 5000", f"data: {json.dumps(payload)}"]
         response = AsyncMock()
-        response.aiter_lines = _async_line_iter(lines)
+        response.aiter_bytes = _async_byte_iter(lines)
 
         events = [e async for e in client._iter_sse_events(response)]
         assert len(events) == 1
@@ -133,7 +133,7 @@ class TestIterSSEEvents:
         payload = _valid_event_payload()
         lines = ["data: {not valid json}", f"data: {json.dumps(payload)}"]
         response = AsyncMock()
-        response.aiter_lines = _async_line_iter(lines)
+        response.aiter_bytes = _async_byte_iter(lines)
 
         with patch("vibe.core.nuage.client.logger") as mock_logger:
             events = [e async for e in client._iter_sse_events(response)]
@@ -159,7 +159,7 @@ class TestStreamEvents:
 
         mock_response = AsyncMock()
         mock_response.raise_for_status = lambda: None
-        mock_response.aiter_lines = _async_line_iter(lines)
+        mock_response.aiter_bytes = _async_byte_iter(lines)
         _setup_mock_client(client, mock_response)
 
         params = StreamEventsQueryParams(workflow_exec_id="wf-1", start_seq=0)
@@ -173,7 +173,7 @@ class TestStreamEvents:
 
         mock_response = AsyncMock()
         mock_response.raise_for_status = lambda: None
-        mock_response.aiter_lines = _async_line_iter([
+        mock_response.aiter_bytes = _async_byte_iter([
             "event: error",
             'data: {"error": "stream error"}',
         ])
@@ -240,9 +240,9 @@ class TestGetWorkflowRuns:
         assert call_params["user_id"] == "user-123"
 
 
-def _async_line_iter(lines: list[str]):
+def _async_byte_iter(lines: list[str]):
     async def _iter():
         for line in lines:
-            yield line
+            yield f"{line}\n".encode()
 
     return _iter

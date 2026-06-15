@@ -11,6 +11,7 @@ from rich.console import Console
 import tomli_w
 
 from vibe import __version__
+from vibe.cli.terminal_detect import detect_terminal
 from vibe.cli.textual_ui.app import StartupOptions, run_textual_ui
 from vibe.cli.update_notifier import (
     FileSystemUpdateCacheRepository,
@@ -328,6 +329,7 @@ def run_cli(args: argparse.Namespace) -> None:
                     agent_name=initial_agent_name,
                     enable_streaming=True,
                     entrypoint_metadata=_build_cli_entrypoint_metadata(),
+                    terminal_emulator=detect_terminal(),
                     defer_heavy_init=True,
                     hook_config_result=hook_config_result,
                 )

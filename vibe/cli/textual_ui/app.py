@@ -23,6 +23,7 @@ from textual.containers import Horizontal, VerticalGroup, VerticalScroll
 from textual.driver import Driver
 from textual.events import AppBlur, AppFocus, MouseUp
 from textual.theme import BUILTIN_THEMES
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -100,7 +101,10 @@ from vibe.cli.textual_ui.widgets.messages import (
 )
 from vibe.cli.textual_ui.widgets.model_picker import ModelPickerApp
 from vibe.cli.textual_ui.widgets.narrator_status import NarratorStatus
-from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.no_markup_static import (
+    NoMarkupStatic,
+    NonSelectableStatic,
+)
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
 from vibe.cli.textual_ui.widgets.proxy_setup_app import ProxySetupApp
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
@@ -109,6 +113,10 @@ from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.cli.textual_ui.widgets.theme_picker import ThemePickerApp, sorted_theme_names
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
+from vibe.cli.textual_ui.widgets.tool_widgets import (
+    EditApprovalWidget,
+    EditResultWidget,
+)
 from vibe.cli.textual_ui.widgets.voice_app import VoiceApp
 from vibe.cli.textual_ui.windowing import (
     HISTORY_RESUME_TAIL_MESSAGES,
@@ -605,6 +613,10 @@ class VibeApp(App):  # noqa: PLR0904
         with Horizontal(id="loading-area"):
             yield NarratorStatus(self._narrator_manager)
             yield Static(id="loading-area-content")
+            self._clipboard_notice = NonSelectableStatic(id="clipboard-notice")
+            self._clipboard_notice.display = False
+            self._clipboard_hide_timer: Timer | None = None
+            yield self._clipboard_notice
             yield FeedbackBar()
 
         with Static(id="bottom-app-container"):
@@ -1151,6 +1163,7 @@ class VibeApp(App):  # noqa: PLR0904
         self, message: ThemePickerApp.ThemePreviewed
     ) -> None:
         self._apply_theme(message.theme)
+        await self._restyle_diff_widgets()
 
     async def on_theme_picker_app_theme_selected(
         self, message: ThemePickerApp.ThemeSelected
@@ -1158,13 +1171,22 @@ class VibeApp(App):  # noqa: PLR0904
         self._apply_theme(message.theme)
         self.config.theme = message.theme
         VibeConfig.save_updates({"theme": message.theme})
+        await self._restyle_diff_widgets()
         await self._switch_to_input_app()
 
     async def on_theme_picker_app_cancelled(
         self, message: ThemePickerApp.Cancelled
     ) -> None:
         self._apply_theme(message.original_theme)
+        await self._restyle_diff_widgets()
         await self._switch_to_input_app()
+
+    async def _restyle_diff_widgets(self) -> None:
+        # Diff content bakes in ANSI-vs-truecolor styling, so it must be rebuilt.
+        for widget in self.query(EditResultWidget):
+            await widget.recompose()
+        for widget in self.query(EditApprovalWidget):
+            await widget.recompose()
 
     async def on_mcpapp_mcpclosed(self, _message: MCPApp.MCPClosed) -> None:
         await self._mount_and_scroll(UserCommandMessage("MCP servers closed."))
@@ -2253,6 +2275,7 @@ class VibeApp(App):  # noqa: PLR0904
             sessions=sessions,
             latest_messages=latest_messages,
             current_session_id=self.agent_loop.session_id,
+            cwd=cwd,
         )
         await self._switch_from_input(picker)
 
@@ -3612,8 +3635,15 @@ class VibeApp(App):  # noqa: PLR0904
 
     def on_mouse_up(self, event: MouseUp) -> None:
         if self.config.autocopy_to_clipboard:
-            copied_text = copy_selection_to_clipboard(self, show_toast=True)
+            copied_text = copy_selection_to_clipboard(self, show_toast=False)
             if copied_text is not None:
+                self._clipboard_notice.update("Selection copied to clipboard")
+                self._clipboard_notice.display = True
+                if self._clipboard_hide_timer is not None:
+                    self._clipboard_hide_timer.stop()
+                self._clipboard_hide_timer = self.set_timer(
+                    2.0, lambda: setattr(self._clipboard_notice, "display", False)
+                )
                 self.agent_loop.telemetry_client.send_user_copied_text(copied_text)
 
     def on_app_blur(self, event: AppBlur) -> None:

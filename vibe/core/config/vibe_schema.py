@@ -216,6 +216,7 @@ class VibeConfigSchema(ConfigSchema):
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False
     narrator_enabled: Annotated[bool, WithReplaceMerge()] = False
     bypass_tool_permissions: Annotated[bool, WithReplaceMerge()] = False
+    raise_on_compaction_failure: Annotated[bool, WithReplaceMerge()] = False
     enable_telemetry: Annotated[bool, WithReplaceMerge()] = True
     system_prompt_id: Annotated[str, WithReplaceMerge()] = SystemPrompt.CLI
     compaction_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.COMPACT

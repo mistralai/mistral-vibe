@@ -59,7 +59,9 @@ class ParsedContent(NamedTuple):
 
 
 class MistralMapper:
-    def prepare_message(self, msg: LLMMessage) -> ChatCompletionRequestMessage:
+    def prepare_message(
+        self, msg: LLMMessage, *, include_reasoning_content: bool = True
+    ) -> ChatCompletionRequestMessage:
         match msg.role:
             case Role.system:
                 return SystemMessage(role="system", content=msg.content or "")
@@ -78,7 +80,7 @@ class MistralMapper:
                 return UserMessage(role="user", content=msg.content)
             case Role.assistant:
                 content: AssistantMessageContent
-                if msg.reasoning_content:
+                if include_reasoning_content and msg.reasoning_content:
                     chunks: list[ContentChunk] = [
                         ThinkChunk(
                             type="thinking",
@@ -295,10 +297,14 @@ class MistralBackend:
             reasoning_effort = _THINKING_TO_REASONING_EFFORT.get(model.thinking)
             if reasoning_effort is not None:
                 temperature = 1.0
-
             response = await self._get_client().chat.complete_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+                messages=[
+                    self._mapper.prepare_message(
+                        msg, include_reasoning_content=model.thinking != "off"
+                    )
+                    for msg in messages
+                ],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools
@@ -376,7 +382,12 @@ class MistralBackend:
 
             stream = await self._get_client().chat.stream_async(
                 model=model.name,
-                messages=[self._mapper.prepare_message(msg) for msg in messages],
+                messages=[
+                    self._mapper.prepare_message(
+                        msg, include_reasoning_content=model.thinking != "off"
+                    )
+                    for msg in messages
+                ],
                 temperature=temperature,
                 tools=[self._mapper.prepare_tool(tool) for tool in tools]
                 if tools

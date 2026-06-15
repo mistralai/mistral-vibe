@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import NamedTuple
+from typing import ClassVar, NamedTuple
 
 from vibe.core.autocompletion.file_indexer import FileIndexer, IndexEntry
 from vibe.core.autocompletion.file_indexer.store import (
@@ -30,30 +30,6 @@ class Completer:
         return None
 
 
-def _prioritize_help_config_slash_menu(
-    items: list[tuple[str, str]],
-) -> list[tuple[str, str]]:
-    """Place /help then /config at the head whenever they appear in the list."""
-    help_item: tuple[str, str] | None = None
-    config_item: tuple[str, str] | None = None
-    rest: list[tuple[str, str]] = []
-    for item in items:
-        match item[0]:
-            case "/help":
-                help_item = item
-            case "/config":
-                config_item = item
-            case _:
-                rest.append(item)
-    ordered: list[tuple[str, str]] = []
-    if help_item is not None:
-        ordered.append(help_item)
-    if config_item is not None:
-        ordered.append(config_item)
-    ordered.extend(rest)
-    return ordered
-
-
 class CommandCompleter(Completer):
     def __init__(self, entries: Callable[[], list[tuple[str, str]]]) -> None:
         self._get_entries = entries
@@ -68,13 +44,31 @@ class CommandCompleter(Completer):
         head = text.split(" ", 1)[0]
         return head[1 : min(cursor_pos, len(head))].lower()
 
+    _PROMOTED_BOOSTS: ClassVar[dict[str, float]] = {"/help": 2.0, "/config": 1.0}
+
+    def _fuzzy_filter(self, aliases: list[str], search_str: str) -> list[str]:
+        query = search_str[1:]
+        slash_aliases = [a for a in aliases if a.startswith("/")]
+        scored: list[tuple[str, float]] = []
+        for alias in slash_aliases:
+            boost = self._PROMOTED_BOOSTS.get(alias, 0.0)
+            if not query:
+                scored.append((alias, boost))
+                continue
+            candidate = alias[1:].lower()
+            result = fuzzy_match(query, candidate)
+            if result.matched:
+                scored.append((alias, result.score + boost))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [alias for alias, _ in scored]
+
     def get_completions(self, text: str, cursor_pos: int) -> list[str]:
         if not text.startswith("/"):
             return []
 
         aliases, _ = self._build_lookup()
         search_str = "/" + self._head_word(text, cursor_pos)
-        return [alias for alias in aliases if alias.lower().startswith(search_str)]
+        return self._fuzzy_filter(aliases, search_str)
 
     def get_completion_items(self, text: str, cursor_pos: int) -> list[tuple[str, str]]:
         if not text.startswith("/"):
@@ -82,12 +76,10 @@ class CommandCompleter(Completer):
 
         aliases, descriptions = self._build_lookup()
         search_str = "/" + self._head_word(text, cursor_pos)
-        items = [
+        return [
             (alias, descriptions.get(alias, ""))
-            for alias in aliases
-            if alias.lower().startswith(search_str)
+            for alias in self._fuzzy_filter(aliases, search_str)
         ]
-        return _prioritize_help_config_slash_menu(items)
 
     def get_replacement_range(
         self, text: str, cursor_pos: int

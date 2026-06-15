@@ -57,6 +57,17 @@ def _format_relative_time(iso_time: str | None) -> str:
     return "unknown"
 
 
+def _build_header_text(cwd: str | None, has_remote: bool) -> Text:
+    text = Text(no_wrap=True)
+    text.append("local ", style="cyan")
+    text.append(cwd or "this folder", style="dim")
+    if has_remote:
+        text.append("  ·  ", style="dim")
+        text.append("remote ", style="cyan")
+        text.append("all folders", style="dim")
+    return text
+
+
 def _build_option_text(session: ResumeSessionInfo, message: str) -> Text:
     text = Text(no_wrap=True)
     time_str = _format_relative_time(session.end_time)
@@ -115,12 +126,14 @@ class SessionPickerApp(Container):
         sessions: list[ResumeSessionInfo],
         latest_messages: dict[str, str],
         current_session_id: str | None = None,
+        cwd: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(id="sessionpicker-app", **kwargs)
         self._sessions = sessions
         self._latest_messages = latest_messages
         self._current_session_id = current_session_id
+        self._cwd = cwd
         self._delete_state: _DeleteState | None = None
 
     @property
@@ -238,7 +251,12 @@ class SessionPickerApp(Container):
             Option(self._normal_option_text(session), id=session.option_id)
             for session in self._sessions
         ]
+        has_remote = any(session.source == "remote" for session in self._sessions)
         with Vertical(id="sessionpicker-content"):
+            yield NoMarkupStatic(
+                _build_header_text(self._cwd, has_remote),
+                classes="sessionpicker-header",
+            )
             yield OptionList(*options, id="sessionpicker-options")
             yield NoMarkupStatic(
                 "↑↓ Navigate  Enter Select  D Delete  Esc Cancel",

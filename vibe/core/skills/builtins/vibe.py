@@ -83,6 +83,18 @@ newer release exists; accepting runs `uv tool upgrade mistral-vibe`, then
 - `vibe --resume [SESSION_ID]`: specific session; without an id, opens a picker.
 - In-session: `/resume` (alias `/continue`).
 
+#### Session storage & folder scoping
+
+Local sessions are written under `~/.vibe/logs/session/` (override with
+`session_logging.save_dir`). Each session records the `cwd` it ran in. The
+`/resume` picker, `--continue`, and bare `--resume` (no id) are **scoped to the
+current folder**: only sessions whose `cwd` matches where Vibe is launched are
+listed, so the same directory shows its own history and nothing else. Switch
+folders to see a different set. The explicit `--resume <SESSION_ID>` form is
+**not** folder-scoped: it resolves the session by id regardless of which folder
+it ran in. When Vibe Code is enabled, active **remote** sessions are listed
+alongside local ones in the picker (tagged `remote`) and are not folder-scoped.
+
 ## Configuration (config.toml)
 
 The configuration file uses TOML format. Settings can also be overridden via
@@ -539,9 +551,10 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/status` - Display agent statistics
 - `/voice` - Configure voice settings
 - `/mcp` - Display available MCP servers (pass a server name to list its tools)
-- `/resume` (or `/continue`) - Browse and resume past sessions. In the picker,
-  press `D` twice to delete a local saved session. The active session cannot be
-  deleted from this picker.
+- `/resume` (or `/continue`) - Browse and resume past sessions for the current
+  folder (plus active remote sessions when Vibe Code is enabled). The picker
+  header shows the folder being listed. Press `D` twice to delete a local saved
+  session; remote sessions and the active session cannot be deleted here.
 - `/rewind` - Rewind to a previous message
 - `/loop <interval> <prompt>` - Schedule a recurring prompt (e.g. `/loop 30s ping`).
   Intervals: `Ns/Nm/Nh/Nd`, minimum 30s, max 50 loops/session.

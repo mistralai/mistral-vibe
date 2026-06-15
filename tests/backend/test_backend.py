@@ -206,6 +206,59 @@ class TestBackend:
                         )
 
     @pytest.mark.asyncio
+    async def test_backend_complete_streaming_keeps_unicode_line_breaks(self):
+        content = "first\u2028second\u0085third"
+        chunk = json.dumps(
+            {
+                "id": "fake_id_1234",
+                "object": "chat.completion.chunk",
+                "created": 1234567890,
+                "model": "model_name",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": content},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ).encode()
+        with respx.mock(base_url="https://api.fireworks.ai") as mock_api:
+            mock_api.post("/v1/chat/completions").mock(
+                return_value=httpx.Response(
+                    status_code=200,
+                    stream=httpx.ByteStream(
+                        stream=b"data: " + chunk + b"\n\ndata: [DONE]\n\n"
+                    ),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            )
+            provider = ProviderConfig(
+                name="provider_name",
+                api_base="https://api.fireworks.ai/v1",
+                api_key_env_var="API_KEY",
+            )
+            backend = GenericBackend(provider=provider)
+            model = ModelConfig(
+                name="model_name", provider="provider_name", alias="model_alias"
+            )
+
+            results: list[LLMChunk] = []
+            async for result in backend.complete_streaming(
+                model=model,
+                messages=[LLMMessage(role=Role.user, content="hi")],
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            ):
+                results.append(result)
+
+        assert [result.message.content for result in results] == [content]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "base_url,backend_class,response",
         [
@@ -591,6 +644,52 @@ class TestMistralBackendReasoningEffort:
             call_kwargs = mock_client.chat.complete_async.call_args.kwargs
             assert call_kwargs["reasoning_effort"] == expected_effort
             assert call_kwargs["temperature"] == expected_temperature
+
+    @pytest.mark.asyncio
+    async def test_complete_omits_reasoning_content_when_thinking_off(
+        self, backend: MistralBackend
+    ) -> None:
+        model = ModelConfig(
+            name="devstral-small-latest",
+            provider="mistral",
+            alias="devstral-small",
+            thinking="off",
+        )
+        messages = [
+            LLMMessage(role=Role.user, content="Hi"),
+            LLMMessage(
+                role=Role.assistant,
+                content="Answer",
+                reasoning_content="Hidden reasoning",
+            ),
+        ]
+
+        with patch.object(backend, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "ok"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage.prompt_tokens = 10
+            mock_response.usage.completion_tokens = 5
+            mock_client.chat.complete_async = AsyncMock(return_value=mock_response)
+            mock_get_client.return_value = mock_client
+
+            await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+            call_kwargs = mock_client.chat.complete_async.call_args.kwargs
+            sent_messages = call_kwargs["messages"]
+            assert len(sent_messages) == 2
+            assert isinstance(sent_messages[1], AssistantMessage)
+            assert sent_messages[1].content == "Answer"
 
 
 class TestBuildHttpErrorBodyReading:

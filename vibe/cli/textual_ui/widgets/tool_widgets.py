@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-import difflib
 from pathlib import Path
 import re
 from typing import ClassVar
@@ -13,6 +12,12 @@ from textual.widget import Widget
 from textual.widgets import Markdown, Static
 
 from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection, lines_label
+from vibe.cli.textual_ui.widgets.diff_rendering import (
+    diff_border_colors,
+    language_for_path,
+    locate_snippet_in_file,
+    render_edit_diff,
+)
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.tools.builtins.ask_user_question import AskUserQuestionResult
 from vibe.core.tools.builtins.bash import BashArgs, BashResult
@@ -51,20 +56,6 @@ def _fenced_code_block(content: str, ext: str) -> str:
     )
     fence = "`" * max(3, longest_run + 1)
     return f"{fence}{safe_ext}\n{content}\n{fence}"
-
-
-def render_diff_line(line: str) -> Static:
-    """Render a single diff line with appropriate styling."""
-    if line.startswith("---") or line.startswith("+++"):
-        return NoMarkupStatic(line, classes="diff-header")
-    elif line.startswith("-"):
-        return NoMarkupStatic(line, classes="diff-removed")
-    elif line.startswith("+"):
-        return NoMarkupStatic(line, classes="diff-added")
-    elif line.startswith("@@"):
-        return NoMarkupStatic(line, classes="diff-range")
-    else:
-        return NoMarkupStatic(line, classes="diff-context")
 
 
 class ToolApprovalWidget[TArgs: BaseModel](Vertical):
@@ -107,6 +98,7 @@ class ToolResultWidget[TResult: BaseModel](Static):
         self.success = success
         self.message = message
         self.warnings = warnings or []
+        self.border_row_colors: dict[int, str] = {}
         self.add_class("tool-result-widget")
 
     def _footer(self, extra: str | None = None) -> ComposeResult:
@@ -201,12 +193,11 @@ class BashResultWidget(ToolResultWidget[BashResult]):
 
 class WriteFileApprovalWidget(ToolApprovalWidget[WriteFileArgs]):
     def compose(self) -> ComposeResult:
-        path = Path(self.args.path)
-        file_extension = path.suffix.lstrip(".") or "text"
-
         yield NoMarkupStatic(f"File: {self.args.path}", classes="approval-description")
         yield NoMarkupStatic("")
-        yield Markdown(_fenced_code_block(self.args.content, file_extension))
+        yield Markdown(
+            _fenced_code_block(self.args.content, language_for_path(self.args.path))
+        )
 
 
 class WriteFileResultWidget(ToolResultWidget[WriteFileResult]):
@@ -217,8 +208,9 @@ class WriteFileResultWidget(ToolResultWidget[WriteFileResult]):
             yield from self._footer()
             return
         if self.result.content:
-            ext = Path(self.result.path).suffix.lstrip(".") or "text"
-            yield from self._yield_truncated_markdown(self.result.content, ext=ext)
+            yield from self._yield_truncated_markdown(
+                self.result.content, ext=language_for_path(self.result.path)
+            )
         yield from self._footer()
 
 
@@ -229,11 +221,16 @@ class EditApprovalWidget(ToolApprovalWidget[EditArgs]):
         )
         yield NoMarkupStatic("")
 
-        old_lines = self.args.old_string.split("\n")
-        new_lines = self.args.new_string.split("\n")
-        diff = list(difflib.unified_diff(old_lines, new_lines, lineterm="", n=2))[2:]
-        for line in diff:
-            yield render_diff_line(line)
+        # Approximate: queued edits ahead of this one may shift the real line.
+        start_line = locate_snippet_in_file(self.args.file_path, self.args.old_string)
+        yield from render_edit_diff(
+            self.args.old_string,
+            self.args.new_string,
+            language_for_path(self.args.file_path),
+            start_line,
+            ansi=self.app.native_ansi_color,
+            dark=self.app.current_theme.dark,
+        )
 
         if self.args.replace_all:
             yield NoMarkupStatic("(replace_all)", classes="approval-description")
@@ -246,13 +243,22 @@ class EditResultWidget(ToolResultWidget[EditResult]):
         if not self.result:
             yield from self._footer()
             return
-        for warning in self.warnings:
-            yield NoMarkupStatic(f"⚠ {warning}", classes="tool-result-warning")
-        old_lines = self.result.old_string.split("\n")
-        new_lines = self.result.new_string.split("\n")
-        diff = list(difflib.unified_diff(old_lines, new_lines, lineterm="", n=2))[2:]
-        diff_widgets = [render_diff_line(line) for line in diff]
-        yield from self._yield_truncated_widgets(diff_widgets)
+        rows: list[Static] = [
+            NoMarkupStatic(f"⚠ {w}", classes="tool-result-warning")
+            for w in self.warnings
+        ]
+        rows.extend(
+            render_edit_diff(
+                self.result.old_string,
+                self.result.new_string,
+                language_for_path(self.result.file),
+                self.result.ui_start_line,
+                ansi=self.app.native_ansi_color,
+                dark=self.app.current_theme.dark,
+            )
+        )
+        self.border_row_colors = diff_border_colors(rows)
+        yield from self._yield_truncated_widgets(rows)
         yield from self._footer()
 
 

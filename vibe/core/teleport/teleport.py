@@ -169,20 +169,42 @@ class TeleportService:
             else None
         )
 
-        return NuageRequest(
-            idempotency_key=str(uuid4()),
-            message=NuageMessage(parts=[NuageTextPart(text=prompt)]),
-            context=NuageContext(
-                repositories=[
-                    NuageRepository(
-                        repo_url=git_info.remote_url,
-                        branch=git_info.branch,
-                        commit_sha=git_info.commit,
-                        diff=diff,
-                    )
-                ]
-            ),
+        message = NuageMessage(parts=[NuageTextPart(text=prompt)])
+        context = NuageContext(
+            repositories=[
+                NuageRepository(
+                    repo_url=git_info.remote_url,
+                    branch=git_info.branch,
+                    commit_sha=git_info.commit,
+                    diff=diff,
+                )
+            ]
         )
+
+        project_name = self._resolve_project_name()
+        idempotency_key = str(uuid4())
+        if project_name is None:
+            return NuageRequest(
+                idempotency_key=idempotency_key, message=message, context=context
+            )
+
+        return NuageRequest(
+            project_name=project_name,
+            idempotency_key=idempotency_key,
+            message=message,
+            context=context,
+        )
+
+    def _resolve_project_name(self) -> str | None:
+        if self._vibe_config is None:
+            return None
+
+        project_name = self._vibe_config.vibe_code_project_name
+        if project_name is None:
+            return None
+
+        normalized_project_name = project_name.strip()
+        return normalized_project_name or None
 
     def _compress_diff(self, diff: str, max_size: int = 1_000_000) -> bytes | None:
         if not diff:

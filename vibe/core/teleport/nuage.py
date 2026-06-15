@@ -10,6 +10,8 @@ from vibe.core.telemetry.types import TeleportFailureDetails
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.utils.http import build_ssl_context
 
+DEFAULT_NUAGE_PROJECT_NAME = "Vibe CLI"
+
 
 class NuageTextPart(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -52,7 +54,9 @@ class NuageContext(BaseModel):
 class NuageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    project_name: str = Field(default="Vibe CLI", serialization_alias="project_name")
+    project_name: str = Field(
+        default=DEFAULT_NUAGE_PROJECT_NAME, serialization_alias="project_name"
+    )
     source: str = "vibe_code_cli"
     idempotency_key: str = Field(serialization_alias="idempotencyKey")
     message: NuageMessage

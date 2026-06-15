@@ -600,6 +600,7 @@ class VibeConfig(BaseSettings):
     active_transcribe_model: str = DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG.alias
     active_tts_model: str = DEFAULT_ACTIVE_TTS_MODEL_CONFIG.alias
     bypass_tool_permissions: bool = False
+    raise_on_compaction_failure: bool = False
     enable_telemetry: bool = True
     experiment_overrides: dict[str, str] = Field(default_factory=dict)
     applied_migrations: list[str] = Field(default_factory=list, exclude=True)
