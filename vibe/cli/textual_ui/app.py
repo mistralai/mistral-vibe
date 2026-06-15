@@ -945,6 +945,7 @@ class VibeApp(App):  # noqa: PLR0904
         self.agent_loop.telemetry_client.send_user_rating_feedback(
             rating=message.rating, model=self.config.active_model
         )
+        self._feedback_bar_manager.record_feedback_given()
 
     async def _remove_loading_widget(self) -> None:
         if self._loading_widget and self._loading_widget.parent:

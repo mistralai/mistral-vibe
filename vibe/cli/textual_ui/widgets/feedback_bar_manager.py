@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.feedback import record_feedback_asked, should_show_feedback
+from vibe.core.feedback import (
+    record_feedback_asked,
+    record_feedback_given,
+    should_show_feedback,
+)
 from vibe.core.types import Role
 
 
@@ -21,3 +25,6 @@ class FeedbackBarManager:
 
     def record_feedback_asked(self) -> None:
         record_feedback_asked()
+
+    def record_feedback_given(self) -> None:
+        record_feedback_given()
