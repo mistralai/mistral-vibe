@@ -112,6 +112,11 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
     parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="Force upgrade check and update if available",
+    )
+    parser.add_argument(
         "--workdir",
         type=Path,
         metavar="DIR",

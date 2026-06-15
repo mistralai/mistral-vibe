@@ -19,6 +19,11 @@ from vibe.cli.update_notifier import (
     get_pending_update_from_cache,
     mark_update_as_dismissed,
 )
+from vibe.cli.update_notifier.update import (
+    get_update_if_available,
+    do_update,
+)
+from vibe.cli.update_notifier.adapters.pypi_update_gateway import PyPIUpdateGateway
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
@@ -296,6 +301,50 @@ def _maybe_run_startup_update_prompt(
             sys.exit(1)
 
 
+def _handle_forced_upgrade() -> None:
+    """Handle the --upgrade flag: force check for updates and perform update if available."""
+    update_cache_repository = FileSystemUpdateCacheRepository()
+    update_gateway = PyPIUpdateGateway(project_name="mistral-vibe")
+
+    try:
+        # Force a fresh update check
+        update_availability = asyncio.run(
+            get_update_if_available(
+                update_gateway, __version__, update_cache_repository
+            )
+        )
+    except Exception as exc:
+        logger.debug("Failed to check for updates", exc_info=exc)
+        rprint("[red]✗ Failed to check for updates. Please try again later.[/]")
+        sys.exit(1)
+
+    if update_availability is None:
+        rprint(f"[green]✔ Vibe is up to date (v{__version__})[/]")
+        sys.exit(0)
+
+    latest_version = update_availability.latest_version
+    rprint(f"[green]New version available: {__version__} → {latest_version}[/]")
+
+    # Perform the update
+    try:
+        update_successful = asyncio.run(do_update())
+    except Exception as exc:
+        logger.debug("Update failed", exc_info=exc)
+        rprint("[red]✗ Vibe could not be updated automatically.[/]")
+        sys.exit(1)
+
+    if update_successful:
+        rprint(
+            f"[green]✔ Vibe was updated from {__version__} to "
+            f"{latest_version}.[/]\n  Run [bold]vibe[/] to start using the "
+            "new version."
+        )
+        sys.exit(0)
+    else:
+        rprint("[red]✗ Vibe could not be updated automatically.[/]")
+        sys.exit(1)
+
+
 def run_cli(args: argparse.Namespace) -> None:
     load_dotenv_values()
     bootstrap_config_files()
@@ -303,6 +352,11 @@ def run_cli(args: argparse.Namespace) -> None:
     if args.setup:
         run_onboarding(entrypoint_metadata=_build_cli_entrypoint_metadata())
         sys.exit(0)
+
+    if args.upgrade:
+        _handle_forced_upgrade()
+        # This function will sys.exit, so we never reach here
+        return
 
     try:
         is_interactive = args.prompt is None
