@@ -6,3 +6,7 @@ Welcome to the Mistral Vibe documentation! For basic setup, see the [main README
 
 - **[ACP Setup](acp-setup.md)** - Setup instructions for using Mistral Vibe with various editors and IDEs that support the Agent Client Protocol.
 - **[Proxy Setup](proxy-setup.md)** - Configure proxy and SSL certificate settings for corporate networks or firewalls.
+
+## Integrations
+
+- **[Crabbox](integrations/crabbox.md)** - Run Vibe-selected commands, tests, and builds on short-lived remote machines via the Crabbox CLI, using a Vibe skill.
