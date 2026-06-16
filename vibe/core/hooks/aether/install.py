@@ -107,31 +107,69 @@ def enable(yes: bool = False) -> None:
 
 
 def disable() -> None:
+    import shutil
     import tomlkit
 
+    # --- hooks.toml ---
     hooks_path = _hooks_toml()
-    if not hooks_path.exists():
-        print("No hooks.toml found — nothing to disable.")
-        return
+    if hooks_path.exists():
+        doc = tomlkit.parse(hooks_path.read_text(encoding="utf-8"))
+        hooks = doc.get("hooks", tomlkit.aot())
+        filtered = tomlkit.aot()
+        removed = False
+        for hook in hooks:
+            if hook.get("name") == "aether":
+                removed = True
+            else:
+                filtered.append(hook)
+        doc["hooks"] = filtered
+        hooks_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        if removed:
+            print(f"✓ Aether hook removed from {hooks_path}")
 
-    doc = tomlkit.parse(hooks_path.read_text(encoding="utf-8"))
-    hooks = doc.get("hooks", tomlkit.aot())
-    filtered = tomlkit.aot()
-    removed = False
-    for hook in hooks:
-        if hook.get("name") == "aether":
-            removed = True
-        else:
-            filtered.append(hook)
+    # --- config.toml: remove bonsai servers and experimental hooks flag ---
+    config_path = _config_toml()
+    if config_path.exists():
+        config_doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
+        bonsai_names = {s["name"] for s in _BONSAI_SERVERS}
+        existing = list(config_doc.get("mcp_servers") or [])
+        kept = [s for s in existing if s.get("name") not in bonsai_names]
+        removed_servers = [s for s in existing if s.get("name") in bonsai_names]
 
-    doc["hooks"] = filtered
-    hooks_path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        if removed_servers:
+            if kept:
+                aot = tomlkit.aot()
+                for entry_data in kept:
+                    entry = tomlkit.table()
+                    for k, v in dict(entry_data).items():
+                        if isinstance(v, list):
+                            arr = tomlkit.array()
+                            for item in v:
+                                arr.append(item)
+                            entry.add(k, arr)
+                        else:
+                            entry.add(k, v)
+                    aot.append(entry)
+                del config_doc["mcp_servers"]
+                config_doc["mcp_servers"] = aot  # type: ignore[index]
+            else:
+                config_doc["mcp_servers"] = tomlkit.array()  # type: ignore[assignment]
+            for s in removed_servers:
+                print(f"✓ MCP server removed: {s['name']}")
 
-    if removed:
-        print(f"✓ Aether hook removed from {hooks_path}")
-    else:
-        print("Aether hook not found — nothing changed.")
+        config_doc["enable_experimental_hooks"] = False
+        config_path.write_text(tomlkit.dumps(config_doc), encoding="utf-8")
+        print("✓ enable_experimental_hooks = false written to config.toml")
 
+    # --- skills ---
+    skills_root = _skills_dir()
+    for skill_name in ("autocritic", "cairn-commit", "temper"):
+        skill_path = skills_root / skill_name
+        if skill_path.exists():
+            shutil.rmtree(skill_path)
+            print(f"✓ Skill removed: ~/.vibe/skills/{skill_name}/")
+
+    # --- AGENTS.md ---
     _remove_agents_md_section()
 
 
@@ -147,13 +185,35 @@ def status() -> None:
         hook_registered = any(h.get("name") == "aether" for h in doc.get("hooks", []))
 
     experimental_on = False
+    bonsai_servers: list[str] = []
     if config_path.exists():
         config_doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
         experimental_on = bool(config_doc.get("enable_experimental_hooks", False))
+        bonsai_names = {s["name"] for s in _BONSAI_SERVERS}
+        bonsai_servers = [
+            s.get("name", "")
+            for s in (config_doc.get("mcp_servers") or [])
+            if s.get("name") in bonsai_names
+        ]
+
+    agents_md_ok = _AGENTS_MD_START in (
+        _agents_md_path().read_text(encoding="utf-8")
+        if _agents_md_path().exists() else ""
+    )
+
+    skills_root = _skills_dir()
+    installed_skills = [
+        name for name in ("autocritic", "cairn-commit", "temper")
+        if (skills_root / name / "SKILL.md").exists()
+    ]
 
     active = hook_registered and experimental_on
-    print(f"Hook registered:      {'✓' if hook_registered else '✗'}")
-    print(f"Experimental hooks:   {'✓' if experimental_on else '✗'}")
+    tick = lambda b: "✓" if b else "✗"  # noqa: E731
+    print(f"Hook registered:      {tick(hook_registered)}")
+    print(f"Experimental hooks:   {tick(experimental_on)}")
+    print(f"Bonsai MCP servers:   {tick(bool(bonsai_servers))}  {', '.join(bonsai_servers) if bonsai_servers else ''}")
+    print(f"AGENTS.md section:    {tick(agents_md_ok)}")
+    print(f"Skills installed:     {tick(bool(installed_skills))}  {', '.join(installed_skills) if installed_skills else ''}")
     print(f"Status:               {'enabled' if active else 'disabled'}")
 
 

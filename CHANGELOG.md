@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Aether discipline suite** (`vibe --enable-aether`): four `BEFORE_TOOL` hooks that fire on every bash call — whetstone (blocks commits when a plan is uncritiqued), bonsai (nudges toward AST tools instead of `grep`/`sed`/`mv` on `.py`/`.ts` files), temper (blocks large or critical-path diffs without a review pass), cairn (nudges toward meaningful commit messages)
+- **Bonsai MCP servers** registered automatically on `--enable-aether`: `bonsai-py` (`uvx bonsai-python`) and `bonsai-ts` (`npx --yes bonsai-ts@latest`) provide AST-aware Python and TypeScript refactoring tools (`pyrename`, `pymove`, `pyfindrefs`, `tsrename`, `tsmove`, etc.)
+- **Bonsai tool guidance** written to `~/.vibe/AGENTS.md` on enable so the model proactively reaches for AST tools in conversation, not just when a gate fires
+- **Companion skills** installed to `~/.vibe/skills/`: `/autocritic` (plan critique, clears whetstone), `/temper` (diff review, clears temper gate), `/cairn-commit` (generates conventional commit messages)
+- `vibe --disable-aether` removes the hook and the AGENTS.md guidance section; `vibe --aether-status` reports current state
+
 ## [2.15.0] - 2026-06-12
 
 ### Added

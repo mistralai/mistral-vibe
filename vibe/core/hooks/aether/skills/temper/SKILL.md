@@ -30,10 +30,12 @@ Output a markdown table:
 
 Followed by counts: Blockers: N, Significant: N, Minor: N
 
-If no blockers (🔴), write the marker file to clear the gate:
+If no blockers (🔴), write the marker file to clear the gate. The file must contain
+the SHA256 hash of the current staged diff so that any subsequent `git add` invalidates
+the approval:
 
 ```bash
-mkdir -p .vibe && touch .vibe/.temper_ok
+mkdir -p .vibe && git diff --cached | python3 -c "import sys,hashlib; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())" > .vibe/.temper_ok
 ```
 
 Then confirm: "✓ temper gate cleared — safe to commit."

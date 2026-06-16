@@ -12,6 +12,10 @@ _PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Strip quoted strings before matching to avoid flagging patterns like
+# grep "\.py" config.json where .py appears only inside a quoted argument.
+_STRIP_QUOTED = re.compile(r'"[^"]*"|\'[^\']*\'')
+
 _SUGGESTIONS: dict[str, str] = {
     "grep": "pygrep (Python) or tsfindrefs (TypeScript) to find all references",
     "sed": "pyrename / tsrename to rename symbols safely across all imports",
@@ -24,7 +28,7 @@ def evaluate(command: str, cwd: str) -> dict | None:
     if is_bypassed(command, ("bonsai:skip",)):
         return None
 
-    match = _PATTERN.search(command)
+    match = _PATTERN.search(_STRIP_QUOTED.sub("", command))
     if not match:
         return None
 

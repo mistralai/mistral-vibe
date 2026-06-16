@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -35,13 +36,6 @@ def evaluate(command: str, cwd: str) -> dict | None:
     except Exception:
         return None
 
-    # Clear if temper was run after the last `git add` (indexed by .git/index mtime)
-    temper_ok = repo_root / ".vibe" / ".temper_ok"
-    git_index = repo_root / ".git" / "index"
-    if temper_ok.exists() and git_index.exists():
-        if temper_ok.stat().st_mtime > git_index.stat().st_mtime:
-            return None
-
     try:
         numstat = subprocess.run(
             ["git", "diff", "--numstat", "--cached"],
@@ -51,8 +45,24 @@ def evaluate(command: str, cwd: str) -> dict | None:
             ["git", "diff", "--cached", "--name-only"],
             capture_output=True, text=True, cwd=cwd, timeout=10,
         )
+        full_diff = subprocess.run(
+            ["git", "diff", "--cached"],
+            capture_output=True, text=True, cwd=cwd, timeout=15,
+        )
     except Exception:
         return None
+
+    # Clear if /temper skill already approved this exact staged diff.
+    # The skill writes SHA256(git diff --cached) to .vibe/.temper_ok so that
+    # a subsequent `git add` (which changes the hash) invalidates the approval.
+    temper_ok = repo_root / ".vibe" / ".temper_ok"
+    if temper_ok.exists():
+        current_hash = hashlib.sha256(full_diff.stdout.encode()).hexdigest()
+        try:
+            if temper_ok.read_text(encoding="utf-8").strip() == current_hash:
+                return None
+        except Exception:
+            pass
 
     files_changed = 0
     total_lines = 0
