@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import signal
 import sys
-from typing import Any, Protocol, cast, override
+from typing import Any, Literal, Protocol, cast, override
 from uuid import uuid4
 
 from acp import (
@@ -21,6 +21,7 @@ from acp import (
     LoadSessionResponse,
     NewSessionResponse,
     PromptResponse,
+    RequestError,
     SetSessionModelResponse,
     SetSessionModeResponse,
     run_agent,
@@ -148,6 +149,13 @@ from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import EntrypointMetadata
 from vibe.core.tools.permissions import RequiredPermission
+from vibe.core.trusted_folders import (
+    WorkspaceTrustDecision,
+    WorkspaceTrustPrompt,
+    apply_workspace_trust_decision,
+    available_workspace_trust_decisions,
+    maybe_build_workspace_trust_prompt,
+)
 from vibe.core.types import (
     AgentProfileChangedEvent,
     ApprovalCallback,
@@ -193,6 +201,8 @@ logger = logging.getLogger("vibe")
 
 NON_INTERACTIVE_DISABLED_TOOLS = ["ask_user_question", "exit_plan_mode"]
 INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS = 0.1
+WORKSPACE_TRUST_CAPABILITY = "workspace-trust"
+TRUST_REQUEST_METHOD = "trust/request"
 
 
 def _merge_non_interactive_disabled_tools(config: VibeConfig) -> None:
@@ -230,6 +240,24 @@ class TelemetrySendNotification(BaseModel):
     event: str
     properties: dict[str, Any] = Field(default_factory=dict)
     session_id: str = Field(validation_alias=AliasChoices("session_id", "sessionId"))
+
+
+class WorkspaceTrustRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    cwd: str
+    repo_root: str | None = Field(default=None, alias="repoRoot")
+    detected_files: list[str] = Field(alias="detectedFiles")
+    repo_detected_files: list[str] = Field(alias="repoDetectedFiles")
+    available_decisions: list[WorkspaceTrustDecision] = Field(
+        alias="availableDecisions"
+    )
+
+
+class WorkspaceTrustResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: WorkspaceTrustDecision | Literal["cancelled"]
 
 
 class AuthStatusResponse(BaseModel):
@@ -404,6 +432,14 @@ class VibeAcpAgentLoop(AcpAgent):
             self.client_capabilities
             and self.client_capabilities.field_meta
             and self.client_capabilities.field_meta.get("browser-auth-delegated")
+            is True
+        )
+
+    def _client_supports_workspace_trust(self) -> bool:
+        return bool(
+            self.client_capabilities
+            and self.client_capabilities.field_meta
+            and self.client_capabilities.field_meta.get(WORKSPACE_TRUST_CAPABILITY)
             is True
         )
 
@@ -699,6 +735,55 @@ class VibeAcpAgentLoop(AcpAgent):
         )
         return modes_state, modes_config, models_state, models_config
 
+    def _build_workspace_trust_request(
+        self, prompt: WorkspaceTrustPrompt
+    ) -> WorkspaceTrustRequest:
+        return WorkspaceTrustRequest(
+            cwd=str(prompt.cwd.resolve()),
+            repoRoot=str(prompt.repo_root.resolve())
+            if prompt.offer_repo_trust and prompt.repo_root
+            else None,
+            detectedFiles=prompt.detected_files,
+            repoDetectedFiles=prompt.repo_detected_files,
+            availableDecisions=available_workspace_trust_decisions(
+                prompt, include_session=True
+            ),
+        )
+
+    async def _resolve_workspace_trust(self, cwd: Path) -> None:
+        if not self._client_supports_workspace_trust():
+            return
+
+        prompt = maybe_build_workspace_trust_prompt(cwd)
+        if prompt is None:
+            return
+
+        request = self._build_workspace_trust_request(prompt)
+
+        try:
+            raw_response = await self.client.ext_method(
+                TRUST_REQUEST_METHOD, request.model_dump(mode="json", by_alias=True)
+            )
+        except RequestError as exc:
+            if exc.code == NotImplementedMethodError.code:
+                return
+            raise
+
+        try:
+            response = WorkspaceTrustResponse.model_validate(raw_response)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP trust decision response: {exc}"
+            ) from exc
+
+        if response.decision == "cancelled":
+            raise InvalidRequestError("Workspace trust prompt was cancelled.")
+
+        try:
+            apply_workspace_trust_decision(prompt, response.decision)
+        except ValueError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+
     @override
     async def new_session(
         self,
@@ -709,6 +794,7 @@ class VibeAcpAgentLoop(AcpAgent):
     ) -> NewSessionResponse:
         load_dotenv_values()
         os.chdir(cwd)
+        await self._resolve_workspace_trust(Path.cwd())
 
         config = self._load_config()
         hook_config_result = load_hooks_from_fs(config)
@@ -973,6 +1059,7 @@ class VibeAcpAgentLoop(AcpAgent):
     ) -> LoadSessionResponse | None:
         load_dotenv_values()
         os.chdir(cwd)
+        await self._resolve_workspace_trust(Path.cwd())
 
         config = self._load_config()
         hook_config_result = load_hooks_from_fs(config)

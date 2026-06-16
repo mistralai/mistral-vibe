@@ -85,7 +85,7 @@ class RemoteEventsSource:
 
     async def close(self) -> None:
         if self._client is not None:
-            await self._client.__aexit__(None, None, None)
+            await self._client.aclose()
             self._client = None
 
     async def attach(self) -> AsyncGenerator[BaseEvent, None]:

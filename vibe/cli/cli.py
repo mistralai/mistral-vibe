@@ -292,7 +292,12 @@ def _maybe_run_startup_update_prompt(
             )
             sys.exit(0)
         case UpdatePromptResult.UPDATE_FAILED:
-            rprint("[red]✗ Vibe could not be updated automatically.[/]")
+            rprint(
+                "[yellow]Vibe could not update automatically.[/]\n"
+                "  Update manually with your package manager (for example "
+                "[bold]uv tool upgrade mistral-vibe[/]), or keep using "
+                f"the current version ({__version__}) for now."
+            )
             sys.exit(1)
 
 

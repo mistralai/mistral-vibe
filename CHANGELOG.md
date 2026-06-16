@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.1] - 2026-06-16
+
+### Added
+
+- ACP workspace trust gated behind the `workspace-trust` client capability
+
+### Changed
+
+- `/resume` now opens much faster
+- Startup update-failure message is now gentler and no longer alarms when an update can't be applied
+
+
 ## [2.16.0] - 2026-06-15
 
 ### Added

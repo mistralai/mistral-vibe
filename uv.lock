@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.12"
 
 [options]
-exclude-newer = "2026-06-08T15:00:29.625263Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -825,7 +825,7 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "2.16.0"
+version = "2.16.1"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },

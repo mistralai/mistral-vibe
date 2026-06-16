@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 from collections.abc import AsyncGenerator
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 from dataclasses import dataclass
 from enum import StrEnum, auto
 import gc
@@ -170,10 +170,12 @@ from vibe.core.paths import HISTORY_FILE
 from vibe.core.rewind import RewindError
 from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image
 from vibe.core.session.resume_sessions import (
+    RemoteResumeResult,
+    RemoteResumeSessions,
     ResumeSessionInfo,
     can_delete_resume_session_source,
     list_local_resume_sessions,
-    list_remote_resume_sessions,
+    session_latest_messages,
     short_session_id,
 )
 from vibe.core.session.saved_sessions import (
@@ -428,6 +430,8 @@ class VibeApp(App):  # noqa: PLR0904
         self._bash_task: asyncio.Task | None = None
         self._queue = QueueController(self._build_queue_ports())
         self._remote_manager = RemoteSessionManager()
+        self._remote_resume = RemoteResumeSessions(lambda: self.config)
+        self._resume_merge_task: asyncio.Task[None] | None = None
 
         self._loading_widget: LoadingWidget | None = None
         self._pending_approval: asyncio.Future | None = None
@@ -2216,29 +2220,71 @@ class VibeApp(App):  # noqa: PLR0904
             UserCommandMessage(f'Session renamed to "{renamed_title}".')
         )
 
-    async def _show_session_picker(self, **kwargs: Any) -> None:
-        cwd = str(Path.cwd())
-        local_sessions = (
-            list_local_resume_sessions(self.config, cwd)
-            if self.config.session_logging.enabled
-            else []
+    def _build_picker(self, sessions: list[ResumeSessionInfo]) -> SessionPickerApp:
+        sessions = sorted(sessions, key=lambda s: s.end_time or "", reverse=True)
+        return SessionPickerApp(
+            sessions=sessions,
+            latest_messages=session_latest_messages(sessions, self.config),
+            current_session_id=self.agent_loop.session_id,
+            cwd=str(Path.cwd()),
         )
+
+    async def _merge_remote_into_picker(
+        self, picker: SessionPickerApp, remote_task: asyncio.Task[RemoteResumeResult]
+    ) -> None:
+        remote_sessions, remote_error = await remote_task
+        if not picker.is_mounted:
+            return
+        if remote_error is not None:
+            await self._mount_and_scroll(
+                ErrorMessage(remote_error, collapsed=self._tools_collapsed)
+            )
+        if remote_sessions:
+            picker.add_sessions(
+                remote_sessions, session_latest_messages(remote_sessions, self.config)
+            )
+
+    async def _cancel_resume_merge(self) -> None:
+        """Cancel the task that fetch and merges remote sessions into the picker, if it exists."""
+        if self._resume_merge_task is not None and not self._resume_merge_task.done():
+            self._resume_merge_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._resume_merge_task
+        self._resume_merge_task = None
+
+    async def _close_remote_resume(self) -> None:
+        """Close the remote resume connection and cancel any ongoing merge task.
+        Used to gracefully close the connection when the app is exiting
+        """
+        await self._cancel_resume_merge()
+        await self._remote_resume.aclose()
+
+    async def _show_session_picker(self, **kwargs: Any) -> None:
+        await self._cancel_resume_merge()
         remote_list_timeout = max(float(self.config.api_timeout), 10.0)
-        remote_error: str | None = None
+        remote_task = self._remote_resume.start(remote_list_timeout)
+
+        # If there are no local sessions, show the remote picker directly
+        if not self.config.session_logging.enabled or not (
+            local_sessions := list_local_resume_sessions(self.config, str(Path.cwd()))
+        ):
+            await self._show_session_picker_remote_only(remote_task)
+            return
+
+        picker = self._build_picker(local_sessions)
+        await self._switch_from_input(picker)
+        self._resume_merge_task = asyncio.create_task(
+            self._merge_remote_into_picker(picker, remote_task)
+        )
+
+    async def _show_session_picker_remote_only(
+        self, remote_task: asyncio.Task[RemoteResumeResult]
+    ) -> None:
         await self._ensure_loading_widget("Loading sessions")
         try:
-            remote_sessions = await asyncio.wait_for(
-                list_remote_resume_sessions(self.config), timeout=remote_list_timeout
-            )
-        except TimeoutError:
-            remote_sessions = []
-            remote_error = (
-                "Timed out while listing remote sessions "
-                f"after {remote_list_timeout:.0f}s."
-            )
-        except Exception as e:
-            remote_sessions = []
-            remote_error = f"Failed to list remote sessions: {e}"
+            remote_sessions, remote_error = await remote_task
+        except asyncio.CancelledError:
+            return
         finally:
             await self._remove_loading_widget()
 
@@ -2247,37 +2293,13 @@ class VibeApp(App):  # noqa: PLR0904
                 ErrorMessage(remote_error, collapsed=self._tools_collapsed)
             )
 
-        raw_sessions = [*local_sessions, *remote_sessions]
-
-        if not raw_sessions:
+        if not remote_sessions:
             await self._mount_and_scroll(
                 UserCommandMessage("No sessions found for this directory.")
             )
             return
 
-        sessions = sorted(raw_sessions, key=lambda s: s.end_time or "", reverse=True)
-
-        latest_messages = {
-            s.option_id: s.title
-            or SessionLoader.get_first_user_message(
-                s.session_id, self.config.session_logging
-            )
-            for s in sessions
-            if s.source == "local"
-        }
-        for session in sessions:
-            if session.source == "remote":
-                latest_messages[session.option_id] = (
-                    f"{session.title or 'Remote workflow'} ({(session.status or 'RUNNING').lower()})"
-                )
-
-        picker = SessionPickerApp(
-            sessions=sessions,
-            latest_messages=latest_messages,
-            current_session_id=self.agent_loop.session_id,
-            cwd=cwd,
-        )
-        await self._switch_from_input(picker)
+        await self._switch_from_input(self._build_picker(remote_sessions))
 
     async def on_session_picker_app_session_selected(
         self, event: SessionPickerApp.SessionSelected
@@ -2686,6 +2708,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._log_reader.shutdown()
         await self._voice_manager.close()
         await self._narrator_manager.close()
+        await self._close_remote_resume()
         await self.agent_loop.aclose()
         try:
             await self.agent_loop.telemetry_client.aclose()
@@ -3437,6 +3460,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         self._log_reader.shutdown()
         self._narrator_manager.cancel()
+        await self._close_remote_resume()
         await self.agent_loop.aclose()
         try:
             await self.agent_loop.telemetry_client.aclose()

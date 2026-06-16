@@ -93,6 +93,9 @@ def _get_candidate_encodings(
 
 def normalize_newlines(text: str) -> tuple[str, str]:
     r"""Return ``text`` with ``\n`` newlines and the detected original style."""
+    if "\r" not in text:
+        newline = "\n" if "\n" in text else os.linesep
+        return text, newline
     newline = _detect_newline(text)
     return text.replace("\r\n", "\n").replace("\r", "\n"), newline
 

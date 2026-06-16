@@ -168,6 +168,18 @@ class SessionPickerApp(Container):
     def _normal_option_text(self, session: ResumeSessionInfo) -> Text:
         return _build_option_text(session, self._session_message(session))
 
+    def _option_text(self, session: ResumeSessionInfo) -> Text:
+        state = self._delete_state
+        if state is None or state.option_id != session.option_id:
+            return self._normal_option_text(session)
+        match state.kind:
+            case "confirmation":
+                return self._delete_confirmation_option_text(session)
+            case "feedback":
+                return self._delete_feedback_option_text(session)
+            case "pending":
+                return self._delete_pending_option_text(session)
+
     def _delete_confirmation_option_text(self, session: ResumeSessionInfo) -> Text:
         text = _build_option_text(session, "")
         text.append("Press D again to delete")
@@ -238,6 +250,41 @@ class SessionPickerApp(Container):
             self._delete_state = None
         self._option_list().remove_option(option_id)
         return True
+
+    def add_sessions(
+        self, sessions: list[ResumeSessionInfo], latest_messages: dict[str, str]
+    ) -> None:
+        existing = {s.option_id for s in self._sessions}
+        new_sessions = [s for s in sessions if s.option_id not in existing]
+        if not new_sessions:
+            return
+
+        self._sessions = sorted(
+            [*self._sessions, *new_sessions],
+            key=lambda s: s.end_time or "",
+            reverse=True,
+        )
+        self._latest_messages.update(latest_messages)
+
+        option_list = self._option_list()
+        highlighted = self._highlighted_option_id()
+        option_list.clear_options()
+        option_list.add_options([
+            Option(self._option_text(session), id=session.option_id)
+            for session in self._sessions
+        ])
+        self._refresh_header()
+        if highlighted is None:
+            return
+        for index, session in enumerate(self._sessions):
+            if session.option_id == highlighted:
+                option_list.highlighted = index
+                return
+
+    def _refresh_header(self) -> None:
+        has_remote = any(session.source == "remote" for session in self._sessions)
+        header = self.query_one(".sessionpicker-header", NoMarkupStatic)
+        header.update(_build_header_text(self._cwd, has_remote))
 
     def clear_pending_delete(self, option_id: str) -> bool:
         if not self._delete_state_matches(option_id, "pending"):

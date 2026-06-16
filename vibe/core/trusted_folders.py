@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 import tomllib
 
@@ -11,6 +13,23 @@ from vibe.core.paths import (
     TRUSTED_FOLDERS_FILE,
     find_local_config_dirs,
 )
+
+
+class WorkspaceTrustDecision(StrEnum):
+    TRUST_REPO = "trust_repo"
+    TRUST_CWD = "trust_cwd"
+    TRUST_SESSION = "trust_session"
+    DECLINE = "decline"
+
+
+@dataclass(frozen=True)
+class WorkspaceTrustPrompt:
+    cwd: Path
+    repo_root: Path | None
+    detected_files: list[str]
+    repo_detected_files: list[str]
+    offer_repo_trust: bool
+    repo_explicitly_untrusted: bool
 
 
 def has_agents_md_file(path: Path) -> bool:
@@ -89,6 +108,73 @@ def find_repo_trustable_files_for_cwd(cwd: Path, repo_root: Path | None) -> list
         current = current.parent
 
     return sorted(found)
+
+
+def maybe_build_workspace_trust_prompt(cwd: Path) -> WorkspaceTrustPrompt | None:
+    resolved_cwd = cwd.resolve()
+    if resolved_cwd == Path.home().resolve():
+        return None
+
+    if trusted_folders_manager.is_trusted(cwd) is True:
+        return None
+    if trusted_folders_manager.is_explicitly_untrusted(cwd):
+        return None
+
+    repo_root = find_git_repo_ancestor(cwd)
+    detected_files = find_trustable_files(cwd)
+    repo_detected_files = find_repo_trustable_files_for_cwd(cwd, repo_root)
+    if not detected_files and not repo_detected_files:
+        return None
+
+    resolved_repo_root = repo_root.resolve() if repo_root else None
+    offer_repo_trust = (
+        resolved_repo_root is not None
+        and resolved_repo_root in resolved_cwd.parents
+        and trusted_folders_manager.is_trusted(resolved_repo_root) is not True
+        and not trusted_folders_manager.is_explicitly_untrusted(resolved_repo_root)
+    )
+    repo_explicitly_untrusted = (
+        resolved_repo_root is not None
+        and trusted_folders_manager.is_explicitly_untrusted(resolved_repo_root)
+    )
+
+    return WorkspaceTrustPrompt(
+        cwd=cwd,
+        repo_root=resolved_repo_root,
+        detected_files=detected_files,
+        repo_detected_files=repo_detected_files,
+        offer_repo_trust=offer_repo_trust,
+        repo_explicitly_untrusted=repo_explicitly_untrusted,
+    )
+
+
+def available_workspace_trust_decisions(
+    prompt: WorkspaceTrustPrompt, *, include_session: bool = False
+) -> list[WorkspaceTrustDecision]:
+    decisions = [WorkspaceTrustDecision.TRUST_CWD, WorkspaceTrustDecision.DECLINE]
+    if include_session:
+        decisions.insert(1, WorkspaceTrustDecision.TRUST_SESSION)
+    if prompt.offer_repo_trust:
+        decisions.insert(0, WorkspaceTrustDecision.TRUST_REPO)
+    return decisions
+
+
+def apply_workspace_trust_decision(
+    prompt: WorkspaceTrustPrompt, decision: WorkspaceTrustDecision
+) -> None:
+    match decision:
+        case WorkspaceTrustDecision.TRUST_REPO if (
+            prompt.offer_repo_trust and prompt.repo_root is not None
+        ):
+            trusted_folders_manager.add_trusted(prompt.repo_root)
+        case WorkspaceTrustDecision.TRUST_CWD:
+            trusted_folders_manager.add_trusted(prompt.cwd)
+        case WorkspaceTrustDecision.TRUST_SESSION:
+            trusted_folders_manager.trust_for_session(prompt.cwd)
+        case WorkspaceTrustDecision.DECLINE:
+            trusted_folders_manager.add_untrusted(prompt.cwd)
+        case _:
+            raise ValueError(f"Unsupported trust decision: {decision}")
 
 
 class TrustedFoldersManager:

@@ -45,6 +45,9 @@ class WorkflowsClient:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
         if self._owns_client and self._client:
             await self._client.aclose()
             self._client = None
