@@ -28,6 +28,7 @@ class MCPRegistry:
 
     def __init__(self) -> None:
         self._cache: dict[str, dict[str, type[BaseTool]]] = {}
+        self._failed: dict[str, str] = {}
 
     @staticmethod
     def _server_key(srv: MCPServer) -> str:
@@ -70,6 +71,7 @@ class MCPRegistry:
                 logger.warning(
                     "MCP discovery failed for server %r: %s", srv.name, result
                 )
+                self._failed[srv.name] = str(result)
                 continue
             if result is None:
                 continue
@@ -177,6 +179,12 @@ class MCPRegistry:
                     exc,
                 )
         return tools
+
+    def pop_failed(self) -> dict[str, str]:
+        """Return and clear the per-server discovery errors accumulated so far."""
+        errors = dict(self._failed)
+        self._failed.clear()
+        return errors
 
     def count_loaded(self, servers: list[MCPServer]) -> int:
         """Return how many of *servers* were successfully discovered (cached)."""
