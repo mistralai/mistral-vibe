@@ -129,6 +129,25 @@ async def test_updates_tokens_stats_based_on_backend_response_streaming(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enable_streaming", [False, True])
+async def test_uses_model_max_output_tokens_for_assistant_turn(
+    enable_streaming: bool,
+) -> None:
+    model = ModelConfig(
+        name="test-model", provider="mistral", alias="test", max_output_tokens=123
+    )
+    config = build_test_vibe_config(models=[model])
+    backend = FakeBackend([mock_llm_chunk(content="Response")])
+    agent = build_test_agent_loop(
+        config=config, backend=backend, enable_streaming=enable_streaming
+    )
+
+    [_ async for _ in agent.act("Hello")]
+
+    assert backend.requests_max_tokens == [123]
+
+
+@pytest.mark.asyncio
 async def test_passes_session_id_to_backend(vibe_config: VibeConfig):
     backend = FakeBackend([mock_llm_chunk(content="Response")])
     agent = build_test_agent_loop(config=vibe_config, backend=backend)

@@ -459,6 +459,7 @@ class ModelConfig(BaseModel):
     thinking: ThinkingLevel = "off"
     supports_images: bool = False
     auto_compact_threshold: int = DEFAULT_AUTO_COMPACT_THRESHOLD
+    max_output_tokens: int | None = None
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
 
 
