@@ -110,6 +110,13 @@ def parse_arguments() -> argparse.Namespace:
         help="Shortcut for --agent auto-approve. Approves all tool calls without "
         "prompting.",
     )
+    agent_group.add_argument(
+        "--plan",
+        action="store_true",
+        help="Shortcut for --agent plan. Starts in read-only planning mode; "
+        "the agent writes a plan file and calls exit_plan_mode when ready "
+        "to request your approval before switching to implementation mode.",
+    )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
     parser.add_argument(
         "--workdir",

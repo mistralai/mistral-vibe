@@ -141,6 +141,7 @@ from vibe.cli.vscode_extension_promo import (
 )
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents import AgentProfile
+from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.audio_player.audio_player import AudioPlayer
 from vibe.core.audio_recorder import AudioRecorder
 from vibe.core.autocompletion.path_prompt import (
@@ -3348,6 +3349,53 @@ class VibeApp(App):  # noqa: PLR0904
             )
 
         self.call_after_refresh(schedule_switch)
+
+    async def _switch_to_named_agent(self, agent_name: str) -> None:
+        """Switch directly to a named agent. The switch is scheduled after the
+        next refresh (same pattern as _cycle_agent) — callers must not assume
+        the switch is complete when this coroutine returns."""
+        try:
+            profile = self.agent_loop.agent_manager.get_agent(agent_name)
+        except Exception:
+            return
+        self._update_profile_widgets(profile)
+        if self._chat_input_container:
+            self._chat_input_container.switching_mode = True
+        loop = asyncio.get_running_loop()
+
+        def schedule_switch() -> None:
+            self._switch_agent_generation += 1
+            my_gen = self._switch_agent_generation
+
+            def switch_agent_sync() -> None:
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.agent_loop.switch_agent(agent_name), loop
+                    )
+                    future.result()
+                    self.agent_loop.set_approval_callback(self._approval_callback)
+                    self.agent_loop.set_user_input_callback(self._user_input_callback)
+                finally:
+                    if (
+                        self._chat_input_container
+                        and self._switch_agent_generation == my_gen
+                    ):
+                        self.call_from_thread(self._refresh_banner)
+                        self.call_from_thread(
+                            setattr, self._chat_input_container, "switching_mode", False
+                        )
+
+            self.run_worker(
+                switch_agent_sync, group="switch_agent", exclusive=True, thread=True
+            )
+
+        self.call_after_refresh(schedule_switch)
+
+    async def _switch_to_plan_mode(self, cmd_args: str = "") -> None:
+        await self._switch_to_named_agent(BuiltinAgentName.PLAN)
+
+    async def _switch_to_accept_edits_mode(self, cmd_args: str = "") -> None:
+        await self._switch_to_named_agent(BuiltinAgentName.ACCEPT_EDITS)
 
     async def action_toggle_debug_console(self, **kwargs: Any) -> None:
         if self._debug_console is not None:

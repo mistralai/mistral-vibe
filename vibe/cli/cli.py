@@ -50,7 +50,8 @@ def _build_cli_entrypoint_metadata() -> EntrypointMetadata:
 def get_initial_agent_name(args: argparse.Namespace, config: VibeConfig) -> str:
     if args.auto_approve:
         return BuiltinAgentName.AUTO_APPROVE
-
+    if args.plan:
+        return BuiltinAgentName.PLAN
     return args.agent or config.default_agent
 
 
@@ -220,6 +221,7 @@ def _run_programmatic_mode(
         *config.disabled_tools,
         "ask_user_question",
         "exit_plan_mode",
+        "enter_plan_mode",
     ]
     programmatic_prompt = args.prompt or stdin_prompt
     if not programmatic_prompt:

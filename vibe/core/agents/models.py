@@ -119,7 +119,7 @@ PLAN = AgentProfile(
     "Plan",
     "Read-only agent for exploration and planning",
     AgentSafety.SAFE,
-    overrides=_plan_overrides(),
+    overrides={**_plan_overrides(), "base_disabled": ["enter_plan_mode"]},
 )
 CHAT = AgentProfile(
     BuiltinAgentName.CHAT,
@@ -146,7 +146,7 @@ AUTO_APPROVE = AgentProfile(
     "Auto Approve",
     "Auto-approves all tool executions",
     AgentSafety.YOLO,
-    overrides={"bypass_tool_permissions": True, "base_disabled": ["exit_plan_mode"]},
+    overrides={"bypass_tool_permissions": True, "base_disabled": ["exit_plan_mode", "enter_plan_mode"]},
 )
 
 EXPLORE = AgentProfile(
@@ -194,7 +194,7 @@ LEAN = AgentProfile(
             "thinking": "off",
         },
         "tools": {"bash": {"default_timeout": 1200}},
-        "base_disabled": ["exit_plan_mode"],
+        "base_disabled": ["exit_plan_mode", "enter_plan_mode"],
     },
 )
 

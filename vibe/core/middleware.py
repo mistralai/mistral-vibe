@@ -158,6 +158,10 @@ def make_plan_agent_reminder(
             "If you are unsure about requirements or approach, use the ask_user_question tool to clarify before finalizing your plan"
         )
     instructions.append("Write your plan to the plan file above")
+    instructions.append(
+        "Before calling exit_plan_mode, critically review your plan: identify architectural blockers (🔴), significant risks (🟡), and minor concerns (🟢). "
+        "Resolve any 🔴 blockers and note 🟡 risks in the plan file. Only proceed when no blockers remain"
+    )
     if has_exit_plan_mode:
         instructions.append(
             "When your plan is complete, call the exit_plan_mode tool to request user approval and switch to implementation mode"

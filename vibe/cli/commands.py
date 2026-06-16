@@ -179,6 +179,16 @@ class CommandRegistry:
                 description="Select theme",
                 handler="_show_theme",
             ),
+            "plan": Command(
+                aliases=frozenset(["/plan"]),
+                description="Switch to plan mode (read-only; agent writes a plan then asks for approval)",
+                handler="_switch_to_plan_mode",
+            ),
+            "accept-edits": Command(
+                aliases=frozenset(["/accept-edits"]),
+                description="Switch to accept-edits mode (file edits auto-approved, other tools ask)",
+                handler="_switch_to_accept_edits_mode",
+            ),
         }
 
     @property
