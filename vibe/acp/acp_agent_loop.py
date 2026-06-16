@@ -199,6 +199,34 @@ def _merge_non_interactive_disabled_tools(config: VibeConfig) -> None:
             config.disabled_tools.append(tool)
 
 
+def _acp_servers_to_config(
+    servers: list[HttpMcpServer | SseMcpServer | McpServerStdio],
+) -> list[Any]:
+    from vibe.core.config import MCPStdio, MCPStreamableHttp
+
+    result: list[Any] = []
+    for srv in servers:
+        if isinstance(srv, McpServerStdio):
+            result.append(
+                MCPStdio(
+                    transport="stdio",
+                    name=srv.name,
+                    command=srv.command,
+                    args=list(srv.args),
+                    env={ev.name: ev.value for ev in srv.env},
+                )
+            )
+        elif isinstance(srv, (HttpMcpServer, SseMcpServer)):
+            result.append(
+                MCPStreamableHttp(
+                    transport="streamable-http",
+                    name=srv.name,
+                    url=srv.url,
+                )
+            )
+    return result
+
+
 class ForkSessionParams(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
@@ -697,6 +725,14 @@ class VibeAcpAgentLoop(AcpAgent):
         config = self._load_config()
         hook_config_result = load_hooks_from_fs(config)
 
+        if mcp_servers:
+            acp_servers = _acp_servers_to_config(mcp_servers)
+            if acp_servers:
+                acp_names = {s.name for s in acp_servers}
+                config.mcp_servers = [
+                    s for s in config.mcp_servers if s.name not in acp_names
+                ] + acp_servers
+
         try:
             agent_loop = self._create_agent_loop(
                 config, BuiltinAgentName.DEFAULT, hook_config_result=hook_config_result
@@ -960,6 +996,14 @@ class VibeAcpAgentLoop(AcpAgent):
 
         config = self._load_config()
         hook_config_result = load_hooks_from_fs(config)
+
+        if mcp_servers:
+            acp_servers = _acp_servers_to_config(mcp_servers)
+            if acp_servers:
+                acp_names = {s.name for s in acp_servers}
+                config.mcp_servers = [
+                    s for s in config.mcp_servers if s.name not in acp_names
+                ] + acp_servers
 
         session_dir = SessionLoader.find_session_by_id(
             session_id, config.session_logging

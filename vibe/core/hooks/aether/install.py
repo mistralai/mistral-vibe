@@ -99,8 +99,8 @@ def enable(yes: bool = False) -> None:
         "  temper    — blocks large/critical commits without review (/temper)\n"
         "  cairn     — nudges toward better commit messages (/cairn-commit)\n"
         "\nBonsai MCP servers registered (started on first use):\n"
-        "  bonsai-py — uvx bonsai-python\n"
-        "  bonsai-ts — npx --yes bonsai-ts@latest\n"
+        f"  bonsai-py — uvx --from {_BONSAI_DIR} bonsai-python\n"
+        f"  bonsai-ts — node {_BONSAI_DIR / 'ts' / 'bin' / 'bonsai-ts.js'}\n"
         "\nBypass any gate: append # aether:skip to your bash command.\n"
         "Disable: vibe --disable-aether\n"
     )
@@ -217,19 +217,21 @@ def status() -> None:
     print(f"Status:               {'enabled' if active else 'disabled'}")
 
 
+_BONSAI_DIR = Path.home() / ".claude" / "plugins" / "marketplaces" / "bonsai"
+
 _BONSAI_SERVERS = [
     {
         "name": "bonsai-py",
         "transport": "stdio",
         "command": "uvx",
-        "args": ["bonsai-python"],
+        "args": ["--from", str(_BONSAI_DIR), "bonsai-python"],
         "prompt": "AST-aware Python refactoring tools (pyfindrefs, pyrename, pymove, pysignature, pygrep, pycallers, pyfindunused)",
     },
     {
         "name": "bonsai-ts",
         "transport": "stdio",
-        "command": "npx",
-        "args": ["--yes", "bonsai-ts@latest"],
+        "command": "node",
+        "args": [str(_BONSAI_DIR / "ts" / "bin" / "bonsai-ts.js")],
         "prompt": "AST-aware TypeScript/JavaScript refactoring tools (tsfindrefs, tsrename, tsmove, tsmovesymbol, tssignature)",
     },
 ]
@@ -300,16 +302,28 @@ def _register_bonsai_servers(config_doc: dict) -> None:  # type: ignore[type-arg
     import tomlkit
 
     existing_raw = list(config_doc.get("mcp_servers") or [])
-    existing_names = {s.get("name") for s in existing_raw}
+    bonsai_by_name = {s["name"]: s for s in _BONSAI_SERVERS}
 
-    to_add = [s for s in _BONSAI_SERVERS if s["name"] not in existing_names]
-    if not to_add:
+    # Separate existing servers into bonsai ones (to replace) and others (to keep).
+    others = [s for s in existing_raw if s.get("name") not in bonsai_by_name]
+    to_write = [*others, *_BONSAI_SERVERS]
+
+    # Check whether any bonsai entry actually changed to avoid unnecessary writes.
+    existing_bonsai = {s.get("name"): dict(s) for s in existing_raw if s.get("name") in bonsai_by_name}
+    changed = [
+        s for s in _BONSAI_SERVERS
+        if existing_bonsai.get(s["name"], {}).get("command") != s["command"]
+        or existing_bonsai.get(s["name"], {}).get("args") != s["args"]
+    ]
+    added = [s for s in _BONSAI_SERVERS if s["name"] not in existing_bonsai]
+
+    if not changed and not added:
         return
 
     # Rebuild as a proper AoT — avoids the invalid-TOML bug where appending
     # a table() to an existing inline [] produces `mcp_servers = [key = val ...]`.
     aot = tomlkit.aot()
-    for entry_data in [*existing_raw, *to_add]:
+    for entry_data in to_write:
         entry = tomlkit.table()
         for k, v in dict(entry_data).items():
             if isinstance(v, list):
@@ -326,8 +340,10 @@ def _register_bonsai_servers(config_doc: dict) -> None:  # type: ignore[type-arg
         del config_doc["mcp_servers"]
     config_doc["mcp_servers"] = aot  # type: ignore[index]
 
-    for spec in to_add:
+    for spec in added:
         print(f"✓ MCP server registered: {spec['name']}")
+    for spec in changed:
+        print(f"✓ MCP server updated: {spec['name']}")
 
 
 def _write_skills() -> None:
