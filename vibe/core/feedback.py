@@ -11,6 +11,7 @@ FEEDBACK_COOLDOWN_SECONDS = 3600
 MIN_USER_MESSAGES_FOR_FEEDBACK = 3
 _CACHE_SECTION = "user_feedback"
 _LAST_SHOWN_KEY = "last_shown_at"
+_RESPONDED_KEY = "responded"
 
 
 def should_show_feedback(
@@ -23,9 +24,11 @@ def should_show_feedback(
     if user_message_count < MIN_USER_MESSAGES_FOR_FEEDBACK:
         return False
 
-    last_ts = (
-        read_cache(CACHE_FILE.path).get(_CACHE_SECTION, {}).get(_LAST_SHOWN_KEY, 0)
-    )
+    section = read_cache(CACHE_FILE.path).get(_CACHE_SECTION, {})
+    if section.get(_RESPONDED_KEY):
+        return False
+
+    last_ts = section.get(_LAST_SHOWN_KEY, 0)
     if not isinstance(last_ts, int):
         return False
 
@@ -37,3 +40,7 @@ def should_show_feedback(
 
 def record_feedback_asked() -> None:
     write_cache(CACHE_FILE.path, _CACHE_SECTION, {_LAST_SHOWN_KEY: int(time.time())})
+
+
+def record_feedback_given() -> None:
+    write_cache(CACHE_FILE.path, _CACHE_SECTION, {_RESPONDED_KEY: True})
