@@ -179,6 +179,11 @@ class CommandRegistry:
                 description="Select theme",
                 handler="_show_theme",
             ),
+            "init": Command(
+                aliases=frozenset(["/init"]),
+                description="Set up AGENTS.md with project conventions. Use VIBE_CODE_NEW_INIT=1 for interactive mode",
+                handler="_init_project",
+            ),
         }
 
     @property

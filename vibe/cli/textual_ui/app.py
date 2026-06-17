@@ -2165,6 +2165,40 @@ class VibeApp(App):  # noqa: PLR0904
             return
         await self._switch_to_theme_picker_app()
 
+    async def _init_project(self, cmd_args: str = "", **kwargs: Any) -> None:
+        """Handle /init command to set up AGENTS.md files."""
+        import os
+        from pathlib import Path
+        
+        # Check for interactive mode via environment variable
+        interactive = os.environ.get("VIBE_CODE_NEW_INIT", "0") == "1"
+        
+        # Parse command arguments
+        args = cmd_args.strip().split() if cmd_args.strip() else []
+        
+        # For now, use the current working directory
+        cwd = Path.cwd()
+        
+        try:
+            from vibe.setup.init import run_init
+            
+            if interactive:
+                # Parse artifacts from arguments or default to all
+                artifacts = args if args else ["agents_md", "skills", "hooks"]
+                result = await run_init(cwd=cwd, interactive=True, artifacts=artifacts)
+            else:
+                result = await run_init(cwd=cwd, interactive=False)
+            
+            await self._mount_and_scroll(
+                UserCommandMessage(result)
+            )
+            
+        except Exception as e:
+            logger.error("Failed to run /init command: %s", e, exc_info=True)
+            await self._mount_and_scroll(
+                ErrorMessage(f"Failed to initialize project: {e}", collapsed=self._tools_collapsed)
+            )
+
     async def _show_proxy_setup(self, **kwargs: Any) -> None:
         if self._current_bottom_app == BottomApp.ProxySetup:
             return
