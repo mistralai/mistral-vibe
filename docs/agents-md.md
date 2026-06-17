@@ -43,6 +43,21 @@ This will:
 
 If an AGENTS.md already exists, `/init` will suggest improvements instead of overwriting it.
 
+### What `/init` Detects
+
+The analyzer recognizes the following out of the box. Anything not listed is still
+captured generically (commands from `Makefile` targets, structure, `.env` variables,
+git workflows), just without language-specific framework or tooling inference.
+
+| Category | Detected |
+|----------|----------|
+| **Languages** | Python, JavaScript, TypeScript, Rust, Go, Java, C, C++, C#, Ruby, PHP, Swift, Kotlin, SCSS, Sass, CSS, Shell, Docker |
+| **Frameworks (Python)** | Django, Flask, FastAPI, Pydantic, SQLAlchemy, PyTest |
+| **Frameworks (JS/TS)** | React, Vue, Angular, Next.js, Express, NestJS |
+| **Frameworks (PHP)** | Laravel, Symfony, WordPress |
+| **Package managers / build** | uv, pip, npm, pnpm, yarn, cargo, go, composer, cmake, maven, gradle, make |
+| **Linters / formatters** | ruff, black, isort, mypy, pylint, ESLint, Prettier, stylelint, PHP-CS-Fixer, PHP_CodeSniffer, PHPStan, EditorConfig |
+
 ## Instruction Hierarchy
 
 Mistral Vibe uses a **hierarchical instruction system** where instructions can come from multiple sources. When instructions conflict, they are resolved in this order (lowest number wins):
