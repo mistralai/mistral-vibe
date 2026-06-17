@@ -466,6 +466,9 @@ async def _detect_language_framework(root: Path, analysis: CodebaseAnalysis, con
         "PHP": ["*.php", "composer.json"],
         "Swift": ["*.swift", "Package.swift"],
         "Kotlin": ["*.kt", "*.kts"],
+        "SCSS": ["*.scss"],
+        "Sass": ["*.sass"],
+        "CSS": ["*.css"],
         "Shell": ["*.sh"],
         "Docker": ["Dockerfile", "docker-compose.yml"],
     }
