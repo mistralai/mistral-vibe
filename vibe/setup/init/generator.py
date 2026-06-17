@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import Enum
 
 from vibe.setup.init.analyzer import CodebaseAnalysis
+from vibe.setup.init.registry import FRAMEWORK_LANGUAGE, LANGUAGE_GUIDELINES
 
 
 class GenerationMode(Enum):
@@ -30,102 +31,130 @@ def generate_agents_md(
     """
     if mode == GenerationMode.SUGGEST and existing_content.strip():
         return _generate_suggestions(analysis, existing_content)
-    
+
     return _generate_full_agents_md(analysis)
 
 
 def _generate_full_agents_md(analysis: CodebaseAnalysis) -> str:
     """Generate complete AGENTS.md content."""
     lines = []
-    
+
     # Header
     project_name = analysis.project_name or "Project"
     lines.append(f"# {project_name} Development Guidelines")
     lines.append("")
-    
+
     if analysis.project_description:
         lines.append(f"{analysis.project_description}")
         lines.append("")
-    
+
     if analysis.project_version:
         lines.append(f"Version: {analysis.project_version}")
         lines.append("")
-    
+
     # Languages and Frameworks
     if analysis.languages:
         lines.append("## Languages")
         lines.append("")
         lines.append(", ".join(analysis.languages))
         lines.append("")
-    
+
     if analysis.frameworks:
         lines.append("## Frameworks")
         lines.append("")
         lines.append(", ".join(analysis.frameworks))
         lines.append("")
-    
+
+    # Monorepo sub-projects (Bedrock app, Sage theme, ...) discovered below root.
+    if analysis.subprojects:
+        lines.append("## Sub-projects")
+        lines.append("")
+        for sub in analysis.subprojects:
+            lines.append(f"- {sub}")
+        lines.append("")
+
+    # Local development environment tooling.
+    if analysis.dev_environments:
+        lines.append("## Development Environment")
+        lines.append("")
+        lines.append(
+            "Local environment tooling detected: "
+            + ", ".join(analysis.dev_environments)
+            + "."
+        )
+        lines.append("")
+
     # Build and Test Commands
-    if analysis.build_commands or analysis.test_commands or analysis.lint_commands or analysis.run_commands:
+    if (
+        analysis.build_commands
+        or analysis.test_commands
+        or analysis.lint_commands
+        or analysis.run_commands
+    ):
         lines.append("## Commands")
         lines.append("")
-        
+
         if analysis.build_commands:
             lines.append("### Build")
             lines.append("")
             for cmd in analysis.build_commands:
                 lines.append(f"- `{cmd}`")
             lines.append("")
-        
+
         if analysis.test_commands:
             lines.append("### Test")
             lines.append("")
             for cmd in analysis.test_commands:
                 lines.append(f"- `{cmd}`")
             lines.append("")
-        
+
         if analysis.run_commands:
             lines.append("### Run")
             lines.append("")
             for cmd in analysis.run_commands:
                 lines.append(f"- `{cmd}`")
             lines.append("")
-        
+
         if analysis.lint_commands:
             lines.append("### Lint/Format")
             lines.append("")
             for cmd in analysis.lint_commands:
                 lines.append(f"- `{cmd}`")
             lines.append("")
-    
+
     # Project Structure
     if analysis.source_dirs or analysis.test_dirs:
         lines.append("## Project Structure")
         lines.append("")
-        
+
         if analysis.source_dirs:
             lines.append(f"- **Source directories**: {', '.join(analysis.source_dirs)}")
         if analysis.test_dirs:
             lines.append(f"- **Test directories**: {', '.join(analysis.test_dirs)}")
         lines.append("")
-    
+
     # Coding Standards
     if analysis.coding_standards or analysis.naming_conventions:
         lines.append("## Coding Standards")
         lines.append("")
-        
+
         if analysis.coding_standards:
-            lines.append(f"- **Linters/Formatters**: {', '.join(analysis.coding_standards)}")
+            lines.append(
+                f"- **Linters/Formatters**: {', '.join(analysis.coding_standards)}"
+            )
         if analysis.naming_conventions:
-            lines.append(f"- **Naming conventions**: {', '.join(analysis.naming_conventions)}")
+            lines.append(
+                f"- **Naming conventions**: {', '.join(analysis.naming_conventions)}"
+            )
         lines.append("")
-    
+
     # Package Management
     if analysis.package_managers:
         lines.append("## Package Management")
         lines.append("")
         lines.append(f"- Package managers: {', '.join(analysis.package_managers)}")
         lines.append("")
-    
+
     # Entry Points
     if analysis.entry_points:
         lines.append("## Entry Points")
@@ -133,7 +162,7 @@ def _generate_full_agents_md(analysis: CodebaseAnalysis) -> str:
         for entry in analysis.entry_points:
             lines.append(f"- `{entry}`")
         lines.append("")
-    
+
     # Environment Variables
     if analysis.env_vars:
         lines.append("## Environment Variables")
@@ -142,7 +171,7 @@ def _generate_full_agents_md(analysis: CodebaseAnalysis) -> str:
         for var in analysis.env_vars:
             lines.append(f"- `{var}`")
         lines.append("")
-    
+
     # Git Workflows
     if analysis.has_git:
         lines.append("## Git Workflows")
@@ -153,68 +182,19 @@ def _generate_full_agents_md(analysis: CodebaseAnalysis) -> str:
         else:
             lines.append("- Standard Git workflow")
         lines.append("")
-    
+
     # General Development Guidelines
     lines.append("## Development Guidelines")
     lines.append("")
-    
-    workflow_lines = []
 
-    language_guidelines: dict[str, list[str]] = {
-        "python": [
-            "- Run tests before committing: `pytest`",
-            "- Format code with: `ruff format .`",
-            "- Lint with: `ruff check --fix .`",
-            "- Type check with: `mypy .`",
-        ],
-        "javascript": [
-            "- Install dependencies: `npm install`",
-            "- Run tests: `npm test`",
-            "- Lint: `npm run lint`",
-        ],
-        "rust": [
-            "- Build: `cargo build`",
-            "- Test: `cargo test`",
-            "- Lint: `cargo clippy`",
-            "- Format: `cargo fmt`",
-        ],
-        "go": [
-            "- Build: `go build ./...`",
-            "- Test: `go test ./...`",
-            "- Format: `gofmt -w .`",
-        ],
-        "php": [
-            "- Install dependencies: `composer install`",
-            "- Run tests: `vendor/bin/phpunit`",
-            "- Check coding standards: `vendor/bin/phpcs`",
-            "- Auto-fix coding standards: `vendor/bin/phpcbf`",
-        ],
-        "c": [
-            "- Configure build: `cmake -B build`",
-            "- Build: `cmake --build build`",
-            "- Run tests: `ctest --test-dir build`",
-        ],
-        "java": [
-            "- Build: `mvn package` (or `./gradlew build`)",
-            "- Run tests: `mvn test` (or `./gradlew test`)",
-        ],
-    }
-    # TypeScript shares the Node.js workflow; C++ shares the CMake workflow.
-    language_guidelines["typescript"] = language_guidelines["javascript"]
-    language_guidelines["c++"] = language_guidelines["c"]
+    workflow_lines = []
 
     # A detected framework is the strongest signal of the primary language —
     # e.g. a WordPress theme is alphabetically "JavaScript, PHP" but is really a
     # PHP project. Promote the framework's language ahead of the sorted list.
-    framework_language = {
-        "wordpress": "php", "laravel": "php", "symfony": "php",
-        "django": "python", "flask": "python", "fastapi": "python",
-        "react": "javascript", "vue": "javascript", "angular": "javascript",
-        "next.js": "javascript", "express": "javascript", "nestjs": "javascript",
-    }
     ordered = [lang.lower() for lang in analysis.languages]
     for fw in analysis.frameworks:
-        primary = framework_language.get(fw.lower())
+        primary = FRAMEWORK_LANGUAGE.get(fw.lower())
         if primary and primary in ordered:
             ordered.remove(primary)
             ordered.insert(0, primary)
@@ -222,7 +202,7 @@ def _generate_full_agents_md(analysis: CodebaseAnalysis) -> str:
 
     # Use the first candidate language that has known guidelines.
     for detected in ordered:
-        if guidelines := language_guidelines.get(detected):
+        if guidelines := LANGUAGE_GUIDELINES.get(detected):
             workflow_lines = list(guidelines)
             break
 
@@ -233,16 +213,23 @@ def _generate_full_agents_md(analysis: CodebaseAnalysis) -> str:
             "- Review changes with linting tools",
             "- Follow existing code patterns",
         ])
-    
+
     for line in workflow_lines:
         lines.append(line)
     lines.append("")
-    
+
+    # Framework-specific notes (Bedrock/Sage, Rails, ...) — only the most useful,
+    # non-obvious conventions that a generic scan can state confidently.
+    notes = _framework_notes(analysis)
+    if notes:
+        lines.extend(notes)
+        lines.append("")
+
     # AI Agent Instructions
     lines.append("## AI Agent Instructions")
     lines.append("")
     lines.append("When working with this codebase:")
-    
+
     agent_instructions = [
         "- Follow the existing code style and patterns",
         "- Use the project's build and test commands",
@@ -250,29 +237,81 @@ def _generate_full_agents_md(analysis: CodebaseAnalysis) -> str:
         "- Add tests for new functionality",
         "- Update documentation when making changes",
     ]
-    
+
     if analysis.source_dirs:
         src_dirs = ", ".join(analysis.source_dirs)
         agent_instructions.append(f"- New code should go in: {src_dirs}")
-    
+
     if analysis.test_dirs:
         test_dirs = ", ".join(analysis.test_dirs)
         agent_instructions.append(f"- Tests should go in: {test_dirs}")
-    
+
     if analysis.config_files:
-        agent_instructions.append(f"- Check {', '.join(analysis.config_files[:3])} for project-specific settings")
-    
+        agent_instructions.append(
+            f"- Check {', '.join(analysis.config_files[:3])} for project-specific settings"
+        )
+
     for instruction in agent_instructions:
         lines.append(instruction)
     lines.append("")
-    
+
     # Footer
     lines.append("---")
     lines.append("")
     lines.append("Generated by Mistral Vibe `/init` command.")
     lines.append("Refine this file with project-specific instructions and conventions.")
-    
+
     return "\n".join(lines)
+
+
+def _framework_notes(analysis: CodebaseAnalysis) -> list[str]:
+    """Build short, high-confidence guidance blocks for detected frameworks.
+
+    Kept deliberately conservative: only conventions that hold for essentially
+    every project using the framework, so a heuristic scan never asserts
+    project-specific details it cannot actually verify.
+    """
+    frameworks = {f.lower() for f in analysis.frameworks}
+    lines: list[str] = []
+
+    if "bedrock" in frameworks or "sage" in frameworks:
+        lines.append("## WordPress (Roots stack)")
+        lines.append("")
+        if "bedrock" in frameworks:
+            lines.append(
+                "- **Bedrock**: WordPress core lives in `web/wp`, site code in "
+                "`web/app` (themes, plugins, mu-plugins). Manage dependencies with "
+                "Composer, not by editing core. Config is in `config/` and `.env`."
+            )
+        if "sage" in frameworks:
+            lines.append(
+                "- **Sage**: theme views are Blade templates under `resources/views`; "
+                "compiled assets build to `public/build`. Run `composer install` and "
+                "`npm install` in the theme, then `npm run dev` (HMR) or `npm run build`."
+            )
+        if "acorn" in frameworks:
+            lines.append(
+                "- **Acorn**: run framework/WP-CLI commands via `wp acorn ...`; clear "
+                "compiled Blade views with `wp acorn view:clear` after template changes."
+            )
+        lines.append("")
+        lines.append(
+            "Run WP-CLI inside whatever local environment hosts the database "
+            "(it is not available from the host shell otherwise)."
+        )
+
+    if "ruby on rails" in frameworks:
+        if lines:
+            lines.append("")
+        lines.append("## Ruby on Rails")
+        lines.append("")
+        lines.append("- Run the app: `bin/rails server`; console: `bin/rails console`.")
+        lines.append("- Database: `bin/rails db:migrate` / `bin/rails db:seed`.")
+        lines.append(
+            "- Tests: `bin/rails test` (or `bundle exec rspec` if RSpec is used)."
+        )
+
+    return lines
 
 
 def _generate_suggestions(analysis: CodebaseAnalysis, existing_content: str) -> str:
@@ -283,39 +322,42 @@ def _generate_suggestions(analysis: CodebaseAnalysis, existing_content: str) -> 
         "Based on codebase analysis, consider adding:",
         "",
     ]
-    
+
     # Check what's missing
     missing_sections = []
-    
+
     # Check for commands
     if not _section_exists(existing_content, r"Commands|Build|Test|Run"):
         if analysis.build_commands or analysis.test_commands:
             missing_sections.append(
-                "**Commands**: Add build and test commands section with:\n" +
-                "\n".join(f"  - `{cmd}`" for cmd in analysis.build_commands[:3] + analysis.test_commands[:3])
+                "**Commands**: Add build and test commands section with:\n"
+                + "\n".join(
+                    f"  - `{cmd}`"
+                    for cmd in analysis.build_commands[:3] + analysis.test_commands[:3]
+                )
             )
-    
+
     # Check for project structure
     if not _section_exists(existing_content, r"Structure|Organization"):
         if analysis.source_dirs or analysis.test_dirs:
             missing_sections.append(
                 f"**Project Structure**: Document source dirs: {', '.join(analysis.source_dirs) if analysis.source_dirs else 'N/A'}"
             )
-    
+
     # Check for coding standards
     if not _section_exists(existing_content, r"Standards|Conventions|Style"):
         if analysis.coding_standards:
             missing_sections.append(
                 f"**Coding Standards**: Mention linters: {', '.join(analysis.coding_standards)}"
             )
-    
+
     # Check for entry points
     if not _section_exists(existing_content, r"Entry|Main"):
         if analysis.entry_points:
             missing_sections.append(
                 f"**Entry Points**: List entry points: {', '.join(analysis.entry_points[:3])}"
             )
-    
+
     # Check for languages/frameworks
     if not _section_exists(existing_content, r"Language|Framework|Stack"):
         if analysis.languages or analysis.frameworks:
@@ -325,8 +367,27 @@ def _generate_suggestions(analysis: CodebaseAnalysis, existing_content: str) -> 
             if analysis.frameworks:
                 tech_stack.append(f"Frameworks: {', '.join(analysis.frameworks)}")
             if tech_stack:
-                missing_sections.append("**Technology Stack**: " + "; ".join(tech_stack))
-    
+                missing_sections.append(
+                    "**Technology Stack**: " + "; ".join(tech_stack)
+                )
+
+    # Check for local development environment tooling.
+    if analysis.dev_environments and not _section_exists(
+        existing_content, r"Environment|Local Dev|Lando|DDEV|Vagrant|Trellis|Docker"
+    ):
+        missing_sections.append(
+            "**Development Environment**: Document local tooling: "
+            + ", ".join(analysis.dev_environments)
+        )
+
+    # Check for monorepo sub-projects.
+    if analysis.subprojects and not _section_exists(
+        existing_content, r"Sub-?project|Monorepo|Packages|Workspaces"
+    ):
+        missing_sections.append(
+            "**Sub-projects**: Note nested projects: " + "; ".join(analysis.subprojects)
+        )
+
     if missing_sections:
         for section in missing_sections:
             lines.append(f"- {section}")
@@ -334,19 +395,20 @@ def _generate_suggestions(analysis: CodebaseAnalysis, existing_content: str) -> 
     else:
         lines.append("The existing AGENTS.md looks comprehensive!")
         lines.append("")
-    
+
     lines.append("---")
     lines.append("")
     lines.append("Suggestions generated by Mistral Vibe `/init` command.")
-    
+
     return "\n".join(lines)
 
 
 def _section_exists(content: str, patterns: str) -> bool:
     """Check if any pattern exists in content as a markdown section header."""
     import re
+
     header_patterns = patterns.split("|")
     for pattern in header_patterns:
-        if re.search(rf"^#{1,6}\s+.*{pattern}", content, re.MULTILINE | re.IGNORECASE):
+        if re.search(rf"^#{1, 6}\s+.*{pattern}", content, re.MULTILINE | re.IGNORECASE):
             return True
     return False
