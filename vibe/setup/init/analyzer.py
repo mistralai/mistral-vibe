@@ -137,7 +137,7 @@ async def _detect_vcs(root: Path, analysis: CodebaseAnalysis) -> None:
         # Detect Git workflows
         try:
             # Check for common Git workflow files
-            for pattern in ["*.github/workflows/*.yml", ".gitlab-ci.yml", ".gitignore"]:
+            for pattern in [".github/workflows/*.yml", ".github/workflows/*.yaml", ".gitlab-ci.yml", ".gitignore"]:
                 if list(root.glob(pattern)):
                     analysis.git_workflows.append(pattern)
         except (OSError, PermissionError):
@@ -208,43 +208,59 @@ async def _detect_build_system(root: Path, analysis: CodebaseAnalysis) -> None: 
     pyproject = root / "pyproject.toml"
     setup_py = root / "setup.py"
     requirements = root / "requirements.txt"
-    
+
     if pyproject.exists() or setup_py.exists():
+        has_uv = (root / "uv.lock").exists()
+        if has_uv:
+            analysis.package_managers.append("uv")
+            analysis.build_commands.append("uv sync")
+            analysis.test_commands.append("uv run pytest")
+        else:
+            analysis.package_managers.append("pip")
+            analysis.build_commands.append("pip install -e .")
+            analysis.test_commands.append("pytest")
+
+        pyproject_content = ""
+        if pyproject.exists():
+            try:
+                pyproject_content = read_safe(pyproject).text
+            except (OSError, UnicodeDecodeError):
+                pass
+
+        has_ruff = "[tool.ruff" in pyproject_content or (root / "ruff.toml").exists()
+        has_black = "[tool.black" in pyproject_content or (root / ".black.toml").exists()
+        has_mypy = "[tool.mypy" in pyproject_content or (root / "mypy.ini").exists() or (root / ".mypy.ini").exists()
+
+        if has_ruff:
+            analysis.lint_commands.append("ruff check .")
+            analysis.lint_commands.append("ruff format .")
+        elif has_black:
+            analysis.lint_commands.append("black .")
+            if "[tool.isort" in pyproject_content:
+                analysis.lint_commands.append("isort .")
+
+        if has_mypy:
+            analysis.lint_commands.append("mypy .")
+
+    if requirements.exists() and not (pyproject.exists() or setup_py.exists()):
         analysis.package_managers.append("pip")
-        analysis.package_managers.append("uv")  # Modern alternative
-        
-        # Check for common Python build commands
-        for cmd in ["pip install -e .", "python -m build", "uv sync"]:
-            analysis.build_commands.append(cmd)
-        
-        for cmd in ["pytest", "python -m pytest", "uv run pytest"]:
-            analysis.test_commands.append(cmd)
-            
-        for cmd in ["mypy", "ruff check", "black .", "isort ."]:
-            analysis.lint_commands.append(cmd)
-    
-    if requirements.exists():
         analysis.build_commands.append("pip install -r requirements.txt")
-        analysis.build_commands.append("uv pip install -r requirements.txt")
-    
-    # Node.js/npm
+
+    # Node.js — detect actual package manager
     package_json = root / "package.json"
     if package_json.exists():
-        analysis.package_managers.append("npm")
-        analysis.package_managers.append("yarn")
-        analysis.package_managers.append("pnpm")
-        
-        for cmd in ["npm install", "yarn install", "pnpm install"]:
-            analysis.build_commands.append(cmd)
-        
-        for cmd in ["npm test", "yarn test", "pnpm test"]:
-            analysis.test_commands.append(cmd)
-            
-        for cmd in ["npm run lint", "yarn lint", "pnpm lint"]:
-            analysis.lint_commands.append(cmd)
-        
-        for cmd in ["npm run build", "yarn build", "pnpm build"]:
-            analysis.build_commands.append(cmd)
+        if (root / "pnpm-lock.yaml").exists():
+            pm = "pnpm"
+        elif (root / "yarn.lock").exists():
+            pm = "yarn"
+        else:
+            pm = "npm"
+        analysis.package_managers.append(pm)
+
+        analysis.build_commands.append(f"{pm} install")
+        analysis.test_commands.append(f"{pm} test")
+        analysis.lint_commands.append(f"{pm} run lint")
+        analysis.build_commands.append(f"{pm} run build")
     
     # Rust/Cargo
     cargo_toml = root / "Cargo.toml"
@@ -266,15 +282,16 @@ async def _detect_build_system(root: Path, analysis: CodebaseAnalysis) -> None: 
         analysis.lint_commands.append("golangci-lint run")
         analysis.lint_commands.append("gofmt -w .")
     
-    # JavaScript/TypeScript tools
+    # JavaScript/TypeScript — extract named scripts using detected package manager
     if package_json.exists():
         try:
             import json
             with open(package_json, encoding="utf-8") as f:
                 data = json.load(f)
                 scripts = data.get("scripts", {})
+                detected_pm = analysis.package_managers[-1] if analysis.package_managers else "npm"
                 for script_name in scripts:
-                    full_cmd = f"npm run {script_name}"
+                    full_cmd = f"{detected_pm} run {script_name}"
                     if "build" in script_name.lower():
                         analysis.build_commands.append(full_cmd)
                     elif "test" in script_name.lower():
@@ -336,10 +353,8 @@ async def _detect_language_framework(root: Path, analysis: CodebaseAnalysis) -> 
     for lang, indicators in file_indicators.items():
         for indicator in indicators:
             if indicator.startswith("*."):
-                # File extension
-                ext = indicator[1:]  # Remove *.
                 try:
-                    if list(root.rglob(f"*.{ext}")):
+                    if list(root.rglob(indicator)):
                         analysis.languages.append(lang)
                         break
                 except (OSError, PermissionError):
@@ -380,31 +395,31 @@ async def _detect_language_framework(root: Path, analysis: CodebaseAnalysis) -> 
     
     if "JavaScript" in analysis.languages or "TypeScript" in analysis.languages:
         frameworks_to_check = [
-            ("React", ["package.json"], ["react", "React"]),
-            ("Vue", ["package.json"], ["vue", "Vue"]),
-            ("Angular", ["angular.json", "package.json"], ["@angular"]),
-            ("Next.js", ["next.config.js", "next.config.mjs"], ["next", "Next.js"]),
-            ("Express", ["package.json"], ["express", "Express"]),
-            ("NestJS", ["nest-cli.json", "package.json"], ["@nestjs"]),
+            ("React", ["react"]),
+            ("Vue", ["vue"]),
+            ("Angular", ["@angular/core"]),
+            ("Next.js", ["next"]),
+            ("Express", ["express"]),
+            ("NestJS", ["@nestjs/core"]),
         ]
-        
-        for framework, files, _imports in frameworks_to_check:
-            if any((root / f).exists() for f in files):
-                # Check if framework is in package.json dependencies
-                pkg_json = root / "package.json"
-                if pkg_json.exists():
-                    try:
-                        import json
-                        with open(pkg_json, encoding="utf-8") as f:
-                            data = json.load(f)
-                            deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
-                            for _, patterns in [("react", ["react"]), ("vue", ["vue"]), ("next", ["next"])]:
-                                for pattern in patterns:
-                                    if pattern in deps or any(p.startswith(pattern) for p in deps):
-                                        analysis.frameworks.append(framework)
-                                        break
-                    except (json.JSONDecodeError, OSError, ImportError):
-                        pass
+
+        pkg_json = root / "package.json"
+        if pkg_json.exists():
+            try:
+                import json
+                with open(pkg_json, encoding="utf-8") as f:
+                    data = json.load(f)
+                    deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+                    for framework, dep_names in frameworks_to_check:
+                        if any(dep in deps for dep in dep_names):
+                            analysis.frameworks.append(framework)
+            except (json.JSONDecodeError, OSError, ImportError):
+                pass
+
+        for config_file, framework in [("next.config.js", "Next.js"), ("next.config.mjs", "Next.js"),
+                                        ("angular.json", "Angular"), ("nest-cli.json", "NestJS")]:
+            if (root / config_file).exists() and framework not in analysis.frameworks:
+                analysis.frameworks.append(framework)
     
     # Sort and deduplicate
     analysis.languages.sort()
@@ -526,19 +541,42 @@ async def _detect_code_standards(root: Path, analysis: CodebaseAnalysis, config:
     # Linters and formatters
     linter_configs = [
         (".eslintrc", "ESLint"),
+        (".eslintrc.js", "ESLint"),
+        (".eslintrc.json", "ESLint"),
+        ("eslint.config.js", "ESLint"),
+        ("eslint.config.mjs", "ESLint"),
         (".prettierrc", "Prettier"),
+        (".prettierrc.json", "Prettier"),
         ("mypy.ini", "mypy"),
-        ("pyproject.toml", "ruff/black"),
+        (".mypy.ini", "mypy"),
+        ("ruff.toml", "ruff"),
         (".pylintrc", "pylint"),
         (".stylelintrc", "stylelint"),
         ("tsconfig.json", "TypeScript"),
-        ("tslint.json", "TSLint"),
+        (".black.toml", "black"),
     ]
-    
+
     for config_file, standard in linter_configs:
         path = root / config_file
-        if path.exists():
+        if path.exists() and standard not in analysis.coding_standards:
             analysis.coding_standards.append(standard)
+
+    pyproject = root / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            content = read_safe(pyproject).text
+            if "[tool.ruff" in content and "ruff" not in analysis.coding_standards:
+                analysis.coding_standards.append("ruff")
+            if "[tool.black" in content and "black" not in analysis.coding_standards:
+                analysis.coding_standards.append("black")
+            if "[tool.mypy" in content and "mypy" not in analysis.coding_standards:
+                analysis.coding_standards.append("mypy")
+            if "[tool.pylint" in content and "pylint" not in analysis.coding_standards:
+                analysis.coding_standards.append("pylint")
+            if "[tool.isort" in content and "isort" not in analysis.coding_standards:
+                analysis.coding_standards.append("isort")
+        except (OSError, UnicodeDecodeError):
+            pass
     
     # Naming conventions from code analysis
     # Check Python files for common patterns

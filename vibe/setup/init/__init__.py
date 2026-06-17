@@ -62,12 +62,8 @@ async def _run_standard_init(workdir: Path) -> str:
 
 async def _run_interactive_init(workdir: Path, artifacts: list[str] | None) -> str:
     """Run interactive init with multi-phase flow."""
-    # TODO: Implement interactive multi-phase flow
-    # This would:
-    # 1. Ask which artifacts to set up (AGENTS.md files, skills, hooks)
-    # 2. Explore codebase with subagent
-    # 3. Fill in gaps via follow-up questions
-    # 4. Present reviewable proposal before writing files
-    
-    # For now, fall back to standard init
-    return await _run_standard_init(workdir)
+    result = await _run_standard_init(workdir)
+    return (
+        "Note: Interactive mode (VIBE_CODE_NEW_INIT=1) is not yet implemented. "
+        "Falling back to standard init.\n\n" + result
+    )

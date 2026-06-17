@@ -306,16 +306,10 @@ def _generate_suggestions(analysis: CodebaseAnalysis, existing_content: str) -> 
 
 
 def _section_exists(content: str, patterns: str) -> bool:
-    """Check if any pattern exists in content as a section header."""
+    """Check if any pattern exists in content as a markdown section header."""
     import re
-    # Look for markdown headers containing any of the patterns
     header_patterns = patterns.split("|")
     for pattern in header_patterns:
-        # Check for various header levels
-        for level in range(1, 7):
-            if re.search(rf"^{'#' * level}\s+{pattern}", content, re.MULTILINE | re.IGNORECASE):
-                return True
-        # Also check if pattern appears as a word in any line
-        if re.search(rf"\b{pattern}\b", content, re.IGNORECASE):
+        if re.search(rf"^#{1,6}\s+.*{pattern}", content, re.MULTILINE | re.IGNORECASE):
             return True
     return False
