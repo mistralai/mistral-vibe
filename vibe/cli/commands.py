@@ -179,6 +179,11 @@ class CommandRegistry:
                 description="Select theme",
                 handler="_show_theme",
             ),
+            "init": Command(
+                aliases=frozenset(["/init"]),
+                description="Analyze the project and set up AGENTS.md with build/test commands and conventions",
+                handler="_init_project",
+            ),
         }
 
     @property

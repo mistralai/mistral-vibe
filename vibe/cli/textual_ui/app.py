@@ -2165,6 +2165,37 @@ class VibeApp(App):  # noqa: PLR0904
             return
         await self._switch_to_theme_picker_app()
 
+    async def _init_project(self, cmd_args: str = "", **kwargs: Any) -> None:
+        """Handle /init: let the agent explore the repo and author AGENTS.md.
+
+        We build an instruction prompt and hand it to the agent as a normal turn
+        (same path as the initial prompt), so it explores the repo and writes the
+        file itself — repo-aware output, watchable and rewindable.
+        """
+        if self._agent_running:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Cannot run /init while the agent is working. Please wait.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        try:
+            from vibe.setup.init import build_init_prompt
+
+            prompt = await build_init_prompt(Path.cwd())
+        except Exception as e:
+            logger.error("Failed to build /init prompt: %s", e, exc_info=True)
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to analyze project: {e}", collapsed=self._tools_collapsed
+                )
+            )
+            return
+
+        await self._handle_user_message(prompt, title_source="/init")
+
     async def _show_proxy_setup(self, **kwargs: Any) -> None:
         if self._current_bottom_app == BottomApp.ProxySetup:
             return
