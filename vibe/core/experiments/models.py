@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from vibe.core.telemetry.types import AgentEntrypoint
+from vibe.core.telemetry.types import AgentEntrypoint, TerminalEmulator
 
 
 class ExperimentAttributes(BaseModel):
@@ -24,7 +24,7 @@ class ExperimentAttributes(BaseModel):
     client_name: str | None = None
     client_version: str | None = None
     os: Literal["darwin", "linux", "windows"] | str
-    terminal_emulator: str | None = None
+    terminal_emulator: TerminalEmulator | None = None
     custom_system_prompt: bool = False
 
 

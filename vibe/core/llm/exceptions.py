@@ -19,7 +19,12 @@ _CONTEXT_TOO_LONG_SUBSTRINGS = (
     "input too large",
     "couldn't fit with truncation",
     "prompt is too long",
+    # orchestral_runtime returns these as 422
+    "model_context_exceeded",
+    "prompt_too_long",
 )
+
+_RESPONSE_TOO_LONG_SUBSTRINGS = ("max_tokens_exceeded", "finish_reason=length")
 
 
 class ErrorDetail(BaseModel):
@@ -63,10 +68,17 @@ class BackendError(RuntimeError):
 
     @property
     def is_context_too_long(self) -> bool:
-        if self.status != HTTPStatus.BAD_REQUEST:
+        if self.status not in {HTTPStatus.BAD_REQUEST, HTTPStatus.UNPROCESSABLE_ENTITY}:
             return False
         body = (self.body_text or "").lower()
         return any(s in body for s in _CONTEXT_TOO_LONG_SUBSTRINGS)
+
+    @property
+    def is_response_too_long(self) -> bool:
+        if self.status != HTTPStatus.UNPROCESSABLE_ENTITY:
+            return False
+        body = (self.body_text or "").lower()
+        return any(s in body for s in _RESPONSE_TOO_LONG_SUBSTRINGS)
 
     def _fmt(self) -> str:
         if self.status == HTTPStatus.UNAUTHORIZED:

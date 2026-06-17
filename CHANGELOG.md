@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.1] - 2026-06-16
+
+### Added
+
+- ACP workspace trust gated behind the `workspace-trust` client capability
+
+### Changed
+
+- `/resume` now opens much faster
+- Startup update-failure message is now gentler and no longer alarms when an update can't be applied
+
+
+## [2.16.0] - 2026-06-15
+
+### Added
+
+- Fuzzy search in slash command autocomplete
+- Syntax-highlighted, line-numbered, theme-aware diffs for file edits
+
+### Changed
+
+- `/resume` now scopes the session picker to the current folder
+- Clipboard copy confirmations now appear inline instead of stacking toast notifications
+- ACP teleports now use the client title as the Vibe Code project name when no explicit project name is configured
+
+### Fixed
+
+- ACP max-output-token responses now stop gracefully with `max_tokens` instead of surfacing internal errors
+- Context-too-long responses wrapped as HTTP 422 are now classified correctly
+- SSE streams are parsed on CR/LF boundaries only, avoiding crashes on valid Unicode line separators in JSON strings
+- CLI banner now shows the Free plan correctly
+- Mistral backend no longer sends reasoning content when model thinking is off
+
+
 ## [2.15.0] - 2026-06-12
 
 ### Added

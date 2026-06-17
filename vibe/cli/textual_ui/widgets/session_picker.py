@@ -57,6 +57,17 @@ def _format_relative_time(iso_time: str | None) -> str:
     return "unknown"
 
 
+def _build_header_text(cwd: str | None, has_remote: bool) -> Text:
+    text = Text(no_wrap=True)
+    text.append("local ", style="cyan")
+    text.append(cwd or "this folder", style="dim")
+    if has_remote:
+        text.append("  ·  ", style="dim")
+        text.append("remote ", style="cyan")
+        text.append("all folders", style="dim")
+    return text
+
+
 def _build_option_text(session: ResumeSessionInfo, message: str) -> Text:
     text = Text(no_wrap=True)
     time_str = _format_relative_time(session.end_time)
@@ -115,12 +126,14 @@ class SessionPickerApp(Container):
         sessions: list[ResumeSessionInfo],
         latest_messages: dict[str, str],
         current_session_id: str | None = None,
+        cwd: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(id="sessionpicker-app", **kwargs)
         self._sessions = sessions
         self._latest_messages = latest_messages
         self._current_session_id = current_session_id
+        self._cwd = cwd
         self._delete_state: _DeleteState | None = None
 
     @property
@@ -154,6 +167,18 @@ class SessionPickerApp(Container):
 
     def _normal_option_text(self, session: ResumeSessionInfo) -> Text:
         return _build_option_text(session, self._session_message(session))
+
+    def _option_text(self, session: ResumeSessionInfo) -> Text:
+        state = self._delete_state
+        if state is None or state.option_id != session.option_id:
+            return self._normal_option_text(session)
+        match state.kind:
+            case "confirmation":
+                return self._delete_confirmation_option_text(session)
+            case "feedback":
+                return self._delete_feedback_option_text(session)
+            case "pending":
+                return self._delete_pending_option_text(session)
 
     def _delete_confirmation_option_text(self, session: ResumeSessionInfo) -> Text:
         text = _build_option_text(session, "")
@@ -226,6 +251,41 @@ class SessionPickerApp(Container):
         self._option_list().remove_option(option_id)
         return True
 
+    def add_sessions(
+        self, sessions: list[ResumeSessionInfo], latest_messages: dict[str, str]
+    ) -> None:
+        existing = {s.option_id for s in self._sessions}
+        new_sessions = [s for s in sessions if s.option_id not in existing]
+        if not new_sessions:
+            return
+
+        self._sessions = sorted(
+            [*self._sessions, *new_sessions],
+            key=lambda s: s.end_time or "",
+            reverse=True,
+        )
+        self._latest_messages.update(latest_messages)
+
+        option_list = self._option_list()
+        highlighted = self._highlighted_option_id()
+        option_list.clear_options()
+        option_list.add_options([
+            Option(self._option_text(session), id=session.option_id)
+            for session in self._sessions
+        ])
+        self._refresh_header()
+        if highlighted is None:
+            return
+        for index, session in enumerate(self._sessions):
+            if session.option_id == highlighted:
+                option_list.highlighted = index
+                return
+
+    def _refresh_header(self) -> None:
+        has_remote = any(session.source == "remote" for session in self._sessions)
+        header = self.query_one(".sessionpicker-header", NoMarkupStatic)
+        header.update(_build_header_text(self._cwd, has_remote))
+
     def clear_pending_delete(self, option_id: str) -> bool:
         if not self._delete_state_matches(option_id, "pending"):
             return False
@@ -238,7 +298,12 @@ class SessionPickerApp(Container):
             Option(self._normal_option_text(session), id=session.option_id)
             for session in self._sessions
         ]
+        has_remote = any(session.source == "remote" for session in self._sessions)
         with Vertical(id="sessionpicker-content"):
+            yield NoMarkupStatic(
+                _build_header_text(self._cwd, has_remote),
+                classes="sessionpicker-header",
+            )
             yield OptionList(*options, id="sessionpicker-options")
             yield NoMarkupStatic(
                 "↑↓ Navigate  Enter Select  D Delete  Esc Cancel",

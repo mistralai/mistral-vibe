@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from acp import RequestError
 from acp.schema import (
     AgentMessageChunk,
     AgentThoughtChunk,
+    ClientCapabilities,
     ToolCallProgress,
     ToolCallStart,
     UserMessageChunk,
@@ -15,10 +17,11 @@ import pytest
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
-from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
+from vibe.acp.acp_agent_loop import WORKSPACE_TRUST_CAPABILITY, VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import ModelConfig, SessionLoggingConfig
+from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import Role
 
 
@@ -121,6 +124,37 @@ class TestLoadSession:
         assert response.config_options[2].id == "thinking"
         assert response.config_options[2].category == "thinking"
         assert response.config_options[2].current_value == "off"
+
+    @pytest.mark.asyncio
+    async def test_load_session_resolves_workspace_trust_before_loading_config(
+        self,
+        acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
+        temp_session_dir: Path,
+        create_test_session,
+        tmp_working_directory: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        acp_agent, client = acp_agent_with_session_config
+        acp_agent.client_capabilities = ClientCapabilities(
+            field_meta={WORKSPACE_TRUST_CAPABILITY: True}
+        )
+        request_trust = AsyncMock(return_value={"decision": "trust_cwd"})
+        monkeypatch.setattr(client, "ext_method", request_trust)
+        (tmp_working_directory / "AGENTS.md").write_text(
+            "Loaded session project instructions", encoding="utf-8"
+        )
+        session_id = "test-sess-trust"
+        create_test_session(temp_session_dir, session_id, str(tmp_working_directory))
+
+        await acp_agent.load_session(
+            cwd=str(tmp_working_directory), mcp_servers=[], session_id=session_id
+        )
+
+        request_trust.assert_awaited_once()
+        assert trusted_folders_manager.is_trusted(tmp_working_directory) is True
+        system_prompt = acp_agent.sessions[session_id].agent_loop.messages[0].content
+        assert system_prompt is not None
+        assert "Loaded session project instructions" in system_prompt
 
     @pytest.mark.asyncio
     async def test_load_session_registers_session_with_original_id(

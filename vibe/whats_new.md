@@ -1,4 +1,4 @@
-# What's new in v2.15.0
-
-- **Message queue**: Type follow-up messages while the agent is busy; they appear in a queue above the input and flush automatically when the agent is free
-- **Smarter compaction**: The agent now retains your original task goals across context resets — long sessions stay on track after compaction
+# What's new in v2.16.0
+- **Better slash commands**: Slash command autocomplete now uses fuzzy search
+- **Readable edit diffs**: File edit previews now include syntax highlighting, line numbers, and theme-aware colors
+- **Focused resume picker**: `/resume` now shows sessions for the current folder

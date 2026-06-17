@@ -21,6 +21,7 @@ from vibe.core.telemetry.types import (
     AttachmentKind,
     EntrypointMetadata,
     TelemetryRequestMetadata,
+    TerminalEmulator,
 )
 from vibe.core.tools.base import BaseTool, ToolPermission
 from vibe.core.types import Backend
@@ -557,7 +558,7 @@ class TestTelemetryClient:
             entrypoint="cli",
             client_name="vscode",
             client_version="1.96.0",
-            terminal_emulator="vscode",
+            terminal_emulator=TerminalEmulator.VSCODE,
         )
 
         assert len(telemetry_events) == 1

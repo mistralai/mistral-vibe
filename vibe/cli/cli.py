@@ -11,6 +11,7 @@ from rich.console import Console
 import tomli_w
 
 from vibe import __version__
+from vibe.cli.terminal_detect import detect_terminal
 from vibe.cli.textual_ui.app import StartupOptions, run_textual_ui
 from vibe.cli.update_notifier import (
     FileSystemUpdateCacheRepository,
@@ -291,7 +292,12 @@ def _maybe_run_startup_update_prompt(
             )
             sys.exit(0)
         case UpdatePromptResult.UPDATE_FAILED:
-            rprint("[red]✗ Vibe could not be updated automatically.[/]")
+            rprint(
+                "[yellow]Vibe could not update automatically.[/]\n"
+                "  Update manually with your package manager (for example "
+                "[bold]uv tool upgrade mistral-vibe[/]), or keep using "
+                f"the current version ({__version__}) for now."
+            )
             sys.exit(1)
 
 
@@ -328,6 +334,7 @@ def run_cli(args: argparse.Namespace) -> None:
                     agent_name=initial_agent_name,
                     enable_streaming=True,
                     entrypoint_metadata=_build_cli_entrypoint_metadata(),
+                    terminal_emulator=detect_terminal(),
                     defer_heavy_init=True,
                     hook_config_result=hook_config_result,
                 )

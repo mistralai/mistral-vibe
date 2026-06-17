@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from acp.schema import TextContentBlock, ToolCallProgress, ToolCallStart
 import pytest
@@ -11,8 +11,10 @@ from tests.conftest import build_test_vibe_config, make_test_models
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
-from vibe.core.agent_loop import AgentLoop
+from vibe.acp.exceptions import CompactionError
+from vibe.core.agent_loop import AgentLoop, CompactionFailedError
 from vibe.core.session.session_id import shorten_session_id
+from vibe.core.types import LLMMessage, Role
 
 
 @pytest.fixture
@@ -87,3 +89,31 @@ class TestCompactEventHandling:
         assert (
             shorten_session_id(session.agent_loop.session_id) in compact_end_text.text
         )
+
+    @pytest.mark.asyncio
+    async def test_slash_compact_maps_compaction_failure(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        """A /compact failure surfaces as a mapped CompactionError, not a raw
+        core exception — same as the auto-compaction path.
+        """
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session = acp_agent_loop.sessions[session_response.session_id]
+        # Need >1 message so /compact does not early-return.
+        session.agent_loop.messages.append(LLMMessage(role=Role.user, content="hello"))
+
+        with patch.object(
+            session.agent_loop,
+            "compact",
+            AsyncMock(side_effect=CompactionFailedError("tool_call")),
+        ):
+            with pytest.raises(CompactionError) as exc_info:
+                await acp_agent_loop.prompt(
+                    prompt=[TextContentBlock(type="text", text="/compact")],
+                    session_id=session_response.session_id,
+                )
+
+        assert exc_info.value.code == -31006
+        assert exc_info.value.data == {"reason": "tool_call"}

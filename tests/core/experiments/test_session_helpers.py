@@ -12,13 +12,16 @@ from vibe.core.experiments.session import (
     hydrate_experiments_from_session,
     initialize_experiments,
 )
+from vibe.core.telemetry.types import TerminalEmulator
 
 
 class _StubClient(RemoteEvalClient):
     def __init__(self, response: EvalResponse | None) -> None:
         self._response = response
+        self.attributes: ExperimentAttributes | None = None
 
     async def evaluate(self, attributes: ExperimentAttributes) -> EvalResponse | None:
+        self.attributes = attributes
         return self._response
 
     async def aclose(self) -> None:
@@ -166,6 +169,36 @@ async def test_initialize_returns_true_and_persists_when_remote_eval_succeeds(
 
     assert result is True
     persist.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_initialize_uses_provided_terminal_emulator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.get_mistral_provider_and_api_key",
+        lambda _config: (MagicMock(), "fake-key"),
+    )
+    persist = AsyncMock()
+    session_logger = MagicMock()
+    session_logger.persist_experiments = persist
+    response = EvalResponse.model_validate({
+        "features": {"vibe_cli_system_prompt": {"defaultValue": "cli"}}
+    })
+    client = _StubClient(response)
+    manager = ExperimentManager(client=client)
+
+    result = await initialize_experiments(
+        config=_make_config(),
+        manager=manager,
+        session_logger=session_logger,
+        entrypoint_metadata=None,
+        terminal_emulator=TerminalEmulator.VSCODE,
+    )
+
+    assert result is True
+    assert client.attributes is not None
+    assert client.attributes.terminal_emulator is TerminalEmulator.VSCODE
 
 
 @pytest.mark.asyncio

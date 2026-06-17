@@ -10,11 +10,19 @@ and ACP error handling (https://agentclientprotocol.com/protocol/overview#error-
   -32603            Internal error (JSON-RPC standard)
   -32000 to -32099  Server errors (JSON-RPC implementation-defined)
   -31xxx            Application errors (Vibe-specific, outside reserved range)
+
+Vibe application codes:
+  -31001            Rate limited
+  -31002            Configuration error
+  -31003            Conversation limit
+  -31004            Context too long
+  -31005            Refusal
+  -31006            Compaction failed
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from acp import RequestError
 
@@ -24,6 +32,9 @@ from vibe.core.types import (
     RateLimitError as CoreRateLimitError,
     RefusalError as CoreRefusalError,
 )
+
+if TYPE_CHECKING:
+    from vibe.core.agent_loop import CompactionFailedError as CoreCompactionFailedError
 
 # JSON-RPC 2.0 standard codes
 UNAUTHENTICATED = -32000
@@ -37,6 +48,7 @@ CONFIGURATION_ERROR = -31002
 CONVERSATION_LIMIT = -31003
 CONTEXT_TOO_LONG = -31004
 REFUSAL = -31005
+COMPACTION_FAILED = -31006
 
 
 class VibeRequestError(RequestError):
@@ -149,6 +161,17 @@ class RefusalError(VibeRequestError):
     @classmethod
     def from_core(cls, exc: CoreRefusalError) -> RefusalError:
         return cls(exc.provider, exc.model, exc.category, exc.explanation)
+
+
+class CompactionError(VibeRequestError):
+    code = COMPACTION_FAILED
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(message=detail, data={"reason": reason})
+
+    @classmethod
+    def from_core(cls, exc: CoreCompactionFailedError) -> CompactionError:
+        return cls(exc.reason, str(exc))
 
 
 class ConfigurationError(VibeRequestError):

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock
+
 from acp import PROTOCOL_VERSION
 from acp.schema import (
     AgentCapabilities,
@@ -13,6 +17,7 @@ from acp.schema import (
 )
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.config import ProviderConfig
 from vibe.core.types import Backend
@@ -67,7 +72,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.15.0"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.16.1"
         )
 
         assert response.auth_methods is not None
@@ -76,6 +81,72 @@ class TestACPInitialize:
         assert auth_method.id == "browser-auth"
         assert auth_method.name == BROWSER_AUTH_NAME
         assert auth_method.description == BROWSER_AUTH_DESCRIPTION
+
+    @pytest.mark.asyncio
+    async def test_load_config_uses_client_info_title_for_vibe_code_project_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = build_test_vibe_config()
+        monkeypatch.setattr(
+            "vibe.acp.acp_agent_loop.VibeConfig.load", lambda *args, **kwargs: config
+        )
+        acp_agent_loop = build_acp_agent_loop()
+
+        await acp_agent_loop.initialize(
+            protocol_version=PROTOCOL_VERSION,
+            client_info=Implementation(name="zed", title="Zed", version="0.999.0"),
+        )
+
+        assert acp_agent_loop._load_config().vibe_code_project_name == "Zed"
+
+    @pytest.mark.asyncio
+    async def test_load_config_preserves_explicit_vibe_code_project_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = build_test_vibe_config(vibe_code_project_name="Configured Project")
+        monkeypatch.setattr(
+            "vibe.acp.acp_agent_loop.VibeConfig.load", lambda *args, **kwargs: config
+        )
+        acp_agent_loop = build_acp_agent_loop()
+
+        await acp_agent_loop.initialize(
+            protocol_version=PROTOCOL_VERSION,
+            client_info=Implementation(name="zed", title="Zed", version="0.999.0"),
+        )
+
+        assert (
+            acp_agent_loop._load_config().vibe_code_project_name == "Configured Project"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reload_method_name", ["_reload_config", "_reload_session_config"]
+    )
+    async def test_reload_config_uses_client_info_title_for_vibe_code_project_name(
+        self, monkeypatch: pytest.MonkeyPatch, reload_method_name: str
+    ) -> None:
+        config = build_test_vibe_config()
+        monkeypatch.setattr(
+            "vibe.acp.acp_agent_loop.VibeConfig.load", lambda *args, **kwargs: config
+        )
+        acp_agent_loop = build_acp_agent_loop()
+        agent_loop = SimpleNamespace(
+            config=SimpleNamespace(tool_paths=[]),
+            reload_with_initial_messages=AsyncMock(),
+        )
+        session = cast(Any, SimpleNamespace(agent_loop=agent_loop))
+
+        await acp_agent_loop.initialize(
+            protocol_version=PROTOCOL_VERSION,
+            client_info=Implementation(name="zed", title="Zed", version="0.999.0"),
+        )
+        await getattr(acp_agent_loop, reload_method_name)(session)
+
+        agent_loop.reload_with_initial_messages.assert_awaited_once()
+        reloaded_config = agent_loop.reload_with_initial_messages.await_args.kwargs[
+            "base_config"
+        ]
+        assert reloaded_config.vibe_code_project_name == "Zed"
 
     @pytest.mark.asyncio
     async def test_initialize_with_terminal_auth(
@@ -101,7 +172,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.15.0"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.16.1"
         )
 
         assert response.auth_methods is not None

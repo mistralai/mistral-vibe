@@ -134,6 +134,7 @@ class Task(
             config=base_config,
             agent_name=args.agent,
             entrypoint_metadata=ctx.entrypoint_metadata,
+            terminal_emulator=ctx.terminal_emulator,
             is_subagent=True,
             defer_heavy_init=True,
             permission_store=ctx.permission_store,

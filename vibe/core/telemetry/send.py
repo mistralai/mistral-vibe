@@ -23,6 +23,7 @@ from vibe.core.telemetry.types import (
     TeleportFailedPayload,
     TeleportFailureDetails,
     TeleportFailureStage,
+    TerminalEmulator,
 )
 from vibe.core.utils import get_server_url_from_api_base, get_user_agent
 from vibe.core.utils.http import build_ssl_context
@@ -294,7 +295,7 @@ class TelemetryClient:
         entrypoint: AgentEntrypoint,
         client_name: str | None,
         client_version: str | None,
-        terminal_emulator: str | None = None,
+        terminal_emulator: TerminalEmulator | None = None,
     ) -> None:
         payload = {
             "has_agents_md": has_agents_md,

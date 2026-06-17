@@ -19,7 +19,6 @@ from uuid import uuid4
 from opentelemetry import trace
 from pydantic import BaseModel
 
-from vibe.cli.terminal_detect import detect_terminal
 from vibe.core.agent_loop_hooks import AgentLoopHooksMixin
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
@@ -77,6 +76,7 @@ from vibe.core.telemetry.types import (
     EntrypointMetadata,
     TelemetryCallType,
     TelemetryRequestMetadata,
+    TerminalEmulator,
 )
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.telemetry import TeleportTelemetryTracker
@@ -121,6 +121,7 @@ from vibe.core.types import (
     RateLimitError,
     ReasoningEvent,
     RefusalError,
+    ResponseTooLongError,
     Role,
     SessionTitleUpdatedEvent,
     ToolCall,
@@ -177,6 +178,14 @@ class AgentLoopLLMResponseError(AgentLoopError):
     """Raised when LLM response is malformed or missing expected data."""
 
 
+class CompactionFailedError(AgentLoopError):
+    """Raised when a compaction turn did not produce a usable summary."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason  # "tool_call" | "empty_summary"
+        super().__init__(f"Compaction did not produce a summary (reason={reason}).")
+
+
 class ImagesNotSupportedError(AgentLoopError):
     """Raised when the active model does not support image attachments."""
 
@@ -204,6 +213,14 @@ def _is_context_too_long_error(e: Exception) -> bool:
         return e.is_context_too_long
     if isinstance(e, RuntimeError) and isinstance(e.__cause__, BackendError):
         return e.__cause__.is_context_too_long
+    return False
+
+
+def _is_response_too_long_error(e: Exception) -> bool:
+    if isinstance(e, BackendError):
+        return e.is_response_too_long
+    if isinstance(e, RuntimeError) and isinstance(e.__cause__, BackendError):
+        return e.__cause__.is_response_too_long
     return False
 
 
@@ -263,6 +280,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         backend: BackendLike | None = None,
         enable_streaming: bool = False,
         entrypoint_metadata: EntrypointMetadata | None = None,
+        terminal_emulator: TerminalEmulator | None = None,
         is_subagent: bool = False,
         defer_heavy_init: bool = False,
         headless: bool = False,
@@ -344,6 +362,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.approval_callback: ApprovalCallback | None = None
         self.user_input_callback: UserInputCallback | None = None
         self.entrypoint_metadata = entrypoint_metadata
+        self.terminal_emulator = terminal_emulator
 
         try:
             active_model = config.get_active_model()
@@ -540,6 +559,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             manager=self.experiment_manager,
             session_logger=self.session_logger,
             entrypoint_metadata=self.entrypoint_metadata,
+            terminal_emulator=self.terminal_emulator,
         )
         if updated:
             with contextlib.suppress(Exception):
@@ -574,10 +594,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         nb_mcp_servers = len(self.config.mcp_servers)
         nb_models = len(self.config.models)
 
-        terminal_emulator = None
-        if entrypoint == "cli":
-            terminal_emulator = detect_terminal().value
-
         self.telemetry_client.send_new_session(
             has_agents_md=has_agents_md,
             nb_skills=nb_skills,
@@ -586,7 +602,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             entrypoint=entrypoint,
             client_name=client_name,
             client_version=client_version,
-            terminal_emulator=terminal_emulator,
+            terminal_emulator=self.terminal_emulator,
         )
 
     def emit_ready_telemetry(self, init_duration_ms: int) -> None:
@@ -1347,6 +1363,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 permission_store=self._permission_store,
                 hook_config_result=self._hook_config_result,
                 session_id=self.session_id,
+                terminal_emulator=self.terminal_emulator,
             ),
             **tool_call.args_dict,
         ):
@@ -1591,6 +1608,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 raise RateLimitError(provider.name, active_model.name) from e
             if _is_context_too_long_error(e):
                 raise ContextTooLongError(provider.name, active_model.name) from e
+            if _is_response_too_long_error(e):
+                raise ResponseTooLongError(provider.name, active_model.name) from e
             if _is_non_retryable_error(e):
                 raise
 
@@ -1671,6 +1690,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 raise RateLimitError(provider.name, active_model.name) from e
             if _is_context_too_long_error(e):
                 raise ContextTooLongError(provider.name, active_model.name) from e
+            if _is_response_too_long_error(e):
+                raise ResponseTooLongError(provider.name, active_model.name) from e
             if _is_non_retryable_error(e):
                 raise
 
@@ -1761,6 +1782,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             agent_name=self.agent_profile.name,
             enable_streaming=self.enable_streaming,
             entrypoint_metadata=self.entrypoint_metadata,
+            terminal_emulator=self.terminal_emulator,
             defer_heavy_init=True,
             hook_config_result=self._hook_config_result,
         )
@@ -1869,8 +1891,12 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     "Usage data missing in compaction summary response"
                 )
             summary_content = (summary_result.message.content or "").strip()
-            if not summary_content:
-                summary_content = "(no summary available)"
+            has_tool_calls = bool(summary_result.message.tool_calls)
+            if has_tool_calls or not summary_content:
+                if self.config.raise_on_compaction_failure:
+                    reason = "tool_call" if has_tool_calls else "empty_summary"
+                    raise CompactionFailedError(reason)
+                summary_content = summary_content or "(no summary available)"
 
             system_message = self.messages[0]
             compaction_context = render_compaction_context(

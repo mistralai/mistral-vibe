@@ -17,6 +17,7 @@ from vibe.core.nuage.workflow import (
     WorkflowExecutionStatus,
 )
 from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.sse import iter_sse_lines
 
 
 class WorkflowsClient:
@@ -44,6 +45,9 @@ class WorkflowsClient:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
         if self._owns_client and self._client:
             await self._client.aclose()
             self._client = None
@@ -104,8 +108,8 @@ class WorkflowsClient:
         self, response: httpx.Response
     ) -> AsyncGenerator[StreamEvent, None]:
         event_type: str | None = None
-        async for line in response.aiter_lines():
-            if line is None or line == "" or line.startswith(":"):
+        async for line in iter_sse_lines(response):
+            if line == "" or line.startswith(":"):
                 continue
             if line.startswith("event:"):
                 event_type = line[len("event:") :].strip()

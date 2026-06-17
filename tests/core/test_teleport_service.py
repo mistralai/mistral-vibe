@@ -13,11 +13,13 @@ import httpx
 import pytest
 import zstandard
 
+from tests.conftest import build_test_vibe_config
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
 )
 from vibe.core.teleport.git import GitRepoInfo
+from vibe.core.teleport.nuage import DEFAULT_NUAGE_PROJECT_NAME
 from vibe.core.teleport.teleport import TeleportService
 from vibe.core.teleport.types import (
     TeleportCheckingGitEvent,
@@ -157,6 +159,49 @@ class TestTeleportServiceIsSupported:
 
 
 class TestTeleportServiceExecute:
+    def test_build_nuage_request_uses_configured_project_name(
+        self, tmp_path: Path
+    ) -> None:
+        service = _make_service(
+            tmp_path,
+            vibe_config=build_test_vibe_config(vibe_code_project_name="  Zed  "),
+        )
+
+        request = service._build_nuage_request(
+            prompt="test prompt",
+            git_info=GitRepoInfo(
+                remote_url="https://github.com/owner/repo",
+                owner="owner",
+                repo="repo",
+                branch="main",
+                commit="abc123",
+                diff="",
+            ),
+        )
+
+        assert request.project_name == "Zed"
+
+    def test_build_nuage_request_uses_default_project_name_for_blank_config(
+        self, tmp_path: Path
+    ) -> None:
+        service = _make_service(
+            tmp_path, vibe_config=build_test_vibe_config(vibe_code_project_name="  ")
+        )
+
+        request = service._build_nuage_request(
+            prompt="test prompt",
+            git_info=GitRepoInfo(
+                remote_url="https://github.com/owner/repo",
+                owner="owner",
+                repo="repo",
+                branch="main",
+                commit="abc123",
+                diff="",
+            ),
+        )
+
+        assert request.project_name == DEFAULT_NUAGE_PROJECT_NAME
+
     @pytest.mark.asyncio
     async def test_execute_happy_path(self, tmp_path: Path) -> None:
         seen_body: dict[str, object] | None = None

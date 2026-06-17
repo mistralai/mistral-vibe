@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -19,18 +18,14 @@ from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.paths import TRUSTED_FOLDERS_FILE
+from vibe.core.trusted_folders import WorkspaceTrustDecision
 
 
 class TrustDialogQuitException(Exception):
     pass
 
 
-class TrustDecision(Enum):
-    """User's choice from the trust dialog."""
-
-    TRUST_REPO = "trust_repo"
-    TRUST_CWD = "trust_cwd"
-    DECLINE = "decline"
+TrustDecision = WorkspaceTrustDecision
 
 
 class TrustFolderDialog(CenterMiddle):

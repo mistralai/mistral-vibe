@@ -195,8 +195,20 @@ def test_resolve_api_key_for_plan_with_missing_env_var() -> None:
             ),
             "### Unlock more with Vibe - [Upgrade to Vibe Pro](https://chat.mistral.ai/code/extensions?focus=key)",
         ),
+        (
+            PlanInfo(
+                plan_type=WhoAmIPlanType.CHAT,
+                plan_name="FREE",
+                prompt_switching_to_pro_plan=False,
+            ),
+            "### Unlock more with Vibe - [Upgrade to Vibe Pro](https://chat.mistral.ai/code/extensions?focus=key)",
+        ),
     ],
-    ids=["switch-to-vibe-pro-key", "upgrade-to-vibe-pro"],
+    ids=[
+        "switch-to-vibe-pro-key",
+        "upgrade-api-to-vibe-pro",
+        "upgrade-free-vibe-to-pro",
+    ],
 )
 def test_plan_offer_cta_routes_users_to_vibe_api_key_extensions(
     plan_info: PlanInfo, expected_cta: str
@@ -238,6 +250,22 @@ def test_plan_offer_cta_uses_configured_vibe_url() -> None:
         ),
         (
             WhoAmIResponse(
+                plan_type=WhoAmIPlanType.CHAT,
+                plan_name="FREE",
+                prompt_switching_to_pro_plan=False,
+            ),
+            False,
+        ),
+        (
+            WhoAmIResponse(
+                plan_type=WhoAmIPlanType.CHAT,
+                plan_name="UNKNOWN",
+                prompt_switching_to_pro_plan=False,
+            ),
+            False,
+        ),
+        (
+            WhoAmIResponse(
                 plan_type=WhoAmIPlanType.API,
                 plan_name="FREE",
                 prompt_switching_to_pro_plan=False,
@@ -256,6 +284,8 @@ def test_plan_offer_cta_uses_configured_vibe_url() -> None:
     ids=[
         "chat-plan-is-eligible",
         "chat-plan-requiring-key-switch-is-ineligible",
+        "free-vibe-plan-is-ineligible",
+        "unknown-chat-plan-is-ineligible",
         "api-plan-is-ineligible",
         "mistral-code-enterprise-is-ineligible",
     ],
@@ -270,14 +300,26 @@ def test_teleport_eligibility_depends_on_chat_plan_and_current_key(
     ("payload", "expected_title"),
     [
         (PlanInfo(plan_type=WhoAmIPlanType.API, plan_name="FREE"), "Free"),
+        (PlanInfo(plan_type=WhoAmIPlanType.CHAT, plan_name="FREE"), "Free"),
+        (
+            PlanInfo(plan_type=WhoAmIPlanType.CHAT, plan_name="INDIVIDUAL"),
+            "[Subscription] Pro",
+        ),
+        (PlanInfo(plan_type=WhoAmIPlanType.CHAT, plan_name="UNKNOWN"), None),
         (
             PlanInfo(plan_type=WhoAmIPlanType.API, plan_name="Scale plan"),
             "[API] Scale plan",
         ),
     ],
-    ids=["free-api-plan", "paid-api-plan"],
+    ids=[
+        "free-api-plan",
+        "free-vibe-plan",
+        "chat-pro-plan",
+        "unknown-chat-plan",
+        "paid-api-plan",
+    ],
 )
-def test_plan_title_uses_current_api_plan_labels(
+def test_plan_title_uses_current_plan_labels(
     payload: PlanInfo, expected_title: str
 ) -> None:
     assert plan_title(payload) == expected_title

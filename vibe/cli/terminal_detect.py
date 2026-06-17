@@ -1,23 +1,13 @@
 from __future__ import annotations
 
-from enum import Enum
 import os
 from typing import Literal
 
+from vibe.core.telemetry.types import TerminalEmulator
 
-class Terminal(Enum):
-    VSCODE = "vscode"
-    VSCODE_INSIDERS = "vscode_insiders"
-    CURSOR = "cursor"
-    JETBRAINS = "jetbrains"
-    ITERM2 = "iterm2"
-    WEZTERM = "wezterm"
-    GHOSTTY = "ghostty"
-    ALACRITTY = "alacritty"
-    KITTY = "kitty"
-    HYPER = "hyper"
-    WINDOWS_TERMINAL = "windows_terminal"
-    UNKNOWN = "unknown"
+Terminal = TerminalEmulator
+
+__all__ = ["Terminal", "detect_terminal"]
 
 
 def _is_cursor() -> bool:

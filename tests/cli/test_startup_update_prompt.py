@@ -194,7 +194,9 @@ def test_failed_update_prints_error_message(
     ):
         _maybe_run_startup_update_prompt(config, repository)
 
-    assert "could not be updated automatically" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "could not update automatically" in out
+    assert "package manager" in out
 
 
 def test_failed_update_does_not_dismiss_so_user_is_reprompted_on_next_launch(

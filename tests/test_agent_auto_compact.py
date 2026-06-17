@@ -14,13 +14,16 @@ from tests.conftest import (
 )
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
+from vibe.core.agent_loop import CompactionFailedError
 from vibe.core.config import ModelConfig
 from vibe.core.types import (
     AssistantEvent,
     CompactEndEvent,
     CompactStartEvent,
+    FunctionCall,
     LLMMessage,
     Role,
+    ToolCall,
     UserMessageEvent,
 )
 
@@ -300,6 +303,66 @@ async def test_compact_without_extra_instructions_has_no_additional_section() ->
     compaction_prompt = backend.requests_messages[0][-1].content
     assert compaction_prompt is not None
     assert "## Additional Instructions" not in compaction_prompt
+
+
+@pytest.mark.asyncio
+async def test_compact_raises_on_tool_call_when_flag_enabled() -> None:
+    """With the flag on, a compaction that returns a tool call raises."""
+    backend = FakeBackend([
+        [
+            mock_llm_chunk(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="t1",
+                        index=0,
+                        function=FunctionCall(name="bash", arguments="{}"),
+                    )
+                ],
+            )
+        ]
+    ])
+    cfg = build_test_vibe_config(
+        models=make_test_models(auto_compact_threshold=999),
+        raise_on_compaction_failure=True,
+    )
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
+    agent.stats.context_tokens = 100
+
+    with pytest.raises(CompactionFailedError) as exc_info:
+        await agent.compact()
+    assert exc_info.value.reason == "tool_call"
+
+
+@pytest.mark.asyncio
+async def test_compact_raises_on_empty_summary_when_flag_enabled() -> None:
+    """With the flag on, a compaction with empty content raises."""
+    backend = FakeBackend([[mock_llm_chunk(content="   ")]])
+    cfg = build_test_vibe_config(
+        models=make_test_models(auto_compact_threshold=999),
+        raise_on_compaction_failure=True,
+    )
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
+    agent.stats.context_tokens = 100
+
+    with pytest.raises(CompactionFailedError) as exc_info:
+        await agent.compact()
+    assert exc_info.value.reason == "empty_summary"
+
+
+@pytest.mark.asyncio
+async def test_compact_falls_back_when_flag_disabled() -> None:
+    """With the flag off (default), empty content uses the legacy fallback."""
+    backend = FakeBackend([[mock_llm_chunk(content="")]])
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
+    agent.stats.context_tokens = 100
+
+    summary = await agent.compact()
+    assert summary == "(no summary available)"
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core import agent_loop as agent_loop_module
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.config import MCPStdio
+from vibe.core.telemetry.types import TerminalEmulator
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.mcp.tools import RemoteTool
 
@@ -317,20 +318,37 @@ class TestStartInitializeExperiments:
 
     @pytest.mark.asyncio
     async def test_refreshes_system_prompt_when_experiments_update(self) -> None:
-        loop = build_test_agent_loop()
+        loop = build_test_agent_loop(terminal_emulator=TerminalEmulator.VSCODE)
         refresh_mock = AsyncMock()
+        init_mock = AsyncMock(return_value=True)
 
         with (
             patch.object(
-                agent_loop_module,
-                "session_initialize_experiments",
-                new=AsyncMock(return_value=True),
+                agent_loop_module, "session_initialize_experiments", new=init_mock
             ),
             patch.object(loop, "refresh_system_prompt", new=refresh_mock),
         ):
             await loop.initialize_experiments()
 
         refresh_mock.assert_awaited_once()
+        init_mock.assert_awaited_once()
+        init_args = init_mock.await_args
+        assert init_args is not None
+        assert init_args.kwargs["terminal_emulator"] is TerminalEmulator.VSCODE
+
+    def test_new_session_telemetry_uses_provided_terminal_emulator(self) -> None:
+        loop = build_test_agent_loop(terminal_emulator=TerminalEmulator.VSCODE)
+        send_new_session = MagicMock()
+
+        with patch.object(
+            loop.telemetry_client, "send_new_session", new=send_new_session
+        ):
+            loop.emit_new_session_telemetry()
+
+        assert (
+            send_new_session.call_args.kwargs["terminal_emulator"]
+            is TerminalEmulator.VSCODE
+        )
 
     @pytest.mark.asyncio
     async def test_does_not_refresh_system_prompt_when_experiments_unchanged(

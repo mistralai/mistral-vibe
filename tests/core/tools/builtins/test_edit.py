@@ -228,3 +228,46 @@ def test_get_result_display() -> None:
     assert isinstance(display, ToolResultDisplay)
     assert display.success is True
     assert "foo.py" in display.message
+
+
+def test_ui_start_line_not_part_of_model_contract() -> None:
+    result = EditResult(file="/x", message="m", old_string="a", new_string="b")
+    result._ui_start_line = 42
+
+    assert result.ui_start_line == 42
+    assert "ui_start_line" not in result.model_dump()
+    assert "_ui_start_line" not in result.model_dump()
+    assert "ui_start_line" not in result.model_dump_json()
+    assert "ui_start_line" not in EditResult.model_fields
+    assert "ui_start_line" not in EditResult.model_json_schema().get("properties", {})
+    assert "ui_start_line" not in dict(result)
+
+
+@pytest.mark.asyncio
+async def test_ui_start_line_computed_at_edit_site(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "f.txt", "alpha\nbeta\ngamma\ndelta\n")
+    edit = _make_edit()
+
+    result = await collect_result(
+        edit.run(EditArgs(file_path="f.txt", old_string="gamma", new_string="GAMMA"))
+    )
+
+    assert result.ui_start_line == 3
+
+
+@pytest.mark.asyncio
+async def test_ui_start_line_set_for_pure_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "f.txt", "keep1\nkeep2\nremove\nkeep3\n")
+    edit = _make_edit()
+
+    result = await collect_result(
+        edit.run(EditArgs(file_path="f.txt", old_string="remove\n", new_string=""))
+    )
+
+    assert result.ui_start_line == 3

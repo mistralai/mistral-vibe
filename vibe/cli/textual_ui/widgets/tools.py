@@ -16,7 +16,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import (
     NonSelectableStatic,
 )
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
-from vibe.cli.textual_ui.widgets.tool_widgets import get_result_widget
+from vibe.cli.textual_ui.widgets.tool_widgets import ToolResultWidget, get_result_widget
 from vibe.core.tools.ui import ToolCallDisplay, ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
@@ -133,6 +133,7 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
         self._tool_name = tool_name or (event.tool_name if event else "unknown")
         self._content = content
         self._content_container: Vertical | None = None
+        self._result_widget: ToolResultWidget | None = None
 
         super().__init__()
         self.add_class("tool-result")
@@ -143,7 +144,8 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="tool-result-container"):
-            yield ExpandingBorder(classes="tool-result-border")
+            self._border = ExpandingBorder(classes="tool-result-border")
+            yield self._border
             self._content_container = Vertical(classes="tool-result-content")
             yield self._content_container
 
@@ -240,7 +242,23 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             warnings=display.warnings,
         )
         await self._content_container.mount(widget)
+        self._result_widget = widget
+        self._apply_border_colors(collapsed=True)
         self.display = bool(widget.children)
+
+    def _apply_border_colors(self, *, collapsed: bool) -> None:
+        if self._result_widget is None:
+            return
+        colors = self._result_widget.border_row_colors
+        if collapsed:
+            preview = self._result_widget.PREVIEW_LINES
+            colors = {i: c for i, c in colors.items() if i < preview}
+        self._border.set_row_colors(colors)
+
+    def on_collapsible_section_toggled(
+        self, message: CollapsibleSection.Toggled
+    ) -> None:
+        self._apply_border_colors(collapsed=message.is_collapsed)
 
     async def on_click(self, event: events.Click) -> None:
         if self._click_is_passive(event):

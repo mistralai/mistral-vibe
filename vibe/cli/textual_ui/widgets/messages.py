@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -38,9 +39,29 @@ from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
 class ExpandingBorder(NonSelectableStatic):
-    def render(self) -> str:
+    def __init__(self, *, classes: str | None = None) -> None:
+        super().__init__(classes=classes)
+        self._row_colors: dict[int, str] = {}
+
+    def set_row_colors(self, colors: dict[int, str]) -> None:
+        self._row_colors = colors
+        self.refresh()
+
+    def render(self) -> Content | str:
         height = self.size.height
-        return "\n".join(["⎢"] * (height - 1) + ["⎣"])
+        chars = ["⎢"] * (height - 1) + ["⎣"]
+        if not self._row_colors:
+            return "\n".join(chars)
+
+        rendered = Content("")
+        for i, ch in enumerate(chars):
+            if i > 0:
+                rendered += Content("\n")
+            if color := self._row_colors.get(i):
+                rendered += Content.styled(ch, color)
+            else:
+                rendered += Content(ch)
+        return rendered
 
     def on_resize(self) -> None:
         self.refresh()

@@ -221,6 +221,56 @@ def test_enter_on_slash_command_with_args_submits_with_head_only_replacement() -
     assert view.replacements == [Replacement(0, 8, "/compact")]
 
 
+def test_on_text_change_matches_substring_not_just_prefix() -> None:
+    controller, view = make_controller()
+
+    controller.on_text_changed("/path", cursor_index=5)
+
+    suggestions, _ = view.suggestion_events[-1]
+    assert any(s.alias == "/logpath" for s in suggestions)
+
+
+def test_on_text_change_matches_middle_segment_of_hyphenated_command() -> None:
+    commands = [
+        ("/foo-bar-skill", "A skill"),
+        ("/baz-bar-other", "Another skill"),
+        ("/unrelated", "No match"),
+    ]
+    completer = CommandCompleter(lambda: commands)
+    view = StubView()
+    controller = SlashCommandController(completer, view)
+
+    controller.on_text_changed("/bar", cursor_index=4)
+
+    suggestions, _ = view.suggestion_events[-1]
+    aliases = [s.alias for s in suggestions]
+    assert "/foo-bar-skill" in aliases
+    assert "/baz-bar-other" in aliases
+    assert "/unrelated" not in aliases
+
+
+def test_on_text_change_fuzzy_matches_scattered_characters() -> None:
+    controller, view = make_controller()
+
+    controller.on_text_changed("/sm", cursor_index=3)
+
+    suggestions, _ = view.suggestion_events[-1]
+    assert any(s.alias == "/summarize" for s in suggestions)
+
+
+def test_on_text_change_fuzzy_ranks_prefix_matches_higher() -> None:
+    commands = [("/zoo-config", "Zoo config"), ("/config", "Main config")]
+    completer = CommandCompleter(lambda: commands)
+    view = StubView()
+    controller = SlashCommandController(completer, view)
+
+    controller.on_text_changed("/config", cursor_index=7)
+
+    suggestions, _ = view.suggestion_events[-1]
+    aliases = [s.alias for s in suggestions]
+    assert aliases.index("/config") < aliases.index("/zoo-config")
+
+
 def test_callable_entries_reflects_enabled_disabled_skills() -> None:
     """Test that skill enable/disable changes are reflected in completions.
 

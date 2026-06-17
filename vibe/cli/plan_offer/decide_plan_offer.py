@@ -26,6 +26,13 @@ class MistralCodePlanName(StrEnum):
     ENTERPRISE = "E"
 
 
+class ChatPlanName(StrEnum):
+    FREE = "FREE"
+    INDIVIDUAL = "INDIVIDUAL"
+    EDU = "EDU"
+    TEAM = "TEAM"
+
+
 class PlanInfo:
     plan_type: WhoAmIPlanType
     plan_name: str
@@ -55,8 +62,18 @@ class PlanInfo:
     def is_free_api_plan(self) -> bool:
         return self.plan_type == WhoAmIPlanType.API and "FREE" in self.plan_name.upper()
 
+    def is_free_chat_plan(self) -> bool:
+        return (
+            self.plan_type == WhoAmIPlanType.CHAT
+            and self.plan_name.upper() == ChatPlanName.FREE
+        )
+
     def is_chat_pro_plan(self) -> bool:
-        return self.plan_type == WhoAmIPlanType.CHAT
+        return self.plan_type == WhoAmIPlanType.CHAT and self.plan_name.upper() in {
+            ChatPlanName.INDIVIDUAL,
+            ChatPlanName.EDU,
+            ChatPlanName.TEAM,
+        }
 
     def is_teleport_eligible(self) -> bool:
         return self.is_chat_pro_plan() and not self.prompt_switching_to_pro_plan
@@ -106,6 +123,7 @@ def plan_offer_cta(
         return f"### Switch to your [Vibe Pro API key]({vibe_api_key_url})"
     if (
         payload.plan_type in {WhoAmIPlanType.API, WhoAmIPlanType.UNAUTHORIZED}
+        or payload.is_free_chat_plan()
         or payload.is_free_mistral_code_plan()
     ):
         return f"### Unlock more with Vibe - [Upgrade to Vibe Pro]({vibe_api_key_url})"
@@ -114,6 +132,8 @@ def plan_offer_cta(
 def plan_title(payload: PlanInfo | None) -> str | None:  # noqa: PLR0911
     if not payload:
         return None
+    if payload.is_free_chat_plan():
+        return "Free"
     if payload.is_chat_pro_plan():
         return "[Subscription] Pro"
     if payload.is_free_api_plan():
