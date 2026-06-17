@@ -37,8 +37,6 @@ class CodebaseAnalysis:
 
     # Package management
     package_managers: list[str] = field(default_factory=list)
-    dependencies: list[str] = field(default_factory=list)
-    dev_dependencies: list[str] = field(default_factory=list)
 
     # Language/framework detection
     languages: list[str] = field(default_factory=list)
@@ -59,28 +57,10 @@ class CodebaseAnalysis:
     test_dirs: list[str] = field(default_factory=list)
     config_files: list[str] = field(default_factory=list)
 
-    # Code standards
-    coding_standards: list[str] = field(default_factory=list)
-    naming_conventions: list[str] = field(default_factory=list)
-
-    # Architectural patterns
-    architecture: list[str] = field(default_factory=list)
-    patterns: list[str] = field(default_factory=list)
-
-    # Workflows
-    workflows: list[str] = field(default_factory=list)
+    # Git workflow hints (branch-naming patterns, ...)
     git_workflows: list[str] = field(default_factory=list)
 
-    # Entry points
-    entry_points: list[str] = field(default_factory=list)
-    main_modules: list[str] = field(default_factory=list)
-
-    # Environment setup
-    env_vars: list[str] = field(default_factory=list)
-    setup_steps: list[str] = field(default_factory=list)
-
-    # File patterns
-    file_patterns: list[str] = field(default_factory=list)
+    # Files ignored by VCS (sampled from .gitignore)
     ignore_patterns: list[str] = field(default_factory=list)
 
     # Project metadata
@@ -320,9 +300,6 @@ async def analyze_codebase(
         _detect_dev_environment(root, analysis, analysis_config),
         _detect_subprojects(root, analysis, analysis_config),
         _detect_structure(root, analysis, analysis_config),
-        _detect_entry_points(root, analysis, analysis_config),
-        _detect_env_setup(root, analysis, analysis_config),
-        _detect_code_standards(root, analysis, analysis_config),
     ]
 
     await asyncio.gather(*tasks)
@@ -1151,185 +1128,3 @@ async def _detect_structure(
         except (OSError, UnicodeDecodeError):
             pass
 
-
-async def _detect_entry_points(
-    root: Path, analysis: CodebaseAnalysis, config: AnalysisConfig
-) -> None:
-    """Detect entry points and main modules."""
-    common_entry_points = [
-        "main.py",
-        "app.py",
-        "index.py",
-        "server.py",
-        "cli.py",
-        "__main__.py",
-        "main.js",
-        "index.js",
-        "main.ts",
-        "index.ts",
-        "App.tsx",
-        "main.rs",
-        "main.go",
-        "index.php",
-        "artisan",
-        "functions.php",
-        "main.c",
-        "main.cpp",
-        "Main.java",
-    ]
-
-    for entry in common_entry_points:
-        path = root / entry
-        if path.exists():
-            analysis.entry_points.append(entry)
-
-    # Check for package __main__.py files
-    try:
-        py_files = _find_files(root, "__main__.py", config)
-        for py_file in py_files:
-            rel_path = py_file.relative_to(root).as_posix()
-            if rel_path not in analysis.entry_points:
-                analysis.entry_points.append(rel_path)
-    except (OSError, PermissionError):
-        pass
-
-    # Sort
-    analysis.entry_points.sort()
-
-
-async def _detect_env_setup(
-    root: Path, analysis: CodebaseAnalysis, config: AnalysisConfig
-) -> None:
-    """Detect environment setup and common patterns."""
-    # Check for .env files
-    env_files = [".env", ".env.example", ".env.local", ".env.development", ".env.test"]
-    for env_file in env_files:
-        path = root / env_file
-        if path.exists():
-            try:
-                content = read_safe(path).text
-                # Extract variable names
-                for line in content.split("\n"):
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        var_name = line.split("=")[0].strip()
-                        if var_name and var_name not in analysis.env_vars:
-                            analysis.env_vars.append(var_name)
-            except (OSError, UnicodeDecodeError):
-                pass
-
-    # Check for setup instructions in README
-    readme = root / "README.md"
-    if readme.exists():
-        try:
-            content = read_safe(readme).text
-            # Look for setup sections
-            setup_sections = [
-                "Setup",
-                "Installation",
-                "Getting Started",
-                "Development",
-                "Build",
-            ]
-            for section in setup_sections:
-                if section.lower() in content.lower():
-                    analysis.setup_steps.append(section)
-        except (OSError, UnicodeDecodeError):
-            pass
-
-    # Sort
-    analysis.env_vars.sort()
-    analysis.setup_steps.sort()
-
-
-async def _detect_code_standards(
-    root: Path, analysis: CodebaseAnalysis, config: AnalysisConfig
-) -> None:
-    """Detect coding standards and conventions."""
-    # Linters and formatters
-    linter_configs = [
-        (".eslintrc", "ESLint"),
-        (".eslintrc.js", "ESLint"),
-        (".eslintrc.json", "ESLint"),
-        ("eslint.config.js", "ESLint"),
-        ("eslint.config.mjs", "ESLint"),
-        (".prettierrc", "Prettier"),
-        (".prettierrc.json", "Prettier"),
-        ("mypy.ini", "mypy"),
-        (".mypy.ini", "mypy"),
-        ("ruff.toml", "ruff"),
-        (".pylintrc", "pylint"),
-        (".stylelintrc", "stylelint"),
-        ("tsconfig.json", "TypeScript"),
-        (".black.toml", "black"),
-        (".php-cs-fixer.php", "PHP-CS-Fixer"),
-        (".php-cs-fixer.dist.php", "PHP-CS-Fixer"),
-        ("phpcs.xml", "PHP_CodeSniffer"),
-        ("phpcs.xml.dist", "PHP_CodeSniffer"),
-        (".phpcs.xml", "PHP_CodeSniffer"),
-        ("phpstan.neon", "PHPStan"),
-        ("phpstan.neon.dist", "PHPStan"),
-        (".editorconfig", "EditorConfig"),
-    ]
-
-    for config_file, standard in linter_configs:
-        path = root / config_file
-        if path.exists() and standard not in analysis.coding_standards:
-            analysis.coding_standards.append(standard)
-
-    pyproject = root / "pyproject.toml"
-    if pyproject.exists():
-        try:
-            content = read_safe(pyproject).text
-            if "[tool.ruff" in content and "ruff" not in analysis.coding_standards:
-                analysis.coding_standards.append("ruff")
-            if "[tool.black" in content and "black" not in analysis.coding_standards:
-                analysis.coding_standards.append("black")
-            if "[tool.mypy" in content and "mypy" not in analysis.coding_standards:
-                analysis.coding_standards.append("mypy")
-            if "[tool.pylint" in content and "pylint" not in analysis.coding_standards:
-                analysis.coding_standards.append("pylint")
-            if "[tool.isort" in content and "isort" not in analysis.coding_standards:
-                analysis.coding_standards.append("isort")
-        except (OSError, UnicodeDecodeError):
-            pass
-
-    # Naming conventions from code analysis — sample several Python files (not just
-    # the first one, whose contents would otherwise decide all conventions).
-    # These labels ("Type hints", "snake_case functions") are Python-specific, so
-    # only emit them for an actual Python project; otherwise a couple of stray
-    # `.py` scripts in a PHP/JS repo would wrongly stamp the whole project.
-    is_python_project = "Python" in analysis.languages or any(
-        (root / marker).exists()
-        for marker in ("pyproject.toml", "setup.py", "requirements.txt", "Pipfile")
-    )
-    try:
-        py_files = (
-            _find_files(root, "*.py", config, limit=10) if is_python_project else []
-        )
-        for py_file in py_files:
-            if py_file.is_file():
-                content = read_safe(py_file).text
-
-                # Check for type hints
-                if "def " in content and ":" in content:
-                    if "-> " in content:
-                        analysis.naming_conventions.append("Type hints")
-                    if "from typing import " in content:
-                        analysis.naming_conventions.append("Modern typing")
-
-                # Check for class naming
-                if re.search(r"class\s+[A-Z][a-zA-Z0-9]+", content):
-                    analysis.naming_conventions.append("PascalCase classes")
-
-                # Check for function naming
-                if re.search(r"def\s+[a-z][a-z0-9_]+", content):
-                    analysis.naming_conventions.append("snake_case functions")
-    except (OSError, PermissionError):
-        pass
-
-    # Sort and deduplicate
-    analysis.coding_standards.sort()
-    analysis.coding_standards = list(dict.fromkeys(analysis.coding_standards))
-    analysis.naming_conventions.sort()
-    analysis.naming_conventions = list(dict.fromkeys(analysis.naming_conventions))

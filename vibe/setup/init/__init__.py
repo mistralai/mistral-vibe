@@ -2,70 +2,107 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vibe.setup.init.analyzer import analyze_codebase
-from vibe.setup.init.generator import GenerationMode, generate_agents_md
+from vibe.setup.init.analyzer import CodebaseAnalysis, analyze_codebase
+
+# Where an existing AGENTS.md may live, in preference order.
+_AGENTS_MD_LOCATIONS = ("AGENTS.md", ".vibe/AGENTS.md")
 
 
-async def run_init(
-    cwd: Path | None = None,
-    interactive: bool = False,
-    artifacts: list[str] | None = None,
-) -> str:
-    """Run the init workflow to generate AGENTS.md files.
+async def build_init_prompt(cwd: Path | None = None) -> str:
+    """Build the `/init` prompt handed to the agent.
+
+    Runs a cheap deterministic scan for high-signal facts (build/test commands,
+    languages, frameworks, sub-projects, ...) and wraps them in instructions that
+    tell the agent to verify those facts against the repo and author AGENTS.md
+    itself. The agent — not a template — writes the file, so the output is
+    repo-aware and we don't carry a renderer that rots as stacks change.
 
     Args:
-        cwd: The working directory to analyze. Defaults to current directory.
-        interactive: Whether to run in interactive mode (VIBE_CODE_NEW_INIT=1)
-        artifacts: List of artifacts to set up (AGENTS.md files, skills, hooks)
+        cwd: Directory to analyze. Defaults to the current working directory.
 
     Returns:
-        Result message describing what was done.
+        A prompt string suitable for driving a single agent turn.
     """
-    workdir = cwd or Path.cwd()
-
-    if interactive:
-        return await _run_interactive_init(workdir, artifacts)
-    else:
-        return await _run_standard_init(workdir)
-
-
-async def _run_standard_init(workdir: Path) -> str:
-    """Run standard init: analyze codebase and generate/improve AGENTS.md."""
-    # Check if AGENTS.md already exists
-    agents_md_path = workdir / "AGENTS.md"
-    agents_md_in_vibe = workdir / ".vibe" / "AGENTS.md"
-
-    existing_content = ""
-    if agents_md_path.exists():
-        existing_content = agents_md_path.read_text(encoding="utf-8")
-    elif agents_md_in_vibe.exists():
-        existing_content = agents_md_in_vibe.read_text(encoding="utf-8")
-
-    # Analyze the codebase
+    workdir = (cwd or Path.cwd()).resolve()
     analysis = await analyze_codebase(workdir)
+    existing = _read_existing_agents_md(workdir)
 
-    if existing_content.strip():
-        # Suggest improvements to existing file
-        suggestions = generate_agents_md(
-            analysis, mode=GenerationMode.SUGGEST, existing_content=existing_content
+    if existing.strip():
+        action = (
+            "An AGENTS.md already exists (shown at the end). Review it against the "
+            "current repo and apply concrete, targeted improvements — fix stale "
+            "commands, fill real gaps. Do not rewrite it wholesale."
         )
-        return suggestions
     else:
-        # Generate new AGENTS.md
-        content = generate_agents_md(analysis, mode=GenerationMode.CREATE)
+        action = "No AGENTS.md exists yet. Create one at ./AGENTS.md."
 
-        # Prefer ./AGENTS.md over ./.vibe/AGENTS.md
-        target_path = agents_md_path
-        target_path.parent.mkdir(parents=True, exist_ok=True)
+    sections = [
+        "Set up this project's AGENTS.md (agent onboarding guide).",
+        action,
+        (
+            "A quick deterministic scan found the facts below. Treat them as hints "
+            "only — they can be incomplete or wrong. Verify each command and "
+            "convention against the actual manifests, config, and source before "
+            "relying on it."
+        ),
+        _format_facts(analysis),
+        (
+            "Author AGENTS.md so a coding agent can be productive immediately:\n"
+            "- Build / test / run / lint commands that actually work in THIS repo\n"
+            "- Project layout and where the important code lives\n"
+            "- Conventions you can observe in the code (don't invent them)\n"
+            "- For a monorepo, note each sub-project's stack and how to work in it\n\n"
+            "Read the key files to confirm before writing. Keep it concise and "
+            "accurate — no filler."
+        ),
+    ]
 
-        target_path.write_text(content, encoding="utf-8")
-        return f"Created AGENTS.md at {target_path.relative_to(workdir)} with project conventions and workflows."
+    if existing.strip():
+        sections.append(
+            "Existing AGENTS.md:\n```markdown\n" + existing.strip() + "\n```"
+        )
+
+    return "\n\n".join(sections)
 
 
-async def _run_interactive_init(workdir: Path, artifacts: list[str] | None) -> str:
-    """Run interactive init with multi-phase flow."""
-    result = await _run_standard_init(workdir)
-    return (
-        "Note: Interactive mode (VIBE_CODE_NEW_INIT=1) is not yet implemented. "
-        "Falling back to standard init.\n\n" + result
-    )
+def _read_existing_agents_md(workdir: Path) -> str:
+    for rel in _AGENTS_MD_LOCATIONS:
+        path = workdir / rel
+        if path.exists():
+            try:
+                return path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return ""
+    return ""
+
+
+def _format_facts(analysis: CodebaseAnalysis) -> str:
+    """Render the high-signal scan results as a compact bullet list."""
+    lines: list[str] = []
+
+    def add(label: str, value: object) -> None:
+        if isinstance(value, list):
+            if value:
+                lines.append(f"- {label}: {', '.join(value)}")
+        elif value:
+            lines.append(f"- {label}: {value}")
+
+    add("Project", analysis.project_name)
+    add("Description", analysis.project_description)
+    add("Version", analysis.project_version)
+    add("Languages", analysis.languages)
+    add("Frameworks", analysis.frameworks)
+    add("Package managers", analysis.package_managers)
+    add("Build commands", analysis.build_commands)
+    add("Test commands", analysis.test_commands)
+    add("Run commands", analysis.run_commands)
+    add("Lint commands", analysis.lint_commands)
+    add("Dev environments", analysis.dev_environments)
+    add("Monorepo tooling", analysis.monorepo_tools)
+    add("Sub-projects", analysis.subprojects)
+    add("Source dirs", analysis.source_dirs)
+    add("Test dirs", analysis.test_dirs)
+
+    if not lines:
+        return "Scan facts: (none detected — analyze the repo directly)."
+    return "Scan facts:\n" + "\n".join(lines)

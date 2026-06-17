@@ -29,25 +29,33 @@ Then start Vibe in your project directory. The agent will automatically read and
 
 ## Automatic Setup with `/init`
 
-Run the `/init` command to automatically analyze your codebase and generate an appropriate AGENTS.md file:
+Run the `/init` command to analyze your codebase and set up an AGENTS.md file:
 
 ```
 > /init
 ```
 
-This will:
-- Detect your project's languages and frameworks
-- Find build, test, and lint commands
-- Identify project structure and conventions
-- Create an AGENTS.md file with all discovered information
+`/init` works in two steps:
 
-If an AGENTS.md already exists, `/init` will suggest improvements instead of overwriting it.
+1. A quick **deterministic scan** collects high-signal facts — languages,
+   frameworks, build/test/run/lint commands, package managers, dev environments,
+   and any monorepo sub-projects.
+2. Those facts are handed to **the agent as a normal turn**, which verifies them
+   against the actual repo and writes (or improves an existing) AGENTS.md itself.
 
-### What `/init` Detects
+Because the agent authors the file, the output is repo-aware rather than
+template-shaped: it confirms commands actually work, reads conventions from the
+code, and explains them. The turn is visible — you can watch, interrupt, or
+rewind it like any other.
 
-The analyzer recognizes the following out of the box. Anything not listed is still
-captured generically (commands from `Makefile` targets, structure, `.env` variables,
-git workflows), just without language-specific framework or tooling inference.
+If an AGENTS.md already exists, `/init` asks the agent to improve it in place
+rather than overwrite it.
+
+### What the scan detects
+
+The scan recognizes the following out of the box and passes it to the agent as
+hints. Anything not listed is still discovered by the agent when it reads the
+repo — the scan only seeds the starting map.
 
 Languages are ranked by file count so the primary language leads, and trivial
 stray files (a lone `.css` in a Python repo) are dropped as noise.
@@ -71,7 +79,6 @@ orchestrator noted. Run `/init` inside a sub-project for stack-specific commands
 | **Monorepo tools** | Turborepo, Nx, Lerna, Rush, pnpm/npm/yarn workspaces, Cargo workspaces, Go workspaces, uv workspaces |
 | **Dev environments** | Lando, DDEV, Vagrant, Trellis, wp-env, Dev Container, Docker Compose |
 | **Package managers / build** | uv, pip, poetry, pipenv, npm, pnpm, yarn, cargo, go, composer, cmake, maven, gradle, make |
-| **Linters / formatters** | ruff, black, isort, mypy, pylint, ESLint, Prettier, stylelint, PHP-CS-Fixer, PHP_CodeSniffer, PHPStan, EditorConfig |
 
 ## Instruction Hierarchy
 
@@ -287,17 +294,6 @@ class UserViewSet(viewsets.ModelViewSet):
 ```
 
 ## Advanced Usage
-
-### Interactive Setup
-
-Set the environment variable `VIBE_CODE_NEW_INIT=1` for an interactive multi-phase setup:
-
-```bash
-VIBE_CODE_NEW_INIT=1 vibe
-> /init
-```
-
-This will guide you through setting up AGENTS.md files, skills, and agent profiles.
 
 ### Multiple Projects
 

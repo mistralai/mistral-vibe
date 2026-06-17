@@ -181,7 +181,7 @@ class CommandRegistry:
             ),
             "init": Command(
                 aliases=frozenset(["/init"]),
-                description="Set up AGENTS.md with project conventions. Use VIBE_CODE_NEW_INIT=1 for interactive mode",
+                description="Analyze the project and set up AGENTS.md with build/test commands and conventions",
                 handler="_init_project",
             ),
         }
