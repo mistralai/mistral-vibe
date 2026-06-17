@@ -171,8 +171,72 @@ FRAMEWORK_LANGUAGE: dict[str, str] = {
     "vue": "javascript",
     "angular": "javascript",
     "next.js": "javascript",
+    "nuxt": "javascript",
+    "astro": "javascript",
+    "remix": "javascript",
+    "gatsby": "javascript",
+    "svelte": "javascript",
+    "solid": "javascript",
     "express": "javascript",
     "nestjs": "javascript",
     "ruby on rails": "ruby",
     "sinatra": "ruby",
+}
+
+# Manifest files that mark a (sub-)project, scanned across the tree so nested
+# projects in a monorepo are discovered (a Next.js app in `apps/web`, a Rails
+# API in `backend/`, a Sage theme several levels deep, ...). Each manifest's
+# stack is inferred from its declared dependencies; see `analyzer._infer_stack`.
+MANIFEST_NAMES: tuple[str, ...] = (
+    "package.json",
+    "composer.json",
+    "Gemfile",
+    "pyproject.toml",
+    "requirements.txt",
+    "go.mod",
+    "Cargo.toml",
+)
+
+# JS/TS framework keyed by its package.json dependency name. Used to infer the
+# stack of every package.json (root and nested), replacing root-only detection.
+JS_FRAMEWORK_BY_DEP: dict[str, str] = {
+    "next": "Next.js",
+    "nuxt": "Nuxt",
+    "astro": "Astro",
+    "@remix-run/react": "Remix",
+    "gatsby": "Gatsby",
+    "@angular/core": "Angular",
+    "@nestjs/core": "NestJS",
+    "express": "Express",
+    "react": "React",
+    "vue": "Vue",
+    "svelte": "Svelte",
+    "solid-js": "Solid",
+}
+# When several JS frameworks are present in one package.json, the meta-framework
+# (Next.js, Nuxt, ...) is the project's real identity, so it is preferred over a
+# bare UI library (React, Vue) when labelling the sub-project.
+JS_FRAMEWORK_PRIORITY: tuple[str, ...] = (
+    "Next.js",
+    "Nuxt",
+    "Astro",
+    "Remix",
+    "Gatsby",
+    "Angular",
+    "NestJS",
+    "Express",
+    "React",
+    "Vue",
+    "Svelte",
+    "Solid",
+)
+
+# Monorepo orchestrators, keyed by a root marker file.
+MONOREPO_FILE_MARKERS: dict[str, str] = {
+    "pnpm-workspace.yaml": "pnpm workspaces",
+    "turbo.json": "Turborepo",
+    "nx.json": "Nx",
+    "lerna.json": "Lerna",
+    "go.work": "Go workspaces",
+    "rush.json": "Rush",
 }

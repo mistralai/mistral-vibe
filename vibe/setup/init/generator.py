@@ -65,12 +65,28 @@ def _generate_full_agents_md(analysis: CodebaseAnalysis) -> str:
         lines.append(", ".join(analysis.frameworks))
         lines.append("")
 
-    # Monorepo sub-projects (Bedrock app, Sage theme, ...) discovered below root.
+    # Monorepo sub-projects (Next.js app, Rails API, Sage theme, ...) discovered
+    # below the root, plus the orchestrator managing them.
     if analysis.subprojects:
         lines.append("## Sub-projects")
         lines.append("")
+        if analysis.monorepo_tools:
+            lines.append(
+                f"Monorepo managed with: {', '.join(analysis.monorepo_tools)}."
+            )
+            lines.append("")
         for sub in analysis.subprojects:
             lines.append(f"- {sub}")
+        lines.append("")
+        lines.append(
+            "Run `/init` inside a sub-project directory for stack-specific commands "
+            "and conventions."
+        )
+        lines.append("")
+    elif analysis.monorepo_tools:
+        lines.append("## Monorepo")
+        lines.append("")
+        lines.append(f"Managed with: {', '.join(analysis.monorepo_tools)}.")
         lines.append("")
 
     # Local development environment tooling.
@@ -384,9 +400,10 @@ def _generate_suggestions(analysis: CodebaseAnalysis, existing_content: str) -> 
     if analysis.subprojects and not _section_exists(
         existing_content, r"Sub-?project|Monorepo|Packages|Workspaces"
     ):
-        missing_sections.append(
-            "**Sub-projects**: Note nested projects: " + "; ".join(analysis.subprojects)
-        )
+        detail = "; ".join(analysis.subprojects)
+        if analysis.monorepo_tools:
+            detail = f"managed with {', '.join(analysis.monorepo_tools)} — " + detail
+        missing_sections.append("**Sub-projects**: Note nested projects: " + detail)
 
     if missing_sections:
         for section in missing_sections:

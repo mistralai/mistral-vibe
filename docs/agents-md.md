@@ -50,17 +50,25 @@ captured generically (commands from `Makefile` targets, structure, `.env` variab
 git workflows), just without language-specific framework or tooling inference.
 
 Languages are ranked by file count so the primary language leads, and trivial
-stray files (a lone `.css` in a Python repo) are dropped as noise. In a monorepo,
-nested stacks are discovered too (e.g. a Bedrock app under `site/` and a Sage
-theme several levels deeper), each listed under a **Sub-projects** section.
+stray files (a lone `.css` in a Python repo) are dropped as noise.
+
+**Monorepo-aware.** The analyzer reads every manifest in the tree
+(`package.json`, `composer.json`, `Gemfile`, `pyproject.toml`, `go.mod`,
+`Cargo.toml`, …), not just the root one, and infers each nested project's stack
+from its dependencies. So a Turborepo with a Next.js app in `apps/web` and a
+NestJS API in `apps/api`, a Rails API under `backend/` with a React SPA in
+`frontend/`, or a Bedrock app under `site/` with a Sage theme several levels
+deeper are all surfaced under a **Sub-projects** section, with the managing
+orchestrator noted. Run `/init` inside a sub-project for stack-specific commands.
 
 | Category | Detected |
 |----------|----------|
 | **Languages** | Python, JavaScript, TypeScript (incl. `.tsx`/`.jsx`), Rust, Go, Java, C, C++, C#, Ruby, PHP, Swift, Kotlin, SCSS, Sass, CSS, HTML, SQL, Blade, Twig, Shell, Docker |
 | **Frameworks (Python)** | Django, Flask, FastAPI, Pydantic, SQLAlchemy, PyTest |
-| **Frameworks (JS/TS)** | React, Vue, Angular, Next.js, Express, NestJS, Svelte, Astro |
+| **Frameworks (JS/TS)** | React, Vue, Angular, Next.js, Nuxt, Astro, Remix, Gatsby, Svelte, Solid, Express, NestJS |
 | **Frameworks (PHP)** | Laravel, Symfony, WordPress, Bedrock, Sage, Acorn |
 | **Frameworks (Ruby)** | Ruby on Rails, Sinatra |
+| **Monorepo tools** | Turborepo, Nx, Lerna, Rush, pnpm/npm/yarn workspaces, Cargo workspaces, Go workspaces, uv workspaces |
 | **Dev environments** | Lando, DDEV, Vagrant, Trellis, wp-env, Dev Container, Docker Compose |
 | **Package managers / build** | uv, pip, poetry, pipenv, npm, pnpm, yarn, cargo, go, composer, cmake, maven, gradle, make |
 | **Linters / formatters** | ruff, black, isort, mypy, pylint, ESLint, Prettier, stylelint, PHP-CS-Fixer, PHP_CodeSniffer, PHPStan, EditorConfig |

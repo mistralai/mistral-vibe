@@ -15,8 +15,12 @@ from vibe.setup.init.registry import (
     DEV_ENV_DIR_MARKERS,
     DEV_ENV_FILE_MARKERS,
     FRAMEWORK_BY_EXT,
+    JS_FRAMEWORK_BY_DEP,
+    JS_FRAMEWORK_PRIORITY,
     LANGUAGE_BY_EXT,
     LANGUAGE_MARKERS,
+    MANIFEST_NAMES,
+    MONOREPO_FILE_MARKERS,
 )
 
 
@@ -45,6 +49,9 @@ class CodebaseAnalysis:
     # Monorepo sub-projects discovered below the root, e.g.
     # "Bedrock app — `site`" or "Sage theme — `site/web/app/themes/nynaeve`".
     subprojects: list[str] = field(default_factory=list)
+
+    # Monorepo orchestrators in use (Turborepo, Nx, pnpm workspaces, ...).
+    monorepo_tools: list[str] = field(default_factory=list)
 
     # Project structure
     source_dirs: list[str] = field(default_factory=list)
@@ -198,6 +205,34 @@ def _find_dirs(
     return found
 
 
+def _find_manifests(
+    root: Path,
+    names: set[str],
+    config: AnalysisConfig,
+    max_depth: int = 6,
+    cap: int = 300,
+) -> list[Path]:
+    """Find every manifest file (by exact name) in the tree, in one bounded walk.
+
+    Searched deeper than the default scan (manifests in a monorepo can be several
+    levels down) but name-restricted, so it stays cheap. Capped to avoid
+    pathological repos.
+    """
+    matches: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel = Path(dirpath).relative_to(root)
+        depth = 0 if str(rel) == "." else len(rel.parts)
+        dirnames[:] = [d for d in dirnames if d not in config.exclude_dirs]
+        if depth >= max_depth:
+            dirnames[:] = []
+        for filename in filenames:
+            if filename in names:
+                matches.append(Path(dirpath) / filename)
+                if len(matches) >= cap:
+                    return matches
+    return matches
+
+
 def _scan_files(
     root: Path, config: AnalysisConfig
 ) -> tuple[Counter[str], Counter[str], set[str]]:
@@ -266,7 +301,7 @@ async def analyze_codebase(
         _detect_build_system(root, analysis),
         _detect_language_framework(root, analysis, analysis_config),
         _detect_dev_environment(root, analysis, analysis_config),
-        _detect_php_stack(root, analysis, analysis_config),
+        _detect_subprojects(root, analysis, analysis_config),
         _detect_structure(root, analysis, analysis_config),
         _detect_entry_points(root, analysis, analysis_config),
         _detect_env_setup(root, analysis, analysis_config),
@@ -283,6 +318,7 @@ async def analyze_codebase(
     analysis.frameworks = list(dict.fromkeys(analysis.frameworks))
     analysis.dev_environments = list(dict.fromkeys(analysis.dev_environments))
     analysis.subprojects = list(dict.fromkeys(analysis.subprojects))
+    analysis.monorepo_tools = list(dict.fromkeys(analysis.monorepo_tools))
 
     return analysis
 
@@ -823,58 +859,182 @@ async def _detect_dev_environment(
     analysis.dev_environments = list(dict.fromkeys(analysis.dev_environments))
 
 
-async def _detect_php_stack(
+async def _detect_subprojects(
     root: Path, analysis: CodebaseAnalysis, config: AnalysisConfig
 ) -> None:
-    """Detect PHP/WordPress stacks nested below the root (the monorepo case).
+    """Discover (sub-)projects from manifest files anywhere in the tree.
 
-    The base framework detection only reads the *root* ``composer.json``. In a
-    Roots/Bedrock layout the real manifests live deeper (``site/composer.json``,
-    ``site/web/app/themes/<name>/composer.json``), so a root-only scan misses
-    Bedrock, Sage and Acorn entirely. Here we read every ``composer.json`` within
-    a generous depth and infer the stack from declared packages, recording where
-    each sub-project lives.
+    The base framework detection only reads *root* manifests, so it misses the
+    common monorepo cases: a Next.js app in ``apps/web``, a Rails API in
+    ``backend/``, a Sage theme several levels deep. Here we find every manifest
+    (``package.json``, ``composer.json``, ``Gemfile``, ``pyproject.toml``,
+    ``go.mod``, ``Cargo.toml``, ...), infer each one's stack from its declared
+    dependencies, bubble the frameworks up, and record nested projects with their
+    location. Also detects monorepo orchestrators (Turborepo, Nx, workspaces).
     """
     try:
-        manifests = _find_files(root, "composer.json", config, limit=50, max_depth=6)
+        manifests = _find_manifests(root, set(MANIFEST_NAMES), config, max_depth=6)
     except (OSError, PermissionError):
-        return
+        manifests = []
 
     for manifest in manifests:
-        try:
-            with open(manifest, encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            continue
-        deps = {**data.get("require", {}), **data.get("require-dev", {})}
         rel_dir = manifest.parent.relative_to(root)
         loc = "." if str(rel_dir) == "." else str(rel_dir)
-        in_theme = "themes" in rel_dir.parts
+        frameworks, label = _infer_stack(manifest, rel_dir)
+        analysis.frameworks.extend(frameworks)
+        # Record nested projects (not the root itself) that resolved to a stack.
+        if loc != "." and label:
+            analysis.subprojects.append(f"{label} — `{loc}`")
 
-        if any(d.startswith("roots/bedrock") or d == "roots/wordpress" for d in deps):
-            analysis.frameworks.append("Bedrock")
-            analysis.subprojects.append(f"Bedrock app — `{loc}`")
-        has_acorn = any(d.startswith("roots/acorn") for d in deps)
-        if has_acorn:
-            analysis.frameworks.append("Acorn")
-        # Sage 11 themes depend on `roots/acorn` (Sage itself is the theme
-        # skeleton, not a Composer package), so an Acorn manifest inside a
-        # `themes/` dir is a Sage theme. Older `roots/sage` installs still match.
-        if any(d.startswith("roots/sage") for d in deps) or (has_acorn and in_theme):
-            analysis.frameworks.append("Sage")
-            analysis.subprojects.append(f"Sage theme — `{loc}`")
-        # Bedrock/Sage are WordPress; ensure the umbrella framework is present too.
-        if any(d.startswith("roots/") or "wpackagist" in d for d in deps):
-            analysis.frameworks.append("WordPress")
-        if any(d.startswith("laravel/") for d in deps):
-            analysis.frameworks.append("Laravel")
-        if any(d.startswith("symfony/") for d in deps):
-            analysis.frameworks.append("Symfony")
+    _detect_monorepo_tools(root, analysis)
 
     analysis.frameworks = list(dict.fromkeys(analysis.frameworks))
     analysis.frameworks.sort()
     analysis.subprojects = list(dict.fromkeys(analysis.subprojects))
     analysis.subprojects.sort()
+
+
+def _infer_stack(manifest: Path, rel_dir: Path) -> tuple[list[str], str | None]:
+    """Infer ``(frameworks, subproject_label)`` from a single manifest file.
+
+    ``subproject_label`` is the short description used when the manifest is a
+    nested project (e.g. "Next.js app", "Rails app", "Sage theme"); ``None`` means
+    "no recognised stack here", so a config-only nested ``package.json`` is not
+    reported as a sub-project.
+    """
+    name = manifest.name
+    if name == "package.json":
+        return _infer_js_stack(manifest)
+    if name == "composer.json":
+        return _infer_php_stack(manifest, rel_dir)
+    if name == "Gemfile":
+        return _infer_ruby_stack(manifest)
+    if name in {"pyproject.toml", "requirements.txt"}:
+        return _infer_python_stack(manifest)
+    # A bare module/crate manifest has no framework but is still a sub-project.
+    return [], {"go.mod": "Go module", "Cargo.toml": "Rust crate"}.get(name)
+
+
+def _infer_js_stack(manifest: Path) -> tuple[list[str], str | None]:
+    try:
+        with open(manifest, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return [], None
+    deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+    found = list(
+        dict.fromkeys(JS_FRAMEWORK_BY_DEP[d] for d in deps if d in JS_FRAMEWORK_BY_DEP)
+    )
+    if not found:
+        return [], None
+    # The meta-framework (Next.js, Nuxt, ...) is the project's real identity.
+    primary = next((f for f in JS_FRAMEWORK_PRIORITY if f in found), found[0])
+    return found, f"{primary} app"
+
+
+def _infer_php_stack(manifest: Path, rel_dir: Path) -> tuple[list[str], str | None]:
+    try:
+        with open(manifest, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return [], None
+    deps = {**data.get("require", {}), **data.get("require-dev", {})}
+    frameworks: list[str] = []
+    label: str | None = None
+    in_theme = "themes" in rel_dir.parts
+
+    if any(d.startswith("roots/bedrock") or d == "roots/wordpress" for d in deps):
+        frameworks.append("Bedrock")
+        label = "Bedrock app"
+    has_acorn = any(d.startswith("roots/acorn") for d in deps)
+    if has_acorn:
+        frameworks.append("Acorn")
+    # Sage 11 themes depend on `roots/acorn` (Sage itself is the theme skeleton,
+    # not a Composer package), so an Acorn manifest inside a `themes/` dir is a
+    # Sage theme. Older `roots/sage` installs still match.
+    if any(d.startswith("roots/sage") for d in deps) or (has_acorn and in_theme):
+        frameworks.append("Sage")
+        label = "Sage theme"
+    if any(d.startswith("roots/") or "wpackagist" in d for d in deps):
+        # WordPress alone does not make a sub-project: a bundled plugin/theme
+        # that pulls wpackagist or a roots/ helper is part of the parent app,
+        # not a separate one. Only Bedrock/Sage above earn a sub-project label.
+        frameworks.append("WordPress")
+    # Match the application framework itself, not any `laravel/*`/`symfony/*`
+    # helper library (those are pulled in by unrelated tools, e.g. a mu-plugin).
+    if {"laravel/framework", "laravel/lumen-framework"} & deps.keys():
+        frameworks.append("Laravel")
+        label = label or "Laravel app"
+    if {"symfony/framework-bundle", "symfony/symfony"} & deps.keys():
+        frameworks.append("Symfony")
+        label = label or "Symfony app"
+    return frameworks, label
+
+
+def _infer_ruby_stack(manifest: Path) -> tuple[list[str], str | None]:
+    try:
+        text = read_safe(manifest).text
+    except (OSError, UnicodeDecodeError):
+        return [], None
+    if re.search(r'gem\s+["\']rails["\']', text):
+        return ["Ruby on Rails"], "Rails app"
+    if re.search(r'gem\s+["\']sinatra["\']', text):
+        return ["Sinatra"], "Sinatra app"
+    return [], None
+
+
+def _infer_python_stack(manifest: Path) -> tuple[list[str], str | None]:
+    try:
+        text = read_safe(manifest).text.lower()
+    except (OSError, UnicodeDecodeError):
+        return [], None
+    frameworks: list[str] = []
+    label: str | None = None
+    if "django" in text or (manifest.parent / "manage.py").exists():
+        frameworks.append("Django")
+        label = "Django app"
+    if "flask" in text:
+        frameworks.append("Flask")
+        label = label or "Flask app"
+    if "fastapi" in text:
+        frameworks.append("FastAPI")
+        label = label or "FastAPI app"
+    return frameworks, label
+
+
+def _detect_monorepo_tools(root: Path, analysis: CodebaseAnalysis) -> None:
+    """Detect monorepo orchestrators from root markers and manifest contents."""
+    for marker, label in MONOREPO_FILE_MARKERS.items():
+        if (root / marker).exists():
+            analysis.monorepo_tools.append(label)
+
+    pkg = root / "package.json"
+    if pkg.exists():
+        try:
+            with open(pkg, encoding="utf-8") as f:
+                if json.load(f).get("workspaces"):
+                    analysis.monorepo_tools.append("npm/yarn workspaces")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    cargo = root / "Cargo.toml"
+    if cargo.exists():
+        try:
+            if "[workspace]" in read_safe(cargo).text:
+                analysis.monorepo_tools.append("Cargo workspaces")
+        except (OSError, UnicodeDecodeError):
+            pass
+
+    pyproject = root / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            if "[tool.uv.workspace]" in read_safe(pyproject).text:
+                analysis.monorepo_tools.append("uv workspaces")
+        except (OSError, UnicodeDecodeError):
+            pass
+
+    analysis.monorepo_tools = list(dict.fromkeys(analysis.monorepo_tools))
+    analysis.monorepo_tools.sort()
 
 
 async def _detect_structure(
