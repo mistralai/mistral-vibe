@@ -159,36 +159,73 @@ def _generate_full_agents_md(analysis: CodebaseAnalysis) -> str:
     lines.append("")
     
     workflow_lines = []
-    
-    if analysis.languages:
-        lang = analysis.languages[0].lower()
-        if lang == "python":
-            workflow_lines.extend([
-                "- Run tests before committing: `pytest`",
-                "- Format code with: `ruff format .`",
-                "- Lint with: `ruff check --fix .`",
-                "- Type check with: `mypy .`",
-            ])
-        elif lang in {"javascript", "typescript"}:
-            workflow_lines.extend([
-                "- Install dependencies: `npm install`",
-                "- Run tests: `npm test`",
-                "- Lint: `npm run lint`",
-            ])
-        elif lang == "rust":
-            workflow_lines.extend([
-                "- Build: `cargo build`",
-                "- Test: `cargo test`",
-                "- Lint: `cargo clippy`",
-                "- Format: `cargo fmt`",
-            ])
-        elif lang == "go":
-            workflow_lines.extend([
-                "- Build: `go build ./...`",
-                "- Test: `go test ./...`",
-                "- Format: `gofmt -w .`",
-            ])
-    
+
+    language_guidelines: dict[str, list[str]] = {
+        "python": [
+            "- Run tests before committing: `pytest`",
+            "- Format code with: `ruff format .`",
+            "- Lint with: `ruff check --fix .`",
+            "- Type check with: `mypy .`",
+        ],
+        "javascript": [
+            "- Install dependencies: `npm install`",
+            "- Run tests: `npm test`",
+            "- Lint: `npm run lint`",
+        ],
+        "rust": [
+            "- Build: `cargo build`",
+            "- Test: `cargo test`",
+            "- Lint: `cargo clippy`",
+            "- Format: `cargo fmt`",
+        ],
+        "go": [
+            "- Build: `go build ./...`",
+            "- Test: `go test ./...`",
+            "- Format: `gofmt -w .`",
+        ],
+        "php": [
+            "- Install dependencies: `composer install`",
+            "- Run tests: `vendor/bin/phpunit`",
+            "- Check coding standards: `vendor/bin/phpcs`",
+            "- Auto-fix coding standards: `vendor/bin/phpcbf`",
+        ],
+        "c": [
+            "- Configure build: `cmake -B build`",
+            "- Build: `cmake --build build`",
+            "- Run tests: `ctest --test-dir build`",
+        ],
+        "java": [
+            "- Build: `mvn package` (or `./gradlew build`)",
+            "- Run tests: `mvn test` (or `./gradlew test`)",
+        ],
+    }
+    # TypeScript shares the Node.js workflow; C++ shares the CMake workflow.
+    language_guidelines["typescript"] = language_guidelines["javascript"]
+    language_guidelines["c++"] = language_guidelines["c"]
+
+    # A detected framework is the strongest signal of the primary language —
+    # e.g. a WordPress theme is alphabetically "JavaScript, PHP" but is really a
+    # PHP project. Promote the framework's language ahead of the sorted list.
+    framework_language = {
+        "wordpress": "php", "laravel": "php", "symfony": "php",
+        "django": "python", "flask": "python", "fastapi": "python",
+        "react": "javascript", "vue": "javascript", "angular": "javascript",
+        "next.js": "javascript", "express": "javascript", "nestjs": "javascript",
+    }
+    ordered = [lang.lower() for lang in analysis.languages]
+    for fw in analysis.frameworks:
+        primary = framework_language.get(fw.lower())
+        if primary and primary in ordered:
+            ordered.remove(primary)
+            ordered.insert(0, primary)
+            break
+
+    # Use the first candidate language that has known guidelines.
+    for detected in ordered:
+        if guidelines := language_guidelines.get(detected):
+            workflow_lines = list(guidelines)
+            break
+
     if not workflow_lines:
         workflow_lines.extend([
             "- Run tests before committing",

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import fnmatch
+import os
 from pathlib import Path
 import re
 
@@ -74,13 +76,45 @@ class AnalysisConfig:
     max_depth: int = 4
     max_files: int = 1000
     exclude_dirs: set[str] = field(default_factory=lambda: {
-        ".git", ".svn", ".hg", "node_modules", ".venv", "venv", ".env", 
+        ".git", ".svn", ".hg", "node_modules", ".venv", "venv", ".env",
         "__pycache__", ".mypy_cache", ".pytest_cache", ".vscode", ".idea",
-        "build", "dist", "target", "out", "bin", "obj", "logs"
+        "build", "dist", "target", "out", "bin", "obj", "logs",
+        "vendor", ".next", ".nuxt", ".svelte-kit", ".gradle", ".tox",
+        "coverage", "Pods", ".cargo", "vendor-bin",
     })
     exclude_files: set[str] = field(default_factory=lambda: {
         "*.log", "*.pyc", "*.swp", "*.swo", ".DS_Store", "Thumbs.db"
     })
+
+
+def _find_files(
+    root: Path,
+    pattern: str,
+    config: AnalysisConfig,
+    limit: int | None = None,
+) -> list[Path]:
+    """Find files matching a glob pattern, pruning excluded dirs and respecting depth/limits.
+
+    This is a bounded replacement for ``Path.rglob`` that honors ``config.exclude_dirs``
+    (so we never descend into ``node_modules``, ``.venv``, ``vendor`` etc.), ``max_depth``
+    and ``max_files``. Without this, language/framework detection picks up files from
+    dependencies and the scan can be very slow on large repos.
+    """
+    matches: list[Path] = []
+    cap = limit if limit is not None else config.max_files
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel = Path(dirpath).relative_to(root)
+        depth = 0 if str(rel) == "." else len(rel.parts)
+        # Prune excluded directories in-place so os.walk skips them entirely.
+        dirnames[:] = [d for d in dirnames if d not in config.exclude_dirs]
+        if depth >= config.max_depth:
+            dirnames[:] = []
+        for filename in filenames:
+            if fnmatch.fnmatch(filename, pattern):
+                matches.append(Path(dirpath) / filename)
+                if cap is not None and len(matches) >= cap:
+                    return matches
+    return matches
 
 
 async def analyze_codebase(
@@ -108,7 +142,7 @@ async def analyze_codebase(
         _detect_vcs(root, analysis),
         _detect_project_metadata(root, analysis),
         _detect_build_system(root, analysis),
-        _detect_language_framework(root, analysis),
+        _detect_language_framework(root, analysis, analysis_config),
         _detect_structure(root, analysis, analysis_config),
         _detect_entry_points(root, analysis, analysis_config),
         _detect_env_setup(root, analysis, analysis_config),
@@ -116,13 +150,14 @@ async def analyze_codebase(
     ]
     
     await asyncio.gather(*tasks)
-    
-    # Deduplicate and clean up
-    analysis.build_commands = list(set(analysis.build_commands))
-    analysis.test_commands = list(set(analysis.test_commands))
-    analysis.languages = list(set(analysis.languages))
-    analysis.frameworks = list(set(analysis.frameworks))
-    
+
+    # Deduplicate while preserving the order/sorting done by each detector.
+    # (list(set(...)) would randomize ordering and make output non-deterministic.)
+    analysis.build_commands = list(dict.fromkeys(analysis.build_commands))
+    analysis.test_commands = list(dict.fromkeys(analysis.test_commands))
+    analysis.languages = list(dict.fromkeys(analysis.languages))
+    analysis.frameworks = list(dict.fromkeys(analysis.frameworks))
+
     return analysis
 
 
@@ -185,17 +220,43 @@ async def _detect_project_metadata(root: Path, analysis: CodebaseAnalysis) -> No
                 analysis.project_version = version_match.group(1)
         except (OSError, UnicodeDecodeError):
             pass
-    
+
+    # Check for composer.json (PHP) — only fill fields not already set.
+    composer_json = root / "composer.json"
+    if composer_json.exists():
+        try:
+            import json
+            with open(composer_json, encoding="utf-8") as f:
+                data = json.load(f)
+            if not analysis.project_name:
+                analysis.project_name = data.get("name", "")
+            if not analysis.project_description:
+                analysis.project_description = data.get("description", "")
+            if not analysis.project_version:
+                analysis.project_version = data.get("version", "")
+        except (json.JSONDecodeError, OSError, ImportError):
+            pass
+
+    # Check for go.mod module name (Go).
+    go_mod = root / "go.mod"
+    if go_mod.exists() and not analysis.project_name:
+        try:
+            content = read_safe(go_mod).text
+            if module_match := re.search(r'^module\s+(\S+)', content, re.MULTILINE):
+                analysis.project_name = module_match.group(1).rsplit("/", 1)[-1]
+        except (OSError, UnicodeDecodeError):
+            pass
+
     # Check for README files for project description
     for readme in ["README.md", "README.txt", "readme.md"]:
         readme_path = root / readme
         if readme_path.exists():
             try:
                 content = read_safe(readme_path).text
-                # First non-empty line as potential description
+                # First non-empty line as potential description (strip markdown heading markers)
                 if not analysis.project_description:
-                    first_line = content.split('\n')[0].strip()
-                    if first_line and first_line != f"#{analysis.project_name}":
+                    first_line = content.split('\n')[0].strip().lstrip('#').strip()
+                    if first_line and first_line.lower() != analysis.project_name.lower():
                         analysis.project_description = first_line[:200]  # Limit length
             except (OSError, UnicodeDecodeError):
                 pass
@@ -248,19 +309,18 @@ async def _detect_build_system(root: Path, analysis: CodebaseAnalysis) -> None: 
 
     # Node.js — detect actual package manager
     package_json = root / "package.json"
+    node_pm = "npm"
     if package_json.exists():
         if (root / "pnpm-lock.yaml").exists():
-            pm = "pnpm"
+            node_pm = "pnpm"
         elif (root / "yarn.lock").exists():
-            pm = "yarn"
-        else:
-            pm = "npm"
-        analysis.package_managers.append(pm)
+            node_pm = "yarn"
+        analysis.package_managers.append(node_pm)
 
-        analysis.build_commands.append(f"{pm} install")
-        analysis.test_commands.append(f"{pm} test")
-        analysis.lint_commands.append(f"{pm} run lint")
-        analysis.build_commands.append(f"{pm} run build")
+        analysis.build_commands.append(f"{node_pm} install")
+        analysis.test_commands.append(f"{node_pm} test")
+        analysis.lint_commands.append(f"{node_pm} run lint")
+        analysis.build_commands.append(f"{node_pm} run build")
     
     # Rust/Cargo
     cargo_toml = root / "Cargo.toml"
@@ -281,7 +341,67 @@ async def _detect_build_system(root: Path, analysis: CodebaseAnalysis) -> None: 
         analysis.test_commands.append("go test ./...")
         analysis.lint_commands.append("golangci-lint run")
         analysis.lint_commands.append("gofmt -w .")
-    
+
+    # PHP/Composer
+    composer_json = root / "composer.json"
+    if composer_json.exists():
+        analysis.package_managers.append("composer")
+        analysis.build_commands.append("composer install")
+        try:
+            import json
+            with open(composer_json, encoding="utf-8") as f:
+                data = json.load(f)
+            # Named composer scripts
+            for script_name in data.get("scripts", {}):
+                cmd = f"composer {script_name}"
+                low = script_name.lower()
+                if "test" in low:
+                    analysis.test_commands.append(cmd)
+                elif "lint" in low or "cs" in low or "stan" in low or "analy" in low:
+                    analysis.lint_commands.append(cmd)
+                elif "build" in low:
+                    analysis.build_commands.append(cmd)
+            # Tooling inferred from dependencies
+            deps = {**data.get("require", {}), **data.get("require-dev", {})}
+            if any("phpunit" in d for d in deps):
+                analysis.test_commands.append("vendor/bin/phpunit")
+            if any("pestphp" in d for d in deps):
+                analysis.test_commands.append("vendor/bin/pest")
+            if any("squizlabs/php_codesniffer" in d for d in deps):
+                analysis.lint_commands.append("vendor/bin/phpcs")
+                analysis.lint_commands.append("vendor/bin/phpcbf")
+            if any("friendsofphp/php-cs-fixer" in d for d in deps):
+                analysis.lint_commands.append("vendor/bin/php-cs-fixer fix")
+            if any("phpstan" in d for d in deps):
+                analysis.lint_commands.append("vendor/bin/phpstan analyse")
+        except (json.JSONDecodeError, OSError, ImportError):
+            pass
+
+    # Standalone PHPUnit config (no composer dependency declared)
+    if ((root / "phpunit.xml").exists() or (root / "phpunit.xml.dist").exists()) \
+            and "vendor/bin/phpunit" not in analysis.test_commands:
+        analysis.test_commands.append("vendor/bin/phpunit")
+
+    # CMake (C/C++)
+    if (root / "CMakeLists.txt").exists():
+        analysis.package_managers.append("cmake")
+        analysis.build_commands.append("cmake -B build")
+        analysis.build_commands.append("cmake --build build")
+        analysis.test_commands.append("ctest --test-dir build")
+
+    # Java — Maven
+    if (root / "pom.xml").exists():
+        analysis.package_managers.append("maven")
+        analysis.build_commands.append("mvn package")
+        analysis.test_commands.append("mvn test")
+
+    # Java/Kotlin — Gradle
+    if (root / "build.gradle").exists() or (root / "build.gradle.kts").exists():
+        analysis.package_managers.append("gradle")
+        gradle = "./gradlew" if (root / "gradlew").exists() else "gradle"
+        analysis.build_commands.append(f"{gradle} build")
+        analysis.test_commands.append(f"{gradle} test")
+
     # JavaScript/TypeScript — extract named scripts using detected package manager
     if package_json.exists():
         try:
@@ -289,9 +409,8 @@ async def _detect_build_system(root: Path, analysis: CodebaseAnalysis) -> None: 
             with open(package_json, encoding="utf-8") as f:
                 data = json.load(f)
                 scripts = data.get("scripts", {})
-                detected_pm = analysis.package_managers[-1] if analysis.package_managers else "npm"
                 for script_name in scripts:
-                    full_cmd = f"{detected_pm} run {script_name}"
+                    full_cmd = f"{node_pm} run {script_name}"
                     if "build" in script_name.lower():
                         analysis.build_commands.append(full_cmd)
                     elif "test" in script_name.lower():
@@ -330,17 +449,18 @@ async def _detect_build_system(root: Path, analysis: CodebaseAnalysis) -> None: 
         setattr(analysis, attr, list(dict.fromkeys(commands)))  # Preserve order, remove dupes
 
 
-async def _detect_language_framework(root: Path, analysis: CodebaseAnalysis) -> None:  # pylint: disable=too-many-branches,too-many-nested-blocks
+async def _detect_language_framework(root: Path, analysis: CodebaseAnalysis, config: AnalysisConfig) -> None:  # pylint: disable=too-many-branches,too-many-nested-blocks,too-many-statements
     """Detect languages and frameworks."""
     # Check for language-specific files
     file_indicators: dict[str, list[str]] = {
         "Python": ["*.py", "pyproject.toml", "setup.py", "requirements.txt", "Pipfile"],
-        "JavaScript": ["*.js", "*.mjs", "package.json", "node_modules"],
+        "JavaScript": ["*.js", "*.mjs", "package.json"],
         "TypeScript": ["*.ts", "tsconfig.json"],
         "Rust": ["*.rs", "Cargo.toml"],
         "Go": ["*.go", "go.mod"],
         "Java": ["*.java", "pom.xml", "build.gradle"],
-        "C++": ["*.cpp", "*.h", "*.hpp", "CMakeLists.txt"],
+        "C": ["*.c"],
+        "C++": ["*.cpp", "*.cc", "*.cxx", "*.hpp"],
         "C#": ["*.cs", "*.sln", "*.csproj"],
         "Ruby": ["*.rb", "Gemfile"],
         "PHP": ["*.php", "composer.json"],
@@ -349,12 +469,12 @@ async def _detect_language_framework(root: Path, analysis: CodebaseAnalysis) -> 
         "Shell": ["*.sh"],
         "Docker": ["Dockerfile", "docker-compose.yml"],
     }
-    
+
     for lang, indicators in file_indicators.items():
         for indicator in indicators:
             if indicator.startswith("*."):
                 try:
-                    if list(root.rglob(indicator)):
+                    if _find_files(root, indicator, config, limit=1):
                         analysis.languages.append(lang)
                         break
                 except (OSError, PermissionError):
@@ -380,7 +500,7 @@ async def _detect_language_framework(root: Path, analysis: CodebaseAnalysis) -> 
             else:
                 # Check for imports in Python files
                 try:
-                    py_files = list(root.rglob("*.py"))[:50]  # Limit for performance
+                    py_files = _find_files(root, "*.py", config, limit=50)
                     for py_file in py_files:
                         if py_file.is_file():
                             content = read_safe(py_file).text
@@ -420,7 +540,39 @@ async def _detect_language_framework(root: Path, analysis: CodebaseAnalysis) -> 
                                         ("angular.json", "Angular"), ("nest-cli.json", "NestJS")]:
             if (root / config_file).exists() and framework not in analysis.frameworks:
                 analysis.frameworks.append(framework)
-    
+
+    if "PHP" in analysis.languages:
+        composer_deps: dict[str, str] = {}
+        composer_json = root / "composer.json"
+        if composer_json.exists():
+            try:
+                import json
+                with open(composer_json, encoding="utf-8") as f:
+                    cdata = json.load(f)
+                composer_deps = {**cdata.get("require", {}), **cdata.get("require-dev", {})}
+            except (json.JSONDecodeError, OSError, ImportError):
+                pass
+
+        if (root / "artisan").exists() or any(d.startswith("laravel/") for d in composer_deps):
+            analysis.frameworks.append("Laravel")
+        if (root / "bin" / "console").exists() or any(d.startswith("symfony/") for d in composer_deps):
+            analysis.frameworks.append("Symfony")
+
+        # WordPress: core install, theme (style.css header / functions.php), or known packages.
+        is_wordpress = (root / "wp-config.php").exists() or (root / "wp-load.php").exists()
+        if not is_wordpress and (root / "style.css").exists():
+            try:
+                if "Theme Name:" in read_safe(root / "style.css").text:
+                    is_wordpress = True
+            except (OSError, UnicodeDecodeError):
+                pass
+        if not is_wordpress and (root / "functions.php").exists():
+            is_wordpress = True
+        if not is_wordpress and any("roots/" in d or "wpackagist" in d for d in composer_deps):
+            is_wordpress = True
+        if is_wordpress:
+            analysis.frameworks.append("WordPress")
+
     # Sort and deduplicate
     analysis.languages.sort()
     analysis.languages = list(dict.fromkeys(analysis.languages))
@@ -475,19 +627,21 @@ async def _detect_structure(root: Path, analysis: CodebaseAnalysis, config: Anal
 async def _detect_entry_points(root: Path, analysis: CodebaseAnalysis, config: AnalysisConfig) -> None:
     """Detect entry points and main modules."""
     common_entry_points = [
-        "main.py", "app.py", "index.py", "server.py", 
-        "cli.py", "__main__.py", "main.js", "index.js", 
-        "main.ts", "index.ts", "App.tsx", "main.rs"
+        "main.py", "app.py", "index.py", "server.py",
+        "cli.py", "__main__.py", "main.js", "index.js",
+        "main.ts", "index.ts", "App.tsx", "main.rs",
+        "main.go", "index.php", "artisan", "functions.php",
+        "main.c", "main.cpp", "Main.java",
     ]
-    
+
     for entry in common_entry_points:
         path = root / entry
         if path.exists():
             analysis.entry_points.append(entry)
-    
+
     # Check for package __main__.py files
     try:
-        py_files = list(root.rglob("__main__.py"))
+        py_files = _find_files(root, "__main__.py", config)
         for py_file in py_files:
             rel_path = py_file.relative_to(root).as_posix()
             if rel_path not in analysis.entry_points:
@@ -554,6 +708,14 @@ async def _detect_code_standards(root: Path, analysis: CodebaseAnalysis, config:
         (".stylelintrc", "stylelint"),
         ("tsconfig.json", "TypeScript"),
         (".black.toml", "black"),
+        (".php-cs-fixer.php", "PHP-CS-Fixer"),
+        (".php-cs-fixer.dist.php", "PHP-CS-Fixer"),
+        ("phpcs.xml", "PHP_CodeSniffer"),
+        ("phpcs.xml.dist", "PHP_CodeSniffer"),
+        (".phpcs.xml", "PHP_CodeSniffer"),
+        ("phpstan.neon", "PHPStan"),
+        ("phpstan.neon.dist", "PHPStan"),
+        (".editorconfig", "EditorConfig"),
     ]
 
     for config_file, standard in linter_configs:
@@ -578,30 +740,28 @@ async def _detect_code_standards(root: Path, analysis: CodebaseAnalysis, config:
         except (OSError, UnicodeDecodeError):
             pass
     
-    # Naming conventions from code analysis
-    # Check Python files for common patterns
+    # Naming conventions from code analysis — sample several Python files (not just
+    # the first one, whose contents would otherwise decide all conventions).
     try:
-        py_files = list(root.rglob("*.py"))[:50]  # Limit for performance
+        py_files = _find_files(root, "*.py", config, limit=10)
         for py_file in py_files:
             if py_file.is_file():
                 content = read_safe(py_file).text
-                
+
                 # Check for type hints
                 if "def " in content and ":" in content:
                     if "-> " in content:
                         analysis.naming_conventions.append("Type hints")
                     if "from typing import " in content:
                         analysis.naming_conventions.append("Modern typing")
-                
+
                 # Check for class naming
                 if re.search(r'class\s+[A-Z][a-zA-Z0-9]+', content):
                     analysis.naming_conventions.append("PascalCase classes")
-                
+
                 # Check for function naming
                 if re.search(r'def\s+[a-z][a-z0-9_]+', content):
                     analysis.naming_conventions.append("snake_case functions")
-                    
-                break  # Just sample first file for performance
     except (OSError, PermissionError):
         pass
     

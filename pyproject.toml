@@ -226,6 +226,9 @@ ignore = ["D203", "D205", "D213", "ANN401", "PLR6301"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN", "PLR"]
+# Codebase-analysis detectors are intentionally branch-heavy (one branch per
+# language/build-system); complexity limits are not meaningful here.
+"vibe/setup/init/*" = ["PLR0912", "PLR0914", "PLR0915", "PLR1702"]
 
 
 [tool.ruff.lint.flake8-tidy-imports]
