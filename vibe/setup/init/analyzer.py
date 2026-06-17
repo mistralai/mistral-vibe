@@ -20,6 +20,7 @@ from vibe.setup.init.registry import (
     LANGUAGE_BY_EXT,
     LANGUAGE_MARKERS,
     MANIFEST_NAMES,
+    MANIFEST_PACKAGE_MANAGER,
     MONOREPO_FILE_MARKERS,
 )
 
@@ -142,6 +143,22 @@ class AnalysisConfig:
             "Thumbs.db",
         }
     )
+
+
+def _collapse_script_variants(names: list[str]) -> list[str]:
+    """Keep only base scripts, dropping colon-separated parametric variants.
+
+    E.g. ``["test:patterns", "test:patterns:mobile", "test:patterns:tablet"]``
+    collapses to ``["test:patterns"]`` because the longer names are just
+    viewport/config variants of the base.
+    """
+    names_sorted = sorted(names, key=len)
+    kept: list[str] = []
+    for name in names_sorted:
+        if any(name.startswith(base + ":") for base in kept):
+            continue
+        kept.append(name)
+    return kept
 
 
 def _find_files(
@@ -338,7 +355,6 @@ async def _detect_vcs(root: Path, analysis: CodebaseAnalysis) -> None:
                 ".github/workflows/*.yml",
                 ".github/workflows/*.yaml",
                 ".gitlab-ci.yml",
-                ".gitignore",
             ]:
                 if list(root.glob(pattern)):
                     analysis.git_workflows.append(pattern)
@@ -601,22 +617,35 @@ async def _detect_build_system(root: Path, analysis: CodebaseAnalysis) -> None: 
         analysis.build_commands.append(f"{gradle} build")
         analysis.test_commands.append(f"{gradle} test")
 
-    # JavaScript/TypeScript — extract named scripts using detected package manager
+    # JavaScript/TypeScript — extract named scripts using detected package manager.
+    # Collapse parametric variants (e.g. test:patterns:mobile) to their base.
     if package_json.exists():
         try:
             with open(package_json, encoding="utf-8") as f:
                 data = json.load(f)
                 scripts = data.get("scripts", {})
+                build_names: list[str] = []
+                test_names: list[str] = []
+                lint_names: list[str] = []
+                run_names: list[str] = []
                 for script_name in scripts:
-                    full_cmd = f"{node_pm} run {script_name}"
-                    if "build" in script_name.lower():
-                        analysis.build_commands.append(full_cmd)
-                    elif "test" in script_name.lower():
-                        analysis.test_commands.append(full_cmd)
-                    elif "lint" in script_name.lower():
-                        analysis.lint_commands.append(full_cmd)
+                    low = script_name.lower()
+                    if "build" in low:
+                        build_names.append(script_name)
+                    elif "test" in low:
+                        test_names.append(script_name)
+                    elif "lint" in low:
+                        lint_names.append(script_name)
                     elif script_name in {"start", "dev"}:
-                        analysis.run_commands.append(full_cmd)
+                        run_names.append(script_name)
+                for name in _collapse_script_variants(build_names):
+                    analysis.build_commands.append(f"{node_pm} run {name}")
+                for name in _collapse_script_variants(test_names):
+                    analysis.test_commands.append(f"{node_pm} run {name}")
+                for name in _collapse_script_variants(lint_names):
+                    analysis.lint_commands.append(f"{node_pm} run {name}")
+                for name in run_names:
+                    analysis.run_commands.append(f"{node_pm} run {name}")
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -858,6 +887,21 @@ async def _detect_dev_environment(
     analysis.dev_environments.sort()
     analysis.dev_environments = list(dict.fromkeys(analysis.dev_environments))
 
+    # Add run commands for known dev-environment tools.
+    _DEV_RUN_COMMANDS: dict[str, list[str]] = {
+        "Lando": ["lando start"],
+        "DDEV": ["ddev start"],
+        "Vagrant": ["vagrant up"],
+        "Docker Compose": ["docker compose up"],
+        "Trellis": [
+            "trellis up",
+            "trellis deploy <environment>",
+        ],
+    }
+    for label in analysis.dev_environments:
+        for cmd in _DEV_RUN_COMMANDS.get(label, []):
+            analysis.run_commands.append(cmd)
+
 
 async def _detect_subprojects(
     root: Path, analysis: CodebaseAnalysis, config: AnalysisConfig
@@ -877,6 +921,7 @@ async def _detect_subprojects(
     except (OSError, PermissionError):
         manifests = []
 
+    seen_pms: set[str] = set(analysis.package_managers)
     for manifest in manifests:
         rel_dir = manifest.parent.relative_to(root)
         loc = "." if str(rel_dir) == "." else str(rel_dir)
@@ -885,6 +930,11 @@ async def _detect_subprojects(
         # Record nested projects (not the root itself) that resolved to a stack.
         if loc != "." and label:
             analysis.subprojects.append(f"{label} — `{loc}`")
+        # Bubble up package managers implied by sub-project manifests.
+        pm = MANIFEST_PACKAGE_MANAGER.get(manifest.name)
+        if pm and pm not in seen_pms:
+            seen_pms.add(pm)
+            analysis.package_managers.append(pm)
 
     _detect_monorepo_tools(root, analysis)
 

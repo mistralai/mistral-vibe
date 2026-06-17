@@ -197,6 +197,15 @@ MANIFEST_NAMES: tuple[str, ...] = (
     "Cargo.toml",
 )
 
+# Maps a manifest filename to its package manager. Used to bubble up package
+# managers discovered in sub-projects when the root has no matching manifest.
+MANIFEST_PACKAGE_MANAGER: dict[str, str] = {
+    "composer.json": "composer",
+    "Gemfile": "bundler",
+    "go.mod": "go",
+    "Cargo.toml": "cargo",
+}
+
 # JS/TS framework keyed by its package.json dependency name. Used to infer the
 # stack of every package.json (root and nested), replacing root-only detection.
 JS_FRAMEWORK_BY_DEP: dict[str, str] = {

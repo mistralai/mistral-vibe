@@ -290,6 +290,8 @@ def _framework_notes(analysis: CodebaseAnalysis) -> list[str]:
     frameworks = {f.lower() for f in analysis.frameworks}
     lines: list[str] = []
 
+    dev_envs = {e.lower() for e in analysis.dev_environments}
+
     if "bedrock" in frameworks or "sage" in frameworks:
         lines.append("## WordPress (Roots stack)")
         lines.append("")
@@ -309,6 +311,13 @@ def _framework_notes(analysis: CodebaseAnalysis) -> list[str]:
             lines.append(
                 "- **Acorn**: run framework/WP-CLI commands via `wp acorn ...`; clear "
                 "compiled Blade views with `wp acorn view:clear` after template changes."
+            )
+        if "trellis" in dev_envs:
+            lines.append(
+                "- **Trellis**: Ansible-based provisioning and deploys live in "
+                "`trellis/`. Environments are configured in `trellis/group_vars/`. "
+                "Use `trellis up` (Vagrant) for local dev, `trellis deploy <environment>` "
+                "to deploy."
             )
         lines.append("")
         lines.append(
