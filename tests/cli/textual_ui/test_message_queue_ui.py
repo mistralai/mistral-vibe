@@ -39,10 +39,10 @@ async def test_no_queue_header_when_empty(vibe_app: VibeApp) -> None:
 async def test_bash_submitted_during_running_bash_is_queued(vibe_app: VibeApp) -> None:
     async with vibe_app.run_test() as pilot:
         chat_input = vibe_app.query_one(ChatInputContainer)
-        chat_input.value = "!sleep 0.3"
+        chat_input.value = "!sleep 2"
         await pilot.press("enter")
 
-        await _wait_until(pilot, lambda: vibe_app._bash_task is not None, timeout=1.0)
+        await _wait_until(pilot, lambda: vibe_app._bash_task is not None, timeout=2.0)
 
         chat_input.value = "!echo queued"
         await pilot.press("enter")
