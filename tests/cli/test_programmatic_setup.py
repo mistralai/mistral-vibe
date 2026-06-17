@@ -19,6 +19,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "max_price": None,
         "max_tokens": None,
         "enabled_tools": None,
+        "disabled_tools": None,
         "output": "text",
         "agent": "default",
         "setup": False,
