@@ -324,6 +324,9 @@ def run_cli(args: argparse.Namespace) -> None:
         if args.enabled_tools:
             config.enabled_tools = args.enabled_tools
 
+        if args.disabled_tools:
+            config.disabled_tools = args.disabled_tools
+
         loaded_session = load_session(args, config)
 
         stdin_prompt = get_prompt_from_stdin()

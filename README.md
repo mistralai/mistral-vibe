@@ -279,6 +279,7 @@ When using `--prompt`, you can specify additional options:
 - **`--agent NAME`**: Select the agent profile for this run.
 - **`--auto-approve`**: Shortcut for `--agent auto-approve`. Approves all tool calls without prompting, including in interactive sessions.
 - **`--enabled-tools TOOL`**: Enable specific tools. In programmatic mode, this disables all other tools. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
+- **`--disabled-tools TOOL`**: Disable specific tools. Ignored if `--enabled-tools` is set. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
 - **`--output FORMAT`**: Set the output format. Options:
   - `text` (default): Human-readable text output
   - `json`: All messages as JSON at the end

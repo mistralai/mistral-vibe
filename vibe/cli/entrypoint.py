@@ -84,6 +84,14 @@ def parse_arguments() -> argparse.Namespace:
         "regex with 're:' prefix. Can be specified multiple times.",
     )
     parser.add_argument(
+        "--disabled-tools",
+        action="append",
+        metavar="TOOL",
+        help="Disable specific tools. Ignored if --enabled-tools is set. "
+        "Can use exact names, glob patterns (e.g., 'bash*'), or "
+        "regex with 're:' prefix. Can be specified multiple times.",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         choices=["text", "json", "streaming"],
