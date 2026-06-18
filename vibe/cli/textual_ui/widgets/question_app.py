@@ -68,6 +68,7 @@ class QuestionApp(Container):
         self.submit_widget: NoMarkupStatic | None = None
         self.help_widget: NoMarkupStatic | None = None
         self.tabs_widget: NoMarkupStatic | None = None
+        self.preview_widget: NoMarkupStatic | None = None
         self._mount_time: float = 0.0
 
     @property
@@ -126,6 +127,10 @@ class QuestionApp(Container):
                 self.option_widgets.append(widget)
                 yield widget
 
+            self.preview_widget = NoMarkupStatic("", classes="question-preview")
+            self.preview_widget.display = False
+            yield self.preview_widget
+
             with Horizontal(classes="question-other-row"):
                 self.other_prefix = NoMarkupStatic("", classes="question-other-prefix")
                 yield self.other_prefix
@@ -167,9 +172,26 @@ class QuestionApp(Container):
         self._update_tabs()
         self._update_title()
         self._update_options()
+        self._update_preview()
         self._update_other_row()
         self._update_submit()
         self._update_help()
+
+    def _update_preview(self) -> None:
+        if not self.preview_widget:
+            return
+        options = self._current_question.options
+        preview = (
+            options[self.selected_option].preview
+            if 0 <= self.selected_option < len(options)
+            else ""
+        )
+        if preview:
+            self.preview_widget.update(preview)
+            self.preview_widget.display = True
+        else:
+            self.preview_widget.update("")
+            self.preview_widget.display = False
 
     def _update_tabs(self) -> None:
         if not self.tabs_widget or len(self.questions) <= 1:

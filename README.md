@@ -176,7 +176,7 @@ The `ask_user_question` tool allows the agent to ask you clarifying questions du
 }])
 ```
 
-The agent can ask multiple questions at once, displayed as tabs. Each question supports 2-4 options plus an automatic "Other" option for free text responses.
+The agent can ask multiple questions at once, displayed as tabs. Each question supports 2-4 options plus an automatic "Other" option for free text responses. Options may also carry an optional `preview` (e.g. a code snippet or mockup) shown when the option is focused, making it easier to compare choices.
 
 ## Terminal Requirements
 

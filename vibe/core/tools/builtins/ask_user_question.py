@@ -23,6 +23,13 @@ class Choice(BaseModel):
     description: str = Field(
         default="", description="Optional explanation of this choice"
     )
+    preview: str = Field(
+        default="",
+        description=(
+            "Optional multi-line preview (e.g. a code snippet or mockup) shown when "
+            "this choice is focused, to help the user compare options."
+        ),
+    )
 
 
 class Question(BaseModel):
