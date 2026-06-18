@@ -93,7 +93,7 @@ pip install mistral-vibe
 
 - **Interactive Chat**: A conversational AI agent that understands your requests and breaks down complex tasks.
 - **Powerful Toolset**: A suite of tools for file manipulation, code searching, version control, and command execution, right from the chat prompt.
-  - Read, write, and patch files (`read`, `write_file`, `edit`).
+  - Read, write, and patch files (`read`, `write_file`, `edit`), and edit Jupyter notebooks cell-by-cell (`notebook_edit`).
   - Execute shell commands in a stateful terminal (`bash`), including long-running background commands (`run_in_background`) read via `bash_output` and stopped with `kill_shell`.
   - Recursively search code with `grep` (with `ripgrep` support), including file-glob filters, `files_with_matches`/`count` output modes, and context lines.
   - Find files by name with `glob` patterns (`**/*.py`), sorted newest-first.
