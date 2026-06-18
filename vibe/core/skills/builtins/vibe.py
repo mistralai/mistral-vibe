@@ -207,7 +207,7 @@ prompt for user permission before running the command.
 
 #### File Tool Permission Resolution
 
-File-based tools (`read`, `grep`, `write_file`, `edit`) resolve
+File-based tools (`read`, `grep`, `glob`, `write_file`, `edit`) resolve
 permissions in this order (first match wins):
 
 1. **Scratchpad** path → always allowed
