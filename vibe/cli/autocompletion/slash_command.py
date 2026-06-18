@@ -47,17 +47,16 @@ class SlashCommandController:
         if not self._suggestions:
             return CompletionResult.IGNORED
 
+        alias, _ = self._suggestions[self._selected_index]
+        is_subcommand = " " in alias
+
         match event.key:
             case "tab":
-                if self._apply_selected_completion(text, cursor_index):
-                    result = CompletionResult.HANDLED
-                else:
-                    result = CompletionResult.IGNORED
+                result = self._handle_tab(text, cursor_index, is_subcommand)
+            case "shift+tab":
+                result = self._handle_shift_tab(is_subcommand)
             case "enter":
-                if self._apply_selected_completion(text, cursor_index):
-                    result = CompletionResult.SUBMIT
-                else:
-                    result = CompletionResult.HANDLED
+                result = self._handle_enter(text, cursor_index, alias)
             case "down":
                 self._move_selection(1)
                 result = CompletionResult.HANDLED
@@ -68,6 +67,37 @@ class SlashCommandController:
                 result = CompletionResult.IGNORED
 
         return result
+
+    def _handle_tab(
+        self, text: str, cursor_index: int, is_subcommand: bool
+    ) -> CompletionResult:
+        if is_subcommand and len(self._suggestions) > 1:
+            self._move_selection(1)
+            return CompletionResult.HANDLED
+        if self._apply_selected_completion(text, cursor_index):
+            return CompletionResult.HANDLED
+        return CompletionResult.IGNORED
+
+    def _handle_shift_tab(self, is_subcommand: bool) -> CompletionResult:
+        if is_subcommand and len(self._suggestions) > 1:
+            self._move_selection(-1)
+            return CompletionResult.HANDLED
+        return CompletionResult.IGNORED
+
+    def _handle_enter(
+        self, text: str, cursor_index: int, alias: str
+    ) -> CompletionResult:
+        has_deeper = False
+        aliases, _ = self._completer._build_lookup()
+        prefix = alias + " "
+        for a in aliases:
+            if a.startswith(prefix):
+                has_deeper = True
+                break
+
+        if self._apply_selected_completion(text, cursor_index):
+            return CompletionResult.HANDLED if has_deeper else CompletionResult.SUBMIT
+        return CompletionResult.HANDLED
 
     def _move_selection(self, delta: int) -> None:
         if not self._suggestions:
@@ -91,5 +121,16 @@ class SlashCommandController:
 
         start, end = replacement_range
         self._view.replace_completion_range(start, end, alias)
-        self.reset()
+
+        # Check if there are any deeper completions starting with this alias + " "
+        has_deeper = False
+        aliases, _ = self._completer._build_lookup()
+        prefix = alias + " "
+        for a in aliases:
+            if a.startswith(prefix):
+                has_deeper = True
+                break
+
+        if not has_deeper:
+            self.reset()
         return True

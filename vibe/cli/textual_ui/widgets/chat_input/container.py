@@ -85,11 +85,15 @@ class ChatInputContainer(Vertical):
         self._body: ChatInputBody | None = None
 
     def _get_slash_entries(self) -> list[tuple[str, str]]:
-        entries = [
-            (alias, command.description)
-            for command in self._command_registry.commands.values()
-            for alias in sorted(command.aliases)
-        ]
+        entries = []
+        for command in self._command_registry.commands.values():
+            for alias in sorted(command.aliases):
+                if alias == "/skills":
+                    continue
+                entries.append((alias, command.description))
+                if command.subcommands:
+                    for sub_name, sub_desc in command.subcommands.items():
+                        entries.append((f"{alias} {sub_name}", sub_desc))
         if self._skill_entries_getter:
             entries.extend(self._skill_entries_getter())
         return sorted(entries)
@@ -204,6 +208,17 @@ class ChatInputContainer(Vertical):
                 return replacement
             # For @-prefixed completions, add space unless suffix starts with whitespace
             return replacement + (" " if not suffix or not suffix[0].isspace() else "")
+
+        # Check if the replacement has deeper completions (subcommands/arguments)
+        has_deeper = False
+        prefix = replacement + " "
+        for alias, _ in self._get_slash_entries():
+            if alias.startswith(prefix):
+                has_deeper = True
+                break
+
+        if has_deeper:
+            return replacement + " "
 
         # For other completions, add space only if suffix exists and doesn't start with whitespace
         return replacement + (" " if suffix and not suffix[0].isspace() else "")

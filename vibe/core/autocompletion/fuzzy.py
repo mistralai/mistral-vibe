@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import difflib
 
 PREFIX_MULTIPLIER = 2.0
 WORD_BOUNDARY_MULTIPLIER = 1.8
 CONSECUTIVE_MULTIPLIER = 1.3
+TYPO_MIN_PATTERN_LEN = 3
+TYPO_MIN_RATIO = 0.5
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,7 @@ def _find_best_match(
         _try_word_boundary_match,
         _try_consecutive_match,
         _try_subsequence_match,
+        _try_typo_match,
     ):
         match = matcher(pattern_original, pattern_lower, text_lower, text_original)
         if match.matched and match.score > best_score:
@@ -138,6 +142,31 @@ def _try_subsequence_match(
         score = _calculate_score(
             pattern_original, pattern, text_lower, tuple(indices), text_original
         )
+        return MatchResult(matched=True, score=score, matched_indices=tuple(indices))
+
+    return MatchResult(matched=False, score=0.0, matched_indices=())
+
+
+def _try_typo_match(
+    pattern_original: str, pattern: str, text_lower: str, text_original: str
+) -> MatchResult:
+    # Only try typo matching if pattern is at least TYPO_MIN_PATTERN_LEN chars long
+    if len(pattern) < TYPO_MIN_PATTERN_LEN:
+        return MatchResult(matched=False, score=0.0, matched_indices=())
+
+    matcher = difflib.SequenceMatcher(None, pattern, text_lower)
+    ratio = matcher.ratio()
+
+    if ratio >= TYPO_MIN_RATIO:
+        indices: list[int] = []
+        for block in matcher.get_matching_blocks():
+            if block.size > 0:
+                indices.extend(range(block.b, block.b + block.size))
+
+        # We give a score based on ratio to be compatible with base_score=100.0
+        # A ratio of 0.8 -> score of 80.0. This easily clears MIN_FUZZY_SCORE (10.0)
+        # but stays below perfect exact/prefix matches (which are > 100.0)
+        score = ratio * 100.0
         return MatchResult(matched=True, score=score, matched_indices=tuple(indices))
 
     return MatchResult(matched=False, score=0.0, matched_indices=())

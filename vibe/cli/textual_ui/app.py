@@ -1288,11 +1288,60 @@ class VibeApp(App):  # noqa: PLR0904
     def _get_skill_entries(self) -> list[tuple[str, str]]:
         if not self.agent_loop:
             return []
-        return [
+        entries = [
             (f"/{name}", info.description)
             for name, info in self.agent_loop.skill_manager.available_skills.items()
             if info.user_invocable
         ]
+
+        all_skills = self.agent_loop.skill_manager._discover_skills()
+
+        for name, _ in all_skills.items():
+            entries.append((f"/skill activate {name}", f"Enable skill: {name}"))
+            entries.append((f"/skill deactivate {name}", f"Disable skill: {name}"))
+
+        mcp_servers = self.config.mcp_servers if self.config else []
+        connector_registry = (
+            self.agent_loop.connector_registry
+            if (
+                self.agent_loop
+                and hasattr(self.agent_loop, "connector_registry")
+                and self._connectors_enabled
+            )
+            else None
+        )
+        connector_names = (
+            connector_registry.get_connector_names() if connector_registry else []
+        )
+        all_mcp_names = [s.name for s in mcp_servers] + connector_names
+        for name in all_mcp_names:
+            entries.append((f"/mcp {name}", f"Inspect MCP server/connector: {name}"))
+            entries.append((
+                f"/connectors {name}",
+                f"Inspect MCP server/connector: {name}",
+            ))
+
+        entries.append(("/loop list", "List scheduled loops"))
+        entries.append(("/loop cancel", "Cancel a scheduled loop run"))
+        entries.append(("/loop cancel all", "Cancel all scheduled loops"))
+        if (
+            self._loop_runner
+            and hasattr(self._loop_runner, "_manager")
+            and self._loop_runner._manager
+        ):
+            max_prompt_len = 30
+            for loop in self._loop_runner._manager.loops:
+                short_prompt = (
+                    loop.prompt[:max_prompt_len] + "..."
+                    if len(loop.prompt) > max_prompt_len
+                    else loop.prompt
+                )
+                entries.append((
+                    f"/loop cancel {loop.id}",
+                    f"Cancel loop {loop.id}: {short_prompt}",
+                ))
+
+        return entries
 
     def _expand_skill(self, user_input: str) -> Skill | None:
         if not self.agent_loop:
@@ -2141,6 +2190,102 @@ class VibeApp(App):  # noqa: PLR0904
 - **Cost**: ${stats.session_cost:.4f}
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
+
+    async def _manage_skills(self, cmd_args: str = "", **kwargs: Any) -> None:  # noqa: PLR0912, PLR0915
+        parts = cmd_args.strip().split()
+        if not parts:
+            help_text = """Usage: `/skill COMMAND [ARGS]...`
+
+  Manage Vibe skills.
+
+**Commands:**
+  `activate`    Enable a skill
+  `deactivate`  Disable a skill
+  `list`        List available skills and their status
+  `reload`      Reload skills from disk
+"""
+            await self._mount_and_scroll(UserCommandMessage(help_text))
+            return
+
+        action = parts[0].lower()
+        args = parts[1:]
+
+        if action == "reload":
+            await self._reload_config()
+        elif action == "list":
+            # Access the private method to get all skills, not just the enabled ones
+            all_skills = self.agent_loop.skill_manager._discover_skills()
+            active_skills = self.agent_loop.skill_manager.available_skills
+
+            if not all_skills:
+                await self._mount_and_scroll(UserCommandMessage("No skills found."))
+            else:
+                lines = ["## Skills"]
+                for name, info in sorted(all_skills.items()):
+                    desc = info.description or "No description provided."
+                    color = "\033[32m" if name in active_skills else "\033[91m"
+                    uncolor = "\033[0m"
+                    lines.append(f"{color} •{uncolor} **{name}** : {desc}")
+
+                await self._mount_and_scroll(UserCommandMessage("\n\n".join(lines)))
+        elif action == "activate":
+            if not args:
+                await self._mount_and_scroll(
+                    ErrorMessage("Usage: /skill activate <name>")
+                )
+            else:
+                name = args[0]
+                all_skills = self.agent_loop.skill_manager._discover_skills()
+                if name not in all_skills:
+                    await self._mount_and_scroll(
+                        ErrorMessage(f"Skill '{name}' not found on disk.")
+                    )
+                else:
+                    config = self.agent_loop.config
+                    enabled = list(config.enabled_skills)
+                    disabled = list(config.disabled_skills)
+
+                    if name in disabled:
+                        disabled.remove(name)
+                    if name not in enabled:
+                        enabled.append(name)
+
+                    VibeConfig.save_updates({
+                        "enabled_skills": enabled,
+                        "disabled_skills": disabled,
+                    })
+                    await self._reload_config()
+                    await self._mount_and_scroll(
+                        UserCommandMessage(f"Skill '{name}' activated.")
+                    )
+        elif action == "deactivate":
+            if not args:
+                await self._mount_and_scroll(
+                    ErrorMessage("Usage: /skill deactivate <name>")
+                )
+            else:
+                name = args[0]
+                config = self.agent_loop.config
+                enabled = list(config.enabled_skills)
+                disabled = list(config.disabled_skills)
+
+                if name in enabled:
+                    enabled.remove(name)
+                if name not in disabled:
+                    disabled.append(name)
+
+                VibeConfig.save_updates({
+                    "enabled_skills": enabled,
+                    "disabled_skills": disabled,
+                })
+                await self._reload_config()
+                await self._mount_and_scroll(
+                    UserCommandMessage(f"Skill '{name}' deactivated.")
+                )
+        else:
+            await self._mount_and_scroll(
+                ErrorMessage(f"Unknown skill action: {action}")
+            )
 
     async def _show_config(self, **kwargs: Any) -> None:
         """Switch to the configuration app in the bottom panel."""

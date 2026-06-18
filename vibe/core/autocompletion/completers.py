@@ -40,7 +40,39 @@ class CommandCompleter(Completer):
             descriptions[alias] = description
         return list(descriptions.keys()), descriptions
 
+    def _fuzzy_rank(
+        self, aliases: list[str], search_str: str
+    ) -> list[tuple[str, float]]:
+        scored: list[tuple[str, float]] = []
+        for alias in aliases:
+            result = fuzzy_match(search_str, alias)
+            if result.matched:
+                scored.append((alias, result.score))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
+    def _filter_aliases_by_prefix(
+        self, aliases: list[str], search_str: str
+    ) -> list[str]:
+        search_parts = search_str.split(" ")
+        target_len = len(search_parts)
+
+        filtered = []
+        for alias in aliases:
+            alias_parts = alias.split(" ")
+            if len(alias_parts) == target_len and alias_parts[:-1] == search_parts[:-1]:
+                filtered.append(alias)
+
+        return filtered
+
     def _head_word(self, text: str, cursor_pos: int) -> str:
+        full_typed = text[1:cursor_pos].lower()
+        aliases, _ = self._build_lookup()
+        prefix = "/" + full_typed
+        for alias in aliases:
+            if alias.lower().startswith(prefix):
+                return full_typed
+
         head = text.split(" ", 1)[0]
         return head[1 : min(cursor_pos, len(head))].lower()
 
@@ -62,32 +94,64 @@ class CommandCompleter(Completer):
         scored.sort(key=lambda x: x[1], reverse=True)
         return [alias for alias, _ in scored]
 
+    def _nested_completions(self, aliases: list[str], search_str: str) -> list[str]:
+        filtered_aliases = self._filter_aliases_by_prefix(aliases, search_str)
+        if filtered_aliases:
+            if search_str.endswith(" "):
+                return filtered_aliases
+
+            ranked = self._fuzzy_rank(filtered_aliases, search_str)
+            if len(ranked) == 1 and ranked[0][0] == search_str:
+                return []
+            return [alias for alias, _ in ranked]
+
+        head = search_str.split(" ", 1)[0]
+        return [head] if head in aliases else []
+
+    def _nested_completion_items(
+        self, aliases: list[str], descriptions: dict[str, str], search_str: str
+    ) -> list[tuple[str, str]]:
+        return [
+            (alias, descriptions.get(alias, ""))
+            for alias in self._nested_completions(aliases, search_str)
+        ]
+
     def get_completions(self, text: str, cursor_pos: int) -> list[str]:
         if not text.startswith("/"):
             return []
 
         aliases, _ = self._build_lookup()
+        if " " in text[:cursor_pos]:
+            search_str = text[:cursor_pos].lower()
+            return self._nested_completions(aliases, search_str)
+
         search_str = "/" + self._head_word(text, cursor_pos)
-        return self._fuzzy_filter(aliases, search_str)
+        ranked_aliases = self._fuzzy_filter(aliases, search_str)
+        if len(ranked_aliases) == 1 and ranked_aliases[0] == search_str:
+            return []
+        return ranked_aliases
 
     def get_completion_items(self, text: str, cursor_pos: int) -> list[tuple[str, str]]:
         if not text.startswith("/"):
             return []
 
         aliases, descriptions = self._build_lookup()
+        if " " in text[:cursor_pos]:
+            search_str = text[:cursor_pos].lower()
+            return self._nested_completion_items(aliases, descriptions, search_str)
+
         search_str = "/" + self._head_word(text, cursor_pos)
-        return [
-            (alias, descriptions.get(alias, ""))
-            for alias in self._fuzzy_filter(aliases, search_str)
-        ]
+        ranked_aliases = self._fuzzy_filter(aliases, search_str)
+        if len(ranked_aliases) == 1 and ranked_aliases[0] == search_str:
+            return []
+        return [(alias, descriptions.get(alias, "")) for alias in ranked_aliases]
 
     def get_replacement_range(
         self, text: str, cursor_pos: int
     ) -> tuple[int, int] | None:
         if not text.startswith("/"):
             return None
-        first_space = text.find(" ")
-        end = cursor_pos if first_space == -1 else min(cursor_pos, first_space)
+        end = 1 + len(self._head_word(text, cursor_pos))
         return (0, end)
 
 
