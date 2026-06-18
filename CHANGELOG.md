@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ask_user_question` options accept an optional `preview` (e.g. a code snippet or mockup) shown when the option is focused, to help compare choices
 - Background shells: `bash` accepts `run_in_background` to start long-running commands (dev servers, watchers) without blocking; read their output with the new `bash_output` tool and stop them with the new `kill_shell` tool
 - `notebook_edit` tool: replace, insert, or delete cells in Jupyter `.ipynb` notebooks while preserving the notebook JSON structure
+- Quick memory: prefix a line with `#` to append a note to your user-level `AGENTS.md` without sending it to the agent
 
 ## [2.16.1] - 2026-06-16
 

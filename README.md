@@ -233,6 +233,7 @@ Simply run `vibe` to enter the interactive chat loop.
 - **Multi-line Input**: Press `Ctrl+J` or `Shift+Enter` for select terminals to insert a newline.
 - **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`).
 - **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
+- **Quick Memory**: Prefix a line with `#` to save a note to your user-level `AGENTS.md` without sending it to the agent (e.g., `> # always run tests with uv`).
 - **External Editor**: Press `Ctrl+G` to edit your current input in an external editor.
 - **Tool Output Toggle**: Press `Ctrl+O` to toggle the tool output view.
 - **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.

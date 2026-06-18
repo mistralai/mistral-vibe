@@ -62,6 +62,8 @@ from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.chat_input.input_kinds import (
     Bash,
     EmptyBash,
+    EmptyMemory,
+    Memory,
     Prompt,
     Skill,
     SlashCommand,
@@ -166,6 +168,7 @@ from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.hooks.models import HookStartEvent
 from vibe.core.log_reader import LogReader
 from vibe.core.logger import logger
+from vibe.core.memory import append_user_memory
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.rewind import RewindError
 from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image
@@ -819,6 +822,14 @@ class VibeApp(App):  # noqa: PLR0904
     def _warn_not_queueable(self, message: str) -> None:
         self.notify(message, severity="warning", markup=False)
 
+    async def _handle_memory_note(self, note: str) -> None:
+        try:
+            path = append_user_memory(note)
+        except (OSError, ValueError) as e:
+            self.notify(f"Could not save memory: {e}", severity="error", markup=False)
+            return
+        self.notify(f"Saved to memory ({path})", markup=False)
+
     async def _dispatch_idle_input(self, value: str) -> None:
         match classify(value, commands=self.commands, expand_skill=self._expand_skill):
             case Teleport(target=target):
@@ -834,6 +845,10 @@ class VibeApp(App):  # noqa: PLR0904
                 self._queue.notify_busy_changed()
             case EmptyBash():
                 await self._empty_bash_error()
+            case Memory(note=note):
+                await self._handle_memory_note(note)
+            case EmptyMemory():
+                self._warn_not_queueable("No note provided after '#'")
             case Prompt(text=text):
                 await self._handle_user_message(text)
 
@@ -864,6 +879,10 @@ class VibeApp(App):  # noqa: PLR0904
                 await self._queue.enqueue_bash(command)
             case EmptyBash():
                 await self._empty_bash_error()
+            case Memory(note=note):
+                await self._handle_memory_note(note)
+            case EmptyMemory():
+                self._warn_not_queueable("No note provided after '#'")
             case Prompt(text=text):
                 return await self._enqueue_prompt_with_resources(text)
         return True
