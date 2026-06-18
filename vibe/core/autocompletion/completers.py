@@ -94,14 +94,9 @@ class CommandCompleter(Completer):
         scored.sort(key=lambda x: x[1], reverse=True)
         return [alias for alias, _ in scored]
 
-    def get_completions(self, text: str, cursor_pos: int) -> list[str]:
-        if not text.startswith("/"):
-            return []
-
-        aliases, _ = self._build_lookup()
-        if " " in text[:cursor_pos]:
-            search_str = text[:cursor_pos].lower()
-            filtered_aliases = self._filter_aliases_by_prefix(aliases, search_str)
+    def _nested_completions(self, aliases: list[str], search_str: str) -> list[str]:
+        filtered_aliases = self._filter_aliases_by_prefix(aliases, search_str)
+        if filtered_aliases:
             if search_str.endswith(" "):
                 return filtered_aliases
 
@@ -109,6 +104,26 @@ class CommandCompleter(Completer):
             if len(ranked) == 1 and ranked[0][0] == search_str:
                 return []
             return [alias for alias, _ in ranked]
+
+        head = search_str.split(" ", 1)[0]
+        return [head] if head in aliases else []
+
+    def _nested_completion_items(
+        self, aliases: list[str], descriptions: dict[str, str], search_str: str
+    ) -> list[tuple[str, str]]:
+        return [
+            (alias, descriptions.get(alias, ""))
+            for alias in self._nested_completions(aliases, search_str)
+        ]
+
+    def get_completions(self, text: str, cursor_pos: int) -> list[str]:
+        if not text.startswith("/"):
+            return []
+
+        aliases, _ = self._build_lookup()
+        if " " in text[:cursor_pos]:
+            search_str = text[:cursor_pos].lower()
+            return self._nested_completions(aliases, search_str)
 
         search_str = "/" + self._head_word(text, cursor_pos)
         ranked_aliases = self._fuzzy_filter(aliases, search_str)
@@ -123,14 +138,7 @@ class CommandCompleter(Completer):
         aliases, descriptions = self._build_lookup()
         if " " in text[:cursor_pos]:
             search_str = text[:cursor_pos].lower()
-            filtered_aliases = self._filter_aliases_by_prefix(aliases, search_str)
-            if search_str.endswith(" "):
-                return [(alias, descriptions.get(alias, "")) for alias in filtered_aliases]
-
-            ranked = self._fuzzy_rank(filtered_aliases, search_str)
-            if len(ranked) == 1 and ranked[0][0] == search_str:
-                return []
-            return [(alias, descriptions.get(alias, "")) for alias, _ in ranked]
+            return self._nested_completion_items(aliases, descriptions, search_str)
 
         search_str = "/" + self._head_word(text, cursor_pos)
         ranked_aliases = self._fuzzy_filter(aliases, search_str)

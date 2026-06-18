@@ -193,7 +193,16 @@ class TestCommandRegistry:
 class TestCommandAliases:
     def test_exit_aliases_resolve_to_exit(self) -> None:
         registry = CommandRegistry()
-        for alias in ["/exit", "/quit", "/close", "/leave", "exit", "quit", ":q", ":quit"]:
+        for alias in [
+            "/exit",
+            "/quit",
+            "/close",
+            "/leave",
+            "exit",
+            "quit",
+            ":q",
+            ":quit",
+        ]:
             assert registry.get_command_name(alias) == "exit"
 
     def test_help_aliases_resolve_to_help(self) -> None:

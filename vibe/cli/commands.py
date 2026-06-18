@@ -106,9 +106,16 @@ class CommandRegistry:
                 handler="_compact_history",
             ),
             "exit": Command(
-                aliases=frozenset(
-                    ["/exit", "/quit", "/close", "/leave", "exit", "quit", ":q", ":quit"]
-                ),
+                aliases=frozenset([
+                    "/exit",
+                    "/quit",
+                    "/close",
+                    "/leave",
+                    "exit",
+                    "quit",
+                    ":q",
+                    ":quit",
+                ]),
                 description="Exit the application",
                 handler="_exit_app",
                 exits=True,
