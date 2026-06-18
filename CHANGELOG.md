@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `glob` tool: find files by glob pattern (e.g. `**/*.py`), returned newest-first, with common noise directories pruned automatically
 - `grep` now supports `output_mode` (`content` / `files_with_matches` / `count`), a `glob` file filter, `context_before` / `context_after` lines, `ignore_case`, and `multiline` matching
 - `ask_user_question` options accept an optional `preview` (e.g. a code snippet or mockup) shown when the option is focused, to help compare choices
+- Background shells: `bash` accepts `run_in_background` to start long-running commands (dev servers, watchers) without blocking; read their output with the new `bash_output` tool and stop them with the new `kill_shell` tool
 
 ## [2.16.1] - 2026-06-16
 

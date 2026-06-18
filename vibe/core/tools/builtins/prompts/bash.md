@@ -8,6 +8,11 @@ Use the `bash` tool to run one-off shell commands.
 - When `timeout` is not specified (or set to `None`), the config default is used
 - If a command is timing out, do not hesitate to increase the timeout using the `timeout` argument
 
+**Background mode:**
+- Set `run_in_background=true` for long-running commands (dev servers, watchers, builds) that should not block. The call returns immediately with a `shell_id`.
+- Read accumulated output with `bash_output(shell_id=...)` (returns only new output since the last read).
+- Stop a background shell with `kill_shell(shell_id=...)`.
+
 **IMPORTANT: Use dedicated tools if available instead of these bash commands:**
 
 **File Operations - DO NOT USE:**
@@ -21,7 +26,7 @@ Use the `bash` tool to run one-off shell commands.
 
 **Search Operations - DO NOT USE:**
 - `grep -r "pattern" .` → Use `grep(pattern="pattern", path=".")`
-- `find . -name "*.py"` → Use `bash("ls -la")` for current dir or `grep` with appropriate pattern
+- `find . -name "*.py"` → Use `glob(pattern="**/*.py")`
 - `ag`, `ack`, `rg` commands → Use the `grep` tool
 - `locate` → Use `grep` tool
 

@@ -13,6 +13,7 @@ import tree_sitter_bash as tsbash
 
 from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.arity import build_session_pattern
+from vibe.core.tools.background_shells import get_background_shell_registry
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -271,6 +272,13 @@ class BashArgs(BaseModel):
     timeout: int | None = Field(
         default=None, description="Override the default command timeout."
     )
+    run_in_background: bool = Field(
+        default=False,
+        description=(
+            "Run the command detached and return immediately with a shell id. "
+            "Use bash_output to read its output and kill_shell to stop it."
+        ),
+    )
 
 
 class BashResult(BaseModel):
@@ -278,6 +286,9 @@ class BashResult(BaseModel):
     stdout: str
     stderr: str
     returncode: int
+    shell_id: str | None = Field(
+        default=None, description="Set when the command was started in the background."
+    )
 
 
 class Bash(
@@ -503,6 +514,10 @@ class Bash(
     async def run(
         self, args: BashArgs, ctx: InvokeContext | None = None
     ) -> AsyncGenerator[ToolStreamEvent | BashResult, None]:
+        if args.run_in_background:
+            yield await self._start_background(args)
+            return
+
         timeout = args.timeout or self.config.default_timeout
         max_bytes = self.config.max_output_bytes
 
@@ -558,3 +573,31 @@ class Bash(
         finally:
             if proc is not None:
                 await kill_async_subprocess(proc)
+
+    async def _start_background(self, args: BashArgs) -> BashResult:
+        kwargs: dict[Literal["start_new_session"], bool] = (
+            {} if is_windows() else {"start_new_session": True}
+        )
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                args.command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
+                env=_get_base_env(),
+                executable=_get_shell_executable(),
+                **kwargs,
+            )
+        except Exception as exc:
+            raise ToolError(
+                f"Error starting background command {args.command!r}: {exc}"
+            ) from exc
+
+        shell = get_background_shell_registry().register(args.command, proc)
+        return BashResult(
+            command=args.command,
+            stdout=f"Started background shell {shell.id}.",
+            stderr="",
+            returncode=0,
+            shell_id=shell.id,
+        )
