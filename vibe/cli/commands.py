@@ -4,27 +4,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import sys
 
-from vibe.cli.plan_offer.decide_plan_offer import PlanInfo
-
 ALT_KEY = "⌥" if sys.platform == "darwin" else "Alt"
 
 
-@dataclass(frozen=True)
-class CommandAvailabilityContext:
-    vibe_code_enabled: bool = False
-    is_active_model_mistral: bool = False
-    plan_info: PlanInfo | None = None
-
-    def is_teleport_available(self) -> bool:
-        return (
-            self.vibe_code_enabled
-            and self.is_active_model_mistral
-            and self.plan_info is not None
-            and self.plan_info.is_teleport_eligible()
-        )
-
-
-CommandAvailability = Callable[[CommandAvailabilityContext], bool]
+CommandAvailability = Callable[[bool], bool]
 
 
 @dataclass
@@ -40,14 +23,13 @@ class CommandRegistry:
     def __init__(
         self,
         excluded_commands: list[str] | None = None,
-        availability_context: CommandAvailabilityContext | None = None,
+        vibe_code_enabled: bool = False,
     ) -> None:
         if excluded_commands is None:
             excluded_commands = []
         self._disabled_commands = set(excluded_commands)
-        self._availability_context = CommandAvailabilityContext()
         self._commands: dict[str, Command] = {}
-        self.refresh(availability_context)
+        self.refresh(vibe_code_enabled)
 
     def _build_commands(self) -> dict[str, Command]:
         return {
@@ -116,7 +98,7 @@ class CommandRegistry:
                 aliases=frozenset(["/teleport"]),
                 description="Teleport session to Vibe Code Web",
                 handler="_teleport_command",
-                is_available=CommandAvailabilityContext.is_teleport_available,
+                is_available=lambda vibe_code_enabled: vibe_code_enabled,
             ),
             "proxy-setup": Command(
                 aliases=frozenset(["/proxy-setup"]),
@@ -186,12 +168,8 @@ class CommandRegistry:
     def commands(self) -> dict[str, Command]:
         return self._commands
 
-    def refresh(
-        self, availability_context: CommandAvailabilityContext | None = None
-    ) -> None:
-        self._availability_context = (
-            availability_context or CommandAvailabilityContext()
-        )
+    def refresh(self, vibe_code_enabled: bool = False) -> None:
+        self._vibe_code_enabled = vibe_code_enabled
         self._commands = {
             name: command
             for name, command in self._build_commands().items()
@@ -202,7 +180,7 @@ class CommandRegistry:
     def _is_command_available(self, command: Command) -> bool:
         if command.is_available is None:
             return True
-        return command.is_available(self._availability_context)
+        return command.is_available(self._vibe_code_enabled)
 
     def _alias_map(self) -> dict[str, str]:
         return {
@@ -261,7 +239,13 @@ class CommandRegistry:
             "",
         ]
 
-        for cmd in self.commands.values():
-            aliases = ", ".join(f"`{alias}`" for alias in sorted(cmd.aliases))
+        for name, cmd in sorted(self.commands.items()):
+            canonical_alias = f"/{name}"
+            aliases = ", ".join(
+                f"`{alias}`"
+                for alias in sorted(
+                    cmd.aliases, key=lambda alias: (alias != canonical_alias, alias)
+                )
+            )
             lines.append(f"- {aliases}: {cmd.description}")
         return "\n".join(lines)

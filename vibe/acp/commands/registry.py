@@ -6,17 +6,7 @@ from dataclasses import dataclass, field
 type OnCommandsChanged = Callable[[], Awaitable[None]]
 
 
-@dataclass(frozen=True)
-class AcpCommandAvailabilityContext:
-    """Context used to decide whether a command should be advertised."""
-
-    vibe_code_enabled: bool = False
-
-    def is_teleport_available(self) -> bool:
-        return self.vibe_code_enabled
-
-
-type CommandAvailability = Callable[[AcpCommandAvailabilityContext], bool]
+type CommandAvailability = Callable[[bool], bool]
 
 
 @dataclass(frozen=True)
@@ -34,9 +24,7 @@ class AcpCommand:
 class AcpCommandRegistry:
     """Registry of ACP commands. Notifies listeners when commands change."""
 
-    availability_context: AcpCommandAvailabilityContext = field(
-        default_factory=AcpCommandAvailabilityContext
-    )
+    vibe_code_enabled: bool = False
     _commands: dict[str, AcpCommand] = field(default_factory=dict)
     _on_changed: OnCommandsChanged | None = None
 
@@ -51,7 +39,7 @@ class AcpCommandRegistry:
     def _is_available(self, command: AcpCommand) -> bool:
         if command.is_available is None:
             return True
-        return command.is_available(self.availability_context)
+        return command.is_available(self.vibe_code_enabled)
 
     def set_on_changed(self, callback: OnCommandsChanged) -> None:
         self._on_changed = callback
@@ -101,7 +89,7 @@ def _build_commands() -> dict[str, AcpCommand]:
             name="teleport",
             description="Teleport session to Vibe Code Web",
             handler="_handle_teleport",
-            is_available=AcpCommandAvailabilityContext.is_teleport_available,
+            is_available=lambda vibe_code_enabled: vibe_code_enabled,
         ),
         "proxy-setup": AcpCommand(
             name="proxy-setup",

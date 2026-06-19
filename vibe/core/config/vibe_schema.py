@@ -177,6 +177,15 @@ class VibeConfigSchema(ConfigSchema):
             " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
+    experimental_enable_registry_skills: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Experimental: pull workspace skills from the Mistral AI Registry"
+            " (api.mistral.ai) and make them available alongside local skills."
+            " Requires a Mistral provider and API key. Local and builtin skills take"
+            " precedence on name collision."
+        ),
+    )
 
     # Internal
     vibe_code_enabled: Annotated[bool, WithReplaceMerge()] = True

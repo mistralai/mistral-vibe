@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.1] - 2026-06-19
+
+### Changed
+
+- Commands in `/help` are now listed alphabetically in both the CLI and ACP
+- `/teleport` is now always available and shows an explicit error when its prerequisites aren't met, instead of being hidden
+
+
 ## [2.17.0] - 2026-06-19
 
 ### Added

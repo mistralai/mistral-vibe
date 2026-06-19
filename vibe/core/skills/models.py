@@ -1,9 +1,37 @@
 from __future__ import annotations
 
+from enum import StrEnum, auto
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
+
+
+class SkillSource(StrEnum):
+    BUILTIN = auto()
+    LOCAL = auto()
+    REGISTRY = auto()
+
+
+class SkillScope(StrEnum):
+    BUILTIN = auto()
+    GLOBAL = auto()
+    PROJECT = auto()
+
+
+# The registry's reserved alias that always resolves to the newest version,
+# server-side (see ai-registry versioning.RESERVED_ALIAS). A pin set to this
+# alias auto-resolves to latest and never reports an "update available".
+REGISTRY_LATEST_ALIAS = "latest"
+
+
+class RegistryRef(BaseModel):
+    skill_id: str
+    # The concrete, materialized version currently on disk (for display/loading).
+    version: int
+    # The pinned alias (e.g. "latest") when this is an alias pin; None when the
+    # pin is frozen to a specific version number.
+    alias: str | None = None
 
 
 class SkillMetadata(BaseModel):
@@ -72,6 +100,9 @@ class SkillInfo(BaseModel):
     user_invocable: bool = True
     skill_path: Path | None = None
     prompt: str
+    source: SkillSource = SkillSource.LOCAL
+    scope: SkillScope = SkillScope.GLOBAL
+    registry: RegistryRef | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -83,7 +114,14 @@ class SkillInfo(BaseModel):
 
     @classmethod
     def from_metadata(
-        cls, meta: SkillMetadata, skill_path: Path, prompt: str
+        cls,
+        meta: SkillMetadata,
+        skill_path: Path,
+        prompt: str,
+        *,
+        source: SkillSource = SkillSource.LOCAL,
+        scope: SkillScope = SkillScope.GLOBAL,
+        registry: RegistryRef | None = None,
     ) -> SkillInfo:
         return cls(
             name=meta.name,
@@ -95,6 +133,9 @@ class SkillInfo(BaseModel):
             user_invocable=meta.user_invocable,
             skill_path=skill_path.resolve(),
             prompt=prompt,
+            source=source,
+            scope=scope,
+            registry=registry,
         )
 
 

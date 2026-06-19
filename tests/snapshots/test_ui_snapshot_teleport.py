@@ -149,19 +149,6 @@ class TeleportCommandHelpProApp(TeleportCommandHelpSnapshotApp):
         )
 
 
-class TeleportCommandHelpFreeApp(TeleportCommandHelpSnapshotApp):
-    def __init__(self):
-        super().__init__(
-            FakeWhoAmIGateway(
-                WhoAmIResponse(
-                    plan_type=WhoAmIPlanType.API,
-                    plan_name="FREE",
-                    prompt_switching_to_pro_plan=False,
-                )
-            )
-        )
-
-
 def test_snapshot_teleport_status_checking_git(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
         await pilot.pause(0.2)
@@ -299,19 +286,6 @@ def test_snapshot_teleport_command_visible_for_pro_account(
 
     assert snap_compare(
         "test_ui_snapshot_teleport.py:TeleportCommandHelpProApp",
-        terminal_size=(120, 48),
-        run_before=run_before,
-    )
-
-
-def test_snapshot_teleport_command_hidden_for_non_pro_account(
-    snap_compare: SnapCompare,
-) -> None:
-    async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.2)
-
-    assert snap_compare(
-        "test_ui_snapshot_teleport.py:TeleportCommandHelpFreeApp",
         terminal_size=(120, 48),
         run_before=run_before,
     )

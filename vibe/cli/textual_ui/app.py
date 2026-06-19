@@ -31,7 +31,7 @@ from textual.widgets import Static
 
 from vibe import __version__ as CORE_VERSION
 from vibe.cli.clipboard import copy_selection_to_clipboard, copy_text_to_clipboard
-from vibe.cli.commands import CommandAvailabilityContext, CommandRegistry
+from vibe.cli.commands import CommandRegistry
 from vibe.cli.narrator_manager import (
     NarratorManager,
     NarratorManagerPort,
@@ -40,6 +40,7 @@ from vibe.cli.narrator_manager import (
 from vibe.cli.plan_offer.adapters.http_whoami_gateway import HttpWhoAmIGateway
 from vibe.cli.plan_offer.decide_plan_offer import (
     PlanInfo,
+    check_teleport_eligibility,
     decide_plan_offer,
     plan_offer_cta,
     plan_title,
@@ -184,6 +185,7 @@ from vibe.core.session.saved_sessions import (
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.session.title_format import format_session_title
 from vibe.core.skills.manager import SkillManager
+from vibe.core.telemetry.types import TeleportFailureStage
 from vibe.core.teleport.telemetry import send_teleport_early_failure_telemetry
 from vibe.core.teleport.types import (
     TeleportCheckingGitEvent,
@@ -588,20 +590,13 @@ class VibeApp(App):  # noqa: PLR0904
     def _connectors_enabled(self) -> bool:
         return self.agent_loop.connector_registry is not None
 
-    def _get_command_availability_context(self) -> CommandAvailabilityContext:
-        return CommandAvailabilityContext(
-            vibe_code_enabled=self.agent_loop.base_config.vibe_code_enabled,
-            is_active_model_mistral=self.config.is_active_model_mistral(),
-            plan_info=self._plan_info,
-        )
-
     def _build_command_registry(self) -> CommandRegistry:
         return CommandRegistry(
-            availability_context=self._get_command_availability_context()
+            vibe_code_enabled=self.agent_loop.base_config.vibe_code_enabled
         )
 
     def _refresh_command_registry(self) -> None:
-        self.commands.refresh(self._get_command_availability_context())
+        self.commands.refresh(self.agent_loop.base_config.vibe_code_enabled)
 
     def compose(self) -> ComposeResult:
         with ChatScroll(id="chat"):
@@ -1881,29 +1876,54 @@ class VibeApp(App):  # noqa: PLR0904
     async def _teleport_command(self, **kwargs: Any) -> None:
         await self._handle_teleport_command(show_message=False)
 
+    def _teleport_unavailable_reason(self) -> str | None:
+        if not self.config.is_active_model_mistral():
+            return (
+                "Teleport requires an active Mistral model. Use /model to switch to "
+                "a Mistral model, then try again."
+            )
+        return check_teleport_eligibility(
+            self._plan_info, vibe_base_url=self.config.vibe_base_url
+        )
+
+    async def _fail_teleport_early(
+        self, *, stage: TeleportFailureStage, error_class: str, message: str
+    ) -> None:
+        send_teleport_early_failure_telemetry(
+            self.agent_loop.telemetry_client,
+            stage=stage,
+            error_class=error_class,
+            nb_session_messages=len(self.agent_loop.messages[1:]),
+        )
+        await self._mount_and_scroll(
+            ErrorMessage(message, collapsed=self._tools_collapsed)
+        )
+
     async def _handle_teleport_command(
         self, value: str | None = None, show_message: bool = True
     ) -> None:
         has_history = any(msg.role != Role.system for msg in self.agent_loop.messages)
-        if not value:
-            if show_message:
-                await self._mount_and_scroll(SlashCommandMessage("teleport"))
-            if not has_history:
-                send_teleport_early_failure_telemetry(
-                    self.agent_loop.telemetry_client,
-                    stage="no_history",
-                    error_class="TeleportNoHistoryError",
-                    nb_session_messages=len(self.agent_loop.messages[1:]),
-                )
-                await self._mount_and_scroll(
-                    ErrorMessage(
-                        "No conversation history to teleport.",
-                        collapsed=self._tools_collapsed,
-                    )
-                )
-                return
-        elif show_message:
-            await self._mount_and_scroll(TeleportUserMessage(value))
+        if show_message:
+            await self._mount_and_scroll(
+                TeleportUserMessage(value) if value else SlashCommandMessage("teleport")
+            )
+
+        if reason := self._teleport_unavailable_reason():
+            await self._fail_teleport_early(
+                stage="ineligible",
+                error_class="TeleportIneligibleError",
+                message=reason,
+            )
+            return
+
+        if not value and not has_history:
+            await self._fail_teleport_early(
+                stage="no_history",
+                error_class="TeleportNoHistoryError",
+                message="No conversation history to teleport.",
+            )
+            return
+
         self.run_worker(self._teleport(value), exclusive=False)
 
     async def _teleport(self, prompt: str | None = None) -> None:

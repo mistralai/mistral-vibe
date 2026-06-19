@@ -194,6 +194,22 @@ async def handle_teleport_command(
             field_meta=_teleport_field_meta("unavailable"),
         )
 
+    if not session.agent_loop.config.is_active_model_mistral():
+        send_teleport_early_failure_telemetry(
+            session.agent_loop.telemetry_client,
+            stage="ineligible",
+            error_class="TeleportIneligibleError",
+            nb_session_messages=len(session.agent_loop.messages[1:]),
+        )
+        return await _teleport_command_reply(
+            client,
+            session,
+            "Teleport requires an active Mistral model. Switch to a Mistral "
+            "model, then try again.",
+            message_id,
+            field_meta=_teleport_field_meta("unavailable"),
+        )
+
     last_user_message = next(
         (
             msg

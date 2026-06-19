@@ -842,9 +842,24 @@ StatusMessage {
     color: $warning;
 }
 
-.diff-removed {
+.diff-removed,
+.diff-added,
+.diff-context {
+    width: 100%;
     height: auto;
 
+    .diff-gutter {
+        width: auto;
+        height: auto;
+    }
+
+    .diff-body {
+        width: 1fr;
+        height: auto;
+    }
+}
+
+.diff-removed {
     &:dark {
         background: $error 10%;
     }
@@ -859,8 +874,6 @@ StatusMessage {
 }
 
 .diff-added {
-    height: auto;
-
     &:dark {
         background: $success 10%;
     }
@@ -881,10 +894,6 @@ StatusMessage {
     &:ansi {
         text-style: dim;
     }
-}
-
-.diff-context {
-    height: auto;
 }
 
 .todo-empty,

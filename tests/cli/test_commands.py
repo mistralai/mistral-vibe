@@ -1,20 +1,6 @@
 from __future__ import annotations
 
-from vibe.cli.commands import Command, CommandAvailabilityContext, CommandRegistry
-from vibe.cli.plan_offer.decide_plan_offer import PlanInfo
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType
-
-
-def _eligible_teleport_context() -> CommandAvailabilityContext:
-    return CommandAvailabilityContext(
-        vibe_code_enabled=True,
-        is_active_model_mistral=True,
-        plan_info=PlanInfo(
-            plan_type=WhoAmIPlanType.CHAT,
-            plan_name="INDIVIDUAL",
-            prompt_switching_to_pro_plan=False,
-        ),
-    )
+from vibe.cli.commands import Command, CommandRegistry
 
 
 class TestCommandRegistry:
@@ -79,7 +65,7 @@ class TestCommandRegistry:
         assert registry.parse_command("/teleport") is None
 
     def test_teleport_command_registration_uses_resolved_context(self) -> None:
-        registry = CommandRegistry(availability_context=_eligible_teleport_context())
+        registry = CommandRegistry(vibe_code_enabled=True)
         assert registry.get_command_name("/teleport") == "teleport"
         assert registry.has_command("teleport")
 
@@ -87,11 +73,22 @@ class TestCommandRegistry:
         registry = CommandRegistry()
         assert "/teleport" not in registry.get_help_text()
 
-        eligible_registry = CommandRegistry(
-            availability_context=_eligible_teleport_context()
-        )
+        eligible_registry = CommandRegistry(vibe_code_enabled=True)
         assert eligible_registry.get("teleport") is not None
         assert "/teleport" in eligible_registry.get_help_text()
+
+    def test_help_text_lists_commands_alphabetically(self) -> None:
+        registry = CommandRegistry()
+        commands_section = registry.get_help_text().split(
+            "### Commands\n\n", maxsplit=1
+        )[1]
+        command_names = [
+            line.split("`", maxsplit=2)[1].removeprefix("/")
+            for line in commands_section.splitlines()
+            if line.startswith("- ")
+        ]
+
+        assert command_names == sorted(command_names)
 
     def test_resume_command_registration(self) -> None:
         registry = CommandRegistry()

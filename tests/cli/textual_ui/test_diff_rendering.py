@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from textual.content import Content
 from textual.highlight import HighlightTheme
-from textual.widgets import Static
+from textual.widget import Widget
 
 from vibe.cli.textual_ui.widgets.diff_rendering import (
     _build_diff_line,
@@ -35,7 +35,9 @@ def _render_with_colors(*args, **kwargs):
     return widgets, diff_border_colors(widgets)
 
 
-def _plain(widget: Static) -> str:
+def _plain(widget: Widget) -> str:
+    if plain := getattr(widget, "plain", None):
+        return plain
     visual = widget.render()
     return visual.plain if isinstance(visual, Content) else str(visual)
 

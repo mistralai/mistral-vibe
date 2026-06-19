@@ -73,7 +73,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from vibe import VIBE_ROOT, __version__
 from vibe.acp.acp_logger import acp_message_observer
-from vibe.acp.commands import AcpCommandAvailabilityContext, AcpCommandRegistry
+from vibe.acp.commands import AcpCommandRegistry
 from vibe.acp.exceptions import (
     CompactionError,
     ConfigurationError,
@@ -224,7 +224,6 @@ WORKSPACE_TRUST_META_KEY = "workspace_trust"
 TRUST_GRANT_DECISIONS = {
     WorkspaceTrustDecision.TRUST_REPO,
     WorkspaceTrustDecision.TRUST_CWD,
-    WorkspaceTrustDecision.TRUST_SESSION,
 }
 
 
@@ -711,9 +710,7 @@ class VibeAcpAgentLoop(AcpAgent):
         self, session_id: str, agent_loop: AgentLoop
     ) -> AcpSessionLoop:
         command_registry = AcpCommandRegistry(
-            availability_context=AcpCommandAvailabilityContext(
-                vibe_code_enabled=agent_loop.base_config.vibe_code_enabled
-            )
+            vibe_code_enabled=agent_loop.base_config.vibe_code_enabled
         )
         session = AcpSessionLoop(
             id=session_id, agent_loop=agent_loop, command_registry=command_registry
@@ -824,7 +821,7 @@ class VibeAcpAgentLoop(AcpAgent):
             repoRoot=str(prompt.repo_root.resolve()) if prompt.repo_root else None,
             ignoredFiles=self._workspace_trust_ignored_files(prompt),
             availableDecisions=available_workspace_trust_decisions(
-                prompt, include_session=True
+                prompt, include_session=False
             ),
         )
 
@@ -873,7 +870,7 @@ class VibeAcpAgentLoop(AcpAgent):
             raise InvalidRequestError("No workspace trust decision is available.")
 
         available_decisions = available_workspace_trust_decisions(
-            prompt, include_session=True
+            prompt, include_session=False
         )
         if decision not in available_decisions:
             raise InvalidRequestError(f"Unsupported trust decision: {decision}")
@@ -914,9 +911,7 @@ class VibeAcpAgentLoop(AcpAgent):
             raise InvalidRequestError(str(exc)) from exc
 
         if session is not None and request.decision in TRUST_GRANT_DECISIONS:
-            os.chdir(cwd)
-            await self._reload_session_config(session)
-            await session.command_registry.notify_changed()
+            session.spawn(self._reload_trusted_workspace_session(session, cwd))
 
         return self._workspace_trust_response(cwd).model_dump(
             mode="json", by_alias=True
@@ -1201,6 +1196,7 @@ class VibeAcpAgentLoop(AcpAgent):
                 )
             )
 
+        commands.sort(key=lambda command: command.name)
         await self.client.session_update(
             session_id=session.id, update=update_available_commands(commands)
         )
@@ -1277,10 +1273,7 @@ class VibeAcpAgentLoop(AcpAgent):
         return True
 
     async def _reload_config(self, session: AcpSessionLoop) -> None:
-        new_config = VibeConfig.load(tool_paths=session.agent_loop.config.tool_paths)
-        self._apply_client_project_name(new_config)
-        _merge_non_interactive_disabled_tools(new_config)
-        await session.agent_loop.reload_with_initial_messages(base_config=new_config)
+        await self._reload_session_config(session)
 
     async def _apply_model_change(self, session: AcpSessionLoop, model_id: str) -> bool:
         model_aliases = [model.alias for model in session.agent_loop.config.models]
@@ -2037,20 +2030,25 @@ class VibeAcpAgentLoop(AcpAgent):
         self, session: AcpSessionLoop, text_prompt: str, message_id: str
     ) -> PromptResponse:
         lines = ["### Available Commands", ""]
-        for cmd in session.command_registry.commands.values():
+        for cmd in sorted(
+            session.command_registry.commands.values(), key=lambda command: command.name
+        ):
             hint = f" `<{cmd.input_hint}>`" if cmd.input_hint else ""
             lines.append(f"- `/{cmd.name}`{hint}: {cmd.description}")
 
         builtin_names = set(session.command_registry.commands)
-        invocable = {
-            n: s
-            for n, s in session.agent_loop.skill_manager.available_skills.items()
-            if s.user_invocable and n not in builtin_names
-        }
+        invocable = sorted(
+            (
+                skill
+                for skill in session.agent_loop.skill_manager.available_skills.values()
+                if skill.user_invocable and skill.name not in builtin_names
+            ),
+            key=lambda skill: skill.name,
+        )
         if invocable:
             lines.extend(["", "### Available Skills", ""])
-            for name, info in invocable.items():
-                lines.append(f"- `/{name}`: {info.description}")
+            for skill in invocable:
+                lines.append(f"- `/{skill.name}`: {skill.description}")
 
         return await self._command_reply(session, "\n".join(lines), message_id)
 
@@ -2185,6 +2183,23 @@ class VibeAcpAgentLoop(AcpAgent):
         self._apply_client_project_name(new_config)
         _merge_non_interactive_disabled_tools(new_config)
         await session.agent_loop.reload_with_initial_messages(base_config=new_config)
+
+    async def _reload_trusted_workspace_session(
+        self, session: AcpSessionLoop, cwd: Path
+    ) -> None:
+        try:
+            os.chdir(cwd)
+            await self._reload_session_config(session)
+            await session.command_registry.notify_changed()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Failed to reload trusted workspace session config: session_id=%s cwd=%s",
+                session.id,
+                cwd,
+                exc_info=exc,
+            )
 
     async def _handle_reload(
         self, session: AcpSessionLoop, text_prompt: str, message_id: str

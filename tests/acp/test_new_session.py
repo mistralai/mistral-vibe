@@ -200,7 +200,7 @@ class TestACPNewSession:
                 "cwd": str(tmp_working_directory.resolve()),
                 "repoRoot": None,
                 "ignoredFiles": ["AGENTS.md"],
-                "availableDecisions": ["trust_cwd", "trust_session", "decline"],
+                "availableDecisions": ["trust_cwd", "decline"],
             },
         }
         assert trusted_folders_manager.is_trusted(tmp_working_directory) is None
@@ -230,12 +230,7 @@ class TestACPNewSession:
                 "cwd": str(cwd.resolve()),
                 "repoRoot": str(repo.resolve()),
                 "ignoredFiles": ["AGENTS.md"],
-                "availableDecisions": [
-                    "trust_repo",
-                    "trust_cwd",
-                    "trust_session",
-                    "decline",
-                ],
+                "availableDecisions": ["trust_repo", "trust_cwd", "decline"],
             },
         }
         assert trusted_folders_manager.is_trusted(repo) is None
@@ -264,7 +259,7 @@ class TestACPNewSession:
                 "cwd": str(tmp_working_directory.resolve()),
                 "repoRoot": None,
                 "ignoredFiles": ["AGENTS.md"],
-                "availableDecisions": ["trust_cwd", "trust_session", "decline"],
+                "availableDecisions": ["trust_cwd", "decline"],
             },
         }
         assert trusted_folders_manager.is_trusted(tmp_working_directory) is False

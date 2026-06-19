@@ -245,7 +245,7 @@ class EditResultWidget(ToolResultWidget[EditResult]):
         if not self.result:
             yield from self._footer()
             return
-        rows: list[Static] = [
+        rows: list[Widget] = [
             NoMarkupStatic(f"⚠ {w}", classes="tool-result-warning")
             for w in self.warnings
         ]

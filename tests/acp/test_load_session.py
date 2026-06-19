@@ -152,7 +152,7 @@ class TestLoadSession:
                     "cwd": str(tmp_working_directory.resolve()),
                     "repoRoot": None,
                     "ignoredFiles": ["AGENTS.md"],
-                    "availableDecisions": ["trust_cwd", "trust_session", "decline"],
+                    "availableDecisions": ["trust_cwd", "decline"],
                 },
             }
         }
