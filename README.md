@@ -497,7 +497,7 @@ Example custom agent configuration (`~/.vibe/agents/redteam.toml`):
 
 ```toml
 # Custom agent configuration for red-teaming
-active_model = "mistral-medium-3.5"
+active_model = "mistral-medium-3.5"  # Falls back to the first configured model if missing
 system_prompt_id = "redteam"
 
 # Disable some tools for this agent

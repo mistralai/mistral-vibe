@@ -201,6 +201,38 @@ class TestSaveUpdates:
         assert result == {"tools": {"bash": {"default_timeout": 600}}}
 
 
+class TestActiveModelFallback:
+    def test_falls_back_to_first_configured_model_when_active_model_is_missing(
+        self,
+    ) -> None:
+        model_a = ModelConfig(name="model-a", provider="mistral", alias="model-a")
+        model_b = ModelConfig(name="model-b", provider="mistral", alias="model-b")
+
+        cfg = VibeConfig(
+            active_model="missing-model",
+            models=[model_a, model_b],
+            enable_update_checks=False,
+        )
+
+        assert cfg.active_model == "model-a"
+        assert cfg.get_active_model().alias == "model-a"
+
+    def test_raises_when_active_model_is_missing_and_no_models_are_configured(
+        self,
+    ) -> None:
+        cfg = VibeConfig(
+            active_model="missing-model",
+            models=[],
+            providers=[],
+            enable_update_checks=False,
+        )
+
+        with pytest.raises(
+            ValueError, match="Active model 'missing-model' not found in configuration"
+        ):
+            cfg.get_active_model()
+
+
 class TestSystemTrustStoreConfig:
     def test_load_configures_ssl_context_from_toml(self, config_dir: Path) -> None:
         config_file = config_dir / "config.toml"

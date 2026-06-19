@@ -108,6 +108,7 @@ from `~/.vibe/prompts/`, and finally from the built-in bundled prompts.
 ```toml
 # Model selection
 active_model = "mistral-medium-3.5"  # Model alias to use (see [[models]])
+# If active_model is missing from [[models]], Vibe falls back to the first model.
 
 # UI preferences
 vim_keybindings = false

@@ -971,6 +971,22 @@ class VibeConfig(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _fallback_missing_active_model(self) -> VibeConfig:
+        if any(model.alias == self.active_model for model in self.models):
+            return self
+        if not self.models:
+            return self
+
+        configured_active_model = self.active_model
+        self.active_model = self.models[0].alias
+        logger.warning(
+            "Active model %r not found in configuration; falling back to %r",
+            configured_active_model,
+            self.active_model,
+        )
+        return self
+
+    @model_validator(mode="after")
     def _check_compaction_model_provider(self) -> VibeConfig:
         if self.compaction_model is None:
             return self
