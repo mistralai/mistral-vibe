@@ -112,14 +112,25 @@ class TestReadFieldMeta:
         assert loc.field_meta == {"type": "file_range", "offset": 10, "limit": 50}
         assert update.field_meta == {"tool_name": "read"}
 
-    def test_call_defaults_offset_none_limit_default(self) -> None:
+    def test_whole_file_read_emits_plain_file_location(self) -> None:
         event = _call_event("read", Read, ReadArgs(file_path="/tmp/f.txt"))
         update = tool_call_session_update(event)
 
         assert isinstance(update, ToolCallStart)
         assert update.locations is not None
         loc = update.locations[0]
-        assert loc.field_meta == {"type": "file_range", "offset": None, "limit": 2000}
+        assert loc.field_meta == {"type": "file"}
+        assert loc.line is None
+
+    def test_read_from_offset_to_end_emits_file_location_with_line(self) -> None:
+        event = _call_event("read", Read, ReadArgs(file_path="/tmp/f.txt", offset=42))
+        update = tool_call_session_update(event)
+
+        assert isinstance(update, ToolCallStart)
+        assert update.locations is not None
+        loc = update.locations[0]
+        assert loc.field_meta == {"type": "file"}
+        assert loc.line == 42
 
     def test_result_location_has_start_line_and_num_lines(self) -> None:
         result = ReadResult(
@@ -128,6 +139,7 @@ class TestReadFieldMeta:
             num_lines=3,
             start_line=10,
             total_lines=20,
+            requested_limit=50,
         )
         event = _result_event("read", Read, result)
         update = tool_result_session_update(event)
@@ -136,6 +148,77 @@ class TestReadFieldMeta:
         assert update.locations is not None
         loc = update.locations[0]
         assert loc.field_meta == {"type": "file_range", "offset": 10, "limit": 3}
+
+    def test_whole_file_result_emits_plain_file_location(self) -> None:
+        result = ReadResult(
+            file_path="/tmp/f.txt",
+            content="     1→line1\n     2→line2",
+            num_lines=2,
+            start_line=1,
+            total_lines=2,
+        )
+        event = _result_event("read", Read, result)
+        update = tool_result_session_update(event)
+
+        assert isinstance(update, ToolCallProgress)
+        assert update.locations is not None
+        loc = update.locations[0]
+        assert loc.field_meta == {"type": "file"}
+        assert loc.line is None
+
+    def test_truncated_default_limit_result_emits_range(self) -> None:
+        # No limit given, but the file exceeded the default limit: the read was
+        # partial, so the chip must show the range, not imply the whole file.
+        result = ReadResult(
+            file_path="/tmp/f.txt",
+            content="     1→line1",
+            num_lines=2000,
+            start_line=1,
+            total_lines=None,
+            was_truncated=True,
+        )
+        event = _result_event("read", Read, result)
+        update = tool_result_session_update(event)
+
+        assert isinstance(update, ToolCallProgress)
+        assert update.locations is not None
+        loc = update.locations[0]
+        assert loc.field_meta == {"type": "file_range", "offset": 1, "limit": 2000}
+
+    def test_offset_to_end_result_emits_file_location_with_line(self) -> None:
+        result = ReadResult(
+            file_path="/tmp/f.txt",
+            content="    42→line42",
+            num_lines=1,
+            start_line=42,
+            total_lines=42,
+            requested_offset=42,
+        )
+        event = _result_event("read", Read, result)
+        update = tool_result_session_update(event)
+
+        assert isinstance(update, ToolCallProgress)
+        assert update.locations is not None
+        loc = update.locations[0]
+        assert loc.field_meta == {"type": "file"}
+        assert loc.line == 42
+
+    def test_bounded_result_clamps_limit_to_lines_read(self) -> None:
+        result = ReadResult(
+            file_path="/tmp/f.txt",
+            content="     1→line1",
+            num_lines=1,
+            start_line=1,
+            total_lines=1,
+            requested_limit=100,
+        )
+        event = _result_event("read", Read, result)
+        update = tool_result_session_update(event)
+
+        assert isinstance(update, ToolCallProgress)
+        assert update.locations is not None
+        loc = update.locations[0]
+        assert loc.field_meta == {"type": "file_range", "offset": 1, "limit": 1}
 
 
 class TestWebSearchFieldMeta:

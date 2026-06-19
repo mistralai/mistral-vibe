@@ -16,7 +16,7 @@ from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.utils.io import read_safe
-from vibe.core.utils.text import snippet_start_line
+from vibe.core.utils.text import snippet_start_lines
 
 _HUNK_HEADER_RE = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
@@ -42,11 +42,11 @@ def language_for_path(file_path: str) -> str:
     return Path(file_path).suffix.lstrip(".") or "text"
 
 
-def locate_snippet_in_file(file_path: str, snippet: str) -> int | None:
+def locate_snippets_in_file(file_path: str, snippet: str) -> list[int]:
     path = Path(file_path)
     if not path.is_file():
-        return None
-    return snippet_start_line(read_safe(path).text, snippet)
+        return []
+    return snippet_start_lines(read_safe(path).text, snippet)
 
 
 def _pick_theme(*, ansi: bool, dark: bool) -> type[HighlightTheme]:
@@ -98,7 +98,7 @@ def render_edit_diff(
     old_string: str,
     new_string: str,
     language: str,
-    start_line: int | None,
+    start_lines: list[int] | None,
     *,
     ansi: bool,
     dark: bool,
@@ -113,6 +113,30 @@ def render_edit_diff(
         )
     )[2:]
 
+    # No known locations: render the hunk once without gutter line numbers.
+    if not start_lines:
+        return _render_occurrence(diff_lines, None, language, ansi=ansi, theme=theme)
+
+    # replace_all repeats the same change at each match; render one block per
+    # occurrence, anchored at its own line number, with a gap in between.
+    widgets: list[Static] = []
+    for index, start_line in enumerate(start_lines):
+        if index > 0:
+            widgets.append(NoMarkupStatic("⋯", classes="diff-gap"))
+        widgets.extend(
+            _render_occurrence(diff_lines, start_line, language, ansi=ansi, theme=theme)
+        )
+    return widgets
+
+
+def _render_occurrence(
+    diff_lines: list[str],
+    start_line: int | None,
+    language: str,
+    *,
+    ansi: bool,
+    theme: type[HighlightTheme],
+) -> list[Static]:
     offset = (start_line - 1) if start_line else 0
     old_lineno = new_lineno = 0  # overwritten by the first @@ header
     widgets: list[Static] = []

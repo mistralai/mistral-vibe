@@ -17,7 +17,8 @@ class FeedbackBarManager:
             telemetry_active=agent_loop.telemetry_client.is_active(),
             is_mistral_model=agent_loop.config.is_active_model_mistral(),
             user_message_count=user_message_count,
+            cache_store=agent_loop.cache_store,
         )
 
-    def record_feedback_asked(self) -> None:
-        record_feedback_asked()
+    def record_feedback_asked(self, agent_loop: AgentLoop) -> None:
+        record_feedback_asked(agent_loop.cache_store)

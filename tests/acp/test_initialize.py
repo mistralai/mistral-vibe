@@ -63,7 +63,7 @@ class TestACPInitialize:
         assert response.agent_capabilities == AgentCapabilities(
             load_session=True,
             prompt_capabilities=PromptCapabilities(
-                audio=False, embedded_context=True, image=False
+                audio=False, embedded_context=True, image=True
             ),
             session_capabilities=SessionCapabilities(
                 close=SessionCloseCapabilities(),
@@ -72,7 +72,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.16.1"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.17.0"
         )
 
         assert response.auth_methods is not None
@@ -163,7 +163,7 @@ class TestACPInitialize:
         assert response.agent_capabilities == AgentCapabilities(
             load_session=True,
             prompt_capabilities=PromptCapabilities(
-                audio=False, embedded_context=True, image=False
+                audio=False, embedded_context=True, image=True
             ),
             session_capabilities=SessionCapabilities(
                 close=SessionCloseCapabilities(),
@@ -172,7 +172,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.16.1"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.17.0"
         )
 
         assert response.auth_methods is not None

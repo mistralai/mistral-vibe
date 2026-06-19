@@ -70,7 +70,8 @@ Vibe never updates silently. With `enable_update_checks = true` (default), it
 polls PyPI for `mistral-vibe` daily and prompts on the next launch when a
 newer release exists; accepting runs `uv tool upgrade mistral-vibe`, then
 `brew upgrade mistral-vibe` as a fallback. Disable via `enable_update_checks
-= false`. Initial install: `uv tool install mistral-vibe`.
+= false`. Run `vibe --check-upgrade` to check immediately, prompt to install a newer
+version if one exists, and exit. Initial install: `uv tool install mistral-vibe`.
 
 ### Version
 
@@ -92,8 +93,7 @@ current folder**: only sessions whose `cwd` matches where Vibe is launched are
 listed, so the same directory shows its own history and nothing else. Switch
 folders to see a different set. The explicit `--resume <SESSION_ID>` form is
 **not** folder-scoped: it resolves the session by id regardless of which folder
-it ran in. When Vibe Code is enabled, active **remote** sessions are listed
-alongside local ones in the picker (tagged `remote`) and are not folder-scoped.
+it ran in.
 
 ## Configuration (config.toml)
 
@@ -124,6 +124,7 @@ enable_update_checks = true       # Daily PyPI check; prompts on next launch whe
 enable_notifications = true
 enable_system_trust_store = false  # Use OS trust store for outbound HTTPS
 api_timeout = 720.0               # API request timeout in seconds
+api_retry_max_elapsed_time = 300.0  # Retry budget for retryable API failures in seconds
 auto_compact_threshold = 200000   # Token count before auto-compaction
 
 # Git commit behavior
@@ -270,7 +271,32 @@ name = "remote-server"
 transport = "http"
 url = "https://mcp.example.com"
 api_key_env = "MCP_API_KEY"
+
+[[mcp_servers]]
+name = "linear"
+transport = "streamable-http"
+url = "https://mcp.linear.app/mcp"
+
+[mcp_servers.auth]
+type = "oauth"
+scopes = ["read", "write"]
+# Optional: client_id = "pre-registered-public-client"
+# Optional: client_metadata_url = "https://example.com/client-metadata.json"
+# Optional: redirect_port = 47823
 ```
+
+HTTP MCP servers can use either static auth or OAuth:
+
+- Static auth: legacy `api_key_env` / `headers` keys still work and are
+  promoted to `auth.type = "static"` internally.
+- OAuth auth: use `auth.type = "oauth"` with `scopes`. Vibe stores tokens
+  in the OS keyring under `mcp-oauth:<alias>:tokens`, dynamic client info
+  under `mcp-oauth:<alias>:client_info`, and config drift fingerprints under
+  `mcp-oauth:<alias>:fingerprint`.
+- Headless environments without an OS keyring cannot store OAuth tokens; use
+  static auth via `api_key_env` instead.
+- For SSH/remote browser callbacks, forward the loopback port:
+  `ssh -L 47823:127.0.0.1:47823 <host>`.
 
 ### Connectors
 
@@ -496,8 +522,9 @@ Tool, skill, and agent names support three matching modes:
 vibe [PROMPT]                       # Start interactive session with optional prompt
 vibe -p TEXT / --prompt TEXT         # Programmatic mode using `default_agent`, one-shot, exit
 vibe -p TEXT --auto-approve          # Programmatic mode with all tool calls approved
+vibe -p TEXT --yolo                  # Alias for `--auto-approve`
 vibe --agent NAME                   # Select agent profile (falls back to `default_agent` config)
-vibe --auto-approve                  # Shortcut for `--agent auto-approve`
+vibe --auto-approve / --yolo         # Shortcut for `--agent auto-approve`
 vibe --workdir DIR                  # Change working directory
 vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
 vibe --trust                        # Trust cwd for this invocation only (not persisted)
@@ -505,6 +532,7 @@ vibe -c / --continue                # Continue most recent session in this termi
 vibe --resume [SESSION_ID]          # Resume a specific session
 vibe -v / --version                 # Show version
 vibe --setup                        # Run onboarding/setup
+vibe --check-upgrade                # Check for a Vibe update now, prompt to install it, and exit
 vibe --max-turns N                  # Max assistant turns (programmatic mode)
 vibe --max-price DOLLARS            # Max cost limit (programmatic mode)
 vibe --max-tokens N                 # Max total session tokens (programmatic mode)
@@ -551,10 +579,13 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/status` - Display agent statistics
 - `/voice` - Configure voice settings
 - `/mcp` - Display available MCP servers (pass a server name to list its tools)
+- `/mcp status` - Display MCP auth state (`ok`, `needs_auth`, `static`, `stdio`)
+- `/mcp login <alias>` - Start OAuth login for an MCP server
+- `/mcp logout <alias>` - Log out from an MCP server and delete stored OAuth
+  secrets
 - `/resume` (or `/continue`) - Browse and resume past sessions for the current
-  folder (plus active remote sessions when Vibe Code is enabled). The picker
-  header shows the folder being listed. Press `D` twice to delete a local saved
-  session; remote sessions and the active session cannot be deleted here.
+  folder. The picker header shows the folder being listed. Press `D` twice to
+  delete a saved session; the active session cannot be deleted here.
 - `/rewind` - Rewind to a previous message
 - `/loop <interval> <prompt>` - Schedule a recurring prompt (e.g. `/loop 30s ping`).
   Intervals: `Ns/Nm/Nh/Nd`, minimum 30s, max 50 loops/session.

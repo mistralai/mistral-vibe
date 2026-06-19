@@ -22,6 +22,11 @@ def _build(
 
 def _render(*args, **kwargs):
     kwargs.setdefault("dark", True)
+    args = list(args)
+    # Tests pass a single start line as an int for readability; the renderer
+    # expects a list of occurrences.
+    if len(args) >= 4 and isinstance(args[3], int):
+        args[3] = [args[3]]
     return render_edit_diff(*args, **kwargs)
 
 
@@ -155,6 +160,32 @@ class TestRenderEditDiff:
         added = [w for w in widgets if "diff-added" in w.classes]
         assert any(_plain(w).rstrip().endswith("d") for w in removed)
         assert any(_plain(w).rstrip().endswith("Z") for w in added)
+
+    def test_replace_all_renders_each_occurrence(self) -> None:
+        widgets = render_edit_diff(
+            "foo", "bar", "py", [3, 10, 25], ansi=False, dark=True
+        )
+        removed = [w for w in widgets if "diff-removed" in w.classes]
+        added = [w for w in widgets if "diff-added" in w.classes]
+        assert len(removed) == 3
+        assert len(added) == 3
+
+    def test_replace_all_uses_each_start_line(self) -> None:
+        widgets = render_edit_diff(
+            "foo", "bar", "py", [3, 10, 25], ansi=False, dark=True
+        )
+        joined = "\n".join(_plain(w) for w in widgets)
+        assert "3" in joined
+        assert "10" in joined
+        assert "25" in joined
+
+    def test_replace_all_separates_occurrences_with_gap(self) -> None:
+        widgets = render_edit_diff("foo", "bar", "py", [3, 10], ansi=False, dark=True)
+        assert sum("diff-gap" in w.classes for w in widgets) == 1
+
+    def test_single_occurrence_has_no_gap(self) -> None:
+        widgets = render_edit_diff("foo", "bar", "py", [3], ansi=False, dark=True)
+        assert all("diff-gap" not in w.classes for w in widgets)
 
 
 class TestBorderColors:

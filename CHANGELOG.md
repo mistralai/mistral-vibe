@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.0] - 2026-06-19
+
+### Added
+
+- `/mcp login`, `/mcp logout`, and `/mcp status` commands to authenticate OAuth-backed MCP servers from the TUI
+- `vibe --check-upgrade` to force an immediate update check and exit
+- `--yolo` as an alias for `--auto-approve`
+- ACP now accepts inline image content blocks
+
+### Changed
+
+- API keys are now stored in the OS keyring instead of plain text
+- Edit diff view now shows all replaced occurrences instead of just the first
+- Completion popup now uses a two-column layout
+- Chat messages now have right padding so text no longer collapses into the scrollbar
+- Faster CLI shutdown by deferring resource cleanup on exit
+
+### Fixed
+
+- Skill autocomplete popup now dismisses after Tab completion
+- Stdio MCP connections now persist across tool calls
+- Retryable 5xx responses from the Mistral backend are now retried instead of failing
+
+
 ## [2.16.1] - 2026-06-16
 
 ### Added

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin
@@ -10,7 +9,7 @@ from urllib.parse import urljoin
 import httpx
 
 from vibe import __version__
-from vibe.core.config import ProviderConfig, VibeConfig
+from vibe.core.config import ProviderConfig, VibeConfig, resolve_api_key
 from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.logger import logger
 from vibe.core.telemetry.build_metadata import build_base_metadata
@@ -53,7 +52,7 @@ def get_mistral_provider_and_api_key(
     if provider is None:
         return None
     env_var = provider.api_key_env_var
-    api_key = os.getenv(env_var) if env_var else None
+    api_key = resolve_api_key(env_var)
     if api_key is None:
         return None
     return provider, api_key
@@ -370,11 +369,6 @@ class TelemetryClient:
             "vibe.user_rating_feedback",
             {"rating": rating, "version": __version__, "model": model},
             correlation_id=self.last_correlation_id,
-        )
-
-    def send_remote_resume_requested(self, *, session_id: str) -> None:
-        self.send_telemetry_event(
-            "vibe.remote_resume_requested", {"session_id": session_id}
         )
 
     def send_teleport_completed(

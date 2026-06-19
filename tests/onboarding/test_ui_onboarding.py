@@ -7,6 +7,8 @@ from pathlib import Path
 import tomllib
 from typing import cast
 
+import keyring
+from keyring.errors import KeyringError
 import pytest
 from textual.events import Resize
 from textual.geometry import Size
@@ -57,6 +59,17 @@ from vibe.setup.onboarding.screens.theme_selection import THEMES, ThemeSelection
 CONSOLE_URL = "https://console.mistral.ai"
 BROWSER_AUTH_API_URL = "https://console.mistral.ai/api"
 TEST_NOW = datetime(2026, 3, 16, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def disable_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the .env fallback so persist tests never touch the real OS keyring."""
+
+    def _unavailable(service: str, username: str, password: str) -> None:
+        raise KeyringError("keyring disabled in tests")
+
+    monkeypatch.setattr(keyring, "set_password", _unavailable)
+    monkeypatch.setattr(keyring, "delete_password", lambda service, username: None)
 
 
 def _expected_browser_sign_in_url(process_id: str = "process-1") -> str:

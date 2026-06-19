@@ -8,6 +8,7 @@ from acp.schema import (
     TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
+    ToolCallStatus,
     ToolKind,
 )
 from pydantic import BaseModel
@@ -99,7 +100,18 @@ def fallback_tool_call(event: ToolCallEvent, title: str) -> ToolCallStart:
     )
 
 
-def tool_call_session_update(event: ToolCallEvent) -> SessionUpdate | None:
+def tool_call_session_update(
+    event: ToolCallEvent, status: ToolCallStatus | None = None
+) -> SessionUpdate | None:
+    update = _build_tool_call_start(event)
+    # Status is a lifecycle concern owned by the caller (live start -> pending,
+    # replay -> completed); the per-tool builders leave it unset.
+    if isinstance(update, ToolCallStart) and update.status is None:
+        update.status = status
+    return update
+
+
+def _build_tool_call_start(event: ToolCallEvent) -> SessionUpdate | None:
     if issubclass(event.tool_class, ToolCallSessionUpdateProtocol):
         return event.tool_class.tool_call_session_update(event)
 

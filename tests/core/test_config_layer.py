@@ -3,18 +3,24 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from jsonpointer import JsonPointerException
 from pydantic import BaseModel, ValidationError
 import pytest
 
 from vibe.core.config.layer import (
     ConfigLayer,
+    ConfigPatchApplicationError,
     LayerImplementationError,
     RawConfig,
     TrustNotResolvedError,
     UntrustedLayerError,
 )
-from vibe.core.config.patch import ConfigPatch
-from vibe.core.config.types import ConcurrencyConflictError, LayerConfigSnapshot
+from vibe.core.config.patch import AddOperationPatch, ConfigPatch, ReplaceOperationPatch
+from vibe.core.config.types import (
+    ConcurrencyConflictError,
+    ConflictStrategy,
+    LayerConfigSnapshot,
+)
 
 
 class StubLayer(ConfigLayer[BaseModel]):
@@ -45,6 +51,9 @@ class StubLayer(ConfigLayer[BaseModel]):
             data=dict(self._data), fingerprint=f"fp-{self.read_count}"
         )
 
+    async def _save_to_store(self, _next_config: BaseModel) -> str:
+        raise NotImplementedError("StubLayer.apply() is not implemented")
+
 
 class ObservableStubLayer(StubLayer):
     """Stub that records _on_trust_changed calls."""
@@ -55,6 +64,18 @@ class ObservableStubLayer(StubLayer):
 
     async def _on_trust_changed(self, old: bool | None, new: bool | None) -> None:
         self.trust_changes.append((old, new))
+
+
+class WritableStubLayer(StubLayer):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.writes: list[dict[str, Any]] = []
+
+    async def _save_to_store(self, _next_config: BaseModel) -> str:
+        next_data = _next_config.model_dump()
+        self.writes.append(next_data)
+        self._data = next_data
+        return f"write-fp-{len(self.writes)}"
 
 
 class SampleSchema(BaseModel):
@@ -90,6 +111,9 @@ async def test_default_check_trust_returns_false() -> None:
     class DefaultTrustLayer(ConfigLayer[BaseModel]):
         async def _build_config_snapshot(self) -> LayerConfigSnapshot:
             return LayerConfigSnapshot(data={}, fingerprint="fp")
+
+        async def _save_to_store(self, _next_config: BaseModel) -> str:
+            raise NotImplementedError
 
     layer = DefaultTrustLayer(name="default")
     result = await layer.resolve_trust()
@@ -236,7 +260,7 @@ async def test_load_returns_data() -> None:
     layer = StubLayer(data={"key": "value"})
     result = await layer.load()
     assert isinstance(result, RawConfig)
-    assert result.model_extra == {"key": "value"}
+    assert result.model_dump() == {"key": "value"}
     assert layer.fingerprint == "fp-1"
 
 
@@ -246,7 +270,7 @@ async def test_load_auto_resolves_trust() -> None:
     assert layer.is_trusted is None
     result = await layer.load()
     assert layer.is_trusted is True
-    assert result.model_extra == {"a": 1}
+    assert result.model_dump() == {"a": 1}
     assert layer.fingerprint == "fp-1"
 
     await layer.resolve_trust()
@@ -311,21 +335,21 @@ async def test_invalidate_cache_causes_reload() -> None:
 async def test_revoke_grant_cycle_refreshes_data() -> None:
     layer = StubLayer(data={"v": 1})
     result1 = await layer.load()
-    assert result1.model_extra == {"v": 1}
+    assert result1.model_dump() == {"v": 1}
 
     await layer.revoke_trust()
     layer._data = {"v": 2}
     await layer.grant_trust()
 
     result2 = await layer.load()
-    assert result2.model_extra == {"v": 2}
+    assert result2.model_dump() == {"v": 2}
 
 
 @pytest.mark.asyncio
 async def test_resolve_trust_clears_data_on_revocation() -> None:
     layer = StubLayer(data={"v": 1})
     result1 = await layer.load()
-    assert result1.model_extra == {"v": 1}
+    assert result1.model_dump() == {"v": 1}
 
     # External revocation via resolve_trust (not revoke_trust)
     layer._stub_trusted = False
@@ -339,7 +363,7 @@ async def test_resolve_trust_clears_data_on_revocation() -> None:
     await layer.resolve_trust()
 
     result2 = await layer.load()
-    assert result2.model_extra == {"v": 2}
+    assert result2.model_dump() == {"v": 2}
 
 
 @pytest.mark.asyncio
@@ -350,7 +374,7 @@ async def test_load_returns_deep_copy() -> None:
     result1.model_extra["items"].append("mutated")
 
     result2 = await layer.load()
-    assert result2.model_extra == {"items": ["a", "b"]}
+    assert result2.model_dump() == {"items": ["a", "b"]}
     assert layer.read_count == 1
 
 
@@ -384,7 +408,7 @@ async def test_default_schema_preserves_extras() -> None:
     layer = StubLayer(data={"anything": "goes"})
     result = await layer.load()
     assert isinstance(result, RawConfig)
-    assert result.model_extra == {"anything": "goes"}
+    assert result.model_dump() == {"anything": "goes"}
 
 
 @pytest.mark.asyncio
@@ -423,6 +447,9 @@ async def test_concurrent_loads_serialize() -> None:
                 data={"v": self.read_count}, fingerprint=f"fp-{self.read_count}"
             )
 
+        async def _save_to_store(self, _next_config: BaseModel) -> str:
+            raise NotImplementedError
+
     layer = SlowLayer()
     results = await asyncio.gather(layer.load(), layer.load(), layer.load())
     assert layer.read_count == 1
@@ -438,8 +465,155 @@ async def test_fingerprint_returns_none_before_load() -> None:
 @pytest.mark.asyncio
 async def test_apply_not_implemented() -> None:
     layer = StubLayer()
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
     with pytest.raises(NotImplementedError):
-        await layer.apply(ConfigPatch(fingerprint="fp-1"))
+        await layer.apply(ConfigPatch(fingerprint=fingerprint))
+
+
+@pytest.mark.asyncio
+async def test_apply_operation_failure_wrapped() -> None:
+    original_data = {"tools": {"disabled_tools": ["bash"]}}
+    layer = WritableStubLayer(data=original_data)
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    with pytest.raises(
+        ConfigPatchApplicationError, match="Layer 'stub': failed to apply patch"
+    ) as exc_info:
+        await layer.apply(
+            ConfigPatch(
+                AddOperationPatch(path="/tools/enabled_tools/-", value="read"),
+                fingerprint=fingerprint,
+            )
+        )
+
+    assert exc_info.value.layer_name == "stub"
+    assert isinstance(exc_info.value.__cause__, JsonPointerException)
+    assert "enabled_tools" in str(exc_info.value.__cause__)
+    assert layer.fingerprint == fingerprint
+    assert (await layer.load()).model_dump() == original_data
+    assert layer.writes == []
+
+
+@pytest.mark.asyncio
+async def test_apply_operation_failure_after_successful_operation_is_atomic() -> None:
+    original_data = {"active_model": "old", "tools": {"disabled_tools": ["bash"]}}
+    layer = WritableStubLayer(data=original_data)
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    with pytest.raises(ConfigPatchApplicationError):
+        await layer.apply(
+            ConfigPatch(
+                ReplaceOperationPatch(path="/active_model", value="new"),
+                AddOperationPatch(path="/tools/enabled_tools/-", value="read"),
+                fingerprint=fingerprint,
+            )
+        )
+
+    assert layer.fingerprint == fingerprint
+    assert (await layer.load()).model_dump() == original_data
+    assert layer.writes == []
+
+
+@pytest.mark.asyncio
+async def test_apply_schema_validation_failure_wrapped() -> None:
+    original_data = {"name": "test", "count": 1}
+    layer = WritableStubLayer(output_schema=SampleSchema, data=original_data)
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    with pytest.raises(
+        ConfigPatchApplicationError, match="Layer 'stub': failed to apply patch"
+    ) as exc_info:
+        await layer.apply(
+            ConfigPatch(
+                ReplaceOperationPatch(path="/count", value={"bad": "value"}),
+                fingerprint=fingerprint,
+            )
+        )
+
+    assert exc_info.value.layer_name == "stub"
+    assert isinstance(exc_info.value.__cause__, ValidationError)
+    assert layer.fingerprint == fingerprint
+    assert (await layer.load()).model_dump() == original_data
+    assert layer.writes == []
+
+
+@pytest.mark.asyncio
+async def test_apply_cancel_rejects_stale_fingerprint() -> None:
+    layer = WritableStubLayer(data={"key": "old"})
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    await layer.apply(
+        ConfigPatch(
+            ReplaceOperationPatch(path="/key", value="first"), fingerprint=fingerprint
+        )
+    )
+
+    with pytest.raises(ConcurrencyConflictError) as exc_info:
+        await layer.apply(
+            ConfigPatch(
+                ReplaceOperationPatch(path="/key", value="second"),
+                fingerprint=fingerprint,
+            )
+        )
+
+    assert exc_info.value.expected_fp == fingerprint
+    assert exc_info.value.actual_fp == layer.fingerprint
+    assert (await layer.load()).model_dump() == {"key": "first"}
+
+
+@pytest.mark.asyncio
+async def test_apply_replace_accepts_stale_fingerprint() -> None:
+    layer = WritableStubLayer(data={"key": "old"})
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    await layer.apply(
+        ConfigPatch(
+            ReplaceOperationPatch(path="/key", value="first"), fingerprint=fingerprint
+        )
+    )
+    await layer.apply(
+        ConfigPatch(
+            ReplaceOperationPatch(path="/key", value="second"), fingerprint=fingerprint
+        ),
+        on_conflict=ConflictStrategy.REPLACE,
+    )
+
+    assert (await layer.load()).model_dump() == {"key": "second"}
+    assert layer.writes == [{"key": "first"}, {"key": "second"}]
+
+
+@pytest.mark.asyncio
+async def test_save_to_store_failure_wrapped() -> None:
+    class BrokenApplyLayer(StubLayer):
+        async def _save_to_store(self, _next_config: BaseModel) -> str:
+            raise OSError("disk full")
+
+    layer = BrokenApplyLayer(data={"key": "old"})
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    with pytest.raises(LayerImplementationError, match="_save_to_store") as exc_info:
+        await layer.apply(
+            ConfigPatch(
+                ReplaceOperationPatch(path="/key", value="new"), fingerprint=fingerprint
+            )
+        )
+
+    assert isinstance(exc_info.value.__cause__, OSError)
 
 
 @pytest.mark.asyncio
@@ -499,6 +673,9 @@ class FakeLocalUserLayer(ConfigLayer[UserConfigSchema]):
     async def _build_config_snapshot(self) -> LayerConfigSnapshot:
         return LayerConfigSnapshot(data=dict(self._data), fingerprint="user-fp")
 
+    async def _save_to_store(self, _next_config: UserConfigSchema) -> str:
+        raise NotImplementedError
+
 
 @pytest.mark.asyncio
 async def test_scenario_local_user_layer_always_trusted() -> None:
@@ -544,6 +721,9 @@ class FakeLocalProjectLayer(ConfigLayer[BaseModel]):
     async def _build_config_snapshot(self) -> LayerConfigSnapshot:
         return LayerConfigSnapshot(data=dict(self._data), fingerprint="project-fp")
 
+    async def _save_to_store(self, _next_config: BaseModel) -> str:
+        raise NotImplementedError
+
 
 @pytest.mark.asyncio
 async def test_scenario_local_project_layer_trust_lifecycle() -> None:
@@ -561,7 +741,7 @@ async def test_scenario_local_project_layer_trust_lifecycle() -> None:
     await layer.grant_trust()
     assert trust_store == {"/tmp/my-project": True}
     result = await layer.load()
-    assert result.model_extra == project_data
+    assert result.model_dump() == project_data
 
     # 3. New instance with same trust store — loads directly
     layer2 = FakeLocalProjectLayer(
@@ -570,7 +750,7 @@ async def test_scenario_local_project_layer_trust_lifecycle() -> None:
     assert layer2.is_trusted is None
     result2 = await layer2.load()
     assert layer2.is_trusted is True
-    assert result2.model_extra == project_data
+    assert result2.model_dump() == project_data
 
     # 4. Revoke trust — removed from store, load raises
     await layer2.revoke_trust()

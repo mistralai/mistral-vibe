@@ -19,25 +19,21 @@ def sample_sessions() -> list[ResumeSessionInfo]:
     return [
         ResumeSessionInfo(
             session_id="session-a",
-            source="local",
             cwd="/test",
             title="Session A",
             end_time=(datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
         ),
         ResumeSessionInfo(
             session_id="session-b",
-            source="local",
             cwd="/test",
             title="Session B",
             end_time=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
         ),
         ResumeSessionInfo(
             session_id="session-c",
-            source="remote",
             cwd="/test",
             title="Session C",
             end_time=(datetime.now(UTC) - timedelta(days=1)).isoformat(),
-            status="RUNNING",
         ),
     ]
 
@@ -45,9 +41,9 @@ def sample_sessions() -> list[ResumeSessionInfo]:
 @pytest.fixture
 def sample_latest_messages() -> dict[str, str]:
     return {
-        "local:session-a": "Help me fix this bug",
-        "local:session-b": "Refactor the authentication module",
-        "remote:session-c": "Add unit tests for the API",
+        "session-a": "Help me fix this bug",
+        "session-b": "Refactor the authentication module",
+        "session-c": "Add unit tests for the API",
     }
 
 
@@ -143,20 +139,9 @@ class TestSessionPickerAppInit:
 
 class TestSessionPickerMessages:
     def test_session_selected_stores_option_id(self) -> None:
-        msg = SessionPickerApp.SessionSelected(
-            "local:test-session-id", "local", "test-session-id"
-        )
-        assert msg.option_id == "local:test-session-id"
-        assert msg.source == "local"
+        msg = SessionPickerApp.SessionSelected("test-session-id", "test-session-id")
+        assert msg.option_id == "test-session-id"
         assert msg.session_id == "test-session-id"
-
-    def test_session_selected_with_full_uuid(self) -> None:
-        session_id = "abc12345-6789-0123-4567-89abcdef0123"
-        option_id = f"remote:{session_id}"
-        msg = SessionPickerApp.SessionSelected(option_id, "remote", session_id)
-        assert msg.option_id == option_id
-        assert msg.source == "remote"
-        assert msg.session_id == session_id
 
     def test_cancelled_can_be_instantiated(self) -> None:
         msg = SessionPickerApp.Cancelled()
@@ -164,10 +149,9 @@ class TestSessionPickerMessages:
 
     def test_session_delete_requested_stores_session_info(self) -> None:
         msg = SessionPickerApp.SessionDeleteRequested(
-            "local:test-session-id", "local", "test-session-id"
+            "test-session-id", "test-session-id"
         )
-        assert msg.option_id == "local:test-session-id"
-        assert msg.source == "local"
+        assert msg.option_id == "test-session-id"
         assert msg.session_id == "test-session-id"
 
 
@@ -199,15 +183,15 @@ class TestSessionPickerSessionRemoval:
         picker = SessionPickerApp(
             sessions=sample_sessions, latest_messages=sample_latest_messages
         )
-        option_list = FakeOptionList(highlighted_option_id="local:session-a")
+        option_list = FakeOptionList(highlighted_option_id="session-a")
         posted_messages: list[object] = []
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         monkeypatch.setattr(picker, "post_message", posted_messages.append)
 
         picker.action_request_delete()
 
-        assert_delete_state(picker, kind="confirmation", option_id="local:session-a")
-        assert option_list.replaced_prompts[-1].option_id == "local:session-a"
+        assert_delete_state(picker, kind="confirmation", option_id="session-a")
+        assert option_list.replaced_prompts[-1].option_id == "session-a"
         assert (
             "Press D again to delete" in option_list.replaced_prompts[-1].prompt.plain
         )
@@ -222,7 +206,7 @@ class TestSessionPickerSessionRemoval:
         picker = SessionPickerApp(
             sessions=sample_sessions, latest_messages=sample_latest_messages
         )
-        option_list = FakeOptionList(highlighted_option_id="local:session-a")
+        option_list = FakeOptionList(highlighted_option_id="session-a")
         posted_messages: list[object] = []
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         monkeypatch.setattr(picker, "post_message", posted_messages.append)
@@ -230,14 +214,13 @@ class TestSessionPickerSessionRemoval:
         picker.action_request_delete()
         picker.action_request_delete()
 
-        assert_delete_state(picker, kind="pending", option_id="local:session-a")
-        assert option_list.replaced_prompts[-1].option_id == "local:session-a"
+        assert_delete_state(picker, kind="pending", option_id="session-a")
+        assert option_list.replaced_prompts[-1].option_id == "session-a"
         assert "Deleting..." in option_list.replaced_prompts[-1].prompt.plain
         assert len(posted_messages) == 1
         message = posted_messages[0]
         assert isinstance(message, SessionPickerApp.SessionDeleteRequested)
-        assert message.option_id == "local:session-a"
-        assert message.source == "local"
+        assert message.option_id == "session-a"
         assert message.session_id == "session-a"
 
     def test_delete_confirmation_is_consumed_after_request(
@@ -249,7 +232,7 @@ class TestSessionPickerSessionRemoval:
         picker = SessionPickerApp(
             sessions=sample_sessions, latest_messages=sample_latest_messages
         )
-        option_list = FakeOptionList(highlighted_option_id="local:session-a")
+        option_list = FakeOptionList(highlighted_option_id="session-a")
         posted_messages: list[object] = []
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         monkeypatch.setattr(picker, "post_message", posted_messages.append)
@@ -259,33 +242,9 @@ class TestSessionPickerSessionRemoval:
         picker.action_request_delete()
 
         assert len(posted_messages) == 1
-        assert_delete_state(picker, kind="pending", option_id="local:session-a")
-        assert option_list.replaced_prompts[-1].option_id == "local:session-a"
+        assert_delete_state(picker, kind="pending", option_id="session-a")
+        assert option_list.replaced_prompts[-1].option_id == "session-a"
         assert "Deleting..." in option_list.replaced_prompts[-1].prompt.plain
-
-    def test_delete_request_shows_feedback_for_remote_sessions(
-        self,
-        sample_sessions: list[ResumeSessionInfo],
-        sample_latest_messages: dict[str, str],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        picker = SessionPickerApp(
-            sessions=sample_sessions, latest_messages=sample_latest_messages
-        )
-        option_list = FakeOptionList(highlighted_option_id="remote:session-c")
-        posted_messages: list[object] = []
-        monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
-        monkeypatch.setattr(picker, "post_message", posted_messages.append)
-
-        picker.action_request_delete()
-
-        assert_delete_state(picker, kind="feedback", option_id="remote:session-c")
-        assert option_list.replaced_prompts[-1].option_id == "remote:session-c"
-        assert (
-            "Can't delete remote session"
-            in option_list.replaced_prompts[-1].prompt.plain
-        )
-        assert posted_messages == []
 
     def test_delete_request_shows_feedback_for_current_session(
         self,
@@ -298,15 +257,15 @@ class TestSessionPickerSessionRemoval:
             latest_messages=sample_latest_messages,
             current_session_id="session-a",
         )
-        option_list = FakeOptionList(highlighted_option_id="local:session-a")
+        option_list = FakeOptionList(highlighted_option_id="session-a")
         posted_messages: list[object] = []
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         monkeypatch.setattr(picker, "post_message", posted_messages.append)
 
         picker.action_request_delete()
 
-        assert_delete_state(picker, kind="feedback", option_id="local:session-a")
-        assert option_list.replaced_prompts[-1].option_id == "local:session-a"
+        assert_delete_state(picker, kind="feedback", option_id="session-a")
+        assert option_list.replaced_prompts[-1].option_id == "session-a"
         assert (
             "Can't delete current session"
             in option_list.replaced_prompts[-1].prompt.plain
@@ -315,7 +274,7 @@ class TestSessionPickerSessionRemoval:
 
         picker.action_request_delete()
 
-        assert_delete_state(picker, kind="feedback", option_id="local:session-a")
+        assert_delete_state(picker, kind="feedback", option_id="session-a")
         assert posted_messages == []
 
     def test_pending_delete_blocks_resume_selection(
@@ -327,7 +286,7 @@ class TestSessionPickerSessionRemoval:
         picker = SessionPickerApp(
             sessions=sample_sessions, latest_messages=sample_latest_messages
         )
-        option_list = FakeOptionList(highlighted_option_id="local:session-a")
+        option_list = FakeOptionList(highlighted_option_id="session-a")
         posted_messages: list[object] = []
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         monkeypatch.setattr(picker, "post_message", posted_messages.append)
@@ -335,15 +294,15 @@ class TestSessionPickerSessionRemoval:
         picker.action_request_delete()
         picker.action_request_delete()
         picker.on_option_list_option_selected(
-            cast(OptionList.OptionSelected, FakeOptionEvent("local:session-a"))
+            cast(OptionList.OptionSelected, FakeOptionEvent("session-a"))
         )
         picker.on_option_list_option_selected(
-            cast(OptionList.OptionSelected, FakeOptionEvent("local:session-b"))
+            cast(OptionList.OptionSelected, FakeOptionEvent("session-b"))
         )
 
         assert len(posted_messages) == 1
         assert isinstance(posted_messages[0], SessionPickerApp.SessionDeleteRequested)
-        assert_delete_state(picker, kind="pending", option_id="local:session-a")
+        assert_delete_state(picker, kind="pending", option_id="session-a")
 
     def test_clear_pending_delete_restores_session_option(
         self,
@@ -354,7 +313,7 @@ class TestSessionPickerSessionRemoval:
         picker = SessionPickerApp(
             sessions=sample_sessions, latest_messages=sample_latest_messages
         )
-        option_list = FakeOptionList(highlighted_option_id="local:session-a")
+        option_list = FakeOptionList(highlighted_option_id="session-a")
         posted_messages: list[object] = []
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         monkeypatch.setattr(picker, "post_message", posted_messages.append)
@@ -362,9 +321,9 @@ class TestSessionPickerSessionRemoval:
         picker.action_request_delete()
         picker.action_request_delete()
 
-        assert picker.clear_pending_delete("local:session-a") is True
+        assert picker.clear_pending_delete("session-a") is True
         assert picker._delete_state is None
-        assert option_list.replaced_prompts[-1].option_id == "local:session-a"
+        assert option_list.replaced_prompts[-1].option_id == "session-a"
         assert "Help me fix this bug" in option_list.replaced_prompts[-1].prompt.plain
 
     def test_highlighting_another_session_clears_confirmation(
@@ -376,16 +335,16 @@ class TestSessionPickerSessionRemoval:
         picker = SessionPickerApp(
             sessions=sample_sessions, latest_messages=sample_latest_messages
         )
-        option_list = FakeOptionList(highlighted_option_id="local:session-a")
+        option_list = FakeOptionList(highlighted_option_id="session-a")
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         picker.action_request_delete()
 
         picker.on_option_list_option_highlighted(
-            cast(OptionList.OptionHighlighted, FakeOptionEvent("local:session-b"))
+            cast(OptionList.OptionHighlighted, FakeOptionEvent("session-b"))
         )
 
         assert picker._delete_state is None
-        assert option_list.replaced_prompts[-1].option_id == "local:session-a"
+        assert option_list.replaced_prompts[-1].option_id == "session-a"
         assert "Help me fix this bug" in option_list.replaced_prompts[-1].prompt.plain
 
     def test_highlighting_another_session_clears_delete_feedback(
@@ -395,18 +354,20 @@ class TestSessionPickerSessionRemoval:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         picker = SessionPickerApp(
-            sessions=sample_sessions, latest_messages=sample_latest_messages
+            sessions=sample_sessions,
+            latest_messages=sample_latest_messages,
+            current_session_id="session-c",
         )
-        option_list = FakeOptionList(highlighted_option_id="remote:session-c")
+        option_list = FakeOptionList(highlighted_option_id="session-c")
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         picker.action_request_delete()
 
         picker.on_option_list_option_highlighted(
-            cast(OptionList.OptionHighlighted, FakeOptionEvent("local:session-b"))
+            cast(OptionList.OptionHighlighted, FakeOptionEvent("session-b"))
         )
 
         assert picker._delete_state is None
-        assert option_list.replaced_prompts[-1].option_id == "remote:session-c"
+        assert option_list.replaced_prompts[-1].option_id == "session-c"
         assert (
             "Add unit tests for the API"
             in option_list.replaced_prompts[-1].prompt.plain
@@ -421,7 +382,7 @@ class TestSessionPickerSessionRemoval:
         picker = SessionPickerApp(
             sessions=sample_sessions, latest_messages=sample_latest_messages
         )
-        option_list = FakeOptionList(highlighted_option_id="local:session-a")
+        option_list = FakeOptionList(highlighted_option_id="session-a")
         posted_messages: list[object] = []
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         monkeypatch.setattr(picker, "post_message", posted_messages.append)
@@ -444,9 +405,11 @@ class TestSessionPickerSessionRemoval:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         picker = SessionPickerApp(
-            sessions=sample_sessions, latest_messages=sample_latest_messages
+            sessions=sample_sessions,
+            latest_messages=sample_latest_messages,
+            current_session_id="session-c",
         )
-        option_list = FakeOptionList(highlighted_option_id="remote:session-c")
+        option_list = FakeOptionList(highlighted_option_id="session-c")
         posted_messages: list[object] = []
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         monkeypatch.setattr(picker, "post_message", posted_messages.append)
@@ -471,20 +434,20 @@ class TestSessionPickerSessionRemoval:
         picker = SessionPickerApp(
             sessions=sample_sessions, latest_messages=sample_latest_messages
         )
-        option_list = FakeOptionList(highlighted_option_id="local:session-a")
+        option_list = FakeOptionList(highlighted_option_id="session-a")
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
         picker.action_request_delete()
-        assert_delete_state(picker, kind="confirmation", option_id="local:session-a")
+        assert_delete_state(picker, kind="confirmation", option_id="session-a")
 
-        assert picker.remove_session("local:session-a") is True
+        assert picker.remove_session("session-a") is True
 
         assert [session.option_id for session in picker._sessions] == [
-            "local:session-b",
-            "remote:session-c",
+            "session-b",
+            "session-c",
         ]
-        assert "local:session-a" not in picker._latest_messages
+        assert "session-a" not in picker._latest_messages
         assert picker._delete_state is None
-        assert option_list.removed_option_ids == ["local:session-a"]
+        assert option_list.removed_option_ids == ["session-a"]
 
     def test_remove_missing_session_returns_false(
         self,
@@ -498,7 +461,7 @@ class TestSessionPickerSessionRemoval:
         option_list = FakeOptionList()
         monkeypatch.setattr(picker, "query_one", lambda _selector: option_list)
 
-        assert picker.remove_session("local:missing") is False
+        assert picker.remove_session("missing") is False
 
         assert picker._sessions == sample_sessions
         assert picker._latest_messages == sample_latest_messages

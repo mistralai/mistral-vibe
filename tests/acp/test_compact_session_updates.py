@@ -101,6 +101,7 @@ class TestCompactEventHandling:
             cwd=str(Path.cwd()), mcp_servers=[]
         )
         session = acp_agent_loop.sessions[session_response.session_id]
+        await session.agent_loop.wait_until_ready()
         # Need >1 message so /compact does not early-return.
         session.agent_loop.messages.append(LLMMessage(role=Role.user, content="hello"))
 

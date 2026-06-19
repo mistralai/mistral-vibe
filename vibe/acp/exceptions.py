@@ -18,6 +18,8 @@ Vibe application codes:
   -31004            Context too long
   -31005            Refusal
   -31006            Compaction failed
+  -31007            Invalid image attachment
+  -31008            Images not supported by the active model
 """
 
 from __future__ import annotations
@@ -49,6 +51,8 @@ CONVERSATION_LIMIT = -31003
 CONTEXT_TOO_LONG = -31004
 REFUSAL = -31005
 COMPACTION_FAILED = -31006
+INVALID_IMAGE_ATTACHMENT = -31007
+IMAGES_NOT_SUPPORTED = -31008
 
 
 class VibeRequestError(RequestError):
@@ -179,6 +183,23 @@ class ConfigurationError(VibeRequestError):
 
     def __init__(self, detail: str) -> None:
         super().__init__(message=detail)
+
+
+class InvalidImageAttachmentError(VibeRequestError):
+    code = INVALID_IMAGE_ATTACHMENT
+
+    def __init__(self, detail: str, reason: str) -> None:
+        super().__init__(message=detail, data={"reason": reason})
+
+
+class ImagesNotSupportedError(VibeRequestError):
+    code = IMAGES_NOT_SUPPORTED
+
+    def __init__(self, model: str) -> None:
+        super().__init__(
+            message=f"Model `{model}` does not support images. "
+            f"Switch model, or ask me to enable the support for this model."
+        )
 
 
 class ConversationLimitError(VibeRequestError):

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 from acp import RequestError
 from acp.schema import (
     AgentMessageChunk,
     AgentThoughtChunk,
-    ClientCapabilities,
     ToolCallProgress,
     ToolCallStart,
     UserMessageChunk,
@@ -17,7 +15,8 @@ import pytest
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
-from vibe.acp.acp_agent_loop import WORKSPACE_TRUST_CAPABILITY, VibeAcpAgentLoop
+from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
+from vibe.acp.user_display_content import USER_DISPLAY_CONTENT_META_KEY
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import ModelConfig, SessionLoggingConfig
@@ -126,35 +125,42 @@ class TestLoadSession:
         assert response.config_options[2].current_value == "off"
 
     @pytest.mark.asyncio
-    async def test_load_session_resolves_workspace_trust_before_loading_config(
+    async def test_load_session_returns_trust_details_without_loading_project_docs(
         self,
         acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
         temp_session_dir: Path,
         create_test_session,
         tmp_working_directory: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        acp_agent, client = acp_agent_with_session_config
-        acp_agent.client_capabilities = ClientCapabilities(
-            field_meta={WORKSPACE_TRUST_CAPABILITY: True}
-        )
-        request_trust = AsyncMock(return_value={"decision": "trust_cwd"})
-        monkeypatch.setattr(client, "ext_method", request_trust)
+        acp_agent, _client = acp_agent_with_session_config
         (tmp_working_directory / "AGENTS.md").write_text(
             "Loaded session project instructions", encoding="utf-8"
         )
         session_id = "test-sess-trust"
         create_test_session(temp_session_dir, session_id, str(tmp_working_directory))
 
-        await acp_agent.load_session(
+        response = await acp_agent.load_session(
             cwd=str(tmp_working_directory), mcp_servers=[], session_id=session_id
         )
 
-        request_trust.assert_awaited_once()
-        assert trusted_folders_manager.is_trusted(tmp_working_directory) is True
+        assert response is not None
+        payload = response.model_dump(mode="json", by_alias=True)
+        assert payload.get("_meta") == {
+            "workspace_trust": {
+                "status": "untrusted",
+                "details": {
+                    "cwd": str(tmp_working_directory.resolve()),
+                    "repoRoot": None,
+                    "ignoredFiles": ["AGENTS.md"],
+                    "availableDecisions": ["trust_cwd", "trust_session", "decline"],
+                },
+            }
+        }
+        assert trusted_folders_manager.is_trusted(tmp_working_directory) is None
+        await acp_agent.sessions[session_id].agent_loop.wait_until_ready()
         system_prompt = acp_agent.sessions[session_id].agent_loop.messages[0].content
         assert system_prompt is not None
-        assert "Loaded session project instructions" in system_prompt
+        assert "Loaded session project instructions" not in system_prompt
 
     @pytest.mark.asyncio
     async def test_load_session_registers_session_with_original_id(
@@ -223,6 +229,51 @@ class TestLoadSession:
         ]
         assert len(user_updates) == 1
         assert user_updates[0].update.content.text == "Hello world"
+        assert user_updates[0].update.field_meta is None
+
+    @pytest.mark.asyncio
+    async def test_load_session_replays_user_display_content(
+        self,
+        acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
+        temp_session_dir: Path,
+        create_test_session,
+    ) -> None:
+        acp_agent, client = acp_agent_with_session_config
+
+        session_id = "replay-dsp-123456"
+        cwd = str(Path.cwd())
+        user_display_content = {
+            "version": "1.0.0",
+            "host": "mistral-vscode",
+            "content": [
+                {"type": "text", "text": "Look at "},
+                {
+                    "type": "workspace_mention",
+                    "kind": "file",
+                    "uri": "file:///repo/src/app.ts",
+                    "name": "app.ts",
+                },
+            ],
+        }
+        messages = [
+            {
+                "role": "user",
+                "content": "Look at app.ts",
+                "user_display_content": user_display_content,
+            }
+        ]
+        create_test_session(temp_session_dir, session_id, cwd, messages=messages)
+
+        await acp_agent.load_session(cwd=cwd, mcp_servers=[], session_id=session_id)
+
+        user_updates = [
+            u for u in client._session_updates if isinstance(u.update, UserMessageChunk)
+        ]
+        assert len(user_updates) == 1
+        assert user_updates[0].update.content.text == "Look at app.ts"
+        assert user_updates[0].update.field_meta == {
+            USER_DISPLAY_CONTENT_META_KEY: user_display_content
+        }
 
     @pytest.mark.asyncio
     async def test_load_session_replays_assistant_messages(
@@ -278,7 +329,12 @@ class TestLoadSession:
                     }
                 ],
             },
-            {"role": "tool", "tool_call_id": "call_123", "content": "file contents"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "name": "read",
+                "content": "file contents",
+            },
         ]
         create_test_session(temp_session_dir, session_id, cwd, messages=messages)
 
@@ -288,15 +344,58 @@ class TestLoadSession:
             u for u in client._session_updates if isinstance(u.update, ToolCallStart)
         ]
         assert len(tool_call_starts) == 1
-        assert tool_call_starts[0].update.title == "read"
-        assert tool_call_starts[0].update.tool_call_id == "call_123"
+        start = tool_call_starts[0].update
+        assert start.tool_call_id == "call_123"
+        assert start.kind == "read"
+        # The host drops created events without a status; replayed calls are
+        # historical, so they must carry one.
+        assert start.status == "completed"
+        assert start.field_meta is not None
+        assert start.field_meta["tool_name"] == "read"
 
         tool_results = [
             u for u in client._session_updates if isinstance(u.update, ToolCallProgress)
         ]
         assert len(tool_results) == 1
-        assert tool_results[0].update.tool_call_id == "call_123"
-        assert tool_results[0].update.status == "completed"
+        result = tool_results[0].update
+        assert result.tool_call_id == "call_123"
+        assert result.status == "completed"
+        # The host drops tool_call_update events without a kind.
+        assert result.kind == "read"
+        assert result.field_meta is not None
+        assert result.field_meta["tool_name"] == "read"
+
+    @pytest.mark.asyncio
+    async def test_load_session_skips_result_whose_call_was_not_replayed(
+        self,
+        acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient],
+        temp_session_dir: Path,
+        create_test_session,
+    ) -> None:
+        acp_agent, client = acp_agent_with_session_config
+
+        session_id = "replay-orphan-12345"
+        cwd = str(Path.cwd())
+        # A tool result whose call was not replayed (here no matching tool call
+        # at all, mirroring a hidden tool whose call replay returns None).
+        # Emitting it would orphan a tool_call_update with no preceding call.
+        messages = [
+            {"role": "user", "content": "Do something"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_orphan",
+                "name": "read",
+                "content": "file contents",
+            },
+        ]
+        create_test_session(temp_session_dir, session_id, cwd, messages=messages)
+
+        await acp_agent.load_session(cwd=cwd, mcp_servers=[], session_id=session_id)
+
+        tool_results = [
+            u for u in client._session_updates if isinstance(u.update, ToolCallProgress)
+        ]
+        assert tool_results == []
 
     @pytest.mark.asyncio
     async def test_load_session_replays_reasoning_content(

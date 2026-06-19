@@ -1,4 +1,5 @@
-# What's new in v2.16.0
-- **Better slash commands**: Slash command autocomplete now uses fuzzy search
-- **Readable edit diffs**: File edit previews now include syntax highlighting, line numbers, and theme-aware colors
-- **Focused resume picker**: `/resume` now shows sessions for the current folder
+# What's new in v2.17.0
+
+- **MCP OAuth login**: Authenticate OAuth-backed MCP servers from the TUI with the new `/mcp login`, `/mcp logout`, and `/mcp status` commands
+- **`--check-upgrade`**: New flag to check for a Vibe update on demand, prompt to install it, and exit
+- **`--yolo`**: New shorthand alias for `--auto-approve`

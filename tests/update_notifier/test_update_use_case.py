@@ -207,6 +207,34 @@ async def test_does_not_notify_when_an_available_update_has_been_recently_cached
 
 
 @pytest.mark.asyncio
+async def test_force_check_ignores_fresh_cache_and_notifies(
+    current_timestamp: int,
+) -> None:
+    update_notifier = FakeUpdateGateway(update=Update(latest_version="1.0.2"))
+    timestamp_twelve_hours_ago = current_timestamp - 12 * 60 * 60
+    update_cache = UpdateCache(
+        latest_version="1.0.1", stored_at_timestamp=timestamp_twelve_hours_ago
+    )
+    update_cache_repository = FakeUpdateCacheRepository(update_cache=update_cache)
+
+    update = await get_update_if_available(
+        update_notifier,
+        current_version="1.0.0",
+        update_cache_repository=update_cache_repository,
+        get_current_timestamp=lambda: current_timestamp,
+        force_check=True,
+    )
+
+    assert update is not None
+    assert update.latest_version == "1.0.2"
+    assert update.should_notify is True
+    assert update_notifier.fetch_update_calls == 1
+    assert update_cache_repository.update_cache is not None
+    assert update_cache_repository.update_cache.latest_version == "1.0.2"
+    assert update_cache_repository.update_cache.stored_at_timestamp == current_timestamp
+
+
+@pytest.mark.asyncio
 async def test_retrieves_nothing_when_the_recently_cached_update_is_the_one_currently_in_use(
     current_timestamp: int,
 ) -> None:

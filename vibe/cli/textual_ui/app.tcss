@@ -116,17 +116,15 @@ TextArea > .text-area--cursor {
 }
 
 #completion-popup {
-    overlay: screen;
-    constrain: inside inside;
     display: none;
-    width: auto;
+    width: 100%;
     height: auto;
     color: $foreground;
     background: $background;
     border: solid $foreground-muted;
     overflow-y: auto;
     scrollbar-size-vertical: 1;
-    /* max-height, max-width and padding set in completion_popup.py */
+    /* max-height and padding set in completion_popup.py */
 }
 
 OptionList, OptionList:focus {
@@ -134,9 +132,38 @@ OptionList, OptionList:focus {
     background-tint: transparent;
 }
 
-#completion-popup _CompletionItem {
+#completion-popup _CompletionRow {
     height: auto;
     width: 1fr;
+}
+
+#completion-popup _CompletionItem {
+    height: auto;
+}
+
+#completion-popup .completion-command {
+    /* width set per-row in completion_popup.py, capped to 30% of the popup */
+    max-width: 30%;
+    margin-right: 2;
+    text-style: bold;
+}
+
+#completion-popup .completion-description {
+    width: 1fr;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#completion-popup _CompletionRow.completion-selected .completion-command {
+    text-style: bold reverse;
+}
+
+#completion-popup _CompletionRow.completion-selected .completion-description {
+    color: $foreground;
+    text-style: italic;
 }
 
 #input-box {
@@ -168,12 +195,6 @@ OptionList, OptionList:focus {
     }
 
     &.border-recording {
-        border-top: solid $mistral_orange;
-        border-bottom: solid $mistral_orange;
-        border-title-color: $mistral_orange;
-    }
-
-    &.border-remote {
         border-top: solid $mistral_orange;
         border-bottom: solid $mistral_orange;
         border-title-color: $mistral_orange;
@@ -308,7 +329,7 @@ Markdown {
 .user-message-attachments {
     width: 100%;
     height: auto;
-    padding-left: 2;
+    padding: 0 2 0 2;
     color: $text-muted;
 
     &:ansi {
@@ -350,7 +371,7 @@ Markdown {
     margin-top: 1;
     width: 100%;
     height: auto;
-    padding-left: 2;
+    padding: 0 2 0 2;
 
     Markdown {
         width: 100%;
@@ -412,7 +433,7 @@ Markdown {
     layout: stream;
     width: 100%;
     height: auto;
-    padding: 0 0 0 2;
+    padding: 0 2 0 2;
     margin: 0;
     color: $text-muted;
     text-style: italic;
@@ -497,6 +518,7 @@ Markdown {
     width: 1fr;
     height: auto;
     margin: 0;
+    padding-right: 2;
     color: $warning;
 }
 
@@ -504,6 +526,7 @@ Markdown {
     width: 1fr;
     height: auto;
     margin: 0;
+    padding-right: 2;
     color: $error;
     text-style: bold;
 }
@@ -512,6 +535,7 @@ Markdown {
     width: 1fr;
     height: auto;
     margin: 0;
+    padding-right: 2;
     color: $warning;
 }
 
@@ -519,6 +543,7 @@ Markdown {
     width: 1fr;
     height: auto;
     margin: 0;
+    padding-right: 2;
 
     Markdown {
         margin: 0;
@@ -605,6 +630,7 @@ Markdown {
 .bash-output-body {
     width: 1fr;
     height: auto;
+    padding-right: 2;
 }
 
 .bash-output {
@@ -716,7 +742,7 @@ StatusMessage {
     width: 100%;
     height: auto;
     color: $text-muted;
-    padding-left: 2;
+    padding: 0 2 0 2;
 
     &:ansi {
         text-style: dim;
@@ -762,7 +788,7 @@ StatusMessage {
 .tool-result-content {
     width: 1fr;
     height: auto;
-    padding: 0;
+    padding-right: 2;
 }
 
 .tool-call-widget,

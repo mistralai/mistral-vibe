@@ -8,10 +8,11 @@ import pytest
 
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.conftest import build_test_vibe_app, build_test_vibe_config
+from tests.constants import OPENAI_BASE_URL
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
-from vibe.core.types import Backend, LLMMessage, Role
+from vibe.core.types import Backend
 
 
 def _chat_plan_gateway(*, prompt_switching_to_pro_plan: bool) -> FakeWhoAmIGateway:
@@ -101,46 +102,6 @@ async def test_teleport_command_without_history_sends_early_failure_telemetry(
 
 
 @pytest.mark.asyncio
-async def test_teleport_command_in_remote_session_sends_early_failure_telemetry(
-    telemetry_events: list[dict[str, Any]],
-) -> None:
-    app = build_test_vibe_app(
-        config=_vibe_code_enabled_config(),
-        plan_offer_gateway=_chat_plan_gateway(prompt_switching_to_pro_plan=False),
-    )
-    app.agent_loop.messages.append(LLMMessage(role=Role.user, content="hello"))
-    app.agent_loop.messages.append(LLMMessage(role=Role.assistant, content="hi"))
-
-    async with app.run_test() as pilot:
-        await _wait_until(
-            pilot.pause,
-            lambda: app.commands.get_command_name("/teleport") == "teleport",
-        )
-
-        await app._remote_manager.attach(session_id="remote-session", config=app.config)
-        await app.on_chat_input_container_submitted(
-            ChatInputContainer.Submitted("/teleport")
-        )
-        await _wait_until(
-            pilot.pause, lambda: len(_teleport_failed_events(telemetry_events)) == 1
-        )
-        await app._remote_manager.detach()
-
-    assert _teleport_failed_events(telemetry_events) == [
-        {
-            "event_name": "vibe.teleport_failed",
-            "properties": {
-                "stage": "remote_session",
-                "error_class": "TeleportRemoteSessionError",
-                "push_required": False,
-                "nb_session_messages": 2,
-                "session_id": app.agent_loop.session_id,
-            },
-        }
-    ]
-
-
-@pytest.mark.asyncio
 async def test_teleport_command_hidden_when_current_key_is_not_eligible() -> None:
     app = build_test_vibe_app(
         config=_vibe_code_enabled_config(),
@@ -215,7 +176,7 @@ async def test_teleport_command_hides_after_switching_to_non_mistral_model(
             ),
             ProviderConfig(
                 name="openai",
-                api_base="https://api.openai.com/v1",
+                api_base=f"{OPENAI_BASE_URL}/v1",
                 api_key_env_var="OPENAI_API_KEY",
                 backend=Backend.GENERIC,
             ),

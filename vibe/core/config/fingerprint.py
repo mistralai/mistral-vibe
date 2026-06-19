@@ -17,17 +17,17 @@ from vibe.core.config.types import ConcurrencyConflictError
 def capture_stable_file(path: Path) -> Iterator[tuple[IO[bytes], str]]:
     """Yield a file and fingerprint, raising if the path changes before exit."""
     with path.open("rb") as file:
-        before = _create_file_fingerprint(file)
+        before = create_file_fingerprint(file)
         yield file, before
 
     with path.open("rb") as file:
-        after = _create_file_fingerprint(file)
+        after = create_file_fingerprint(file)
 
     if after != before:
         raise ConcurrencyConflictError(expected_fp=before, actual_fp=after)
 
 
-def _create_file_fingerprint(file: IO) -> str:
+def create_file_fingerprint(file: IO) -> str:
     """Return an opaque token representing the current state of a file."""
     stat = os.fstat(file.fileno())
     return f"{stat.st_dev}:{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_size}"

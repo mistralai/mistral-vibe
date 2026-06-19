@@ -128,6 +128,14 @@ class TestCommandRegistry:
         result = registry.parse_command("/connectors filesystem")
         assert result == ("mcp", registry.commands["mcp"], "filesystem")
 
+    def test_mcp_command_description_surfaces_auth_subcommands(self) -> None:
+        registry = CommandRegistry()
+        command = registry.commands["mcp"]
+
+        assert "status" in command.description
+        assert "login <alias>" in command.description
+        assert "logout <alias>" in command.description
+
     def test_data_retention_command_registration(self) -> None:
         registry = CommandRegistry()
         result = registry.parse_command("/data-retention")

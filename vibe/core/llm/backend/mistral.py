@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Sequence
 import json
-import os
 import types
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
@@ -33,6 +32,7 @@ from mistralai.client.models import (
 )
 from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
 
+from vibe.core.config import resolve_api_key
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.exceptions import BackendErrorBuilder
 from vibe.core.types import (
@@ -196,16 +196,17 @@ _THINKING_TO_REASONING_EFFORT: dict[str, ReasoningEffortValue] = {
 
 
 class MistralBackend:
-    def __init__(self, provider: ProviderConfig, timeout: float = 720.0) -> None:
+    def __init__(
+        self,
+        provider: ProviderConfig,
+        timeout: float = 720.0,
+        retry_max_elapsed_time: float = 300.0,
+    ) -> None:
         self._client: Mistral | None = None
         self._http_client: httpx.AsyncClient | None = None
         self._provider = provider
         self._mapper = MistralMapper()
-        self._api_key = (
-            os.getenv(self._provider.api_key_env_var)
-            if self._provider.api_key_env_var
-            else None
-        )
+        self._api_key = resolve_api_key(self._provider.api_key_env_var)
 
         reasoning_field = getattr(provider, "reasoning_field_name", "reasoning_content")
         if reasoning_field != "reasoning_content":
@@ -223,16 +224,18 @@ class MistralBackend:
             )
         self._server_url = server_url
         self._timeout = timeout
+        self._retry_max_elapsed_time = retry_max_elapsed_time
         self._retry_config = self._build_retry_config()
 
     def _build_retry_config(self) -> RetryConfig:
+        max_elapsed_time_ms = int(self._retry_max_elapsed_time * 1000)
         return RetryConfig(
             strategy="backoff",
             backoff=BackoffStrategy(
                 initial_interval=500,
                 max_interval=30000,
                 exponent=1.5,
-                max_elapsed_time=300000,
+                max_elapsed_time=max_elapsed_time_ms,
             ),
             retry_connection_errors=True,
         )

@@ -6,12 +6,7 @@ import tomllib
 
 from vibe.core.config.fingerprint import capture_stable_file
 from vibe.core.config.layer import ConfigLayer, RawConfig
-from vibe.core.config.patch import ConfigPatch
-from vibe.core.config.types import (
-    EMPTY_CONFIG_SNAPSHOT,
-    ConflictStrategy,
-    LayerConfigSnapshot,
-)
+from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
 from vibe.core.paths._vibe_home import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
 
@@ -73,13 +68,10 @@ class ProjectConfigLayer(ConfigLayer[RawConfig]):
 
         await super().revoke_trust()
 
-    async def apply(
-        self,
-        patch: ConfigPatch,
-        *,
-        on_conflict: ConflictStrategy = ConflictStrategy.CANCEL,
-    ) -> None:
-        raise NotImplementedError("ProjectConfigLayer.apply() is not implemented (M2)")
+    async def _save_to_store(self, _next_config: RawConfig) -> str:
+        raise NotImplementedError(
+            "ProjectConfigLayer patch persistence is not implemented yet"
+        )
 
     async def _find_config_file(self) -> None:
         async with self._find_lock:

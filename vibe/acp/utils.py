@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from acp.helpers import SessionUpdate
 from acp.schema import (
     AgentMessageChunk,
     AgentThoughtChunk,
@@ -22,11 +23,20 @@ from acp.schema import (
     UserMessageChunk,
 )
 
+from vibe.acp.tools.session_update import resolve_kind, tool_call_session_update
+from vibe.acp.user_display_content import USER_DISPLAY_CONTENT_META_KEY
 from vibe.core.agents.models import AgentProfile, AgentType
 from vibe.core.config._settings import THINKING_LEVELS, ThinkingLevel
+from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.proxy_setup import SUPPORTED_PROXY_VARS, get_current_proxy_settings
 from vibe.core.tools.permissions import RequiredPermission
-from vibe.core.types import CompactEndEvent, CompactStartEvent, LLMMessage
+from vibe.core.types import (
+    CompactEndEvent,
+    CompactStartEvent,
+    LLMMessage,
+    ToolCall,
+    ToolCallEvent,
+)
 from vibe.core.utils import compact_complete_display
 
 if TYPE_CHECKING:
@@ -280,10 +290,20 @@ def get_proxy_help_text() -> str:
 
 def create_user_message_replay(msg: LLMMessage) -> UserMessageChunk:
     content = msg.content if isinstance(msg.content, str) else ""
+    field_meta = (
+        {
+            USER_DISPLAY_CONTENT_META_KEY: msg.user_display_content.model_dump(
+                mode="json"
+            )
+        }
+        if msg.user_display_content is not None
+        else None
+    )
     return UserMessageChunk(
         session_update="user_message_chunk",
         content=TextContentBlock(type="text", text=content),
         message_id=msg.message_id,
+        field_meta=field_meta,
     )
 
 
@@ -313,13 +333,38 @@ def create_reasoning_replay(msg: LLMMessage) -> AgentThoughtChunk | None:
 def create_tool_call_replay(
     tool_call_id: str, tool_name: str, arguments: str | None
 ) -> ToolCallStart:
+    # Fallback when a stored tool call can't be resolved (unknown tool or
+    # args that no longer validate). Replayed calls are historical, so they
+    # carry a terminal status; the host drops created events without one.
     return ToolCallStart(
         session_update="tool_call",
         title=tool_name,
         tool_call_id=tool_call_id,
-        kind="other",
+        kind=resolve_kind(tool_name),
+        status="completed",
         raw_input=arguments,
         field_meta={"tool_name": tool_name},
+    )
+
+
+def tool_call_replay_update(
+    resolved: ResolvedToolCall | None, tool_call: ToolCall
+) -> SessionUpdate | None:
+    tool_name = tool_call.function.name or ""
+    tool_call_id = tool_call.id or ""
+    if resolved is None:
+        return create_tool_call_replay(
+            tool_call_id, tool_name, tool_call.function.arguments
+        )
+
+    return tool_call_session_update(
+        ToolCallEvent(
+            tool_call_id=resolved.call_id,
+            tool_name=resolved.tool_name,
+            tool_class=resolved.tool_class,
+            args=resolved.validated_args,
+        ),
+        status="completed",
     )
 
 
@@ -328,11 +373,14 @@ def create_tool_result_replay(msg: LLMMessage) -> ToolCallProgress | None:
         return None
 
     content = msg.content if isinstance(msg.content, str) else ""
+    tool_name = msg.name or ""
     return ToolCallProgress(
         session_update="tool_call_update",
         tool_call_id=msg.tool_call_id,
         status="completed",
+        kind=resolve_kind(tool_name),
         raw_output=content,
+        field_meta={"tool_name": tool_name},
         content=[
             ContentToolCallContent(
                 type="content", content=TextContentBlock(type="text", text=content)

@@ -10,24 +10,21 @@ from vibe.core.session.resume_sessions import ResumeSessionInfo
 _SESSIONS = [
     ResumeSessionInfo(
         session_id="local-session-0001",
-        source="local",
         cwd="/test/workdir",
         title="Refactor the auth module",
         end_time=None,
     ),
     ResumeSessionInfo(
-        session_id="remote-session-0002",
-        source="remote",
-        cwd="",
-        title="Vibe Code",
+        session_id="local-session-0002",
+        cwd="/test/workdir",
+        title="Add unit tests for the API",
         end_time=None,
-        status="RUNNING",
     ),
 ]
 
 _LATEST_MESSAGES = {
     _SESSIONS[0].option_id: "Refactor the auth module",
-    _SESSIONS[1].option_id: "Vibe Code (running)",
+    _SESSIONS[1].option_id: "Add unit tests for the API",
 }
 
 

@@ -176,6 +176,27 @@ def test_resolve_api_key_for_plan_with_missing_env_var() -> None:
         environ["MISTRAL_API_KEY"] = previous_api_key
 
 
+def test_resolve_api_key_for_plan_falls_back_to_keyring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    keyring_api_key = "keyring_mistral_api_key"
+    monkeypatch.setattr(
+        "vibe.core.config._settings.keyring.get_password",
+        lambda service, username: keyring_api_key,
+    )
+
+    provider = ProviderConfig(
+        name="test_mistral",
+        api_base="https://api.mistral.ai",
+        backend=Backend.MISTRAL,
+        api_key_env_var="MISTRAL_API_KEY",
+    )
+
+    result = resolve_api_key_for_plan(provider)
+    assert result == keyring_api_key
+
+
 @pytest.mark.parametrize(
     ("plan_info", "expected_cta"),
     [

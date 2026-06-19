@@ -91,6 +91,12 @@ def _build_commands() -> dict[str, AcpCommand]:
             description="Show path to current session log directory",
             handler="_handle_log",
         ),
+        "mcp": AcpCommand(
+            name="mcp",
+            description="Show MCP OAuth status, login guidance, or log out an OAuth MCP server",
+            handler="_handle_mcp",
+            input_hint="status | login <alias> | logout <alias>",
+        ),
         "teleport": AcpCommand(
             name="teleport",
             description="Teleport session to Vibe Code Web",

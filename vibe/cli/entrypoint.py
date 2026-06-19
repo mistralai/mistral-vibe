@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import os
 from pathlib import Path
 import sys
@@ -50,7 +51,7 @@ def parse_arguments() -> argparse.Namespace:
         metavar="TEXT",
         help="Run in programmatic mode: send prompt, output response, and exit. "
         "Tool approval follows the selected --agent (or 'default_agent' config); "
-        "pass --auto-approve to allow all tool calls.",
+        "pass --auto-approve or --yolo to allow all tool calls.",
     )
     parser.add_argument(
         "--max-turns",
@@ -104,11 +105,17 @@ def parse_arguments() -> argparse.Namespace:
     )
     agent_group.add_argument(
         "--auto-approve",
+        "--yolo",
         action="store_true",
         help="Shortcut for --agent auto-approve. Approves all tool calls without "
         "prompting.",
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
+    parser.add_argument(
+        "--check-upgrade",
+        action="store_true",
+        help="Check for a Vibe update now, prompt to install it, and exit",
+    )
     parser.add_argument(
         "--workdir",
         type=Path,
@@ -216,14 +223,19 @@ def main() -> None:
         additional_dirs.append(resolved)
         trusted_folders_manager.trust_for_session(resolved)
 
-    is_interactive = args.prompt is None
-    if is_interactive:
-        check_and_resolve_trusted_folder(cwd)
     init_harness_files_manager("user", "project", additional_dirs=additional_dirs)
 
     from vibe.cli.cli import run_cli
 
-    run_cli(args)
+    resolve_trusted_folder: Callable[[], None] | None = None
+    if args.prompt is None and not args.check_upgrade:
+
+        def _resolve_trusted_folder() -> None:
+            check_and_resolve_trusted_folder(cwd)
+
+        resolve_trusted_folder = _resolve_trusted_folder
+
+    run_cli(args, resolve_trusted_folder=resolve_trusted_folder)
 
 
 if __name__ == "__main__":

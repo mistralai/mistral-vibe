@@ -15,7 +15,7 @@ from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection, lines_la
 from vibe.cli.textual_ui.widgets.diff_rendering import (
     diff_border_colors,
     language_for_path,
-    locate_snippet_in_file,
+    locate_snippets_in_file,
     render_edit_diff,
 )
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
@@ -221,13 +221,15 @@ class EditApprovalWidget(ToolApprovalWidget[EditArgs]):
         )
         yield NoMarkupStatic("")
 
-        # Approximate: queued edits ahead of this one may shift the real line.
-        start_line = locate_snippet_in_file(self.args.file_path, self.args.old_string)
+        # Approximate: queued edits ahead of this one may shift the real lines.
+        start_lines = locate_snippets_in_file(self.args.file_path, self.args.old_string)
+        if not self.args.replace_all:
+            start_lines = start_lines[:1]
         yield from render_edit_diff(
             self.args.old_string,
             self.args.new_string,
             language_for_path(self.args.file_path),
-            start_line,
+            start_lines,
             ansi=self.app.native_ansi_color,
             dark=self.app.current_theme.dark,
         )
@@ -252,7 +254,7 @@ class EditResultWidget(ToolResultWidget[EditResult]):
                 self.result.old_string,
                 self.result.new_string,
                 language_for_path(self.result.file),
-                self.result.ui_start_line,
+                self.result.ui_start_lines,
                 ansi=self.app.native_ansi_color,
                 dark=self.app.current_theme.dark,
             )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.constants import ANTHROPIC_BASE_URL
 from vibe.core.config import OtelSpanExporterConfig, ProviderConfig, VibeConfig
 from vibe.core.types import Backend
 
@@ -62,7 +63,7 @@ class TestOtelSpanExporterConfig:
             update={
                 "providers": [
                     ProviderConfig(
-                        name="anthropic", api_base="https://api.anthropic.com/v1"
+                        name="anthropic", api_base=f"{ANTHROPIC_BASE_URL}/v1"
                     )
                 ]
             }
@@ -79,6 +80,18 @@ class TestOtelSpanExporterConfig:
         result = vibe_config.otel_span_exporter_config
         assert result is not None
         assert result.endpoint == "https://api.mistral.ai/telemetry/v1/traces"
+
+    def test_resolves_api_key_from_keyring(
+        self, vibe_config: VibeConfig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Key stored only in the OS keyring (no env var) must still authenticate OTEL.
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        monkeypatch.setattr(
+            "keyring.get_password", lambda service, username: "sk-keyring"
+        )
+        result = vibe_config.otel_span_exporter_config
+        assert result is not None
+        assert result.headers == {"Authorization": "Bearer sk-keyring"}
 
     def test_returns_none_and_warns_when_api_key_missing(
         self,

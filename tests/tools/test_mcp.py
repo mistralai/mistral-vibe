@@ -1,21 +1,28 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
+import re
+import sys
 import threading
 import time
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 from pydantic import ValidationError
 import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp, VibeConfig
+from vibe.core.tools.base import BaseToolConfig, BaseToolState, InvokeContext
 from vibe.core.tools.mcp import (
+    AuthStatus,
+    MCPConnectionPool,
     MCPRegistry,
     MCPToolResult,
     RemoteTool,
@@ -30,6 +37,8 @@ from vibe.core.tools.mcp import (
     list_tools_http,
     list_tools_stdio,
 )
+from vibe.core.tools.mcp.pool import _StdioConnection, stdio_key
+from vibe.core.tools.mcp.tools import _OpenArgs, build_stdio_params
 
 
 class TestRemoteTool:
@@ -555,6 +564,28 @@ class TestMCPRegistry:
 
         assert registry.get_tools([]) == {}
 
+    def test_get_tools_reconciles_status_with_active_servers(self):
+        registry = MCPRegistry()
+        kept = self._make_http_server("kept", url="http://kept:1")
+        removed = self._make_http_server("removed", url="http://removed:1")
+        kept_proxy = create_mcp_http_proxy_tool_class(
+            url="http://kept:1", remote=RemoteTool(name="search"), alias="kept"
+        )
+        removed_proxy = create_mcp_http_proxy_tool_class(
+            url="http://removed:1", remote=RemoteTool(name="search"), alias="removed"
+        )
+        registry._cache[registry._server_key(kept)] = {
+            kept_proxy.get_name(): kept_proxy
+        }
+        registry._cache[registry._server_key(removed)] = {
+            removed_proxy.get_name(): removed_proxy
+        }
+
+        registry.get_tools([kept, removed])
+        registry.get_tools([kept])
+
+        assert registry.status() == {"kept": AuthStatus.STATIC}
+
     def test_clear_drops_cache(self):
         registry = MCPRegistry()
         srv = self._make_http_server("s")
@@ -968,3 +999,325 @@ class TestMCPDisableFiltering:
             config_getter=lambda: config, mcp_registry=registry, connector_registry=None
         )
         assert "demo_tool_a" in tm.available_tools
+
+
+def _ok_result(value: dict[str, Any] | None = None) -> SimpleNamespace:
+    return SimpleNamespace(structuredContent=value or {"ok": 1}, content=None)
+
+
+class _FakeSession:
+    def __init__(self, call_tool: AsyncMock) -> None:
+        self.call_tool = call_tool
+
+
+def _patch_enter(sessions: list[_FakeSession], closed: list[_FakeSession]) -> AsyncMock:
+    it = iter(sessions)
+
+    async def _record_close(session: _FakeSession) -> None:
+        closed.append(session)
+
+    async def _enter(stack, params, *, init_timeout, sampling_callback=None):
+        session = next(it)
+        stack.push_async_callback(_record_close, session)
+        return session
+
+    return AsyncMock(side_effect=_enter)
+
+
+class TestMCPConnectionPool:
+    @pytest.mark.asyncio
+    async def test_reuses_connection_across_calls(self):
+        call_tool = AsyncMock(return_value=_ok_result())
+        session = _FakeSession(call_tool)
+        enter = _patch_enter([session], [])
+        pool = MCPConnectionPool()
+
+        with patch("vibe.core.tools.mcp.pool.enter_stdio_session", enter):
+            r1 = await pool.call_tool(
+                command=["srv"], tool_name="t", arguments={"a": 1}
+            )
+            r2 = await pool.call_tool(
+                command=["srv"], tool_name="t", arguments={"a": 2}
+            )
+
+        assert enter.call_count == 1
+        assert call_tool.await_count == 2
+        assert isinstance(r1, MCPToolResult) and r1.structured == {"ok": 1}
+        assert r2.structured == {"ok": 1}
+
+    @pytest.mark.asyncio
+    async def test_serializes_concurrent_calls_to_same_connection(self):
+        active = 0
+        max_active = 0
+        order: list[int] = []
+
+        async def _call(tool_name, arguments, read_timeout_seconds=None):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            order.append(arguments["i"])
+            active -= 1
+            return _ok_result()
+
+        session = _FakeSession(AsyncMock(side_effect=_call))
+        enter = _patch_enter([session], [])
+        pool = MCPConnectionPool()
+
+        with patch("vibe.core.tools.mcp.pool.enter_stdio_session", enter):
+            await asyncio.gather(
+                *(
+                    pool.call_tool(command=["srv"], tool_name="t", arguments={"i": i})
+                    for i in range(5)
+                )
+            )
+
+        assert enter.call_count == 1
+        assert max_active == 1
+        assert order == [0, 1, 2, 3, 4]
+
+    @pytest.mark.asyncio
+    async def test_reconnects_once_on_transport_death(self):
+        dead = AsyncMock(side_effect=anyio.ClosedResourceError())
+        alive = AsyncMock(return_value=_ok_result({"recovered": 1}))
+        sessions = [_FakeSession(dead), _FakeSession(alive)]
+        enter = _patch_enter(sessions, [])
+        pool = MCPConnectionPool()
+
+        with patch("vibe.core.tools.mcp.pool.enter_stdio_session", enter):
+            result = await pool.call_tool(command=["srv"], tool_name="t", arguments={})
+
+        assert enter.call_count == 2
+        assert result.structured == {"recovered": 1}
+
+    @pytest.mark.asyncio
+    async def test_second_transport_failure_propagates(self):
+        dead1 = AsyncMock(side_effect=anyio.ClosedResourceError())
+        dead2 = AsyncMock(side_effect=anyio.BrokenResourceError())
+        sessions = [_FakeSession(dead1), _FakeSession(dead2)]
+        enter = _patch_enter(sessions, [])
+        pool = MCPConnectionPool()
+
+        with patch("vibe.core.tools.mcp.pool.enter_stdio_session", enter):
+            with pytest.raises(anyio.BrokenResourceError):
+                await pool.call_tool(command=["srv"], tool_name="t", arguments={})
+
+        assert enter.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_distinct_keys_get_distinct_connections(self):
+        sessions = [
+            _FakeSession(AsyncMock(return_value=_ok_result())),
+            _FakeSession(AsyncMock(return_value=_ok_result())),
+        ]
+        enter = _patch_enter(sessions, [])
+        pool = MCPConnectionPool()
+
+        with patch("vibe.core.tools.mcp.pool.enter_stdio_session", enter):
+            await pool.call_tool(command=["srv-a"], tool_name="t", arguments={})
+            await pool.call_tool(command=["srv-b"], tool_name="t", arguments={})
+
+        assert enter.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_same_key_different_env_get_distinct_connections(self):
+        sessions = [
+            _FakeSession(AsyncMock(return_value=_ok_result())),
+            _FakeSession(AsyncMock(return_value=_ok_result())),
+        ]
+        enter = _patch_enter(sessions, [])
+        pool = MCPConnectionPool()
+
+        with patch("vibe.core.tools.mcp.pool.enter_stdio_session", enter):
+            await pool.call_tool(
+                command=["srv"], tool_name="t", arguments={}, env={"K": "1"}
+            )
+            await pool.call_tool(
+                command=["srv"], tool_name="t", arguments={}, env={"K": "2"}
+            )
+
+        assert enter.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_aclose_closes_all_connections(self):
+        closed: list[_FakeSession] = []
+        sessions = [
+            _FakeSession(AsyncMock(return_value=_ok_result())),
+            _FakeSession(AsyncMock(return_value=_ok_result())),
+        ]
+        enter = _patch_enter(sessions, closed)
+        pool = MCPConnectionPool()
+
+        with patch("vibe.core.tools.mcp.pool.enter_stdio_session", enter):
+            await pool.call_tool(command=["srv-a"], tool_name="t", arguments={})
+            await pool.call_tool(command=["srv-b"], tool_name="t", arguments={})
+            await pool.aclose()
+
+        assert closed == sessions
+        assert pool._conns == {}
+
+    @pytest.mark.asyncio
+    async def test_tool_error_does_not_reconnect(self):
+        err = RuntimeError("tool blew up")
+        session = _FakeSession(AsyncMock(side_effect=err))
+        enter = _patch_enter([session], [])
+        pool = MCPConnectionPool()
+
+        with patch("vibe.core.tools.mcp.pool.enter_stdio_session", enter):
+            with pytest.raises(RuntimeError, match="tool blew up"):
+                await pool.call_tool(command=["srv"], tool_name="t", arguments={})
+
+        assert enter.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_bind_loop_drops_connections_on_loop_change(self):
+        pool = MCPConnectionPool()
+        other_loop = asyncio.new_event_loop()
+        try:
+            pool._loop = other_loop
+            pool._conns["k"] = _StdioConnection(build_stdio_params(["srv"]), None, None)
+            pool._bind_loop()
+            assert pool._conns == {}
+            assert pool._loop is asyncio.get_running_loop()
+        finally:
+            other_loop.close()
+
+    def test_stdio_key_stable_and_distinct(self):
+        base = stdio_key(["srv", "--x"], {"A": "1"}, "/tmp")
+        assert base == stdio_key(["srv", "--x"], {"A": "1"}, "/tmp")
+        assert base != stdio_key(["srv", "--y"], {"A": "1"}, "/tmp")
+        assert base != stdio_key(["srv", "--x"], {"A": "2"}, "/tmp")
+        assert base != stdio_key(["srv", "--x"], {"A": "1"}, "/other")
+
+
+class TestMCPStdioProxyToolPooling:
+    @staticmethod
+    def _make_tool():
+        cls = create_mcp_stdio_proxy_tool_class(
+            command=["srv"], remote=RemoteTool(name="t"), alias="local"
+        )
+        return cls(lambda: BaseToolConfig(), BaseToolState())
+
+    @pytest.mark.asyncio
+    async def test_run_routes_through_pool_when_present(self):
+        tool = self._make_tool()
+        pool = MagicMock()
+        pool.call_tool = AsyncMock(
+            return_value=MCPToolResult(server="s", tool="t", text="ok")
+        )
+        ctx = InvokeContext(tool_call_id="1", mcp_pool=pool)
+
+        with patch("vibe.core.tools.mcp.tools.call_tool_stdio") as one_shot:
+            results = [ev async for ev in tool.run(_OpenArgs(), ctx)]
+
+        one_shot.assert_not_called()
+        pool.call_tool.assert_awaited_once()
+        assert isinstance(results[0], MCPToolResult)
+        assert results[0].text == "ok"
+
+    @pytest.mark.asyncio
+    async def test_run_falls_back_without_pool(self):
+        tool = self._make_tool()
+        ctx = InvokeContext(tool_call_id="1", mcp_pool=None)
+
+        with patch(
+            "vibe.core.tools.mcp.tools.call_tool_stdio",
+            AsyncMock(return_value=MCPToolResult(server="s", tool="t", text="fb")),
+        ) as one_shot:
+            results = [ev async for ev in tool.run(_OpenArgs(), ctx)]
+
+        one_shot.assert_awaited_once()
+        assert isinstance(results[0], MCPToolResult)
+        assert results[0].text == "fb"
+
+
+_COUNTER_SERVER = """
+import os
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("counter")
+_state = {"n": 0}
+
+
+@mcp.tool()
+def increment() -> str:
+    _state["n"] += 1
+    return f"count={_state['n']} pid={os.getpid()}"
+
+
+if __name__ == "__main__":
+    mcp.run()
+"""
+
+
+def _result_text(result: MCPToolResult) -> str:
+    if result.text:
+        return result.text
+    return str(result.structured)
+
+
+class TestMCPConnectionPoolIntegration:
+    @pytest.mark.asyncio
+    async def test_persists_real_subprocess_state_across_calls(self, tmp_path):
+        script = tmp_path / "counter_server.py"
+        script.write_text(_COUNTER_SERVER)
+        command = [sys.executable, str(script)]
+        pool = MCPConnectionPool()
+
+        try:
+            r1 = await pool.call_tool(
+                command=command,
+                tool_name="increment",
+                arguments={},
+                startup_timeout_sec=30,
+                tool_timeout_sec=30,
+            )
+            r2 = await pool.call_tool(
+                command=command,
+                tool_name="increment",
+                arguments={},
+                startup_timeout_sec=30,
+                tool_timeout_sec=30,
+            )
+        finally:
+            await pool.aclose()
+
+        t1, t2 = _result_text(r1), _result_text(r2)
+        # State survives across calls only if the same subprocess handled both.
+        assert "count=1" in t1
+        assert "count=2" in t2
+        pid1 = re.search(r"pid=(\d+)", t1)
+        pid2 = re.search(r"pid=(\d+)", t2)
+        assert pid1 is not None and pid2 is not None
+        assert pid1.group(1) == pid2.group(1)
+
+    @pytest.mark.asyncio
+    async def test_aclose_terminates_real_subprocess(self, tmp_path):
+        script = tmp_path / "counter_server.py"
+        script.write_text(_COUNTER_SERVER)
+        command = [sys.executable, str(script)]
+        pool = MCPConnectionPool()
+
+        result = await pool.call_tool(
+            command=command,
+            tool_name="increment",
+            arguments={},
+            startup_timeout_sec=30,
+            tool_timeout_sec=30,
+        )
+        pid_match = re.search(r"pid=(\d+)", _result_text(result))
+        assert pid_match is not None
+        pid = int(pid_match.group(1))
+
+        await pool.aclose()
+
+        # The subprocess should be gone after aclose; poll briefly to allow the
+        # OS to reap it.
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.1)
+        else:
+            pytest.fail(f"MCP subprocess pid={pid} still alive after aclose")

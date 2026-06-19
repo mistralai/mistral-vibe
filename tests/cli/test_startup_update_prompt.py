@@ -8,9 +8,20 @@ from unittest.mock import patch
 import pytest
 
 from tests.conftest import build_test_vibe_config
-from vibe.cli.cli import _maybe_run_startup_update_prompt
-from vibe.cli.update_notifier import FileSystemUpdateCacheRepository, UpdateCache
-from vibe.setup.update_prompt.update_prompt_dialog import UpdatePromptResult
+from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
+from vibe import __version__
+from vibe.cli.cli import _maybe_run_startup_update_prompt, _run_check_upgrade
+from vibe.cli.update_notifier import (
+    FileSystemUpdateCacheRepository,
+    Update,
+    UpdateCache,
+    UpdateGatewayCause,
+    UpdateGatewayError,
+)
+from vibe.setup.update_prompt.update_prompt_dialog import (
+    UpdatePromptMode,
+    UpdatePromptResult,
+)
 
 
 class _BrokenRepository:
@@ -127,6 +138,76 @@ def test_no_op_when_cache_read_raises_oserror() -> None:
         _maybe_run_startup_update_prompt(config, repository)
 
     mock_ask.assert_not_called()
+
+
+def test_check_upgrade_fetches_and_prompts_when_update_is_available(
+    repository: FileSystemUpdateCacheRepository,
+) -> None:
+    notifier = FakeUpdateGateway(update=Update(latest_version="999.0.0"))
+
+    with patch(
+        "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.CONTINUE
+    ) as mock_ask:
+        _run_check_upgrade(repository, update_notifier=notifier, theme="textual-light")
+
+    mock_ask.assert_called_once_with(
+        __version__,
+        "999.0.0",
+        theme="textual-light",
+        prompt_mode=UpdatePromptMode.CHECK_UPGRADE,
+    )
+    assert notifier.fetch_update_calls == 1
+
+
+def test_check_upgrade_cancel_does_not_dismiss_update(
+    repository: FileSystemUpdateCacheRepository,
+) -> None:
+    config = build_test_vibe_config(enable_update_checks=True)
+    notifier = FakeUpdateGateway(update=Update(latest_version="999.0.0"))
+
+    with patch(
+        "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.CONTINUE
+    ):
+        _run_check_upgrade(repository, update_notifier=notifier)
+
+    cache = asyncio.run(repository.get())
+    assert cache is not None
+    assert cache.dismissed_version is None
+
+    with patch(
+        "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.CONTINUE
+    ) as mock_ask:
+        _maybe_run_startup_update_prompt(config, repository)
+
+    mock_ask.assert_called_once()
+
+
+def test_check_upgrade_prints_up_to_date_when_no_update_exists(
+    repository: FileSystemUpdateCacheRepository, capsys: pytest.CaptureFixture[str]
+) -> None:
+    notifier = FakeUpdateGateway(update=None)
+
+    with patch("vibe.cli.cli.ask_update_prompt") as mock_ask:
+        _run_check_upgrade(repository, update_notifier=notifier)
+
+    mock_ask.assert_not_called()
+    out = capsys.readouterr().out
+    assert "already up to date" in out
+    assert __version__ in out
+
+
+def test_check_upgrade_exits_one_when_gateway_errors(
+    repository: FileSystemUpdateCacheRepository, capsys: pytest.CaptureFixture[str]
+) -> None:
+    notifier = FakeUpdateGateway(
+        error=UpdateGatewayError(cause=UpdateGatewayCause.REQUEST_FAILED)
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_check_upgrade(repository, update_notifier=notifier)
+
+    assert excinfo.value.code == 1
+    assert "Update check failed" in capsys.readouterr().out
 
 
 def test_continue_marks_version_as_dismissed_and_prevents_reprompt(

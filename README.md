@@ -137,8 +137,8 @@ custom agent file in `~/.vibe/agents/` or the project's `.vibe/agents/`
 directory. Subagents such as `explore` are not accepted.
 
 > Note: `default_agent` applies in both interactive and programmatic
-> (`-p` / `--prompt`) sessions. Pass `--auto-approve` when a run should
-> approve all tool calls without prompting.
+> (`-p` / `--prompt`) sessions. Pass `--auto-approve` or `--yolo` when
+> a run should approve all tool calls without prompting.
 
 ### Subagents and Task Delegation
 
@@ -262,8 +262,8 @@ vibe --prompt "Refactor the main function in cli/main.py to be more modular."
 ```
 
 By default, it uses your configured `default_agent` (`default` unless changed).
-To approve all tool calls without prompting, pass `--auto-approve` (also
-available for interactive sessions):
+To approve all tool calls without prompting, pass `--auto-approve` or `--yolo`
+(also available for interactive sessions):
 
 ```bash
 vibe --prompt "Refactor the main function in cli/main.py to be more modular." --auto-approve
@@ -277,7 +277,7 @@ When using `--prompt`, you can specify additional options:
 - **`--max-price DOLLARS`**: Set a maximum cost limit in dollars. The session will be interrupted if the cost exceeds this limit.
 - **`--max-tokens N`**: Set a maximum cumulative LLM token budget for the session, counting both prompt and completion tokens. The session will be interrupted if usage exceeds this limit.
 - **`--agent NAME`**: Select the agent profile for this run.
-- **`--auto-approve`**: Shortcut for `--agent auto-approve`. Approves all tool calls without prompting, including in interactive sessions.
+- **`--auto-approve`, `--yolo`**: Shortcut for `--agent auto-approve`. Approves all tool calls without prompting, including in interactive sessions.
 - **`--enabled-tools TOOL`**: Enable specific tools. In programmatic mode, this disables all other tools. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
 - **`--output FORMAT`**: Set the output format. Options:
   - `text` (default): Human-readable text output
@@ -729,6 +729,8 @@ Each path is implicitly trusted (no trust prompt) and contributes its `AGENTS.md
 ### Update Settings
 
 Vibe checks PyPI at most once per day during a session. When a newer version is found, the next launch shows an update prompt before opening the chat, offering to either update immediately (via `uv tool upgrade mistral-vibe` or `brew upgrade mistral-vibe`) or continue with the current version.
+
+Run `vibe --check-upgrade` to check PyPI immediately, prompt to install a newer version if one exists, and exit.
 
 To disable the daily check entirely, add this to your `config.toml`:
 

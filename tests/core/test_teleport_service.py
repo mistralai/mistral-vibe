@@ -14,6 +14,7 @@ import pytest
 import zstandard
 
 from tests.conftest import build_test_vibe_config
+from tests.constants import TELEPORT_COMPLETE_URL, TELEPORT_SESSIONS_PATH
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
@@ -59,7 +60,7 @@ def _mock_handler() -> Any:
                 "webSessionId": "web-session-id",
                 "projectId": "project-id",
                 "status": "running",
-                "url": "https://chat.example.com/code/project-id/web-session-id",
+                "url": TELEPORT_COMPLETE_URL,
             },
         )
 
@@ -218,7 +219,7 @@ class TestTeleportServiceExecute:
                     "webSessionId": "web-session-id",
                     "projectId": "project-id",
                     "status": "running",
-                    "url": "https://chat.example.com/code/project-id/web-session-id",
+                    "url": TELEPORT_COMPLETE_URL,
                 },
             )
 
@@ -247,10 +248,8 @@ class TestTeleportServiceExecute:
         assert isinstance(events[0], TeleportCheckingGitEvent)
         assert isinstance(events[1], TeleportStartingWorkflowEvent)
         assert isinstance(events[2], TeleportCompleteEvent)
-        assert (
-            events[2].url == "https://chat.example.com/code/project-id/web-session-id"
-        )
-        assert seen_url == "https://chat.example.com/api/v1/code/sessions"
+        assert events[2].url == TELEPORT_COMPLETE_URL
+        assert seen_url == f"https://chat.example.com{TELEPORT_SESSIONS_PATH}"
         assert seen_body is not None
         assert seen_body["message"] == {
             "role": "user",

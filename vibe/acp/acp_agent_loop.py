@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import signal
 import sys
-from typing import Any, Literal, Protocol, cast, override
+from typing import Any, Protocol, cast, override
 from uuid import uuid4
 
 from acp import (
@@ -21,7 +21,6 @@ from acp import (
     LoadSessionResponse,
     NewSessionResponse,
     PromptResponse,
-    RequestError,
     SetSessionModelResponse,
     SetSessionModeResponse,
     run_agent,
@@ -69,6 +68,7 @@ from acp.schema import (
     Usage,
     UsageUpdate,
 )
+from keyring.errors import KeyringError
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from vibe import VIBE_ROOT, __version__
@@ -79,6 +79,7 @@ from vibe.acp.exceptions import (
     ConfigurationError,
     ContextTooLongError,
     ConversationLimitError,
+    ImagesNotSupportedError as AcpImagesNotSupportedError,
     InternalError,
     InvalidRequestError,
     NotImplementedMethodError,
@@ -88,6 +89,7 @@ from vibe.acp.exceptions import (
     SessionNotFoundError,
     UnauthenticatedError,
 )
+from vibe.acp.image_blocks import extract_image_attachments
 from vibe.acp.session import AcpSessionLoop
 from vibe.acp.teleport import handle_teleport_command
 from vibe.acp.title import acp_blocks_to_title_segments
@@ -97,6 +99,10 @@ from vibe.acp.tools.session_update import (
     resolve_kind,
     tool_call_session_update,
     tool_result_session_update,
+)
+from vibe.acp.user_display_content import (
+    USER_DISPLAY_CONTENT_META_KEY,
+    parse_user_display_content_metadata,
 )
 from vibe.acp.utils import (
     THINKING_LEVELS,
@@ -109,17 +115,23 @@ from vibe.acp.utils import (
     create_compact_end_session_update,
     create_compact_start_session_update,
     create_reasoning_replay,
-    create_tool_call_replay,
     create_tool_result_replay,
     create_user_message_replay,
     get_proxy_help_text,
     is_jetbrains_client,
     is_valid_acp_mode,
     make_thinking_response,
+    tool_call_replay_update,
 )
-from vibe.core.agent_loop import AgentLoop, CompactionFailedError
+from vibe.core.agent_loop import (
+    AgentLoop,
+    CompactionFailedError,
+    ImagesNotSupportedError,
+)
 from vibe.core.agents.models import CHAT as CHAT_AGENT, BuiltinAgentName
+from vibe.core.auth import MCPOAuthError
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
+from vibe.core.cache_store import FileSystemVibeCodeCacheStore
 from vibe.core.config import (
     MissingAPIKeyError,
     ProviderConfig,
@@ -148,13 +160,16 @@ from vibe.core.skills.manager import SkillManager
 from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import EntrypointMetadata
+from vibe.core.tools.mcp import AuthStatus
 from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.trusted_folders import (
     WorkspaceTrustDecision,
     WorkspaceTrustPrompt,
+    WorkspaceTrustStatus,
     apply_workspace_trust_decision,
     available_workspace_trust_decisions,
     maybe_build_workspace_trust_prompt,
+    trusted_folders_manager,
 )
 from vibe.core.types import (
     AgentProfileChangedEvent,
@@ -164,6 +179,7 @@ from vibe.core.types import (
     CompactEndEvent,
     CompactStartEvent,
     ContextTooLongError as CoreContextTooLongError,
+    ImageAttachment,
     LLMMessage,
     RateLimitError as CoreRateLimitError,
     ReasoningEvent,
@@ -174,6 +190,7 @@ from vibe.core.types import (
     ToolCallEvent,
     ToolResultEvent,
     ToolStreamEvent,
+    UserDisplayContentMetadata,
 )
 from vibe.core.utils import (
     CancellationReason,
@@ -201,8 +218,23 @@ logger = logging.getLogger("vibe")
 
 NON_INTERACTIVE_DISABLED_TOOLS = ["ask_user_question", "exit_plan_mode"]
 INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS = 0.1
-WORKSPACE_TRUST_CAPABILITY = "workspace-trust"
-TRUST_REQUEST_METHOD = "trust/request"
+_MCP_COMMAND_MAX_SPLITS = 2
+_MCP_COMMAND_ARG_INDEX = 2
+WORKSPACE_TRUST_META_KEY = "workspace_trust"
+TRUST_GRANT_DECISIONS = {
+    WorkspaceTrustDecision.TRUST_REPO,
+    WorkspaceTrustDecision.TRUST_CWD,
+    WorkspaceTrustDecision.TRUST_SESSION,
+}
+
+
+def _mcp_tui_login_message(alias: str) -> str:
+    return (
+        "MCP OAuth login must be performed via the Vibe TUI. "
+        "Run `vibe` in a terminal and execute "
+        f"`/mcp login {alias}` there. Tokens are stored in the OS keyring; "
+        "run `/reload` in this ACP session afterward if the tools are not visible."
+    )
 
 
 def _merge_non_interactive_disabled_tools(config: VibeConfig) -> None:
@@ -242,22 +274,38 @@ class TelemetrySendNotification(BaseModel):
     session_id: str = Field(validation_alias=AliasChoices("session_id", "sessionId"))
 
 
-class WorkspaceTrustRequest(BaseModel):
+class WorkspaceTrustDetails(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     cwd: str
     repo_root: str | None = Field(default=None, alias="repoRoot")
-    detected_files: list[str] = Field(alias="detectedFiles")
-    repo_detected_files: list[str] = Field(alias="repoDetectedFiles")
+    ignored_files: list[str] = Field(alias="ignoredFiles")
     available_decisions: list[WorkspaceTrustDecision] = Field(
         alias="availableDecisions"
     )
 
 
-class WorkspaceTrustResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class WorkspaceTrustStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
-    decision: WorkspaceTrustDecision | Literal["cancelled"]
+    cwd: str | None = None
+
+
+class WorkspaceTrustDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    cwd: str | None = None
+    decision: WorkspaceTrustDecision
+    session_id: str | None = Field(
+        default=None, validation_alias=AliasChoices("session_id", "sessionId")
+    )
+
+
+class WorkspaceTrustStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    trust_status: WorkspaceTrustStatus = Field(alias="trust_status")
+    details: WorkspaceTrustDetails | None = None
 
 
 class AuthStatusResponse(BaseModel):
@@ -435,14 +483,6 @@ class VibeAcpAgentLoop(AcpAgent):
             is True
         )
 
-    def _client_supports_workspace_trust(self) -> bool:
-        return bool(
-            self.client_capabilities
-            and self.client_capabilities.field_meta
-            and self.client_capabilities.field_meta.get(WORKSPACE_TRUST_CAPABILITY)
-            is True
-        )
-
     @override
     async def initialize(
         self,
@@ -502,7 +542,7 @@ class VibeAcpAgentLoop(AcpAgent):
             agent_capabilities=AgentCapabilities(
                 load_session=True,
                 prompt_capabilities=PromptCapabilities(
-                    audio=False, embedded_context=True, image=False
+                    audio=False, embedded_context=True, image=True
                 ),
                 session_capabilities=SessionCapabilities(
                     close=SessionCloseCapabilities(),
@@ -689,7 +729,7 @@ class VibeAcpAgentLoop(AcpAgent):
             agent_loop.set_approval_callback(self._create_approval_callback(session.id))
 
         session.spawn(self._send_initial_available_commands(session))
-        session.spawn(self._warm_up_agent_loop(agent_loop))
+        session.spawn(self._warm_up_agent_loop(session))
 
         return session
 
@@ -699,15 +739,40 @@ class VibeAcpAgentLoop(AcpAgent):
         await asyncio.sleep(INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS)
         await self._send_available_commands(session)
 
-    async def _warm_up_agent_loop(self, agent_loop: AgentLoop) -> None:
+    async def _warm_up_agent_loop(self, session: AcpSessionLoop) -> None:
         """Proactively await deferred init so `vibe.ready` telemetry is emitted
         without waiting for the user's first prompt. Errors are swallowed here
         and will resurface on the first `act()` call via `requires_init`.
         """
         try:
-            await agent_loop.wait_until_ready()
+            await session.agent_loop.wait_until_ready()
+            await self._notify_mcp_auth_required(session)
         except Exception:
             pass
+
+    async def _notify_mcp_auth_required(self, session: AcpSessionLoop) -> None:
+        statuses = session.agent_loop.mcp_registry.status()
+        aliases = sorted(
+            alias
+            for alias, status in statuses.items()
+            if status is AuthStatus.NEEDS_AUTH
+        )
+        if not aliases:
+            return
+        message = _mcp_tui_login_message(aliases[0])
+        if len(aliases) > 1:
+            message = (
+                "MCP OAuth login must be performed via the Vibe TUI for these "
+                f"servers first: {', '.join(aliases)}.\n\n{message}"
+            )
+        await self.client.session_update(
+            session_id=session.id,
+            update=AgentMessageChunk(
+                session_update="agent_message_chunk",
+                content=TextContentBlock(type="text", text=message),
+                message_id=str(uuid4()),
+            ),
+        )
 
     def _create_agent_loop(
         self, config: VibeConfig, agent_name: str, hook_config_result: Any = None
@@ -719,6 +784,7 @@ class VibeAcpAgentLoop(AcpAgent):
             entrypoint_metadata=self._build_entrypoint_metadata(),
             defer_heavy_init=True,
             hook_config_result=hook_config_result,
+            cache_store=FileSystemVibeCodeCacheStore(),
         )
         agent_loop.agent_manager.register_agent(CHAT_AGENT)
         return agent_loop
@@ -735,54 +801,126 @@ class VibeAcpAgentLoop(AcpAgent):
         )
         return modes_state, modes_config, models_state, models_config
 
-    def _build_workspace_trust_request(
+    def _workspace_trust_details(
+        self, cwd: Path
+    ) -> tuple[WorkspaceTrustStatus, WorkspaceTrustDetails | None]:
+        status = self._workspace_trust_status(cwd)
+        if status is not WorkspaceTrustStatus.UNTRUSTED:
+            return status, None
+
+        prompt = maybe_build_workspace_trust_prompt(
+            cwd, include_explicitly_untrusted=True
+        )
+        if prompt is None:
+            return status, None
+
+        return status, self._build_workspace_trust_details(prompt)
+
+    def _build_workspace_trust_details(
         self, prompt: WorkspaceTrustPrompt
-    ) -> WorkspaceTrustRequest:
-        return WorkspaceTrustRequest(
+    ) -> WorkspaceTrustDetails:
+        return WorkspaceTrustDetails(
             cwd=str(prompt.cwd.resolve()),
-            repoRoot=str(prompt.repo_root.resolve())
-            if prompt.offer_repo_trust and prompt.repo_root
-            else None,
-            detectedFiles=prompt.detected_files,
-            repoDetectedFiles=prompt.repo_detected_files,
+            repoRoot=str(prompt.repo_root.resolve()) if prompt.repo_root else None,
+            ignoredFiles=self._workspace_trust_ignored_files(prompt),
             availableDecisions=available_workspace_trust_decisions(
                 prompt, include_session=True
             ),
         )
 
-    async def _resolve_workspace_trust(self, cwd: Path) -> None:
-        if not self._client_supports_workspace_trust():
-            return
+    def _workspace_trust_ignored_files(self, prompt: WorkspaceTrustPrompt) -> list[str]:
+        found = set(prompt.repo_detected_files)
+        if prompt.repo_root is None:
+            found.update(prompt.detected_files)
+            return sorted(found)
 
-        prompt = maybe_build_workspace_trust_prompt(cwd)
+        try:
+            cwd_relative = prompt.cwd.resolve().relative_to(prompt.repo_root.resolve())
+        except ValueError:
+            found.update(prompt.detected_files)
+            return sorted(found)
+
+        cwd_prefix = "" if cwd_relative == Path(".") else cwd_relative.as_posix()
+        for file in prompt.detected_files:
+            found.add(file if not cwd_prefix else f"{cwd_prefix}/{file}")
+        return sorted(found)
+
+    def _workspace_trust_status(self, cwd: Path) -> WorkspaceTrustStatus:
+        return trusted_folders_manager.trust_status(cwd)
+
+    def _workspace_trust_response(self, cwd: Path) -> WorkspaceTrustStatusResponse:
+        status, details = self._workspace_trust_details(cwd)
+        return WorkspaceTrustStatusResponse(trust_status=status, details=details)
+
+    def _workspace_trust_meta(self, cwd: Path) -> dict[str, Any]:
+        response = self._workspace_trust_response(cwd).model_dump(
+            mode="json", by_alias=True
+        )
+        return {
+            WORKSPACE_TRUST_META_KEY: {
+                "status": response["trust_status"],
+                "details": response["details"],
+            }
+        }
+
+    def _workspace_trust_prompt_for_decision(
+        self, cwd: Path, decision: WorkspaceTrustDecision
+    ) -> WorkspaceTrustPrompt:
+        prompt = maybe_build_workspace_trust_prompt(
+            cwd, include_explicitly_untrusted=True
+        )
         if prompt is None:
-            return
+            raise InvalidRequestError("No workspace trust decision is available.")
 
-        request = self._build_workspace_trust_request(prompt)
+        available_decisions = available_workspace_trust_decisions(
+            prompt, include_session=True
+        )
+        if decision not in available_decisions:
+            raise InvalidRequestError(f"Unsupported trust decision: {decision}")
 
+        return prompt
+
+    async def _handle_workspace_trust_status(self, params: dict) -> dict[str, Any]:
         try:
-            raw_response = await self.client.ext_method(
-                TRUST_REQUEST_METHOD, request.model_dump(mode="json", by_alias=True)
-            )
-        except RequestError as exc:
-            if exc.code == NotImplementedMethodError.code:
-                return
-            raise
-
-        try:
-            response = WorkspaceTrustResponse.model_validate(raw_response)
+            request = WorkspaceTrustStatusRequest.model_validate(params)
         except ValidationError as exc:
             raise InvalidRequestError(
-                f"Invalid ACP trust decision response: {exc}"
+                f"Invalid ACP workspace trust status request: {exc}"
             ) from exc
 
-        if response.decision == "cancelled":
-            raise InvalidRequestError("Workspace trust prompt was cancelled.")
+        cwd = Path(request.cwd).expanduser().resolve() if request.cwd else Path.cwd()
+        return self._workspace_trust_response(cwd).model_dump(
+            mode="json", by_alias=True
+        )
+
+    async def _handle_workspace_trust_decision(self, params: dict) -> dict[str, Any]:
+        try:
+            request = WorkspaceTrustDecisionRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP workspace trust decision request: {exc}"
+            ) from exc
+
+        cwd = Path(request.cwd).expanduser().resolve() if request.cwd else Path.cwd()
+        session = self.sessions.get(request.session_id) if request.session_id else None
+        if request.session_id is not None and session is None:
+            raise SessionNotFoundError(request.session_id)
+
+        prompt = self._workspace_trust_prompt_for_decision(cwd, request.decision)
 
         try:
-            apply_workspace_trust_decision(prompt, response.decision)
+            apply_workspace_trust_decision(prompt, request.decision)
         except ValueError as exc:
             raise InvalidRequestError(str(exc)) from exc
+
+        if session is not None and request.decision in TRUST_GRANT_DECISIONS:
+            os.chdir(cwd)
+            await self._reload_session_config(session)
+            await session.command_registry.notify_changed()
+
+        return self._workspace_trust_response(cwd).model_dump(
+            mode="json", by_alias=True
+        )
 
     @override
     async def new_session(
@@ -794,7 +932,6 @@ class VibeAcpAgentLoop(AcpAgent):
     ) -> NewSessionResponse:
         load_dotenv_values()
         os.chdir(cwd)
-        await self._resolve_workspace_trust(Path.cwd())
 
         config = self._load_config()
         hook_config_result = load_hooks_from_fs(config)
@@ -820,6 +957,7 @@ class VibeAcpAgentLoop(AcpAgent):
             models=models_state,
             modes=modes_state,
             config_options=self._build_config_options(session),
+            field_meta=self._workspace_trust_meta(Path.cwd()),
         )
 
     def _get_acp_tool_overrides(self) -> list[Path]:
@@ -978,19 +1116,33 @@ class VibeAcpAgentLoop(AcpAgent):
 
         session.spawn(_send())
 
-    async def _replay_tool_calls(self, session_id: str, msg: LLMMessage) -> None:
+    async def _replay_tool_calls(self, session_id: str, msg: LLMMessage) -> set[str]:
         if not msg.tool_calls:
-            return
+            return set()
+
+        agent_loop = self._get_session(session_id).agent_loop
+        parsed = agent_loop.format_handler.parse_message(msg)
+        resolved = agent_loop.format_handler.resolve_tool_calls(
+            parsed, agent_loop.tool_manager
+        )
+        resolved_by_id = {call.call_id: call for call in resolved.tool_calls}
+
+        emitted_call_ids: set[str] = set()
         for tool_call in msg.tool_calls:
-            if tool_call.id and tool_call.function.name:
-                update = create_tool_call_replay(
-                    tool_call.id, tool_call.function.name, tool_call.function.arguments
-                )
+            if not (tool_call.id and tool_call.function.name):
+                continue
+            update = tool_call_replay_update(
+                resolved_by_id.get(tool_call.id), tool_call
+            )
+            if update:
+                emitted_call_ids.add(tool_call.id)
                 await self.client.session_update(session_id=session_id, update=update)
+        return emitted_call_ids
 
     async def _replay_conversation_history(
         self, session_id: str, messages: list[LLMMessage]
     ) -> None:
+        replayed_call_ids: set[str] = set()
         for msg in messages:
             if msg.role == Role.user:
                 update = create_user_message_replay(msg)
@@ -1005,9 +1157,14 @@ class VibeAcpAgentLoop(AcpAgent):
                     await self.client.session_update(
                         session_id=session_id, update=text_update
                     )
-                await self._replay_tool_calls(session_id, msg)
+                replayed_call_ids |= await self._replay_tool_calls(session_id, msg)
 
             elif msg.role == Role.tool:
+                # Skip results whose call was not replayed (e.g. hidden tools
+                # like todo): emitting one would orphan a tool_call_update with
+                # no preceding tool_call.
+                if msg.tool_call_id not in replayed_call_ids:
+                    continue
                 if result_update := create_tool_result_replay(msg):
                     await self.client.session_update(
                         session_id=session_id, update=result_update
@@ -1059,7 +1216,6 @@ class VibeAcpAgentLoop(AcpAgent):
     ) -> LoadSessionResponse | None:
         load_dotenv_values()
         os.chdir(cwd)
-        await self._resolve_workspace_trust(Path.cwd())
 
         config = self._load_config()
         hook_config_result = load_hooks_from_fs(config)
@@ -1101,6 +1257,7 @@ class VibeAcpAgentLoop(AcpAgent):
             models=models_state,
             modes=modes_state,
             config_options=self._build_config_options(session),
+            field_meta=self._workspace_trust_meta(Path.cwd()),
         )
 
     async def _apply_mode_change(self, session: AcpSessionLoop, mode_id: str) -> bool:
@@ -1241,6 +1398,15 @@ class VibeAcpAgentLoop(AcpAgent):
                 "Concurrent prompts are not supported yet, wait for agent loop to finish"
             )
 
+        try:
+            user_display_content = parse_user_display_content_metadata(
+                kwargs.get(USER_DISPLAY_CONTENT_META_KEY)
+            )
+        except ValidationError as e:
+            raise InvalidRequestError(
+                f"Invalid user display content metadata: {e}"
+            ) from e
+
         text_prompt = self._build_text_prompt(prompt)
         resolved_message_id = _resolved_user_message_id(message_id)
 
@@ -1266,9 +1432,18 @@ class VibeAcpAgentLoop(AcpAgent):
                 format_session_title(acp_blocks_to_title_segments(prompt)) or None
             )
 
+        images = extract_image_attachments(
+            prompt, session_dir=session.agent_loop.session_logger.session_dir
+        )
+
         async def agent_loop_task() -> None:
             async for update in self._run_agent_loop(
-                session, text_prompt, resolved_message_id, auto_title=auto_title
+                session,
+                text_prompt,
+                resolved_message_id,
+                auto_title=auto_title,
+                user_display_content=user_display_content,
+                images=images,
             ):
                 await self.client.session_update(session_id=session.id, update=update)
 
@@ -1307,6 +1482,9 @@ class VibeAcpAgentLoop(AcpAgent):
         except ConversationLimitException as e:
             raise ConversationLimitError(str(e)) from e
 
+        except ImagesNotSupportedError as e:
+            raise AcpImagesNotSupportedError(str(e)) from e
+
         except Exception as e:
             raise InternalError(str(e)) from e
 
@@ -1328,9 +1506,10 @@ class VibeAcpAgentLoop(AcpAgent):
             telemetry_active=agent_loop.telemetry_client.is_active(),
             is_mistral_model=agent_loop.config.is_active_model_mistral(),
             user_message_count=user_message_count,
+            cache_store=agent_loop.cache_store,
         ):
             return None
-        record_feedback_asked()
+        record_feedback_asked(agent_loop.cache_store)
         return {"show_feedback_prompt": True}
 
     def _build_text_prompt(self, acp_prompt: list[ContentBlock]) -> str:
@@ -1383,6 +1562,10 @@ class VibeAcpAgentLoop(AcpAgent):
                     ]
                     block_prompt = "\n".join(parts)
                     text_prompt = f"{text_prompt}{separator}{block_prompt}"
+                case "image":
+                    # Images carry no prompt text; they are extracted separately
+                    # via extract_image_attachments and passed to act(images=...).
+                    continue
                 case _:
                     raise InvalidRequestError(
                         f"We currently don't support {block.type} content blocks"
@@ -1413,6 +1596,8 @@ class VibeAcpAgentLoop(AcpAgent):
         client_message_id: str | None = None,
         *,
         auto_title: str | None = None,
+        user_display_content: UserDisplayContentMetadata | None = None,
+        images: list[ImageAttachment] | None = None,
     ) -> AsyncGenerator[SessionUpdate | UsageUpdate]:
         rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
 
@@ -1421,6 +1606,8 @@ class VibeAcpAgentLoop(AcpAgent):
                 rendered_prompt,
                 client_message_id=client_message_id,
                 auto_title=auto_title,
+                user_display_content=user_display_content,
+                images=images or None,
             )
         ) as events:
             async for event in events:
@@ -1451,7 +1638,9 @@ class VibeAcpAgentLoop(AcpAgent):
                             session_id=session.id,
                         )
 
-                    session_update = tool_call_session_update(event)
+                    # A starting tool call is pending until it streams or
+                    # finishes; the host drops created events without a status.
+                    session_update = tool_call_session_update(event, status="pending")
                     if session_update:
                         yield session_update
 
@@ -1742,14 +1931,6 @@ class VibeAcpAgentLoop(AcpAgent):
         )
         return provider, auth_state
 
-    def _process_env_value_before_dotenv_load(
-        self, provider: ProviderConfig
-    ) -> str | None:
-        if not provider.api_key_env_var:
-            return None
-
-        return self._environ_before_dotenv_load.get(provider.api_key_env_var)
-
     def _handle_auth_status(self) -> dict[str, Any]:
         _, auth_state = self._assess_current_auth_state()
         return _auth_status_response_from_auth_state(auth_state).model_dump(
@@ -1765,15 +1946,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
         try:
             self._remove_api_key(provider)
-            if (
-                auth_state.kind
-                == AuthStateKind.VIBE_HOME_ENV_FILE_OVERRIDES_PROCESS_ENV
-                and auth_state.env_key
-            ):
-                process_env_value = self._process_env_value_before_dotenv_load(provider)
-                if process_env_value:
-                    os.environ[auth_state.env_key] = process_env_value
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, KeyringError) as exc:
             raise InternalError(f"Failed to sign out: {exc}") from exc
 
         return {}
@@ -1791,6 +1964,12 @@ class VibeAcpAgentLoop(AcpAgent):
 
         if method == "session/delete":
             return await self._handle_session_delete(params)
+
+        if method == "trust/status":
+            return await self._handle_workspace_trust_status(params)
+
+        if method == "trust/decision":
+            return await self._handle_workspace_trust_decision(params)
 
         raise NotImplementedMethodError(method)
 
@@ -1874,6 +2053,90 @@ class VibeAcpAgentLoop(AcpAgent):
                 lines.append(f"- `/{name}`: {info.description}")
 
         return await self._command_reply(session, "\n".join(lines), message_id)
+
+    async def _handle_mcp(
+        self, session: AcpSessionLoop, text_prompt: str, message_id: str
+    ) -> PromptResponse:
+        parts = text_prompt.strip().split(None, _MCP_COMMAND_MAX_SPLITS)
+        subcommand = parts[1].lower() if len(parts) > 1 else "status"
+        arg = (
+            parts[_MCP_COMMAND_ARG_INDEX].strip()
+            if len(parts) > _MCP_COMMAND_ARG_INDEX
+            else ""
+        )
+
+        match subcommand:
+            case "status":
+                return await self._handle_mcp_status(session, arg, message_id)
+            case "login":
+                return await self._handle_mcp_login(session, arg, message_id)
+            case "logout":
+                return await self._handle_mcp_logout(session, arg, message_id)
+            case _:
+                return await self._command_reply(
+                    session,
+                    "Usage: `/mcp status`, `/mcp login <alias>`, or `/mcp logout <alias>`",
+                    message_id,
+                )
+
+    async def _handle_mcp_status(
+        self, session: AcpSessionLoop, arg: str, message_id: str
+    ) -> PromptResponse:
+        if arg:
+            return await self._command_reply(
+                session, "Usage: `/mcp status`", message_id
+            )
+        await session.agent_loop.wait_until_ready()
+        statuses = session.agent_loop.mcp_registry.status()
+        if not statuses:
+            return await self._command_reply(
+                session, "No MCP servers configured.", message_id
+            )
+        lines = ["### MCP auth status", ""]
+        for alias, status in sorted(statuses.items()):
+            lines.append(f"- `{alias}`: `{status.value}`")
+        return await self._command_reply(session, "\n".join(lines), message_id)
+
+    async def _handle_mcp_login(
+        self, session: AcpSessionLoop, alias: str, message_id: str
+    ) -> PromptResponse:
+        if not alias:
+            return await self._command_reply(
+                session, "Usage: `/mcp login <alias>`", message_id
+            )
+        await session.agent_loop.wait_until_ready()
+        statuses = session.agent_loop.mcp_registry.status()
+        if alias not in statuses:
+            return await self._command_reply(
+                session, f"Unknown MCP server: `{alias}`", message_id
+            )
+        if statuses[alias] in {AuthStatus.STATIC, AuthStatus.STDIO}:
+            return await self._command_reply(
+                session,
+                f"MCP server `{alias}` is not configured for OAuth.",
+                message_id,
+            )
+        return await self._command_reply(
+            session, _mcp_tui_login_message(alias), message_id
+        )
+
+    async def _handle_mcp_logout(
+        self, session: AcpSessionLoop, alias: str, message_id: str
+    ) -> PromptResponse:
+        if not alias:
+            return await self._command_reply(
+                session, "Usage: `/mcp logout <alias>`", message_id
+            )
+        await session.agent_loop.wait_until_ready()
+        try:
+            await session.agent_loop.mcp_registry.logout(alias)
+            await session.agent_loop.tool_manager.refresh_remote_tools_async()
+            await session.agent_loop.refresh_system_prompt()
+        except (MCPOAuthError, ValueError) as exc:
+            return await self._command_reply(session, str(exc), message_id)
+        return await self._command_reply(
+            session, f"MCP server `{alias}` logged out.", message_id
+        )
 
     async def _handle_compact(
         self, session: AcpSessionLoop, text_prompt: str, message_id: str

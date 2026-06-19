@@ -3,29 +3,32 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from acp import RequestError
-from acp.schema import ClientCapabilities
+from acp import NewSessionResponse
 import pytest
 
 from tests.acp.conftest import _create_acp_agent
 from tests.conftest import build_test_vibe_config
-from vibe.acp.acp_agent_loop import WORKSPACE_TRUST_CAPABILITY, VibeAcpAgentLoop
-from vibe.acp.exceptions import InvalidRequestError
+from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import ModelConfig
+from vibe.core.feedback import _CACHE_SECTION, _LAST_SHOWN_KEY, record_feedback_asked
 from vibe.core.trusted_folders import trusted_folders_manager
 
 
-def _system_prompt(acp_agent_loop: VibeAcpAgentLoop, session_id: str) -> str:
+async def _system_prompt(acp_agent_loop: VibeAcpAgentLoop, session_id: str) -> str:
     session = acp_agent_loop.sessions[session_id]
+    await session.agent_loop.wait_until_ready()
     return session.agent_loop.messages[0].content or ""
 
 
-def _enable_workspace_trust(acp_agent_loop: VibeAcpAgentLoop) -> None:
-    acp_agent_loop.client_capabilities = ClientCapabilities(
-        field_meta={WORKSPACE_TRUST_CAPABILITY: True}
-    )
+def _workspace_trust_meta(session_response: NewSessionResponse) -> dict:
+    payload = session_response.model_dump(mode="json", by_alias=True)
+    meta = payload.get("_meta")
+    assert isinstance(meta, dict)
+    workspace_trust = meta.get("workspace_trust")
+    assert isinstance(workspace_trust, dict)
+    return workspace_trust
 
 
 @pytest.fixture
@@ -153,7 +156,27 @@ class TestACPNewSession:
         assert len(thinking_config.options) == 5
 
     @pytest.mark.asyncio
-    async def test_new_session_loads_root_agents_md_from_workspace_cwd(
+    async def test_new_session_uses_file_backed_feedback_cache(
+        self, acp_agent_loop: VibeAcpAgentLoop, config_dir: Path
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        acp_session = acp_agent_loop.sessions[session_response.session_id]
+
+        record_feedback_asked(acp_session.agent_loop.cache_store)
+
+        cache_path = config_dir / "cache.toml"
+        assert cache_path.exists()
+        assert (
+            acp_session.agent_loop.cache_store.read_section(_CACHE_SECTION)[
+                _LAST_SHOWN_KEY
+            ]
+            > 0
+        )
+
+    @pytest.mark.asyncio
+    async def test_new_session_returns_actionable_trust_details_without_prompting(
         self,
         acp_agent_loop: VibeAcpAgentLoop,
         tmp_working_directory: Path,
@@ -162,7 +185,6 @@ class TestACPNewSession:
         (tmp_working_directory / "AGENTS.md").write_text(
             "Root project instructions", encoding="utf-8"
         )
-        _enable_workspace_trust(acp_agent_loop)
         request_trust = AsyncMock(return_value={"decision": "trust_cwd"})
         monkeypatch.setattr(acp_agent_loop.client, "ext_method", request_trust)
 
@@ -171,26 +193,24 @@ class TestACPNewSession:
         )
         assert session_response.session_id is not None
 
-        request_trust.assert_awaited_once()
-        await_args = request_trust.await_args
-        assert await_args is not None
-        method, params = await_args.args
-        assert method == "trust/request"
-        assert params["cwd"] == str(tmp_working_directory.resolve())
-        assert params["detectedFiles"] == ["AGENTS.md"]
-        assert params["repoDetectedFiles"] == []
-        assert params["availableDecisions"] == ["trust_cwd", "trust_session", "decline"]
-        assert trusted_folders_manager.is_trusted(tmp_working_directory) is True
-        assert "Root project instructions" in _system_prompt(
+        request_trust.assert_not_awaited()
+        assert _workspace_trust_meta(session_response) == {
+            "status": "untrusted",
+            "details": {
+                "cwd": str(tmp_working_directory.resolve()),
+                "repoRoot": None,
+                "ignoredFiles": ["AGENTS.md"],
+                "availableDecisions": ["trust_cwd", "trust_session", "decline"],
+            },
+        }
+        assert trusted_folders_manager.is_trusted(tmp_working_directory) is None
+        assert "Root project instructions" not in await _system_prompt(
             acp_agent_loop, session_response.session_id
         )
 
     @pytest.mark.asyncio
-    async def test_new_session_can_trust_full_repo_from_subdirectory(
-        self,
-        acp_agent_loop: VibeAcpAgentLoop,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    async def test_new_session_returns_repo_trust_details_from_subdirectory(
+        self, acp_agent_loop: VibeAcpAgentLoop, tmp_path: Path
     ) -> None:
         repo = tmp_path / "repo"
         cwd = repo / "src" / "pkg"
@@ -198,79 +218,68 @@ class TestACPNewSession:
         (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
         cwd.mkdir(parents=True)
         (repo / "AGENTS.md").write_text("Repo instructions", encoding="utf-8")
-        _enable_workspace_trust(acp_agent_loop)
-        request_trust = AsyncMock(return_value={"decision": "trust_repo"})
-        monkeypatch.setattr(acp_agent_loop.client, "ext_method", request_trust)
 
         session_response = await acp_agent_loop.new_session(
             cwd=str(cwd), mcp_servers=[]
         )
         assert session_response.session_id is not None
 
-        request_trust.assert_awaited_once()
-        await_args = request_trust.await_args
-        assert await_args is not None
-        method, params = await_args.args
-        assert method == "trust/request"
-        assert params["cwd"] == str(cwd.resolve())
-        assert params["repoRoot"] == str(repo.resolve())
-        assert params["detectedFiles"] == []
-        assert params["repoDetectedFiles"] == ["AGENTS.md"]
-        assert params["availableDecisions"] == [
-            "trust_repo",
-            "trust_cwd",
-            "trust_session",
-            "decline",
-        ]
-        assert trusted_folders_manager.is_trusted(repo) is True
-        assert trusted_folders_manager.is_trusted(cwd) is True
-        assert "Repo instructions" in _system_prompt(
+        assert _workspace_trust_meta(session_response) == {
+            "status": "untrusted",
+            "details": {
+                "cwd": str(cwd.resolve()),
+                "repoRoot": str(repo.resolve()),
+                "ignoredFiles": ["AGENTS.md"],
+                "availableDecisions": [
+                    "trust_repo",
+                    "trust_cwd",
+                    "trust_session",
+                    "decline",
+                ],
+            },
+        }
+        assert trusted_folders_manager.is_trusted(repo) is None
+        assert trusted_folders_manager.is_trusted(cwd) is None
+        assert "Repo instructions" not in await _system_prompt(
             acp_agent_loop, session_response.session_id
         )
 
     @pytest.mark.asyncio
-    async def test_new_session_decline_skips_project_docs(
-        self,
-        acp_agent_loop: VibeAcpAgentLoop,
-        tmp_working_directory: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    async def test_new_session_returns_details_after_explicit_decline(
+        self, acp_agent_loop: VibeAcpAgentLoop, tmp_working_directory: Path
     ) -> None:
         (tmp_working_directory / "AGENTS.md").write_text(
             "Do not load this", encoding="utf-8"
         )
-        _enable_workspace_trust(acp_agent_loop)
-        monkeypatch.setattr(
-            acp_agent_loop.client,
-            "ext_method",
-            AsyncMock(return_value={"decision": "decline"}),
-        )
+        trusted_folders_manager.add_untrusted(tmp_working_directory)
 
         session_response = await acp_agent_loop.new_session(
             cwd=str(tmp_working_directory), mcp_servers=[]
         )
         assert session_response.session_id is not None
 
+        assert _workspace_trust_meta(session_response) == {
+            "status": "untrusted",
+            "details": {
+                "cwd": str(tmp_working_directory.resolve()),
+                "repoRoot": None,
+                "ignoredFiles": ["AGENTS.md"],
+                "availableDecisions": ["trust_cwd", "trust_session", "decline"],
+            },
+        }
         assert trusted_folders_manager.is_trusted(tmp_working_directory) is False
-        assert "Do not load this" not in _system_prompt(
+        assert "Do not load this" not in await _system_prompt(
             acp_agent_loop, session_response.session_id
         )
 
     @pytest.mark.asyncio
     async def test_new_session_session_trust_loads_docs_without_persisting(
-        self,
-        acp_agent_loop: VibeAcpAgentLoop,
-        tmp_working_directory: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        self, acp_agent_loop: VibeAcpAgentLoop, tmp_working_directory: Path
     ) -> None:
         (tmp_working_directory / "AGENTS.md").write_text(
             "Session-only instructions", encoding="utf-8"
         )
-        _enable_workspace_trust(acp_agent_loop)
-        monkeypatch.setattr(
-            acp_agent_loop.client,
-            "ext_method",
-            AsyncMock(return_value={"decision": "trust_session"}),
-        )
+        trusted_folders_manager.trust_for_session(tmp_working_directory)
 
         session_response = await acp_agent_loop.new_session(
             cwd=str(tmp_working_directory), mcp_servers=[]
@@ -278,10 +287,14 @@ class TestACPNewSession:
         assert session_response.session_id is not None
 
         normalized = str(tmp_working_directory.resolve())
+        assert _workspace_trust_meta(session_response) == {
+            "status": "session",
+            "details": None,
+        }
         assert trusted_folders_manager.is_trusted(tmp_working_directory) is True
         assert normalized in trusted_folders_manager._session_trusted
         assert normalized not in trusted_folders_manager._trusted
-        assert "Session-only instructions" in _system_prompt(
+        assert "Session-only instructions" in await _system_prompt(
             acp_agent_loop, session_response.session_id
         )
 
@@ -292,90 +305,45 @@ class TestACPNewSession:
         tmp_working_directory: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _enable_workspace_trust(acp_agent_loop)
-        request_trust = AsyncMock(return_value={"decision": "trust_cwd"})
-        monkeypatch.setattr(acp_agent_loop.client, "ext_method", request_trust)
-
-        await acp_agent_loop.new_session(cwd=str(tmp_working_directory), mcp_servers=[])
-
-        request_trust.assert_not_awaited()
-        assert trusted_folders_manager.is_trusted(tmp_working_directory) is None
-
-    @pytest.mark.asyncio
-    async def test_new_session_direct_client_fallback_skips_project_docs(
-        self,
-        acp_agent_loop: VibeAcpAgentLoop,
-        tmp_working_directory: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        (tmp_working_directory / "AGENTS.md").write_text(
-            "Direct client should skip this", encoding="utf-8"
-        )
-        _enable_workspace_trust(acp_agent_loop)
-        monkeypatch.setattr(
-            acp_agent_loop.client,
-            "ext_method",
-            AsyncMock(side_effect=RequestError.method_not_found("trust/request")),
-        )
-
-        session_response = await acp_agent_loop.new_session(
-            cwd=str(tmp_working_directory), mcp_servers=[]
-        )
-        assert session_response.session_id is not None
-
-        assert trusted_folders_manager.is_trusted(tmp_working_directory) is None
-        assert "Direct client should skip this" not in _system_prompt(
-            acp_agent_loop, session_response.session_id
-        )
-
-    @pytest.mark.asyncio
-    async def test_new_session_without_workspace_trust_capability_skips_prompt(
-        self,
-        acp_agent_loop: VibeAcpAgentLoop,
-        tmp_working_directory: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        (tmp_working_directory / "AGENTS.md").write_text(
-            "Unsupported client should skip this", encoding="utf-8"
-        )
         request_trust = AsyncMock(return_value={"decision": "trust_cwd"})
         monkeypatch.setattr(acp_agent_loop.client, "ext_method", request_trust)
 
         session_response = await acp_agent_loop.new_session(
             cwd=str(tmp_working_directory), mcp_servers=[]
         )
-        assert session_response.session_id is not None
 
         request_trust.assert_not_awaited()
-        assert trusted_folders_manager.is_trusted(tmp_working_directory) is None
-        assert "Unsupported client should skip this" not in _system_prompt(
-            acp_agent_loop, session_response.session_id
+        assert _workspace_trust_meta(session_response) == {
+            "status": "untrusted",
+            "details": None,
+        }
+        assert (
+            trusted_folders_manager.trust_status(tmp_working_directory) == "untrusted"
         )
+        assert trusted_folders_manager.is_trusted(tmp_working_directory) is None
 
     @pytest.mark.asyncio
-    async def test_new_session_cancelled_trust_prompt_cancels_session_creation(
-        self,
-        acp_agent_loop: VibeAcpAgentLoop,
-        tmp_working_directory: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    async def test_new_session_trusted_folder_loads_docs_with_no_details(
+        self, acp_agent_loop: VibeAcpAgentLoop, tmp_working_directory: Path
     ) -> None:
         (tmp_working_directory / "AGENTS.md").write_text(
-            "Cancelled prompt", encoding="utf-8"
+            "Trusted folder instructions", encoding="utf-8"
         )
-        _enable_workspace_trust(acp_agent_loop)
-        monkeypatch.setattr(
-            acp_agent_loop.client,
-            "ext_method",
-            AsyncMock(return_value={"decision": "cancelled"}),
+        trusted_folders_manager.add_trusted(tmp_working_directory)
+
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(tmp_working_directory), mcp_servers=[]
         )
+        assert session_response.session_id is not None
 
-        with pytest.raises(InvalidRequestError):
-            await acp_agent_loop.new_session(
-                cwd=str(tmp_working_directory), mcp_servers=[]
-            )
-
-        assert trusted_folders_manager.is_trusted(tmp_working_directory) is None
-        assert acp_agent_loop.sessions == {}
+        assert trusted_folders_manager.is_trusted(tmp_working_directory) is True
+        assert _workspace_trust_meta(session_response) == {
+            "status": "trusted",
+            "details": None,
+        }
+        assert "Trusted folder instructions" in await _system_prompt(
+            acp_agent_loop, session_response.session_id
+        )
 
     @pytest.mark.skip(reason="TODO: Fix this test")
     @pytest.mark.asyncio

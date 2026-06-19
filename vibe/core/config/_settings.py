@@ -11,6 +11,8 @@ from typing import Annotated, Any, ClassVar, Literal, get_args
 from urllib.parse import urljoin
 
 from dotenv import dotenv_values
+import keyring
+from keyring.errors import KeyringError
 from mistralai.client.models import SpeechOutputFormat
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
     DEFAULT_TRACES_EXPORT_PATH,
@@ -77,7 +79,26 @@ def load_dotenv_values(
     for key, value in env_vars.items():
         if not value:
             continue
-        environ.update({key: value})
+        if environ.get(key):
+            # An explicit non-empty process/shell value wins over the .env file.
+            continue
+        environ[key] = value
+
+
+_KEYRING_SERVICE = "vibe"
+
+
+def resolve_api_key(env_key: str) -> str | None:
+    """Resolve an API key value: process/.env environment first, then OS keyring."""
+    if not env_key:
+        return None
+    value = os.environ.get(env_key)
+    if value:
+        return value
+    try:
+        return keyring.get_password(_KEYRING_SERVICE, env_key)
+    except KeyringError:
+        return None
 
 
 class MissingAPIKeyError(RuntimeError):
@@ -447,6 +468,7 @@ THINKING_LEVELS: list[str] = list(get_args(ThinkingLevel))
 
 DEFAULT_AUTO_COMPACT_THRESHOLD = 200_000
 DEFAULT_API_TIMEOUT = 720.0
+DEFAULT_API_RETRY_MAX_ELAPSED_TIME = 300.0
 
 
 class ModelConfig(BaseModel):
@@ -504,9 +526,6 @@ class OtelSpanExporterConfig(BaseModel):
 
 MISTRAL_OTEL_PATH = "/telemetry"
 DEFAULT_MISTRAL_SERVER_URL = "https://api.mistral.ai"
-
-DEFAULT_VIBE_CODE_WORKFLOW_ID = "__shared-nuage-workflow"
-DEFAULT_VIBE_CODE_TASK_QUEUE = "shared-vibe-nuage"
 
 DEFAULT_PROVIDERS = [
     ProviderConfig(
@@ -586,6 +605,15 @@ DEFAULT_TTS_MODELS = [DEFAULT_ACTIVE_TTS_MODEL_CONFIG]
 DEFAULT_THEME = "ansi-dark"
 
 
+def resolve_theme_name(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return DEFAULT_THEME
+    if value not in BUILTIN_THEMES:
+        logger.warning("Unknown theme=%s; falling back to %s", value, DEFAULT_THEME)
+        return DEFAULT_THEME
+    return value
+
+
 class VibeConfig(BaseSettings):
     active_model: str = DEFAULT_ACTIVE_MODEL_CONFIG.alias
     vim_keybindings: bool = False
@@ -614,15 +642,12 @@ class VibeConfig(BaseSettings):
     enable_notifications: bool = True
     enable_system_trust_store: bool = False
     api_timeout: float = DEFAULT_API_TIMEOUT
+    api_retry_max_elapsed_time: float = DEFAULT_API_RETRY_MAX_ELAPSED_TIME
     auto_compact_threshold: int = DEFAULT_AUTO_COMPACT_THRESHOLD
 
     vibe_code_enabled: bool = Field(default=True, exclude=True)
-    vibe_code_base_url: str = Field(default=DEFAULT_MISTRAL_SERVER_URL, exclude=True)
     vibe_code_sessions_base_url: str = Field(
         default="https://chat.mistral.ai", exclude=True
-    )
-    vibe_code_workflow_id: str = Field(
-        default=DEFAULT_VIBE_CODE_WORKFLOW_ID, exclude=True
     )
     vibe_code_api_key_env_var: str = Field(
         default=DEFAULT_MISTRAL_API_ENV_KEY, exclude=True
@@ -771,7 +796,7 @@ class VibeConfig(BaseSettings):
 
     @property
     def vibe_code_api_key(self) -> str:
-        return os.getenv(self.vibe_code_api_key_env_var, "")
+        return resolve_api_key(self.vibe_code_api_key_env_var) or ""
 
     @property
     def otel_span_exporter_config(self) -> OtelSpanExporterConfig | None:
@@ -801,7 +826,7 @@ class VibeConfig(BaseSettings):
             traces_export_path,
         )
 
-        if not (api_key := os.getenv(api_key_env)):
+        if not (api_key := resolve_api_key(api_key_env)):
             logger.warning(
                 "OTEL tracing enabled but %s is not set; skipping.", api_key_env
             )
@@ -925,10 +950,12 @@ class VibeConfig(BaseSettings):
     @model_validator(mode="after")
     def _apply_global_auto_compact_threshold(self) -> VibeConfig:
         self.models = [
-            model
-            if "auto_compact_threshold" in model.model_fields_set
-            else model.model_copy(
-                update={"auto_compact_threshold": self.auto_compact_threshold}
+            (
+                model
+                if "auto_compact_threshold" in model.model_fields_set
+                else model.model_copy(
+                    update={"auto_compact_threshold": self.auto_compact_threshold}
+                )
             )
             for model in self.models
         ]
@@ -957,7 +984,7 @@ class VibeConfig(BaseSettings):
         try:
             provider = self.get_active_provider()
             api_key_env = provider.api_key_env_var
-            if api_key_env and not os.getenv(api_key_env):
+            if api_key_env and not resolve_api_key(api_key_env):
                 raise MissingAPIKeyError(api_key_env, provider.name)
         except ValueError:
             pass
@@ -966,14 +993,7 @@ class VibeConfig(BaseSettings):
     @field_validator("theme", mode="before")
     @classmethod
     def _validate_theme(cls, v: Any) -> str:
-        if not isinstance(v, str) or not v:
-            return DEFAULT_THEME
-        if v not in BUILTIN_THEMES:
-            logger.warning(
-                "Unknown theme=%s in config; falling back to %s", v, DEFAULT_THEME
-            )
-            return DEFAULT_THEME
-        return v
+        return resolve_theme_name(v)
 
     @field_validator("tool_paths", mode="before")
     @classmethod

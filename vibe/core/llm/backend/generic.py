@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Sequence
 import json
-import os
 import types
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import httpx
 
+from vibe.core.config import resolve_api_key
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.anthropic import AnthropicAdapter
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
@@ -123,6 +123,7 @@ class OpenAIAdapter(APIAdapter):
                             "reasoning_state",
                             "injected",
                             "images",
+                            "user_display_content",
                         },
                     ),
                     field_name,
@@ -266,11 +267,7 @@ class GenericBackend:
         extra_headers: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
-        api_key = (
-            os.getenv(self._provider.api_key_env_var)
-            if self._provider.api_key_env_var
-            else None
-        )
+        api_key = resolve_api_key(self._provider.api_key_env_var)
 
         api_style = getattr(self._provider, "api_style", "openai")
         adapter = _get_adapter(api_style)
@@ -334,11 +331,7 @@ class GenericBackend:
         extra_headers: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
-        api_key = (
-            os.getenv(self._provider.api_key_env_var)
-            if self._provider.api_key_env_var
-            else None
-        )
+        api_key = resolve_api_key(self._provider.api_key_env_var)
 
         api_style = getattr(self._provider, "api_style", "openai")
         adapter = _get_adapter(api_style)

@@ -4,7 +4,7 @@ import base64
 from functools import lru_cache
 from pathlib import Path
 
-from vibe.core.types import ImageAttachment
+from vibe.core.types import FileImageSource, ImageAttachment, InlineImageSource
 
 
 class ImageReadError(Exception):
@@ -23,11 +23,15 @@ def _encode_cached(path_str: str, mtime_ns: int, size: int) -> str:
 
 
 def _encode(att: ImageAttachment) -> str:
-    try:
-        stat = att.path.stat()
-    except OSError as e:
-        raise ImageReadError(f"Failed to stat image {att.path}: {e}") from e
-    return _encode_cached(str(att.path), stat.st_mtime_ns, stat.st_size)
+    match att.source:
+        case InlineImageSource(data=data):
+            return data
+        case FileImageSource(path=path):
+            try:
+                stat = path.stat()
+            except OSError as e:
+                raise ImageReadError(f"Failed to stat image {path}: {e}") from e
+            return _encode_cached(str(path), stat.st_mtime_ns, stat.st_size)
 
 
 def to_data_uri(att: ImageAttachment) -> str:

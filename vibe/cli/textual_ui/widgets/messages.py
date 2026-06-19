@@ -8,7 +8,7 @@ from rich.markup import escape
 
 from vibe.core.hooks.models import HookMessageSeverity
 from vibe.core.logger import logger
-from vibe.core.types import ImageAttachment
+from vibe.core.types import FileImageSource, ImageAttachment, InlineImageSource
 from vibe.core.utils.io import read_safe_async
 
 if TYPE_CHECKING:
@@ -121,15 +121,22 @@ class UserMessage(Static):
                 self.add_class("pending")
 
     @staticmethod
+    def _format_attachment_link(att: ImageAttachment) -> str:
+        match att.source:
+            case FileImageSource(path=path):
+                # Quote the URL in Textual [link="..."] markup: the parser stops
+                # at `:` inside an unquoted tag value, so a raw `file://...` URL
+                # would raise MarkupError. Textual auto-wires the click to
+                # webbrowser.open(url), opening the OS default viewer.
+                return f'[link="{path.as_uri()}"]{escape(att.alias)}[/link]'
+            case InlineImageSource():
+                # Inline images have no file on disk, so there's nothing to link.
+                return escape(att.alias)
+
+    @staticmethod
     def _format_attachments_footer(images: list[ImageAttachment]) -> str:
         label = "attached image" if len(images) == 1 else "attached images"
-        # Use Textual [link="..."] markup with the URL quoted: Textual's
-        # markup parser stops at `:` inside an unquoted tag value, so a raw
-        # `file://...` URL would raise MarkupError. Textual auto-wires the
-        # click to webbrowser.open(url), opening the OS default viewer.
-        links = ", ".join(
-            f'[link="{att.path.as_uri()}"]{escape(att.alias)}[/link]' for att in images
-        )
+        links = ", ".join(UserMessage._format_attachment_link(att) for att in images)
         return f"└ {label}: {links}"
 
     async def set_pending(self, pending: bool) -> None:

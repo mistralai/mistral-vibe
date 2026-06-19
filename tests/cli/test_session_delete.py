@@ -57,13 +57,11 @@ async def test_session_delete_request_deletes_local_session(
     monkeypatch.setattr(app, "_mount_and_scroll", mount_and_scroll)
 
     await app.on_session_picker_app_session_delete_requested(
-        SessionPickerApp.SessionDeleteRequested(
-            "local:deleted-session", "local", "deleted-session"
-        )
+        SessionPickerApp.SessionDeleteRequested("deleted-session", "deleted-session")
     )
 
     assert deleted_sessions == [("deleted-session", config.session_logging)]
-    assert picker.removed_option_ids == ["local:deleted-session"]
+    assert picker.removed_option_ids == ["deleted-session"]
     assert any(
         isinstance(widget, UserCommandMessage)
         and widget._content
@@ -96,13 +94,11 @@ async def test_session_delete_request_keeps_picker_on_delete_error(
     monkeypatch.setattr(app, "_mount_and_scroll", mount_and_scroll)
 
     await app.on_session_picker_app_session_delete_requested(
-        SessionPickerApp.SessionDeleteRequested(
-            "local:deleted-session", "local", "deleted-session"
-        )
+        SessionPickerApp.SessionDeleteRequested("deleted-session", "deleted-session")
     )
 
     assert picker.removed_option_ids == []
-    assert picker.cleared_pending_option_ids == ["local:deleted-session"]
+    assert picker.cleared_pending_option_ids == ["deleted-session"]
     assert any(
         isinstance(widget, ErrorMessage)
         and widget._error == "Failed to delete session: disk said no"
@@ -140,13 +136,11 @@ async def test_session_delete_request_returns_to_input_when_picker_becomes_empty
     monkeypatch.setattr(app, "_switch_to_input_app", switch_to_input)
 
     await app.on_session_picker_app_session_delete_requested(
-        SessionPickerApp.SessionDeleteRequested(
-            "local:deleted-session", "local", "deleted-session"
-        )
+        SessionPickerApp.SessionDeleteRequested("deleted-session", "deleted-session")
     )
 
     assert switched_to_input is True
-    assert picker.removed_option_ids == ["local:deleted-session"]
+    assert picker.removed_option_ids == ["deleted-session"]
     assert [
         widget._content
         for widget in mounted_widgets
@@ -155,40 +149,6 @@ async def test_session_delete_request_returns_to_input_when_picker_becomes_empty
         f"Deleted session `{short_session_id('deleted-session')}`.",
         "No saved sessions left for this directory.",
     ]
-
-
-@pytest.mark.asyncio
-async def test_session_delete_request_rejects_remote_sessions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config = build_test_vibe_config(
-        session_logging=_enabled_session_config(tmp_path), enable_connectors=False
-    )
-    app = build_test_vibe_app(config=config)
-    mounted_widgets: list[object] = []
-
-    async def delete_session(
-        session_id: str, session_config: SessionLoggingConfig
-    ) -> None:
-        pytest.fail("remote sessions should not be deleted")
-
-    async def mount_and_scroll(widget: object, after: object | None = None) -> None:
-        mounted_widgets.append(widget)
-
-    monkeypatch.setattr("vibe.cli.textual_ui.app.delete_saved_session", delete_session)
-    monkeypatch.setattr(app, "_mount_and_scroll", mount_and_scroll)
-
-    await app.on_session_picker_app_session_delete_requested(
-        SessionPickerApp.SessionDeleteRequested(
-            "remote:remote-session", "remote", "remote-session"
-        )
-    )
-
-    assert any(
-        isinstance(widget, ErrorMessage)
-        and widget._error == "Deleting remote sessions is not supported."
-        for widget in mounted_widgets
-    )
 
 
 @pytest.mark.asyncio
@@ -217,12 +177,12 @@ async def test_session_delete_request_rejects_current_session(
 
     await app.on_session_picker_app_session_delete_requested(
         SessionPickerApp.SessionDeleteRequested(
-            f"local:{app.agent_loop.session_id}", "local", app.agent_loop.session_id
+            app.agent_loop.session_id, app.agent_loop.session_id
         )
     )
 
     assert deleted_sessions == []
-    assert picker.cleared_pending_option_ids == [f"local:{app.agent_loop.session_id}"]
+    assert picker.cleared_pending_option_ids == [app.agent_loop.session_id]
     assert any(
         isinstance(widget, ErrorMessage)
         and widget._error == "Deleting the current session is not supported."

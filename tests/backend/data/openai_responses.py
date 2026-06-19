@@ -4,8 +4,7 @@ import json
 from typing import Any
 
 from tests.backend.data import Chunk, JsonResponse, ResultData, Url
-
-OPENAI_RESPONSES_TEST_BASE_URL = "https://api.openai.com"
+from tests.constants import OPENAI_BASE_URL
 
 
 def _sse_event(data: dict[str, Any] | str) -> Chunk:
@@ -90,9 +89,134 @@ def _function_call_item(
     }
 
 
+def openai_message_item(
+    text: str, *, phase: str | None = None, message_id: str = "msg_1"
+) -> dict[str, Any]:
+    return _message_output_item(message_id, text, phase=phase)
+
+
+def openai_function_call_item(
+    name: str, arguments: str, *, item_id: str = "fc_1", call_id: str = "call_1"
+) -> dict[str, Any]:
+    return _function_call_item(item_id, call_id, name, arguments)
+
+
+def openai_response(
+    output: list[dict[str, Any]],
+    *,
+    input_tokens: int = 10,
+    output_tokens: int = 2,
+    response_id: str = "resp_1",
+    model: str = "gpt-test",
+) -> JsonResponse:
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": 1234567890,
+        "model": model,
+        "output": output,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    }
+
+
+def openai_sse(*events: dict[str, Any] | str) -> list[Chunk]:
+    return [_sse_event(event) for event in events]
+
+
+def openai_reasoning_tool_call_stream(
+    name: str,
+    arguments: str,
+    *,
+    reasoning: str = "thinking...",
+    call_id: str = "call_1",
+    item_id: str = "fc_1",
+    input_tokens: int = 20,
+    output_tokens: int = 5,
+) -> list[Chunk]:
+    return openai_sse(
+        {"type": "response.created", "response": {"id": "resp_1", "output": []}},
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": _stream_message_item("msg_r", phase="commentary"),
+        },
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 0,
+            "delta": reasoning,
+        },
+        {
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": _function_call_item(
+                item_id, call_id, name, "", status="in_progress"
+            ),
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 1,
+            "call_id": call_id,
+            "delta": arguments,
+        },
+        {
+            "type": "response.function_call_arguments.done",
+            "output_index": 1,
+            "call_id": call_id,
+            "name": name,
+            "arguments": arguments,
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "item": _function_call_item(item_id, call_id, name, arguments),
+        },
+        {
+            "type": "response.completed",
+            "response": openai_response(
+                [_function_call_item(item_id, call_id, name, arguments)],
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            ),
+        },
+        "[DONE]",
+    )
+
+
+def openai_text_stream(
+    text: str, *, input_tokens: int = 10, output_tokens: int = 2
+) -> list[Chunk]:
+    return openai_sse(
+        {"type": "response.created", "response": {"id": "resp_1", "output": []}},
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": _stream_message_item("msg_1"),
+        },
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": text,
+        },
+        {
+            "type": "response.completed",
+            "response": openai_response(
+                [openai_message_item(text)],
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            ),
+        },
+        "[DONE]",
+    )
+
+
 SIMPLE_CONVERSATION_PARAMS: list[tuple[Url, JsonResponse, ResultData]] = [
     (
-        OPENAI_RESPONSES_TEST_BASE_URL,
+        OPENAI_BASE_URL,
         {
             "id": "resp_fake_id_1234",
             "object": "response",
@@ -113,7 +237,7 @@ SIMPLE_CONVERSATION_PARAMS: list[tuple[Url, JsonResponse, ResultData]] = [
 
 TOOL_CONVERSATION_PARAMS: list[tuple[Url, JsonResponse, ResultData]] = [
     (
-        OPENAI_RESPONSES_TEST_BASE_URL,
+        OPENAI_BASE_URL,
         {
             "id": "resp_fake_id_9012",
             "object": "response",
@@ -144,7 +268,7 @@ TOOL_CONVERSATION_PARAMS: list[tuple[Url, JsonResponse, ResultData]] = [
 
 STREAMED_SIMPLE_CONVERSATION_PARAMS: list[tuple[Url, list[Chunk], list[ResultData]]] = [
     (
-        OPENAI_RESPONSES_TEST_BASE_URL,
+        OPENAI_BASE_URL,
         [
             _sse_event({
                 "type": "response.created",
@@ -235,7 +359,7 @@ STREAMED_SIMPLE_CONVERSATION_PARAMS: list[tuple[Url, list[Chunk], list[ResultDat
 
 COMMENTARY_CONVERSATION_PARAMS: list[tuple[Url, JsonResponse, ResultData]] = [
     (
-        OPENAI_RESPONSES_TEST_BASE_URL,
+        OPENAI_BASE_URL,
         {
             "id": "resp_thinking_1234",
             "object": "response",
@@ -268,7 +392,7 @@ STREAMED_COMMENTARY_CONVERSATION_PARAMS: list[
     tuple[Url, list[Chunk], list[ResultData]]
 ] = [
     (
-        OPENAI_RESPONSES_TEST_BASE_URL,
+        OPENAI_BASE_URL,
         [
             _sse_event({
                 "type": "response.created",
@@ -419,7 +543,7 @@ STREAMED_COMMENTARY_CONVERSATION_PARAMS: list[
 
 STREAMED_TOOL_CONVERSATION_PARAMS: list[tuple[Url, list[Chunk], list[ResultData]]] = [
     (
-        OPENAI_RESPONSES_TEST_BASE_URL,
+        OPENAI_BASE_URL,
         [
             _sse_event({
                 "type": "response.created",

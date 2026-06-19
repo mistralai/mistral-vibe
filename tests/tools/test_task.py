@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -228,3 +228,44 @@ class TestTaskToolExecution:
             assert isinstance(result, TaskResult)
             assert result.completed is False
             assert "Simulated error" in result.response
+
+    @pytest.mark.asyncio
+    async def test_closes_subagent_loop_on_success(
+        self, task_tool: Task, ctx: InvokeContext
+    ) -> None:
+        async def mock_act(task: str):
+            yield AssistantEvent(content="done")
+
+        with patch("vibe.core.tools.builtins.task.AgentLoop") as mock_agent_loop_class:
+            mock_agent_loop = MagicMock()
+            mock_agent_loop.act = mock_act
+            mock_agent_loop.messages = [LLMMessage(role=Role.assistant, content="a")]
+            mock_agent_loop.set_approval_callback = MagicMock()
+            mock_agent_loop.aclose = AsyncMock()
+            mock_agent_loop_class.return_value = mock_agent_loop
+
+            args = TaskArgs(task="do something", agent="explore")
+            await collect_result(task_tool.run(args, ctx))
+
+            mock_agent_loop.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_closes_subagent_loop_on_exception(
+        self, task_tool: Task, ctx: InvokeContext
+    ) -> None:
+        async def mock_act(task: str):
+            yield AssistantEvent(content="starting")
+            raise RuntimeError("boom")
+
+        with patch("vibe.core.tools.builtins.task.AgentLoop") as mock_agent_loop_class:
+            mock_agent_loop = MagicMock()
+            mock_agent_loop.act = mock_act
+            mock_agent_loop.messages = [LLMMessage(role=Role.assistant, content="a")]
+            mock_agent_loop.set_approval_callback = MagicMock()
+            mock_agent_loop.aclose = AsyncMock()
+            mock_agent_loop_class.return_value = mock_agent_loop
+
+            args = TaskArgs(task="do something", agent="explore")
+            await collect_result(task_tool.run(args, ctx))
+
+            mock_agent_loop.aclose.assert_awaited_once()

@@ -60,7 +60,7 @@ class TelemetryRequestMetadata(TelemetryBaseMetadata):
 
 
 TeleportFailureStage = Literal[
-    "no_history", "remote_session", "git_check", "push", "workflow_start", "cancelled"
+    "no_history", "git_check", "push", "workflow_start", "cancelled"
 ]
 
 
