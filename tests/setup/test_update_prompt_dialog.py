@@ -8,6 +8,7 @@ import pytest
 from vibe.setup.update_prompt.update_prompt_dialog import (
     UpdateChoice,
     UpdatePromptApp,
+    UpdatePromptMode,
     UpdatePromptResult,
 )
 
@@ -73,6 +74,33 @@ async def test_dialog_default_selection_is_update() -> None:
         await pilot.pause()
         assert app._dialog is not None
         assert app._dialog.selected is UpdateChoice.UPDATE
+
+
+@pytest.mark.asyncio
+async def test_startup_prompt_uses_continue_label() -> None:
+    app = UpdatePromptApp(current_version="1.0.0", latest_version="2.0.0")
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._dialog is not None
+        assert (
+            app._dialog._choice_labels[UpdateChoice.CONTINUE]
+            == "Continue with current version"
+        )
+
+
+@pytest.mark.asyncio
+async def test_check_upgrade_prompt_uses_cancel_label() -> None:
+    app = UpdatePromptApp(
+        current_version="1.0.0",
+        latest_version="2.0.0",
+        prompt_mode=UpdatePromptMode.CHECK_UPGRADE,
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._dialog is not None
+        assert app._dialog._choice_labels[UpdateChoice.CONTINUE] == "Cancel upgrade"
 
 
 @pytest.mark.asyncio

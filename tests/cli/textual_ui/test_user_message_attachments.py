@@ -5,12 +5,14 @@ from weakref import WeakKeyDictionary
 
 from vibe.cli.textual_ui.widgets.messages import UserMessage
 from vibe.cli.textual_ui.windowing.history import build_history_widgets
-from vibe.core.types import ImageAttachment, LLMMessage, Role
+from vibe.core.types import FileImageSource, ImageAttachment, LLMMessage, Role
 
 
 def _att(path: Path, alias: str) -> ImageAttachment:
     path.write_bytes(b"\x89PNG")
-    return ImageAttachment(path=path, alias=alias, mime_type="image/png")
+    return ImageAttachment(
+        source=FileImageSource(path=path), alias=alias, mime_type="image/png"
+    )
 
 
 def test_attachments_footer_singular(tmp_path: Path) -> None:

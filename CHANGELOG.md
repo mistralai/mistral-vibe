@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.1] - 2026-06-19
+
+### Changed
+
+- Commands in `/help` are now listed alphabetically in both the CLI and ACP
+- `/teleport` is now always available and shows an explicit error when its prerequisites aren't met, instead of being hidden
+
+
+## [2.17.0] - 2026-06-19
+
+### Added
+
+- `/mcp login`, `/mcp logout`, and `/mcp status` commands to authenticate OAuth-backed MCP servers from the TUI
+- `vibe --check-upgrade` to force an immediate update check and exit
+- `--yolo` as an alias for `--auto-approve`
+- ACP now accepts inline image content blocks
+
+### Changed
+
+- API keys are now stored in the OS keyring instead of plain text
+- Edit diff view now shows all replaced occurrences instead of just the first
+- Completion popup now uses a two-column layout
+- Chat messages now have right padding so text no longer collapses into the scrollbar
+- Faster CLI shutdown by deferring resource cleanup on exit
+
+### Fixed
+
+- Skill autocomplete popup now dismisses after Tab completion
+- Stdio MCP connections now persist across tool calls
+- Retryable 5xx responses from the Mistral backend are now retried instead of failing
+
+
+## [2.16.1] - 2026-06-16
+
+### Added
+
+- ACP workspace trust gated behind the `workspace-trust` client capability
+
+### Changed
+
+- `/resume` now opens much faster
+- Startup update-failure message is now gentler and no longer alarms when an update can't be applied
+
+
+## [2.16.0] - 2026-06-15
+
+### Added
+
+- Fuzzy search in slash command autocomplete
+- Syntax-highlighted, line-numbered, theme-aware diffs for file edits
+
+### Changed
+
+- `/resume` now scopes the session picker to the current folder
+- Clipboard copy confirmations now appear inline instead of stacking toast notifications
+- ACP teleports now use the client title as the Vibe Code project name when no explicit project name is configured
+
+### Fixed
+
+- ACP max-output-token responses now stop gracefully with `max_tokens` instead of surfacing internal errors
+- Context-too-long responses wrapped as HTTP 422 are now classified correctly
+- SSE streams are parsed on CR/LF boundaries only, avoiding crashes on valid Unicode line separators in JSON strings
+- CLI banner now shows the Free plan correctly
+- Mistral backend no longer sends reasoning content when model thinking is off
+
+
 ## [2.15.0] - 2026-06-12
 
 ### Added

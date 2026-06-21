@@ -122,12 +122,14 @@ async def get_update_if_available(
     current_version: str,
     update_cache_repository: UpdateCacheRepository,
     get_current_timestamp: Callable[[], int] = lambda: int(time.time()),
+    *,
+    force_check: bool = False,
 ) -> UpdateAvailability | None:
     current = _parse_version(current_version)
     if current is None:
         return None
 
-    if update_cache := await update_cache_repository.get():
+    if not force_check and (update_cache := await update_cache_repository.get()):
         if _is_cache_fresh(update_cache, get_current_timestamp):
             return _get_cached_update_if_any(update_cache, current)
 

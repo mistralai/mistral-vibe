@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import ClassVar, final
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from vibe.core.rewind.manager import FileSnapshot
 from vibe.core.scratchpad import is_scratchpad_path
@@ -26,6 +26,7 @@ from vibe.core.utils.io import (
     file_write_lock,
     read_safe_async,
 )
+from vibe.core.utils.text import snippet_start_lines
 
 
 class EditArgs(BaseModel):
@@ -45,6 +46,13 @@ class EditResult(BaseModel):
     message: str
     old_string: str
     new_string: str
+    # UI hint for the diff renderer; not part of the serialized result contract.
+    # One entry per replaced occurrence (replace_all yields several).
+    _ui_start_lines: list[int] = PrivateAttr(default_factory=list)
+
+    @property
+    def ui_start_lines(self) -> list[int]:
+        return self._ui_start_lines
 
 
 class EditConfig(BaseToolConfig):
@@ -138,6 +146,10 @@ class Edit(
                         f"instance.\nString: {args.old_string}"
                     )
 
+                start_lines = snippet_start_lines(original, args.old_string)
+                if not args.replace_all:
+                    start_lines = start_lines[:1]
+
                 modified = self._apply_edit(
                     original, args.old_string, args.new_string, args.replace_all
                 )
@@ -163,12 +175,14 @@ class Edit(
         else:
             message = "The file has been updated successfully."
 
-        yield EditResult(
+        result = EditResult(
             file=str(file_path),
             message=message,
             old_string=args.old_string,
             new_string=args.new_string,
         )
+        result._ui_start_lines = start_lines
+        yield result
 
     @final
     def _validate_args(self, args: EditArgs) -> Path:

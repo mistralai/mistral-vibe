@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from abc import ABC, abstractmethod
+from typing import Annotated, Any
+
+from jsonpointer import JsonPointer, JsonPointerException
+from pydantic import AfterValidator, BaseModel, ConfigDict
 
 
 class ConfigPatch:
-    """Declarative, storage-agnostic description of a config delta."""
+    """A storage-agnostic set of config changes expressed as JSON Patch operations."""
 
     def __init__(
         self, *operations: PatchOp, fingerprint: str, reason: str = ""
@@ -19,83 +22,75 @@ class ConfigPatch:
         self.operations.extend(operations)
         return self
 
+    def to_json_patch(self) -> list[dict[str, Any]]:
+        return [op.to_json_patch() for op in self.operations]
+
     def describe(self) -> list[str]:
         """Human-readable summary of each operation."""
-        lines: list[str] = []
-        for op in self.operations:
-            match op:
-                case SetField(key=key, value=value):
-                    lines.append(f"set {key!r} = {value!r}")
-                case AppendToList(key=key, items=items):
-                    lines.append(f"append to {key!r}: {list(items)!r}")
-                case RemoveFromList(key=key, values=values):
-                    lines.append(f"remove from {key!r}: {list(values)!r}")
-                case DeleteField(key=key):
-                    lines.append(f"delete {key!r}")
-        return lines
+        return [op.describe() for op in self.operations]
 
 
-@dataclass(frozen=True, slots=True)
-class SetField:
-    """Set a top-level or nested field to a value."""
+class _OperationPatch(BaseModel, ABC):
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    key: str
+    @staticmethod
+    def _validate_json_pointer(path: str) -> str:
+        try:
+            JsonPointer(path)
+        except JsonPointerException as e:
+            raise ValueError("path must be a valid JSON Pointer") from e
+
+        return path
+
+    path: Annotated[str, AfterValidator(_validate_json_pointer)]
+
+    @abstractmethod
+    def to_json_patch(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def describe(self) -> str:
+        raise NotImplementedError
+
+
+class AddOperationPatch(_OperationPatch):
+    """Add a value at a JSON Pointer path."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     value: Any
 
-    def __post_init__(self) -> None:
-        _validate_key_path(self.key)
+    def to_json_patch(self) -> dict[str, Any]:
+        return {"op": "add", "path": self.path, "value": self.value}
+
+    def describe(self) -> str:
+        return f"add {self.path!r} = {self.value!r}"
 
 
-@dataclass(frozen=True, slots=True)
-class AppendToList:
-    """Append items to a list field."""
+class ReplaceOperationPatch(_OperationPatch):
+    """Replace the existing value at a JSON Pointer path."""
 
-    key: str
-    items: tuple[Any, ...]
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    def __post_init__(self) -> None:
-        _validate_key_path(self.key)
-        _validate_tuple_value("AppendToList.items", self.items)
+    value: Any
 
+    def to_json_patch(self) -> dict[str, Any]:
+        return {"op": "replace", "path": self.path, "value": self.value}
 
-@dataclass(frozen=True, slots=True)
-class RemoveFromList:
-    """Remove items from a list field by value."""
-
-    key: str
-    values: tuple[Any, ...]
-
-    def __post_init__(self) -> None:
-        _validate_key_path(self.key)
-        _validate_tuple_value("RemoveFromList.values", self.values)
+    def describe(self) -> str:
+        return f"replace {self.path!r} = {self.value!r}"
 
 
-@dataclass(frozen=True, slots=True)
-class DeleteField:
-    """Remove a field entirely from the config."""
+class RemoveOperationPatch(_OperationPatch):
+    """Remove the existing value at a JSON Pointer path."""
 
-    key: str
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    def __post_init__(self) -> None:
-        _validate_key_path(self.key)
+    def to_json_patch(self) -> dict[str, Any]:
+        return {"op": "remove", "path": self.path}
 
-
-PatchOp = SetField | AppendToList | RemoveFromList | DeleteField
-
-
-def _validate_key_path(key: object) -> None:
-    if not isinstance(key, str):
-        raise TypeError(
-            f"Patch operation key must be a string, got {type(key).__name__}"
-        )
-    if not key:
-        raise ValueError("Patch operation key must not be empty")
-    if any(not segment for segment in key.split(".")):
-        raise ValueError(
-            "Patch operation key must be a dot-separated path without empty segments"
-        )
+    def describe(self) -> str:
+        return f"remove {self.path!r}"
 
 
-def _validate_tuple_value(field_name: str, value: object) -> None:
-    if not isinstance(value, tuple):
-        raise TypeError(f"{field_name} must be a tuple, got {type(value).__name__}")
+type PatchOp = AddOperationPatch | ReplaceOperationPatch | RemoveOperationPatch

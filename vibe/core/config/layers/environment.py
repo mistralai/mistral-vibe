@@ -44,5 +44,7 @@ class EnvironmentLayer(ConfigLayer[RawConfig]):
         fingerprint = create_dict_fingerprint(data)
         return LayerConfigSnapshot(data=data, fingerprint=fingerprint)
 
-    async def apply(self, patch: Any, *, on_conflict: str = "cancel") -> None:
-        raise NotImplementedError("EnvironmentLayer.apply() is not implemented (M2)")
+    async def _save_to_store(self, _next_config: RawConfig) -> str:
+        raise NotImplementedError(
+            "EnvironmentLayer patch persistence is not implemented yet"
+        )

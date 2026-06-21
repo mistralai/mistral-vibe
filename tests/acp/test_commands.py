@@ -166,6 +166,25 @@ class TestHandleHelp:
             assert f"/{cmd}" in content
 
     @pytest.mark.asyncio
+    async def test_lists_registered_commands_alphabetically(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        await _prompt(acp_agent_loop, session_id, "/help")
+
+        content = _get_message_texts(acp_agent_loop)[0]
+        commands_section = content.split("### Available Commands\n\n", maxsplit=1)[
+            1
+        ].split("\n\n", maxsplit=1)[0]
+        command_names = [
+            line.split("`", maxsplit=2)[1].removeprefix("/")
+            for line in commands_section.splitlines()
+            if line.startswith("- ")
+        ]
+
+        assert command_names == sorted(command_names)
+
+    @pytest.mark.asyncio
     async def test_includes_user_invocable_skills(
         self, acp_agent_loop_with_skills: VibeAcpAgentLoop, skills_dir: Path
     ) -> None:
@@ -265,6 +284,28 @@ class TestHandleTeleport:
         assert _get_message_texts(acp_agent_loop) == [
             "No conversation history to teleport."
         ]
+        assert _get_tool_updates(acp_agent_loop) == []
+
+    @pytest.mark.asyncio
+    async def test_teleport_replies_with_error_when_model_not_mistral(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_id = await _new_session_and_clear(acp_agent_loop)
+
+        with patch(
+            "vibe.core.config._settings.VibeConfig.is_active_model_mistral",
+            return_value=False,
+        ):
+            response = await _prompt(acp_agent_loop, session_id, "/teleport")
+
+        assert response.stop_reason == "end_turn"
+        assert response.field_meta == {
+            "tool_name": "teleport",
+            "teleport": {"status": "unavailable"},
+        }
+        texts = _get_message_texts(acp_agent_loop)
+        assert len(texts) == 1
+        assert "active Mistral model" in texts[0]
         assert _get_tool_updates(acp_agent_loop) == []
 
     @pytest.mark.asyncio
@@ -542,6 +583,25 @@ class TestCommandFallthrough:
 
 
 class TestAvailableCommandsWithSkills:
+    @pytest.mark.asyncio
+    async def test_available_commands_are_alphabetical(
+        self, acp_agent_loop_with_skills: VibeAcpAgentLoop, skills_dir: Path
+    ) -> None:
+        create_skill(skills_dir, "alpha-skill", "First skill")
+
+        await acp_agent_loop_with_skills.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        await _wait_for_available_commands(acp_agent_loop_with_skills)
+
+        updates = _get_client(acp_agent_loop_with_skills)._session_updates
+        available = [
+            u for u in updates if isinstance(u.update, AvailableCommandsUpdate)
+        ]
+        cmd_names = [c.name for c in available[0].update.available_commands]
+
+        assert cmd_names == sorted(cmd_names)
+
     @pytest.mark.asyncio
     async def test_skills_appear_in_available_commands(
         self, acp_agent_loop_with_skills: VibeAcpAgentLoop, skills_dir: Path

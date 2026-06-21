@@ -4,7 +4,6 @@ import contextlib
 from typing import TYPE_CHECKING
 
 from vibe import __version__
-from vibe.cli.terminal_detect import detect_terminal
 from vibe.core.experiments.manager import ExperimentManager, hash_api_key
 from vibe.core.experiments.models import ExperimentAttributes
 from vibe.core.telemetry.send import get_mistral_provider_and_api_key
@@ -13,7 +12,7 @@ from vibe.core.utils import get_platform_id
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
     from vibe.core.session.session_logger import SessionLogger
-    from vibe.core.telemetry.types import EntrypointMetadata
+    from vibe.core.telemetry.types import EntrypointMetadata, TerminalEmulator
 
 
 async def initialize_experiments(
@@ -22,6 +21,7 @@ async def initialize_experiments(
     manager: ExperimentManager,
     session_logger: SessionLogger,
     entrypoint_metadata: EntrypointMetadata | None,
+    terminal_emulator: TerminalEmulator | None = None,
 ) -> bool:
     if not config.enable_telemetry or not config.experiments.enable:
         return False
@@ -29,7 +29,9 @@ async def initialize_experiments(
     if provider_and_key is None:
         return False
     _, api_key = provider_and_key
-    attributes = _build_attributes(config, api_key, entrypoint_metadata)
+    attributes = _build_attributes(
+        config, api_key, entrypoint_metadata, terminal_emulator
+    )
     await manager.initialize(attributes)
     state = manager.export_state()
     if state is None:
@@ -55,7 +57,10 @@ async def hydrate_experiments_from_session(
 
 
 def _build_attributes(
-    config: VibeConfig, api_key: str, entrypoint_metadata: EntrypointMetadata | None
+    config: VibeConfig,
+    api_key: str,
+    entrypoint_metadata: EntrypointMetadata | None,
+    terminal_emulator: TerminalEmulator | None,
 ) -> ExperimentAttributes:
     from vibe.core.config import VibeConfig as _VibeConfig
 
@@ -67,7 +72,6 @@ def _build_attributes(
     agent_version = (
         entrypoint_metadata.agent_version if entrypoint_metadata else __version__
     )
-    terminal_emulator = detect_terminal().value if entrypoint == "cli" else None
     default_prompt_id = _VibeConfig.model_fields["system_prompt_id"].default
     return ExperimentAttributes(
         userId=hash_api_key(api_key),

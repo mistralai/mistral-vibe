@@ -6,7 +6,6 @@ import pytest
 
 from vibe.core.config.layer import UntrustedLayerError
 from vibe.core.config.layers.project import ProjectConfigLayer
-from vibe.core.config.patch import ConfigPatch
 from vibe.core.config.types import MISSING_CONFIG_FILE_FINGERPRINT
 from vibe.core.paths._vibe_home import GlobalPath
 from vibe.core.trusted_folders import trusted_folders_manager
@@ -71,13 +70,6 @@ async def test_missing_file_returns_empty(tmp_working_directory: Path) -> None:
 async def test_default_name(tmp_working_directory: Path) -> None:
     layer = ProjectConfigLayer(path=tmp_working_directory)
     assert layer.name == "project-toml"
-
-
-@pytest.mark.asyncio
-async def test_apply_raises_not_implemented(tmp_working_directory: Path) -> None:
-    layer = ProjectConfigLayer(path=tmp_working_directory)
-    with pytest.raises(NotImplementedError, match="M2"):
-        await layer.apply(ConfigPatch(fingerprint="fp-1"))
 
 
 @pytest.mark.asyncio

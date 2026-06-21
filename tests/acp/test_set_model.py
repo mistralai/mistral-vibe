@@ -235,6 +235,7 @@ class TestACPSetModel:
             (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
         )
         assert acp_session is not None
+        await acp_session.agent_loop.wait_until_ready()
 
         user_msg = LLMMessage(role=Role.user, content="Hello")
         assistant_msg = LLMMessage(role=Role.assistant, content="Hi there!")

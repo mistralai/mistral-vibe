@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 import fnmatch
 from typing import ClassVar
 
@@ -134,6 +134,7 @@ class Task(
             config=base_config,
             agent_name=args.agent,
             entrypoint_metadata=ctx.entrypoint_metadata,
+            terminal_emulator=ctx.terminal_emulator,
             is_subagent=True,
             defer_heavy_init=True,
             permission_store=ctx.permission_store,
@@ -185,6 +186,9 @@ class Task(
             turns_used = sum(
                 msg.role == Role.assistant for msg in subagent_loop.messages
             )
+        finally:
+            with suppress(Exception):
+                await subagent_loop.aclose()
 
         yield TaskResult(
             response="".join(accumulated_response),

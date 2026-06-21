@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.config.fingerprint import capture_stable_file, create_dict_fingerprint
+from vibe.core.config.fingerprint import (
+    capture_stable_file,
+    create_dict_fingerprint,
+    create_file_fingerprint,
+)
 from vibe.core.config.types import ConcurrencyConflictError
 
 
@@ -65,6 +69,32 @@ class TestCaptureStableFile:
         with pytest.raises(FileNotFoundError):
             with capture_stable_file(path):
                 pass
+
+
+class TestCreateFileFingerprint:
+    def test_captures_file_state(self, tmp_working_directory: Path) -> None:
+        path = tmp_working_directory / "config.toml"
+        path.write_text("key = 1")
+
+        with path.open("rb") as file:
+            first_fingerprint = create_file_fingerprint(file)
+        with path.open("rb") as file:
+            second_fingerprint = create_file_fingerprint(file)
+
+        assert isinstance(first_fingerprint, str)
+        assert first_fingerprint
+        assert first_fingerprint == second_fingerprint
+
+    def test_changes_when_file_changes(self, tmp_working_directory: Path) -> None:
+        path = tmp_working_directory / "config.toml"
+        path.write_text("key = 1")
+        with path.open("rb") as file:
+            first_fingerprint = create_file_fingerprint(file)
+
+        path.write_text("key = 2")
+
+        with path.open("rb") as file:
+            assert create_file_fingerprint(file) != first_fingerprint
 
 
 class TestCreateDictFingerprint:

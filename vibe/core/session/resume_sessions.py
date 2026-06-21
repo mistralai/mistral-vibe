@@ -1,49 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Literal
 
 from vibe.core.config import VibeConfig
-from vibe.core.logger import logger
-from vibe.core.nuage.client import WorkflowsClient
-from vibe.core.nuage.workflow import WorkflowExecutionStatus
 from vibe.core.session.session_id import shorten_session_id
 from vibe.core.session.session_loader import SessionLoader
 
-ResumeSessionSource = Literal["local", "remote"]
 
-
-def can_delete_resume_session_source(source: ResumeSessionSource) -> bool:
-    return source == "local"
-
-
-def short_session_id(session_id: str, source: ResumeSessionSource = "local") -> str:
-    return shorten_session_id(session_id, from_end=source == "remote")
-
-
-_ACTIVE_STATUSES = [
-    WorkflowExecutionStatus.RUNNING,
-    WorkflowExecutionStatus.CONTINUED_AS_NEW,
-]
+def short_session_id(session_id: str) -> str:
+    return shorten_session_id(session_id)
 
 
 @dataclass(frozen=True)
 class ResumeSessionInfo:
     session_id: str
-    source: ResumeSessionSource
     cwd: str
     title: str | None
     end_time: str | None
-    status: str | None = None
 
     @property
     def option_id(self) -> str:
-        return f"{self.source}:{self.session_id}"
-
-    @property
-    def can_delete(self) -> bool:
-        return can_delete_resume_session_source(self.source)
+        return self.session_id
 
 
 def list_local_resume_sessions(
@@ -52,7 +29,6 @@ def list_local_resume_sessions(
     return [
         ResumeSessionInfo(
             session_id=session["session_id"],
-            source="local",
             cwd=session["cwd"],
             title=session.get("title"),
             end_time=session.get("end_time"),
@@ -61,43 +37,15 @@ def list_local_resume_sessions(
     ]
 
 
-async def list_remote_resume_sessions(config: VibeConfig) -> list[ResumeSessionInfo]:
-    if not config.vibe_code_enabled or not config.vibe_code_api_key:
-        logger.debug("Remote resume listing skipped: missing Vibe Code configuration")
-        return []
-
-    async with WorkflowsClient(
-        base_url=config.vibe_code_base_url,
-        api_key=config.vibe_code_api_key,
-        timeout=config.api_timeout,
-    ) as client:
-        response = await client.get_workflow_runs(
-            workflow_identifier=config.vibe_code_workflow_id,
-            page_size=50,
-            status=_ACTIVE_STATUSES,
+def session_latest_messages(
+    sessions: list[ResumeSessionInfo], config: VibeConfig
+) -> dict[str, str]:
+    messages: dict[str, str] = {}
+    for session in sessions:
+        messages[session.option_id] = (
+            session.title
+            or SessionLoader.get_first_user_message(
+                session.session_id, config.session_logging
+            )
         )
-
-    seen: dict[str, ResumeSessionInfo] = {}
-    latest_start: dict[str, datetime] = {}
-    for execution in response.executions:
-        session = ResumeSessionInfo(
-            session_id=execution.execution_id,
-            source="remote",
-            cwd="",
-            title="Vibe Code",
-            end_time=(
-                execution.end_time.isoformat()
-                if execution.end_time
-                else execution.start_time.isoformat()
-            ),
-            status=execution.status,
-        )
-        prev_start = latest_start.get(execution.execution_id)
-        if prev_start is None or execution.start_time > prev_start:
-            seen[execution.execution_id] = session
-            latest_start[execution.execution_id] = execution.start_time
-
-    sessions = list(seen.values())
-
-    logger.debug("Remote resume listing filtered sessions: %d", len(sessions))
-    return sessions
+    return messages

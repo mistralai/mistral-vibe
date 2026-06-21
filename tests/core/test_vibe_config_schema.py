@@ -27,6 +27,7 @@ async def test_full_toml_to_vibe_config_schema(tmp_path: Path) -> None:
         """\
 vim_keybindings = true
 api_timeout = 300.0
+api_retry_max_elapsed_time = 120.0
 active_model = "codestral"
 disabled_tools = ["bash"]
 default_agent = "plan"
@@ -54,6 +55,7 @@ provider = "mistral"
 
     assert config.vim_keybindings is True
     assert config.api_timeout == 300.0
+    assert config.api_retry_max_elapsed_time == 120.0
     assert config.active_model == "codestral"
     assert config.models[0].alias == "codestral"
     assert "bash" in config.disabled_tools

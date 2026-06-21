@@ -10,11 +10,11 @@ from vibe.core.config._settings import (
     DEFAULT_ACTIVE_MODEL_CONFIG,
     DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG,
     DEFAULT_ACTIVE_TTS_MODEL_CONFIG,
+    DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
     DEFAULT_API_TIMEOUT,
     DEFAULT_AUTO_COMPACT_THRESHOLD,
     DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_API_ENV_KEY,
-    DEFAULT_MISTRAL_SERVER_URL,
     DEFAULT_MODELS,
     DEFAULT_PROVIDERS,
     DEFAULT_THEME,
@@ -23,8 +23,6 @@ from vibe.core.config._settings import (
     DEFAULT_TTS_MODELS,
     DEFAULT_TTS_PROVIDERS,
     DEFAULT_VIBE_BASE_URL,
-    DEFAULT_VIBE_CODE_TASK_QUEUE,
-    DEFAULT_VIBE_CODE_WORKFLOW_ID,
     ConnectorConfig,
     ExperimentsConfig,
     MCPServer,
@@ -179,21 +177,22 @@ class VibeConfigSchema(ConfigSchema):
             " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
+    experimental_enable_registry_skills: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Experimental: pull workspace skills from the Mistral AI Registry"
+            " (api.mistral.ai) and make them available alongside local skills."
+            " Requires a Mistral provider and API key. Local and builtin skills take"
+            " precedence on name collision."
+        ),
+    )
 
     # Internal
     vibe_code_enabled: Annotated[bool, WithReplaceMerge()] = True
-    vibe_code_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_MISTRAL_SERVER_URL
-    vibe_code_workflow_id: Annotated[str, WithReplaceMerge()] = (
-        DEFAULT_VIBE_CODE_WORKFLOW_ID
-    )
-    vibe_code_task_queue: Annotated[str | None, WithReplaceMerge()] = (
-        DEFAULT_VIBE_CODE_TASK_QUEUE
-    )
     vibe_code_api_key_env_var: Annotated[str, WithReplaceMerge()] = (
         DEFAULT_MISTRAL_API_ENV_KEY
     )
     vibe_code_project_name: Annotated[str | None, WithReplaceMerge()] = None
-    vibe_code_experimental_nuage_enabled: Annotated[bool, WithReplaceMerge()] = False
     enable_otel: Annotated[bool, WithReplaceMerge()] = False
     otel_endpoint: Annotated[str, WithReplaceMerge()] = ""
     console_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_CONSOLE_BASE_URL
@@ -216,6 +215,7 @@ class VibeConfigSchema(ConfigSchema):
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False
     narrator_enabled: Annotated[bool, WithReplaceMerge()] = False
     bypass_tool_permissions: Annotated[bool, WithReplaceMerge()] = False
+    raise_on_compaction_failure: Annotated[bool, WithReplaceMerge()] = False
     enable_telemetry: Annotated[bool, WithReplaceMerge()] = True
     system_prompt_id: Annotated[str, WithReplaceMerge()] = SystemPrompt.CLI
     compaction_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.COMPACT
@@ -228,6 +228,9 @@ class VibeConfigSchema(ConfigSchema):
     enable_notifications: Annotated[bool, WithReplaceMerge()] = True
     enable_system_trust_store: Annotated[bool, WithReplaceMerge()] = False
     api_timeout: Annotated[float, WithReplaceMerge()] = DEFAULT_API_TIMEOUT
+    api_retry_max_elapsed_time: Annotated[float, WithReplaceMerge()] = (
+        DEFAULT_API_RETRY_MAX_ELAPSED_TIME
+    )
     vibe_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_VIBE_BASE_URL
     vibe_code_sessions_base_url: Annotated[str, WithReplaceMerge()] = (
         "https://chat.mistral.ai"

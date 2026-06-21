@@ -26,39 +26,57 @@ class SessionInfo(TypedDict):
 
 class SessionLoader:
     @staticmethod
-    def _is_valid_session(  # noqa: PLR0911
+    def _parse_message_lines(text: str) -> list[dict[str, Any]] | None:
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+
+        messages: list[dict[str, Any]] = []
+        for line in lines:
+            message = json.loads(line)
+            if not isinstance(message, dict):
+                return None
+            messages.append(message)
+        return messages or None
+
+    @staticmethod
+    def _read_validated_session(
         session_dir: Path, working_directory: Path | None = None
-    ) -> bool:
-        """Check if a session directory contains valid metadata and messages."""
+    ) -> dict[str, Any] | None:
         metadata_path = session_dir / METADATA_FILENAME
         messages_path = session_dir / MESSAGES_FILENAME
 
         if not metadata_path.is_file() or not messages_path.is_file():
-            return False
+            return None
 
         try:
             metadata = json.loads(read_safe(metadata_path).text)
             if not isinstance(metadata, dict):
-                return False
+                return None
             if working_directory is not None:
                 session_working_directory = (metadata.get("environment") or {}).get(
                     "working_directory"
                 )
                 if session_working_directory != str(working_directory):
-                    return False
+                    return None
 
-            has_messages = False
-            for line in read_safe(messages_path).text.splitlines():
-                has_messages = True
-                message = json.loads(line)
-                if not isinstance(message, dict):
-                    return False
-            if not has_messages:
-                return False
+            messages = SessionLoader._parse_message_lines(read_safe(messages_path).text)
         except (OSError, json.JSONDecodeError):
-            return False
+            return None
 
-        return True
+        if messages is None:
+            return None
+
+        return metadata
+
+    @staticmethod
+    def _is_valid_session(
+        session_dir: Path, working_directory: Path | None = None
+    ) -> bool:
+        return (
+            SessionLoader._read_validated_session(session_dir, working_directory)
+            is not None
+        )
 
     @staticmethod
     def latest_session(
@@ -158,13 +176,8 @@ class SessionLoader:
 
         sessions: list[SessionInfo] = []
         for session_dir in session_dirs:
-            if not SessionLoader._is_valid_session(session_dir):
-                continue
-
-            metadata_path = session_dir / METADATA_FILENAME
-            try:
-                metadata = json.loads(read_safe(metadata_path).text)
-            except (OSError, json.JSONDecodeError):
+            metadata = SessionLoader._read_validated_session(session_dir)
+            if metadata is None:
                 continue
 
             session_id = metadata.get("session_id")

@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from tests.constants import ANTHROPIC_BASE_URL, ANTHROPIC_MESSAGES_PATH
 from vibe.core.config import ProviderConfig
 from vibe.core.llm.backend.anthropic import AnthropicAdapter, AnthropicMapper
 from vibe.core.types import (
@@ -30,7 +31,7 @@ def adapter():
 def provider():
     return ProviderConfig(
         name="anthropic",
-        api_base="https://api.anthropic.com",
+        api_base=ANTHROPIC_BASE_URL,
         api_key_env_var="ANTHROPIC_API_KEY",
         api_style="anthropic",
     )
@@ -229,75 +230,6 @@ class TestMapperParseResponse:
         assert chunk.usage.completion_tokens == 7
 
 
-class TestMapperStreamingEvents:
-    def test_text_delta(self, mapper):
-        chunk, idx = mapper.parse_streaming_event(
-            "content_block_delta",
-            {"delta": {"type": "text_delta", "text": "hi"}, "index": 0},
-            0,
-        )
-        assert chunk.message.content == "hi"
-
-    def test_thinking_delta(self, mapper):
-        chunk, _ = mapper.parse_streaming_event(
-            "content_block_delta",
-            {"delta": {"type": "thinking_delta", "thinking": "hmm"}, "index": 0},
-            0,
-        )
-        assert chunk.message.reasoning_content == "hmm"
-
-    def test_tool_use_start(self, mapper):
-        chunk, idx = mapper.parse_streaming_event(
-            "content_block_start",
-            {
-                "content_block": {"type": "tool_use", "id": "t1", "name": "search"},
-                "index": 2,
-            },
-            0,
-        )
-        assert chunk.message.tool_calls[0].id == "t1"
-        assert idx == 2
-
-    def test_input_json_delta(self, mapper):
-        chunk, _ = mapper.parse_streaming_event(
-            "content_block_delta",
-            {
-                "delta": {"type": "input_json_delta", "partial_json": '{"q":'},
-                "index": 1,
-            },
-            0,
-        )
-        assert chunk.message.tool_calls[0].function.arguments == '{"q":'
-
-    def test_message_start_usage(self, mapper):
-        chunk, _ = mapper.parse_streaming_event(
-            "message_start",
-            {"message": {"usage": {"input_tokens": 50, "cache_read_input_tokens": 10}}},
-            0,
-        )
-        assert chunk.usage.prompt_tokens == 60
-
-    def test_message_delta_usage(self, mapper):
-        chunk, _ = mapper.parse_streaming_event(
-            "message_delta", {"usage": {"output_tokens": 42}}, 0
-        )
-        assert chunk.usage.completion_tokens == 42
-
-    def test_unknown_event(self, mapper):
-        chunk, idx = mapper.parse_streaming_event("ping", {}, 5)
-        assert chunk is None
-        assert idx == 5
-
-    def test_signature_delta(self, mapper):
-        chunk, _ = mapper.parse_streaming_event(
-            "content_block_delta",
-            {"delta": {"type": "signature_delta", "signature": "sig"}, "index": 0},
-            0,
-        )
-        assert chunk is not None
-        assert chunk.message.reasoning_signature == "sig"
-
-
 class TestAdapterPrepareRequest:
     def test_basic(self, adapter, provider):
         messages = [LLMMessage(role=Role.user, content="Hello")]
@@ -316,7 +248,7 @@ class TestAdapterPrepareRequest:
         assert payload["model"] == "claude-sonnet-4-20250514"
         assert payload["max_tokens"] == 1024
         assert "temperature" not in payload
-        assert req.endpoint == "/v1/messages"
+        assert req.endpoint == ANTHROPIC_MESSAGES_PATH
         assert req.headers["anthropic-version"] == "2023-06-01"
 
     def test_beta_features(self, adapter, provider):

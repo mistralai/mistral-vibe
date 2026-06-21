@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import os
 from pathlib import Path
 import sys
@@ -10,13 +11,11 @@ from rich import print as rprint
 from vibe import __version__
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.trusted_folders import (
-    find_git_repo_ancestor,
-    find_repo_trustable_files_for_cwd,
-    find_trustable_files,
+    apply_workspace_trust_decision,
+    maybe_build_workspace_trust_prompt,
     trusted_folders_manager,
 )
 from vibe.setup.trusted_folders.trust_folder_dialog import (
-    TrustDecision,
     TrustDialogQuitException,
     ask_trust_folder,
 )
@@ -52,7 +51,7 @@ def parse_arguments() -> argparse.Namespace:
         metavar="TEXT",
         help="Run in programmatic mode: send prompt, output response, and exit. "
         "Tool approval follows the selected --agent (or 'default_agent' config); "
-        "pass --auto-approve to allow all tool calls.",
+        "pass --auto-approve or --yolo to allow all tool calls.",
     )
     parser.add_argument(
         "--max-turns",
@@ -106,11 +105,17 @@ def parse_arguments() -> argparse.Namespace:
     )
     agent_group.add_argument(
         "--auto-approve",
+        "--yolo",
         action="store_true",
         help="Shortcut for --agent auto-approve. Approves all tool calls without "
         "prompting.",
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
+    parser.add_argument(
+        "--check-upgrade",
+        action="store_true",
+        help="Check for a Vibe update now, prompt to install it, and exit",
+    )
     parser.add_argument(
         "--workdir",
         type=Path,
@@ -157,38 +162,18 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def check_and_resolve_trusted_folder(cwd: Path) -> None:
-    if cwd.resolve() == Path.home().resolve():
+    prompt = maybe_build_workspace_trust_prompt(cwd)
+    if prompt is None:
         return
-
-    if trusted_folders_manager.is_trusted(cwd) is True:
-        return
-    if trusted_folders_manager.is_explicitly_untrusted(cwd):
-        return
-
-    repo_root = find_git_repo_ancestor(cwd)
-    detected_files = find_trustable_files(cwd)
-    repo_detected_files = find_repo_trustable_files_for_cwd(cwd, repo_root)
-    if not detected_files and not repo_detected_files:
-        return
-
-    offer_repo_trust = (
-        repo_root is not None
-        and trusted_folders_manager.is_trusted(repo_root) is not True
-        and not trusted_folders_manager.is_explicitly_untrusted(repo_root)
-    )
-    repo_explicitly_untrusted = (
-        repo_root is not None
-        and trusted_folders_manager.is_explicitly_untrusted(repo_root)
-    )
 
     try:
         decision = ask_trust_folder(
-            cwd,
-            repo_root,
-            detected_files,
-            repo_detected_files=repo_detected_files,
-            offer_repo_trust=offer_repo_trust,
-            repo_explicitly_untrusted=repo_explicitly_untrusted,
+            prompt.cwd,
+            prompt.repo_root,
+            prompt.detected_files,
+            repo_detected_files=prompt.repo_detected_files,
+            offer_repo_trust=prompt.offer_repo_trust,
+            repo_explicitly_untrusted=prompt.repo_explicitly_untrusted,
         )
     except (KeyboardInterrupt, EOFError, TrustDialogQuitException):
         sys.exit(0)
@@ -196,13 +181,8 @@ def check_and_resolve_trusted_folder(cwd: Path) -> None:
         rprint(f"[yellow]Error showing trust dialog: {e}[/]")
         return
 
-    match decision:
-        case TrustDecision.TRUST_REPO if repo_root is not None:
-            trusted_folders_manager.add_trusted(repo_root)
-        case TrustDecision.TRUST_CWD:
-            trusted_folders_manager.add_trusted(cwd)
-        case TrustDecision.DECLINE:
-            trusted_folders_manager.add_untrusted(cwd)
+    if decision is not None:
+        apply_workspace_trust_decision(prompt, decision)
 
 
 def main() -> None:
@@ -243,14 +223,19 @@ def main() -> None:
         additional_dirs.append(resolved)
         trusted_folders_manager.trust_for_session(resolved)
 
-    is_interactive = args.prompt is None
-    if is_interactive:
-        check_and_resolve_trusted_folder(cwd)
     init_harness_files_manager("user", "project", additional_dirs=additional_dirs)
 
     from vibe.cli.cli import run_cli
 
-    run_cli(args)
+    resolve_trusted_folder: Callable[[], None] | None = None
+    if args.prompt is None and not args.check_upgrade:
+
+        def _resolve_trusted_folder() -> None:
+            check_and_resolve_trusted_folder(cwd)
+
+        resolve_trusted_folder = _resolve_trusted_folder
+
+    run_cli(args, resolve_trusted_folder=resolve_trusted_folder)
 
 
 if __name__ == "__main__":

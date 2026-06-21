@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import tempfile
 import tomllib
 
-from vibe.core.config.fingerprint import capture_stable_file
+import tomli_w
+
+from vibe.core.config.fingerprint import capture_stable_file, create_file_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
-from vibe.core.config.patch import ConfigPatch
-from vibe.core.config.types import (
-    EMPTY_CONFIG_SNAPSHOT,
-    ConflictStrategy,
-    LayerConfigSnapshot,
-)
+from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
 from vibe.core.paths._vibe_home import VIBE_HOME
 
 
@@ -37,10 +36,29 @@ class UserConfigLayer(ConfigLayer[RawConfig]):
 
         return LayerConfigSnapshot(data=data, fingerprint=fingerprint)
 
-    async def apply(
-        self,
-        patch: ConfigPatch,
-        *,
-        on_conflict: ConflictStrategy = ConflictStrategy.CANCEL,
-    ) -> None:
-        raise NotImplementedError("UserConfigLayer.apply() is not implemented (M2)")
+    async def _save_to_store(self, next_config: RawConfig) -> str:
+        if not self._path.exists():
+            raise FileNotFoundError(self._path)
+
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=self._path.parent,
+                prefix=f".{self._path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_file:
+                tmp_path = Path(tmp_file.name)
+                tomli_w.dump(next_config.model_dump(), tmp_file)
+                tmp_file.flush()  # Flush Python buffers.
+                os.fsync(tmp_file.fileno())  # Flush OS buffers.
+                fingerprint = create_file_fingerprint(tmp_file)
+
+            tmp_path.replace(self._path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+        return fingerprint

@@ -21,6 +21,7 @@ from vibe.core.telemetry.types import (
     AttachmentKind,
     EntrypointMetadata,
     TelemetryRequestMetadata,
+    TerminalEmulator,
 )
 from vibe.core.tools.base import BaseTool, ToolPermission
 from vibe.core.types import Backend
@@ -509,16 +510,6 @@ class TestTelemetryClient:
             "nb_session_messages": 4,
         }
 
-    def test_send_remote_resume_requested_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-        client.send_remote_resume_requested(session_id="remote-123")
-        assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe.remote_resume_requested"
-        assert telemetry_events[0]["properties"] == {"session_id": "remote-123"}
-
     def test_send_teleport_failed_payload_includes_error_details(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
@@ -557,7 +548,7 @@ class TestTelemetryClient:
             entrypoint="cli",
             client_name="vscode",
             client_version="1.96.0",
-            terminal_emulator="vscode",
+            terminal_emulator=TerminalEmulator.VSCODE,
         )
 
         assert len(telemetry_events) == 1

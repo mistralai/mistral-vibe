@@ -553,6 +553,7 @@ class TestSessionUpdates:
 
             assert tool_call.params.update.session_update == "tool_call"
             assert tool_call.params.update.kind == "search"
+            assert tool_call.params.update.status == "pending"
             assert tool_call.params.update.title == "Grepping 'auth'"
             assert (
                 tool_call.params.update.raw_input

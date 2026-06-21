@@ -296,6 +296,7 @@ class ToolManager:
         if self._mcp_integrated:
             return
         if not self._config.mcp_servers:
+            self._mcp_registry.sync_active_servers([])
             return
 
         try:

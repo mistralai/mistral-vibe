@@ -8,6 +8,7 @@ import pytest
 import respx
 
 from tests.conftest import build_test_vibe_config
+from tests.constants import CONNECTORS_BOOTSTRAP_PATH, MISTRAL_BASE_URL
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.config import ConnectorConfig, VibeConfig
@@ -468,7 +469,7 @@ class TestConnectorDisableFiltering:
 # Bootstrap-based discovery (ConnectorRegistry._discover_all via httpx)
 # ---------------------------------------------------------------------------
 
-_BOOTSTRAP_URL = "https://api.mistral.ai/v1/connectors/bootstrap"
+_BOOTSTRAP_URL = f"{MISTRAL_BASE_URL}{CONNECTORS_BOOTSTRAP_PATH}"
 
 
 def _make_bootstrap_response(

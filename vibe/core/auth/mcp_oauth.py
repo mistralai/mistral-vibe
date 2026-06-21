@@ -10,6 +10,7 @@ import anyio.to_thread
 import httpx
 import keyring
 import keyring.backends.fail
+import keyring.errors
 from mcp.client.auth import (
     OAuthClientProvider,
     OAuthFlowError,
@@ -101,6 +102,13 @@ async def _kr_set(username: str, value: str) -> None:
     await anyio.to_thread.run_sync(keyring.set_password, _SERVICE, username, value)
 
 
+async def _kr_delete(username: str) -> None:
+    try:
+        await anyio.to_thread.run_sync(keyring.delete_password, _SERVICE, username)
+    except keyring.errors.PasswordDeleteError:
+        pass
+
+
 class Fingerprint(BaseModel):
     """Config-drift detection marker for OAuth MCP servers.
 
@@ -143,13 +151,23 @@ class Fingerprint(BaseModel):
     async def save(self, alias: str) -> None:
         await _kr_set(_kr_username(alias, "fingerprint"), self.model_dump_json())
 
+    @classmethod
+    async def delete(cls, alias: str) -> None:
+        await _kr_delete(_kr_username(alias, "fingerprint"))
+
 
 class KeyringTokenStorage(TokenStorage):
-    def __init__(self, alias: str) -> None:
+    def __init__(
+        self,
+        alias: str,
+        *,
+        fallback_client_info: OAuthClientInformationFull | None = None,
+    ) -> None:
         backend = keyring.get_keyring()
         if isinstance(backend, keyring.backends.fail.Keyring):
             raise MCPOAuthHeadlessError(server_alias=alias)
         self._alias = alias
+        self._fallback_client_info = fallback_client_info
 
     async def get_tokens(self) -> OAuthToken | None:
         raw = await _kr_get(_kr_username(self._alias, "tokens"))
@@ -160,16 +178,22 @@ class KeyringTokenStorage(TokenStorage):
     async def set_tokens(self, tokens: OAuthToken) -> None:
         await _kr_set(_kr_username(self._alias, "tokens"), tokens.model_dump_json())
 
+    async def delete_tokens(self) -> None:
+        await _kr_delete(_kr_username(self._alias, "tokens"))
+
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         raw = await _kr_get(_kr_username(self._alias, "client_info"))
         if raw is None:
-            return None
+            return self._fallback_client_info
         return OAuthClientInformationFull.model_validate_json(raw)
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         await _kr_set(
             _kr_username(self._alias, "client_info"), client_info.model_dump_json()
         )
+
+    async def delete_client_info(self) -> None:
+        await _kr_delete(_kr_username(self._alias, "client_info"))
 
 
 _LOGO_SVG: Final = (
@@ -392,10 +416,23 @@ def build_oauth_provider(
     client_metadata_url = (
         str(auth.client_metadata_url) if auth.client_metadata_url else None
     )
+    fallback_client_info = None
+    if auth.client_id:
+        fallback_client_info = OAuthClientInformationFull(
+            client_id=auth.client_id,
+            redirect_uris=[redirect_uri],
+            scope=scope,
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            token_endpoint_auth_method="none",
+            client_name=_CLIENT_NAME,
+        )
     return OAuthClientProvider(
         server_url=server.url,
         client_metadata=metadata,
-        storage=KeyringTokenStorage(alias=server.name),
+        storage=KeyringTokenStorage(
+            alias=server.name, fallback_client_info=fallback_client_info
+        ),
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
         client_metadata_url=client_metadata_url,
@@ -420,8 +457,6 @@ async def perform_oauth_login(
             auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
         ) as client:
             await client.get(server.url)
-    except OAuthTokenError as exc:
+    except (OAuthTokenError, OAuthFlowError) as exc:
         raise MCPOAuthLoginFailed(server_alias=server.name, reason=str(exc)) from exc
-    except OAuthFlowError:
-        raise
     await Fingerprint.compute(server).save(server.name)

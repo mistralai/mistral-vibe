@@ -4,10 +4,12 @@ import os
 from pathlib import Path
 
 from dotenv import dotenv_values
+import keyring
+from keyring.errors import KeyringError
 import pytest
 
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
-from vibe.acp.exceptions import InvalidRequestError
+from vibe.acp.exceptions import InternalError, InvalidRequestError
 from vibe.core.config import (
     DEFAULT_MISTRAL_API_ENV_KEY,
     ProviderConfig,
@@ -16,6 +18,15 @@ from vibe.core.config import (
 from vibe.core.types import Backend
 from vibe.setup.auth import AuthStateKind
 from vibe.setup.onboarding.context import OnboardingContext
+
+
+@pytest.fixture(autouse=True)
+def disable_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
+    monkeypatch.setattr(
+        keyring, "set_password", lambda service, username, password: None
+    )
+    monkeypatch.setattr(keyring, "delete_password", lambda service, username: None)
 
 
 def build_mistral_provider(
@@ -127,7 +138,7 @@ class TestACPAuthStatus:
         }
 
     @pytest.mark.asyncio
-    async def test_returns_combined_source_when_process_env_existed_before_dotenv(
+    async def test_returns_process_env_when_process_env_existed_before_dotenv(
         self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(DEFAULT_MISTRAL_API_ENV_KEY, "process-key")
@@ -138,7 +149,25 @@ class TestACPAuthStatus:
 
         assert response == {
             "authenticated": True,
-            "authState": AuthStateKind.VIBE_HOME_ENV_FILE_OVERRIDES_PROCESS_ENV.value,
+            "authState": AuthStateKind.PROCESS_ENV.value,
+            "signOutAvailable": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_returns_keyring_when_key_only_exists_in_keyring(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(DEFAULT_MISTRAL_API_ENV_KEY, raising=False)
+        monkeypatch.setattr(
+            keyring, "get_password", lambda service, username: "keyring-key"
+        )
+        acp_agent_loop = build_acp_agent_loop(build_mistral_provider())
+
+        response = await acp_agent_loop.ext_method("auth/status", {})
+
+        assert response == {
+            "authenticated": True,
+            "authState": AuthStateKind.OS_KEYRING.value,
             "signOutAvailable": True,
         }
 
@@ -213,23 +242,58 @@ class TestACPAuthSignOut:
         assert os.environ[DEFAULT_MISTRAL_API_ENV_KEY] == "process-key"
 
     @pytest.mark.asyncio
-    async def test_removes_dotenv_key_and_restores_process_env_key(
+    async def test_refuses_dotenv_key_when_process_env_key_exists(
         self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv(DEFAULT_MISTRAL_API_ENV_KEY, "process-key")
         write_env_file(config_dir, f"{DEFAULT_MISTRAL_API_ENV_KEY}=file-key\n")
         acp_agent_loop = build_acp_agent_loop(build_mistral_provider())
 
+        with pytest.raises(InvalidRequestError, match=AuthStateKind.PROCESS_ENV.value):
+            await acp_agent_loop.ext_method("auth/signOut", {})
+
+        assert (
+            dotenv_values(config_dir / ".env")[DEFAULT_MISTRAL_API_ENV_KEY]
+            == "file-key"
+        )
+        assert os.environ[DEFAULT_MISTRAL_API_ENV_KEY] == "process-key"
+
+    @pytest.mark.asyncio
+    async def test_removes_keyring_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        deleted: list[str] = []
+        monkeypatch.delenv(DEFAULT_MISTRAL_API_ENV_KEY, raising=False)
+        monkeypatch.setattr(
+            keyring, "get_password", lambda service, username: "keyring-key"
+        )
+        monkeypatch.setattr(
+            keyring,
+            "delete_password",
+            lambda service, username: deleted.append(username),
+        )
+        acp_agent_loop = build_acp_agent_loop(build_mistral_provider())
+
         response = await acp_agent_loop.ext_method("auth/signOut", {})
 
         assert response == {}
-        assert DEFAULT_MISTRAL_API_ENV_KEY not in dotenv_values(config_dir / ".env")
-        assert os.environ[DEFAULT_MISTRAL_API_ENV_KEY] == "process-key"
-        assert await acp_agent_loop.ext_method("auth/status", {}) == {
-            "authenticated": True,
-            "authState": AuthStateKind.PROCESS_ENV.value,
-            "signOutAvailable": False,
-        }
+        assert deleted == [DEFAULT_MISTRAL_API_ENV_KEY]
+
+    @pytest.mark.asyncio
+    async def test_surfaces_internal_error_when_keyring_delete_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(DEFAULT_MISTRAL_API_ENV_KEY, raising=False)
+        monkeypatch.setattr(
+            keyring, "get_password", lambda service, username: "keyring-key"
+        )
+
+        def _failed(service: str, username: str) -> None:
+            raise KeyringError("delete failed")
+
+        monkeypatch.setattr(keyring, "delete_password", _failed)
+        acp_agent_loop = build_acp_agent_loop(build_mistral_provider())
+
+        with pytest.raises(InternalError, match="Failed to sign out"):
+            await acp_agent_loop.ext_method("auth/signOut", {})
 
     @pytest.mark.asyncio
     async def test_refuses_unsupported_provider_key(

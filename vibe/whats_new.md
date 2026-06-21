@@ -1,4 +1,5 @@
-# What's new in v2.15.0
+# What's new in v2.17.0
 
-- **Message queue**: Type follow-up messages while the agent is busy; they appear in a queue above the input and flush automatically when the agent is free
-- **Smarter compaction**: The agent now retains your original task goals across context resets — long sessions stay on track after compaction
+- **MCP OAuth login**: Authenticate OAuth-backed MCP servers from the TUI with the new `/mcp login`, `/mcp logout`, and `/mcp status` commands
+- **`--check-upgrade`**: New flag to check for a Vibe update on demand, prompt to install it, and exit
+- **`--yolo`**: New shorthand alias for `--auto-approve`

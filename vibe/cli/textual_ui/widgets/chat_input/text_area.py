@@ -76,6 +76,7 @@ class ChatTextArea(TextArea):
         self._input_mode: InputMode = self.DEFAULT_MODE
         self._last_text = ""
         self._navigating_history = False
+        self._applying_completion = False
         self._original_text: str = ""
         self._cursor_pos_after_load: tuple[int, int] | None = None
         self._cursor_moved_since_load: bool = False
@@ -144,8 +145,14 @@ class ChatTextArea(TextArea):
         self._last_text = self.text
         was_navigating_history = self._navigating_history
         self._navigating_history = False
+        was_applying_completion = self._applying_completion
+        self._applying_completion = False
 
-        if self._completion_manager and not was_navigating_history:
+        if (
+            self._completion_manager
+            and not was_navigating_history
+            and not was_applying_completion
+        ):
             self._completion_manager.on_text_changed(
                 self.get_full_text(), self._get_full_cursor_offset()
             )
@@ -317,6 +324,14 @@ class ChatTextArea(TextArea):
 
         await super()._on_key(event)
         self._mark_cursor_moved_if_needed()
+
+    @property
+    def applying_completion(self) -> bool:
+        return self._applying_completion
+
+    @applying_completion.setter
+    def applying_completion(self, value: bool) -> None:
+        self._applying_completion = value
 
     def set_completion_manager(self, manager: MultiCompletionManager | None) -> None:
         self._completion_manager = manager

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from tests.conftest import build_test_vibe_app
-from vibe.cli.textual_ui.app import VibeApp
+from vibe.cli.textual_ui.app import VibeApp, _run_app_with_cleanup
 from vibe.cli.textual_ui.quit_manager import QUIT_CONFIRM_DELAY, QuitManager
 
 
@@ -182,3 +183,69 @@ class TestActionDeleteRightOrQuit:
         mock_confirm.assert_called_once_with(
             "Ctrl+D", "1 queued message will be discarded"
         )
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cleanup_cancels_in_flight_tasks(app: VibeApp) -> None:
+    async def _pending() -> None:
+        await asyncio.Event().wait()
+
+    agent_task = asyncio.create_task(_pending())
+    bash_task = asyncio.create_task(_pending())
+    app._agent_task = agent_task
+    app._bash_task = bash_task
+
+    await asyncio.wait_for(app.shutdown_cleanup(), timeout=1.0)
+
+    assert agent_task.cancelled()
+    assert bash_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_disables_future_queue_drains(app: VibeApp) -> None:
+    app._input_queue.append_prompt("queued")
+
+    await app._begin_shutdown()
+
+    with patch("vibe.cli.textual_ui.message_queue.asyncio.create_task") as create_task:
+        app._queue.start_drain_if_needed()
+
+    create_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_begin_shutdown_stops_scheduled_loop_runner(app: VibeApp) -> None:
+    with (
+        patch.object(app._queue, "shutdown", new_callable=AsyncMock) as queue_shutdown,
+        patch.object(app._loop_runner, "stop", new_callable=AsyncMock) as loop_stop,
+    ):
+        await app._begin_shutdown()
+
+    queue_shutdown.assert_awaited_once()
+    loop_stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cleanup_flushes_telemetry(app: VibeApp) -> None:
+    with patch.object(
+        app.agent_loop.telemetry_client, "aclose", new_callable=AsyncMock
+    ) as telemetry_aclose:
+        await app.shutdown_cleanup()
+
+    telemetry_aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_app_with_cleanup_runs_cleanup_when_run_async_raises(
+    app: VibeApp,
+) -> None:
+    with (
+        patch.object(
+            app, "run_async", new_callable=AsyncMock, side_effect=RuntimeError("boom")
+        ),
+        patch.object(app, "shutdown_cleanup", new_callable=AsyncMock) as cleanup,
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            await _run_app_with_cleanup(app)
+
+    cleanup.assert_awaited_once()

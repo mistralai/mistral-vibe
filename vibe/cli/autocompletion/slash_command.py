@@ -90,6 +90,6 @@ class SlashCommandController:
             return False
 
         start, end = replacement_range
-        self._view.replace_completion_range(start, end, alias)
+        self._view.replace_completion_range(start, end, alias, suppress_update=True)
         self.reset()
         return True

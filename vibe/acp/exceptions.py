@@ -10,11 +10,21 @@ and ACP error handling (https://agentclientprotocol.com/protocol/overview#error-
   -32603            Internal error (JSON-RPC standard)
   -32000 to -32099  Server errors (JSON-RPC implementation-defined)
   -31xxx            Application errors (Vibe-specific, outside reserved range)
+
+Vibe application codes:
+  -31001            Rate limited
+  -31002            Configuration error
+  -31003            Conversation limit
+  -31004            Context too long
+  -31005            Refusal
+  -31006            Compaction failed
+  -31007            Invalid image attachment
+  -31008            Images not supported by the active model
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from acp import RequestError
 
@@ -24,6 +34,9 @@ from vibe.core.types import (
     RateLimitError as CoreRateLimitError,
     RefusalError as CoreRefusalError,
 )
+
+if TYPE_CHECKING:
+    from vibe.core.agent_loop import CompactionFailedError as CoreCompactionFailedError
 
 # JSON-RPC 2.0 standard codes
 UNAUTHENTICATED = -32000
@@ -37,6 +50,9 @@ CONFIGURATION_ERROR = -31002
 CONVERSATION_LIMIT = -31003
 CONTEXT_TOO_LONG = -31004
 REFUSAL = -31005
+COMPACTION_FAILED = -31006
+INVALID_IMAGE_ATTACHMENT = -31007
+IMAGES_NOT_SUPPORTED = -31008
 
 
 class VibeRequestError(RequestError):
@@ -151,11 +167,39 @@ class RefusalError(VibeRequestError):
         return cls(exc.provider, exc.model, exc.category, exc.explanation)
 
 
+class CompactionError(VibeRequestError):
+    code = COMPACTION_FAILED
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(message=detail, data={"reason": reason})
+
+    @classmethod
+    def from_core(cls, exc: CoreCompactionFailedError) -> CompactionError:
+        return cls(exc.reason, str(exc))
+
+
 class ConfigurationError(VibeRequestError):
     code = CONFIGURATION_ERROR
 
     def __init__(self, detail: str) -> None:
         super().__init__(message=detail)
+
+
+class InvalidImageAttachmentError(VibeRequestError):
+    code = INVALID_IMAGE_ATTACHMENT
+
+    def __init__(self, detail: str, reason: str) -> None:
+        super().__init__(message=detail, data={"reason": reason})
+
+
+class ImagesNotSupportedError(VibeRequestError):
+    code = IMAGES_NOT_SUPPORTED
+
+    def __init__(self, model: str) -> None:
+        super().__init__(
+            message=f"Model `{model}` does not support images. "
+            f"Switch model, or ask me to enable the support for this model."
+        )
 
 
 class ConversationLimitError(VibeRequestError):

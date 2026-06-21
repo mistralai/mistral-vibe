@@ -13,11 +13,14 @@ import httpx
 import pytest
 import zstandard
 
+from tests.conftest import build_test_vibe_config
+from tests.constants import TELEPORT_COMPLETE_URL, TELEPORT_SESSIONS_PATH
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
 )
 from vibe.core.teleport.git import GitRepoInfo
+from vibe.core.teleport.nuage import DEFAULT_NUAGE_PROJECT_NAME
 from vibe.core.teleport.teleport import TeleportService
 from vibe.core.teleport.types import (
     TeleportCheckingGitEvent,
@@ -57,7 +60,7 @@ def _mock_handler() -> Any:
                 "webSessionId": "web-session-id",
                 "projectId": "project-id",
                 "status": "running",
-                "url": "https://chat.example.com/code/project-id/web-session-id",
+                "url": TELEPORT_COMPLETE_URL,
             },
         )
 
@@ -157,6 +160,49 @@ class TestTeleportServiceIsSupported:
 
 
 class TestTeleportServiceExecute:
+    def test_build_nuage_request_uses_configured_project_name(
+        self, tmp_path: Path
+    ) -> None:
+        service = _make_service(
+            tmp_path,
+            vibe_config=build_test_vibe_config(vibe_code_project_name="  Zed  "),
+        )
+
+        request = service._build_nuage_request(
+            prompt="test prompt",
+            git_info=GitRepoInfo(
+                remote_url="https://github.com/owner/repo",
+                owner="owner",
+                repo="repo",
+                branch="main",
+                commit="abc123",
+                diff="",
+            ),
+        )
+
+        assert request.project_name == "Zed"
+
+    def test_build_nuage_request_uses_default_project_name_for_blank_config(
+        self, tmp_path: Path
+    ) -> None:
+        service = _make_service(
+            tmp_path, vibe_config=build_test_vibe_config(vibe_code_project_name="  ")
+        )
+
+        request = service._build_nuage_request(
+            prompt="test prompt",
+            git_info=GitRepoInfo(
+                remote_url="https://github.com/owner/repo",
+                owner="owner",
+                repo="repo",
+                branch="main",
+                commit="abc123",
+                diff="",
+            ),
+        )
+
+        assert request.project_name == DEFAULT_NUAGE_PROJECT_NAME
+
     @pytest.mark.asyncio
     async def test_execute_happy_path(self, tmp_path: Path) -> None:
         seen_body: dict[str, object] | None = None
@@ -173,7 +219,7 @@ class TestTeleportServiceExecute:
                     "webSessionId": "web-session-id",
                     "projectId": "project-id",
                     "status": "running",
-                    "url": "https://chat.example.com/code/project-id/web-session-id",
+                    "url": TELEPORT_COMPLETE_URL,
                 },
             )
 
@@ -202,10 +248,8 @@ class TestTeleportServiceExecute:
         assert isinstance(events[0], TeleportCheckingGitEvent)
         assert isinstance(events[1], TeleportStartingWorkflowEvent)
         assert isinstance(events[2], TeleportCompleteEvent)
-        assert (
-            events[2].url == "https://chat.example.com/code/project-id/web-session-id"
-        )
-        assert seen_url == "https://chat.example.com/api/v1/code/sessions"
+        assert events[2].url == TELEPORT_COMPLETE_URL
+        assert seen_url == f"https://chat.example.com{TELEPORT_SESSIONS_PATH}"
         assert seen_body is not None
         assert seen_body["message"] == {
             "role": "user",

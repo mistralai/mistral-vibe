@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Sequence
 import json
-import os
 import types
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import httpx
 
+from vibe.core.config import resolve_api_key
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.anthropic import AnthropicAdapter
 from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
@@ -24,6 +24,7 @@ from vibe.core.types import (
 )
 from vibe.core.utils import async_generator_retry, async_retry
 from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.sse import iter_sse_lines
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
@@ -122,6 +123,7 @@ class OpenAIAdapter(APIAdapter):
                             "reasoning_state",
                             "injected",
                             "images",
+                            "user_display_content",
                         },
                     ),
                     field_name,
@@ -265,11 +267,7 @@ class GenericBackend:
         extra_headers: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
     ) -> LLMChunk:
-        api_key = (
-            os.getenv(self._provider.api_key_env_var)
-            if self._provider.api_key_env_var
-            else None
-        )
+        api_key = resolve_api_key(self._provider.api_key_env_var)
 
         api_style = getattr(self._provider, "api_style", "openai")
         adapter = _get_adapter(api_style)
@@ -296,10 +294,30 @@ class GenericBackend:
 
         try:
             res_data, _ = await self._make_request(url, req.body, headers)
-        except httpx.HTTPStatusError as exc:
-            raise self._handle_error_response(exc, adapter) from exc
+            return adapter.parse_response(res_data, self._provider)
 
-        return adapter.parse_response(res_data, self._provider)
+        except httpx.HTTPStatusError as e:
+            raise BackendErrorBuilder.build_http_error(
+                provider=self._provider.name,
+                endpoint=url,
+                error=e,
+                model=model.name,
+                messages=messages,
+                temperature=temperature,
+                has_tools=bool(tools),
+                tool_choice=tool_choice,
+            ) from e
+        except httpx.RequestError as e:
+            raise BackendErrorBuilder.build_request_error(
+                provider=self._provider.name,
+                endpoint=url,
+                error=e,
+                model=model.name,
+                messages=messages,
+                temperature=temperature,
+                has_tools=bool(tools),
+                tool_choice=tool_choice,
+            ) from e
 
     async def complete_streaming(
         self,
@@ -313,12 +331,7 @@ class GenericBackend:
         extra_headers: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
     ) -> AsyncGenerator[LLMChunk, None]:
-        DELIM_CHAR = ":"
-        api_key = (
-            os.getenv(self._provider.api_key_env_var)
-            if self._provider.api_key_env_var
-            else None
-        )
+        api_key = resolve_api_key(self._provider.api_key_env_var)
 
         api_style = getattr(self._provider, "api_style", "openai")
         adapter = _get_adapter(api_style)
@@ -344,129 +357,85 @@ class GenericBackend:
         url = f"{base}{req.endpoint}"
 
         try:
-            async with (
-                await self._get_client().stream(
-                    "POST",
-                    url,
-                    content=req.body,
-                    headers=headers,
-                )
-            ) as response:
-                response.raise_for_status()
-                async for chunk in self._consume_streaming_response(
-                    response, adapter, DELIM_CHAR
-                ):
-                    yield chunk
-        except httpx.HTTPStatusError as exc:
-            raise self._handle_error_response(exc, adapter) from exc
+            async for res_data in self._make_streaming_request(url, req.body, headers):
+                yield adapter.parse_response(res_data, self._provider)
 
-    async def _consume_streaming_response(
-        self,
-        response: httpx.Response,
-        adapter: APIAdapter,
-        DELIM_CHAR: str,
-    ) -> AsyncGenerator[LLMChunk, None]:
-        async for line in response.aiter_lines():
-            if line.strip() == "" or line.strip().startswith(":"):
-                continue
-            if f"{DELIM_CHAR} " not in line:
-                raise ValueError(
-                    f"Stream chunk improperly formatted. "
-                    f"Expected `key: value`, received `{line}`"
-                )
+        except httpx.HTTPStatusError as e:
+            raise BackendErrorBuilder.build_http_error(
+                provider=self._provider.name,
+                endpoint=url,
+                error=e,
+                model=model.name,
+                messages=messages,
+                temperature=temperature,
+                has_tools=bool(tools),
+                tool_choice=tool_choice,
+            ) from e
+        except httpx.RequestError as e:
+            raise BackendErrorBuilder.build_request_error(
+                provider=self._provider.name,
+                endpoint=url,
+                error=e,
+                model=model.name,
+                messages=messages,
+                temperature=temperature,
+                has_tools=bool(tools),
+                tool_choice=tool_choice,
+            ) from e
 
-            _, value = line.split(DELIM_CHAR, 1)
-            value = value.strip()
-            data = json.loads(value)
+    class HTTPResponse(NamedTuple):
+        data: dict[str, Any]
+        headers: dict[str, str]
 
-            if data == "[DONE]":
-                return
-
-            yield adapter.parse_response(data, self._provider)
-
+    @async_retry(tries=3)
     async def _make_request(
-        self, url: str, body: bytes, headers: dict[str, str]
-    ) -> tuple[dict[str, Any], httpx.Response]:
-        response = await self._get_client().post(
-            url, content=body, headers=headers
-        )
+        self, url: str, data: bytes, headers: dict[str, str]
+    ) -> HTTPResponse:
+        client = self._get_client()
+        response = await client.post(url, content=data, headers=headers)
         response.raise_for_status()
-        json_data = response.json()
-        return json_data, response
 
-    def _handle_error_response(
-        self, exc: httpx.HTTPStatusError, adapter: APIAdapter
-    ) -> BackendErrorBuilder:
-        """Build a BackendErrorBuilder from an HTTP error response."""
-        from vibe.core.llm.exceptions import (
-            BackendError,
-            PayloadSummary,
-            _build_payload_summary_from_request_content,
-        )
+        response_headers = dict(response.headers.items())
+        response_body = response.json()
+        return self.HTTPResponse(response_body, response_headers)
 
-        request_content = exc.request.content
-        payload_summary = (
-            _build_payload_summary_from_request_content(request_content)
-            if request_content
-            else PayloadSummary()
-        )
+    @async_generator_retry(tries=3)
+    async def _make_streaming_request(
+        self, url: str, data: bytes, headers: dict[str, str]
+    ) -> AsyncGenerator[dict[str, Any]]:
+        client = self._get_client()
+        async with client.stream(
+            method="POST", url=url, content=data, headers=headers
+        ) as response:
+            if not response.is_success:
+                await response.aread()
+            response.raise_for_status()
+            async for line in iter_sse_lines(response):
+                stripped = line.strip()
+                # Skip blank lines and SSE comment lines: per the SSE spec any
+                # line beginning with ":" is a comment (e.g. keep-alive
+                # heartbeats), so ignore them instead of raising below.
+                if stripped == "" or stripped.startswith(":"):
+                    continue
 
-        # Build the error from the response
-        error_builder = BackendErrorBuilder(
-            provider=self._provider.name,
-            model="",
-            body=json.dumps(payload_summary.model_dump(), ensure_ascii=False),
-            status_code=exc.response.status_code,
-        )
+                DELIM_CHAR = ":"
+                if f"{DELIM_CHAR} " not in line:
+                    raise ValueError(
+                        f"Stream chunk improperly formatted. "
+                        f"Expected `key{DELIM_CHAR} value`, received `{line}`"
+                    )
+                delim_index = line.find(DELIM_CHAR)
+                key = line[0:delim_index]
+                value = line[delim_index + 2 :]
 
-        try:
-            error_body = exc.response.json()
-            if isinstance(error_body, dict):
-                error_builder.set_parse_error(error_body)
-        except (json.JSONDecodeError, ValueError):
-            error_builder.set_response_text(exc.response.text)
+                if key != "data":
+                    # This might be the case with openrouter, so we just ignore it
+                    continue
+                if value == "[DONE]":
+                    return
+                yield json.loads(value.strip())
 
-        return error_builder
-
-    async def _retryable_complete(
-        self,
-        model: ModelConfig,
-        messages: Sequence[LLMMessage],
-        temperature: float,
-        tools: list[AvailableTool] | None,
-        max_tokens: int | None,
-        tool_choice: StrToolChoice | AvailableTool | None,
-        **kwargs: Any,
-    ) -> LLMChunk:
-        return await async_retry(
-            self.complete,
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            tools=tools,
-            max_tokens=max_tokens,
-            tool_choice=tool_choice,
-            **kwargs,
-        )
-
-    async def _retryable_complete_streaming(
-        self,
-        model: ModelConfig,
-        messages: Sequence[LLMMessage],
-        temperature: float,
-        tools: list[AvailableTool] | None,
-        max_tokens: int | None,
-        tool_choice: StrToolChoice | AvailableTool | None,
-        **kwargs: Any,
-    ) -> AsyncGenerator[LLMChunk, None]:
-        async for chunk in async_generator_retry(
-            self.complete_streaming,
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            tools=tools,
-            max_tokens=max_tokens,
-            tool_choice=tool_choice,
-            **kwargs,
-        ):
-            yield chunk
+    async def close(self) -> None:
+        if self._owns_client and self._client:
+            await self._client.aclose()
+            self._client = None

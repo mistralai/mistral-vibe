@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import keyring
+import pytest
+
 from vibe.core.config import DEFAULT_MISTRAL_API_ENV_KEY, ProviderConfig
 from vibe.core.types import Backend
 from vibe.setup.auth import AuthState, AuthStateKind, assess_auth_state
+
+
+@pytest.fixture(autouse=True)
+def disable_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
 
 
 def _mistral_provider(
@@ -100,7 +108,7 @@ def test_assess_process_env_when_default_key_is_only_in_process_env(
     )
 
 
-def test_assess_vibe_home_env_file_overrides_process_env_when_both_sources_exist(
+def test_assess_process_env_when_process_env_and_dotenv_both_exist(
     tmp_path: Path,
 ) -> None:
     env_path = tmp_path / ".env"
@@ -114,9 +122,9 @@ def test_assess_vibe_home_env_file_overrides_process_env_when_both_sources_exist
     )
 
     assert state == AuthState(
-        kind=AuthStateKind.VIBE_HOME_ENV_FILE_OVERRIDES_PROCESS_ENV,
+        kind=AuthStateKind.PROCESS_ENV,
         can_use_active_provider=True,
-        sign_out_available=True,
+        sign_out_available=False,
         env_key=DEFAULT_MISTRAL_API_ENV_KEY,
     )
 
@@ -213,4 +221,63 @@ def test_assess_empty_dotenv_value_as_signed_out(tmp_path: Path) -> None:
         can_use_active_provider=False,
         sign_out_available=False,
         env_key=DEFAULT_MISTRAL_API_ENV_KEY,
+    )
+
+
+def test_assess_os_keyring_when_default_key_is_in_keyring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        keyring, "get_password", lambda service, username: "keyring-key"
+    )
+
+    state = assess_auth_state(
+        _mistral_provider(), env_path=tmp_path / ".env", environ={}
+    )
+
+    assert state == AuthState(
+        kind=AuthStateKind.OS_KEYRING,
+        can_use_active_provider=True,
+        sign_out_available=True,
+        env_key=DEFAULT_MISTRAL_API_ENV_KEY,
+    )
+
+
+def test_assess_vibe_home_env_file_when_dotenv_and_keyring_both_have_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # resolve_api_key reads the .env-injected os.environ value before the keyring,
+    # so an overlap must be reported as the .env file, not OS keyring.
+    monkeypatch.setattr(
+        keyring, "get_password", lambda service, username: "keyring-key"
+    )
+    env_path = tmp_path / ".env"
+    _write_env_file(env_path, f"{DEFAULT_MISTRAL_API_ENV_KEY}=file-key\n")
+
+    state = assess_auth_state(_mistral_provider(), env_path=env_path, environ={})
+
+    assert state == AuthState(
+        kind=AuthStateKind.VIBE_HOME_ENV_FILE,
+        can_use_active_provider=True,
+        sign_out_available=True,
+        env_key=DEFAULT_MISTRAL_API_ENV_KEY,
+    )
+
+
+def test_assess_unsupported_provider_when_custom_key_is_in_keyring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        keyring, "get_password", lambda service, username: "keyring-key"
+    )
+
+    state = assess_auth_state(
+        _generic_provider(), env_path=tmp_path / ".env", environ={}
+    )
+
+    assert state == AuthState(
+        kind=AuthStateKind.UNSUPPORTED_PROVIDER,
+        can_use_active_provider=True,
+        sign_out_available=False,
+        env_key="CUSTOM_API_KEY",
     )

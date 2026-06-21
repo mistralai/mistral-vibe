@@ -8,7 +8,7 @@ from rich.markup import escape
 
 from vibe.core.hooks.models import HookMessageSeverity
 from vibe.core.logger import logger
-from vibe.core.types import ImageAttachment
+from vibe.core.types import FileImageSource, ImageAttachment, InlineImageSource
 from vibe.core.utils.io import read_safe_async
 
 if TYPE_CHECKING:
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -38,9 +39,29 @@ from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
 
 class ExpandingBorder(NonSelectableStatic):
-    def render(self) -> str:
+    def __init__(self, *, classes: str | None = None) -> None:
+        super().__init__(classes=classes)
+        self._row_colors: dict[int, str] = {}
+
+    def set_row_colors(self, colors: dict[int, str]) -> None:
+        self._row_colors = colors
+        self.refresh()
+
+    def render(self) -> Content | str:
         height = self.size.height
-        return "\n".join(["⎢"] * (height - 1) + ["⎣"])
+        chars = ["⎢"] * (height - 1) + ["⎣"]
+        if not self._row_colors:
+            return "\n".join(chars)
+
+        rendered = Content("")
+        for i, ch in enumerate(chars):
+            if i > 0:
+                rendered += Content("\n")
+            if color := self._row_colors.get(i):
+                rendered += Content.styled(ch, color)
+            else:
+                rendered += Content(ch)
+        return rendered
 
     def on_resize(self) -> None:
         self.refresh()
@@ -100,15 +121,22 @@ class UserMessage(Static):
                 self.add_class("pending")
 
     @staticmethod
+    def _format_attachment_link(att: ImageAttachment) -> str:
+        match att.source:
+            case FileImageSource(path=path):
+                # Quote the URL in Textual [link="..."] markup: the parser stops
+                # at `:` inside an unquoted tag value, so a raw `file://...` URL
+                # would raise MarkupError. Textual auto-wires the click to
+                # webbrowser.open(url), opening the OS default viewer.
+                return f'[link="{path.as_uri()}"]{escape(att.alias)}[/link]'
+            case InlineImageSource():
+                # Inline images have no file on disk, so there's nothing to link.
+                return escape(att.alias)
+
+    @staticmethod
     def _format_attachments_footer(images: list[ImageAttachment]) -> str:
         label = "attached image" if len(images) == 1 else "attached images"
-        # Use Textual [link="..."] markup with the URL quoted: Textual's
-        # markup parser stops at `:` inside an unquoted tag value, so a raw
-        # `file://...` URL would raise MarkupError. Textual auto-wires the
-        # click to webbrowser.open(url), opening the OS default viewer.
-        links = ", ".join(
-            f'[link="{att.path.as_uri()}"]{escape(att.alias)}[/link]' for att in images
-        )
+        links = ", ".join(UserMessage._format_attachment_link(att) for att in images)
         return f"└ {label}: {links}"
 
     async def set_pending(self, pending: bool) -> None:

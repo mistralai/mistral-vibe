@@ -20,7 +20,7 @@ def test_skips_missing_file(tmp_path: Path) -> None:
     assert environ == {"EXISTING": "1"}
 
 
-def test_sets_and_overrides_values(tmp_path: Path) -> None:
+def test_adds_missing_values_without_overriding_existing(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     _write_env_file(
         env_path,
@@ -42,11 +42,23 @@ def test_sets_and_overrides_values(tmp_path: Path) -> None:
 
     load_dotenv_values(env_path=env_path, environ=environ)
 
-    assert environ["MISTRAL_API_KEY"] == "new-key"
-    assert environ["HTTPS_PROXY"] == "https://local-proxy:8080"
-    assert environ["OTHER"] == "from-env"
+    # An explicit process/shell value wins over the .env file.
+    assert environ["MISTRAL_API_KEY"] == "old-key"
+    assert environ["HTTPS_PROXY"] == "old-https"
+    assert environ["OTHER"] == "keep"
+    assert environ["FOO"] == "keep"
+    # Keys absent from the process env are still loaded from the .env file.
     assert environ["NEW_KEY"] == "added"
-    assert environ["FOO"] == "replace"
+
+
+def test_adds_dotenv_value_when_process_env_is_empty(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    _write_env_file(env_path, "MISTRAL_API_KEY=file-key\n")
+    environ = {"MISTRAL_API_KEY": ""}
+
+    load_dotenv_values(env_path=env_path, environ=environ)
+
+    assert environ["MISTRAL_API_KEY"] == "file-key"
 
 
 def test_ignores_empty_values(tmp_path: Path) -> None:

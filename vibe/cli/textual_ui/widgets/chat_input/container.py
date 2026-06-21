@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import math
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +15,7 @@ from vibe.cli.textual_ui.widgets.chat_input.body import ChatInputBody
 from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
-from vibe.cli.textual_ui.widgets.chat_input.completion_popup import (
-    COMPLETION_POPUP_MAX_HEIGHT,
-    COMPLETION_POPUP_MAX_WIDTH,
-    COMPLETION_POPUP_PADDING_X,
-    CompletionPopup,
-)
+from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.voice_manager.voice_manager_port import VoiceManagerPort
 from vibe.core.agents import AgentSafety
@@ -34,15 +28,8 @@ SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
 }
 
 
-COMPLETION_POPUP_MAX_LINES = COMPLETION_POPUP_MAX_HEIGHT - 2
-COMPLETION_POPUP_MAX_CHARS = (
-    COMPLETION_POPUP_MAX_WIDTH - 2 * COMPLETION_POPUP_PADDING_X - 2
-)  # -2 for borders
-
-
 class ChatInputContainer(Vertical):
     ID_INPUT_BOX = "input-box"
-    REMOTE_BORDER_CLASS = "border-remote"
 
     class Submitted(Message):
         def __init__(self, value: str) -> None:
@@ -71,7 +58,6 @@ class ChatInputContainer(Vertical):
         )
         self._voice_manager = voice_manager
         self._custom_border_label: str | None = None
-        self._custom_border_class: str | None = None
 
         self._completion_manager = MultiCompletionManager([
             SlashCommandController(CommandCompleter(self._get_slash_entries), self),
@@ -157,7 +143,6 @@ class ChatInputContainer(Vertical):
         except Exception:
             return
         popup.update_suggestions(suggestions, selected_index)
-        self._position_popup(popup, suggestions)
 
     def clear_completion_suggestions(self) -> None:
         try:
@@ -165,29 +150,6 @@ class ChatInputContainer(Vertical):
         except Exception:
             return
         popup.hide()
-
-    def _compute_line_count(self, suggestions: list[tuple[str, str]]) -> int:
-        line_count_without_scrollbar = sum(
-            math.ceil(
-                CompletionPopup.rendered_text_length(label, description)
-                / COMPLETION_POPUP_MAX_CHARS
-            )
-            for label, description in suggestions
-        )
-        return min(line_count_without_scrollbar, COMPLETION_POPUP_MAX_LINES)
-
-    def _position_popup(
-        self, popup: CompletionPopup, suggestions: list[tuple[str, str]]
-    ) -> None:
-        widget = self.input_widget
-        if not widget:
-            return
-        cursor = widget.cursor_screen_offset
-        my_region = self.region
-        # Place popup bottom edge just above the cursor row
-        popup_height = self._compute_line_count(suggestions) + 2  # +2 for solid border
-        offset = (cursor.x - my_region.x, cursor.y - popup_height - my_region.y)
-        popup.styles.offset = offset
 
     def _format_insertion(self, replacement: str, suffix: str) -> str:
         """Format the insertion text with appropriate spacing.
@@ -208,7 +170,9 @@ class ChatInputContainer(Vertical):
         # For other completions, add space only if suffix exists and doesn't start with whitespace
         return replacement + (" " if suffix and not suffix[0].isspace() else "")
 
-    def replace_completion_range(self, start: int, end: int, replacement: str) -> None:
+    def replace_completion_range(
+        self, start: int, end: int, replacement: str, *, suppress_update: bool = False
+    ) -> None:
         widget = self.input_widget
         if not widget or not self._body:
             return
@@ -225,6 +189,8 @@ class ChatInputContainer(Vertical):
         insertion = self._format_insertion(replacement, suffix)
         new_text = f"{prefix}{insertion}{suffix}"
 
+        if suppress_update:
+            widget.applying_completion = True
         self._body.replace_input(new_text, cursor_offset=start + len(insertion))
 
     def on_chat_input_body_submitted(self, event: ChatInputBody.Submitted) -> None:
@@ -248,16 +214,11 @@ class ChatInputContainer(Vertical):
         self._agent_name = name
         self._apply_input_box_chrome()
 
-    def set_custom_border(
-        self, label: str | None, border_class: str | None = None
-    ) -> None:
+    def set_custom_border(self, label: str | None) -> None:
         self._custom_border_label = label
-        self._custom_border_class = border_class
         self._apply_input_box_chrome()
 
     def _get_border_class(self) -> str:
-        if self._custom_border_class is not None:
-            return self._custom_border_class
         if self._custom_border_label is not None:
             return ""
         return SAFETY_BORDER_CLASSES.get(self._safety, "")
@@ -272,7 +233,6 @@ class ChatInputContainer(Vertical):
         except Exception:
             return
 
-        input_box.remove_class(self.REMOTE_BORDER_CLASS)
         for border_class in SAFETY_BORDER_CLASSES.values():
             input_box.remove_class(border_class)
 

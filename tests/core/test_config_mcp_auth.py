@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import logging
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from pydantic import ValidationError
 import pytest
 
 from vibe.core.config import MCPHttp, MCPOAuth, MCPStaticAuth, MCPStreamableHttp
+from vibe.core.tools.mcp import AuthStatus
 from vibe.core.tools.mcp.registry import MCPRegistry
 
 HTTP_TRANSPORTS = [
@@ -183,10 +184,8 @@ def test_oauth_scopes_empty_list_allowed() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("cls", "transport"), HTTP_TRANSPORTS)
-async def test_registry_skips_oauth_servers_with_gated_warning(
-    cls: type[MCPHttp | MCPStreamableHttp],
-    transport: str,
-    caplog: pytest.LogCaptureFixture,
+async def test_registry_marks_oauth_servers_without_tokens_as_needing_auth(
+    cls: type[MCPHttp | MCPStreamableHttp], transport: str
 ) -> None:
     srv = cls.model_validate({
         "name": "linear",
@@ -195,19 +194,23 @@ async def test_registry_skips_oauth_servers_with_gated_warning(
         "auth": {"type": "oauth", "scopes": ["read"]},
     })
     registry = MCPRegistry()
+    storage = MagicMock()
+    storage.get_tokens = AsyncMock(return_value=None)
+    storage.delete_tokens = AsyncMock()
+    storage.delete_client_info = AsyncMock()
 
-    with caplog.at_level(logging.WARNING, logger="vibe"):
+    with (
+        patch("vibe.core.tools.mcp.registry.KeyringTokenStorage", return_value=storage),
+        patch(
+            "vibe.core.tools.mcp.registry.Fingerprint.load",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("vibe.core.tools.mcp.registry.Fingerprint.delete", new=AsyncMock()),
+    ):
         first = await registry.get_tools_async([srv])
-
-    assert first == {}
-    assert (
-        "OAuth support for MCP servers is not yet enabled; coming in a future release"
-        in caplog.text
-    )
-
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="vibe"):
         second = await registry.get_tools_async([srv])
 
+    assert first == {}
     assert second == {}
-    assert "OAuth support" not in caplog.text
+    assert registry.needs_auth == {"linear"}
+    assert registry.status()["linear"] == AuthStatus.NEEDS_AUTH
