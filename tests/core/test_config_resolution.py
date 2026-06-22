@@ -200,6 +200,22 @@ class TestSaveUpdates:
 
         assert result == {"tools": {"bash": {"default_timeout": 600}}}
 
+    def test_show_clear_context_on_plan_accept_defaults_false(self) -> None:
+        assert VibeConfig().show_clear_context_on_plan_accept is False
+
+    def test_show_clear_context_on_plan_accept_round_trips(
+        self, config_dir: Path
+    ) -> None:
+        config_file = config_dir / "config.toml"
+        config_file.write_text("")
+
+        VibeConfig.save_updates({"show_clear_context_on_plan_accept": True})
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+
+        assert result["show_clear_context_on_plan_accept"] is True
+
 
 class TestSystemTrustStoreConfig:
     def test_load_configures_ssl_context_from_toml(self, config_dir: Path) -> None:

@@ -37,7 +37,12 @@ if TYPE_CHECKING:
     from vibe.core.tools.mcp.pool import MCPConnectionPool
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
     from vibe.core.tools.permissions import PermissionContext, PermissionStore
-    from vibe.core.types import ApprovalCallback, SwitchAgentCallback, UserInputCallback
+    from vibe.core.types import (
+        ApprovalCallback,
+        ClearContextCallback,
+        SwitchAgentCallback,
+        UserInputCallback,
+    )
 
 ARGS_COUNT = 4
 
@@ -55,6 +60,7 @@ class InvokeContext:
     entrypoint_metadata: EntrypointMetadata | None = field(default=None)
     plan_file_path: Path | None = field(default=None)
     switch_agent_callback: SwitchAgentCallback | None = field(default=None)
+    request_clear_context_callback: ClearContextCallback | None = field(default=None)
     skill_manager: SkillManager | None = field(default=None)
     scratchpad_dir: Path | None = field(default=None)
     permission_store: PermissionStore | None = field(default=None)

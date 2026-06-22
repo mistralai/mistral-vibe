@@ -110,6 +110,7 @@ from vibe.core.types import (
     BaseEvent,
     CompactEndEvent,
     CompactStartEvent,
+    ContextClearedEvent,
     ContextTooLongError,
     ImageAttachment,
     LLMChunk,
@@ -368,6 +369,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._current_user_message_id: str | None = None
         self._is_user_prompt_call: bool = False
         self._pending_injected_messages: list[LLMMessage] = []
+        self._pending_clear_context: bool = False
 
         self.experiment_manager = ExperimentManager(
             client=RemoteEvalClient.from_settings(
@@ -929,7 +931,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         headers["x-affinity"] = self.session_id
         return headers
 
-    async def _conversation_loop(
+    async def _conversation_loop(  # noqa: PLR0912
         self,
         user_msg: str,
         client_message_id: str | None = None,
@@ -989,6 +991,12 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 # inner loop so before_tool rewrites land in the snapshot.
                 await self._save_messages()
                 self._is_user_prompt_call = False
+
+                if self._pending_clear_context:
+                    await self._perform_deferred_context_clear()
+                    yield ContextClearedEvent()
+                    should_break_loop = False
+                    continue
 
                 last_message = self.messages[-1]
                 should_break_loop = last_message.role != Role.tool
@@ -1359,6 +1367,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 sampling_callback=self._sampling_handler,
                 plan_file_path=self._plan_session.plan_file_path,
                 switch_agent_callback=self.switch_agent,
+                request_clear_context_callback=self._request_clear_context,
                 skill_manager=self.skill_manager,
                 scratchpad_dir=self.scratchpad_dir,
                 permission_store=self._permission_store,
@@ -1936,6 +1945,39 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 self.agent_profile,
             )
             raise
+
+    async def _request_clear_context(self) -> None:
+        """Signal that the context should be cleared at the next turn boundary.
+
+        The actual clear is deferred so the in-flight tool turn can finish
+        appending its tool-result before ``self.messages`` is wiped.
+        """
+        self._pending_clear_context = True
+
+    async def _perform_deferred_context_clear(self) -> None:
+        """Clear the conversation after a plan accept and re-seed the plan.
+
+        Runs at a turn boundary (never mid-tool) so the tool-result message has
+        already landed before ``self.messages`` is reset. The approved plan is
+        re-injected as a system-reminder so the implementing agent keeps going.
+        The caller emits the ``ContextClearedEvent`` for the UI.
+        """
+        self._pending_clear_context = False
+        plan_content = self._plan_session.read()
+        await self.clear_history()
+        if plan_content:
+            self.messages.append(
+                LLMMessage(
+                    role=Role.user,
+                    content=(
+                        f"<{VIBE_WARNING_TAG}>The conversation context was cleared "
+                        f"after the plan was approved. Implement the approved plan "
+                        f"below -- it is the source of truth:\n\n{plan_content}"
+                        f"</{VIBE_WARNING_TAG}>"
+                    ),
+                    injected=True,
+                )
+            )
 
     @requires_init
     async def switch_agent(self, agent_name: str) -> None:
