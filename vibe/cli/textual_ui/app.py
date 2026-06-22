@@ -151,7 +151,7 @@ from vibe.cli.vscode_extension_promo import (
 )
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents import AgentProfile
-from vibe.core.audio_player.audio_player import AudioPlayer
+from vibe.core.audio_player.audio_player import AudioPlayer, check_audio_available
 from vibe.core.audio_recorder import AudioRecorder
 from vibe.core.auth import MCPOAuthError
 from vibe.core.autocompletion.path_prompt import (
@@ -1150,6 +1150,14 @@ class VibeApp(App):  # noqa: PLR0904
             VibeConfig.save_updates(non_voice_changes)
             self.agent_loop.refresh_config()
             self._narrator_manager.sync()
+            if non_voice_changes.get("narrator_enabled") is True:
+                audio_error = check_audio_available()
+                if audio_error:
+                    self.notify(
+                        f"Narrator enabled but audio is unavailable: {audio_error}",
+                        severity="warning",
+                        timeout=15,
+                    )
 
     async def on_model_picker_app_model_selected(
         self, message: ModelPickerApp.ModelSelected
