@@ -104,7 +104,6 @@ pip install mistral-vibe
   - Autocompletion for slash commands (`/`) and file paths (`@`).
   - Image attachments via `@` mentions — `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` files are sent to vision-capable models (e.g. Mistral Medium 3.5) as native multimodal content.
   - Persistent command history.
-  - Beautiful Themes.
 - **Highly Configurable**: Customize models, providers, tool permissions, and UI preferences through a simple `config.toml` file.
 - **Safety First**: Features tool execution approval.
 - **Multiple Built-in Agents**: Choose from different agent profiles tailored for specific workflows.
