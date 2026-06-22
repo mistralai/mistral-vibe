@@ -71,7 +71,6 @@ class ConfigApp(Container):
                 "file_watcher_for_autocomplete",
                 "Autocomplete watcher (may delay first autocompletion)",
             ),
-            ("show_clear_context_on_plan_accept", "Clear context on plan accept"),
         ]
 
     def _get_current_model(self) -> str:
