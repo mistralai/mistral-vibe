@@ -173,7 +173,7 @@ def test_snapshot_mcp_escape_closes(snap_compare: SnapCompare) -> None:
 def test_snapshot_mcp_refresh_shortcut(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
         await _run_mcp_command(pilot, "/mcp")
-        await pilot.press("r")
+        await pilot.press("R")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 

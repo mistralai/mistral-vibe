@@ -8,7 +8,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Container, Vertical
-from textual.events import DescendantBlur
+from textual.events import DescendantBlur, Key
 from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option, OptionDoesNotExist
@@ -79,9 +79,9 @@ class MCPApp(Container):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "close", "Close", show=False),
         Binding("backspace", "back", "Back", show=False),
-        Binding("d", "disable", "Disable", show=False),
-        Binding("e", "enable", "Enable", show=False),
-        Binding("r", "refresh", "Refresh", show=False),
+        Binding("D", "disable", "Disable", show=False),
+        Binding("E", "enable", "Enable", show=False),
+        Binding("R", "refresh", "Refresh", show=False),
     ]
 
     class MCPClosed(Message):
@@ -146,6 +146,7 @@ class MCPApp(Container):
         self._refresh_callback = refresh_callback
         self._status_message: str | None = None
         self._refreshing = False
+        self._filter_text = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="mcp-content"):
@@ -172,6 +173,23 @@ class MCPApp(Container):
     def on_descendant_blur(self, _event: DescendantBlur) -> None:
         self.query_one(OptionList).focus()
 
+    def on_key(self, event: Key) -> None:
+        if self._refreshing or self._viewing_server is not None:
+            return
+        if event.key in {"D", "E", "R"}:
+            return
+        if event.key in {"delete", "ctrl+u", "ctrl+w"}:
+            if self._filter_text:
+                event.stop()
+                self._filter_text = ""
+                self._refresh_view(None)
+            return
+        if not event.is_printable or event.character is None:
+            return
+        event.stop()
+        self._filter_text += event.character
+        self._refresh_view(None)
+
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option.id or ""
         if option_id.startswith("server:"):
@@ -196,12 +214,16 @@ class MCPApp(Container):
             option_list.scroll_to(y=0, animate=False, force=True, immediate=True)
         # Update help text based on whether highlighted connector needs auth.
         if self._viewing_server is None:
-            self._set_help_text(self._list_help_for_option(event.option))
+            self._set_list_help_text(self._list_help_for_option(event.option))
 
     def action_back(self) -> None:
         if self._refreshing:
             return
         if self._viewing_server is not None:
+            self._refresh_view(None)
+            return
+        if self._filter_text:
+            self._filter_text = self._filter_text[:-1]
             self._refresh_view(None)
 
     def action_close(self) -> None:
@@ -224,7 +246,10 @@ class MCPApp(Container):
             help = _DETAIL_VIEW_HELP if all_tools else _DETAIL_VIEW_HELP_NO_TOOLS
         else:
             help = _LIST_VIEW_HELP_TOOLS
-        self._set_help_text(help)
+        if self._viewing_server is None:
+            self._set_list_help_text(help)
+        else:
+            self._set_help_text(help)
 
         self._refreshing = True
         self.run_worker(self._run_refresh(), exclusive=True, group="refresh")
@@ -260,6 +285,11 @@ class MCPApp(Container):
         if self._status_message:
             text = f"{self._status_message}  {text}"
         self.query_one("#mcp-help", NoMarkupStatic).update(text)
+
+    def _set_list_help_text(self, text: str) -> None:
+        if self._filter_text:
+            text = f"Filter: {self._filter_text}  {text}"
+        self._set_help_text(text)
 
     def _connector_configs(self) -> list[ConnectorConfig]:
         return self._get_vibe_config().connectors if self._get_vibe_config else []
@@ -444,23 +474,30 @@ class MCPApp(Container):
     def _show_list_view(self, option_list: OptionList, index: MCPToolIndex) -> None:
         self._viewing_server = None
         self._viewing_kind = None
-        has_connectors = bool(self._connector_names)
-        title = "MCP Servers & Connectors" if has_connectors else "MCP Servers"
+        server_names = self._filtered_server_names(index)
+        connector_names = self._filtered_connector_names(index)
+        has_connectors = bool(connector_names)
+        title = "MCP Servers & Connectors" if self._connector_names else "MCP Servers"
         self.query_one("#mcp-title", NoMarkupStatic).update(title)
-        self._set_help_text(_LIST_VIEW_HELP_TOOLS)
+        self._set_list_help_text(_LIST_VIEW_HELP_TOOLS)
 
-        has_servers = bool(self._mcp_servers)
+        has_servers = bool(server_names)
 
         if has_servers:
-            self._list_mcp_servers(option_list, index)
+            self._list_mcp_servers(option_list, index, server_names)
         if has_connectors:
             if has_servers:
                 option_list.add_option(Option(Text("", no_wrap=True), disabled=True))
-            self._list_connectors(option_list=option_list, index=index)
-        if not has_servers and not has_connectors:
-            option_list.add_option(
-                Option("No MCP servers or connectors configured", disabled=True)
+            self._list_connectors(
+                option_list=option_list, index=index, connector_names=connector_names
             )
+        if not has_servers and not has_connectors:
+            message = (
+                f"No MCP servers or connectors match '{self._filter_text}'"
+                if self._filter_text
+                else "No MCP servers or connectors configured"
+            )
+            option_list.add_option(Option(message, disabled=True))
 
         if has_servers or has_connectors:
             # Skip disabled header options (e.g. section labels).
@@ -469,13 +506,50 @@ class MCPApp(Container):
             )
             option_list.highlighted = first_enabled
 
-    def _list_mcp_servers(self, option_list: OptionList, index: MCPToolIndex) -> None:
-        max_name = max(len(srv.name) for srv in self._mcp_servers)
-        max_type = max(len(srv.transport) + 2 for srv in self._mcp_servers)
+    def _filtered_server_names(self, index: MCPToolIndex) -> list[str]:
+        query = self._filter_text.casefold()
+        if not query:
+            return [srv.name for srv in self._mcp_servers]
+        return [
+            srv.name
+            for srv in self._mcp_servers
+            if query in srv.name.casefold()
+            or query in srv.transport.casefold()
+            or any(
+                query in tool_name.casefold()
+                or query in cls.get_remote_name().casefold()
+                or query in (cls.description or "").casefold()
+                for tool_name, cls in index.server_tools.get(srv.name, [])
+            )
+        ]
+
+    def _filtered_connector_names(self, index: MCPToolIndex) -> list[str]:
+        query = self._filter_text.casefold()
+        if not query:
+            return list(self._sorted_connector_names)
+        return [
+            name
+            for name in self._sorted_connector_names
+            if query in name.casefold()
+            or any(
+                query in tool_name.casefold()
+                or query in cls.get_remote_name().casefold()
+                or query in (cls.description or "").casefold()
+                for tool_name, cls in index.connector_tools.get(name, [])
+            )
+        ]
+
+    def _list_mcp_servers(
+        self, option_list: OptionList, index: MCPToolIndex, server_names: Sequence[str]
+    ) -> None:
+        server_set = set(server_names)
+        servers = [srv for srv in self._mcp_servers if srv.name in server_set]
+        max_name = max(len(srv.name) for srv in servers)
+        max_type = max(len(srv.transport) + 2 for srv in servers)
         option_list.add_option(
             Option(Text("Local MCP Servers", style="bold", no_wrap=True), disabled=True)
         )
-        for srv in self._mcp_servers:
+        for srv in servers:
             tools = index.server_tools.get(srv.name, [])
             total = len(tools)
             enabled = sum(1 for t, _ in tools if t in index.enabled_tools)
@@ -488,8 +562,13 @@ class MCPApp(Container):
                 _append_status(label, "○", "dim", "disabled")
             option_list.add_option(Option(label, id=f"server:{srv.name}"))
 
-    def _list_connectors(self, option_list: OptionList, index: MCPToolIndex) -> None:
-        ordered_connector_names = self._sorted_connector_names
+    def _list_connectors(
+        self,
+        option_list: OptionList,
+        index: MCPToolIndex,
+        connector_names: Sequence[str],
+    ) -> None:
+        ordered_connector_names = list(connector_names)
         max_name = max(len(n) for n in ordered_connector_names)
         type_tag = "[connector]"
         type_width = len(type_tag)

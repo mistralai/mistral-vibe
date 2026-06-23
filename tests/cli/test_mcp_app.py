@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from textual.events import Key
 from textual.widgets.option_list import Option
 
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
@@ -233,6 +234,80 @@ class TestMCPAppInit:
         app.action_back()
 
         assert render_calls == []
+
+    def test_printable_keys_filter_overview(self) -> None:
+        registry = FakeConnectorRegistry(
+            connectors={
+                "github": [RemoteTool(name="search_repos", description="Search repos")],
+                "linear": [RemoteTool(name="issue_search", description="Find issues")],
+            }
+        )
+        mgr = _make_tool_manager(registry.get_tools())
+        app = MCPApp(mcp_servers=[], tool_manager=mgr, connector_registry=registry)
+        app.query_one = MagicMock()
+
+        app.on_key(Key("g", "g"))
+
+        assert app._filter_text == "g"
+        assert app._filtered_connector_names(app._index) == ["github"]
+
+    def test_backspace_removes_filter_character_in_overview(self) -> None:
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[], tool_manager=mgr)
+        app._filter_text = "git"
+        app._refresh_view = MagicMock()
+
+        app.action_back()
+
+        assert app._filter_text == "gi"
+        app._refresh_view.assert_called_once_with(None)
+
+    def test_delete_clears_filter_in_overview(self) -> None:
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[], tool_manager=mgr)
+        app._filter_text = "git"
+        app._refresh_view = MagicMock()
+
+        app.on_key(Key("delete", None))
+
+        assert app._filter_text == ""
+        app._refresh_view.assert_called_once_with(None)
+
+    @pytest.mark.parametrize("key", ["D", "E", "R"])
+    def test_shortcuts_do_not_filter_overview(self, key: str) -> None:
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[], tool_manager=mgr)
+        app._refresh_view = MagicMock()
+
+        app.on_key(Key(key, key))
+
+        assert app._filter_text == ""
+        app._refresh_view.assert_not_called()
+
+    def test_filter_ignored_in_detail_view(self) -> None:
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[], tool_manager=mgr)
+        app._viewing_server = "github"
+        app._viewing_kind = MCPSourceKind.CONNECTOR
+        app._refresh_view = MagicMock()
+
+        app.on_key(Key("g", "g"))
+
+        assert app._filter_text == ""
+        app._refresh_view.assert_not_called()
+
+    def test_filter_matches_tool_names_and_descriptions(self) -> None:
+        registry = FakeConnectorRegistry(
+            connectors={
+                "github": [RemoteTool(name="search_repos", description="Search repos")],
+                "linear": [RemoteTool(name="issue_search", description="Find tickets")],
+            }
+        )
+        mgr = _make_tool_manager(registry.get_tools())
+        app = MCPApp(mcp_servers=[], tool_manager=mgr, connector_registry=registry)
+        app._filter_text = "tickets"
+
+        assert app._filtered_connector_names(app._index) == ["linear"]
 
 
 class TestConnectorMenuOrdering:
