@@ -267,6 +267,20 @@ def test_snapshot_mcp_with_connectors_overview(snap_compare: SnapCompare) -> Non
     )
 
 
+def test_snapshot_mcp_finder_filters_connectors(snap_compare: SnapCompare) -> None:
+
+    async def run_before(pilot: Pilot) -> None:
+        await _run_mcp_command(pilot, "/mcp")
+        await pilot.press("f", "g", "m")
+        await pilot.pause(0.1)
+
+    assert snap_compare(
+        "test_ui_snapshot_mcp_command.py:SnapshotTestAppWithConnectors",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Connector auth app snapshot tests
 # ---------------------------------------------------------------------------
