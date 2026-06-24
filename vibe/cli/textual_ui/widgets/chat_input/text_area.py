@@ -18,7 +18,7 @@ from vibe.cli.textual_ui.widgets.chat_input.paste_path import (
     maybe_prepend_at_for_image_path,
     rewrite_bare_image_paths_in_text,
 )
-from vibe.cli.textual_ui.widgets.vscode_compat import patch_vscode_space
+from vibe.cli.textual_ui.widgets.vscode_compat import patch_csi_u_keys
 from vibe.cli.voice_manager.voice_manager_port import (
     RecordingStartError,
     TranscribeState,
@@ -320,7 +320,7 @@ class ChatTextArea(TextArea):
             event.stop()
             return
 
-        patch_vscode_space(event)
+        patch_csi_u_keys(event)
 
         await super()._on_key(event)
         self._mark_cursor_moved_if_needed()
