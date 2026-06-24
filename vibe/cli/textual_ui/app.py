@@ -3550,7 +3550,7 @@ class VibeApp(App):  # noqa: PLR0904
         if self._update_notifier is None or not self.config.enable_update_checks:
             return
 
-        asyncio.create_task(self._check_update(), name="version-update-check")
+        self._update_task = asyncio.create_task(self._check_update(), name="version-update-check")
 
     async def _check_update(self) -> None:
         if self._update_notifier is None or self._update_cache_repository is None:
