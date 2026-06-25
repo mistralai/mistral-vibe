@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Any
 
 from jsonpointer import JsonPointer, JsonPointerException
-from pydantic import AfterValidator, BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints
 
 
 class ConfigPatch:
@@ -43,6 +43,9 @@ class _OperationPatch(BaseModel, ABC):
         return path
 
     path: Annotated[str, AfterValidator(_validate_json_pointer)]
+    target_layer_name: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None
+    ) = None
 
     @abstractmethod
     def to_json_patch(self) -> dict[str, Any]:

@@ -5,8 +5,9 @@ from typing import Any
 
 import pytest
 
-from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop, e2e_config
+from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop
 from tests.backend.data.mistral import mistral_completion
+from tests.conftest import build_test_vibe_config
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.tools.builtins.ask_user_question import (
     AskUserQuestionArgs,
@@ -93,7 +94,7 @@ def _plan_agent(mistral_api: MistralAPI) -> Any:
         mistral_completion("Staying in plan mode."),
     )
     return build_e2e_agent_loop(
-        config=e2e_config(enabled_tools=["exit_plan_mode"]),
+        config=build_test_vibe_config(enabled_tools=["exit_plan_mode"]),
         agent_name=BuiltinAgentName.PLAN,
     )
 

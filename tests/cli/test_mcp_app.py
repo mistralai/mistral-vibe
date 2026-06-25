@@ -8,6 +8,7 @@ import pytest
 from textual.widgets.option_list import Option
 
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
+from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.cli.textual_ui.widgets.mcp_app import (
     _LIST_VIEW_HELP_AUTH,
     _LIST_VIEW_HELP_TOOLS,
@@ -16,7 +17,7 @@ from vibe.cli.textual_ui.widgets.mcp_app import (
     _sort_connector_names_for_menu,
     collect_mcp_tool_index,
 )
-from vibe.core.config import MCPStdio
+from vibe.core.config import MCPHttp, MCPOAuth, MCPStdio
 from vibe.core.tools.base import InvokeContext
 from vibe.core.tools.connectors.connector_registry import (
     ConnectorAuthAction,
@@ -60,6 +61,16 @@ def _make_tool_manager(
     mgr.registered_tools = all_tools
     mgr.available_tools = available_tools if available_tools is not None else all_tools
     return mgr
+
+
+def _make_oauth_server(*, name: str = "oauth", disabled: bool = False) -> MCPHttp:
+    return MCPHttp(
+        name=name,
+        transport="http",
+        url="http://mcp.example.test",
+        auth=MCPOAuth(type="oauth", scopes=[]),
+        disabled=disabled,
+    )
 
 
 class TestCollectMcpToolIndex:
@@ -343,6 +354,26 @@ class TestHelpBarChanges:
         option = Option("", id="connector:slack")
         assert app._list_help_for_option(option) == _LIST_VIEW_HELP_AUTH
 
+    def test_help_shows_authenticate_for_oauth_server(self) -> None:
+        server = _make_oauth_server()
+        registry = FakeMCPRegistry()
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[server], tool_manager=mgr, mcp_registry=registry)
+
+        option = Option("", id="server:oauth")
+
+        assert app._list_help_for_option(option) == _LIST_VIEW_HELP_AUTH
+
+    def test_help_shows_tools_for_disabled_oauth_server(self) -> None:
+        server = _make_oauth_server(disabled=True)
+        registry = FakeMCPRegistry()
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[server], tool_manager=mgr, mcp_registry=registry)
+
+        option = Option("", id="server:oauth")
+
+        assert app._list_help_for_option(option) == _LIST_VIEW_HELP_TOOLS
+
     def test_help_shows_tools_for_degraded_connector(self) -> None:
         registry = FakeConnectorRegistry(connectors={"slack": []})
         mgr = _make_tool_manager({})
@@ -443,3 +474,84 @@ class TestConnectorAuthRequested:
         assert "No tools discovered" in str(
             option_list.add_option.call_args.args[0].prompt
         )
+
+    def test_oauth_server_with_no_tools_posts_auth_requested(self) -> None:
+        server = _make_oauth_server()
+        registry = FakeMCPRegistry()
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[server], tool_manager=mgr, mcp_registry=registry)
+        app.query_one = MagicMock()
+        app.post_message = MagicMock()
+
+        option_list = MagicMock()
+        app._show_detail_view(
+            "oauth", option_list, app._index, kind=MCPSourceKind.SERVER
+        )
+
+        app.post_message.assert_called_once()
+        msg = app.post_message.call_args.args[0]
+        assert isinstance(msg, MCPApp.MCPOAuthRequested)
+        assert msg.server_name == "oauth"
+        assert msg.mcp_registry is registry
+        option_list.add_option.assert_not_called()
+
+    def test_oauth_server_with_stale_tools_posts_auth_requested(self) -> None:
+        server = _make_oauth_server()
+        registry = FakeMCPRegistry()
+        stale_tool = _make_tool_cls(
+            is_mcp=True, server_name="oauth", remote_name="stale"
+        )
+        mgr = _make_tool_manager({"oauth_stale": stale_tool})
+        app = MCPApp(mcp_servers=[server], tool_manager=mgr, mcp_registry=registry)
+        app.query_one = MagicMock()
+        app.post_message = MagicMock()
+
+        option_list = MagicMock()
+        app._show_detail_view(
+            "oauth", option_list, app._index, kind=MCPSourceKind.SERVER
+        )
+
+        app.post_message.assert_called_once()
+        assert isinstance(app.post_message.call_args.args[0], MCPApp.MCPOAuthRequested)
+        option_list.add_option.assert_not_called()
+
+
+class TestServerStatusLabels:
+    def test_servers_show_enabled_disabled_and_needs_auth(self) -> None:
+        servers = [
+            MCPStdio(name="filesystem", transport="stdio", command="npx"),
+            MCPHttp(name="search", transport="http", url="http://mcp.example.test"),
+            _make_oauth_server(name="oauth"),
+            _make_oauth_server(name="disabled-oauth", disabled=True),
+        ]
+        registry = FakeMCPRegistry()
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=servers, tool_manager=mgr, mcp_registry=registry)
+        option_list = MagicMock()
+
+        app._list_mcp_servers(option_list, app._index)
+
+        prompts = [
+            str(call.args[0].prompt) for call in option_list.add_option.call_args_list
+        ]
+        assert any("filesystem" in prompt and "enabled" in prompt for prompt in prompts)
+        assert any("search" in prompt and "enabled" in prompt for prompt in prompts)
+        assert any("oauth" in prompt and "needs auth" in prompt for prompt in prompts)
+        assert any(
+            "disabled-oauth" in prompt and "disabled" in prompt for prompt in prompts
+        )
+
+    def test_oauth_server_with_cached_tools_shows_connected(self) -> None:
+        server = _make_oauth_server()
+        registry = FakeMCPRegistry()
+        registry.set_tools([server], {})
+        mgr = _make_tool_manager({})
+        app = MCPApp(mcp_servers=[server], tool_manager=mgr, mcp_registry=registry)
+        option_list = MagicMock()
+
+        app._list_mcp_servers(option_list, app._index)
+
+        prompts = [
+            str(call.args[0].prompt) for call in option_list.add_option.call_args_list
+        ]
+        assert any("oauth" in prompt and "connected" in prompt for prompt in prompts)

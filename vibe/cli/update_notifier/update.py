@@ -167,6 +167,7 @@ UPDATE_COMMANDS = ["uv tool upgrade mistral-vibe", "brew upgrade mistral-vibe"]
 
 
 async def do_update() -> bool:
+    any_succeeded = False
     for command in UPDATE_COMMANDS:
         process = await asyncio.create_subprocess_shell(
             command,
@@ -180,8 +181,8 @@ async def do_update() -> bool:
             await _terminate(process)
             raise
         if process.returncode == 0:
-            return True
-    return False
+            any_succeeded = True
+    return any_succeeded
 
 
 async def _terminate(process: asyncio.subprocess.Process) -> None:

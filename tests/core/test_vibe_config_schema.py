@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import keyring
 import pytest
 
+from vibe.core.config import (
+    DEFAULT_THEME,
+    MissingAPIKeyError,
+    ModelConfig,
+    ProviderConfig,
+)
 from vibe.core.config._settings import VibeConfig
 from vibe.core.config.vibe_schema import VibeConfigSchema
 
@@ -47,7 +54,7 @@ provider = "mistral"
     class VibeConfig(VibeConfigSchema):
         pass
 
-    layer = UserConfigLayer(path=toml_path, name="user-toml")
+    layer = UserConfigLayer(path=toml_path)
     orchestrator = await ConfigOrchestrator[VibeConfig].create(
         schema=VibeConfig, layers=[layer]
     )
@@ -62,3 +69,43 @@ provider = "mistral"
     assert config.default_agent == "plan"
     assert "search" in config.enabled_skills
     assert config.enable_otel is True
+
+
+def test_duplicate_model_alias_raises() -> None:
+    with pytest.raises(ValueError, match="Duplicate alias"):
+        VibeConfigSchema(
+            models=[
+                ModelConfig(name="model-a", provider="mistral", alias="same"),
+                ModelConfig(name="model-b", provider="mistral", alias="same"),
+            ]
+        )
+
+
+def test_compaction_model_provider_must_match_active() -> None:
+    providers = [
+        ProviderConfig(
+            name="mistral",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="MISTRAL_API_KEY",
+        ),
+        ProviderConfig(
+            name="other",
+            api_base="https://other.ai/v1",
+            api_key_env_var="MISTRAL_API_KEY",
+        ),
+    ]
+    compaction = ModelConfig(name="compact-model", provider="other", alias="compact")
+    with pytest.raises(ValueError, match="must share the same provider"):
+        VibeConfigSchema(compaction_model=compaction, providers=providers)
+
+
+def test_check_api_key_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
+    with pytest.raises(MissingAPIKeyError):
+        VibeConfigSchema()
+
+
+def test_unknown_theme_falls_back_to_default() -> None:
+    config = VibeConfigSchema(theme="totally-unknown-theme")
+    assert config.theme == DEFAULT_THEME

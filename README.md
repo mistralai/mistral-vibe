@@ -760,6 +760,7 @@ This affects where Vibe looks for:
 
 - `config.toml` - Main configuration
 - `.env` - API keys
+- `connector_bootstrap_cache.json` - Short-lived connector discovery cache
 - `agents/` - Custom agent configurations
 - `prompts/` - Custom system and compaction prompts
 - `tools/` - Custom tools

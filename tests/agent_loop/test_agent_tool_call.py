@@ -39,11 +39,7 @@ async def act_and_collect_events(agent_loop: AgentLoop, prompt: str) -> list[Bas
 
 def make_config(todo_permission: ToolPermission = ToolPermission.ALWAYS) -> VibeConfig:
     return build_test_vibe_config(
-        enabled_tools=["todo"],
-        tools={"todo": {"permission": todo_permission.value}},
-        system_prompt_id="tests",
-        include_project_context=False,
-        include_prompt_detail=False,
+        enabled_tools=["todo"], tools={"todo": {"permission": todo_permission.value}}
     )
 
 

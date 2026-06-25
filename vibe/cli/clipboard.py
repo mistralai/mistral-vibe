@@ -8,6 +8,7 @@ import subprocess
 
 import pyperclip
 from textual.app import App
+from textual.widgets import Input, TextArea
 
 from vibe.core.utils.io import decode_safe
 
@@ -133,6 +134,11 @@ def _get_selected_texts(app: App) -> list[str]:
     selected_texts = []
 
     for widget in app.query("*"):
+        if isinstance(widget, (TextArea, Input)):
+            if (selected_text := widget.selected_text).strip():
+                selected_texts.append(selected_text)
+            continue
+
         try:
             if not hasattr(widget, "text_selection") or not widget.text_selection:
                 continue

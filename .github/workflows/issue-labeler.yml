@@ -29,11 +29,13 @@ jobs:
 
             - name: Apply component label
               uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+              env:
+                  BUG_COMPONENT: ${{ steps.parse-bug.outputs.issueparser_component }}
+                  FEATURE_COMPONENT: ${{ steps.parse-feature.outputs.issueparser_component }}
               with:
                   script: |
-                      // Get component from either bug report or feature request
-                      const bugComponent = '${{ steps.parse-bug.outputs.issueparser_component }}';
-                      const featureComponent = '${{ steps.parse-feature.outputs.issueparser_component }}';
+                      const bugComponent = process.env.BUG_COMPONENT;
+                      const featureComponent = process.env.FEATURE_COMPONENT;
                       const component = bugComponent || featureComponent;
 
                       if (!component) {
@@ -41,22 +43,22 @@ jobs:
                         return;
                       }
 
-                      const labels = [];
+                      const componentLabels = new Map([
+                        ['CLI', 'CLI'],
+                        ['ACP', 'ACP'],
+                        ['VS Code extension', 'VS Code extension'],
+                      ]);
+                      const label = componentLabels.get(component);
 
-                      if (component === 'CLI') {
-                        labels.push('CLI');
-                      } else if (component === 'ACP') {
-                        labels.push('ACP');
-                      } else if (component === 'VS Code extension') {
-                        labels.push('VS Code extension');
+                      if (!label) {
+                        console.log(`Unknown component '${component}', skipping labeling`);
+                        return;
                       }
 
-                      if (labels.length > 0) {
-                        await github.rest.issues.addLabels({
-                          owner: context.repo.owner,
-                          repo: context.repo.repo,
-                          issue_number: context.issue.number,
-                          labels: labels
-                        });
-                        console.log(`Added labels: ${labels.join(', ')}`);
-                      }
+                      await github.rest.issues.addLabels({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: context.issue.number,
+                        labels: [label],
+                      });
+                      console.log(`Added label: ${label}`);

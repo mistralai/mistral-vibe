@@ -16,7 +16,7 @@ from vibe.core.config.patch import (
     RemoveOperationPatch,
     ReplaceOperationPatch,
 )
-from vibe.core.config.types import MISSING_CONFIG_FILE_FINGERPRINT
+from vibe.core.config.types import MISSING_BACKING_STORE_DATA_FINGERPRINT
 
 
 def random_config_file_name() -> str:
@@ -28,7 +28,7 @@ async def test_reads_toml_file(tmp_working_directory: Path) -> None:
     path = tmp_working_directory / random_config_file_name()
     path.write_text('active_model = "mistral-large"\ncount = 42\n')
 
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
     data = await layer.load()
     assert data.model_extra == {"active_model": "mistral-large", "count": 42}
     fingerprint = layer.fingerprint
@@ -41,7 +41,7 @@ async def test_always_trusted(tmp_working_directory: Path) -> None:
     path = tmp_working_directory / random_config_file_name()
     path.write_text('key = "value"\n')
 
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
     assert layer.is_trusted is None
     data = await layer.load()
     assert layer.is_trusted is True
@@ -51,10 +51,10 @@ async def test_always_trusted(tmp_working_directory: Path) -> None:
 @pytest.mark.asyncio
 async def test_missing_file_returns_empty(tmp_working_directory: Path) -> None:
     path = tmp_working_directory / random_config_file_name()
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
     data = await layer.load()
     assert data.model_extra == {}
-    assert layer.fingerprint == MISSING_CONFIG_FILE_FINGERPRINT
+    assert layer.fingerprint == MISSING_BACKING_STORE_DATA_FINGERPRINT
 
 
 @pytest.mark.asyncio
@@ -62,16 +62,16 @@ async def test_apply_raises_when_file_does_not_exist(
     tmp_working_directory: Path,
 ) -> None:
     path = tmp_working_directory / random_config_file_name()
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
 
     await layer.load()
-    assert layer.fingerprint == MISSING_CONFIG_FILE_FINGERPRINT
+    assert layer.fingerprint == MISSING_BACKING_STORE_DATA_FINGERPRINT
 
     with pytest.raises(LayerNotLoadedError, match="loaded before applying patches"):
         await layer.apply(
             ConfigPatch(
                 AddOperationPatch(path="/active_model", value="mistral-large"),
-                fingerprint=MISSING_CONFIG_FILE_FINGERPRINT,
+                fingerprint=MISSING_BACKING_STORE_DATA_FINGERPRINT,
             )
         )
 
@@ -90,7 +90,7 @@ active_model = "old"
 disabled_tools = ["bash", "python"]
 deprecated_setting = true
 """)
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
 
     await layer.load()
     fingerprint = layer.fingerprint
@@ -126,7 +126,7 @@ async def test_apply_cache_fingerprint_matches_written_file(
 ) -> None:
     path = tmp_working_directory / random_config_file_name()
     path.write_text("")
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
 
     await layer.load()
     fingerprint = layer.fingerprint
@@ -149,7 +149,7 @@ async def test_apply_uses_unique_temp_file(tmp_working_directory: Path) -> None:
     fixed_tmp_path = tmp_working_directory / f".{path.name}.tmp"
     path.write_text("")
     fixed_tmp_path.write_text("stale")
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
 
     await layer.load()
     fingerprint = layer.fingerprint
@@ -190,13 +190,13 @@ async def test_apply_raises_when_layer_is_not_loaded(
     tmp_working_directory: Path,
 ) -> None:
     path = tmp_working_directory / random_config_file_name()
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
 
     with pytest.raises(LayerNotLoadedError, match="loaded before applying patches"):
         await layer.apply(
             ConfigPatch(
                 AddOperationPatch(path="/active_model", value="mistral-large"),
-                fingerprint=MISSING_CONFIG_FILE_FINGERPRINT,
+                fingerprint=MISSING_BACKING_STORE_DATA_FINGERPRINT,
             )
         )
 
@@ -207,7 +207,7 @@ async def test_apply_raises_when_cache_is_invalidated(
 ) -> None:
     path = tmp_working_directory / random_config_file_name()
     path.write_text('active_model = "old"\n')
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
 
     await layer.load()
     fingerprint = layer.fingerprint
@@ -228,7 +228,7 @@ async def test_apply_raises_when_parent_directory_does_not_exist(
     tmp_working_directory: Path,
 ) -> None:
     path = tmp_working_directory / "nested" / random_config_file_name()
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
 
     await layer.load()
 
@@ -236,7 +236,7 @@ async def test_apply_raises_when_parent_directory_does_not_exist(
         await layer.apply(
             ConfigPatch(
                 AddOperationPatch(path="/active_model", value="mistral-large"),
-                fingerprint=MISSING_CONFIG_FILE_FINGERPRINT,
+                fingerprint=MISSING_BACKING_STORE_DATA_FINGERPRINT,
             )
         )
 
@@ -247,7 +247,7 @@ async def test_apply_raises_when_parent_directory_does_not_exist(
 async def test_commit_sets_missing_nested_field(tmp_working_directory: Path) -> None:
     path = tmp_working_directory / random_config_file_name()
     path.write_text("[models]\n")
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
 
     await layer.load()
     fingerprint = layer.fingerprint
@@ -270,7 +270,7 @@ async def test_apply_overwrites_external_file_changes(
 ) -> None:
     path = tmp_working_directory / random_config_file_name()
     path.write_text('active_model = "old"\n')
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
 
     await layer.load()
     fingerprint = layer.fingerprint
@@ -301,7 +301,7 @@ active_model = "test"
 alias = "a"
 provider = "p"
 """)
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
     data = await layer.load()
     assert data.model_extra == {
         "models": {"active_model": "test", "items": [{"alias": "a", "provider": "p"}]}
@@ -312,7 +312,7 @@ provider = "p"
 async def test_invalid_toml_raises(tmp_working_directory: Path) -> None:
     path = tmp_working_directory / random_config_file_name()
     path.write_text("this is not valid = = = toml [[[")
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
     with pytest.raises(LayerImplementationError, match="_build_config_snapshot"):
         await layer.load()
 
@@ -321,7 +321,7 @@ async def test_invalid_toml_raises(tmp_working_directory: Path) -> None:
 async def test_force_reload_reads_fresh_data(tmp_working_directory: Path) -> None:
     path = tmp_working_directory / random_config_file_name()
     path.write_text('value = "first"\n')
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
 
     data1 = await layer.load()
     fp1 = layer.fingerprint
@@ -340,13 +340,13 @@ async def test_force_reload_reads_fresh_data(tmp_working_directory: Path) -> Non
     path.unlink()
     data3 = await layer.load(force=True)
     assert data3.model_extra == {}
-    assert layer.fingerprint == MISSING_CONFIG_FILE_FINGERPRINT
+    assert layer.fingerprint == MISSING_BACKING_STORE_DATA_FINGERPRINT
 
 
 @pytest.mark.asyncio
 async def test_empty_toml_file(tmp_working_directory: Path) -> None:
     path = tmp_working_directory / random_config_file_name()
     path.write_text("")
-    layer = UserConfigLayer(path=path, name="user-toml")
+    layer = UserConfigLayer(path=path)
     data = await layer.load()
     assert data.model_extra == {}

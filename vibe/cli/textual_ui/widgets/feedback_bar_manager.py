@@ -1,14 +1,49 @@
 from __future__ import annotations
 
-from vibe.core.agent_loop import AgentLoop
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Protocol
+
 from vibe.core.feedback import record_feedback_asked, should_show_feedback
 from vibe.core.types import Role
+
+if TYPE_CHECKING:
+    from vibe.core.cache_store import VibeCodeCacheStore
+
+
+class _FeedbackTelemetry(Protocol):
+    def is_active(self) -> bool: ...
+
+
+class _FeedbackConfig(Protocol):
+    def is_active_model_mistral(self) -> bool: ...
+
+
+class _FeedbackMessage(Protocol):
+    @property
+    def role(self) -> str: ...
+
+    @property
+    def injected(self) -> bool: ...
+
+
+class _FeedbackSource(Protocol):
+    @property
+    def messages(self) -> Sequence[_FeedbackMessage]: ...
+
+    @property
+    def telemetry_client(self) -> _FeedbackTelemetry: ...
+
+    @property
+    def config(self) -> _FeedbackConfig: ...
+
+    @property
+    def cache_store(self) -> VibeCodeCacheStore: ...
 
 
 class FeedbackBarManager:
     """Decides whether to show the feedback bar and records when feedback is given."""
 
-    def should_show(self, agent_loop: AgentLoop) -> bool:
+    def should_show(self, agent_loop: _FeedbackSource) -> bool:
         user_message_count = (
             sum(m.role == Role.user and not m.injected for m in agent_loop.messages)
             + 1  # +1 for the message the user just sent
@@ -20,5 +55,5 @@ class FeedbackBarManager:
             cache_store=agent_loop.cache_store,
         )
 
-    def record_feedback_asked(self, agent_loop: AgentLoop) -> None:
+    def record_feedback_asked(self, agent_loop: _FeedbackSource) -> None:
         record_feedback_asked(agent_loop.cache_store)

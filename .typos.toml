@@ -5,3 +5,8 @@ extend-ignore-re = ["(?m)^.*(#|//)\\s*typos:disable-line$", "datas"]
 iterm = "iterm"
 ITERM = "ITERM"
 asend = "asend"
+
+[default.extend-identifiers]
+# macOS pasteboard four-char-code for the PNG flavor — required verbatim
+# by AppleScript syntax (`the clipboard as «class PNGf»`).
+PNGf = "PNGf"

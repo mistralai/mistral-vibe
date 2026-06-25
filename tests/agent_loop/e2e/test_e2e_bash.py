@@ -7,8 +7,9 @@ from typing import Any, cast
 from pydantic import BaseModel
 import pytest
 
-from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop, e2e_config
+from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop
 from tests.backend.data.mistral import mistral_completion
+from tests.conftest import build_test_vibe_config
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.tools.builtins.bash import BashResult
 from vibe.core.tools.permissions import RequiredPermission
@@ -41,7 +42,7 @@ async def _run_bash(
 ) -> ToolResultEvent:
     mistral_api.reply(_bash_call(command, timeout), mistral_completion("done"))
     agent = build_e2e_agent_loop(
-        config=e2e_config(enabled_tools=["bash"]), agent_name=agent_name
+        config=build_test_vibe_config(enabled_tools=["bash"]), agent_name=agent_name
     )
     if approval is not None:
 

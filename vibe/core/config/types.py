@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum, auto
 from typing import Annotated, Any
@@ -35,9 +36,9 @@ class LayerConfigSnapshot(BaseModel):
     fingerprint: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
-MISSING_CONFIG_FILE_FINGERPRINT = "vibe:missing-config-file"
+MISSING_BACKING_STORE_DATA_FINGERPRINT = "vibe:missing-backing-store-data"
 EMPTY_CONFIG_SNAPSHOT = LayerConfigSnapshot(
-    data={}, fingerprint=MISSING_CONFIG_FILE_FINGERPRINT
+    data={}, fingerprint=MISSING_BACKING_STORE_DATA_FINGERPRINT
 )
 
 
@@ -49,3 +50,7 @@ class ConfigChangeEvent:
     before: dict[str, Any]
     after: dict[str, Any]
     reason: str
+
+
+type ConfigChangeCallback = Callable[[ConfigChangeEvent], None]
+"""Function signature for a callback that receives a config change event."""

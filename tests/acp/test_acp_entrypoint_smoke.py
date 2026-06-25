@@ -105,6 +105,7 @@ def _build_env(vibe_home_dir: Path, *, include_api_key: bool) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["VIBE_HOME"] = str(vibe_home_dir)
+    env["VIBE_TEST_DISABLE_KEYRING"] = "1"
 
     vibe_home_dir.mkdir(parents=True, exist_ok=True)
     config_file = vibe_home_dir / "config.toml"

@@ -7,13 +7,10 @@ import os
 from pathlib import Path
 
 from dotenv import dotenv_values
-import keyring
-from keyring.errors import KeyringError
 
 from vibe.core.config import DEFAULT_MISTRAL_API_ENV_KEY, ProviderConfig
 from vibe.core.paths import GLOBAL_ENV_FILE
-
-_KEYRING_SERVICE = "vibe"
+from vibe.core.utils.keyring import get_api_key_from_keyring
 
 
 class AuthStateKind(StrEnum):
@@ -84,10 +81,7 @@ def _capture_auth_env_snapshot(
 ) -> _AuthEnvSnapshot:
     resolved_env_path = env_path if env_path is not None else GLOBAL_ENV_FILE.path
     resolved_environ = environ if environ is not None else os.environ
-    try:
-        keyring_has_value = _has_value(keyring.get_password(_KEYRING_SERVICE, env_key))
-    except KeyringError:
-        keyring_has_value = False
+    keyring_has_value = _has_value(get_api_key_from_keyring(env_key))
 
     return _AuthEnvSnapshot(
         env_key=env_key,

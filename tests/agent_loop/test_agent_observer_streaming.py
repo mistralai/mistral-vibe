@@ -57,9 +57,6 @@ def make_config(
     *, enabled_tools: list[str] | None = None, tools: dict[str, dict] | None = None
 ) -> VibeConfig:
     return build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
-        include_prompt_detail=False,
         include_model_info=False,
         include_commit_signature=False,
         enabled_tools=enabled_tools or [],

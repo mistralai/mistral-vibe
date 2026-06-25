@@ -20,8 +20,6 @@ def test_get_universal_system_prompt_includes_windows_prompt_on_windows(
     monkeypatch.setenv("COMSPEC", "C:\\Windows\\System32\\cmd.exe")
 
     config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
         include_prompt_detail=True,
         include_model_info=False,
         include_commit_signature=False,
@@ -49,8 +47,6 @@ def test_get_universal_system_prompt_includes_windows_prompt_on_windows(
 def test_scratchpad_section_included_when_passed() -> None:
     sp = init_scratchpad("test-session")
     config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
         include_prompt_detail=True,
         include_model_info=False,
         include_commit_signature=False,
@@ -70,8 +66,6 @@ def test_scratchpad_section_included_when_passed() -> None:
 
 def test_scratchpad_section_absent_when_not_passed() -> None:
     config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
         include_prompt_detail=True,
         include_model_info=False,
         include_commit_signature=False,
@@ -89,11 +83,7 @@ def test_scratchpad_section_absent_when_not_passed() -> None:
 
 def test_headless_section_included_when_enabled() -> None:
     config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
-        include_prompt_detail=False,
-        include_model_info=False,
-        include_commit_signature=False,
+        include_model_info=False, include_commit_signature=False
     )
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
@@ -109,11 +99,7 @@ def test_headless_section_included_when_enabled() -> None:
 
 def test_headless_section_absent_by_default() -> None:
     config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
-        include_prompt_detail=False,
-        include_model_info=False,
-        include_commit_signature=False,
+        include_model_info=False, include_commit_signature=False
     )
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
@@ -128,11 +114,7 @@ def test_headless_section_absent_by_default() -> None:
 
 def test_current_date_placeholder_substituted_in_prompt() -> None:
     config = build_test_vibe_config(
-        system_prompt_id="cli",
-        include_project_context=False,
-        include_prompt_detail=False,
-        include_model_info=False,
-        include_commit_signature=False,
+        system_prompt_id="cli", include_model_info=False, include_commit_signature=False
     )
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)

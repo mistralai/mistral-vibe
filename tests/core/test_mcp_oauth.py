@@ -31,6 +31,8 @@ from vibe.core.auth.mcp_oauth import (
 )
 from vibe.core.config import MCPOAuth, MCPStreamableHttp
 
+_KEYRING_SERVICE = "ai.mistral.vibe"
+
 
 class _MemoryKeyring(KeyringBackend):
     priority = 100  # type: ignore[assignment]
@@ -46,7 +48,7 @@ class _MemoryKeyring(KeyringBackend):
 
     def delete_password(self, service: str, username: str) -> None:
         if (service, username) not in self.store:
-            raise keyring.errors.PasswordDeleteError(username)
+            raise keyring.errors.PasswordDeleteError()
         del self.store[(service, username)]
 
 
@@ -143,7 +145,7 @@ class TestKeyringTokenStorage:
         assert loaded.access_token == "at"
         assert loaded.refresh_token == "rt"
         assert loaded.scope == "read write"
-        assert ("vibe", "mcp-oauth:linear:tokens") in memory_keyring.store
+        assert (_KEYRING_SERVICE, "mcp-oauth:linear:tokens") in memory_keyring.store
 
     @pytest.mark.asyncio
     async def test_round_trip_client_info(self, memory_keyring: _MemoryKeyring) -> None:
@@ -160,7 +162,10 @@ class TestKeyringTokenStorage:
         loaded = await storage.get_client_info()
         assert loaded is not None
         assert loaded.client_id == "abc123"
-        assert ("vibe", "mcp-oauth:linear:client_info") in memory_keyring.store
+        assert (
+            _KEYRING_SERVICE,
+            "mcp-oauth:linear:client_info",
+        ) in memory_keyring.store
 
     @pytest.mark.asyncio
     async def test_per_alias_isolation(self, memory_keyring: _MemoryKeyring) -> None:

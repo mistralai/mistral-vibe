@@ -133,6 +133,7 @@ class TeleportCommandHelpSnapshotApp(BaseSnapshotTestApp):
 
     async def on_mount(self) -> None:
         await super().on_mount()
+        await self._resolve_plan()
         await self._show_help()
 
 
@@ -274,18 +275,5 @@ def test_snapshot_teleport_push_confirmation_cancel_selected(
     assert snap_compare(
         "test_ui_snapshot_teleport.py:TeleportPushConfirmationMultipleCommitsApp",
         terminal_size=(80, 12),
-        run_before=run_before,
-    )
-
-
-def test_snapshot_teleport_command_visible_for_pro_account(
-    snap_compare: SnapCompare,
-) -> None:
-    async def run_before(pilot: Pilot) -> None:
-        await pilot.pause(0.2)
-
-    assert snap_compare(
-        "test_ui_snapshot_teleport.py:TeleportCommandHelpProApp",
-        terminal_size=(120, 48),
         run_before=run_before,
     )

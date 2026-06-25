@@ -6,8 +6,9 @@ from typing import Any, cast
 
 import pytest
 
-from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop, e2e_config
+from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop
 from tests.backend.data.mistral import mistral_completion
+from tests.conftest import build_test_vibe_config
 from vibe.core.tools.builtins.grep import GrepResult
 from vibe.core.tools.builtins.read import ReadResult
 from vibe.core.tools.builtins.todo import TodoResult
@@ -33,7 +34,7 @@ async def _run_tool(
     # Drive one tool call against the real cwd, then a final reply, and return
     # the single tool result for the test to assert on.
     mistral_api.reply(_tool_call(name, arguments), mistral_completion("done"))
-    agent = build_e2e_agent_loop(config=e2e_config(enabled_tools=[name]))
+    agent = build_e2e_agent_loop(config=build_test_vibe_config(enabled_tools=[name]))
     events: list[BaseEvent] = [event async for event in agent.act("go")]
     result = next(e for e in events if isinstance(e, ToolResultEvent))
     assert result.error is None

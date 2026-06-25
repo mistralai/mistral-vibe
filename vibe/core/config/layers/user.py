@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import tomllib
+from typing import ClassVar
 
 import tomli_w
 
@@ -20,8 +21,10 @@ class UserConfigLayer(ConfigLayer[RawConfig]):
     Pass an explicit ``path`` for testing.
     """
 
-    def __init__(self, *, path: Path | None = None, name: str = "user-toml") -> None:
-        super().__init__(name=name)
+    LAYER_NAME: ClassVar[str] = "user-toml"
+
+    def __init__(self, *, path: Path | None = None) -> None:
+        super().__init__(name=self.LAYER_NAME)
         self._path = path or (VIBE_HOME.path / "config.toml")
 
     async def _check_trust(self) -> bool:

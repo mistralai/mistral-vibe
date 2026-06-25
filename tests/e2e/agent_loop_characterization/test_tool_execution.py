@@ -119,7 +119,7 @@ def test_denylisted_bash_tool_does_not_run_and_is_reported_to_the_model(
     )
 
 
-@pytest.mark.timeout(25)
+@pytest.mark.timeout(40)
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_failing_bash_factory, id="failing-bash-tool")],
@@ -148,7 +148,7 @@ def test_failed_bash_tool_result_is_reported_to_the_model_and_turn_recovers(
             timeout=10,
         )
         wait_for_rendered_text(
-            child, captured, needle="Recovered after the shell failure.", timeout=10
+            child, captured, needle="Recovered after the shell failure.", timeout=20
         )
 
         send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)

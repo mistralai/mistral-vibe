@@ -35,6 +35,7 @@ from vibe.core.config.harness_files import (
     reset_harness_files_manager,
 )
 from vibe.core.llm.types import BackendLike
+from vibe.core.utils import keyring as keyring_utils
 
 
 class _EmptyKeyring(KeyringBackend):
@@ -49,11 +50,11 @@ class _EmptyKeyring(KeyringBackend):
         return None
 
     def delete_password(self, service: str, username: str) -> None:
-        raise keyring.errors.PasswordDeleteError(username)
+        raise keyring.errors.PasswordDeleteError()
 
 
 @pytest.fixture(autouse=True)
-def _disable_os_keyring() -> Generator[None, None, None]:
+def _disable_os_keyring(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Keep the suite off the real OS keyring.
 
     ``resolve_api_key`` and ``VibeConfig._check_api_key`` now consult the keyring, so
@@ -63,10 +64,13 @@ def _disable_os_keyring() -> Generator[None, None, None]:
     behaviour opt in by patching ``keyring.get_password`` / ``set_password`` directly.
     """
     original = keyring.get_keyring()
+    monkeypatch.setattr(keyring_utils, "_should_use_macos_security", lambda: False)
     keyring.set_keyring(_EmptyKeyring())
+    keyring_utils.clear_api_key_keyring_cache()
     try:
         yield
     finally:
+        keyring_utils.clear_api_key_keyring_cache()
         keyring.set_keyring(original)
 
 
@@ -181,6 +185,8 @@ def _mock_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "mock")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "mock")
     monkeypatch.setenv("OPENAI_API_KEY", "mock")
+    monkeypatch.setenv("VERTEX_API_KEY", "mock")
+    monkeypatch.setenv("REASONING_API_KEY", "mock")
 
 
 @pytest.fixture(autouse=True)
@@ -303,6 +309,12 @@ def build_test_vibe_config(**kwargs) -> VibeConfig:
     # Connectors trigger a real HTTP discovery on agent construction; off by
     # default so tests don't pay for it. Connector tests pass enable_connectors=True.
     kwargs.setdefault("enable_connectors", False)
+    # Use the lightweight test system prompt unless a test asks for a real one.
+    kwargs.setdefault("system_prompt_id", "tests")
+    # Keep the test prompt minimal: skip project-context discovery and prompt
+    # detail unless a test opts in.
+    kwargs.setdefault("include_project_context", False)
+    kwargs.setdefault("include_prompt_detail", False)
     return VibeConfig(
         session_logging=resolved_session_logging,
         enable_update_checks=resolved_enable_update_checks,

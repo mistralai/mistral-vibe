@@ -31,6 +31,7 @@ agents, prompts, logs, and session data live here.
   .env                 # API keys and credentials (dotenv format)
   vibehistory          # Command history
   trusted_folders.toml # Trust database for project folders
+  connector_bootstrap_cache.json # Short-lived connector discovery cache
   agents/              # Custom agent profiles (*.toml)
   prompts/             # Custom prompts (*.md)
   skills/              # User-level skills (each skill is a subdirectory with SKILL.md)
@@ -578,7 +579,8 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/compact` - Compact conversation history by summarizing
 - `/status` - Display agent statistics
 - `/voice` - Configure voice settings
-- `/mcp` - Display available MCP servers (pass a server name to list its tools)
+- `/mcp` - Display MCP servers and connector status; pass a server or connector
+  name to list its tools or open its auth panel when authentication is required
 - `/mcp status` - Display MCP auth state (`ok`, `needs_auth`, `static`, `stdio`)
 - `/mcp login <alias>` - Start OAuth login for an MCP server
 - `/mcp logout <alias>` - Log out from an MCP server and delete stored OAuth
@@ -625,7 +627,7 @@ Image attachments:
   not added to the conversation.
 - Snapshotted into `<session_dir>/attachments/<sha1>.<ext>` so that
   resumed sessions stay reproducible even if the source file is moved.
-- Capped at 10 MB per image and 8 images per message.
+- Capped at 10 MiB per image and 8 images per message.
 - Out-of-project paths work via `@/abs/path/to.png` (the picker only
   suggests project files, but the `@`-parser accepts absolute paths).
   Drag-and-drop from Finder into Terminal, iTerm2, or Ghostty is
@@ -634,9 +636,19 @@ Image attachments:
   automatically prepends `@` (and quotes paths containing spaces).
   Non-image paths are pasted verbatim so non-image use cases are not
   affected.
-- Rendered in the chat bubble as a dim footer line linking each
-  attachment to its snapshot. Clicking opens the file with the OS
-  default image viewer.
+- **Image copy/paste from the clipboard** (**macOS only** for now):
+  writes the image to `<session_dir>/attachments/clipboard-<ts>.png`
+  (or the system temp dir when no session is active) and inserts an
+  `@<path>` token at the cursor. Two entry points:
+  1. `Ctrl+V` keybinding inside the prompt.
+  2. `/paste-image` slash command.
+
+  Uses `osascript` with a TIFF→PNG fallback via `sips`. On Linux and
+  Windows the binding and the slash command are not registered at all,
+  so the feature is invisible to users on those platforms.
+- Rendered in the chat bubble as one dim `attached image:` footer line
+  per image, linking each attachment to its snapshot. Clicking opens the
+  file with the OS default image viewer.
 
 ## Input Queue
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import Field
+from pydantic import AfterValidator, BeforeValidator, Field, model_validator
 
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config._settings import (
@@ -26,6 +27,7 @@ from vibe.core.config._settings import (
     ConnectorConfig,
     ExperimentsConfig,
     MCPServer,
+    MissingAPIKeyError,
     ModelConfig,
     ProjectContextConfig,
     ProviderConfig,
@@ -34,6 +36,8 @@ from vibe.core.config._settings import (
     TranscribeProviderConfig,
     TTSModelConfig,
     TTSProviderConfig,
+    resolve_api_key,
+    resolve_theme_name,
 )
 from vibe.core.config.schema import (
     ConfigSchema,
@@ -42,7 +46,37 @@ from vibe.core.config.schema import (
     WithShallowMerge,
     WithUnionMerge,
 )
-from vibe.core.prompts import SystemPrompt, UtilityPrompt
+from vibe.core.prompts import (
+    SystemPrompt,
+    UtilityPrompt,
+    load_prompt,
+    load_system_prompt,
+)
+
+
+def _unique_by(key: str) -> Callable[[list[Any]], list[Any]]:
+    def check(items: list[Any]) -> list[Any]:
+        seen: set[str] = set()
+        for item in items:
+            value = getattr(item, key)
+            if value in seen:
+                raise ValueError(f"Duplicate {key} {value!r}; must be unique")
+            seen.add(value)
+        return items
+
+    return check
+
+
+def _expand_paths(v: Any) -> list[Path]:
+    if not v:
+        return []
+    return [Path(p).expanduser().resolve() for p in v]
+
+
+def _normalize_tool_configs(v: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(v, dict):
+        return {}
+    return {name: cfg if isinstance(cfg, dict) else {} for name, cfg in v.items()}
 
 
 class VibeConfigSchema(ConfigSchema):
@@ -51,9 +85,11 @@ class VibeConfigSchema(ConfigSchema):
     providers: Annotated[list[ProviderConfig], WithUnionMerge(merge_key="name")] = (
         Field(default_factory=lambda: list(DEFAULT_PROVIDERS))
     )
-    models: Annotated[list[ModelConfig], WithUnionMerge(merge_key="alias")] = Field(
-        default_factory=lambda: list(DEFAULT_MODELS)
-    )
+    models: Annotated[
+        list[ModelConfig],
+        WithUnionMerge(merge_key="alias"),
+        AfterValidator(_unique_by("alias")),
+    ] = Field(default_factory=lambda: list(DEFAULT_MODELS))
     compaction_model: Annotated[ModelConfig | None, WithReplaceMerge()] = None
     auto_compact_threshold: Annotated[int, WithReplaceMerge()] = (
         DEFAULT_AUTO_COMPACT_THRESHOLD
@@ -65,7 +101,9 @@ class VibeConfigSchema(ConfigSchema):
         list[TranscribeProviderConfig], WithUnionMerge(merge_key="name")
     ] = Field(default_factory=lambda: list(DEFAULT_TRANSCRIBE_PROVIDERS))
     transcribe_models: Annotated[
-        list[TranscribeModelConfig], WithUnionMerge(merge_key="alias")
+        list[TranscribeModelConfig],
+        WithUnionMerge(merge_key="alias"),
+        AfterValidator(_unique_by("alias")),
     ] = Field(default_factory=lambda: list(DEFAULT_TRANSCRIBE_MODELS))
     active_tts_model: Annotated[str, WithReplaceMerge()] = (
         DEFAULT_ACTIVE_TTS_MODEL_CONFIG.alias
@@ -73,15 +111,21 @@ class VibeConfigSchema(ConfigSchema):
     tts_providers: Annotated[
         list[TTSProviderConfig], WithUnionMerge(merge_key="name")
     ] = Field(default_factory=lambda: list(DEFAULT_TTS_PROVIDERS))
-    tts_models: Annotated[list[TTSModelConfig], WithUnionMerge(merge_key="alias")] = (
-        Field(default_factory=lambda: list(DEFAULT_TTS_MODELS))
-    )
+    tts_models: Annotated[
+        list[TTSModelConfig],
+        WithUnionMerge(merge_key="alias"),
+        AfterValidator(_unique_by("alias")),
+    ] = Field(default_factory=lambda: list(DEFAULT_TTS_MODELS))
 
     # Tools
-    tools: Annotated[dict[str, dict[str, Any]], WithShallowMerge()] = Field(
-        default_factory=dict
-    )
-    tool_paths: Annotated[list[Path], WithConcatMerge()] = Field(
+    tools: Annotated[
+        dict[str, dict[str, Any]],
+        WithShallowMerge(),
+        BeforeValidator(_normalize_tool_configs),
+    ] = Field(default_factory=dict)
+    tool_paths: Annotated[
+        list[Path], WithConcatMerge(), BeforeValidator(_expand_paths)
+    ] = Field(
         default_factory=list,
         description=(
             "Additional directories or files to explore for custom tools. "
@@ -155,7 +199,9 @@ class VibeConfigSchema(ConfigSchema):
     )
 
     # Skills
-    skill_paths: Annotated[list[Path], WithConcatMerge()] = Field(
+    skill_paths: Annotated[
+        list[Path], WithConcatMerge(), BeforeValidator(_expand_paths)
+    ] = Field(
         default_factory=list,
         description=(
             "Additional directories to search for skills. "
@@ -199,7 +245,9 @@ class VibeConfigSchema(ConfigSchema):
     enable_experimental_hooks: Annotated[bool, WithReplaceMerge()] = False
 
     # Top-level scalars
-    theme: Annotated[str, WithReplaceMerge()] = DEFAULT_THEME
+    theme: Annotated[str, WithReplaceMerge(), BeforeValidator(resolve_theme_name)] = (
+        DEFAULT_THEME
+    )
     experiment_overrides: Annotated[dict[str, str], WithReplaceMerge()] = Field(
         default_factory=dict
     )
@@ -246,3 +294,90 @@ class VibeConfigSchema(ConfigSchema):
     experiments: Annotated[ExperimentsConfig, WithReplaceMerge()] = Field(
         default_factory=ExperimentsConfig
     )
+
+    @property
+    def active_model_config(self) -> ModelConfig:
+        if model := next(
+            (m for m in self.models if m.alias == self.active_model), None
+        ):
+            return model
+        raise ValueError(
+            f"Active model '{self.active_model}' not found in configuration."
+        )
+
+    def get_provider_for_model(self, model: ModelConfig) -> ProviderConfig:
+        if provider := next(
+            (p for p in self.providers if p.name == model.provider), None
+        ):
+            return provider
+        raise ValueError(
+            f"Provider '{model.provider}' for model '{model.name}' not found in configuration."
+        )
+
+    @property
+    def active_provider_config(self) -> ProviderConfig:
+        return self.get_provider_for_model(self.active_model_config)
+
+    @property
+    def system_prompt(self) -> str:
+        return load_system_prompt(self.system_prompt_id)
+
+    @property
+    def compaction_prompt(self) -> str:
+        return load_prompt(
+            self.compaction_prompt_id,
+            setting_name="compaction_prompt_id",
+            builtins={"compact": UtilityPrompt.COMPACT.path},
+        )
+
+    @model_validator(mode="after")
+    def _apply_global_auto_compact_threshold(self) -> VibeConfigSchema:
+        models = [
+            model
+            if "auto_compact_threshold" in model.model_fields_set
+            else model.model_copy(
+                update={"auto_compact_threshold": self.auto_compact_threshold}
+            )
+            for model in self.models
+        ]
+        object.__setattr__(self, "models", models)
+        return self
+
+    @model_validator(mode="after")
+    def _check_compaction_model_provider(self) -> VibeConfigSchema:
+        if self.compaction_model is None:
+            return self
+
+        compaction_provider = self.get_provider_for_model(self.compaction_model)
+        try:
+            active_provider = self.active_provider_config
+        except ValueError:
+            return self
+        if active_provider.name != compaction_provider.name:
+            raise ValueError(
+                f"Compaction model '{self.compaction_model.alias}' uses provider "
+                f"'{compaction_provider.name}' but active model uses provider "
+                f"'{active_provider.name}'. They must share the same provider."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_api_key(self) -> VibeConfigSchema:
+        try:
+            provider = self.active_provider_config
+            api_key_env = provider.api_key_env_var
+            if api_key_env and not resolve_api_key(api_key_env):
+                raise MissingAPIKeyError(api_key_env, provider.name)
+        except ValueError:
+            pass
+        return self
+
+    @model_validator(mode="after")
+    def _check_system_prompt(self) -> VibeConfigSchema:
+        _ = self.system_prompt
+        return self
+
+    @model_validator(mode="after")
+    def _check_compaction_prompt(self) -> VibeConfigSchema:
+        _ = self.compaction_prompt
+        return self

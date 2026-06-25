@@ -19,7 +19,7 @@ from vibe.core.config import MCPStdio
 from vibe.core.telemetry.types import TerminalEmulator
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.mcp import AuthStatus
-from vibe.core.tools.mcp.tools import RemoteTool
+from vibe.core.tools.remote import RemoteTool
 
 
 def _build_uninitiated_loop(**kwargs):
@@ -67,8 +67,8 @@ class TestCompleteInit:
         loop = _build_uninitiated_loop(config=config)
 
         with patch.object(
-            loop.tool_manager._mcp_registry,
-            "get_tools_async",
+            loop.tool_manager,
+            "integrate_all",
             side_effect=RuntimeError("mcp discovery boom"),
         ):
             _run_init(loop)
@@ -76,6 +76,20 @@ class TestCompleteInit:
         assert loop.is_initialized
         assert isinstance(loop._init_error, RuntimeError)
         assert str(loop._init_error) == "mcp discovery boom"
+
+    def test_delays_connector_registry_until_deferred_init(self) -> None:
+        config = build_test_vibe_config(enable_connectors=True)
+        with patch.object(AgentLoop, "_start_deferred_init"):
+            loop = AgentLoop(
+                config=config, backend=FakeBackend(), defer_heavy_init=True
+            )
+
+        assert loop.connector_registry is None
+
+        with patch.object(loop.tool_manager, "integrate_all"):
+            _run_init(loop)
+
+        assert loop.connector_registry is not None
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +245,27 @@ class TestDeferredInitPublicMethods:
         await loop.reload_with_initial_messages()
 
         assert loop.is_initialized
+
+    @pytest.mark.asyncio
+    async def test_reload_creates_shared_mcp_registry_after_servers_are_added(
+        self,
+    ) -> None:
+        loop = build_test_agent_loop(defer_heavy_init=True, mcp_registry=None)
+        await loop.wait_until_ready()
+        assert loop.mcp_registry is None
+
+        mcp_server = MCPStdio(name="srv", transport="stdio", command="echo")
+        config = build_test_vibe_config(mcp_servers=[mcp_server])
+        registry = FakeMCPRegistry()
+
+        with (
+            patch.object(AgentLoop, "_create_mcp_registry", return_value=registry),
+            patch.object(ToolManager, "integrate_all"),
+        ):
+            await loop.reload_with_initial_messages(base_config=config)
+
+        assert loop.mcp_registry is registry
+        assert loop.tool_manager._mcp_registry is registry
 
     @pytest.mark.asyncio
     async def test_switch_agent_waits_for_deferred_init(self) -> None:

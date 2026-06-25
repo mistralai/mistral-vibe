@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.0] - 2026-06-25
+
+### Added
+
+- Clickable URLs in web fetch and web search tool output
+- Context window usage display in tokens at the bottom of the TUI
+- Clipboard image paste support in the TUI (macOS)
+- Max generated tokens set_config_option in ACP
+
+### Changed
+
+- MCP OAuth authentication UX improvements in `/mcp` panel
+- Diff gutter and body split into separate widgets
+- Faster UI startup with lazy heavy imports
+- Improved connector performance with bootstrap caching
+
+### Fixed
+
+- macOS keychain access for Vibe credentials
+- Standalone denylist incorrectly blocking commands with heredocs
+- Copy selected text from prompt input and text areas
+- Repeated keyring requests in Vibe Code
+- Brew upgrade now always runs even when uv upgrade succeeds
+- Terminal kill/release bounding for ACP to prevent hangs
+
+
 ## [2.17.1] - 2026-06-19
 
 ### Changed

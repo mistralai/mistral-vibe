@@ -748,7 +748,10 @@ class VibeAcpAgentLoop(AcpAgent):
             pass
 
     async def _notify_mcp_auth_required(self, session: AcpSessionLoop) -> None:
-        statuses = session.agent_loop.mcp_registry.status()
+        registry = session.agent_loop.mcp_registry
+        if registry is None:
+            return
+        statuses = registry.status()
         aliases = sorted(
             alias
             for alias, status in statuses.items()
@@ -1335,6 +1338,14 @@ class VibeAcpAgentLoop(AcpAgent):
                     success = False
                 else:
                     session.agent_loop.set_max_turns(max_turns)
+                    success = True
+            case "max_tokens" if isinstance(value, str):
+                try:
+                    max_tokens = int(value)
+                except ValueError:
+                    success = False
+                else:
+                    session.agent_loop.set_max_tokens(max_tokens)
                     success = True
             case _:
                 success = False
@@ -2085,7 +2096,8 @@ class VibeAcpAgentLoop(AcpAgent):
                 session, "Usage: `/mcp status`", message_id
             )
         await session.agent_loop.wait_until_ready()
-        statuses = session.agent_loop.mcp_registry.status()
+        registry = session.agent_loop.mcp_registry
+        statuses = registry.status() if registry is not None else {}
         if not statuses:
             return await self._command_reply(
                 session, "No MCP servers configured.", message_id
@@ -2103,7 +2115,8 @@ class VibeAcpAgentLoop(AcpAgent):
                 session, "Usage: `/mcp login <alias>`", message_id
             )
         await session.agent_loop.wait_until_ready()
-        statuses = session.agent_loop.mcp_registry.status()
+        registry = session.agent_loop.mcp_registry
+        statuses = registry.status() if registry is not None else {}
         if alias not in statuses:
             return await self._command_reply(
                 session, f"Unknown MCP server: `{alias}`", message_id
@@ -2126,8 +2139,13 @@ class VibeAcpAgentLoop(AcpAgent):
                 session, "Usage: `/mcp logout <alias>`", message_id
             )
         await session.agent_loop.wait_until_ready()
+        registry = session.agent_loop.mcp_registry
+        if registry is None:
+            return await self._command_reply(
+                session, "No MCP servers configured.", message_id
+            )
         try:
-            await session.agent_loop.mcp_registry.logout(alias)
+            await registry.logout(alias)
             await session.agent_loop.tool_manager.refresh_remote_tools_async()
             await session.agent_loop.refresh_system_prompt()
         except (MCPOAuthError, ValueError) as exc:

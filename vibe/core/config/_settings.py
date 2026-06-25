@@ -11,8 +11,6 @@ from typing import Annotated, Any, ClassVar, Literal, get_args
 from urllib.parse import urljoin
 
 from dotenv import dotenv_values
-import keyring
-from keyring.errors import KeyringError
 from mistralai.client.models import SpeechOutputFormat
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
     DEFAULT_TRACES_EXPORT_PATH,
@@ -47,6 +45,7 @@ from vibe.core.prompts import (
 )
 from vibe.core.types import Backend
 from vibe.core.utils import configure_ssl_context, get_server_url_from_api_base
+from vibe.core.utils.keyring import get_api_key_from_keyring
 
 
 def _strip_bash_pattern_wildcard(pattern: str) -> str:
@@ -85,9 +84,6 @@ def load_dotenv_values(
         environ[key] = value
 
 
-_KEYRING_SERVICE = "vibe"
-
-
 def resolve_api_key(env_key: str) -> str | None:
     """Resolve an API key value: process/.env environment first, then OS keyring."""
     if not env_key:
@@ -95,10 +91,7 @@ def resolve_api_key(env_key: str) -> str | None:
     value = os.environ.get(env_key)
     if value:
         return value
-    try:
-        return keyring.get_password(_KEYRING_SERVICE, env_key)
-    except KeyringError:
-        return None
+    return get_api_key_from_keyring(env_key)
 
 
 class MissingAPIKeyError(RuntimeError):

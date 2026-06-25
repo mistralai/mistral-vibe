@@ -18,6 +18,7 @@ from vibe.cli.textual_ui.widgets.diff_rendering import (
     locate_snippets_in_file,
     render_edit_diff,
 )
+from vibe.cli.textual_ui.widgets.links import LinkStatic, link_markup
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.tools.builtins.ask_user_question import AskUserQuestionResult
 from vibe.core.tools.builtins.bash import BashArgs, BashResult
@@ -25,6 +26,8 @@ from vibe.core.tools.builtins.edit import EditArgs, EditResult
 from vibe.core.tools.builtins.grep import GrepArgs, GrepResult
 from vibe.core.tools.builtins.read import ReadArgs, ReadResult
 from vibe.core.tools.builtins.todo import TodoArgs, TodoResult
+from vibe.core.tools.builtins.webfetch import WebFetchResult
+from vibe.core.tools.builtins.websearch import WebSearchResult, WebSearchSource
 from vibe.core.tools.builtins.write_file import WriteFileArgs, WriteFileResult
 
 _LINE_NUMBER_PREFIX = re.compile(r"^ *\d+→")
@@ -380,6 +383,41 @@ class AskUserQuestionResultWidget(ToolResultWidget[AskUserQuestionResult]):
         yield from self._footer()
 
 
+class WebSearchResultWidget(ToolResultWidget[WebSearchResult]):
+    @staticmethod
+    def _source_markup(source: WebSearchSource) -> str:
+        label = source.title or source.url
+        return link_markup(label, source.url)
+
+    def compose(self) -> ComposeResult:
+        if not self.result:
+            yield from self._footer()
+            return
+        result = self.result
+        yield NoMarkupStatic(f"query: {result.query}", classes="tool-result-detail")
+        if result.answer:
+            yield from self._yield_truncated_text(f"answer: {result.answer}")
+        if result.sources:
+            yield NoMarkupStatic("")
+            if len(result.sources) > 1:
+                yield NoMarkupStatic("Sources:", classes="tool-result-detail")
+            lines = [f"  • {self._source_markup(s)}" for s in result.sources]
+            yield LinkStatic("\n".join(lines), classes="tool-result-detail")
+        yield from self._footer()
+
+
+class WebFetchResultWidget(ToolResultWidget[WebFetchResult]):
+    def compose(self) -> ComposeResult:
+        if not self.result:
+            yield from self._footer()
+            return
+        yield from self._yield_truncated_text(self.result.content)
+        yield NoMarkupStatic("")
+        link = link_markup(self.result.url, self.result.url)
+        yield LinkStatic(link, classes="tool-result-detail")
+        yield from self._footer()
+
+
 APPROVAL_WIDGETS: dict[str, type[ToolApprovalWidget]] = {
     "bash": BashApprovalWidget,
     "read": ReadApprovalWidget,
@@ -397,7 +435,13 @@ RESULT_WIDGETS: dict[str, type[ToolResultWidget]] = {
     "grep": GrepResultWidget,
     "todo": TodoResultWidget,
     "ask_user_question": AskUserQuestionResultWidget,
+    "web_search": WebSearchResultWidget,
+    "web_fetch": WebFetchResultWidget,
 }
+
+# Tools whose result message text is allowed to contain clickable URLs.
+# Opt-in: extend this set when a tool's message becomes URL-shaped.
+LINKIFY_RESULT_TOOLS: frozenset[str] = frozenset({"web_fetch"})
 
 
 def get_approval_widget(tool_name: str, args: BaseModel) -> ToolApprovalWidget:

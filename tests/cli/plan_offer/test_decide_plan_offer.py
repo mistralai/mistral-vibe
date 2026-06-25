@@ -183,7 +183,7 @@ def test_resolve_api_key_for_plan_falls_back_to_keyring(
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     keyring_api_key = "keyring_mistral_api_key"
     monkeypatch.setattr(
-        "vibe.core.config._settings.keyring.get_password",
+        "vibe.core.utils.keyring.keyring.get_password",
         lambda service, username: keyring_api_key,
     )
 

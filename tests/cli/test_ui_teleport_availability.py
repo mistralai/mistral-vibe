@@ -12,6 +12,7 @@ from tests.constants import OPENAI_BASE_URL
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.messages import ErrorMessage
+from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.types import Backend
 
@@ -71,6 +72,23 @@ async def test_teleport_command_visible_for_paid_chat_users() -> None:
         input_widget = app.query_one(ChatInputContainer).input_widget
         assert input_widget is not None
         assert "&" in input_widget.mode_characters
+
+
+@pytest.mark.asyncio
+async def test_plan_resolution_updates_subscription_banner() -> None:
+    app = build_test_vibe_app(
+        config=_vibe_code_enabled_config(),
+        plan_offer_gateway=_chat_plan_gateway(prompt_switching_to_pro_plan=False),
+    )
+
+    async with app.run_test() as pilot:
+        await _wait_until(
+            pilot.pause,
+            lambda: (
+                "[Subscription] Pro"
+                in str(app.query_one("#banner-user-plan", NoMarkupStatic).content)
+            ),
+        )
 
 
 @pytest.mark.asyncio

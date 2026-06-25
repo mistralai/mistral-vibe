@@ -206,6 +206,7 @@ async def get_acp_agent_loop_process(
     env.update(mock_env)
     env["MISTRAL_API_KEY"] = "mock"
     env["VIBE_HOME"] = str(vibe_home)
+    env["VIBE_TEST_DISABLE_KEYRING"] = "1"
 
     process = await asyncio.create_subprocess_exec(
         *cmd,

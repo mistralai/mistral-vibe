@@ -61,9 +61,6 @@ def _make_agent_loop(backend: FakeBackend):
             "edit": {"permission": "always"},
             "bash": {"permission": "always"},
         },
-        system_prompt_id="tests",
-        include_project_context=False,
-        include_prompt_detail=False,
     )
     return build_test_agent_loop(
         config=config, agent_name=BuiltinAgentName.AUTO_APPROVE, backend=backend

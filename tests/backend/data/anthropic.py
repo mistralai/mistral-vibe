@@ -3,11 +3,40 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from tests.backend.data import Chunk, JsonResponse
+from tests.backend.data import (
+    ANSWER_COMPLETION_TOKENS,
+    ANSWER_PROMPT_TOKENS,
+    Chunk,
+    JsonResponse,
+)
 
 
 def _sse_event(data: dict[str, Any]) -> Chunk:
     return f"data: {json.dumps(data, separators=(',', ':'))}".encode()
+
+
+def _block_start(index: int, block: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "content_block_start", "index": index, "content_block": block}
+
+
+def _block_delta(index: int, delta: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "content_block_delta", "index": index, "delta": delta}
+
+
+def _content_stream(
+    blocks: list[dict[str, Any]], *, input_tokens: int, output_tokens: int, stop: str
+) -> list[Chunk]:
+    events = [
+        {"type": "message_start", "message": {"usage": {"input_tokens": input_tokens}}},
+        *blocks,
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop},
+            "usage": {"output_tokens": output_tokens},
+        },
+        {"type": "message_stop"},
+    ]
+    return [_sse_event(e) for e in events]
 
 
 def anthropic_request_content_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -24,8 +53,8 @@ def anthropic_request_content_blocks(payload: dict[str, Any]) -> list[dict[str, 
 def anthropic_message(
     text: str,
     *,
-    input_tokens: int = 12,
-    output_tokens: int = 3,
+    input_tokens: int = ANSWER_PROMPT_TOKENS,
+    output_tokens: int = ANSWER_COMPLETION_TOKENS,
     stop_reason: str = "end_turn",
 ) -> JsonResponse:
     return {
@@ -62,71 +91,31 @@ def anthropic_reasoning_tool_use_stream(
     input_tokens: int = 20,
     output_tokens: int = 5,
 ) -> list[Chunk]:
-    return [
-        _sse_event(e)
-        for e in (
-            {
-                "type": "message_start",
-                "message": {"usage": {"input_tokens": input_tokens}},
-            },
-            {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "thinking", "thinking": reasoning},
-            },
-            {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "signature_delta", "signature": signature},
-            },
+    return _content_stream(
+        [
+            _block_start(0, {"type": "thinking", "thinking": reasoning}),
+            _block_delta(0, {"type": "signature_delta", "signature": signature}),
             {"type": "content_block_stop", "index": 0},
-            {
-                "type": "content_block_start",
-                "index": 1,
-                "content_block": {"type": "tool_use", "id": tool_id, "name": name},
-            },
-            {
-                "type": "content_block_delta",
-                "index": 1,
-                "delta": {"type": "input_json_delta", "partial_json": arguments},
-            },
+            _block_start(1, {"type": "tool_use", "id": tool_id, "name": name}),
+            _block_delta(1, {"type": "input_json_delta", "partial_json": arguments}),
             {"type": "content_block_stop", "index": 1},
-            {
-                "type": "message_delta",
-                "delta": {"stop_reason": "tool_use"},
-                "usage": {"output_tokens": output_tokens},
-            },
-            {"type": "message_stop"},
-        )
-    ]
+        ],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        stop="tool_use",
+    )
 
 
 def anthropic_text_stream(
     text: str, *, input_tokens: int = 12, output_tokens: int = 3
 ) -> list[Chunk]:
-    return [
-        _sse_event(e)
-        for e in (
-            {
-                "type": "message_start",
-                "message": {"usage": {"input_tokens": input_tokens}},
-            },
-            {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
-            },
-            {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "text_delta", "text": text},
-            },
+    return _content_stream(
+        [
+            _block_start(0, {"type": "text", "text": ""}),
+            _block_delta(0, {"type": "text_delta", "text": text}),
             {"type": "content_block_stop", "index": 0},
-            {
-                "type": "message_delta",
-                "delta": {"stop_reason": "end_turn"},
-                "usage": {"output_tokens": output_tokens},
-            },
-            {"type": "message_stop"},
-        )
-    ]
+        ],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        stop="end_turn",
+    )

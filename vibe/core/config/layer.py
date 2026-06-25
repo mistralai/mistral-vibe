@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from vibe.core.config.patch import ConfigPatch
 from vibe.core.config.types import (
-    MISSING_CONFIG_FILE_FINGERPRINT,
+    MISSING_BACKING_STORE_DATA_FINGERPRINT,
     ConcurrencyConflictError,
     ConflictStrategy,
     LayerConfigSnapshot,
@@ -303,7 +303,7 @@ class ConfigLayer[S: BaseModel](ABC):
         if (
             state.data is None
             or state.fingerprint is None
-            or state.fingerprint == MISSING_CONFIG_FILE_FINGERPRINT
+            or state.fingerprint == MISSING_BACKING_STORE_DATA_FINGERPRINT
         ):
             raise LayerNotLoadedError(self.name)
 

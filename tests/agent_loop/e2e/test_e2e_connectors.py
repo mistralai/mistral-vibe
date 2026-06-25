@@ -6,8 +6,9 @@ import httpx
 import pytest
 import respx
 
-from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop, e2e_config
+from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop
 from tests.backend.data.mistral import mistral_completion
+from tests.conftest import build_test_vibe_config
 from tests.constants import CONNECTORS_BOOTSTRAP_PATH
 from vibe.core.config import ConnectorConfig
 
@@ -44,8 +45,9 @@ def _set_bootstrap(router: respx.MockRouter, connectors: list[dict[str, Any]]) -
 
 
 def _connectors_config(*aliases: str) -> Any:
-    return e2e_config(
-        connectors=[ConnectorConfig(name=alias, disabled=False) for alias in aliases]
+    return build_test_vibe_config(
+        enable_connectors=True,
+        connectors=[ConnectorConfig(name=alias, disabled=False) for alias in aliases],
     )
 
 

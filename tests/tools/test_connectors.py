@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -13,8 +14,12 @@ from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.config import ConnectorConfig, VibeConfig
 from vibe.core.tools.base import BaseToolConfig, ToolError
-from vibe.core.tools.connectors import compute_connector_counts
+from vibe.core.tools.connectors import (
+    compute_connector_counts,
+    connector_registry as connector_registry_module,
+)
 from vibe.core.tools.connectors.connector_registry import (
+    _BOOTSTRAP_CACHE_TTL_SECONDS,
     ConnectorAuthAction,
     ConnectorRegistry,
     RemoteTool,
@@ -25,6 +30,8 @@ from vibe.core.tools.connectors.connector_registry import (
 )
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.mcp.tools import MCPTool, MCPToolResult
+
+_BOOTSTRAP_CACHE_FILE_NAME = "connector_bootstrap_cache.json"
 
 # ---------------------------------------------------------------------------
 # Unit tests for helper functions
@@ -561,6 +568,202 @@ class TestBootstrapDiscovery:
         assert tools == {}
         assert registry.connector_count == 0
 
+    @pytest.mark.asyncio
+    async def test_fresh_bootstrap_cache_avoids_http(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("cached")])
+        ])
+
+        with (
+            patch.object(connector_registry_module.time, "time", return_value=1_000),
+            respx.mock,
+        ):
+            respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            await ConnectorRegistry(api_key="test-key").get_tools_async()
+
+        with (
+            patch.object(connector_registry_module.time, "time", return_value=1_100),
+            respx.mock(assert_all_called=False) as router,
+        ):
+            route = router.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(500, text="should not be called")
+            )
+            tools = await ConnectorRegistry(api_key="test-key").get_tools_async()
+
+        assert "connector_wiki_cached" in tools
+        assert not route.called
+
+    @pytest.mark.asyncio
+    async def test_stale_bootstrap_cache_falls_back_to_http(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        cached_payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("cached")])
+        ])
+        fresh_payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("fresh")])
+        ])
+
+        with (
+            patch.object(connector_registry_module.time, "time", return_value=1_000),
+            respx.mock,
+        ):
+            respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=cached_payload)
+            )
+            await ConnectorRegistry(api_key="test-key").get_tools_async()
+
+        with (
+            patch.object(
+                connector_registry_module.time,
+                "time",
+                return_value=1_000 + _BOOTSTRAP_CACHE_TTL_SECONDS + 1,
+            ),
+            respx.mock,
+        ):
+            route = respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=fresh_payload)
+            )
+            tools = await ConnectorRegistry(api_key="test-key").get_tools_async()
+
+        assert route.called
+        assert "connector_wiki_fresh" in tools
+        assert "connector_wiki_cached" not in tools
+
+    @pytest.mark.asyncio
+    async def test_malformed_bootstrap_cache_falls_back_to_http(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        (tmp_path / _BOOTSTRAP_CACHE_FILE_NAME).write_text("{bad toml")
+        payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("fresh")])
+        ])
+
+        with respx.mock:
+            route = respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            tools = await ConnectorRegistry(api_key="test-key").get_tools_async()
+
+        assert route.called
+        assert "connector_wiki_fresh" in tools
+
+    @pytest.mark.asyncio
+    async def test_force_refresh_bypasses_fresh_bootstrap_cache(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        cached_payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("cached")])
+        ])
+        fresh_payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("fresh")])
+        ])
+
+        with (
+            patch.object(connector_registry_module.time, "time", return_value=1_000),
+            respx.mock,
+        ):
+            respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=cached_payload)
+            )
+            await ConnectorRegistry(api_key="test-key").get_tools_async()
+
+        with (
+            patch.object(connector_registry_module.time, "time", return_value=1_100),
+            respx.mock,
+        ):
+            route = respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=fresh_payload)
+            )
+            tools = await ConnectorRegistry(api_key="test-key").get_tools_async(
+                force_refresh=True
+            )
+
+        assert route.called
+        assert "connector_wiki_fresh" in tools
+        assert "connector_wiki_cached" not in tools
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_cache_does_not_store_raw_api_key(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("cached")])
+        ])
+
+        with respx.mock:
+            respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            await ConnectorRegistry(api_key="secret-test-key").get_tools_async()
+
+        cache_text = (tmp_path / _BOOTSTRAP_CACHE_FILE_NAME).read_text()
+        assert "secret-test-key" not in cache_text
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_cache_stores_only_consumed_connector_fields(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                tools=[{**_make_tool_payload("cached"), "secret_extra": "tool-secret"}],
+                auth_action={"type": "oauth", "url": "https://secret.example.com"},
+            )
+            | {
+                "display_name": "Private display name",
+                "description": "Private connector description",
+                "bootstrap_errors": ["private error detail"],
+            }
+        ])
+
+        with respx.mock:
+            respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            await ConnectorRegistry(api_key="test-key").get_tools_async()
+
+        cache_text = (tmp_path / _BOOTSTRAP_CACHE_FILE_NAME).read_text()
+        assert "Private display name" not in cache_text
+        assert "Private connector description" not in cache_text
+        assert "private error detail" not in cache_text
+        assert "https://secret.example.com" not in cache_text
+        assert "tool-secret" not in cache_text
+
+        cache = json.loads(cache_text)
+        entry = next(iter(cache.values()))
+        connector = entry["payload"]["connectors"][0]
+        assert set(connector) == {"id", "name", "status", "tools", "auth_action"}
+        assert connector["auth_action"] == {"type": "oauth"}
+        assert set(connector["tools"][0]) == {"name", "description", "inputSchema"}
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_cache_uses_dedicated_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        payload = _make_bootstrap_response([
+            _make_connector_payload(tools=[_make_tool_payload("cached")])
+        ])
+
+        with respx.mock:
+            respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            await ConnectorRegistry(api_key="test-key").get_tools_async()
+
+        assert (tmp_path / _BOOTSTRAP_CACHE_FILE_NAME).exists()
+        assert not (tmp_path / "cache.toml").exists()
+
     @respx.mock
     @pytest.mark.asyncio
     async def test_deduplicates_connector_aliases(self) -> None:
@@ -820,6 +1023,51 @@ class TestAuthActionablediscovery:
         assert "connector_linear_search_issues" in refreshed
         assert registry.is_connected("linear")
         assert registry.get_auth_action("linear") == ConnectorAuthAction.NONE
+
+    @pytest.mark.asyncio
+    async def test_refresh_updates_bootstrap_file_cache(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1",
+                name="linear",
+                is_ready=False,
+                tools=[],
+                auth_action={"type": "oauth"},
+            )
+        ])
+
+        with respx.mock:
+            respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            registry = ConnectorRegistry(api_key="test-key")
+            await registry.get_tools_async()
+
+        refresh_payload = _make_bootstrap_response([
+            _make_connector_payload(
+                connector_id="c-1",
+                name="linear",
+                tools=[_make_tool_payload("search_issues")],
+            )
+        ])
+        with respx.mock:
+            respx.get(_BOOTSTRAP_URL).mock(
+                return_value=httpx.Response(200, json=refresh_payload)
+            )
+            await registry.refresh_connector_async("linear")
+
+        with respx.mock:
+            route = respx.get(_BOOTSTRAP_URL).mock(return_value=httpx.Response(500))
+            warm_registry = ConnectorRegistry(api_key="test-key")
+            tools = await warm_registry.get_tools_async()
+
+        assert not route.called
+        assert "connector_linear_search_issues" in tools
+        assert warm_registry.is_connected("linear")
+        assert warm_registry.get_auth_action("linear") == ConnectorAuthAction.NONE
 
     def test_get_auth_action_unknown_alias_returns_none(self) -> None:
         registry = ConnectorRegistry(api_key="test-key")

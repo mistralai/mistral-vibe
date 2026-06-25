@@ -528,3 +528,67 @@ class TestACPSetConfigOptionMaxTurns:
         ]
         assert len(turn_limits) == 1
         assert turn_limits[0].max_turns == 200
+
+
+class TestACPSetConfigOptionMaxTokens:
+    @pytest.mark.asyncio
+    async def test_set_config_option_max_tokens_success(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="max_tokens", value="8192"
+        )
+
+        assert response is not None
+        assert acp_session.agent_loop._max_tokens == 8192
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_max_tokens_invalid_string_returns_none(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+        initial_max_tokens = acp_session.agent_loop._max_tokens
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="max_tokens", value="abc"
+        )
+
+        assert response is None
+        assert acp_session.agent_loop._max_tokens == initial_max_tokens
+
+    @pytest.mark.asyncio
+    async def test_set_config_option_max_tokens_bool_returns_none(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = next(
+            (s for s in acp_agent_loop.sessions.values() if s.id == session_id), None
+        )
+        assert acp_session is not None
+        initial_max_tokens = acp_session.agent_loop._max_tokens
+
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="max_tokens", value=True
+        )
+
+        assert response is None
+        assert acp_session.agent_loop._max_tokens == initial_max_tokens

@@ -367,12 +367,6 @@ class TestAgentProfileOverrides:
 
 class TestAgentManagerCycling:
     @pytest.fixture
-    def base_config(self) -> VibeConfig:
-        return build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
-
-    @pytest.fixture
     def backend(self) -> FakeBackend:
         return FakeBackend([
             LLMChunk(
@@ -382,10 +376,10 @@ class TestAgentManagerCycling:
         ])
 
     def test_get_agent_order_includes_primary_agents(
-        self, base_config: VibeConfig, backend: FakeBackend
+        self, vibe_config: VibeConfig, backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=vibe_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         order = agent.agent_manager.get_agent_order()
         assert len(order) == 4
@@ -395,10 +389,10 @@ class TestAgentManagerCycling:
         assert BuiltinAgentName.ACCEPT_EDITS in order
 
     def test_next_agent_cycles_through_all(
-        self, base_config: VibeConfig, backend: FakeBackend
+        self, vibe_config: VibeConfig, backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=vibe_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         order = agent.agent_manager.get_agent_order()
         current = agent.agent_manager.active_profile
@@ -409,10 +403,10 @@ class TestAgentManagerCycling:
         assert len(set(visited)) == len(order)
 
     def test_next_agent_wraps_around(
-        self, base_config: VibeConfig, backend: FakeBackend
+        self, vibe_config: VibeConfig, backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=vibe_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         order = agent.agent_manager.get_agent_order()
         last_profile = agent.agent_manager.get_agent(order[-1])
@@ -434,12 +428,6 @@ class TestAgentProfileConfig:
 
 class TestAgentSwitchAgent:
     @pytest.fixture
-    def base_config(self) -> VibeConfig:
-        return build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
-
-    @pytest.fixture
     def backend(self) -> FakeBackend:
         return FakeBackend([
             LLMChunk(
@@ -450,10 +438,10 @@ class TestAgentSwitchAgent:
 
     @pytest.mark.asyncio
     async def test_switch_to_plan_agent_has_tools_with_restricted_permissions(
-        self, base_config: VibeConfig, backend: FakeBackend
+        self, vibe_config: VibeConfig, backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=vibe_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         await agent.switch_agent(BuiltinAgentName.PLAN)
 
@@ -471,10 +459,10 @@ class TestAgentSwitchAgent:
 
     @pytest.mark.asyncio
     async def test_switch_from_plan_to_default_restores_tools(
-        self, base_config: VibeConfig, backend: FakeBackend
+        self, vibe_config: VibeConfig, backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=base_config, agent_name=BuiltinAgentName.PLAN, backend=backend
+            config=vibe_config, agent_name=BuiltinAgentName.PLAN, backend=backend
         )
 
         await agent.switch_agent(BuiltinAgentName.DEFAULT)
@@ -486,10 +474,10 @@ class TestAgentSwitchAgent:
 
     @pytest.mark.asyncio
     async def test_switch_agent_preserves_conversation_history(
-        self, base_config: VibeConfig, backend: FakeBackend
+        self, vibe_config: VibeConfig, backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=vibe_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         user_msg = LLMMessage(role=Role.user, content="Hello")
         assistant_msg = LLMMessage(role=Role.assistant, content="Hi there")
@@ -504,10 +492,10 @@ class TestAgentSwitchAgent:
 
     @pytest.mark.asyncio
     async def test_switch_to_same_agent_is_noop(
-        self, base_config: VibeConfig, backend: FakeBackend
+        self, vibe_config: VibeConfig, backend: FakeBackend
     ) -> None:
         agent = build_test_agent_loop(
-            config=base_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
+            config=vibe_config, agent_name=BuiltinAgentName.DEFAULT, backend=backend
         )
         original_config = agent.config
 
@@ -587,11 +575,7 @@ class TestPlanAgentToolRestriction:
 
 class TestAgentManagerFiltering:
     def test_enabled_agents_filters_to_only_enabled(self) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            enabled_agents=["default", "plan"],
-        )
+        config = build_test_vibe_config(enabled_agents=["default", "plan"])
         manager = AgentManager(lambda: config)
 
         agents = manager.available_agents
@@ -603,9 +587,7 @@ class TestAgentManagerFiltering:
 
     def test_disabled_agents_excludes_disabled(self) -> None:
         config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            disabled_agents=["auto-approve", "accept-edits"],
+            disabled_agents=["auto-approve", "accept-edits"]
         )
         manager = AgentManager(lambda: config)
 
@@ -618,8 +600,6 @@ class TestAgentManagerFiltering:
 
     def test_enabled_agents_takes_precedence_over_disabled(self) -> None:
         config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
             enabled_agents=["default"],
             disabled_agents=["default"],  # Should be ignored
         )
@@ -630,11 +610,7 @@ class TestAgentManagerFiltering:
         assert "default" in agents
 
     def test_glob_pattern_matching(self) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            disabled_agents=["auto-*", "accept-*"],
-        )
+        config = build_test_vibe_config(disabled_agents=["auto-*", "accept-*"])
         manager = AgentManager(lambda: config)
 
         agents = manager.available_agents
@@ -644,11 +620,7 @@ class TestAgentManagerFiltering:
         assert "accept-edits" not in agents
 
     def test_regex_pattern_matching(self) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            enabled_agents=["re:^(default|plan)$"],
-        )
+        config = build_test_vibe_config(enabled_agents=["re:^(default|plan)$"])
         manager = AgentManager(lambda: config)
 
         agents = manager.available_agents
@@ -657,11 +629,7 @@ class TestAgentManagerFiltering:
         assert "plan" in agents
 
     def test_empty_enabled_agents_returns_all(self) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            enabled_agents=[],
-        )
+        config = build_test_vibe_config(enabled_agents=[])
         manager = AgentManager(lambda: config)
 
         agents = manager.available_agents
@@ -671,31 +639,21 @@ class TestAgentManagerFiltering:
         assert "explore" in agents
 
     def test_install_required_agents_hidden_by_default(self) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
+        config = build_test_vibe_config()
         manager = AgentManager(lambda: config)
 
         agents = manager.available_agents
         assert "lean" not in agents
 
     def test_install_required_agents_visible_when_installed(self) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            installed_agents=["lean"],
-        )
+        config = build_test_vibe_config(installed_agents=["lean"])
         manager = AgentManager(lambda: config)
 
         agents = manager.available_agents
         assert "lean" in agents
 
     def test_get_subagents_respects_filtering(self) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            disabled_agents=["explore"],
-        )
+        config = build_test_vibe_config(disabled_agents=["explore"])
         manager = AgentManager(lambda: config)
 
         subagents = manager.get_subagents()
@@ -722,11 +680,9 @@ class TestAgentLoopInitialization:
         monkeypatch.setattr("vibe.core.agents.models.BUILTIN_AGENTS", patched_agents)
         monkeypatch.setattr("vibe.core.agents.manager.BUILTIN_AGENTS", patched_agents)
 
-        config = build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
+        config = build_test_vibe_config(system_prompt_id="cli")
         assert config.system_prompt_id == "cli", (
-            "Base config should use default 'cli' prompt"
+            "Base config should use the 'cli' prompt"
         )
 
         agent_loop = build_test_agent_loop(

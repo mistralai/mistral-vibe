@@ -4,16 +4,13 @@ from typing import Any
 
 import pytest
 
-from tests.agent_loop.e2e.conftest import (
-    MistralAPI,
-    assistant_text,
-    build_e2e_agent_loop,
-    e2e_config,
-)
+from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop
+from tests.agent_loop.e2e.providers import assistant_text
 from tests.backend.data.mistral import (
     STREAMED_SIMPLE_CONVERSATION_PARAMS,
     mistral_completion,
 )
+from tests.conftest import build_test_vibe_config
 from vibe.core.types import (
     AssistantEvent,
     ToolCallEvent,
@@ -75,7 +72,7 @@ async def test_act_tool_call_round_trip(mistral_api: MistralAPI) -> None:
         mistral_completion("", tool_calls=TODO_TOOL_CALL),
         mistral_completion("All done"),
     )
-    agent = build_e2e_agent_loop(config=e2e_config(enabled_tools=["todo"]))
+    agent = build_e2e_agent_loop(config=build_test_vibe_config(enabled_tools=["todo"]))
 
     events = [event async for event in agent.act("Show my todos")]
 
@@ -89,7 +86,7 @@ async def test_act_tool_call_round_trip(mistral_api: MistralAPI) -> None:
 async def test_act_serializes_tools_in_request_payload(mistral_api: MistralAPI) -> None:
     # Enabled tools are serialized into the outgoing chat-completions request.
     mistral_api.reply(mistral_completion("ok"))
-    agent = build_e2e_agent_loop(config=e2e_config(enabled_tools=["todo"]))
+    agent = build_e2e_agent_loop(config=build_test_vibe_config(enabled_tools=["todo"]))
 
     _ = [event async for event in agent.act("Hello")]
 

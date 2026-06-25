@@ -260,7 +260,7 @@ class TestACPAuthSignOut:
 
     @pytest.mark.asyncio
     async def test_removes_keyring_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        deleted: list[str] = []
+        deleted: list[tuple[str, str]] = []
         monkeypatch.delenv(DEFAULT_MISTRAL_API_ENV_KEY, raising=False)
         monkeypatch.setattr(
             keyring, "get_password", lambda service, username: "keyring-key"
@@ -268,14 +268,17 @@ class TestACPAuthSignOut:
         monkeypatch.setattr(
             keyring,
             "delete_password",
-            lambda service, username: deleted.append(username),
+            lambda service, username: deleted.append((service, username)),
         )
         acp_agent_loop = build_acp_agent_loop(build_mistral_provider())
 
         response = await acp_agent_loop.ext_method("auth/signOut", {})
 
         assert response == {}
-        assert deleted == [DEFAULT_MISTRAL_API_ENV_KEY]
+        assert deleted == [
+            ("ai.mistral.vibe", DEFAULT_MISTRAL_API_ENV_KEY),
+            ("vibe", DEFAULT_MISTRAL_API_ENV_KEY),
+        ]
 
     @pytest.mark.asyncio
     async def test_surfaces_internal_error_when_keyring_delete_fails(

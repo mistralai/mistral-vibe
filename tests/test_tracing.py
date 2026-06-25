@@ -331,9 +331,6 @@ class TestIntegration:
         config = build_test_vibe_config(
             enabled_tools=["todo"],
             tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
-            system_prompt_id="tests",
-            include_project_context=False,
-            include_prompt_detail=False,
         )
         agent_loop = build_test_agent_loop(config=config, backend=backend)
 

@@ -4,8 +4,6 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 
-from rich.markup import escape
-
 from vibe.core.hooks.models import HookMessageSeverity
 from vibe.core.logger import logger
 from vibe.core.types import FileImageSource, ImageAttachment, InlineImageSource
@@ -22,7 +20,7 @@ from textual.content import Content
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Markdown, Static
+from textual.widgets import Link, Markdown, Static
 from textual.widgets._markdown import MarkdownStream
 from watchfiles import awatch
 
@@ -77,6 +75,48 @@ class ExpandingSeparator(NonSelectableStatic):
         self.refresh()
 
 
+def _attachment_label(attachment: ImageAttachment) -> str:
+    alias_path = Path(attachment.alias).expanduser()
+    if not alias_path.is_absolute():
+        return attachment.alias
+    return _format_display_path(alias_path)
+
+
+def _format_display_path(path: Path) -> str:
+    home = Path.home()
+    try:
+        relative = path.relative_to(home)
+    except ValueError:
+        return str(path)
+    if str(relative) == ".":
+        return "~"
+    return f"~/{relative}"
+
+
+class UserMessageAttachment(Horizontal):
+    def __init__(self, attachment: ImageAttachment) -> None:
+        super().__init__(classes="user-message-attachment-line")
+        self._attachment = attachment
+
+    def compose(self) -> ComposeResult:
+        yield NoMarkupStatic(
+            "└ attached image: ", classes="user-message-attachment-label"
+        )
+        match self._attachment.source:
+            case FileImageSource(path=path):
+                yield Link(
+                    _attachment_label(self._attachment),
+                    url=path.as_uri(),
+                    classes="user-message-attachment-link",
+                )
+            case InlineImageSource():
+                # Inline images have no file on disk, so there's nothing to link.
+                yield NoMarkupStatic(
+                    _attachment_label(self._attachment),
+                    classes="user-message-attachment-link",
+                )
+
+
 class UserMessage(Static):
     PROMPT_CHAR: ClassVar[str] = ">"
     SHOW_SEPARATOR: ClassVar[bool] = True
@@ -110,34 +150,21 @@ class UserMessage(Static):
                 )
                 yield NoMarkupStatic(self._content, classes="user-message-content")
             if self._images:
-                yield Static(
-                    self._format_attachments_footer(self._images),
-                    classes="user-message-attachments",
-                    markup=True,
-                )
+                with Vertical(classes="user-message-attachments"):
+                    for image in self._images:
+                        yield UserMessageAttachment(image)
             if self.SHOW_SEPARATOR:
                 yield ExpandingSeparator(classes="user-message-separator")
             if self._pending:
                 self.add_class("pending")
 
     @staticmethod
-    def _format_attachment_link(att: ImageAttachment) -> str:
-        match att.source:
-            case FileImageSource(path=path):
-                # Quote the URL in Textual [link="..."] markup: the parser stops
-                # at `:` inside an unquoted tag value, so a raw `file://...` URL
-                # would raise MarkupError. Textual auto-wires the click to
-                # webbrowser.open(url), opening the OS default viewer.
-                return f'[link="{path.as_uri()}"]{escape(att.alias)}[/link]'
-            case InlineImageSource():
-                # Inline images have no file on disk, so there's nothing to link.
-                return escape(att.alias)
+    def _attachment_label(attachment: ImageAttachment) -> str:
+        return _attachment_label(attachment)
 
     @staticmethod
-    def _format_attachments_footer(images: list[ImageAttachment]) -> str:
-        label = "attached image" if len(images) == 1 else "attached images"
-        links = ", ".join(UserMessage._format_attachment_link(att) for att in images)
-        return f"└ {label}: {links}"
+    def _format_display_path(path: Path) -> str:
+        return _format_display_path(path)
 
     async def set_pending(self, pending: bool) -> None:
         if pending == self._pending:

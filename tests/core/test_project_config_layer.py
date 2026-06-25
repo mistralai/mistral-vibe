@@ -6,7 +6,7 @@ import pytest
 
 from vibe.core.config.layer import UntrustedLayerError
 from vibe.core.config.layers.project import ProjectConfigLayer
-from vibe.core.config.types import MISSING_CONFIG_FILE_FINGERPRINT
+from vibe.core.config.types import MISSING_BACKING_STORE_DATA_FINGERPRINT
 from vibe.core.paths._vibe_home import GlobalPath
 from vibe.core.trusted_folders import trusted_folders_manager
 
@@ -28,7 +28,7 @@ async def test_reads_toml_when_trusted(tmp_working_directory: Path) -> None:
     config_path.unlink()
     data = await layer.load(force=True)
     assert data.model_extra == {}
-    assert layer.fingerprint == MISSING_CONFIG_FILE_FINGERPRINT
+    assert layer.fingerprint == MISSING_BACKING_STORE_DATA_FINGERPRINT
 
 
 @pytest.mark.asyncio
@@ -63,7 +63,7 @@ async def test_missing_file_returns_empty(tmp_working_directory: Path) -> None:
     layer = ProjectConfigLayer(path=tmp_working_directory)
     data = await layer.load()
     assert data.model_extra == {}
-    assert layer.fingerprint == MISSING_CONFIG_FILE_FINGERPRINT
+    assert layer.fingerprint == MISSING_BACKING_STORE_DATA_FINGERPRINT
 
 
 @pytest.mark.asyncio

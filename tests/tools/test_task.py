@@ -34,9 +34,7 @@ class TestTaskArgs:
 class TestTaskToolValidation:
     @pytest.fixture
     def ctx(self) -> InvokeContext:
-        config = build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
+        config = build_test_vibe_config()
         manager = AgentManager(lambda: config)
         return InvokeContext(
             tool_call_id="test-call-id",
@@ -133,9 +131,7 @@ class TestTaskToolResolvePermission:
 class TestTaskToolExecution:
     @pytest.fixture
     def ctx(self) -> InvokeContext:
-        config = build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
+        config = build_test_vibe_config()
         manager = AgentManager(lambda: config)
         return InvokeContext(
             tool_call_id="test-call-id",

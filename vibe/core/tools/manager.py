@@ -9,19 +9,19 @@ from pathlib import Path
 import re
 import sys
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
 from vibe.core.paths import DEFAULT_TOOL_DIR
 from vibe.core.tools.base import BaseTool, BaseToolConfig, ToolPermission
-from vibe.core.tools.connectors import ConnectorRegistry
-from vibe.core.tools.mcp import MCPRegistry
-from vibe.core.tools.mcp.tools import MCPTool
+from vibe.core.tools.remote import MCPTool
 from vibe.core.utils import name_matches, run_sync
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
+    from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
+    from vibe.core.tools.mcp.registry import MCPRegistry
 
 
 def _try_canonical_module_name(path: Path) -> str | None:
@@ -80,7 +80,7 @@ class ToolManager:
     ) -> None:
         self._config_getter = config_getter
         self._permission_getter = permission_getter
-        self._mcp_registry = mcp_registry or MCPRegistry()
+        self._mcp_registry = mcp_registry
         self._connector_registry = connector_registry
         self._instances: dict[str, BaseTool] = {}
         self._search_paths: list[Path] = self._compute_search_paths(self._config)
@@ -92,6 +92,21 @@ class ToolManager:
         }
         if not defer_mcp:
             self.integrate_all()
+
+    def set_mcp_registry(self, mcp_registry: MCPRegistry | None) -> None:
+        self._mcp_registry = mcp_registry
+
+    def set_connector_registry(
+        self, connector_registry: ConnectorRegistry | None
+    ) -> None:
+        self._connector_registry = connector_registry
+
+    def _get_mcp_registry(self) -> MCPRegistry:
+        if self._mcp_registry is None:
+            from vibe.core.tools.mcp.registry import MCPRegistry
+
+            self._mcp_registry = MCPRegistry()
+        return self._mcp_registry
 
     @property
     def _config(self) -> VibeConfig:
@@ -273,7 +288,7 @@ class ToolManager:
         disabled_sources: set[tuple[str, bool]],
         per_source_disabled: dict[tuple[str, bool], set[str]],
     ) -> bool:
-        if not issubclass(tool_cls, MCPTool):
+        if not ToolManager._is_remote_tool_class(tool_cls):
             return False
         server_name = tool_cls.get_server_name()
         if server_name is None:
@@ -282,6 +297,10 @@ class ToolManager:
         if key in disabled_sources:
             return True
         return tool_cls.get_remote_name() in per_source_disabled.get(key, set())
+
+    @staticmethod
+    def _is_remote_tool_class(tool_cls: type[BaseTool]) -> TypeGuard[type[MCPTool]]:
+        return issubclass(tool_cls, MCPTool)
 
     def integrate_mcp(self, *, raise_on_failure: bool = False) -> None:
         """Discover and register MCP tools (sync wrapper).
@@ -296,11 +315,12 @@ class ToolManager:
         if self._mcp_integrated:
             return
         if not self._config.mcp_servers:
-            self._mcp_registry.sync_active_servers([])
+            if self._mcp_registry is not None:
+                self._mcp_registry.sync_active_servers([])
             return
 
         try:
-            mcp_tools = await self._mcp_registry.get_tools_async(
+            mcp_tools = await self._get_mcp_registry().get_tools_async(
                 self._config.mcp_servers
             )
         except Exception as exc:
@@ -321,7 +341,7 @@ class ToolManager:
         stale_keys = [
             name
             for name, cls in self._all_tools.items()
-            if issubclass(cls, MCPTool) and cls.is_connector()
+            if self._is_remote_tool_class(cls) and cls.is_connector()
         ]
         for key in stale_keys:
             self._all_tools.pop(key, None)
@@ -332,17 +352,17 @@ class ToolManager:
         stale_keys = [
             name
             for name, cls in self._all_tools.items()
-            if issubclass(cls, MCPTool) and not cls.is_connector()
+            if self._is_remote_tool_class(cls) and not cls.is_connector()
         ]
         for key in stale_keys:
             self._all_tools.pop(key, None)
             self._instances.pop(key, None)
 
-    def integrate_connectors(self) -> None:
+    def integrate_connectors(self, *, force_refresh: bool = False) -> None:
         """Discover and register connector tools (sync wrapper)."""
-        run_sync(self.integrate_connectors_async())
+        run_sync(self.integrate_connectors_async(force_refresh=force_refresh))
 
-    async def integrate_connectors_async(self) -> None:
+    async def integrate_connectors_async(self, *, force_refresh: bool = False) -> None:
         """Discover and register connector tools — canonical implementation.
 
         Thread-safe: can be called from the deferred-init background thread.
@@ -351,7 +371,9 @@ class ToolManager:
             return
 
         try:
-            connector_tools = await self._connector_registry.get_tools_async()
+            connector_tools = await self._connector_registry.get_tools_async(
+                force_refresh=force_refresh
+            )
         except Exception as exc:
             logger.warning(f"Connector integration failed: {exc}")
             with self._lock:
@@ -366,28 +388,37 @@ class ToolManager:
     async def refresh_remote_tools_async(self) -> None:
         """Force MCP and connector re-discovery for the current config."""
         with self._lock:
-            self._mcp_registry.clear()
+            if self._mcp_registry is not None:
+                self._mcp_registry.clear()
             self._purge_mcp_state()
             self._mcp_integrated = False
             self._purge_connector_state()
             if self._connector_registry is not None:
                 self._connector_registry.clear()
 
-        await self._integrate_all_async()
+        await self._integrate_all_async(force_refresh=True)
 
     def refresh_remote_tools(self) -> None:
         """Sync wrapper for :meth:`refresh_remote_tools_async`."""
         run_sync(self.refresh_remote_tools_async())
 
-    def integrate_all(self, *, raise_on_mcp_failure: bool = False) -> None:
+    def integrate_all(
+        self, *, raise_on_mcp_failure: bool = False, force_refresh: bool = False
+    ) -> None:
         """Discover MCP and connector tools in parallel.
 
         Runs both async discovery paths concurrently via ``asyncio.gather``
         inside a single ``run_sync`` call.
         """
-        run_sync(self._integrate_all_async(raise_on_mcp_failure=raise_on_mcp_failure))
+        run_sync(
+            self._integrate_all_async(
+                raise_on_mcp_failure=raise_on_mcp_failure, force_refresh=force_refresh
+            )
+        )
 
-    async def _integrate_all_async(self, *, raise_on_mcp_failure: bool = False) -> None:
+    async def _integrate_all_async(
+        self, *, raise_on_mcp_failure: bool = False, force_refresh: bool = False
+    ) -> None:
         """Run MCP and connector discovery concurrently.
 
         Uses ``return_exceptions=True`` so that a failing MCP server does
@@ -395,7 +426,7 @@ class ToolManager:
         """
         mcp_result, connector_result = await asyncio.gather(
             self._integrate_mcp_async(raise_on_failure=raise_on_mcp_failure),
-            self.integrate_connectors_async(),
+            self.integrate_connectors_async(force_refresh=force_refresh),
             return_exceptions=True,
         )
 

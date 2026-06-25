@@ -22,8 +22,12 @@ from pydantic import AnyUrl, BaseModel, ConfigDict
 
 from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp
 from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.keyring import (
+    delete_api_key_from_keyring,
+    get_api_key_from_keyring,
+    set_api_key_in_keyring,
+)
 
-_SERVICE: Final = "vibe"
 _USERNAME_PREFIX: Final = "mcp-oauth"
 _CLIENT_NAME: Final = "Mistral Vibe"
 _LOGIN_TIMEOUT_SECONDS: Final = 300.0
@@ -95,16 +99,16 @@ def _kr_username(alias: str, kind: str) -> str:
 
 
 async def _kr_get(username: str) -> str | None:
-    return await anyio.to_thread.run_sync(keyring.get_password, _SERVICE, username)
+    return await anyio.to_thread.run_sync(get_api_key_from_keyring, username)
 
 
 async def _kr_set(username: str, value: str) -> None:
-    await anyio.to_thread.run_sync(keyring.set_password, _SERVICE, username, value)
+    await anyio.to_thread.run_sync(set_api_key_in_keyring, username, value)
 
 
 async def _kr_delete(username: str) -> None:
     try:
-        await anyio.to_thread.run_sync(keyring.delete_password, _SERVICE, username)
+        await anyio.to_thread.run_sync(delete_api_key_from_keyring, username)
     except keyring.errors.PasswordDeleteError:
         pass
 

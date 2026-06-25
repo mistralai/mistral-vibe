@@ -243,6 +243,30 @@ def test_assess_os_keyring_when_default_key_is_in_keyring(
     )
 
 
+def test_assess_os_keyring_reuses_cached_keyring_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def _get_password(service: str, username: str) -> str:
+        calls.append((service, username))
+        return "keyring-key"
+
+    monkeypatch.setattr(keyring, "get_password", _get_password)
+    provider = _mistral_provider()
+    env_path = tmp_path / ".env"
+
+    assert (
+        assess_auth_state(provider, env_path=env_path, environ={}).kind
+        == AuthStateKind.OS_KEYRING
+    )
+    assert (
+        assess_auth_state(provider, env_path=env_path, environ={}).kind
+        == AuthStateKind.OS_KEYRING
+    )
+    assert calls == [("ai.mistral.vibe", DEFAULT_MISTRAL_API_ENV_KEY)]
+
+
 def test_assess_vibe_home_env_file_when_dotenv_and_keyring_both_have_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -5,7 +5,7 @@ Once you have set up `vibe` with the API keys, you are ready to use `vibe-acp` i
 
 ## Zed
 
-For usage in Zed, we recommend using the [Mistral Vibe Zed's extension](https://zed.dev/extensions/mistral-vibe). Alternatively, you can set up a local install as follows:
+For usage in Zed, we recommend using the [Mistral Vibe Zed ACP agent](https://zed.dev/acp/agent/mistral-vibe). Alternatively, you can set up a local install as follows:
 
 1. Go to `~/.config/zed/settings.json` and, under the `agent_servers` JSON object, add the following key-value pair to invoke the `vibe-acp` command. Here is the snippet:
 
@@ -22,7 +22,7 @@ For usage in Zed, we recommend using the [Mistral Vibe Zed's extension](https://
 }
 ```
 
-1. In the `New Thread` pane on the right, select the `vibe` agent and start the conversation.
+2. In the `Agent Panel` view, select the `Mistral Vibe` agent and start the conversation.
 
 ## JetBrains IDEs
 

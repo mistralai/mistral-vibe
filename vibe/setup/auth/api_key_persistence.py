@@ -3,17 +3,15 @@ from __future__ import annotations
 import os
 
 from dotenv import set_key, unset_key
-import keyring
 from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 
 from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig, VibeConfig
 from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE
-
-_KEYRING_SERVICE = "vibe"
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import EntrypointMetadata
 from vibe.core.types import Backend
+from vibe.core.utils.keyring import delete_api_key_from_keyring, set_api_key_in_keyring
 
 
 def _save_api_key_to_env_file(env_key: str, api_key: str) -> None:
@@ -60,7 +58,7 @@ def persist_api_key(
     except ValueError:
         return f"env_var_error:{env_key}"
     try:
-        keyring.set_password(_KEYRING_SERVICE, env_key, api_key)
+        set_api_key_in_keyring(env_key, api_key)
     except KeyringError:
         try:
             _save_api_key_to_env_file(env_key, api_key)
@@ -93,7 +91,7 @@ def remove_api_key(provider: ProviderConfig) -> None:
     keyring_error: KeyringError | None = None
 
     try:
-        keyring.delete_password(_KEYRING_SERVICE, env_key)
+        delete_api_key_from_keyring(env_key)
     except (NoKeyringError, PasswordDeleteError):
         # No keyring backend, or nothing stored to remove: both are no-ops for sign-out.
         pass

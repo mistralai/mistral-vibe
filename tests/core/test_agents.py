@@ -31,9 +31,7 @@ class TestAgentProfile:
 class TestAgentManager:
     @pytest.fixture
     def manager(self) -> AgentManager:
-        config = build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
+        config = build_test_vibe_config()
         return AgentManager(lambda: config)
 
     def test_get_subagents_returns_only_subagents(self, manager: AgentManager) -> None:
@@ -81,17 +79,13 @@ class TestAgentManager:
 
     def test_initial_agent_rejects_subagent(self) -> None:
         """Test that creating AgentManager with a subagent as initial_agent raises."""
-        config = build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
+        config = build_test_vibe_config()
         with pytest.raises(ValueError, match="cannot be used as the primary agent"):
             AgentManager(lambda: config, initial_agent="explore")
 
     def test_initial_agent_accepts_subagent_when_allowed(self) -> None:
         """Test that allow_subagent=True permits subagent as initial_agent."""
-        config = build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
+        config = build_test_vibe_config()
         manager = AgentManager(
             lambda: config, initial_agent="explore", allow_subagent=True
         )
@@ -99,18 +93,12 @@ class TestAgentManager:
 
     def test_initial_agent_accepts_agent_type(self) -> None:
         """Test that creating AgentManager with an agent-type agent works."""
-        config = build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
+        config = build_test_vibe_config()
         manager = AgentManager(lambda: config, initial_agent="plan")
         assert manager.active_profile.name == "plan"
 
     def test_initial_agent_raises_when_agent_is_disabled(self) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            disabled_agents=["plan"],
-        )
+        config = build_test_vibe_config(disabled_agents=["plan"])
         with pytest.raises(ValueError, match="disabled_agents") as exc_info:
             AgentManager(lambda: config, initial_agent="plan")
         message = str(exc_info.value)
@@ -120,11 +108,7 @@ class TestAgentManager:
     def test_explicit_agent_excluded_by_enabled_agents_does_not_blame_default(
         self,
     ) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            enabled_agents=["default"],
-        )
+        config = build_test_vibe_config(enabled_agents=["default"])
         with pytest.raises(ValueError, match="enabled_agents") as exc_info:
             AgentManager(lambda: config, initial_agent="plan")
         message = str(exc_info.value)
@@ -132,20 +116,14 @@ class TestAgentManager:
         assert message.startswith("Agent 'plan'")
 
     def test_initial_agent_raises_when_agent_does_not_exist(self) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False, include_prompt_detail=False
-        )
+        config = build_test_vibe_config()
         with pytest.raises(ValueError, match="not found"):
             AgentManager(lambda: config, initial_agent="nonexistent-agent")
 
     def test_default_agent_excluded_by_enabled_agents_raises_config_contradiction(
         self,
     ) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            enabled_agents=["plan"],
-        )
+        config = build_test_vibe_config(enabled_agents=["plan"])
         with pytest.raises(ValueError, match="enabled_agents") as exc_info:
             AgentManager(lambda: config)
         message = str(exc_info.value)
@@ -155,11 +133,7 @@ class TestAgentManager:
     def test_default_agent_excluded_by_disabled_agents_raises_config_contradiction(
         self,
     ) -> None:
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            disabled_agents=["default"],
-        )
+        config = build_test_vibe_config(disabled_agents=["default"])
         with pytest.raises(ValueError, match="disabled_agents") as exc_info:
             AgentManager(lambda: config)
         assert "default_agent" in str(exc_info.value)
@@ -168,10 +142,7 @@ class TestAgentManager:
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            enabled_agents=["plan"],
-            disabled_agents=["plan"],
+            enabled_agents=["plan"], disabled_agents=["plan"]
         )
         with caplog.at_level("WARNING"):
             manager = AgentManager(lambda: config, initial_agent="plan")
@@ -181,11 +152,7 @@ class TestAgentManager:
     def test_install_required_agent_reports_install_not_disabled_agents(self) -> None:
         # 'lean' is install_required and enabled but not installed: the message
         # must point to installation, not blame disabled_agents.
-        config = build_test_vibe_config(
-            include_project_context=False,
-            include_prompt_detail=False,
-            enabled_agents=["lean"],
-        )
+        config = build_test_vibe_config(enabled_agents=["lean"])
         with pytest.raises(ValueError, match="requires installation") as exc_info:
             AgentManager(lambda: config, initial_agent="lean")
         assert "disabled_agents" not in str(exc_info.value)

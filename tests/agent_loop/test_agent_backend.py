@@ -101,6 +101,30 @@ async def test_passes_x_affinity_header_when_asking_an_answer_streaming(
 
 
 @pytest.mark.asyncio
+async def test_max_tokens_is_passed_to_backend(vibe_config: VibeConfig):
+    backend = FakeBackend([mock_llm_chunk(content="Response")])
+    agent = build_test_agent_loop(config=vibe_config, backend=backend)
+
+    agent.set_max_tokens(8192)
+    [_ async for _ in agent.act("Hello")]
+
+    assert backend.requests_max_tokens == [8192]
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_is_passed_to_streaming_backend(vibe_config: VibeConfig):
+    backend = FakeBackend([mock_llm_chunk(content="Response")])
+    agent = build_test_agent_loop(
+        config=vibe_config, backend=backend, enable_streaming=True
+    )
+
+    agent.set_max_tokens(8192)
+    [_ async for _ in agent.act("Hello")]
+
+    assert backend.requests_max_tokens == [8192]
+
+
+@pytest.mark.asyncio
 async def test_updates_tokens_stats_based_on_backend_response(vibe_config: VibeConfig):
     chunk = mock_llm_chunk(content="Response", prompt_tokens=100, completion_tokens=50)
     backend = FakeBackend([chunk])

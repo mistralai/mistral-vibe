@@ -42,6 +42,7 @@ def acp_agent_with_session_config(
             ),
         ],
         session_logging=session_config,
+        include_project_context=True,
     )
 
     class PatchedAgentLoop(AgentLoop):

@@ -47,11 +47,7 @@ def _build_managers(config):
 @pytest.mark.asyncio
 async def test_system_prompt_uses_assigned_variant() -> None:
     config = build_test_vibe_config(
-        system_prompt_id="cli",
-        include_project_context=False,
-        include_prompt_detail=False,
-        include_model_info=False,
-        include_commit_signature=False,
+        system_prompt_id="cli", include_model_info=False, include_commit_signature=False
     )
     response = EvalResponse.model_validate({
         "features": {
@@ -78,11 +74,7 @@ async def test_system_prompt_uses_assigned_variant() -> None:
 @pytest.mark.asyncio
 async def test_system_prompt_falls_back_to_default_when_variant_unknown() -> None:
     config = build_test_vibe_config(
-        system_prompt_id="cli",
-        include_project_context=False,
-        include_prompt_detail=False,
-        include_model_info=False,
-        include_commit_signature=False,
+        system_prompt_id="cli", include_model_info=False, include_commit_signature=False
     )
     response = EvalResponse.model_validate({
         "features": {
@@ -109,11 +101,7 @@ async def test_system_prompt_falls_back_to_default_when_variant_unknown() -> Non
 
 def test_system_prompt_uses_default_when_no_manager() -> None:
     config = build_test_vibe_config(
-        system_prompt_id="cli",
-        include_project_context=False,
-        include_prompt_detail=False,
-        include_model_info=False,
-        include_commit_signature=False,
+        system_prompt_id="cli", include_model_info=False, include_commit_signature=False
     )
     tool_manager, skill_manager, agent_manager = _build_managers(config)
     prompt = get_universal_system_prompt(
@@ -125,8 +113,6 @@ def test_system_prompt_uses_default_when_no_manager() -> None:
 def test_system_prompt_honors_user_config_when_manager_uninitialized() -> None:
     config = build_test_vibe_config(
         system_prompt_id="lean",
-        include_project_context=False,
-        include_prompt_detail=False,
         include_model_info=False,
         include_commit_signature=False,
     )
@@ -143,8 +129,6 @@ def test_system_prompt_honors_user_config_when_manager_uninitialized() -> None:
 async def test_system_prompt_honors_user_config_when_no_remote_assignment() -> None:
     config = build_test_vibe_config(
         system_prompt_id="lean",
-        include_project_context=False,
-        include_prompt_detail=False,
         include_model_info=False,
         include_commit_signature=False,
     )
@@ -169,8 +153,6 @@ async def test_system_prompt_honors_user_config_when_no_remote_assignment() -> N
 async def test_user_config_overrides_assigned_experiment_variant() -> None:
     config = build_test_vibe_config(
         system_prompt_id="lean",
-        include_project_context=False,
-        include_prompt_detail=False,
         include_model_info=False,
         include_commit_signature=False,
     )

@@ -49,7 +49,7 @@ api_base = "https://api.mistral.ai/v1"
     from vibe.core.config.layers.user import UserConfigLayer
     from vibe.core.config.orchestrator import ConfigOrchestrator
 
-    layer = UserConfigLayer(path=toml_path, name="user-toml")
+    layer = UserConfigLayer(path=toml_path)
     orchestrator = await ConfigOrchestrator.create(schema=MinimalSchema, layers=[layer])
 
     assert orchestrator.config.models.active_model == "mistral-large"

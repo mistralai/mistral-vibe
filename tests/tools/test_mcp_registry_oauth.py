@@ -41,7 +41,7 @@ class MemoryKeyring(KeyringBackend):
 
     def delete_password(self, service: str, username: str) -> None:
         if (service, username) not in self.store:
-            raise keyring.errors.PasswordDeleteError(username)
+            raise keyring.errors.PasswordDeleteError()
         del self.store[(service, username)]
 
 

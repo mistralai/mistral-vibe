@@ -35,6 +35,7 @@ def _workspace_trust_meta(session_response: NewSessionResponse) -> dict:
 def acp_agent_loop(backend) -> VibeAcpAgentLoop:
     config = build_test_vibe_config(
         active_model="devstral-latest",
+        include_project_context=True,
         models=[
             ModelConfig(
                 name="devstral-latest", provider="mistral", alias="devstral-latest"

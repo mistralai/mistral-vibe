@@ -54,6 +54,13 @@ def _extract_commands(command: str) -> list[str]:
                     and child.text is not None
                 ):
                     parts.append(child.text.decode("utf-8"))
+            # When a command has a heredoc (or other redirect), tree-sitter
+            # wraps it in a redirected_statement and the redirect is a sibling
+            # of the command node, not a child.  Without this check,
+            # `python3 << 'EOF'` is extracted as bare `python3` and
+            # incorrectly blocked by the standalone denylist.
+            if parts and node.parent and node.parent.type == "redirected_statement":
+                parts.append("<redirect>")
             if parts:
                 commands.append(" ".join(parts))
 

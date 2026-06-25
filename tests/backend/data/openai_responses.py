@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from tests.backend.data import Chunk, JsonResponse, ResultData, Url
+from tests.backend.data import (
+    ANSWER_COMPLETION_TOKENS,
+    ANSWER_PROMPT_TOKENS,
+    Chunk,
+    JsonResponse,
+    ResultData,
+    Url,
+)
 from tests.constants import OPENAI_BASE_URL
 
 
@@ -104,8 +111,8 @@ def openai_function_call_item(
 def openai_response(
     output: list[dict[str, Any]],
     *,
-    input_tokens: int = 10,
-    output_tokens: int = 2,
+    input_tokens: int = ANSWER_PROMPT_TOKENS,
+    output_tokens: int = ANSWER_COMPLETION_TOKENS,
     response_id: str = "resp_1",
     model: str = "gpt-test",
 ) -> JsonResponse:

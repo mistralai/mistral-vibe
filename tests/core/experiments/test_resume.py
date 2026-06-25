@@ -147,11 +147,7 @@ def _build_managers(config):
 @pytest.mark.asyncio
 async def test_graduated_experiment_with_deleted_variant_file_falls_back() -> None:
     config = build_test_vibe_config(
-        system_prompt_id="cli",
-        include_project_context=False,
-        include_prompt_detail=False,
-        include_model_info=False,
-        include_commit_signature=False,
+        system_prompt_id="cli", include_model_info=False, include_commit_signature=False
     )
     response = _response_forcing("removed_after_graduation_2025_07")
     manager = ExperimentManager(client=_StubClient(None))
