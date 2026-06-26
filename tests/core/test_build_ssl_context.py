@@ -28,6 +28,7 @@ def test_build_ssl_context_uses_certifi_by_default(monkeypatch):
 
     mock_ctx = MagicMock(spec=ssl.SSLContext)
     with (
+        patch("vibe.core.utils.http.os.path.exists", return_value=True),
         patch("vibe.core.utils.http.certifi.where", return_value="/certifi.pem"),
         patch(
             "vibe.core.utils.http.ssl.create_default_context", return_value=mock_ctx
