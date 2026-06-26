@@ -8,8 +8,6 @@ import urllib.parse
 
 import anyio.to_thread
 import httpx
-import keyring
-import keyring.backends.fail
 import keyring.errors
 from mcp.client.auth import (
     OAuthClientProvider,
@@ -25,6 +23,7 @@ from vibe.core.utils.http import build_ssl_context
 from vibe.core.utils.keyring import (
     delete_api_key_from_keyring,
     get_api_key_from_keyring,
+    is_keyring_available,
     set_api_key_in_keyring,
 )
 
@@ -167,8 +166,7 @@ class KeyringTokenStorage(TokenStorage):
         *,
         fallback_client_info: OAuthClientInformationFull | None = None,
     ) -> None:
-        backend = keyring.get_keyring()
-        if isinstance(backend, keyring.backends.fail.Keyring):
+        if not is_keyring_available():
             raise MCPOAuthHeadlessError(server_alias=alias)
         self._alias = alias
         self._fallback_client_info = fallback_client_info

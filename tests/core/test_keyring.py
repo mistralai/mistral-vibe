@@ -11,6 +11,7 @@ import vibe.core.utils.keyring as keyring_utils
 from vibe.core.utils.keyring import (
     delete_api_key_from_keyring,
     get_api_key_from_keyring,
+    is_keyring_available,
     set_api_key_in_keyring,
 )
 
@@ -126,6 +127,32 @@ def test_get_does_not_overwrite_concurrent_cache_write(
         raise errors[0]
     assert results == ["new-key"]
     assert get_api_key_from_keyring("CUSTOM_API_KEY") == "new-key"
+
+
+def test_keyring_backend_detection_error_returns_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _get_keyring() -> object:
+        raise ModuleNotFoundError("No module named 'flyte'")
+
+    monkeypatch.setattr(keyring, "get_keyring", _get_keyring)
+
+    assert is_keyring_available() is False
+
+
+def test_keyring_backend_errors_are_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _backend_error(*_args: object) -> None:
+        raise ModuleNotFoundError("No module named 'flyte'")
+
+    monkeypatch.setattr(keyring, "get_password", _backend_error)
+    monkeypatch.setattr(keyring, "set_password", _backend_error)
+    monkeypatch.setattr(keyring, "delete_password", _backend_error)
+
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") is None
+    with pytest.raises(KeyringError, match="Keyring backend is unavailable"):
+        set_api_key_in_keyring("CUSTOM_API_KEY", "new-key")
+    with pytest.raises(KeyringError, match="Keyring backend is unavailable"):
+        delete_api_key_from_keyring("CUSTOM_API_KEY")
 
 
 def test_disabled_keyring_get_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:

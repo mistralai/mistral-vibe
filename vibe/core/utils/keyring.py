@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+import logging
 import os
 import shlex
 import subprocess
@@ -7,6 +10,7 @@ import sys
 from threading import Lock
 
 import keyring
+import keyring.backends.fail
 from keyring.errors import KeyringError, PasswordDeleteError
 
 _KEYRING_SERVICE = "ai.mistral.vibe"
@@ -15,6 +19,7 @@ _DISABLE_KEYRING_ENV_VAR = "VIBE_TEST_DISABLE_KEYRING"
 _cache_lock = Lock()
 _api_key_cache: dict[str, str | None] = {}
 _SECURITY_NOT_FOUND = "could not be found"
+_KEYRING_BACKEND_LOGGER = "keyring.backend"
 
 
 class _PasswordNotFoundError(KeyringError):
@@ -27,6 +32,34 @@ def _is_keyring_disabled() -> bool:
 
 def _should_use_macos_security() -> bool:
     return sys.platform == "darwin"
+
+
+@contextmanager
+def _suppress_keyring_backend_plugin_errors() -> Iterator[None]:
+    logger = logging.getLogger(_KEYRING_BACKEND_LOGGER)
+    disabled = logger.disabled
+    logger.disabled = True
+    try:
+        yield
+    finally:
+        logger.disabled = disabled
+
+
+def _keyring_backend_error(exc: Exception) -> KeyringError:
+    return KeyringError(f"Keyring backend is unavailable: {exc}")
+
+
+def is_keyring_available() -> bool:
+    if _is_keyring_disabled():
+        return False
+    if _should_use_macos_security():
+        return True
+    try:
+        with _suppress_keyring_backend_plugin_errors():
+            backend = keyring.get_keyring()
+    except Exception:
+        return False
+    return not isinstance(backend, keyring.backends.fail.Keyring)
 
 
 def _run_security(
@@ -60,7 +93,13 @@ def _delete_macos_password(service: str, username: str) -> None:
 
 def _set_password(service: str, username: str, password: str) -> None:
     if not _should_use_macos_security():
-        keyring.set_password(service, username, password)
+        try:
+            with _suppress_keyring_backend_plugin_errors():
+                keyring.set_password(service, username, password)
+        except KeyringError:
+            raise
+        except Exception as exc:
+            raise _keyring_backend_error(exc) from exc
         return
 
     try:
@@ -100,7 +139,13 @@ def _get_password(service: str, username: str) -> str | None:
             raise KeyringError("Can't get password from macOS Keychain") from exc
         return result.stdout.removesuffix("\n")
 
-    return keyring.get_password(service, username)
+    try:
+        with _suppress_keyring_backend_plugin_errors():
+            return keyring.get_password(service, username)
+    except KeyringError:
+        raise
+    except Exception as exc:
+        raise _keyring_backend_error(exc) from exc
 
 
 def _delete_password(service: str, username: str) -> None:
@@ -108,7 +153,13 @@ def _delete_password(service: str, username: str) -> None:
         _delete_macos_password(service, username)
         return
 
-    keyring.delete_password(service, username)
+    try:
+        with _suppress_keyring_backend_plugin_errors():
+            keyring.delete_password(service, username)
+    except KeyringError:
+        raise
+    except Exception as exc:
+        raise _keyring_backend_error(exc) from exc
 
 
 def _migrate_legacy_password(username: str, password: str, legacy_service: str) -> None:

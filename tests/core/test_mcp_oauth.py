@@ -183,8 +183,9 @@ class TestKeyringTokenStorage:
         assert loaded_b is not None and loaded_b.access_token == "B"
 
     def test_headless_init_raises(self, headless_keyring: None) -> None:
-        with pytest.raises(MCPOAuthHeadlessError) as exc_info:
-            KeyringTokenStorage(alias="linear")
+        with patch("vibe.core.auth.mcp_oauth.is_keyring_available", return_value=False):
+            with pytest.raises(MCPOAuthHeadlessError) as exc_info:
+                KeyringTokenStorage(alias="linear")
         msg = str(exc_info.value)
         assert "linear" in msg
         assert "api_key_env" in msg
