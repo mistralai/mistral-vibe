@@ -93,9 +93,10 @@ pip install mistral-vibe
 
 - **Interactive Chat**: A conversational AI agent that understands your requests and breaks down complex tasks.
 - **Powerful Toolset**: A suite of tools for file manipulation, code searching, version control, and command execution, right from the chat prompt.
-  - Read, write, and patch files (`read`, `write_file`, `edit`).
-  - Execute shell commands in a stateful terminal (`bash`).
-  - Recursively search code with `grep` (with `ripgrep` support).
+  - Read, write, and patch files (`read`, `write_file`, `edit`), and edit Jupyter notebooks cell-by-cell (`notebook_edit`).
+  - Execute shell commands in a stateful terminal (`bash`), including long-running background commands (`run_in_background`) read via `bash_output` and stopped with `kill_shell`.
+  - Recursively search code with `grep` (with `ripgrep` support), including file-glob filters, `files_with_matches`/`count` output modes, and context lines.
+  - Find files by name with `glob` patterns (`**/*.py`), sorted newest-first.
   - Manage a `todo` list to track the agent's work.
   - Ask interactive questions to gather user input (`ask_user_question`).
   - Delegate tasks to subagents for parallel work (`task`).
@@ -175,7 +176,7 @@ The `ask_user_question` tool allows the agent to ask you clarifying questions du
 }])
 ```
 
-The agent can ask multiple questions at once, displayed as tabs. Each question supports 2-4 options plus an automatic "Other" option for free text responses.
+The agent can ask multiple questions at once, displayed as tabs. Each question supports 2-4 options plus an automatic "Other" option for free text responses. Options may also carry an optional `preview` (e.g. a code snippet or mockup) shown when the option is focused, making it easier to compare choices.
 
 ## Terminal Requirements
 
@@ -232,6 +233,7 @@ Simply run `vibe` to enter the interactive chat loop.
 - **Multi-line Input**: Press `Ctrl+J` or `Shift+Enter` for select terminals to insert a newline.
 - **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`).
 - **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
+- **Quick Memory**: Prefix a line with `#` to save a note to your user-level `AGENTS.md` without sending it to the agent (e.g., `> # always run tests with uv`).
 - **External Editor**: Press `Ctrl+G` to edit your current input in an external editor.
 - **Tool Output Toggle**: Press `Ctrl+O` to toggle the tool output view.
 - **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.

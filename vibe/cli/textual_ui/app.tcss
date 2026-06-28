@@ -1269,6 +1269,19 @@ StatusMessage {
     }
 }
 
+.question-preview {
+    height: auto;
+    color: $text-muted;
+    background: $surface;
+    border-left: outer $primary;
+    padding: 0 1;
+    margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
 .question-help {
     height: auto;
     color: $text-muted;

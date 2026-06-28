@@ -558,7 +558,10 @@ class TestSessionUpdates:
             assert tool_call.params.update.title == "Grepping 'auth'"
             assert (
                 tool_call.params.update.raw_input
-                == '{"pattern":"auth","path":".","max_matches":null,"use_default_ignore":true}'
+                == '{"pattern":"auth","path":".","max_matches":null,'
+                '"use_default_ignore":true,"glob":null,"output_mode":"content",'
+                '"context_before":0,"context_after":0,"ignore_case":false,'
+                '"multiline":false}'
             )
 
 

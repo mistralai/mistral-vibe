@@ -33,11 +33,23 @@ class EmptyBash:
 
 
 @dataclass(frozen=True, slots=True)
+class Memory:
+    note: str
+
+
+@dataclass(frozen=True, slots=True)
+class EmptyMemory:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class Prompt:
     text: str
 
 
-ClassifiedInput = Teleport | SlashCommand | Skill | Bash | EmptyBash | Prompt
+ClassifiedInput = (
+    Teleport | SlashCommand | Skill | Bash | EmptyBash | Memory | EmptyMemory | Prompt
+)
 
 
 def classify(
@@ -56,4 +68,7 @@ def classify(
     if value.startswith("!"):
         cmd = value[1:]
         return EmptyBash() if not cmd else Bash(command=cmd)
+    if value.startswith("#"):
+        note = value[1:].strip()
+        return EmptyMemory() if not note else Memory(note=note)
     return Prompt(text=value)

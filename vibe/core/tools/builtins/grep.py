@@ -33,6 +33,12 @@ class GrepBackend(StrEnum):
     GNU_GREP = auto()
 
 
+class GrepOutputMode(StrEnum):
+    CONTENT = auto()
+    FILES_WITH_MATCHES = auto()
+    COUNT = auto()
+
+
 class GrepToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
     sensitive_patterns: list[str] = Field(
@@ -91,6 +97,34 @@ class GrepArgs(BaseModel):
     )
     use_default_ignore: bool = Field(
         default=True, description="Whether to respect .gitignore and .ignore files."
+    )
+    glob: str | None = Field(
+        default=None,
+        description="Only search files matching this glob, e.g. '*.py' or '**/*.ts'.",
+    )
+    output_mode: GrepOutputMode = Field(
+        default=GrepOutputMode.CONTENT,
+        description=(
+            "'content' returns matching lines (default), 'files_with_matches' returns "
+            "only file paths, 'count' returns per-file match counts."
+        ),
+    )
+    context_before: int = Field(
+        default=0,
+        ge=0,
+        description="Lines of context to show before each match (content mode only).",
+    )
+    context_after: int = Field(
+        default=0,
+        ge=0,
+        description="Lines of context to show after each match (content mode only).",
+    )
+    ignore_case: bool = Field(
+        default=False,
+        description="Force case-insensitive matching (default is smart-case).",
+    )
+    multiline: bool = Field(
+        default=False, description="Allow patterns to span lines (ripgrep only)."
     )
 
 
@@ -237,18 +271,35 @@ class Grep(
 
         cmd = [
             "rg",
-            "--line-number",
             "--no-heading",
             "--with-filename",
-            "--smart-case",
             "--no-binary",
             # Request one extra to detect truncation
             "--max-count",
             str(max_matches + 1),
         ]
 
+        cmd.append("-i" if args.ignore_case else "--smart-case")
+
+        if args.output_mode == GrepOutputMode.FILES_WITH_MATCHES:
+            cmd.append("--files-with-matches")
+        elif args.output_mode == GrepOutputMode.COUNT:
+            cmd.append("--count")
+        else:
+            cmd.append("--line-number")
+            if args.context_before:
+                cmd.extend(["-B", str(args.context_before)])
+            if args.context_after:
+                cmd.extend(["-A", str(args.context_after)])
+
+        if args.multiline:
+            cmd.extend(["--multiline", "--multiline-dotall"])
+
         if not args.use_default_ignore:
             cmd.append("--no-ignore")
+
+        if args.glob:
+            cmd.extend(["--glob", args.glob])
 
         for pattern in exclude_patterns:
             cmd.extend(["--glob", f"!{pattern}"])
@@ -262,10 +313,24 @@ class Grep(
     ) -> list[str]:
         max_matches = args.max_matches or self.config.default_max_matches
 
-        cmd = ["grep", "-r", "-n", "-H", "-I", "-E", f"--max-count={max_matches + 1}"]
+        cmd = ["grep", "-r", "-H", "-I", "-E", f"--max-count={max_matches + 1}"]
 
-        if args.pattern.islower():
+        if args.output_mode == GrepOutputMode.FILES_WITH_MATCHES:
+            cmd.append("-l")
+        elif args.output_mode == GrepOutputMode.COUNT:
+            cmd.append("-c")
+        else:
+            cmd.append("-n")
+            if args.context_before:
+                cmd.append(f"-B{args.context_before}")
+            if args.context_after:
+                cmd.append(f"-A{args.context_after}")
+
+        if args.ignore_case or args.pattern.islower():
             cmd.append("-i")
+
+        if args.glob:
+            cmd.append(f"--include={args.glob}")
 
         for pattern in exclude_patterns:
             if pattern.endswith("/"):
