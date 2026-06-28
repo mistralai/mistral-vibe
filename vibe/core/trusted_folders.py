@@ -22,6 +22,12 @@ class WorkspaceTrustDecision(StrEnum):
     DECLINE = "decline"
 
 
+class WorkspaceTrustStatus(StrEnum):
+    TRUSTED = "trusted"
+    SESSION = "session"
+    UNTRUSTED = "untrusted"
+
+
 @dataclass(frozen=True)
 class WorkspaceTrustPrompt:
     cwd: Path
@@ -110,14 +116,19 @@ def find_repo_trustable_files_for_cwd(cwd: Path, repo_root: Path | None) -> list
     return sorted(found)
 
 
-def maybe_build_workspace_trust_prompt(cwd: Path) -> WorkspaceTrustPrompt | None:
+def maybe_build_workspace_trust_prompt(
+    cwd: Path, *, include_explicitly_untrusted: bool = False
+) -> WorkspaceTrustPrompt | None:
     resolved_cwd = cwd.resolve()
     if resolved_cwd == Path.home().resolve():
         return None
 
     if trusted_folders_manager.is_trusted(cwd) is True:
         return None
-    if trusted_folders_manager.is_explicitly_untrusted(cwd):
+    if (
+        not include_explicitly_untrusted
+        and trusted_folders_manager.is_explicitly_untrusted(cwd)
+    ):
         return None
 
     repo_root = find_git_repo_ancestor(cwd)
@@ -131,7 +142,10 @@ def maybe_build_workspace_trust_prompt(cwd: Path) -> WorkspaceTrustPrompt | None
         resolved_repo_root is not None
         and resolved_repo_root in resolved_cwd.parents
         and trusted_folders_manager.is_trusted(resolved_repo_root) is not True
-        and not trusted_folders_manager.is_explicitly_untrusted(resolved_repo_root)
+        and (
+            include_explicitly_untrusted
+            or not trusted_folders_manager.is_explicitly_untrusted(resolved_repo_root)
+        )
     )
     repo_explicitly_untrusted = (
         resolved_repo_root is not None
@@ -237,6 +251,20 @@ class TrustedFoldersManager:
                 return trusted
             case None:
                 return None
+
+    def trust_status(self, path: Path) -> WorkspaceTrustStatus:
+        current = Path(self._normalize_path(path))
+        while True:
+            s = str(current)
+            if s in self._session_trusted:
+                return WorkspaceTrustStatus.SESSION
+            if s in self._trusted:
+                return WorkspaceTrustStatus.TRUSTED
+            if s in self._untrusted:
+                return WorkspaceTrustStatus.UNTRUSTED
+            if current.parent == current:
+                return WorkspaceTrustStatus.UNTRUSTED
+            current = current.parent
 
     def is_explicitly_untrusted(self, path: Path) -> bool:
         """*path* literally in the untrusted list (no ancestor walk)."""

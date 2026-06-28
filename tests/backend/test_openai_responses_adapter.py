@@ -19,13 +19,13 @@ import respx
 from tests.backend.data import Chunk, JsonResponse, ResultData, Url
 from tests.backend.data.openai_responses import (
     COMMENTARY_CONVERSATION_PARAMS,
-    OPENAI_RESPONSES_TEST_BASE_URL,
     SIMPLE_CONVERSATION_PARAMS,
     STREAMED_COMMENTARY_CONVERSATION_PARAMS,
     STREAMED_SIMPLE_CONVERSATION_PARAMS,
     STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS,
 )
+from tests.constants import OPENAI_BASE_URL, OPENAI_RESPONSES_PATH
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm.backend.generic import GenericBackend
 from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
@@ -55,7 +55,7 @@ def model():
     return _make_model()
 
 
-def _make_provider(base_url: Url = OPENAI_RESPONSES_TEST_BASE_URL) -> ProviderConfig:
+def _make_provider(base_url: Url = OPENAI_BASE_URL) -> ProviderConfig:
     return ProviderConfig(
         name="openai",
         api_base=f"{base_url}/v1",
@@ -68,7 +68,7 @@ def _make_model() -> ModelConfig:
     return ModelConfig(name="gpt-4o", provider="openai", alias="gpt-4o")
 
 
-def _make_backend(base_url: Url = OPENAI_RESPONSES_TEST_BASE_URL) -> GenericBackend:
+def _make_backend(base_url: Url = OPENAI_BASE_URL) -> GenericBackend:
     return GenericBackend(provider=_make_provider(base_url))
 
 
@@ -1229,7 +1229,7 @@ class TestGenericBackendIntegration:
         self, base_url: Url, json_response: JsonResponse, result_data: ResultData
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/responses").mock(
+            mock_api.post(OPENAI_RESPONSES_PATH).mock(
                 return_value=httpx.Response(status_code=200, json=json_response)
             )
             backend = _make_backend(base_url)
@@ -1261,7 +1261,7 @@ class TestGenericBackendIntegration:
         self, base_url: Url, chunks: list[Chunk], result_data: list[ResultData]
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/responses").mock(
+            mock_api.post(OPENAI_RESPONSES_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
@@ -1289,9 +1289,9 @@ class TestGenericBackendIntegration:
 
     @pytest.mark.asyncio
     async def test_streaming_payload_includes_stream_flag(self):
-        base_url = OPENAI_RESPONSES_TEST_BASE_URL
+        base_url = OPENAI_BASE_URL
         with respx.mock(base_url=base_url) as mock_api:
-            route = mock_api.post("/v1/responses").mock(
+            route = mock_api.post(OPENAI_RESPONSES_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(

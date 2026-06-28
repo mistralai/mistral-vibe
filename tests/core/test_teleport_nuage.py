@@ -5,6 +5,7 @@ import json
 import httpx
 import pytest
 
+from tests.constants import TELEPORT_SESSIONS_PATH
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.nuage import (
     NuageClient,
@@ -52,7 +53,7 @@ async def test_start_posts_nuage_request() -> None:
         response = await nuage.start(_request())
 
     assert seen_request is not None
-    assert str(seen_request.url) == "https://chat.example.com/api/v1/code/sessions"
+    assert str(seen_request.url) == f"https://chat.example.com{TELEPORT_SESSIONS_PATH}"
     assert seen_request.headers["authorization"] == "Bearer api-key"
     assert seen_request.headers["content-type"] == "application/json"
     assert json.loads(seen_request.content) == {

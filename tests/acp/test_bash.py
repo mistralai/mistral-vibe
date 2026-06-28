@@ -291,6 +291,37 @@ class TestAcpBashTimeout:
         assert custom_handle._killed
 
     @pytest.mark.asyncio
+    async def test_run_timeout_bounded_when_kill_hangs(
+        self, mock_client: MockClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "vibe.acp.tools.builtins.bash._TERMINAL_CLEANUP_TIMEOUT", 0.05
+        )
+
+        custom_handle = MockTerminalHandle(
+            terminal_id="hanging_kill_terminal", wait_delay=20
+        )
+        mock_client._terminal_handle = custom_handle
+
+        async def hanging_kill() -> None:
+            await asyncio.sleep(30)
+
+        custom_handle.kill = hanging_kill
+
+        tool = Bash(
+            config_getter=lambda: BashToolConfig(),
+            state=AcpBashState.model_construct(
+                client=mock_client, session_id="test_session"
+            ),
+        )
+
+        args = BashArgs(command="slow_command", timeout=1)
+        with pytest.raises(ToolError) as exc_info:
+            await asyncio.wait_for(collect_result(tool.run(args)), timeout=5)
+
+        assert str(exc_info.value) == "Command timed out after 1s: 'slow_command'"
+
+    @pytest.mark.asyncio
     async def test_run_timeout_handles_kill_failure(
         self, mock_client: MockClient
     ) -> None:

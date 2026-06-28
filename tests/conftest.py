@@ -5,6 +5,9 @@ from pathlib import Path
 import sys
 from typing import Any
 
+import keyring
+from keyring.backend import KeyringBackend
+import keyring.errors
 import pytest
 import tomli_w
 
@@ -32,6 +35,43 @@ from vibe.core.config.harness_files import (
     reset_harness_files_manager,
 )
 from vibe.core.llm.types import BackendLike
+from vibe.core.utils import keyring as keyring_utils
+
+
+class _EmptyKeyring(KeyringBackend):
+    """A keyring backend that stores nothing, used to keep tests off the real OS keyring."""
+
+    priority = 1  # type: ignore[assignment]
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return None
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        return None
+
+    def delete_password(self, service: str, username: str) -> None:
+        raise keyring.errors.PasswordDeleteError()
+
+
+@pytest.fixture(autouse=True)
+def _disable_os_keyring(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Keep the suite off the real OS keyring.
+
+    ``resolve_api_key`` and ``VibeConfig._check_api_key`` now consult the keyring, so
+    without this every config construction would touch the real Keychain. We install an
+    empty backend (rather than patching ``keyring.get_password``) so tests that swap in
+    their own backend via ``keyring.set_keyring`` still work. Tests that exercise keyring
+    behaviour opt in by patching ``keyring.get_password`` / ``set_password`` directly.
+    """
+    original = keyring.get_keyring()
+    monkeypatch.setattr(keyring_utils, "_should_use_macos_security", lambda: False)
+    keyring.set_keyring(_EmptyKeyring())
+    keyring_utils.clear_api_key_keyring_cache()
+    try:
+        yield
+    finally:
+        keyring_utils.clear_api_key_keyring_cache()
+        keyring.set_keyring(original)
 
 
 def get_base_config() -> dict[str, Any]:
@@ -143,6 +183,10 @@ def _scratchpad_dir(
 @pytest.fixture(autouse=True)
 def _mock_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "mock")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "mock")
+    monkeypatch.setenv("OPENAI_API_KEY", "mock")
+    monkeypatch.setenv("VERTEX_API_KEY", "mock")
+    monkeypatch.setenv("REASONING_API_KEY", "mock")
 
 
 @pytest.fixture(autouse=True)
@@ -262,6 +306,15 @@ def build_test_vibe_config(**kwargs) -> VibeConfig:
     )
     if kwargs.get("models"):
         kwargs.setdefault("active_model", kwargs["models"][0].alias)
+    # Connectors trigger a real HTTP discovery on agent construction; off by
+    # default so tests don't pay for it. Connector tests pass enable_connectors=True.
+    kwargs.setdefault("enable_connectors", False)
+    # Use the lightweight test system prompt unless a test asks for a real one.
+    kwargs.setdefault("system_prompt_id", "tests")
+    # Keep the test prompt minimal: skip project-context discovery and prompt
+    # detail unless a test opts in.
+    kwargs.setdefault("include_project_context", False)
+    kwargs.setdefault("include_prompt_detail", False)
     return VibeConfig(
         session_logging=resolved_session_logging,
         enable_update_checks=resolved_enable_update_checks,

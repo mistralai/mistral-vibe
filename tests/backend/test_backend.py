@@ -36,8 +36,9 @@ from tests.backend.data.mistral import (
     STREAMED_TOOL_CONVERSATION_PARAMS as MISTRAL_STREAMED_TOOL_CONVERSATION_PARAMS,
     TOOL_CONVERSATION_PARAMS as MISTRAL_TOOL_CONVERSATION_PARAMS,
 )
+from tests.constants import CHAT_COMPLETIONS_PATH
 from vibe.core.config import ModelConfig, ProviderConfig
-from vibe.core.llm.backend.factory import BACKEND_FACTORY
+from vibe.core.llm.backend.factory import BACKEND_FACTORY, create_backend
 from vibe.core.llm.backend.generic import GenericBackend
 from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper
 from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
@@ -71,7 +72,7 @@ class TestBackend:
         self, base_url: Url, json_response: JsonResponse, result_data: ResultData
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(status_code=200, json=json_response)
             )
             provider = ProviderConfig(
@@ -139,7 +140,7 @@ class TestBackend:
         self, base_url: Url, chunks: list[Chunk], result_data: list[ResultData]
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
@@ -291,7 +292,7 @@ class TestBackend:
         response: httpx.Response,
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(return_value=response)
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(return_value=response)
             provider = ProviderConfig(
                 name="provider_name",
                 api_base=f"{base_url}/v1",
@@ -335,7 +336,7 @@ class TestBackend:
         self, base_url: Url, provider_name: str, expected_stream_options: dict
     ):
         with respx.mock(base_url=base_url) as mock_api:
-            route = mock_api.post("/v1/chat/completions").mock(
+            route = mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(
                     status_code=200,
                     stream=httpx.ByteStream(
@@ -399,7 +400,7 @@ class TestBackend:
             ],
         }
         with respx.mock(base_url=base_url) as mock_api:
-            mock_api.post("/v1/chat/completions").mock(
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(
                 return_value=httpx.Response(status_code=200, json=json_response)
             )
 
@@ -441,7 +442,7 @@ class TestBackend:
                 stream=httpx.ByteStream(stream=b"\n\n".join(chunks)),
                 headers={"Content-Type": "text/event-stream"},
             )
-            mock_api.post("/v1/chat/completions").mock(return_value=mock_response)
+            mock_api.post(CHAT_COMPLETIONS_PATH).mock(return_value=mock_response)
 
             provider = ProviderConfig(
                 name="provider_name",
@@ -470,13 +471,29 @@ class TestBackend:
 
 class TestMistralRetry:
     @staticmethod
-    def _create_test_backend() -> MistralBackend:
+    def _create_test_backend(
+        timeout: float = 720.0, retry_max_elapsed_time: float = 300.0
+    ) -> MistralBackend:
         provider = ProviderConfig(
             name="test_provider",
             api_base="https://api.mistral.ai/v1",
             api_key_env_var="API_KEY",
         )
-        return MistralBackend(provider=provider)
+        return MistralBackend(
+            provider=provider,
+            timeout=timeout,
+            retry_max_elapsed_time=retry_max_elapsed_time,
+        )
+
+    @staticmethod
+    def _build_fast_http_retry_config() -> RetryConfig:
+        return RetryConfig(
+            strategy="backoff",
+            backoff=BackoffStrategy(
+                initial_interval=1, max_interval=1, exponent=1, max_elapsed_time=10000
+            ),
+            retry_connection_errors=True,
+        )
 
     @pytest.mark.asyncio
     async def test_client_creation_includes_timeout_and_retry_config(self):
@@ -491,6 +508,61 @@ class TestMistralRetry:
             assert call_kwargs["timeout_ms"] == 720000
             assert call_kwargs["retry_config"] is backend._retry_config
             assert "async_client" in call_kwargs
+
+    def test_retry_budget_uses_explicit_config(self):
+        backend = self._create_test_backend(
+            timeout=7200.0, retry_max_elapsed_time=1234.0
+        )
+
+        assert backend._timeout == 7200.0
+        assert backend._retry_config.backoff.max_elapsed_time == 1234000
+
+    def test_create_backend_passes_retry_budget(self):
+        provider = ProviderConfig(
+            name="test_provider",
+            api_base="https://api.mistral.ai/v1",
+            api_key_env_var="API_KEY",
+            backend=Backend.MISTRAL,
+        )
+
+        backend = create_backend(
+            provider=provider, timeout=7200.0, retry_max_elapsed_time=1234.0
+        )
+
+        assert isinstance(backend, MistralBackend)
+        assert backend._timeout == 7200.0
+        assert backend._retry_config.backoff.max_elapsed_time == 1234000
+
+    @pytest.mark.asyncio
+    async def test_complete_retries_retryable_http_error(self):
+        with respx.mock(base_url="https://api.mistral.ai") as mock_api:
+            route = mock_api.post("/v1/chat/completions").mock(
+                side_effect=[
+                    httpx.Response(status_code=502, text="Bad Gateway"),
+                    httpx.Response(
+                        status_code=200, json=MISTRAL_SIMPLE_CONVERSATION_PARAMS[0][1]
+                    ),
+                ]
+            )
+            backend = self._create_test_backend()
+            backend._retry_config = self._build_fast_http_retry_config()
+            model = ModelConfig(
+                name="model_name", provider="test_provider", alias="model_alias"
+            )
+            messages = [LLMMessage(role=Role.user, content="Just say hi")]
+
+            result = await backend.complete(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                tools=None,
+                max_tokens=None,
+                tool_choice=None,
+                extra_headers=None,
+            )
+
+            assert result.message.content == "Some content"
+            assert route.call_count == 2
 
 
 class TestMistralMapperPrepareMessage:

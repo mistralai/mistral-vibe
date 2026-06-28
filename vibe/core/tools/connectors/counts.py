@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
-
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
+    from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
 
 
 def compute_connector_counts(

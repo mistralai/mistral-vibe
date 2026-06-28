@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from vibe.core.tools.mcp.registry import MCPRegistry
+from vibe.core.tools.mcp.pool import MCPConnectionPool
+from vibe.core.tools.mcp.registry import AuthStatus, MCPRegistry
 from vibe.core.tools.mcp.tools import (
     MCPToolResult,
     RemoteTool,
@@ -17,6 +18,8 @@ from vibe.core.tools.mcp.tools import (
 )
 
 __all__ = [
+    "AuthStatus",
+    "MCPConnectionPool",
     "MCPRegistry",
     "MCPToolResult",
     "RemoteTool",

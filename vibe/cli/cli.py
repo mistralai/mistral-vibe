@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 import sys
 
@@ -15,12 +16,17 @@ from vibe.cli.terminal_detect import detect_terminal
 from vibe.cli.textual_ui.app import StartupOptions, run_textual_ui
 from vibe.cli.update_notifier import (
     FileSystemUpdateCacheRepository,
+    PyPIUpdateGateway,
     UpdateCacheRepository,
+    UpdateError,
+    UpdateGateway,
     get_pending_update_from_cache,
+    get_update_if_available,
     mark_update_as_dismissed,
 )
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.cache_store import FileSystemVibeCodeCacheStore
 from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.hooks.config import HookConfigResult, load_hooks_from_fs
@@ -36,7 +42,12 @@ from vibe.core.trusted_folders import find_trustable_files, trusted_folders_mana
 from vibe.core.types import LLMMessage, OutputFormat, Role
 from vibe.core.utils import ConversationLimitException
 from vibe.setup.onboarding import run_onboarding
-from vibe.setup.update_prompt import UpdatePromptResult, ask_update_prompt
+from vibe.setup.update_prompt import (
+    UpdatePromptMode,
+    UpdatePromptResult,
+    ask_update_prompt,
+    load_update_prompt_theme,
+)
 
 
 def _build_cli_entrypoint_metadata() -> EntrypointMetadata:
@@ -256,31 +267,25 @@ def _run_programmatic_mode(
         sys.exit(1)
 
 
-def _maybe_run_startup_update_prompt(
-    config: VibeConfig, repository: UpdateCacheRepository
+def _show_update_prompt(
+    repository: UpdateCacheRepository,
+    latest_version: str,
+    *,
+    theme: str | None,
+    dismiss_on_continue: bool,
+    prompt_mode: UpdatePromptMode,
 ) -> None:
-    if not config.enable_update_checks:
-        return
-
-    try:
-        latest_version = asyncio.run(
-            get_pending_update_from_cache(repository, __version__)
-        )
-    except OSError as exc:
-        logger.debug("Failed to read pending update from cache", exc_info=exc)
-        return
-
-    if latest_version is None:
-        return
-
-    result = ask_update_prompt(__version__, latest_version, theme=config.theme)
+    result = ask_update_prompt(
+        __version__, latest_version, theme=theme, prompt_mode=prompt_mode
+    )
 
     match result:
         case UpdatePromptResult.CONTINUE:
-            try:
-                asyncio.run(mark_update_as_dismissed(repository, latest_version))
-            except OSError as exc:
-                logger.debug("Failed to persist dismissed update", exc_info=exc)
+            if dismiss_on_continue:
+                try:
+                    asyncio.run(mark_update_as_dismissed(repository, latest_version))
+                except OSError as exc:
+                    logger.debug("Failed to persist dismissed update", exc_info=exc)
             return
         case UpdatePromptResult.QUIT:
             sys.exit(0)
@@ -301,7 +306,74 @@ def _maybe_run_startup_update_prompt(
             sys.exit(1)
 
 
-def run_cli(args: argparse.Namespace) -> None:
+def _maybe_run_startup_update_prompt(
+    config: VibeConfig, repository: UpdateCacheRepository
+) -> None:
+    if not config.enable_update_checks:
+        return
+
+    try:
+        latest_version = asyncio.run(
+            get_pending_update_from_cache(repository, __version__)
+        )
+    except OSError as exc:
+        logger.debug("Failed to read pending update from cache", exc_info=exc)
+        return
+
+    if latest_version is None:
+        return
+
+    _show_update_prompt(
+        repository,
+        latest_version,
+        theme=config.theme,
+        dismiss_on_continue=True,
+        prompt_mode=UpdatePromptMode.STARTUP,
+    )
+
+
+def _run_check_upgrade(
+    repository: UpdateCacheRepository,
+    *,
+    update_notifier: UpdateGateway | None = None,
+    theme: str | None = None,
+) -> None:
+    notifier = update_notifier or PyPIUpdateGateway(project_name="mistral-vibe")
+    try:
+        update = asyncio.run(
+            get_update_if_available(
+                update_notifier=notifier,
+                current_version=__version__,
+                update_cache_repository=repository,
+                force_check=True,
+            )
+        )
+    except UpdateError as exc:
+        rprint(f"[red]✗ Update check failed:[/] {exc.message}")
+        sys.exit(1)
+    except OSError as exc:
+        logger.debug("Failed to persist forced update check", exc_info=exc)
+        rprint("[red]✗ Update check failed while writing the update cache.[/]")
+        sys.exit(1)
+
+    if update is None:
+        rprint(f"[green]Vibe is already up to date ({__version__}).[/]")
+        return
+
+    _show_update_prompt(
+        repository,
+        update.latest_version,
+        theme=theme,
+        dismiss_on_continue=False,
+        prompt_mode=UpdatePromptMode.CHECK_UPGRADE,
+    )
+
+
+def run_cli(
+    args: argparse.Namespace,
+    *,
+    resolve_trusted_folder: Callable[[], None] | None = None,
+) -> None:
     load_dotenv_values()
     bootstrap_config_files()
 
@@ -310,12 +382,21 @@ def run_cli(args: argparse.Namespace) -> None:
         sys.exit(0)
 
     try:
+        update_cache_repository = FileSystemUpdateCacheRepository()
+        if getattr(args, "check_upgrade", False):
+            _run_check_upgrade(
+                update_cache_repository, theme=load_update_prompt_theme()
+            )
+            sys.exit(0)
+
         is_interactive = args.prompt is None
         config = load_config_or_exit(interactive=is_interactive)
-        update_cache_repository = FileSystemUpdateCacheRepository()
 
         if is_interactive:
             _maybe_run_startup_update_prompt(config, update_cache_repository)
+            if resolve_trusted_folder is not None:
+                resolve_trusted_folder()
+                config = load_config_or_exit(interactive=True)
 
         initial_agent_name = get_initial_agent_name(args, config)
         hook_config_result = load_hooks_from_fs(config)
@@ -337,6 +418,7 @@ def run_cli(args: argparse.Namespace) -> None:
                     terminal_emulator=detect_terminal(),
                     defer_heavy_init=True,
                     hook_config_result=hook_config_result,
+                    cache_store=FileSystemVibeCodeCacheStore(),
                 )
             except ValueError as e:
                 rprint(f"[red]Error:[/] {e}")

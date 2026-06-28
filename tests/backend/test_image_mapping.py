@@ -14,7 +14,7 @@ from vibe.core.llm.backend.generic import OpenAIAdapter
 from vibe.core.llm.backend.mistral import MistralMapper
 from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
 from vibe.core.llm.backend.reasoning_adapter import ReasoningAdapter
-from vibe.core.types import ImageAttachment, LLMMessage, Role
+from vibe.core.types import FileImageSource, ImageAttachment, LLMMessage, Role
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 EXPECTED_B64 = base64.b64encode(PNG_BYTES).decode("ascii")
@@ -25,7 +25,9 @@ EXPECTED_DATA_URI = f"data:image/png;base64,{EXPECTED_B64}"
 def image_attachment(tmp_path: Path) -> ImageAttachment:
     path = tmp_path / "shot.png"
     path.write_bytes(PNG_BYTES)
-    return ImageAttachment(path=path, alias="shot.png", mime_type="image/png")
+    return ImageAttachment(
+        source=FileImageSource(path=path), alias="shot.png", mime_type="image/png"
+    )
 
 
 def _user_message(image: ImageAttachment) -> LLMMessage:

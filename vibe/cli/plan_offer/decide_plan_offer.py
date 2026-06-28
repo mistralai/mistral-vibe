@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from enum import StrEnum
 import logging
-from os import getenv
 
 from vibe.cli.plan_offer.ports.whoami_gateway import (
     WhoAmIGateway,
@@ -15,6 +14,7 @@ from vibe.core.config import (
     DEFAULT_MISTRAL_API_ENV_KEY,
     DEFAULT_VIBE_BASE_URL,
     ProviderConfig,
+    resolve_api_key,
 )
 from vibe.core.types import Backend
 
@@ -110,7 +110,11 @@ def resolve_api_key_for_plan(provider: ProviderConfig) -> str | None:
     if provider.backend == Backend.MISTRAL:
         api_env_key = provider.api_key_env_var
 
-    return getenv(api_env_key)
+    return resolve_api_key(api_env_key)
+
+
+def vibe_api_key_url(vibe_base_url: str = DEFAULT_VIBE_BASE_URL) -> str:
+    return f"{vibe_base_url.rstrip('/')}/code/extensions?focus=key"
 
 
 def plan_offer_cta(
@@ -118,15 +122,32 @@ def plan_offer_cta(
 ) -> str | None:
     if not payload:
         return
-    vibe_api_key_url = f"{vibe_base_url.rstrip('/')}/code/extensions?focus=key"
+    key_url = vibe_api_key_url(vibe_base_url)
     if payload.prompt_switching_to_pro_plan:
-        return f"### Switch to your [Vibe Pro API key]({vibe_api_key_url})"
+        return f"### Switch to your [Vibe Pro API key]({key_url})"
     if (
         payload.plan_type in {WhoAmIPlanType.API, WhoAmIPlanType.UNAUTHORIZED}
         or payload.is_free_chat_plan()
         or payload.is_free_mistral_code_plan()
     ):
-        return f"### Unlock more with Vibe - [Upgrade to Vibe Pro]({vibe_api_key_url})"
+        return f"### Unlock more with Vibe - [Upgrade to Vibe Pro]({key_url})"
+
+
+def check_teleport_eligibility(
+    payload: PlanInfo | None, *, vibe_base_url: str = DEFAULT_VIBE_BASE_URL
+) -> str | None:
+    if payload is not None and payload.is_teleport_eligible():
+        return None
+    key_url = vibe_api_key_url(vibe_base_url)
+    if payload is not None and payload.prompt_switching_to_pro_plan:
+        return (
+            "Teleport requires a Vibe Pro API key, but the current key is on a "
+            f"different plan. Switch to your Vibe Pro API key: {key_url}"
+        )
+    return (
+        "Teleport requires a Vibe Pro subscription. Your current API key isn't "
+        f"eligible. Upgrade to Vibe Pro: {key_url}"
+    )
 
 
 def plan_title(payload: PlanInfo | None) -> str | None:  # noqa: PLR0911

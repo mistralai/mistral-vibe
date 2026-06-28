@@ -3,14 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from textual.content import Content
-from textual.style import Style
 from textual.widgets import Markdown
 
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import (
     CompletionPopup,
     _CompletionItem,
+    _CompletionRow,
 )
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
 
@@ -42,7 +41,7 @@ async def test_popup_hides_when_input_cleared(vibe_app: VibeApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pressing_tab_writes_selected_command_and_leaves_popup_visible(
+async def test_pressing_tab_completes_command_and_hides_popup_when_exact_match(
     vibe_app: VibeApp,
 ) -> None:
     async with vibe_app.run_test() as pilot:
@@ -53,24 +52,18 @@ async def test_pressing_tab_writes_selected_command_and_leaves_popup_visible(
         await pilot.press("tab")
 
         assert chat_input.value == "/config"
-        assert popup.styles.display == "block"
+        assert popup.styles.display == "none"
 
 
 def ensure_selected_command(popup: CompletionPopup, expected_alias: str) -> None:
-    selected_aliases: list[str] = []
-    for item in popup.query(_CompletionItem):
-        renderable = item.render()
-        assert isinstance(renderable, Content)
-        content = str(renderable)
-        for span in renderable.spans:
-            style = span.style
-            if isinstance(style, Style) and style.reverse:
-                alias_text = content[span.start : span.end].strip()
-                alias = alias_text.split()[0] if alias_text else ""
-                selected_aliases.append(alias)
-
-    assert len(selected_aliases) == 1
-    assert selected_aliases[0] == expected_alias
+    selected_rows = [
+        row
+        for row in popup.query(_CompletionRow)
+        if row.has_class("completion-selected")
+    ]
+    assert len(selected_rows) == 1
+    command = selected_rows[0].query_one(".completion-command", _CompletionItem)
+    assert str(command.render()).strip() == expected_alias
 
 
 @pytest.mark.asyncio
@@ -295,20 +288,6 @@ async def test_finds_files_recursively_with_partial_path(
         popup_content = popup.content_text
         assert "vibe/acp/entrypoint.py" in popup_content
         assert popup.styles.display == "block"
-
-
-@pytest.mark.asyncio
-async def test_popup_is_positioned_near_cursor(vibe_app: VibeApp) -> None:
-    async with vibe_app.run_test() as pilot:
-        popup = vibe_app.query_one(CompletionPopup)
-
-        await pilot.press(*"/com")
-
-        assert popup.styles.display == "block"
-        offset = popup.styles.offset
-        # The popup should have an explicit offset set by _position_popup
-        assert offset.x is not None
-        assert offset.y is not None
 
 
 @pytest.mark.asyncio

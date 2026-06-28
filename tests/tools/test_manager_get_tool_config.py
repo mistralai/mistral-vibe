@@ -10,15 +10,8 @@ from vibe.core.tools.manager import NoSuchToolError, ToolManager
 
 
 @pytest.fixture
-def config():
-    return build_test_vibe_config(
-        system_prompt_id="tests", include_project_context=False
-    )
-
-
-@pytest.fixture
-def tool_manager(config):
-    return ToolManager(lambda: config)
+def tool_manager(vibe_config):
+    return ToolManager(lambda: vibe_config)
 
 
 def test_returns_default_config_when_no_overrides(tool_manager):
@@ -33,11 +26,7 @@ def test_returns_default_config_when_no_overrides(tool_manager):
 
 
 def test_merges_user_overrides_with_defaults():
-    vibe_config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
-        tools={"bash": {"permission": "always"}},
-    )
+    vibe_config = build_test_vibe_config(tools={"bash": {"permission": "always"}})
     manager = ToolManager(lambda: vibe_config)
 
     config = manager.get_tool_config("bash")
@@ -50,11 +39,7 @@ def test_merges_user_overrides_with_defaults():
 
 
 def test_preserves_tool_specific_fields_from_overrides():
-    vibe_config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
-        tools={"bash": {"permission": "ask"}},
-    )
+    vibe_config = build_test_vibe_config(tools={"bash": {"permission": "ask"}})
     vibe_config.tools["bash"]["default_timeout"] = 600
     manager = ToolManager(lambda: vibe_config)
 
@@ -73,9 +58,7 @@ def test_falls_back_to_base_config_for_unknown_tool(tool_manager):
 
 def test_partial_override_preserves_tool_defaults():
     vibe_config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
-        tools={"read": {"sensitive_patterns": ["**/*.key"]}},
+        tools={"read": {"sensitive_patterns": ["**/*.key"]}}
     )
     manager = ToolManager(lambda: vibe_config)
 
@@ -89,11 +72,7 @@ def test_partial_override_preserves_tool_defaults():
 
 class TestToolManagerFiltering:
     def test_enabled_tools_filters_to_only_enabled(self):
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            enabled_tools=["bash", "grep"],
-        )
+        vibe_config = build_test_vibe_config(enabled_tools=["bash", "grep"])
         manager = ToolManager(lambda: vibe_config)
 
         tools = manager.available_tools
@@ -104,11 +83,7 @@ class TestToolManagerFiltering:
         assert "write_file" not in tools
 
     def test_disabled_tools_excludes_disabled(self):
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            disabled_tools=["bash", "write_file"],
-        )
+        vibe_config = build_test_vibe_config(disabled_tools=["bash", "write_file"])
         manager = ToolManager(lambda: vibe_config)
 
         tools = manager.available_tools
@@ -120,8 +95,6 @@ class TestToolManagerFiltering:
 
     def test_enabled_tools_takes_precedence_over_disabled(self):
         vibe_config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
             enabled_tools=["bash"],
             disabled_tools=["bash"],  # Should be ignored
         )
@@ -133,9 +106,7 @@ class TestToolManagerFiltering:
 
     def test_glob_pattern_matching(self):
         vibe_config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            disabled_tools=["write_*"],  # Matches write_file
+            disabled_tools=["write_*"]  # Matches write_file
         )
         manager = ToolManager(lambda: vibe_config)
 
@@ -145,11 +116,7 @@ class TestToolManagerFiltering:
         assert "grep" in tools
 
     def test_regex_pattern_matching(self):
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            enabled_tools=["re:^(bash|grep)$"],
-        )
+        vibe_config = build_test_vibe_config(enabled_tools=["re:^(bash|grep)$"])
         manager = ToolManager(lambda: vibe_config)
 
         tools = manager.available_tools
@@ -158,11 +125,7 @@ class TestToolManagerFiltering:
         assert "grep" in tools
 
     def test_get_raises_for_disabled_tool(self):
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            disabled_tools=["bash"],
-        )
+        vibe_config = build_test_vibe_config(disabled_tools=["bash"])
         manager = ToolManager(lambda: vibe_config)
 
         assert "bash" not in manager.available_tools
@@ -170,11 +133,7 @@ class TestToolManagerFiltering:
             manager.get("bash")
 
     def test_case_insensitive_matching(self):
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            enabled_tools=["BASH", "GREP"],
-        )
+        vibe_config = build_test_vibe_config(enabled_tools=["BASH", "GREP"])
         manager = ToolManager(lambda: vibe_config)
 
         tools = manager.available_tools
@@ -182,9 +141,7 @@ class TestToolManagerFiltering:
         assert "grep" in tools
 
     def test_empty_enabled_tools_returns_all(self):
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False, enabled_tools=[]
-        )
+        vibe_config = build_test_vibe_config(enabled_tools=[])
         manager = ToolManager(lambda: vibe_config)
 
         tools = manager.available_tools
@@ -242,11 +199,7 @@ class FileTool(BaseTool[FileToolArgs, FileToolResult, BaseToolConfig, BaseToolSt
         for k in to_remove:
             del sys.modules[k]
 
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            tool_paths=[tool_dir, file_tool],
-        )
+        vibe_config = build_test_vibe_config(tool_paths=[tool_dir, file_tool])
         manager = ToolManager(lambda: vibe_config)
 
         tools = manager.available_tools
@@ -292,11 +245,7 @@ class ConditionalTool(BaseTool[ConditionalToolArgs, ConditionalToolResult, BaseT
             del sys.modules[k]
 
         monkeypatch.delenv("TEST_VAR", raising=False)
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            tool_paths=[tool_dir],
-        )
+        vibe_config = build_test_vibe_config(tool_paths=[tool_dir])
         manager = ToolManager(lambda: vibe_config)
         assert "conditional_tool" not in manager.available_tools
 
@@ -310,9 +259,7 @@ class ConditionalTool(BaseTool[ConditionalToolArgs, ConditionalToolResult, BaseT
 
     def test_default_is_available_returns_true(self):
         """Tools without is_available() override should be available."""
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False
-        )
+        vibe_config = build_test_vibe_config()
         manager = ToolManager(lambda: vibe_config)
 
         assert "bash" in manager.available_tools
@@ -329,9 +276,7 @@ class TestToolManagerModuleReuse:
 
     def test_multiple_managers_share_tool_classes(self):
         """Tool classes should be identical across multiple ToolManager instances."""
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False
-        )
+        vibe_config = build_test_vibe_config()
 
         manager1 = ToolManager(lambda: vibe_config)
         manager2 = ToolManager(lambda: vibe_config)
@@ -347,9 +292,7 @@ class TestToolManagerModuleReuse:
 
     def test_tool_state_classes_are_identical(self):
         """Tool state classes should be identical across managers."""
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False
-        )
+        vibe_config = build_test_vibe_config()
 
         manager1 = ToolManager(lambda: vibe_config)
         manager2 = ToolManager(lambda: vibe_config)
@@ -364,9 +307,7 @@ class TestToolManagerModuleReuse:
 
     def test_tool_args_results_classes_are_identical(self):
         """Tool args and result classes should be identical across managers."""
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False
-        )
+        vibe_config = build_test_vibe_config()
 
         manager1 = ToolManager(lambda: vibe_config)
         manager2 = ToolManager(lambda: vibe_config)
@@ -386,9 +327,7 @@ class TestToolManagerModuleReuse:
         This ensures subagents have isolated state (e.g., separate todo lists)
         while still sharing class definitions for Pydantic validation.
         """
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False
-        )
+        vibe_config = build_test_vibe_config()
 
         manager1 = ToolManager(lambda: vibe_config)
         manager2 = ToolManager(lambda: vibe_config)
@@ -412,9 +351,7 @@ class TestToolManagerModuleReuse:
 
     def test_class_shared_but_instances_isolated(self):
         """Classes must be shared (for validation) but instances isolated (for state)."""
-        vibe_config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False
-        )
+        vibe_config = build_test_vibe_config()
 
         manager1 = ToolManager(lambda: vibe_config)
         manager2 = ToolManager(lambda: vibe_config)

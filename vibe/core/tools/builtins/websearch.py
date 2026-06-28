@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-import os
 from typing import TYPE_CHECKING, ClassVar, final
 
 import httpx
@@ -15,7 +14,7 @@ from mistralai.client.models import (
 )
 from pydantic import BaseModel, Field
 
-from vibe.core.config import DEFAULT_MISTRAL_API_ENV_KEY, VibeConfig
+from vibe.core.config import DEFAULT_MISTRAL_API_ENV_KEY, VibeConfig, resolve_api_key
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -67,13 +66,13 @@ class WebSearch(
     @classmethod
     def is_available(cls, config: VibeConfig | None = None) -> bool:
         if config is None:
-            return bool(os.getenv(DEFAULT_MISTRAL_API_ENV_KEY))
+            return bool(resolve_api_key(DEFAULT_MISTRAL_API_ENV_KEY))
 
         provider = config.get_mistral_provider()
         if provider is None:
-            return bool(os.getenv(DEFAULT_MISTRAL_API_ENV_KEY))
+            return bool(resolve_api_key(DEFAULT_MISTRAL_API_ENV_KEY))
 
-        return bool(os.getenv(cls._api_key_env_var(config)))
+        return bool(resolve_api_key(cls._api_key_env_var(config)))
 
     @final
     async def run(
@@ -81,7 +80,7 @@ class WebSearch(
     ) -> AsyncGenerator[ToolStreamEvent | WebSearchResult, None]:
         config = self._resolve_config(ctx)
         api_key_env_var = self._api_key_env_var(config)
-        api_key = os.getenv(api_key_env_var)
+        api_key = resolve_api_key(api_key_env_var)
         if not api_key:
             raise ToolError(f"{api_key_env_var} environment variable not set.")
 

@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import base64
-import os
 
 import httpx
 from mistralai.client import Mistral
 from mistralai.client.models import SpeechOutputFormat
 
-from vibe.core.config import TTSModelConfig, TTSProviderConfig
+from vibe.core.config import TTSModelConfig, TTSProviderConfig, resolve_api_key
 from vibe.core.tts.tts_client_port import TTSResult
 from vibe.core.utils.http import build_ssl_context
 
 
 class MistralTTSClient:
     def __init__(self, provider: TTSProviderConfig, model: TTSModelConfig) -> None:
-        self._api_key = os.getenv(provider.api_key_env_var, "")
+        self._api_key = resolve_api_key(provider.api_key_env_var) or ""
         self._server_url = provider.api_base
         self._model_name = model.name
         self._voice = model.voice

@@ -10,6 +10,7 @@ from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from vibe.cli.plan_offer.decide_plan_offer import (
     PlanInfo,
     WhoAmIPlanType,
+    check_teleport_eligibility,
     decide_plan_offer,
     plan_offer_cta,
     plan_title,
@@ -176,6 +177,27 @@ def test_resolve_api_key_for_plan_with_missing_env_var() -> None:
         environ["MISTRAL_API_KEY"] = previous_api_key
 
 
+def test_resolve_api_key_for_plan_falls_back_to_keyring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    keyring_api_key = "keyring_mistral_api_key"
+    monkeypatch.setattr(
+        "vibe.core.utils.keyring.keyring.get_password",
+        lambda service, username: keyring_api_key,
+    )
+
+    provider = ProviderConfig(
+        name="test_mistral",
+        api_base="https://api.mistral.ai",
+        backend=Backend.MISTRAL,
+        api_key_env_var="MISTRAL_API_KEY",
+    )
+
+    result = resolve_api_key_for_plan(provider)
+    assert result == keyring_api_key
+
+
 @pytest.mark.parametrize(
     ("plan_info", "expected_cta"),
     [
@@ -227,6 +249,62 @@ def test_plan_offer_cta_uses_configured_vibe_url() -> None:
         plan_offer_cta(plan_info, vibe_base_url="https://vibe.example.com/")
         == "### Switch to your [Vibe Pro API key](https://vibe.example.com/code/extensions?focus=key)"
     )
+
+
+def test_check_teleport_eligibility_returns_none_for_eligible_key() -> None:
+    plan_info = PlanInfo(
+        plan_type=WhoAmIPlanType.CHAT,
+        plan_name="INDIVIDUAL",
+        prompt_switching_to_pro_plan=False,
+    )
+
+    assert check_teleport_eligibility(plan_info) is None
+
+
+@pytest.mark.parametrize(
+    "plan_info",
+    [
+        PlanInfo(
+            plan_type=WhoAmIPlanType.CHAT,
+            plan_name="INDIVIDUAL",
+            prompt_switching_to_pro_plan=True,
+        ),
+        PlanInfo(
+            plan_type=WhoAmIPlanType.API,
+            plan_name="FREE",
+            prompt_switching_to_pro_plan=False,
+        ),
+        PlanInfo(
+            plan_type=WhoAmIPlanType.CHAT,
+            plan_name="FREE",
+            prompt_switching_to_pro_plan=False,
+        ),
+        None,
+    ],
+    ids=["pro-plan-wrong-key", "api-free", "chat-free", "unresolved"],
+)
+def test_check_teleport_eligibility_points_ineligible_keys_to_api_key_url(
+    plan_info: PlanInfo | None,
+) -> None:
+    message = check_teleport_eligibility(plan_info)
+
+    assert message is not None
+    assert "https://chat.mistral.ai/code/extensions?focus=key" in message
+
+
+def test_check_teleport_eligibility_uses_configured_vibe_url() -> None:
+    plan_info = PlanInfo(
+        plan_type=WhoAmIPlanType.CHAT,
+        plan_name="INDIVIDUAL",
+        prompt_switching_to_pro_plan=True,
+    )
+
+    message = check_teleport_eligibility(
+        plan_info, vibe_base_url="https://vibe.example.com/"
+    )
+
+    assert message is not None
+    assert "https://vibe.example.com/code/extensions?focus=key" in message
 
 
 @pytest.mark.parametrize(

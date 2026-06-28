@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "enabled_tools": None,
         "output": "text",
         "agent": "default",
+        "check_upgrade": False,
         "setup": False,
         "workdir": None,
         "add_dir": [],
@@ -135,15 +137,14 @@ def test_trust_flag_trusts_cwd_for_session_only(
     args = _make_args(trust=True, prompt=None)
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod, "check_and_resolve_trusted_folder", lambda _cwd: None
-    )
-    monkeypatch.setattr(
         entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
     )
+
     # Stop main() before it runs the actual CLI.
-    monkeypatch.setattr(
-        "vibe.cli.cli.run_cli", lambda _args: (_ for _ in ()).throw(SystemExit(0))
-    )
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
 
     with pytest.raises(SystemExit) as exc_info:
         entrypoint_mod.main()
@@ -172,15 +173,89 @@ def test_trust_flag_works_in_programmatic_mode(
     monkeypatch.setattr(
         entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
     )
-    monkeypatch.setattr(
-        "vibe.cli.cli.run_cli", lambda _args: (_ for _ in ()).throw(SystemExit(0))
-    )
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
 
     with pytest.raises(SystemExit):
         entrypoint_mod.main()
 
     assert trusted_folders_manager.is_trusted(project) is True
     assert trusted_folders_manager._trusted == []
+
+
+def test_check_upgrade_does_not_pass_trust_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "AGENTS.md").write_text("hello", encoding="utf-8")
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt=None, check_upgrade=True)
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        entrypoint_mod,
+        "check_and_resolve_trusted_folder",
+        lambda _cwd: pytest.fail("check-upgrade must not prompt for trust"),
+    )
+    monkeypatch.setattr(
+        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+    )
+
+    def fake_run_cli(
+        _args: argparse.Namespace,
+        *,
+        resolve_trusted_folder: Callable[[], None] | None = None,
+    ) -> None:
+        assert resolve_trusted_folder is None
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit) as exc_info:
+        entrypoint_mod.main()
+
+    assert exc_info.value.code == 0
+
+
+def test_interactive_start_passes_trust_resolver_to_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt=None)
+    calls: list[str] = []
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        entrypoint_mod,
+        "check_and_resolve_trusted_folder",
+        lambda _cwd: calls.append("trust"),
+    )
+    monkeypatch.setattr(
+        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+    )
+
+    def fake_run_cli(
+        _args: argparse.Namespace,
+        *,
+        resolve_trusted_folder: Callable[[], None] | None = None,
+    ) -> None:
+        assert callable(resolve_trusted_folder)
+        resolve_trusted_folder()
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit) as exc_info:
+        entrypoint_mod.main()
+
+    assert exc_info.value.code == 0
+    assert calls == ["trust"]
 
 
 def test_session_trust_does_not_write_to_disk(
@@ -224,3 +299,60 @@ def test_run_cli_passes_max_tokens_to_run_programmatic(
 
     assert exc_info.value.code == 0
     assert call["max_session_tokens"] == 123
+
+
+def test_run_cli_runs_update_prompt_before_trust_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _make_args(prompt=None)
+    config = build_test_vibe_config()
+    calls: list[str] = []
+
+    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "load_config_or_exit", lambda interactive: config)
+    monkeypatch.setattr(
+        cli_mod,
+        "_maybe_run_startup_update_prompt",
+        lambda _config, _repository: calls.append("update"),
+    )
+
+    def resolve_trusted_folder() -> None:
+        calls.append("trust")
+        raise SystemExit(0)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.run_cli(args, resolve_trusted_folder=resolve_trusted_folder)
+
+    assert exc_info.value.code == 0
+    assert calls == ["update", "trust"]
+
+
+def test_run_cli_check_upgrade_exits_before_loading_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _make_args(prompt=None, check_upgrade=True)
+    call: dict[str, object] = {}
+
+    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_config_or_exit",
+        lambda interactive: pytest.fail("check-upgrade should not load config"),
+    )
+    monkeypatch.setattr(cli_mod, "load_update_prompt_theme", lambda: "dracula")
+
+    def fake_run_check_upgrade(_repository: object, *, theme: str | None) -> None:
+        call["theme"] = theme
+
+    monkeypatch.setattr(cli_mod, "_run_check_upgrade", fake_run_check_upgrade)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.run_cli(
+            args,
+            resolve_trusted_folder=lambda: pytest.fail(
+                "check-upgrade should not prompt for trust"
+            ),
+        )
+
+    assert exc_info.value.code == 0
+    assert call["theme"] == "dracula"

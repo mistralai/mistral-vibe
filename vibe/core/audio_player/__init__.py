@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from vibe.core.audio_player.audio_player import AudioPlayer
+from typing import TYPE_CHECKING
+
 from vibe.core.audio_player.audio_player_port import (
     AlreadyPlayingError,
     AudioBackendUnavailableError,
@@ -9,6 +10,9 @@ from vibe.core.audio_player.audio_player_port import (
     NoAudioOutputDeviceError,
     UnsupportedAudioFormatError,
 )
+
+if TYPE_CHECKING:
+    from vibe.core.audio_player.audio_player import AudioPlayer
 
 __all__ = [
     "AlreadyPlayingError",
@@ -19,3 +23,11 @@ __all__ = [
     "NoAudioOutputDeviceError",
     "UnsupportedAudioFormatError",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name == "AudioPlayer":
+        from vibe.core.audio_player.audio_player import AudioPlayer
+
+        return AudioPlayer
+    raise AttributeError(name)

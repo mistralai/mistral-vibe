@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.constants import CHAT_COMPLETIONS_PATH
 from vibe.core.llm.exceptions import BackendError, PayloadSummary
 
 
@@ -24,7 +25,7 @@ def _make_error(
 ) -> BackendError:
     return BackendError(
         provider="test-provider",
-        endpoint="/v1/chat/completions",
+        endpoint=CHAT_COMPLETIONS_PATH,
         status=status,
         reason="some reason",
         headers=headers or {},

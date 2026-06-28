@@ -21,8 +21,10 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    JsonValue,
     PrivateAttr,
     computed_field,
+    field_validator,
     model_validator,
 )
 
@@ -221,13 +223,71 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".gif", "
 MAX_IMAGE_BYTES: int = 10 * 1024 * 1024
 MAX_IMAGES_PER_MESSAGE: int = 8
 
+type UserDisplayContentItem = dict[str, JsonValue]
+
+
+class UserDisplayContentMetadata(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
+
+    version: str = Field(min_length=1)
+    host: str = Field(min_length=1)
+    content: list[UserDisplayContentItem]
+
+    @field_validator("version")
+    @classmethod
+    def validate_version(cls, value: str) -> str:
+        version = value.strip()
+        if not version:
+            raise ValueError("version must not be blank")
+
+        return version
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        host = value.strip()
+        if not host:
+            raise ValueError("host must not be blank")
+
+        return host
+
+
+class FileImageSource(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    kind: Literal["file"] = "file"
+    path: Path
+
+
+class InlineImageSource(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    kind: Literal["inline"] = "inline"
+    # Raw base64-encoded bytes (no `data:` prefix). Used when the image has no
+    # durable file on disk (session logging disabled): memory-only, never
+    # persisted to a session transcript.
+    data: str
+
 
 class ImageAttachment(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    path: Path
+    source: Annotated[FileImageSource | InlineImageSource, Field(discriminator="kind")]
     alias: str
     mime_type: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_flat_source(cls, value: Any) -> Any:
+        # Accept and migrate the legacy flat shape `{path|data, ...}` from older
+        # session transcripts.
+        if not isinstance(value, dict) or "source" in value:
+            return value
+        if value.get("path") is not None:
+            return {**value, "source": {"kind": "file", "path": value["path"]}}
+        if value.get("data") is not None:
+            return {**value, "source": {"kind": "inline", "data": value["data"]}}
+        return value
 
 
 class LLMMessage(BaseModel):
@@ -245,6 +305,7 @@ class LLMMessage(BaseModel):
     name: str | None = None
     tool_call_id: str | None = None
     message_id: str | None = None
+    user_display_content: UserDisplayContentMetadata | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -273,6 +334,7 @@ class LLMMessage(BaseModel):
             "images": getattr(v, "images", None),
             "message_id": getattr(v, "message_id", None)
             or (str(uuid4()) if role != "tool" else None),
+            "user_display_content": getattr(v, "user_display_content", None),
         }
 
     def __add__(self, other: LLMMessage) -> LLMMessage:
@@ -343,6 +405,9 @@ class LLMMessage(BaseModel):
             name=self.name,
             tool_call_id=self.tool_call_id,
             message_id=self.message_id,
+            user_display_content=self.user_display_content
+            if self.user_display_content is not None
+            else other.user_display_content,
         )
 
 
@@ -548,15 +613,19 @@ class MessageList(Sequence[LLMMessage]):
         for hook in self._reset_hooks:
             hook()
 
-    def update_system_prompt(self, new: str) -> None:
-        """Update the system prompt in place.
+    def update_system_prompt(self, new: str, *, notify: bool = False) -> None:
+        """Replace the system prompt, or insert it if none exists yet.
 
-        Called from a background thread during deferred init.  A single
-        list-item assignment is atomic under CPython's GIL, and the
-        ``@requires_init`` decorator ensures no ``act()`` call reads the
-        prompt concurrently, so no additional lock is needed here.
+        Under deferred init the prompt can land after messages were already
+        appended, so insert at the front rather than clobber slot 0.
         """
-        self._data[0] = LLMMessage(role=Role.system, content=new)
+        msg = LLMMessage(role=Role.system, content=new)
+        if self._data and self._data[0].role == Role.system:
+            self._data[0] = msg
+        else:
+            self._data.insert(0, msg)
+        if notify:
+            self._notify(msg)
 
     @contextmanager
     def silent(self) -> Iterator[None]:

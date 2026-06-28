@@ -10,10 +10,11 @@ from http import HTTPStatus
 import inspect
 import os
 from pathlib import Path
+import shutil
 import threading
 from threading import Thread
 import time
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from opentelemetry import trace
@@ -22,8 +23,9 @@ from pydantic import BaseModel
 from vibe.core.agent_loop_hooks import AgentLoopHooksMixin
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
+from vibe.core.cache_store import InMemoryVibeCodeCacheStore, VibeCodeCacheStore
 from vibe.core.compaction import collect_prior_user_messages, render_compaction_context
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig, resolve_api_key
 from vibe.core.experiments import ExperimentManager
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.session import (
@@ -32,7 +34,7 @@ from vibe.core.experiments.session import (
 )
 from vibe.core.hooks.manager import HooksManager
 from vibe.core.hooks.models import HookConfigResult, HookEvent
-from vibe.core.llm.backend.factory import BACKEND_FACTORY
+from vibe.core.llm.backend.factory import create_backend
 from vibe.core.llm.exceptions import BackendError
 from vibe.core.llm.format import (
     APIToolFormatHandler,
@@ -89,10 +91,7 @@ from vibe.core.tools.base import (
     ToolPermission,
     ToolPermissionError,
 )
-from vibe.core.tools.connectors import ConnectorRegistry
 from vibe.core.tools.manager import ToolManager
-from vibe.core.tools.mcp import MCPRegistry
-from vibe.core.tools.mcp_sampling import MCPSamplingHandler
 from vibe.core.tools.permissions import (
     ApprovedRule,
     PermissionContext,
@@ -128,6 +127,7 @@ from vibe.core.types import (
     ToolCallEvent,
     ToolResultEvent,
     ToolStreamEvent,
+    UserDisplayContentMetadata,
     UserInputCallback,
     UserMessageEvent,
 )
@@ -142,17 +142,38 @@ from vibe.core.utils import (
     is_user_cancellation_event,
 )
 
-try:
-    from vibe.core.teleport.teleport import TeleportService as _TeleportService
 
-    _TELEPORT_AVAILABLE = True
-except ImportError:
-    _TELEPORT_AVAILABLE = False
-    _TeleportService = None
+def _is_git_executable_available() -> bool:
+    executable = os.environ.get("GIT_PYTHON_GIT_EXECUTABLE")
+    if not executable:
+        return shutil.which("git") is not None
+
+    path = Path(executable).expanduser()
+    if path.is_absolute() or os.sep in executable:
+        return path.is_file() and os.access(path, os.X_OK)
+    return shutil.which(executable) is not None
+
+
+_TELEPORT_AVAILABLE = _is_git_executable_available()
+
+
+def _load_teleport_service() -> type[TeleportService]:
+    try:
+        from vibe.core.teleport.teleport import TeleportService
+    except ImportError as e:
+        raise TeleportError(
+            "Teleport requires git to be installed. Please install git and try again."
+        ) from e
+    return TeleportService
+
 
 if TYPE_CHECKING:
     from vibe.core.teleport.teleport import TeleportService
     from vibe.core.teleport.types import TeleportPushResponseEvent, TeleportYieldEvent
+    from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
+    from vibe.core.tools.mcp.pool import MCPConnectionPool
+    from vibe.core.tools.mcp.registry import MCPRegistry
+    from vibe.core.tools.mcp_sampling import MCPSamplingHandler
 
 
 class ToolExecutionResponse(StrEnum):
@@ -276,6 +297,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         message_observer: Callable[[LLMMessage], None] | None = None,
         max_turns: int | None = None,
         max_price: float | None = None,
+        max_tokens: int | None = None,
         max_session_tokens: int | None = None,
         backend: BackendLike | None = None,
         enable_streaming: bool = False,
@@ -287,9 +309,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         hook_config_result: HookConfigResult | None = None,
         permission_store: PermissionStore | None = None,
         mcp_registry: MCPRegistry | None = None,
+        cache_store: VibeCodeCacheStore | None = None,
     ) -> None:
         self._base_config = config
         self._headless = headless
+        self.cache_store = cache_store or InMemoryVibeCodeCacheStore()
 
         self._defer_heavy_init = defer_heavy_init
         self._deferred_init_thread: threading.Thread | None = None
@@ -302,8 +326,17 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         self._permission_store = permission_store or PermissionStore()
 
-        self.mcp_registry = mcp_registry or MCPRegistry()
-        self.connector_registry = self._create_connector_registry()
+        self.mcp_registry: MCPRegistry | None = (
+            mcp_registry
+            if defer_heavy_init
+            else mcp_registry or self._create_mcp_registry()
+        )
+        self._mcp_pool: MCPConnectionPool | None = (
+            None if defer_heavy_init else self._create_mcp_pool()
+        )
+        self.connector_registry: ConnectorRegistry | None = (
+            None if defer_heavy_init else self._create_connector_registry()
+        )
         self.agent_manager = AgentManager(
             lambda: self._base_config,
             initial_agent=agent_name,
@@ -313,13 +346,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             lambda: self.config,
             mcp_registry=self.mcp_registry,
             connector_registry=self.connector_registry,
-            defer_mcp=defer_heavy_init,
+            defer_mcp=True,
             permission_getter=self._permission_store.get_tool_permission,
         )
         self.skill_manager = SkillManager(lambda: self.config)
         self.message_observer = message_observer
         self._max_turns = max_turns
         self._max_price = max_price
+        self._max_tokens = max_tokens
         self._max_session_tokens = max_session_tokens
         self._plan_session = PlanSession()
 
@@ -327,7 +361,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         self.backend_factory = lambda: backend or self._select_backend()
         self.backend = self.backend_factory()
-        self._sampling_handler = MCPSamplingHandler(
+        self._sampling_handler = self._create_sampling_handler(
             backend_getter=lambda: self.backend,
             config_getter=lambda: self.config,
             metadata_getter=lambda: self._build_backend_metadata(
@@ -346,17 +380,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             init_scratchpad(self.session_id) if not is_subagent else None
         )
 
-        system_prompt = get_universal_system_prompt(
-            self.tool_manager,
-            self.config,
-            self.skill_manager,
-            self.agent_manager,
-            include_git_status=not defer_heavy_init,
-            scratchpad_dir=self.scratchpad_dir,
-            headless=self._headless,
-        )
-        system_message = LLMMessage(role=Role.system, content=system_prompt)
-        self.messages = MessageList(initial=[system_message], observer=message_observer)
+        self.messages = MessageList(initial=[], observer=message_observer)
 
         self.stats = AgentStats()
         self.approval_callback: ApprovalCallback | None = None
@@ -414,6 +438,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         if defer_heavy_init:
             self._start_deferred_init()
+        else:
+            self._complete_init()
+            if err := self._init_error:
+                raise err
 
     def _start_deferred_init(self) -> threading.Thread:
         """Spawn a daemon thread that finishes deferred heavy I/O once."""
@@ -443,17 +471,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         ``defer_heavy_init=True`` was passed to ``__init__``.
         """
         try:
+            self._ensure_remote_registries()
             self.tool_manager.integrate_all(raise_on_mcp_failure=True)
-            system_prompt = get_universal_system_prompt(
-                self.tool_manager,
-                self.config,
-                self.skill_manager,
-                self.agent_manager,
-                scratchpad_dir=self.scratchpad_dir,
-                headless=self._headless,
-                experiment_manager=self.experiment_manager,
-            )
-            self.messages.update_system_prompt(system_prompt)
+            self.messages.update_system_prompt(self._build_system_prompt(), notify=True)
         except Exception as exc:
             self._init_error = exc
 
@@ -496,6 +516,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def refresh_config(self) -> None:
         self._base_config = VibeConfig.load()
         self.agent_manager.invalidate_config()
+        if self.mcp_registry is not None:
+            self.mcp_registry.sync_active_servers(self.config.mcp_servers)
 
     def _drain_pending_injections(self) -> bool:
         if not self._pending_injected_messages:
@@ -616,6 +638,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             task.cancel()
             with contextlib.suppress(BaseException):
                 await task
+        if self._mcp_pool is not None:
+            with contextlib.suppress(Exception):
+                await self._mcp_pool.aclose()
         with contextlib.suppress(Exception):
             await self.backend.__aexit__(None, None, None)
         with contextlib.suppress(Exception):
@@ -630,17 +655,67 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             return None
 
         api_key_env = provider.api_key_env_var or "MISTRAL_API_KEY"
-        api_key = os.getenv(api_key_env, "")
+        api_key = resolve_api_key(api_key_env) or ""
         if not api_key:
             return None
 
         server_url = get_server_url_from_api_base(provider.api_base)
+        from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
+
         return ConnectorRegistry(api_key=api_key, server_url=server_url)
 
-    @requires_init
-    async def refresh_system_prompt(self) -> None:
-        """Rebuild and replace the system prompt with current tool/skill state."""
-        system_prompt = get_universal_system_prompt(
+    @staticmethod
+    def _create_mcp_registry() -> MCPRegistry:
+        from vibe.core.tools.mcp.registry import MCPRegistry
+
+        return MCPRegistry()
+
+    @staticmethod
+    def _create_mcp_pool() -> MCPConnectionPool:
+        from vibe.core.tools.mcp.pool import MCPConnectionPool
+
+        return MCPConnectionPool()
+
+    def _ensure_remote_registries(self) -> None:
+        if self.mcp_registry is None and self.config.mcp_servers:
+            self.mcp_registry = self._create_mcp_registry()
+            self.tool_manager.set_mcp_registry(self.mcp_registry)
+
+        if self._mcp_pool is None and self.config.mcp_servers:
+            self._mcp_pool = self._create_mcp_pool()
+
+        if self.connector_registry is None:
+            self.connector_registry = self._create_connector_registry()
+            self.tool_manager.set_connector_registry(self.connector_registry)
+
+    @staticmethod
+    def _create_sampling_handler(
+        *,
+        backend_getter: Callable[[], BackendLike],
+        config_getter: Callable[[], VibeConfig],
+        metadata_getter: Callable[[], dict[str, Any]],
+        extra_headers_getter: Callable[[], dict[str, str]],
+    ) -> MCPSamplingHandler:
+        handler: MCPSamplingHandler | None = None
+
+        async def lazy_handler(context: Any, params: Any) -> Any:
+            nonlocal handler
+            if handler is None:
+                from vibe.core.tools.mcp_sampling import MCPSamplingHandler
+
+                handler = MCPSamplingHandler(
+                    backend_getter=backend_getter,
+                    config_getter=config_getter,
+                    metadata_getter=metadata_getter,
+                    extra_headers_getter=extra_headers_getter,
+                )
+            return await handler(context, params)
+
+        # Only ever invoked as a callable, never attribute-accessed.
+        return cast("MCPSamplingHandler", lazy_handler)
+
+    def _build_system_prompt(self) -> str:
+        return get_universal_system_prompt(
             self.tool_manager,
             self.config,
             self.skill_manager,
@@ -649,12 +724,19 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             headless=self._headless,
             experiment_manager=self.experiment_manager,
         )
-        self.messages.update_system_prompt(system_prompt)
+
+    @requires_init
+    async def refresh_system_prompt(self) -> None:
+        """Rebuild and replace the system prompt with current tool/skill state."""
+        self.messages.update_system_prompt(self._build_system_prompt())
 
     def _select_backend(self) -> BackendLike:
         provider = self.config.get_active_provider()
-        timeout = self.config.api_timeout
-        return BACKEND_FACTORY[provider.backend](provider=provider, timeout=timeout)
+        return create_backend(
+            provider=provider,
+            timeout=self.config.api_timeout,
+            retry_max_elapsed_time=self.config.api_retry_max_elapsed_time,
+        )
 
     async def _save_messages(self) -> None:
         await self.session_logger.save_interaction(
@@ -702,6 +784,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         *,
         auto_title: str | None = None,
         images: list[ImageAttachment] | None = None,
+        user_display_content: UserDisplayContentMetadata | None = None,
     ) -> AsyncGenerator[BaseEvent, None]:
         try:
             active_model = self.config.get_active_model()
@@ -719,6 +802,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 client_message_id=client_message_id,
                 auto_title=auto_title,
                 images=images,
+                user_display_content=user_display_content,
             ):
                 yield event
 
@@ -731,9 +815,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             )
 
         if self._teleport_service is None:
-            if _TeleportService is None:
-                raise TeleportError("_TeleportService is unexpectedly None")
-            self._teleport_service = _TeleportService(
+            self._teleport_service = _load_teleport_service()(
                 session_logger=self.session_logger,
                 vibe_code_sessions_base_url=self.config.vibe_code_sessions_base_url,
                 vibe_code_api_key=self.config.vibe_code_api_key,
@@ -798,6 +880,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def set_max_turns(self, max_turns: int) -> None:
         self._max_turns = max_turns
         self._setup_middleware()
+
+    def set_max_tokens(self, max_tokens: int) -> None:
+        self._max_tokens = max_tokens
 
     def _setup_middleware(self) -> None:
         """Configure middleware pipeline for this conversation."""
@@ -937,12 +1022,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         *,
         auto_title: str | None = None,
         images: list[ImageAttachment] | None = None,
+        user_display_content: UserDisplayContentMetadata | None = None,
     ) -> AsyncGenerator[BaseEvent]:
         user_message = LLMMessage(
             role=Role.user,
             content=user_msg,
             message_id=client_message_id,
             images=images or None,
+            user_display_content=user_display_content,
         )
         self.messages.append(user_message)
         self.stats.steps += 1
@@ -1363,6 +1450,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 permission_store=self._permission_store,
                 hook_config_result=self._hook_config_result,
                 session_id=self.session_id,
+                mcp_pool=self._mcp_pool,
                 terminal_emulator=self.terminal_emulator,
             ),
             **tool_call.args_dict,
@@ -1543,9 +1631,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             return 0
         return sum(1 for m in self.messages if m.images)
 
-    async def _chat(
-        self, max_tokens: int | None = None, model_override: ModelConfig | None = None
-    ) -> LLMChunk:
+    async def _chat(self, model_override: ModelConfig | None = None) -> LLMChunk:
         active_model = model_override or self.config.get_active_model()
         provider = self.config.get_provider_for_model(active_model)
         backend_metadata = self._build_backend_metadata()
@@ -1577,7 +1663,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 tools=available_tools,
                 tool_choice=tool_choice,
                 extra_headers=self._get_extra_headers(provider),
-                max_tokens=max_tokens,
+                max_tokens=self._max_tokens,
                 metadata=backend_metadata.model_dump(exclude_none=True),
             )
             end_time = time.perf_counter()
@@ -1617,9 +1703,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 f"API error from {provider.name} (model: {active_model.name}): {e}"
             ) from e
 
-    async def _chat_streaming(
-        self, max_tokens: int | None = None
-    ) -> AsyncGenerator[LLMChunk]:
+    async def _chat_streaming(self) -> AsyncGenerator[LLMChunk]:
         active_model = self.config.get_active_model()
         provider = self.config.get_active_provider()
         backend_metadata = self._build_backend_metadata()
@@ -1653,7 +1737,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 tools=available_tools,
                 tool_choice=tool_choice,
                 extra_headers=self._get_extra_headers(),
-                max_tokens=max_tokens,
+                max_tokens=self._max_tokens,
                 metadata=backend_metadata.model_dump(exclude_none=True),
             ):
                 if chunk.correlation_id:
@@ -1780,11 +1864,16 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         forked = AgentLoop(
             config=self.base_config.model_copy(deep=True),
             agent_name=self.agent_profile.name,
+            max_turns=self._max_turns,
+            max_price=self._max_price,
+            max_tokens=self._max_tokens,
+            max_session_tokens=self._max_session_tokens,
             enable_streaming=self.enable_streaming,
             entrypoint_metadata=self.entrypoint_metadata,
             terminal_emulator=self.terminal_emulator,
             defer_heavy_init=True,
             hook_config_result=self._hook_config_result,
+            cache_store=self.cache_store,
         )
         forked.session_id = generate_session_id(suffix=extract_suffix(self.session_id))
         forked.parent_session_id = self.session_id
@@ -1974,6 +2063,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if max_price is not None:
             self._max_price = max_price
 
+        self._ensure_remote_registries()
         self.tool_manager = ToolManager(
             lambda: self.config,
             mcp_registry=self.mcp_registry,
@@ -1982,17 +2072,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         )
         self.skill_manager = SkillManager(lambda: self.config)
 
-        new_system_prompt = get_universal_system_prompt(
-            self.tool_manager,
-            self.config,
-            self.skill_manager,
-            self.agent_manager,
-            scratchpad_dir=self.scratchpad_dir,
-            headless=self._headless,
-            experiment_manager=self.experiment_manager,
-        )
-
-        self.messages.update_system_prompt(new_system_prompt)
+        self.messages.update_system_prompt(self._build_system_prompt())
 
         if len(self.messages) == 1:
             self.stats.reset_context_state()

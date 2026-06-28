@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.core.utils.text import snippet_start_line
+from vibe.core.utils.text import snippet_start_line, snippet_start_lines
 
 
 class TestSnippetStartLine:
@@ -27,3 +27,26 @@ class TestSnippetStartLine:
 
     def test_blank_snippet(self) -> None:
         assert snippet_start_line("hello", "\n") is None
+
+
+class TestSnippetStartLines:
+    def test_single_occurrence(self) -> None:
+        assert snippet_start_lines("a\nb\nc", "b") == [2]
+
+    def test_all_occurrences(self) -> None:
+        assert snippet_start_lines("x\ny\nx\nz\nx", "x") == [1, 3, 5]
+
+    def test_repeated_on_same_line(self) -> None:
+        assert snippet_start_lines("x x x", "x") == [1, 1, 1]
+
+    def test_non_overlapping(self) -> None:
+        assert snippet_start_lines("aaaa", "aa") == [1, 1]
+
+    def test_multiline_snippet_occurrences(self) -> None:
+        assert snippet_start_lines("a\nb\nc\na\nb", "a\nb") == [1, 4]
+
+    def test_not_found(self) -> None:
+        assert snippet_start_lines("hello\nworld", "missing") == []
+
+    def test_blank_snippet(self) -> None:
+        assert snippet_start_lines("hello", "\n") == []

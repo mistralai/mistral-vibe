@@ -1,135 +1,84 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import FrozenInstanceError
 from typing import Any, get_args
 
+from pydantic import ValidationError
 import pytest
 
 from vibe.core.config import (
-    AppendToList,
-    DeleteField,
-    PatchOp,
-    RemoveFromList,
-    SetField,
+    AddOperationPatch,
+    RemoveOperationPatch,
+    ReplaceOperationPatch,
 )
-from vibe.core.config.patch import ConfigPatch
+from vibe.core.config.patch import ConfigPatch, PatchOp
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (
+            AddOperationPatch(path="/tools/disabled_tools/0", value="bash"),
+            {"op": "add", "path": "/tools/disabled_tools/0", "value": "bash"},
+        ),
+        (
+            ReplaceOperationPatch(path="/active_model", value="devstral-small"),
+            {"op": "replace", "path": "/active_model", "value": "devstral-small"},
+        ),
+        (
+            RemoveOperationPatch(path="/tools/deprecated_setting"),
+            {"op": "remove", "path": "/tools/deprecated_setting"},
+        ),
+    ],
+)
+def test_json_patch_operations_convert_to_json_patch_payload(
+    operation: AddOperationPatch | ReplaceOperationPatch | RemoveOperationPatch,
+    expected: dict[str, Any],
+) -> None:
+    assert operation.to_json_patch() == expected
 
 
 def test_patch_op_union_contains_all_operations() -> None:
-    assert get_args(PatchOp) == (SetField, AppendToList, RemoveFromList, DeleteField)
-
-
-def test_set_field_accepts_top_level_key() -> None:
-    op = SetField("active_model", "devstral-small")
-
-    assert op.key == "active_model"
-    assert op.value == "devstral-small"
-
-
-def test_set_field_accepts_nested_key() -> None:
-    op = SetField("models.providers", {"mistral": {"region": "eu"}})
-
-    assert op.key == "models.providers"
-
-
-def test_append_to_list_accepts_nested_key() -> None:
-    op = AppendToList("tools.disabled_tools", ("bash", "python"))
-
-    assert op.key == "tools.disabled_tools"
-    assert op.items == ("bash", "python")
-
-
-def test_remove_from_list_accepts_nested_key() -> None:
-    op = RemoveFromList("models.available_models", ("codestral-latest",))
-
-    assert op.key == "models.available_models"
-    assert op.values == ("codestral-latest",)
-
-
-def test_delete_field_accepts_nested_key() -> None:
-    op = DeleteField("tools.deprecated_setting")
-
-    assert op.key == "tools.deprecated_setting"
+    assert set(get_args(PatchOp.__value__)) == {
+        AddOperationPatch,
+        ReplaceOperationPatch,
+        RemoveOperationPatch,
+    }
 
 
 @pytest.mark.parametrize(
     "factory",
     [
-        lambda key: SetField(key, "value"),
-        lambda key: AppendToList(key, ("value",)),
-        lambda key: RemoveFromList(key, ("value",)),
-        lambda key: DeleteField(key),
+        lambda path: AddOperationPatch(path=path, value="value"),
+        lambda path: ReplaceOperationPatch(path=path, value="value"),
+        lambda path: RemoveOperationPatch(path=path),
     ],
 )
-@pytest.mark.parametrize(
-    "invalid_key", ["", ".active_model", "active_model.", "tools..bash"]
-)
-def test_patch_operations_reject_invalid_key_paths(
-    factory: Callable[[str], object], invalid_key: str
-) -> None:
-    with pytest.raises(ValueError, match="dot-separated path|must not be empty"):
-        factory(invalid_key)
+def test_json_patch_operations_reject_non_pointer_paths(factory: Any) -> None:
+    with pytest.raises(ValidationError, match="valid JSON Pointer"):
+        factory("tools.disabled_tools")
 
 
 @pytest.mark.parametrize(
     "factory",
     [
-        lambda key: SetField(key, "value"),
-        lambda key: AppendToList(key, ("value",)),
-        lambda key: RemoveFromList(key, ("value",)),
-        lambda key: DeleteField(key),
+        lambda path: AddOperationPatch(path=path, value="value"),
+        lambda path: ReplaceOperationPatch(path=path, value="value"),
+        lambda path: RemoveOperationPatch(path=path),
     ],
 )
-def test_patch_operations_reject_non_string_keys(
-    factory: Callable[[Any], object],
-) -> None:
-    with pytest.raises(TypeError, match="Patch operation key must be a string"):
-        factory(1)
+def test_json_patch_operations_reject_invalid_escapes(factory: Any) -> None:
+    with pytest.raises(ValidationError, match="valid JSON Pointer"):
+        factory("/tools/~2")
 
 
-def test_append_to_list_rejects_non_tuple_items() -> None:
-    bad_items: Any = ["bash"]
+def test_json_patch_operations_accept_slash_prefixed_paths() -> None:
+    op = ReplaceOperationPatch(path="/", value={"active_model": "devstral-small"})
 
-    with pytest.raises(TypeError, match="AppendToList.items must be a tuple"):
-        AppendToList("tools.disabled_tools", bad_items)
-
-
-def test_remove_from_list_rejects_non_tuple_values() -> None:
-    bad_values: Any = ["bash"]
-
-    with pytest.raises(TypeError, match="RemoveFromList.values must be a tuple"):
-        RemoveFromList("tools.disabled_tools", bad_values)
-
-
-def test_patch_operations_are_frozen() -> None:
-    op = SetField("active_model", "devstral-small")
-
-    with pytest.raises(FrozenInstanceError):
-        op.__setattr__("key", "models.active_model")
-
-
-def test_scenario_mini_vibe_patch_operations() -> None:
-    operations: list[PatchOp] = [
-        SetField("active_model", "devstral-small"),
-        AppendToList("tools.disabled_tools", ("bash",)),
-        RemoveFromList("models.available_models", ("codestral-latest",)),
-        DeleteField("tools.deprecated_setting"),
-    ]
-
-    assert operations == [
-        SetField("active_model", "devstral-small"),
-        AppendToList("tools.disabled_tools", ("bash",)),
-        RemoveFromList("models.available_models", ("codestral-latest",)),
-        DeleteField("tools.deprecated_setting"),
-    ]
-
-
-# --- ConfigPatch ---
+    assert op.path == "/"
 
 
 def test_config_patch_stores_operations_and_metadata() -> None:
-    op = SetField("active_model", "devstral-small")
+    op = ReplaceOperationPatch(path="/active_model", value="devstral-small")
     patch = ConfigPatch(op, fingerprint="fp-1", reason="test")
 
     assert patch.operations == [op]
@@ -145,9 +94,9 @@ def test_config_patch_defaults() -> None:
 
 
 def test_config_patch_accepts_multiple_operations() -> None:
-    ops: list[PatchOp] = [
-        SetField("active_model", "devstral-small"),
-        AppendToList("tools.disabled_tools", ("bash",)),
+    ops = [
+        ReplaceOperationPatch(path="/active_model", value="devstral-small"),
+        AddOperationPatch(path="/tools/disabled_tools/-", value="bash"),
     ]
     patch = ConfigPatch(*ops, fingerprint="fp-1")
 
@@ -155,18 +104,23 @@ def test_config_patch_accepts_multiple_operations() -> None:
 
 
 def test_config_patch_add_appends_operations() -> None:
-    patch = ConfigPatch(SetField("active_model", "devstral-small"), fingerprint="fp-1")
-    patch.add(DeleteField("tools.deprecated_setting"))
+    patch = ConfigPatch(
+        ReplaceOperationPatch(path="/active_model", value="devstral-small"),
+        fingerprint="fp-1",
+    )
+    patch.add(RemoveOperationPatch(path="/tools/deprecated_setting"))
 
     assert patch.operations == [
-        SetField("active_model", "devstral-small"),
-        DeleteField("tools.deprecated_setting"),
+        ReplaceOperationPatch(path="/active_model", value="devstral-small"),
+        RemoveOperationPatch(path="/tools/deprecated_setting"),
     ]
 
 
 def test_config_patch_add_returns_self() -> None:
     patch = ConfigPatch(fingerprint="fp-1")
-    result = patch.add(SetField("active_model", "devstral-small"))
+    result = patch.add(
+        ReplaceOperationPatch(path="/active_model", value="devstral-small")
+    )
 
     assert result is patch
 
@@ -174,8 +128,8 @@ def test_config_patch_add_returns_self() -> None:
 def test_config_patch_add_accepts_multiple_operations() -> None:
     patch = ConfigPatch(fingerprint="fp-1")
     patch.add(
-        SetField("active_model", "devstral-small"),
-        AppendToList("tools.disabled_tools", ("bash",)),
+        ReplaceOperationPatch(path="/active_model", value="devstral-small"),
+        AddOperationPatch(path="/tools/disabled_tools/-", value="bash"),
     )
 
     assert len(patch.operations) == 2
@@ -184,42 +138,52 @@ def test_config_patch_add_accepts_multiple_operations() -> None:
 def test_config_patch_add_is_chainable() -> None:
     patch = (
         ConfigPatch(fingerprint="fp-1")
-        .add(SetField("active_model", "devstral-small"))
-        .add(DeleteField("tools.deprecated_setting"))
+        .add(ReplaceOperationPatch(path="/active_model", value="devstral-small"))
+        .add(RemoveOperationPatch(path="/tools/deprecated_setting"))
     )
 
     assert len(patch.operations) == 2
 
 
-def test_config_patch_describe_set_field() -> None:
-    patch = ConfigPatch(SetField("active_model", "devstral-small"), fingerprint="fp-1")
-
-    assert patch.describe() == ["set 'active_model' = 'devstral-small'"]
-
-
-def test_config_patch_describe_append_to_list() -> None:
+def test_config_patch_to_json_patch_from_wrappers() -> None:
     patch = ConfigPatch(
-        AppendToList("tools.disabled_tools", ("bash", "python")), fingerprint="fp-1"
-    )
-
-    assert patch.describe() == ["append to 'tools.disabled_tools': ['bash', 'python']"]
-
-
-def test_config_patch_describe_remove_from_list() -> None:
-    patch = ConfigPatch(
-        RemoveFromList("models.available_models", ("codestral-latest",)),
+        ReplaceOperationPatch(path="/active_model", value="devstral-small"),
+        AddOperationPatch(path="/tools/disabled_tools/-", value="bash"),
+        RemoveOperationPatch(path="/tools/deprecated_setting"),
         fingerprint="fp-1",
     )
 
-    assert patch.describe() == [
-        "remove from 'models.available_models': ['codestral-latest']"
+    assert patch.to_json_patch() == [
+        {"op": "replace", "path": "/active_model", "value": "devstral-small"},
+        {"op": "add", "path": "/tools/disabled_tools/-", "value": "bash"},
+        {"op": "remove", "path": "/tools/deprecated_setting"},
     ]
 
 
-def test_config_patch_describe_delete_field() -> None:
-    patch = ConfigPatch(DeleteField("tools.deprecated_setting"), fingerprint="fp-1")
+def test_config_patch_describe_add_operation() -> None:
+    patch = ConfigPatch(
+        AddOperationPatch(path="/tools/disabled_tools/-", value="bash"),
+        fingerprint="fp-1",
+    )
 
-    assert patch.describe() == ["delete 'tools.deprecated_setting'"]
+    assert patch.describe() == ["add '/tools/disabled_tools/-' = 'bash'"]
+
+
+def test_config_patch_describe_replace_operation() -> None:
+    patch = ConfigPatch(
+        ReplaceOperationPatch(path="/active_model", value="devstral-small"),
+        fingerprint="fp-1",
+    )
+
+    assert patch.describe() == ["replace '/active_model' = 'devstral-small'"]
+
+
+def test_config_patch_describe_remove_operation() -> None:
+    patch = ConfigPatch(
+        RemoveOperationPatch(path="/tools/deprecated_setting"), fingerprint="fp-1"
+    )
+
+    assert patch.describe() == ["remove '/tools/deprecated_setting'"]
 
 
 def test_config_patch_describe_empty_returns_empty_list() -> None:
@@ -230,28 +194,28 @@ def test_config_patch_describe_empty_returns_empty_list() -> None:
 
 def test_config_patch_describe_multiple_operations() -> None:
     patch = ConfigPatch(
-        SetField("active_model", "devstral-small"),
-        AppendToList("tools.disabled_tools", ("bash",)),
-        DeleteField("tools.deprecated_setting"),
+        ReplaceOperationPatch(path="/active_model", value="devstral-small"),
+        AddOperationPatch(path="/tools/disabled_tools/-", value="bash"),
+        RemoveOperationPatch(path="/tools/deprecated_setting"),
         fingerprint="fp-1",
     )
 
     assert patch.describe() == [
-        "set 'active_model' = 'devstral-small'",
-        "append to 'tools.disabled_tools': ['bash']",
-        "delete 'tools.deprecated_setting'",
+        "replace '/active_model' = 'devstral-small'",
+        "add '/tools/disabled_tools/-' = 'bash'",
+        "remove '/tools/deprecated_setting'",
     ]
 
 
 def test_scenario_build_patch_incrementally() -> None:
     patch = ConfigPatch(fingerprint="fp-abc", reason="/model command")
-    patch.add(SetField("active_model", "devstral-small"))
-    patch.add(AppendToList("tools.disabled_tools", ("bash",)))
+    patch.add(ReplaceOperationPatch(path="/active_model", value="devstral-small"))
+    patch.add(AddOperationPatch(path="/tools/disabled_tools/-", value="bash"))
 
     assert patch.fingerprint == "fp-abc"
     assert patch.reason == "/model command"
     assert len(patch.operations) == 2
     assert patch.describe() == [
-        "set 'active_model' = 'devstral-small'",
-        "append to 'tools.disabled_tools': ['bash']",
+        "replace '/active_model' = 'devstral-small'",
+        "add '/tools/disabled_tools/-' = 'bash'",
     ]

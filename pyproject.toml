@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.16.1"
+version = "2.18.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -33,15 +33,15 @@ dependencies = [
     "attrs==26.1.0",
     "beautifulsoup4==4.14.3",
     "cachetools==7.0.6",
-    "certifi==2026.4.22",
+    "certifi==2026.6.17",
     "cffi==2.0.0",
     "charset-normalizer==3.4.7",
     "click==8.3.3 ; sys_platform != 'emscripten'",
     "colorama==0.4.6 ; sys_platform == 'win32'",
-    "cryptography==47.0.0",
+    "cryptography==48.0.1",
     "eval-type-backport==0.3.1",
     "gitdb==4.0.12",
-    "gitpython==3.1.47",
+    "gitpython==3.1.50",
     "giturlparse==0.14.0",
     "google-auth==2.49.2",
     "googleapis-common-protos==1.74.0",
@@ -50,7 +50,7 @@ dependencies = [
     "httpx==0.28.1",
     "httpx-sse==0.4.3",
     "humanize==4.15.0",
-    "idna==3.13",
+    "idna==3.18",
     "importlib-metadata==8.7.1",
     "jaraco-classes==3.4.0",
     "jaraco-context==6.1.2",
@@ -65,10 +65,10 @@ dependencies = [
     "linkify-it-py==2.1.0",
     "markdown-it-py==4.0.0",
     "markdownify==1.2.2",
-    "mcp==1.27.1",
+    "mcp==1.28.0",
     "mdit-py-plugins==0.5.0",
     "mdurl==0.1.2",
-    "mistralai==2.4.4",
+    "mistralai==2.4.11",
     "more-itertools==11.0.2",
     "opentelemetry-api==1.39.1",
     "opentelemetry-exporter-otlp-proto-common==1.39.1",
@@ -86,13 +86,13 @@ dependencies = [
     "pycparser==3.0 ; implementation_name != 'PyPy'",
     "pydantic==2.13.3",
     "pydantic-core==2.46.3",
-    "pydantic-settings==2.14.0",
+    "pydantic-settings==2.14.2",
     "pygments==2.20.0",
-    "pyjwt==2.12.1",
+    "pyjwt==2.13.0",
     "pyperclip==1.11.0",
     "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.2",
-    "python-multipart==0.0.27",
+    "python-multipart==0.0.32",
     "pywin32==311 ; sys_platform == 'win32'",
     "pywin32-ctypes==0.2.3 ; sys_platform == 'win32'",
     "pyyaml==6.0.3",
@@ -116,7 +116,7 @@ dependencies = [
     "typing-extensions==4.15.0",
     "typing-inspection==0.4.2",
     "uc-micro-py==2.0.0",
-    "urllib3==2.6.3",
+    "urllib3==2.7.0",
     "uvicorn==0.46.0 ; sys_platform != 'emscripten'",
     "watchfiles==1.1.1",
     "websockets==16.0",
@@ -147,7 +147,7 @@ vibe-acp = "vibe.acp.entrypoint:main"
 
 
 [tool.uv]
-exclude-newer = "7 days"
+exclude-newer = "2 days"
 
 package = true
 required-version = ">=0.8.0"

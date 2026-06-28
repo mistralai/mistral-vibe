@@ -67,6 +67,8 @@ class ReadResult(BaseModel):
     content: str
     num_lines: int
     start_line: int
+    requested_offset: int | None = None
+    requested_limit: int = DEFAULT_LINE_LIMIT
     total_lines: int | None = None
     was_truncated: bool = False
 
@@ -178,6 +180,8 @@ class Read(
             content=content,
             num_lines=len(selected),
             start_line=start_line,
+            requested_offset=args.offset,
+            requested_limit=args.limit,
             total_lines=total_lines,
             was_truncated=was_truncated,
         )

@@ -42,11 +42,7 @@ def test_run_programmatic_preload_streaming_is_batched(
         ),
     ):
         cfg = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            include_prompt_detail=False,
-            include_model_info=False,
-            include_commit_signature=False,
+            include_model_info=False, include_commit_signature=False
         )
 
         previous = [
@@ -116,11 +112,7 @@ def test_run_programmatic_ignores_system_messages_in_previous(
         lambda provider, **kwargs: FakeBackend([mock_llm_chunk(content="Understood.")]),
     ):
         cfg = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            include_prompt_detail=False,
-            include_model_info=False,
-            include_commit_signature=False,
+            include_model_info=False, include_commit_signature=False
         )
 
         run_programmatic(
@@ -166,9 +158,6 @@ def test_run_programmatic_teleport_ignored_when_nuage_disabled(
         ]),
     ):
         cfg = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            include_prompt_detail=False,
             include_model_info=False,
             include_commit_signature=False,
             vibe_code_enabled=False,

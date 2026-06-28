@@ -38,9 +38,7 @@ class TestBuiltinSkills:
 
     def test_discovers_builtin_skills(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("vibe.core.skills.manager.BUILTIN_SKILLS", BUILTIN_SKILLS)
-        config = build_test_vibe_config(
-            system_prompt_id="tests", include_project_context=False
-        )
+        config = build_test_vibe_config()
         manager = SkillManager(lambda: config)
 
         assert "vibe" in manager.available_skills
@@ -53,11 +51,7 @@ class TestBuiltinSkills:
         skills_dir.mkdir()
         create_skill(skills_dir, "vibe", "Custom vibe override")
 
-        config = build_test_vibe_config(
-            system_prompt_id="tests",
-            include_project_context=False,
-            skill_paths=[skills_dir],
-        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
         assert "vibe" in manager.available_skills

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-import os
 
 import httpx
 from mistralai.client import Mistral
@@ -14,7 +13,11 @@ from mistralai.client.models import (
 )
 from mistralai.extra.realtime import UnknownRealtimeEvent
 
-from vibe.core.config import TranscribeModelConfig, TranscribeProviderConfig
+from vibe.core.config import (
+    TranscribeModelConfig,
+    TranscribeProviderConfig,
+    resolve_api_key,
+)
 from vibe.core.transcribe.transcribe_client_port import (
     TranscribeDone,
     TranscribeError,
@@ -29,7 +32,7 @@ class MistralTranscribeClient:
     def __init__(
         self, provider: TranscribeProviderConfig, model: TranscribeModelConfig
     ) -> None:
-        self._api_key = os.getenv(provider.api_key_env_var, "")
+        self._api_key = resolve_api_key(provider.api_key_env_var) or ""
         self._server_url = provider.api_base
         self._model_name = model.name
         self._audio_format = AudioFormat(

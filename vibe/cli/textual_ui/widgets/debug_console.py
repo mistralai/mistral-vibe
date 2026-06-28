@@ -4,6 +4,8 @@ import bisect
 from collections.abc import Callable
 
 from rich.markup import escape
+from rich.segment import Segment
+from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
@@ -26,6 +28,7 @@ LOG_LEVEL_COLORS: dict[str, str] = {
 }
 
 DEFAULT_LOG_PAGE_SIZE = 30
+_EMPTY_STYLE = Style()
 
 
 class _LogView(ScrollView, can_focus=True):
@@ -122,7 +125,13 @@ class _LogView(ScrollView, can_focus=True):
 
         base = self._wrap_prefix[logical_idx]
         for i, line_text in enumerate(wrapped):
-            strip = Strip(line_text.render(self.app.console), line_text.cell_len)
+            segments = [
+                segment
+                if segment.style is not None
+                else Segment(segment.text, _EMPTY_STYLE, segment.control)
+                for segment in line_text.render(self.app.console)
+            ]
+            strip = Strip(segments, line_text.cell_len)
             strip = strip.crop_extend(0, width, rich_style)
             self._render_line_cache[base + i] = strip
 

@@ -157,6 +157,34 @@ class TestACPForkSession:
         assert forked_session.agent_loop.parent_session_id == source_session.id
 
     @pytest.mark.asyncio
+    async def test_fork_session_inherits_limits(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        source_session = acp_agent_loop.sessions[session_response.session_id]
+
+        await acp_agent_loop.set_config_option(
+            session_id=source_session.id, config_id="max_turns", value="42"
+        )
+        await acp_agent_loop.set_config_option(
+            session_id=source_session.id, config_id="max_tokens", value="8192"
+        )
+        source_session.agent_loop._max_price = 1.5
+        source_session.agent_loop._max_session_tokens = 100_000
+
+        response = await acp_agent_loop.fork_session(
+            cwd=str(Path.cwd()), session_id=source_session.id, mcp_servers=[]
+        )
+
+        forked = acp_agent_loop.sessions[response.session_id].agent_loop
+        assert forked._max_turns == 42
+        assert forked._max_tokens == 8192
+        assert forked._max_price == 1.5
+        assert forked._max_session_tokens == 100_000
+
+    @pytest.mark.asyncio
     async def test_fork_session_rejects_running_session(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:

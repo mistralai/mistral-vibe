@@ -22,6 +22,7 @@ from vibe.acp.tools.session_update import (
 )
 from vibe.core.tools.base import ToolError
 from vibe.core.tools.builtins.read import (
+    DEFAULT_LINE_LIMIT,
     Read as CoreReadTool,
     ReadArgs,
     ReadResult,
@@ -81,17 +82,46 @@ class Read(
             tool_call_id=event.tool_call_id,
             kind=resolve_kind(event.tool_name),
             raw_input=event.args.model_dump_json(),
-            locations=[
-                ToolCallLocation(
-                    path=resolved,
-                    field_meta={
-                        "type": "file_range",
-                        "offset": event.args.offset,
-                        "limit": event.args.limit,
-                    },
-                )
-            ],
+            locations=[cls._call_location(resolved, event.args)],
             field_meta={"tool_name": event.tool_name},
+        )
+
+    @staticmethod
+    def _call_location(resolved: str, args: ReadArgs) -> ToolCallLocation:
+        # Only range explicitly bounded reads; a whole-file read's default
+        # limit would render a misleading "L1-L<default>" chip.
+        if args.limit != DEFAULT_LINE_LIMIT:
+            return ToolCallLocation(
+                path=resolved,
+                field_meta={
+                    "type": "file_range",
+                    "offset": args.offset,
+                    "limit": args.limit,
+                },
+            )
+        return ToolCallLocation(
+            path=resolved, line=args.offset, field_meta={"type": "file"}
+        )
+
+    @staticmethod
+    def _result_location(resolved: str, result: ReadResult) -> ToolCallLocation:
+        # Mirror the start-event logic: a whole-file read points at the file with
+        # no line (requested_offset is None), so it renders "Read foo.ts" rather
+        # than a stray "L1". A default-limit read that got truncated only read
+        # part of the file, so surface the real range instead of implying the
+        # whole file was read. num_lines is already clamped to the lines read.
+        bounded = result.requested_limit != DEFAULT_LINE_LIMIT or result.was_truncated
+        if bounded:
+            return ToolCallLocation(
+                path=resolved,
+                field_meta={
+                    "type": "file_range",
+                    "offset": result.start_line,
+                    "limit": result.num_lines,
+                },
+            )
+        return ToolCallLocation(
+            path=resolved, line=result.requested_offset, field_meta={"type": "file"}
         )
 
     @classmethod
@@ -102,16 +132,7 @@ class Read(
         result = event.result
         assert isinstance(result, ReadResult)
         resolved = str(Path(result.file_path).resolve())
-        locations = [
-            ToolCallLocation(
-                path=resolved,
-                field_meta={
-                    "type": "file_range",
-                    "offset": result.start_line,
-                    "limit": result.num_lines,
-                },
-            )
-        ]
+        locations = [cls._result_location(resolved, result)]
 
         return ToolCallProgress(
             session_update="tool_call_update",

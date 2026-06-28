@@ -17,12 +17,13 @@ from textual.worker import Worker
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ConnectorConfig, VibeConfig
 from vibe.core.tools.connectors import ConnectorAuthAction, ConnectorRegistry
-from vibe.core.tools.mcp.tools import MCPTool
 from vibe.core.tools.mcp_settings import updated_tool_list
+from vibe.core.tools.remote import MCPTool
 
 if TYPE_CHECKING:
     from vibe.core.config import MCPServer
     from vibe.core.tools.manager import ToolManager
+    from vibe.core.tools.mcp import AuthStatus, MCPRegistry
 
 
 class MCPSourceKind(StrEnum):
@@ -117,18 +118,29 @@ class MCPApp(Container):
             self.connector_registry = connector_registry
             self.tool_manager = tool_manager
 
+    class MCPOAuthRequested(Message):
+        """Posted when an OAuth MCP server needs authentication."""
+
+        def __init__(self, server_name: str, mcp_registry: MCPRegistry) -> None:
+            super().__init__()
+            self.server_name = server_name
+            self.mcp_registry = mcp_registry
+
     def __init__(
         self,
         mcp_servers: Sequence[MCPServer],
         tool_manager: ToolManager,
         initial_server: str = "",
         connector_registry: ConnectorRegistry | None = None,
+        mcp_registry: MCPRegistry | None = None,
         get_vibe_config: Callable[[], VibeConfig] | None = None,
         refresh_callback: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         super().__init__(id="mcp-app")
         self._mcp_servers = mcp_servers
         self._connector_registry = connector_registry
+        self._mcp_registry = mcp_registry
+        self._sync_mcp_registry()
         self._get_vibe_config = get_vibe_config
         connector_names = (
             connector_registry.get_connector_names() if connector_registry else []
@@ -254,12 +266,34 @@ class MCPApp(Container):
                 == ConnectorAuthAction.OAUTH
             ):
                 return _LIST_VIEW_HELP_AUTH
+        if option_id.startswith("server:"):
+            name = option_id.removeprefix("server:")
+            if self._server_needs_auth(name):
+                return _LIST_VIEW_HELP_AUTH
         return _LIST_VIEW_HELP_TOOLS
 
     def _set_help_text(self, text: str) -> None:
         if self._status_message:
             text = f"{self._status_message}  {text}"
         self.query_one("#mcp-help", NoMarkupStatic).update(text)
+
+    def _sync_mcp_registry(self) -> None:
+        if self._mcp_registry is None:
+            return
+        self._mcp_registry.sync_active_servers(list(self._mcp_servers))
+
+    def _server_auth_status(self, name: str) -> AuthStatus | None:
+        if self._mcp_registry is None:
+            return None
+        return self._mcp_registry.status().get(name)
+
+    def _server_needs_auth(self, name: str) -> bool:
+        from vibe.core.tools.mcp import AuthStatus
+
+        server = next((srv for srv in self._mcp_servers if srv.name == name), None)
+        if server is None or server.disabled:
+            return False
+        return self._server_auth_status(name) is AuthStatus.NEEDS_AUTH
 
     def _connector_configs(self) -> list[ConnectorConfig]:
         return self._get_vibe_config().connectors if self._get_vibe_config else []
@@ -372,6 +406,7 @@ class MCPApp(Container):
 
     def _rebuild_preserving_scroll(self) -> None:
         """Rebuild the tool index and refresh the view, preserving highlight and scroll."""
+        self._sync_mcp_registry()
         option_list = self.query_one(OptionList)
         saved_option_id: str | None = None
         if (idx := option_list.highlighted) is not None:
@@ -470,22 +505,37 @@ class MCPApp(Container):
             option_list.highlighted = first_enabled
 
     def _list_mcp_servers(self, option_list: OptionList, index: MCPToolIndex) -> None:
+        from vibe.core.tools.mcp import AuthStatus
+
         max_name = max(len(srv.name) for srv in self._mcp_servers)
         max_type = max(len(srv.transport) + 2 for srv in self._mcp_servers)
-        option_list.add_option(
-            Option(Text("Local MCP Servers", style="bold", no_wrap=True), disabled=True)
-        )
+        tool_texts: dict[str, str] = {}
         for srv in self._mcp_servers:
             tools = index.server_tools.get(srv.name, [])
             total = len(tools)
             enabled = sum(1 for t, _ in tools if t in index.enabled_tools)
+            tool_texts[srv.name] = _tool_count_text(enabled, total)
+        max_tools = max(len(t) for t in tool_texts.values())
+        statuses = self._mcp_registry.status() if self._mcp_registry else {}
+        option_list.add_option(
+            Option(Text("Local MCP Servers", style="bold", no_wrap=True), disabled=True)
+        )
+        for srv in self._mcp_servers:
             type_tag = f"[{srv.transport}]"
             label = Text(no_wrap=True)
             label.append(f"  {srv.name:<{max_name}}")
             label.append(f"  {type_tag:<{max_type}}", style="dim")
-            label.append(f"  {_tool_count_text(enabled, total)}", style="dim")
+            label.append(f"  {tool_texts[srv.name]:<{max_tools}}", style="dim")
             if srv.disabled:
                 _append_status(label, "○", "dim", "disabled")
+            else:
+                match statuses.get(srv.name):
+                    case AuthStatus.NEEDS_AUTH:
+                        _append_status(label, "○", "dim", "needs auth")
+                    case AuthStatus.OK:
+                        _append_status(label, "●", "green", "connected")
+                    case _:
+                        _append_status(label, "●", "green", "enabled")
             option_list.add_option(Option(label, id=f"server:{srv.name}"))
 
     def _list_connectors(self, option_list: OptionList, index: MCPToolIndex) -> None:
@@ -556,6 +606,15 @@ class MCPApp(Container):
         )
         tools_source = index.connector_tools if is_connector else index.server_tools
         all_tools = sorted(tools_source.get(server_name, []), key=lambda t: t[0])
+        if not is_connector and self._server_needs_auth(server_name):
+            self._set_help_text(_DETAIL_VIEW_HELP_NO_TOOLS)
+            if self._mcp_registry is not None:
+                self.post_message(
+                    self.MCPOAuthRequested(
+                        server_name=server_name, mcp_registry=self._mcp_registry
+                    )
+                )
+            return
         self._set_help_text(
             _DETAIL_VIEW_HELP if all_tools else _DETAIL_VIEW_HELP_NO_TOOLS
         )

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from vibe.core.telemetry.build_metadata import build_attachment_counts
 from vibe.core.telemetry.types import AttachmentKind
-from vibe.core.types import ImageAttachment, LLMMessage, Role
+from vibe.core.types import FileImageSource, ImageAttachment, LLMMessage, Role
 
 
 def _msg(images: list[ImageAttachment] | None) -> LLMMessage:
@@ -13,7 +13,9 @@ def _msg(images: list[ImageAttachment] | None) -> LLMMessage:
 
 def _image() -> ImageAttachment:
     return ImageAttachment(
-        path=Path("/tmp/x.png"), alias="x.png", mime_type="image/png"
+        source=FileImageSource(path=Path("/tmp/x.png")),
+        alias="x.png",
+        mime_type="image/png",
     )
 
 

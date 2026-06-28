@@ -40,3 +40,32 @@ class TestToolCallSessionUpdate:
         assert update.tool_call_id == "test_call_123"
         assert update.kind == "read"
         assert update.raw_input is None
+
+    def test_whole_file_read_emits_plain_file_location(self) -> None:
+        event = self._create_event()
+
+        update = tool_call_session_update(event)
+
+        assert isinstance(update, ToolCallStart)
+        assert update.locations is not None
+        location = update.locations[0]
+        assert location.field_meta == {"type": "file"}
+        assert location.line is None
+
+    def test_bounded_read_emits_file_range_location(self) -> None:
+        event = ToolCallEvent(
+            tool_name="read",
+            tool_call_id="test_call_123",
+            args=ReadArgs(file_path="/tmp/test.txt", offset=10, limit=20),
+            tool_class=Read,
+        )
+
+        update = tool_call_session_update(event)
+
+        assert isinstance(update, ToolCallStart)
+        assert update.locations is not None
+        location = update.locations[0]
+        assert location.field_meta is not None
+        assert location.field_meta["type"] == "file_range"
+        assert location.field_meta["offset"] == 10
+        assert location.field_meta["limit"] == 20

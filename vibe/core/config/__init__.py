@@ -36,24 +36,27 @@ from vibe.core.config._settings import (
     TTSProviderConfig,
     VibeConfig,
     load_dotenv_values,
+    resolve_api_key,
+    resolve_theme_name,
 )
 from vibe.core.config.layer import (
     ConfigLayer,
     ConfigLayerError,
+    ConfigPatchApplicationError,
     EmptyLayerError,
     LayerImplementationError,
+    LayerNotLoadedError,
     RawConfig,
     TrustNotResolvedError,
     TrustResolutionError,
     UntrustedLayerError,
 )
 from vibe.core.config.patch import (
-    AppendToList,
+    AddOperationPatch,
     ConfigPatch,
-    DeleteField,
     PatchOp,
-    RemoveFromList,
-    SetField,
+    RemoveOperationPatch,
+    ReplaceOperationPatch,
 )
 from vibe.core.config.schema import (
     ConfigDefinitionError,
@@ -67,7 +70,12 @@ from vibe.core.config.schema import (
     WithShallowMerge,
     WithUnionMerge,
 )
-from vibe.core.config.types import MISSING_CONFIG_FILE_FINGERPRINT, LayerConfigSnapshot
+from vibe.core.config.types import (
+    MISSING_BACKING_STORE_DATA_FINGERPRINT,
+    ConfigChangeCallback,
+    ConfigChangeEvent,
+    LayerConfigSnapshot,
+)
 from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.prompts import MissingPromptFileError
 
@@ -82,22 +90,25 @@ __all__ = [
     "DEFAULT_TTS_MODELS",
     "DEFAULT_TTS_PROVIDERS",
     "DEFAULT_VIBE_BASE_URL",
-    "MISSING_CONFIG_FILE_FINGERPRINT",
+    "MISSING_BACKING_STORE_DATA_FINGERPRINT",
     "THINKING_LEVELS",
-    "AppendToList",
+    "AddOperationPatch",
+    "ConfigChangeCallback",
+    "ConfigChangeEvent",
     "ConfigDefinitionError",
     "ConfigFragment",
     "ConfigLayer",
     "ConfigLayerError",
     "ConfigPatch",
+    "ConfigPatchApplicationError",
     "ConfigSchema",
     "ConnectorConfig",
-    "DeleteField",
     "DuplicateMergeMetadataError",
     "EmptyLayerError",
     "ExperimentsConfig",
     "LayerConfigSnapshot",
     "LayerImplementationError",
+    "LayerNotLoadedError",
     "MCPHttp",
     "MCPOAuth",
     "MCPServer",
@@ -113,9 +124,9 @@ __all__ = [
     "ProjectContextConfig",
     "ProviderConfig",
     "RawConfig",
-    "RemoveFromList",
+    "RemoveOperationPatch",
+    "ReplaceOperationPatch",
     "SessionLoggingConfig",
-    "SetField",
     "TTSClient",
     "TTSModelConfig",
     "TTSProviderConfig",
@@ -135,4 +146,6 @@ __all__ = [
     "WithShallowMerge",
     "WithUnionMerge",
     "load_dotenv_values",
+    "resolve_api_key",
+    "resolve_theme_name",
 ]

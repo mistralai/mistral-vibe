@@ -197,7 +197,7 @@
 </text><text class="terminal-r1" x="1464" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">
 </text><text class="terminal-r1" x="1464" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">
 </text><text class="terminal-r1" x="0" y="849.6" textLength="1464" clip-path="url(#terminal-line-34)">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text><text class="terminal-r1" x="1464" y="849.6" textLength="12.2" clip-path="url(#terminal-line-34)">
-</text><text class="terminal-r5" x="0" y="874" textLength="158.6" clip-path="url(#terminal-line-35)">/test/workdir</text><text class="terminal-r5" x="1256.6" y="874" textLength="207.4" clip-path="url(#terminal-line-35)">0%&#160;of&#160;200k&#160;tokens</text>
+</text><text class="terminal-r5" x="0" y="874" textLength="158.6" clip-path="url(#terminal-line-35)">/test/workdir</text><text class="terminal-r5" x="1244.4" y="874" textLength="219.6" clip-path="url(#terminal-line-35)">0/200k&#160;tokens&#160;(0%)</text>
     </g>
     </g>
 </svg>

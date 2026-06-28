@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from rich.markup import escape
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -10,13 +11,18 @@ from vibe.cli.textual_ui.widgets.collapsible import (
     CollapsibleSection,
     lines_label,
 )
+from vibe.cli.textual_ui.widgets.links import LinkStatic, linkify_urls_in_text
 from vibe.cli.textual_ui.widgets.messages import ExpandingBorder
 from vibe.cli.textual_ui.widgets.no_markup_static import (
     NoMarkupStatic,
     NonSelectableStatic,
 )
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
-from vibe.cli.textual_ui.widgets.tool_widgets import ToolResultWidget, get_result_widget
+from vibe.cli.textual_ui.widgets.tool_widgets import (
+    LINKIFY_RESULT_TOOLS,
+    ToolResultWidget,
+    get_result_widget,
+)
 from vibe.core.tools.ui import ToolCallDisplay, ToolUIDataAdapter
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
@@ -47,7 +53,7 @@ class ToolCallMessage(StatusMessage):
                     self._spinner.current_frame(), classes="status-indicator-icon"
                 )
                 yield self._indicator_widget
-                self._text_widget = NoMarkupStatic("", classes="status-indicator-text")
+                self._text_widget = LinkStatic("", classes="status-indicator-text")
                 yield self._text_widget
                 self._suffix_widget = NoMarkupStatic(
                     "", classes="status-indicator-suffix"
@@ -83,6 +89,9 @@ class ToolCallMessage(StatusMessage):
             return adapter.get_call_display(self._event)
         return ToolCallDisplay(summary=self._tool_name)
 
+    def _format_text(self, content: str) -> str:
+        return escape(content)
+
     def update_event(self, event: ToolCallEvent) -> None:
         self._event = event
         self._tool_name = event.tool_name
@@ -98,12 +107,15 @@ class ToolCallMessage(StatusMessage):
         """Stop the spinner while keeping stream row stable to avoid layout jumps."""
         super().stop_spinning(success)
 
-    def set_result_text(self, text: str, suffix: str = "") -> None:
-        self._set_text(text, suffix)
+    def set_result_text(
+        self, text: str, suffix: str = "", *, linkify: bool = False
+    ) -> None:
+        self._set_text(text, suffix, linkify=linkify)
 
-    def _set_text(self, text: str, suffix: str) -> None:
+    def _set_text(self, text: str, suffix: str, *, linkify: bool = False) -> None:
         if self._text_widget:
-            self._text_widget.update(text)
+            content = linkify_urls_in_text(text) if linkify else escape(text)
+            self._text_widget.update(content)
         self._update_suffix(suffix)
 
     def _update_suffix(self, suffix: str) -> None:
@@ -154,7 +166,10 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             success = self._determine_success()
             self._call_widget.stop_spinning(success=success)
             result_text, result_suffix = self._get_result_text()
-            self._call_widget.set_result_text(result_text, result_suffix)
+            linkify = self._tool_name in LINKIFY_RESULT_TOOLS
+            self._call_widget.set_result_text(
+                result_text, result_suffix, linkify=linkify
+            )
         await self._render_result()
 
     def _determine_success(self) -> bool:

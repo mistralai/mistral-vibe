@@ -15,6 +15,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Background shells: `bash` accepts `run_in_background` to start long-running commands (dev servers, watchers) without blocking; read their output with the new `bash_output` tool and stop them with the new `kill_shell` tool
 - `notebook_edit` tool: replace, insert, or delete cells in Jupyter `.ipynb` notebooks while preserving the notebook JSON structure
 - Quick memory: prefix a line with `#` to append a note to your user-level `AGENTS.md` without sending it to the agent
+## [2.18.0] - 2026-06-25
+
+### Added
+
+- Clickable URLs in web fetch and web search tool output
+- Context window usage display in tokens at the bottom of the TUI
+- Clipboard image paste support in the TUI (macOS)
+- Max generated tokens set_config_option in ACP
+
+### Changed
+
+- MCP OAuth authentication UX improvements in `/mcp` panel
+- Diff gutter and body split into separate widgets
+- Faster UI startup with lazy heavy imports
+- Improved connector performance with bootstrap caching
+
+### Fixed
+
+- macOS keychain access for Vibe credentials
+- Standalone denylist incorrectly blocking commands with heredocs
+- Copy selected text from prompt input and text areas
+- Repeated keyring requests in Vibe Code
+- Brew upgrade now always runs even when uv upgrade succeeds
+- Terminal kill/release bounding for ACP to prevent hangs
+
+
+## [2.17.1] - 2026-06-19
+
+### Changed
+
+- Commands in `/help` are now listed alphabetically in both the CLI and ACP
+- `/teleport` is now always available and shows an explicit error when its prerequisites aren't met, instead of being hidden
+
+
+## [2.17.0] - 2026-06-19
+
+### Added
+
+- `/mcp login`, `/mcp logout`, and `/mcp status` commands to authenticate OAuth-backed MCP servers from the TUI
+- `vibe --check-upgrade` to force an immediate update check and exit
+- `--yolo` as an alias for `--auto-approve`
+- ACP now accepts inline image content blocks
+
+### Changed
+
+- API keys are now stored in the OS keyring instead of plain text
+- Edit diff view now shows all replaced occurrences instead of just the first
+- Completion popup now uses a two-column layout
+- Chat messages now have right padding so text no longer collapses into the scrollbar
+- Faster CLI shutdown by deferring resource cleanup on exit
+
+### Fixed
+
+- Skill autocomplete popup now dismisses after Tab completion
+- Stdio MCP connections now persist across tool calls
+- Retryable 5xx responses from the Mistral backend are now retried instead of failing
+
 
 ## [2.16.1] - 2026-06-16
 

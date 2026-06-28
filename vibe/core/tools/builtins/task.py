@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 import fnmatch
 from typing import ClassVar
 
@@ -186,6 +186,9 @@ class Task(
             turns_used = sum(
                 msg.role == Role.assistant for msg in subagent_loop.messages
             )
+        finally:
+            with suppress(Exception):
+                await subagent_loop.aclose()
 
         yield TaskResult(
             response="".join(accumulated_response),

@@ -31,6 +31,9 @@ class FakeLayer(ConfigLayer[RawConfig]):
     async def _build_config_snapshot(self) -> LayerConfigSnapshot:
         return LayerConfigSnapshot(data=dict(self._data), fingerprint="fp")
 
+    async def _save_to_store(self, _next_config: RawConfig) -> str:
+        raise NotImplementedError
+
 
 class UntrustedFakeLayer(FakeLayer):
     async def _check_trust(self) -> bool:

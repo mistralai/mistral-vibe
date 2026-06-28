@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from vibe.acp.commands.registry import AcpCommandAvailabilityContext, AcpCommandRegistry
+from vibe.acp.commands.registry import AcpCommandRegistry
 
-__all__ = ["AcpCommandAvailabilityContext", "AcpCommandRegistry"]
+__all__ = ["AcpCommandRegistry"]

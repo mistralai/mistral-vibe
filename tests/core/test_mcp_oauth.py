@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 import socket
+from types import TracebackType
+from unittest.mock import patch
 import urllib.parse
 
 import httpx
@@ -11,6 +13,7 @@ import keyring
 from keyring.backend import KeyringBackend
 import keyring.backends.fail
 import keyring.errors
+from mcp.client.auth import OAuthFlowError
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 import pytest
 import respx
@@ -21,11 +24,14 @@ from vibe.core.auth.mcp_oauth import (
     LoopbackCallbackHandler,
     MCPOAuthError,
     MCPOAuthHeadlessError,
+    MCPOAuthLoginFailed,
     MCPOAuthPortInUse,
     build_oauth_provider,
     perform_oauth_login,
 )
 from vibe.core.config import MCPOAuth, MCPStreamableHttp
+
+_KEYRING_SERVICE = "ai.mistral.vibe"
 
 
 class _MemoryKeyring(KeyringBackend):
@@ -42,7 +48,7 @@ class _MemoryKeyring(KeyringBackend):
 
     def delete_password(self, service: str, username: str) -> None:
         if (service, username) not in self.store:
-            raise keyring.errors.PasswordDeleteError(username)
+            raise keyring.errors.PasswordDeleteError()
         del self.store[(service, username)]
 
 
@@ -139,7 +145,7 @@ class TestKeyringTokenStorage:
         assert loaded.access_token == "at"
         assert loaded.refresh_token == "rt"
         assert loaded.scope == "read write"
-        assert ("vibe", "mcp-oauth:linear:tokens") in memory_keyring.store
+        assert (_KEYRING_SERVICE, "mcp-oauth:linear:tokens") in memory_keyring.store
 
     @pytest.mark.asyncio
     async def test_round_trip_client_info(self, memory_keyring: _MemoryKeyring) -> None:
@@ -156,7 +162,10 @@ class TestKeyringTokenStorage:
         loaded = await storage.get_client_info()
         assert loaded is not None
         assert loaded.client_id == "abc123"
-        assert ("vibe", "mcp-oauth:linear:client_info") in memory_keyring.store
+        assert (
+            _KEYRING_SERVICE,
+            "mcp-oauth:linear:client_info",
+        ) in memory_keyring.store
 
     @pytest.mark.asyncio
     async def test_per_alias_isolation(self, memory_keyring: _MemoryKeyring) -> None:
@@ -367,6 +376,26 @@ class TestBuildOAuthProvider:
         assert provider.context.client_metadata_url == "https://vibe.example/cm.json"
 
     @pytest.mark.asyncio
+    async def test_client_id_is_exposed_as_fallback_client_info(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        srv = _oauth_server(client_id="pre-registered-client")
+
+        async def on_url(_url: str) -> None:
+            return None
+
+        async def cb() -> tuple[str, str | None]:
+            return "code", None
+
+        provider = build_oauth_provider(
+            srv, redirect_handler=on_url, callback_handler=cb
+        )
+        client_info = await provider.context.storage.get_client_info()
+
+        assert client_info is not None
+        assert client_info.client_id == "pre-registered-client"
+
+    @pytest.mark.asyncio
     async def test_rejects_static_auth(self, memory_keyring: _MemoryKeyring) -> None:
         from vibe.core.config import MCPStaticAuth
 
@@ -388,6 +417,39 @@ class TestBuildOAuthProvider:
 
 
 class TestPerformOAuthLogin:
+    @pytest.mark.asyncio
+    async def test_oauth_flow_error_becomes_login_failed(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        srv = _oauth_server(name="demo")
+
+        class OAuthFlowFailingClient:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def __aenter__(self) -> OAuthFlowFailingClient:
+                return self
+
+            async def __aexit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> None:
+                pass
+
+            async def get(self, _url: str) -> None:
+                raise OAuthFlowError("cancelled")
+
+        async def on_url(_url: str) -> None:
+            pass
+
+        with patch(
+            "vibe.core.auth.mcp_oauth.httpx.AsyncClient", new=OAuthFlowFailingClient
+        ):
+            with pytest.raises(MCPOAuthLoginFailed, match="cancelled"):
+                await perform_oauth_login(srv, on_url=on_url)
+
     @pytest.mark.asyncio
     async def test_full_flow_persists_tokens_and_fingerprint(
         self, memory_keyring: _MemoryKeyring

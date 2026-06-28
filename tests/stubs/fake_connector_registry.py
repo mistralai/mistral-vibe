@@ -50,7 +50,7 @@ class FakeConnectorRegistry(ConnectorRegistry):
                 connector_name, ConnectorAuthAction.NONE
             )
 
-    def get_tools(self) -> dict[str, type[BaseTool]]:
+    def get_tools(self, *, force_refresh: bool = False) -> dict[str, type[BaseTool]]:
         if self._cache is None:
             self._build_cache()
 
@@ -60,8 +60,10 @@ class FakeConnectorRegistry(ConnectorRegistry):
                 result.update(tools)
         return result
 
-    async def get_tools_async(self) -> dict[str, type[BaseTool]]:
-        return self.get_tools()
+    async def get_tools_async(
+        self, *, force_refresh: bool = False
+    ) -> dict[str, type[BaseTool]]:
+        return self.get_tools(force_refresh=force_refresh)
 
     async def get_auth_url(self, alias: str) -> str | None:
         """Return a fake auth URL for connectors that have no tools (not connected)."""

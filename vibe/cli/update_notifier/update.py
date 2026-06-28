@@ -122,12 +122,14 @@ async def get_update_if_available(
     current_version: str,
     update_cache_repository: UpdateCacheRepository,
     get_current_timestamp: Callable[[], int] = lambda: int(time.time()),
+    *,
+    force_check: bool = False,
 ) -> UpdateAvailability | None:
     current = _parse_version(current_version)
     if current is None:
         return None
 
-    if update_cache := await update_cache_repository.get():
+    if not force_check and (update_cache := await update_cache_repository.get()):
         if _is_cache_fresh(update_cache, get_current_timestamp):
             return _get_cached_update_if_any(update_cache, current)
 
@@ -165,6 +167,7 @@ UPDATE_COMMANDS = ["uv tool upgrade mistral-vibe", "brew upgrade mistral-vibe"]
 
 
 async def do_update() -> bool:
+    any_succeeded = False
     for command in UPDATE_COMMANDS:
         process = await asyncio.create_subprocess_shell(
             command,
@@ -178,8 +181,8 @@ async def do_update() -> bool:
             await _terminate(process)
             raise
         if process.returncode == 0:
-            return True
-    return False
+            any_succeeded = True
+    return any_succeeded
 
 
 async def _terminate(process: asyncio.subprocess.Process) -> None:

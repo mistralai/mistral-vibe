@@ -63,6 +63,23 @@ class TestBashGranularPermissions:
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ASK
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python3 << 'EOF'\nprint(42)\nEOF",
+            "python3 - << 'EOF'\nprint(42)\nEOF",
+            "python3 <<'PYEOF'\nimport sys\nprint('hello')\nPYEOF",
+            "python3 < input.txt",
+        ],
+    )
+    def test_standalone_denylisted_with_redirect_not_denied(self, command):
+        bash = self._bash()
+        result = bash.resolve_permission(BashArgs(command=command))
+        assert isinstance(result, PermissionContext)
+        assert result.permission is not ToolPermission.NEVER, (
+            f"Command with redirect should not be denied: {command!r}"
+        )
+
     def test_unknown_command_returns_permission_context(self):
         bash = self._bash()
         result = bash.resolve_permission(BashArgs(command="npm install"))

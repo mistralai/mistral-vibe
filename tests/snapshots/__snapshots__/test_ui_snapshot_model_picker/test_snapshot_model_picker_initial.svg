@@ -197,7 +197,7 @@
 </text><text class="terminal-r1" x="0" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">│</text><text class="terminal-r1" x="1207.8" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">│</text><text class="terminal-r1" x="1220" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">
 </text><text class="terminal-r1" x="0" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">│</text><text class="terminal-r7" x="24.4" y="825.2" textLength="451.4" clip-path="url(#terminal-line-33)">↑↓&#160;Navigate&#160;&#160;Enter&#160;Select&#160;&#160;Esc&#160;Cancel</text><text class="terminal-r1" x="1207.8" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">│</text><text class="terminal-r1" x="1220" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">
 </text><text class="terminal-r1" x="0" y="849.6" textLength="1220" clip-path="url(#terminal-line-34)">└──────────────────────────────────────────────────────────────────────────────────────────────────┘</text><text class="terminal-r1" x="1220" y="849.6" textLength="12.2" clip-path="url(#terminal-line-34)">
-</text><text class="terminal-r7" x="0" y="874" textLength="158.6" clip-path="url(#terminal-line-35)">/test/workdir</text><text class="terminal-r7" x="1012.6" y="874" textLength="207.4" clip-path="url(#terminal-line-35)">0%&#160;of&#160;200k&#160;tokens</text>
+</text><text class="terminal-r7" x="0" y="874" textLength="158.6" clip-path="url(#terminal-line-35)">/test/workdir</text><text class="terminal-r7" x="1000.4" y="874" textLength="219.6" clip-path="url(#terminal-line-35)">0/200k&#160;tokens&#160;(0%)</text>
     </g>
     </g>
 </svg>
