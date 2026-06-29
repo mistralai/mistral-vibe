@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Callable
+from typing import Any
 
 from jsonpatch import JsonPatchException, apply_patch
 from jsonpointer import JsonPointerException
@@ -11,12 +12,9 @@ from pydantic import ValidationError
 from vibe.core.config.builder import ConfigBuilder
 from vibe.core.config.event_bus import EventBus
 from vibe.core.config.layer import ConfigLayer, LayerNotLoadedError, RawConfig
-from vibe.core.config.layers.user import UserConfigLayer
-from vibe.core.config.patch import ConfigPatch, PatchOp
+from vibe.core.config.patch import AddOperationPatch, ConfigPatch, PatchOp
 from vibe.core.config.schema import ConfigSchema
 from vibe.core.config.types import ConfigChangeCallback, ConflictStrategy
-
-DEFAULT_PATCH_LAYER_NAME = UserConfigLayer.LAYER_NAME
 
 
 class ConfigPatchValidationError(Exception):
@@ -29,14 +27,26 @@ class ConfigPatchValidationError(Exception):
         )
 
 
+class DefaultLayerResolutionError(Exception):
+    """Raised when a patch needs implicit routing but no valid default is available."""
+
+
+type DefaultLayerResolver = Callable[[], ConfigLayer[RawConfig]]
+
+
 class ConfigOrchestrator[S: ConfigSchema]:
     """Single entry point for config management."""
 
     def __init__(
-        self, builder: ConfigBuilder[S], config: S, bus: EventBus | None = None
+        self,
+        builder: ConfigBuilder[S],
+        config: S,
+        default_layer_resolver: DefaultLayerResolver,
+        bus: EventBus | None = None,
     ) -> None:
         self._builder = builder
         self._config = config
+        self._default_layer_resolver = default_layer_resolver
         self._bus = bus if bus is not None else EventBus()
 
     @classmethod
@@ -45,13 +55,14 @@ class ConfigOrchestrator[S: ConfigSchema]:
         *,
         schema: type[S],
         layers: list[ConfigLayer[RawConfig]],
+        default_layer_resolver: DefaultLayerResolver,
         bus: EventBus | None = None,
     ) -> ConfigOrchestrator[S]:
         """Build an orchestrator from a schema and an ordered list of layers."""
         builder = ConfigBuilder[S](schema)
         builder.add_layers(layers)
         config = await builder.build()
-        instance = cls(builder, config, bus)
+        instance = cls(builder, config, default_layer_resolver, bus)
         return instance
 
     @property
@@ -67,6 +78,13 @@ class ConfigOrchestrator[S: ConfigSchema]:
     async def reload(self) -> None:
         """Force-reload all layers and atomically replace the config snapshot."""
         self._config = await self._builder.build(force_load=True)
+
+    async def set_field(
+        self, path: str, value: Any, reason: str = "No reason"
+    ) -> list[BaseException]:
+        return await self.apply_patch(
+            [AddOperationPatch(path=path, value=value)], reason=reason
+        )
 
     async def apply_patch(
         self,
@@ -97,12 +115,14 @@ class ConfigOrchestrator[S: ConfigSchema]:
             raise ConfigPatchValidationError() from exc
 
         operations_by_layer: dict[str, list[PatchOp]] = defaultdict(list)
+        default_layer_name: str | None = None
         for op in operations:
-            layer_name = (
-                op.target_layer_name
-                if op.target_layer_name is not None
-                else DEFAULT_PATCH_LAYER_NAME
-            )
+            layer_name = op.target_layer_name
+            if layer_name is None:
+                if default_layer_name is None:
+                    default_layer_name = self._resolve_default_layer_name()
+                layer_name = default_layer_name
+
             operations_by_layer[layer_name].append(op)
 
         tasks = []
@@ -141,6 +161,15 @@ class ConfigOrchestrator[S: ConfigSchema]:
             ),
             on_conflict=on_conflict,
         )
+
+    def _resolve_default_layer_name(self) -> str:
+        layer = self._default_layer_resolver()
+        if layer not in self._builder.layers:
+            raise DefaultLayerResolutionError(
+                f"Default layer resolver returned unknown layer {layer.name!r}"
+            )
+
+        return layer.name
 
     def subscribe(
         self, callback: ConfigChangeCallback, *, keys: set[str] | None = None

@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.18.0"
+version = "2.18.1"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -215,7 +215,6 @@ select = [
     "PLR",
     "B0",
     "B905",
-    "DOC102",
     "RUF022",
     "RUF010",
     "RUF012",

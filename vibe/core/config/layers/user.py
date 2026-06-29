@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import tempfile
 import tomllib
-from typing import ClassVar
 
 import tomli_w
 
@@ -21,10 +20,8 @@ class UserConfigLayer(ConfigLayer[RawConfig]):
     Pass an explicit ``path`` for testing.
     """
 
-    LAYER_NAME: ClassVar[str] = "user-toml"
-
-    def __init__(self, *, path: Path | None = None) -> None:
-        super().__init__(name=self.LAYER_NAME)
+    def __init__(self, *, path: Path | None = None, name: str = "user-toml") -> None:
+        super().__init__(name=name)
         self._path = path or (VIBE_HOME.path / "config.toml")
 
     async def _check_trust(self) -> bool:
@@ -40,8 +37,7 @@ class UserConfigLayer(ConfigLayer[RawConfig]):
         return LayerConfigSnapshot(data=data, fingerprint=fingerprint)
 
     async def _save_to_store(self, next_config: RawConfig) -> str:
-        if not self._path.exists():
-            raise FileNotFoundError(self._path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
 
         tmp_path: Path | None = None
         try:

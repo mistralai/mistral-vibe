@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from typing import Any
 
 from textual.app import ComposeResult
@@ -10,6 +11,9 @@ from vibe.cli.textual_ui.widgets.braille_renderer import render_braille
 
 WIDTH = 22
 HEIGHT = 12
+FRAME_INTERVAL_S = 0.16
+CYCLE_DELAY_MIN_S = 5.0
+CYCLE_DELAY_MAX_S = 20.0
 STARTING_DOTS = [
     set[int](),
     {6, 7, 15, 19},
@@ -160,6 +164,11 @@ TRANSITIONS = [
 ]
 # cf render_braille() docstring for coordinates convention
 
+# Transition indices reached right after a head settles into a direction, with
+# the eyes open. The cat may rest at any of these, on top of the end of cycle.
+EYES_OPEN_PAUSE_FRAMES = frozenset({5, 11, 21, 24})
+MID_CYCLE_PAUSE_CHANCE = 0.25
+
 
 class PetitChat(Static):
     def __init__(self, animate: bool = True, **kwargs: Any) -> None:
@@ -171,6 +180,7 @@ class PetitChat(Static):
         self._do_animate = animate
         self._freeze_requested = False
         self._timer: Timer | None = None
+        self._resume_frame: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(render_braille(self._dots, WIDTH, HEIGHT), classes="petit-chat")
@@ -178,7 +188,9 @@ class PetitChat(Static):
     def on_mount(self) -> None:
         self._inner = self.query_one(".petit-chat", Static)
         if self._do_animate:
-            self._timer = self.set_interval(0.16, self._apply_next_transition)
+            self._timer = self.set_interval(
+                FRAME_INTERVAL_S, self._apply_next_transition
+            )
 
     def freeze_animation(self) -> None:
         self._freeze_requested = True
@@ -195,3 +207,35 @@ class PetitChat(Static):
         self._dots |= transition["add"]
         self._transition_index = (self._transition_index + 1) % len(TRANSITIONS)
         self._inner.update(render_braille(self._dots, WIDTH, HEIGHT))
+
+        if not self._may_stop():
+            return
+
+        if self._transition_index == 0 or (
+            self._transition_index in EYES_OPEN_PAUSE_FRAMES
+            and random.random() < MID_CYCLE_PAUSE_CHANCE
+        ):
+            self._pause_between_cycles()
+
+    def _may_stop(self) -> bool:
+        # After a stop, play one full cycle back to the frame we stopped at
+        # before considering any new stop.
+        if self._resume_frame is None:
+            return True
+        if self._transition_index == self._resume_frame:
+            self._resume_frame = None
+            return True
+        return False
+
+    def _pause_between_cycles(self) -> None:
+        if self._timer:
+            self._timer.stop()
+        self._resume_frame = self._transition_index
+        delay = random.uniform(CYCLE_DELAY_MIN_S, CYCLE_DELAY_MAX_S)
+        self._timer = self.set_timer(delay, self._resume_animation)
+
+    def _resume_animation(self) -> None:
+        if self._freeze_requested:
+            self._timer = None
+            return
+        self._timer = self.set_interval(FRAME_INTERVAL_S, self._apply_next_transition)

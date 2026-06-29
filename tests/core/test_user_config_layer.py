@@ -58,7 +58,7 @@ async def test_missing_file_returns_empty(tmp_working_directory: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_raises_when_file_does_not_exist(
+async def test_apply_creates_file_when_it_does_not_exist(
     tmp_working_directory: Path,
 ) -> None:
     path = tmp_working_directory / random_config_file_name()
@@ -67,15 +67,16 @@ async def test_apply_raises_when_file_does_not_exist(
     await layer.load()
     assert layer.fingerprint == MISSING_BACKING_STORE_DATA_FINGERPRINT
 
-    with pytest.raises(LayerNotLoadedError, match="loaded before applying patches"):
-        await layer.apply(
-            ConfigPatch(
-                AddOperationPatch(path="/active_model", value="mistral-large"),
-                fingerprint=MISSING_BACKING_STORE_DATA_FINGERPRINT,
-            )
+    await layer.apply(
+        ConfigPatch(
+            AddOperationPatch(path="/active_model", value="mistral-large"),
+            fingerprint=MISSING_BACKING_STORE_DATA_FINGERPRINT,
         )
+    )
 
-    assert not path.exists()
+    with path.open("rb") as file:
+        assert tomllib.load(file) == {"active_model": "mistral-large"}
+        assert layer.fingerprint == create_file_fingerprint(file)
 
 
 @pytest.mark.asyncio
@@ -224,7 +225,7 @@ async def test_apply_raises_when_cache_is_invalidated(
 
 
 @pytest.mark.asyncio
-async def test_apply_raises_when_parent_directory_does_not_exist(
+async def test_apply_creates_parent_directory_when_it_does_not_exist(
     tmp_working_directory: Path,
 ) -> None:
     path = tmp_working_directory / "nested" / random_config_file_name()
@@ -232,15 +233,15 @@ async def test_apply_raises_when_parent_directory_does_not_exist(
 
     await layer.load()
 
-    with pytest.raises(LayerNotLoadedError, match="loaded before applying patches"):
-        await layer.apply(
-            ConfigPatch(
-                AddOperationPatch(path="/active_model", value="mistral-large"),
-                fingerprint=MISSING_BACKING_STORE_DATA_FINGERPRINT,
-            )
+    await layer.apply(
+        ConfigPatch(
+            AddOperationPatch(path="/active_model", value="mistral-large"),
+            fingerprint=MISSING_BACKING_STORE_DATA_FINGERPRINT,
         )
+    )
 
-    assert not path.exists()
+    with path.open("rb") as file:
+        assert tomllib.load(file) == {"active_model": "mistral-large"}
 
 
 @pytest.mark.asyncio

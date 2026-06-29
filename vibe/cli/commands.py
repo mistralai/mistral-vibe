@@ -130,8 +130,9 @@ class CommandRegistry:
                 aliases=frozenset(["/mcp", "/connectors"]),
                 description=(
                     "Display available MCP servers and connectors. "
-                    "Pass a name to list tools; subcommands: status, "
-                    "login <alias>, logout <alias>"
+                    "Pass a name to list tools; subcommands: add <url> "
+                    "[--transport http|streamable-http], status, login <alias>, "
+                    "logout <alias>"
                 ),
                 handler="_show_mcp",
             ),

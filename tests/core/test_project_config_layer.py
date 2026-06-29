@@ -189,6 +189,24 @@ async def test_find_file_result_is_cached(tmp_working_directory: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_is_file_discovered_reflects_cached_discovery_state(
+    tmp_working_directory: Path,
+) -> None:
+    trusted_folders_manager.add_trusted(tmp_working_directory)
+    config_path = tmp_working_directory / ".vibe" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text('active_model = "project-model"\n')
+
+    layer = ProjectConfigLayer(path=tmp_working_directory)
+
+    assert layer.is_file_discovered is False
+
+    await layer.load()
+
+    assert layer.is_file_discovered is True
+
+
+@pytest.mark.asyncio
 async def test_config_file_added_after_first_search_is_not_detected(
     tmp_working_directory: Path,
 ) -> None:

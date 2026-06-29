@@ -28,6 +28,10 @@ class ProjectConfigLayer(ConfigLayer[RawConfig]):
     def config_file_path(self) -> Path | None:
         return self._config_file_path
 
+    @property
+    def is_file_discovered(self) -> bool:
+        return self._is_set and self._config_file_path is not None
+
     async def _check_trust(self) -> bool:
         await self._find_config_file()
 

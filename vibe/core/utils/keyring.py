@@ -60,7 +60,10 @@ def _delete_macos_password(service: str, username: str) -> None:
 
 def _set_password(service: str, username: str, password: str) -> None:
     if not _should_use_macos_security():
-        keyring.set_password(service, username, password)
+        try:
+            keyring.set_password(service, username, password)
+        except ImportError as exc:
+            raise KeyringError("Can't load keyring backend") from exc
         return
 
     try:
@@ -100,7 +103,10 @@ def _get_password(service: str, username: str) -> str | None:
             raise KeyringError("Can't get password from macOS Keychain") from exc
         return result.stdout.removesuffix("\n")
 
-    return keyring.get_password(service, username)
+    try:
+        return keyring.get_password(service, username)
+    except ImportError as exc:
+        raise KeyringError("Can't load keyring backend") from exc
 
 
 def _delete_password(service: str, username: str) -> None:
@@ -108,7 +114,10 @@ def _delete_password(service: str, username: str) -> None:
         _delete_macos_password(service, username)
         return
 
-    keyring.delete_password(service, username)
+    try:
+        keyring.delete_password(service, username)
+    except ImportError as exc:
+        raise KeyringError("Can't load keyring backend") from exc
 
 
 def _migrate_legacy_password(username: str, password: str, legacy_service: str) -> None:

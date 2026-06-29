@@ -56,7 +56,7 @@ provider = "mistral"
 
     layer = UserConfigLayer(path=toml_path)
     orchestrator = await ConfigOrchestrator[VibeConfig].create(
-        schema=VibeConfig, layers=[layer]
+        schema=VibeConfig, layers=[layer], default_layer_resolver=lambda: layer
     )
     config = orchestrator.config
 

@@ -260,6 +260,20 @@ default_agent = "plan"
 
 ### MCP Servers
 
+Hosted OAuth MCP servers can be added from inside Vibe:
+
+```text
+/mcp add https://mcp.linear.app/mcp
+/mcp add https://mcp.example.com/mcp --name docs --scope read --transport http --no-login
+```
+
+`/mcp add` is OAuth-only. It writes `auth.type = "oauth"` with optional
+scopes and starts login by default. It uses `transport = "streamable-http"`
+unless you pass `--transport http`. Pass `--no-login` to add the server without
+starting OAuth login. The shortcut supports `streamable-http` and `http`
+transports. For API-key/static auth, edit `config.toml` using the static auth
+example below.
+
 ```toml
 [[mcp_servers]]
 name = "my-server"
@@ -581,6 +595,10 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/voice` - Configure voice settings
 - `/mcp` - Display MCP servers and connector status; pass a server or connector
   name to list its tools or open its auth panel when authentication is required
+- `/mcp add <url>` - Add a hosted OAuth MCP server. Supports `--name <alias>`,
+  repeatable `--scope <scope>`, `--transport <http|streamable-http>`, and
+  `--no-login`. Starts OAuth login by default. OAuth-only; use `config.toml`
+  for API-key/static auth.
 - `/mcp status` - Display MCP auth state (`ok`, `needs_auth`, `static`, `stdio`)
 - `/mcp login <alias>` - Start OAuth login for an MCP server
 - `/mcp logout <alias>` - Log out from an MCP server and delete stored OAuth

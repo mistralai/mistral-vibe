@@ -357,6 +357,35 @@ def test_delete_attempts_legacy_service_when_current_service_raises(
     assert deleted == [(service, "CUSTOM_API_KEY") for service in _ALL_SERVICES]
 
 
+def _raise_unloadable_backend(*_args: str) -> None:
+    # Mirrors keyring.get_keyring() failing because PYTHON_KEYRING_BACKEND points
+    # at a backend module absent from Vibe's venv (e.g. flyte._keyring.file).
+    raise ModuleNotFoundError("No module named 'flyte'")
+
+
+def test_get_returns_none_when_backend_module_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(keyring, "get_password", _raise_unloadable_backend)
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") is None
+
+
+def test_set_converts_backend_import_error_to_keyring_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(keyring, "set_password", _raise_unloadable_backend)
+    with pytest.raises(KeyringError):
+        set_api_key_in_keyring("CUSTOM_API_KEY", "new-key")
+
+
+def test_delete_converts_backend_import_error_to_keyring_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(keyring, "delete_password", _raise_unloadable_backend)
+    with pytest.raises(KeyringError):
+        delete_api_key_from_keyring("CUSTOM_API_KEY")
+
+
 def test_delete_prefers_operation_error_over_missing_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -542,6 +542,20 @@ Notes:
 
 You can configure MCP (Model Context Protocol) servers to extend Vibe's capabilities. Add MCP server configurations under the `mcp_servers` section:
 
+For hosted OAuth MCP servers, you can add the server from inside Vibe:
+
+```text
+/mcp add https://mcp.linear.app/mcp
+/mcp add https://mcp.example.com/mcp --name docs --scope read --transport http --no-login
+```
+
+`/mcp add` is OAuth-only. It writes `auth.type = "oauth"` with optional
+scopes and starts login by default. It uses `transport = "streamable-http"`
+unless you pass `--transport http`. Pass `--no-login` to add the server without
+starting OAuth login. The shortcut supports `streamable-http` and `http`
+transports. For API-key/static auth, edit `config.toml` using the static auth
+example below.
+
 ```toml
 # Example MCP server configurations
 [[mcp_servers]]
@@ -585,6 +599,20 @@ Key fields:
 - `startup_timeout_sec`: Timeout in seconds for the server to start and initialize (default 10s)
 - `tool_timeout_sec`: Timeout in seconds for tool execution (default 60s)
 - `env`: Environment variables to set for the MCP server of transport type stdio
+
+HTTP MCP servers can use either static auth or OAuth. Static auth uses
+`api_key_env` / `headers` in `config.toml`; OAuth uses an `auth` block:
+
+```toml
+[[mcp_servers]]
+name = "linear"
+transport = "streamable-http"
+url = "https://mcp.linear.app/mcp"
+
+[mcp_servers.auth]
+type = "oauth"
+scopes = []
+```
 
 MCP tools are named using the pattern `{server_name}_{tool_name}` and can be configured with permissions like built-in tools:
 

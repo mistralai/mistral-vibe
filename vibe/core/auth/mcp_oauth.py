@@ -167,7 +167,10 @@ class KeyringTokenStorage(TokenStorage):
         *,
         fallback_client_info: OAuthClientInformationFull | None = None,
     ) -> None:
-        backend = keyring.get_keyring()
+        try:
+            backend = keyring.get_keyring()
+        except (ImportError, keyring.errors.KeyringError) as exc:
+            raise MCPOAuthHeadlessError(server_alias=alias) from exc
         if isinstance(backend, keyring.backends.fail.Keyring):
             raise MCPOAuthHeadlessError(server_alias=alias)
         self._alias = alias

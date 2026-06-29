@@ -190,6 +190,18 @@ class TestKeyringTokenStorage:
         assert "api_key_env" in msg
         assert exc_info.value.server_alias == "linear"
 
+    def test_unloadable_backend_raises_headless(self) -> None:
+        # PYTHON_KEYRING_BACKEND can point at a backend module that is absent from
+        # Vibe's isolated venv (e.g. flyte._keyring.file in Flyte/Slurm envs), so
+        # get_keyring() raises ModuleNotFoundError instead of returning a backend.
+        with patch(
+            "vibe.core.auth.mcp_oauth.keyring.get_keyring",
+            side_effect=ModuleNotFoundError("No module named 'flyte'"),
+        ):
+            with pytest.raises(MCPOAuthHeadlessError) as exc_info:
+                KeyringTokenStorage(alias="notion")
+        assert exc_info.value.server_alias == "notion"
+
 
 class TestFingerprint:
     def test_compute_stable_across_scope_order(

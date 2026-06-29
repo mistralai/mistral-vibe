@@ -48,7 +48,7 @@ def classify(
 ) -> ClassifiedInput:
     if value.startswith("&") and commands.has_command("teleport"):
         return Teleport(target=value[1:])
-    if value.startswith("/") and commands.parse_command(value) is not None:
+    if commands.parse_command(value) is not None:
         return SlashCommand()
     if value.startswith("/"):
         if (expanded := expand_skill(value)) is not None:

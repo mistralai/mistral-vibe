@@ -18,8 +18,14 @@ from vibe.core.config.layer import (
     RawConfig,
 )
 from vibe.core.config.layers.environment import EnvironmentLayer
+from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.layers.user import UserConfigLayer
-from vibe.core.config.orchestrator import ConfigOrchestrator, ConfigPatchValidationError
+from vibe.core.config.orchestrator import (
+    ConfigOrchestrator,
+    ConfigPatchValidationError,
+    DefaultLayerResolutionError,
+)
 from vibe.core.config.patch import (
     AddOperationPatch,
     RemoveOperationPatch,
@@ -36,6 +42,7 @@ from vibe.core.config.types import (
     ConfigChangeEvent,
     LayerConfigSnapshot,
 )
+from vibe.core.trusted_folders import trusted_folders_manager
 
 
 class FakeLayer(ConfigLayer[RawConfig]):
@@ -143,6 +150,12 @@ class RoutingSchema(ConfigSchema):
     default_agent: Annotated[str, WithReplaceMerge()] = "default-agent"
 
 
+class CliRoutingSchema(ConfigSchema):
+    active_model: Annotated[str, WithReplaceMerge()] = "default-model"
+    default_agent: Annotated[str, WithReplaceMerge()] = "default-agent"
+    enabled_tools: Annotated[list[str], WithConcatMerge()] = Field(default_factory=list)
+
+
 class RequiredPairSchema(ConfigSchema):
     first: Annotated[str, WithReplaceMerge()]
     second: Annotated[str, WithReplaceMerge()]
@@ -157,23 +170,33 @@ def assert_single_failure[E: BaseException](
     return failure
 
 
+def unused_default_layer() -> ConfigLayer[RawConfig]:
+    return FakeLayer(name="unused-default", data={})
+
+
 @pytest.mark.asyncio
 async def test_create_builds_config() -> None:
     layer = FakeLayer(name="test", data={"value": "hello"})
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[layer])
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
     assert orch.config.model_dump() == {"value": "hello"}
 
 
 @pytest.mark.asyncio
 async def test_get_layer_returns_named_layer() -> None:
     layer = FakeLayer(name="my-layer", data={})
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[layer])
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
     assert orch.get_layer("my-layer") is layer
 
 
 @pytest.mark.asyncio
 async def test_get_layer_unknown_raises() -> None:
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[])
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[], default_layer_resolver=unused_default_layer
+    )
     with pytest.raises(KeyError, match="No layer named 'unknown'"):
         orch.get_layer("unknown")
 
@@ -181,7 +204,9 @@ async def test_get_layer_unknown_raises() -> None:
 @pytest.mark.asyncio
 async def test_reload_picks_up_changes() -> None:
     layer = FakeLayer(name="mutable", data={"value": "original"})
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[layer])
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
     assert orch.config.value == "original"
 
     layer._data = {"value": "updated"}
@@ -192,21 +217,27 @@ async def test_reload_picks_up_changes() -> None:
 @pytest.mark.asyncio
 async def test_config_is_immutable() -> None:
     layer = FakeLayer(name="test", data={"value": "hello"})
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[layer])
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
     with pytest.raises(ValidationError, match="frozen"):
         orch.config.value = "changed"  # type: ignore[misc]
 
 
 @pytest.mark.asyncio
 async def test_origin_of_missing_key_returns_none() -> None:
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[])
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[], default_layer_resolver=unused_default_layer
+    )
     assert orch.config.origin_of("nonexistent") is None
 
 
 @pytest.mark.asyncio
 async def test_apply_patch_empty_operations_is_noop() -> None:
     layer = FakeLayer(name="test", data={"value": "hello"})
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[layer])
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
 
     result = await orch.apply_patch([], reason="no-op")
 
@@ -216,7 +247,9 @@ async def test_apply_patch_empty_operations_is_noop() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_patch_rejects_invalid_schema_result_before_routing() -> None:
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[])
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[], default_layer_resolver=unused_default_layer
+    )
     with pytest.raises(ConfigPatchValidationError) as exc_info:
         await orch.apply_patch(
             [ReplaceOperationPatch(path="/value", value={"invalid": "shape"})],
@@ -230,24 +263,11 @@ async def test_apply_patch_rejects_invalid_schema_result_before_routing() -> Non
 
 
 @pytest.mark.asyncio
-async def test_apply_patch_returns_failure_when_default_fallback_layer_is_missing() -> (
-    None
-):
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[])
-
-    result = await orch.apply_patch(
-        [ReplaceOperationPatch(path="/value", value="updated")], reason="test update"
-    )
-
-    failure = assert_single_failure(result, KeyError)
-    assert str(failure) == f'"No layer named {UserConfigLayer.LAYER_NAME!r}"'
-    assert orch.config.value == "default"
-
-
-@pytest.mark.asyncio
 async def test_apply_patch_unknown_explicit_target_returns_failure() -> None:
-    layer = NormalizingWritableLayer(name=UserConfigLayer.LAYER_NAME, data={})
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[layer])
+    layer = NormalizingWritableLayer(name="user-toml", data={})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
 
     result = await orch.apply_patch(
         [
@@ -265,11 +285,11 @@ async def test_apply_patch_unknown_explicit_target_returns_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_patch_falls_back_to_default_user_layer_and_reloads_config() -> (
-    None
-):
-    layer = NormalizingWritableLayer(name=UserConfigLayer.LAYER_NAME, data={})
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[layer])
+async def test_apply_patch_uses_default_layer_resolver_and_reloads_config() -> None:
+    layer = NormalizingWritableLayer(name="user-toml", data={})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
 
     result = await orch.apply_patch(
         [AddOperationPatch(path="/value", value="updated")], reason="test update"
@@ -281,13 +301,28 @@ async def test_apply_patch_falls_back_to_default_user_layer_and_reloads_config()
 
 
 @pytest.mark.asyncio
+async def test_set_field_uses_default_layer_resolver() -> None:
+    layer = NormalizingWritableLayer(name="user-toml", data={})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+
+    result = await orch.set_field("/value", "updated", reason="set field")
+
+    assert result == []
+    assert orch.config.value == "updated-normalized"
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_returns_layer_save_error_after_other_layer_commits() -> None:
     first_layer = FieldWritableLayer(
         name="first-layer", field_name="first", data={"first": "one"}
     )
     second_layer = FailingSaveLayer(name="second-layer", data={"second": "two"})
     orch = await ConfigOrchestrator.create(
-        schema=MultiValueSchema, layers=[first_layer, second_layer]
+        schema=MultiValueSchema,
+        layers=[first_layer, second_layer],
+        default_layer_resolver=lambda: first_layer,
     )
 
     result = await orch.apply_patch(
@@ -325,7 +360,9 @@ async def test_apply_patch_returns_layer_apply_error_in_failures(
     error: Exception,
 ) -> None:
     layer = ApplyErrorLayer(name="test", data={"value": "hello"}, error=error)
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[layer])
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
 
     result = await orch.apply_patch(
         [
@@ -344,7 +381,9 @@ async def test_apply_patch_returns_unloaded_layer_error_in_failures() -> None:
     loaded_layer = FakeLayer(name="loaded", data={"value": "hello"})
     target_layer = FakeLayer(name="target", data={"value": "hello"})
     orch = await ConfigOrchestrator.create(
-        schema=SimpleSchema, layers=[loaded_layer, target_layer]
+        schema=SimpleSchema,
+        layers=[loaded_layer, target_layer],
+        default_layer_resolver=lambda: loaded_layer,
     )
     await target_layer.invalidate_cache()
 
@@ -374,7 +413,9 @@ async def test_apply_patch_applies_layers_in_parallel() -> None:
         barrier=barrier,
     )
     orch = await ConfigOrchestrator.create(
-        schema=MultiValueSchema, layers=[first_layer, second_layer]
+        schema=MultiValueSchema,
+        layers=[first_layer, second_layer],
+        default_layer_resolver=lambda: first_layer,
     )
 
     result = await orch.apply_patch(
@@ -412,7 +453,11 @@ deprecated_setting = true
     )
 
     user_layer = UserConfigLayer(path=toml_path)
-    orch = await ConfigOrchestrator.create(schema=ToolSchema, layers=[user_layer])
+    orch = await ConfigOrchestrator.create(
+        schema=ToolSchema,
+        layers=[user_layer],
+        default_layer_resolver=lambda: user_layer,
+    )
 
     result = await orch.apply_patch(
         [
@@ -437,22 +482,26 @@ deprecated_setting = true
 
 
 @pytest.mark.asyncio
-async def test_apply_patch_fallback_to_user_layer_fails_when_user_file_is_missing(
+async def test_apply_patch_creates_user_file_when_it_is_missing(
     tmp_working_directory: Path,
 ) -> None:
     toml_path = tmp_working_directory / "config.toml"
     user_layer = UserConfigLayer(path=toml_path)
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[user_layer])
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema,
+        layers=[user_layer],
+        default_layer_resolver=lambda: user_layer,
+    )
 
     result = await orch.apply_patch(
         [AddOperationPatch(path="/value", value="created-later")],
         reason="fallback write without user file",
     )
 
-    failure = assert_single_failure(result, LayerNotLoadedError)
-    assert str(failure) == "Layer 'user-toml' must be loaded before applying patches"
-    assert not toml_path.exists()
-    assert orch.config.value == "default"
+    assert result == []
+    with toml_path.open("rb") as file:
+        assert tomllib.load(file) == {"value": "created-later"}
+    assert orch.config.value == "created-later"
 
 
 @pytest.mark.asyncio
@@ -466,7 +515,9 @@ async def test_apply_patch_end_to_end_falls_back_to_user_layer_when_no_target_is
     user_layer = UserConfigLayer(path=toml_path)
     environment_layer = EnvironmentLayer(schema=RoutingSchema)
     orch = await ConfigOrchestrator.create(
-        schema=RoutingSchema, layers=[user_layer, environment_layer]
+        schema=RoutingSchema,
+        layers=[user_layer, environment_layer],
+        default_layer_resolver=lambda: user_layer,
     )
 
     result = await orch.apply_patch(
@@ -498,7 +549,9 @@ async def test_apply_patch_end_to_end_respects_explicit_target_layer(
     user_layer = UserConfigLayer(path=toml_path)
     environment_layer = EnvironmentLayer(schema=RoutingSchema)
     orch = await ConfigOrchestrator.create(
-        schema=RoutingSchema, layers=[user_layer, environment_layer]
+        schema=RoutingSchema,
+        layers=[user_layer, environment_layer],
+        default_layer_resolver=lambda: user_layer,
     )
 
     result = await orch.apply_patch(
@@ -522,9 +575,116 @@ async def test_apply_patch_end_to_end_respects_explicit_target_layer(
 
 
 @pytest.mark.asyncio
+async def test_apply_patch_returns_failure_when_resolver_returns_unknown_layer() -> (
+    None
+):
+    loaded_layer = RawWritableLayer(name="loaded", data={})
+    unknown_layer = RawWritableLayer(name="unknown", data={})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema,
+        layers=[loaded_layer],
+        default_layer_resolver=lambda: unknown_layer,
+    )
+
+    with pytest.raises(DefaultLayerResolutionError, match="unknown layer 'unknown'"):
+        await orch.apply_patch(
+            [AddOperationPatch(path="/value", value="updated")],
+            reason="unknown resolver target",
+        )
+
+    assert orch.config.value == "default"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_explicit_target_does_not_resolve_default_layer() -> None:
+    layer = RawWritableLayer(name="target", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema,
+        layers=[layer],
+        default_layer_resolver=lambda: (_ for _ in ()).throw(
+            AssertionError("resolver should not be called")
+        ),
+    )
+
+    result = await orch.apply_patch(
+        [
+            ReplaceOperationPatch(
+                path="/value", value="updated", target_layer_name="target"
+            )
+        ],
+        reason="explicit target only",
+    )
+
+    assert result == []
+    assert orch.config.value == "updated"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_end_to_end_routes_default_writes_to_project_layer(
+    monkeypatch: pytest.MonkeyPatch, tmp_working_directory: Path
+) -> None:
+    workspace = tmp_working_directory / "workspace"
+    workspace.mkdir()
+    project_config_path = workspace / ".vibe" / "config.toml"
+    project_config_path.parent.mkdir(parents=True, exist_ok=True)
+    project_config_path.write_text('default_agent = "plan"\n', encoding="utf-8")
+
+    user_config_path = tmp_working_directory / "user.toml"
+    user_config_path.write_text('default_agent = "accept-edits"\n', encoding="utf-8")
+
+    trusted_folders_manager.add_trusted(project_config_path.parent)
+    monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
+
+    user_layer = UserConfigLayer(path=user_config_path)
+    project_layer = ProjectConfigLayer(path=workspace)
+    environment_layer = EnvironmentLayer(schema=CliRoutingSchema)
+    overrides_layer = OverridesLayer(data={"enabled_tools": ["read"]})
+
+    def resolve_default_layer() -> ConfigLayer[RawConfig]:
+        if project_layer.is_file_discovered:
+            return project_layer
+
+        return user_layer
+
+    orch = await ConfigOrchestrator.create(
+        schema=CliRoutingSchema,
+        layers=[user_layer, project_layer, environment_layer, overrides_layer],
+        default_layer_resolver=resolve_default_layer,
+    )
+
+    assert project_layer.is_file_discovered is True
+    assert orch.config.active_model == "env-model"
+    assert orch.config.default_agent == "plan"
+    assert orch.config.enabled_tools == ["read"]
+
+    result = await orch.apply_patch(
+        [
+            AddOperationPatch(path="/active_model", value="persisted-in-project-file"),
+            ReplaceOperationPatch(path="/default_agent", value="auto-approve"),
+        ],
+        reason="update runtime defaults",
+    )
+
+    failure = assert_single_failure(result, NotImplementedError)
+    assert str(failure) == "ProjectConfigLayer patch persistence is not implemented yet"
+    with project_config_path.open("rb") as file:
+        assert tomllib.load(file) == {"default_agent": "plan"}
+    with user_config_path.open("rb") as file:
+        assert tomllib.load(file) == {"default_agent": "accept-edits"}
+    assert orch.config.active_model == "env-model"
+    assert orch.config.default_agent == "plan"
+    assert orch.config.enabled_tools == ["read"]
+
+
+@pytest.mark.asyncio
 async def test_subscribe_registers_on_the_bus() -> None:
     bus = EventBus()
-    orch = await ConfigOrchestrator.create(schema=SimpleSchema, layers=[], bus=bus)
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema,
+        layers=[],
+        default_layer_resolver=unused_default_layer,
+        bus=bus,
+    )
     received: list[ConfigChangeEvent] = []
     orch.subscribe(received.append)
 
