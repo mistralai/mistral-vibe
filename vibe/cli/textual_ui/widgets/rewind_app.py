@@ -143,5 +143,13 @@ class RewindApp(Container):
             case _RewindAction.EDIT_ONLY:
                 self.post_message(self.RewindWithoutRestore())
 
+    def on_key(self, event: events.Key) -> None:
+        if event.key in {"alt+up", "ctrl+p"}:
+            event.prevent_default()
+            self.app.call_next(self.app.action_rewind_prev)
+        elif event.key in {"alt+down", "ctrl+n"}:
+            event.prevent_default()
+            self.app.call_next(self.app.action_rewind_next)
+
     def on_blur(self, event: events.Blur) -> None:
         self.call_after_refresh(self.focus)
