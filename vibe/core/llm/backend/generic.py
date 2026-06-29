@@ -427,7 +427,7 @@ class GenericBackend:
                 if key != "data":
                     # This might be the case with openrouter, so we just ignore it
                     continue
-                if value == "[DONE]":
+                if value.strip() == "[DONE]":
                     return
                 yield json.loads(value.strip())
 
