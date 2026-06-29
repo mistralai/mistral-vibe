@@ -61,6 +61,24 @@ class ConfigBuilder[S: ConfigSchema]:
             merged, origins = self._merge_fields(self._schema, layer_dicts)
             return self._schema(origins=origins, **merged)
 
+    async def build_merged(self, force_load: bool = False) -> dict[str, Any]:
+        """Merge all layers and return the raw merged dict (no schema defaults)."""
+        async with self._lock:
+            internal_layers = self._layers.copy()
+
+            layer_dicts: list[_LayerData] = []
+            for layer in internal_layers:
+                try:
+                    data = await layer.load(force=force_load)
+                    raw = data.model_dump()
+                    if raw:
+                        layer_dicts.append(_LayerData(name=layer.name, data=raw))
+                except (UntrustedLayerError, EmptyLayerError):
+                    continue
+
+            merged, _ = self._merge_fields(self._schema, layer_dicts)
+            return merged
+
     def _merge_fields(
         self, schema: type[S], layer_dicts: list[_LayerData]
     ) -> tuple[dict[str, Any], dict[str, Any]]:

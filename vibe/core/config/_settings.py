@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import MutableMapping
 from enum import StrEnum, auto
 import os
@@ -103,24 +104,50 @@ class MissingAPIKeyError(RuntimeError):
         self.provider_name = provider_name
 
 
+def _read_toml_file(file: Path) -> dict[str, Any]:
+    try:
+        with file.open("rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return {}
+    except tomllib.TOMLDecodeError as e:
+        raise RuntimeError(f"Invalid TOML in {file}: {e}") from e
+    except OSError as e:
+        raise RuntimeError(f"Cannot read {file}: {e}") from e
+
+
+def _load_layered_toml_config() -> dict[str, Any]:
+    """Load and merge user + project TOML config using schema merge semantics."""
+    from vibe.core.config.builder import ConfigBuilder
+    from vibe.core.config.layers.project import ProjectConfigLayer
+    from vibe.core.config.layers.user import UserConfigLayer
+    from vibe.core.config.vibe_schema import VibeConfigSchema
+
+    async def _load() -> dict[str, Any]:
+        builder = ConfigBuilder(VibeConfigSchema)
+        builder.add_layers([UserConfigLayer(), ProjectConfigLayer()])
+        return await builder.build_merged()
+
+    return asyncio.run(_load())
+
+
 class TomlFileSettingsSource(PydanticBaseSettingsSource):
     def __init__(self, settings_cls: type[BaseSettings]) -> None:
         super().__init__(settings_cls)
         self.toml_data = self._load_toml()
 
     def _load_toml(self) -> dict[str, Any]:
-        file = get_harness_files_manager().config_file
-        if file is None:
-            return {}
         try:
-            with file.open("rb") as f:
-                return tomllib.load(f)
-        except FileNotFoundError:
+            get_harness_files_manager()
+        except RuntimeError:
             return {}
-        except tomllib.TOMLDecodeError as e:
-            raise RuntimeError(f"Invalid TOML in {file}: {e}") from e
-        except OSError as e:
-            raise RuntimeError(f"Cannot read {file}: {e}") from e
+
+        mgr = get_harness_files_manager()
+        if "project" not in mgr.sources:
+            user_file = mgr.user_config_file
+            return _read_toml_file(user_file) if user_file.is_file() else {}
+
+        return _load_layered_toml_config()
 
     def get_field_value(
         self, field: FieldInfo, field_name: str
