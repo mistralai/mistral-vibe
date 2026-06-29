@@ -45,6 +45,7 @@ from vibe.core.prompts import (
 )
 from vibe.core.types import Backend
 from vibe.core.utils import configure_ssl_context, get_server_url_from_api_base
+from vibe.core.utils.concurrency import run_sync
 from vibe.core.utils.keyring import get_api_key_from_keyring
 
 
@@ -103,24 +104,57 @@ class MissingAPIKeyError(RuntimeError):
         self.provider_name = provider_name
 
 
+def _read_toml_file(file: Path) -> dict[str, Any]:
+    try:
+        with file.open("rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return {}
+    except tomllib.TOMLDecodeError as e:
+        raise RuntimeError(f"Invalid TOML in {file}: {e}") from e
+    except OSError as e:
+        raise RuntimeError(f"Cannot read {file}: {e}") from e
+
+
+def _load_layered_toml_config() -> dict[str, Any]:
+    """Load and merge user + project TOML config using schema merge semantics."""
+    from vibe.core.config.builder import ConfigBuilder
+    from vibe.core.config.layers.project import ProjectConfigLayer
+    from vibe.core.config.layers.user import UserConfigLayer
+    from vibe.core.config.vibe_schema import VibeConfigSchema
+
+    async def _load() -> dict[str, Any]:
+        builder = ConfigBuilder(VibeConfigSchema)
+        builder.add_layers([UserConfigLayer(), ProjectConfigLayer()])
+        return await builder.build_merged()
+
+    return run_sync(_load())
+
+
+def _load_persisted_toml_config() -> dict[str, Any]:
+    """Load the single on-disk config file targeted by save/migrate paths."""
+    mgr = get_harness_files_manager()
+    file = mgr.config_file or mgr.user_config_file
+    return _read_toml_file(file) if file.is_file() else {}
+
+
 class TomlFileSettingsSource(PydanticBaseSettingsSource):
     def __init__(self, settings_cls: type[BaseSettings]) -> None:
         super().__init__(settings_cls)
         self.toml_data = self._load_toml()
 
     def _load_toml(self) -> dict[str, Any]:
-        file = get_harness_files_manager().config_file
-        if file is None:
-            return {}
         try:
-            with file.open("rb") as f:
-                return tomllib.load(f)
-        except FileNotFoundError:
+            get_harness_files_manager()
+        except RuntimeError:
             return {}
-        except tomllib.TOMLDecodeError as e:
-            raise RuntimeError(f"Invalid TOML in {file}: {e}") from e
-        except OSError as e:
-            raise RuntimeError(f"Cannot read {file}: {e}") from e
+
+        mgr = get_harness_files_manager()
+        if "project" not in mgr.sources:
+            user_file = mgr.user_config_file
+            return _read_toml_file(user_file) if user_file.is_file() else {}
+
+        return _load_layered_toml_config()
 
     def get_field_value(
         self, field: FieldInfo, field_name: str
@@ -1077,7 +1111,7 @@ class VibeConfig(BaseSettings):
                 self.models[i] = m.model_copy(update={"thinking": level})
                 break
 
-        current_config = TomlFileSettingsSource(type(self)).toml_data
+        current_config = _load_persisted_toml_config()
         models = current_config.get("models", [])
         for entry in models:
             if entry.get("alias", entry.get("name")) == model.alias:
@@ -1115,13 +1149,13 @@ class VibeConfig(BaseSettings):
 
     @classmethod
     def get_persisted_config(cls) -> dict[str, Any]:
-        return TomlFileSettingsSource(cls).toml_data
+        return _load_persisted_toml_config()
 
     @classmethod
     def save_updates(cls, updates: dict[str, Any]) -> None:
         if not get_harness_files_manager().persist_allowed:
             return
-        current_config = TomlFileSettingsSource(cls).toml_data
+        current_config = _load_persisted_toml_config()
         merged_config = deep_update(current_config, updates)
         cls.dump_config(merged_config)
 

@@ -156,6 +156,140 @@ class TestResolveConfigFile:
         assert mgr.config_file == VIBE_HOME.path / "config.toml"
 
 
+class TestLayeredTomlConfigMerge:
+    def test_user_models_preserved_when_project_config_exists(
+        self,
+        tmp_working_directory: Path,
+        config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user_config = config_dir / "config.toml"
+        user_data = {
+            **_custom_provider_payload(),
+            "active_model": "devstral-large",
+            "models": [
+                {
+                    "name": "devstral-latest",
+                    "provider": "custom-provider",
+                    "alias": "devstral-large",
+                }
+            ],
+            "providers": [_custom_provider_payload()],
+        }
+        with user_config.open("wb") as f:
+            tomli_w.dump(user_data, f)
+
+        project_config_dir = tmp_working_directory / ".vibe"
+        project_config_dir.mkdir()
+        project_config = project_config_dir / "config.toml"
+        with project_config.open("wb") as f:
+            tomli_w.dump(
+                {
+                    "enable_experimental_hooks": True,
+                    "tools": {"read_file": {"permission": "always"}},
+                },
+                f,
+            )
+
+        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
+        monkeypatch.setenv("CUSTOM_API_KEY", "test-key")
+        reset_harness_files_manager()
+        init_harness_files_manager("user", "project")
+
+        config = VibeConfig.load()
+
+        assert config.active_model == "devstral-large"
+        assert any(model.alias == "devstral-large" for model in config.models)
+        assert config.enable_experimental_hooks is True
+        assert config.tools["read"]["permission"] == "always"
+
+    def test_project_active_model_overrides_user_when_explicitly_set(
+        self,
+        tmp_working_directory: Path,
+        config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user_config = config_dir / "config.toml"
+        with user_config.open("rb") as f:
+            user_data = tomllib.load(f)
+        user_data["active_model"] = "user-model"
+        with user_config.open("wb") as f:
+            tomli_w.dump(user_data, f)
+
+        project_config_dir = tmp_working_directory / ".vibe"
+        project_config_dir.mkdir()
+        project_config = project_config_dir / "config.toml"
+        with project_config.open("wb") as f:
+            tomli_w.dump({"active_model": "project-model"}, f)
+
+        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
+        reset_harness_files_manager()
+        init_harness_files_manager("user", "project")
+
+        config = VibeConfig.load()
+
+        assert config.active_model == "project-model"
+
+    def test_untrusted_project_uses_user_config_only(
+        self,
+        tmp_working_directory: Path,
+        config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user_config = config_dir / "config.toml"
+        with user_config.open("rb") as f:
+            user_data = tomllib.load(f)
+        user_data["active_model"] = "user-model"
+        with user_config.open("wb") as f:
+            tomli_w.dump(user_data, f)
+
+        project_config_dir = tmp_working_directory / ".vibe"
+        project_config_dir.mkdir()
+        project_config = project_config_dir / "config.toml"
+        with project_config.open("wb") as f:
+            tomli_w.dump({"active_model": "project-model"}, f)
+
+        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: False)
+        reset_harness_files_manager()
+        init_harness_files_manager("user", "project")
+
+        config = VibeConfig.load()
+
+        assert config.active_model == "user-model"
+
+    def test_save_updates_does_not_write_user_fields_into_project_toml(
+        self,
+        tmp_working_directory: Path,
+        config_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        user_config = config_dir / "config.toml"
+        with user_config.open("rb") as f:
+            user_data = tomllib.load(f)
+        user_data["active_model"] = "user-only-model"
+        with user_config.open("wb") as f:
+            tomli_w.dump(user_data, f)
+
+        project_config_dir = tmp_working_directory / ".vibe"
+        project_config_dir.mkdir()
+        project_config = project_config_dir / "config.toml"
+        with project_config.open("wb") as f:
+            tomli_w.dump({"enable_experimental_hooks": True}, f)
+
+        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
+        reset_harness_files_manager()
+        init_harness_files_manager("user", "project")
+
+        VibeConfig.save_updates({"tools": {"bash": {"permission": "always"}}})
+
+        with project_config.open("rb") as f:
+            persisted = tomllib.load(f)
+
+        assert persisted["tools"]["bash"]["permission"] == "always"
+        assert "active_model" not in persisted
+        assert "models" not in persisted
+
+
 class TestSaveUpdates:
     def test_merges_nested_tool_updates_without_materializing_defaults(
         self, config_dir: Path
