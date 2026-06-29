@@ -32,7 +32,7 @@ async def test_full_toml_to_vibe_config_schema(tmp_path: Path) -> None:
     toml_path = tmp_path / "config.toml"
     toml_path.write_text(
         """\
-vim_keybindings = true
+disable_welcome_banner_animation = true
 api_timeout = 300.0
 api_retry_max_elapsed_time = 120.0
 active_model = "codestral"
@@ -60,7 +60,7 @@ provider = "mistral"
     )
     config = orchestrator.config
 
-    assert config.vim_keybindings is True
+    assert config.disable_welcome_banner_animation is True
     assert config.api_timeout == 300.0
     assert config.api_retry_max_elapsed_time == 120.0
     assert config.active_model == "codestral"

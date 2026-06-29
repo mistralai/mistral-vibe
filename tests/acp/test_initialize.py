@@ -72,7 +72,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.18.1"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.18.2"
         )
 
         assert response.auth_methods is not None
@@ -172,7 +172,7 @@ class TestACPInitialize:
             ),
         )
         assert response.agent_info == Implementation(
-            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.18.1"
+            name="@mistralai/mistral-vibe", title="Mistral Vibe", version="2.18.2"
         )
 
         assert response.auth_methods is not None

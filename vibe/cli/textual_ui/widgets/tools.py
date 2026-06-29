@@ -89,9 +89,6 @@ class ToolCallMessage(StatusMessage):
             return adapter.get_call_display(self._event)
         return ToolCallDisplay(summary=self._tool_name)
 
-    def _format_text(self, content: str) -> str:
-        return escape(content)
-
     def update_event(self, event: ToolCallEvent) -> None:
         self._event = event
         self._tool_name = event.tool_name
@@ -114,7 +111,7 @@ class ToolCallMessage(StatusMessage):
 
     def _set_text(self, text: str, suffix: str, *, linkify: bool = False) -> None:
         if self._text_widget:
-            content = linkify_urls_in_text(text) if linkify else escape(text)
+            content = linkify_urls_in_text(text) if linkify else text
             self._text_widget.update(content)
         self._update_suffix(suffix)
 
@@ -126,6 +123,19 @@ class ToolCallMessage(StatusMessage):
     def update_display(self) -> None:
         super().update_display()
         self._update_suffix(self.get_content_suffix())
+
+    def show_muted(self) -> None:
+        # Neutral grey square with the call summary -- used for an error whose
+        # verdict is still unknown and for a user-cancelled call.
+        self.muted = True
+        self.success = True
+        self.stop_spinning(success=True)
+
+    def escalate_error(self) -> None:
+        # No recovery followed: promote the held square to a hard red cross.
+        self.muted = False
+        self.success = False
+        self.update_display()
 
 
 class ToolResultMessage(ClickWithoutDragMixin, Static):
@@ -146,6 +156,7 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
         self._content = content
         self._content_container: Vertical | None = None
         self._result_widget: ToolResultWidget | None = None
+        self._is_error = False
 
         super().__init__()
         self.add_class("tool-result")
@@ -163,14 +174,29 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
 
     async def on_mount(self) -> None:
         if self._call_widget:
-            success = self._determine_success()
-            self._call_widget.stop_spinning(success=success)
-            result_text, result_suffix = self._get_result_text()
-            linkify = self._tool_name in LINKIFY_RESULT_TOOLS
-            self._call_widget.set_result_text(
-                result_text, result_suffix, linkify=linkify
-            )
+            if self._event is not None and self._event.error:
+                # Start muted; the verdict (recoverable vs terminal) lands later.
+                self._call_widget.show_muted()
+            else:
+                success = self._determine_success()
+                self._call_widget.stop_spinning(success=success)
+                result_text, result_suffix = self._get_result_text()
+                linkify = self._tool_name in LINKIFY_RESULT_TOOLS
+                self._call_widget.set_result_text(
+                    result_text, result_suffix, linkify=linkify
+                )
         await self._render_result()
+
+    def escalate_error(self) -> None:
+        # Turn ended without a follow-up tool call: switch to the red-cross icon
+        # and error header. The folded body keeps the same style as a recoverable
+        # error -- only the leading "Error" word stays colored.
+        if not self._is_error:
+            return
+        if self._call_widget is not None:
+            self._call_widget.escalate_error()
+            result_text, result_suffix = self._get_result_text()
+            self._call_widget.set_result_text(result_text, result_suffix)
 
     def _determine_success(self) -> bool:
         if self._event is None:
@@ -221,13 +247,13 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             return
 
         if self._event.error:
-            self.add_class("error-text")
-            error_text = f"Error: {self._event.error}"
-            line_count = len(error_text.strip("\n").split("\n"))
+            self._is_error = True
+            # Only the inline "Error" span is ever colored; escalation changes the
+            # call icon to a red cross but leaves this folded body untouched.
+            line_count = len(self._event.error.strip("\n").split("\n"))
+            detail = Static(f"[$error]Error[/]: {escape(self._event.error)}")
             await self._content_container.mount(
-                CollapsibleSection(
-                    NoMarkupStatic(error_text), collapsed_label=lines_label(line_count)
-                )
+                CollapsibleSection(detail, collapsed_label=lines_label(line_count))
             )
             self.display = True
             return

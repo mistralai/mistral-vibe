@@ -98,7 +98,12 @@ from vibe.core.tools.permissions import (
     PermissionStore,
     RequiredPermission,
 )
-from vibe.core.tracing import agent_span, set_tool_result, tool_span
+from vibe.core.tracing import (
+    agent_span,
+    build_otel_span_exporter_config,
+    set_tool_result,
+    tool_span,
+)
 from vibe.core.trusted_folders import has_agents_md_file
 from vibe.core.types import (
     AgentProfileChangedEvent,
@@ -736,6 +741,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             provider=provider,
             timeout=self.config.api_timeout,
             retry_max_elapsed_time=self.config.api_retry_max_elapsed_time,
+            enable_otel=(
+                self.config.enable_telemetry
+                and self.config.enable_otel
+                and build_otel_span_exporter_config(
+                    self.config.otel_endpoint, self.config.get_mistral_provider()
+                )
+                is not None
+            ),
         )
 
     async def _save_messages(self) -> None:

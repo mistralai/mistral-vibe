@@ -60,24 +60,27 @@ class TestSetupTracing:
         mock_set.assert_not_called()
 
     def test_noop_when_exporter_config_is_none(self) -> None:
-        config = MagicMock(
-            enable_telemetry=True, enable_otel=True, otel_span_exporter_config=None
-        )
-        with patch("vibe.core.tracing.trace.set_tracer_provider") as mock_set:
+        config = MagicMock(enable_telemetry=True, enable_otel=True)
+        with (
+            patch(
+                "vibe.core.tracing.build_otel_span_exporter_config", return_value=None
+            ),
+            patch("vibe.core.tracing.trace.set_tracer_provider") as mock_set,
+        ):
             setup_tracing(config)
         mock_set.assert_not_called()
 
     def test_configures_provider_from_exporter_config(self) -> None:
-        config = MagicMock(
-            enable_telemetry=True,
-            enable_otel=True,
-            otel_span_exporter_config=OtelSpanExporterConfig(
-                endpoint="https://customer.mistral.ai/telemetry/v1/traces",
-                headers={"Authorization": "Bearer sk-test"},
-            ),
-        )
+        config = MagicMock(enable_telemetry=True, enable_otel=True)
 
         with (
+            patch(
+                "vibe.core.tracing.build_otel_span_exporter_config",
+                return_value=OtelSpanExporterConfig(
+                    endpoint="https://customer.mistral.ai/telemetry/v1/traces",
+                    headers={"Authorization": "Bearer sk-test"},
+                ),
+            ),
             patch(
                 "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
             ) as mock_exporter,
@@ -93,15 +96,15 @@ class TestSetupTracing:
         assert isinstance(mock_set.call_args[0][0], TracerProvider)
 
     def test_custom_endpoint_has_no_auth_headers(self) -> None:
-        config = MagicMock(
-            enable_telemetry=True,
-            enable_otel=True,
-            otel_span_exporter_config=OtelSpanExporterConfig(
-                endpoint="https://my-collector:4318/v1/traces"
-            ),
-        )
+        config = MagicMock(enable_telemetry=True, enable_otel=True)
 
         with (
+            patch(
+                "vibe.core.tracing.build_otel_span_exporter_config",
+                return_value=OtelSpanExporterConfig(
+                    endpoint="https://my-collector:4318/v1/traces"
+                ),
+            ),
             patch(
                 "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
             ) as mock_exporter,

@@ -111,7 +111,6 @@ from `~/.vibe/prompts/`, and finally from the built-in bundled prompts.
 active_model = "mistral-medium-3.5"  # Model alias to use (see [[models]])
 
 # UI preferences
-vim_keybindings = false
 disable_welcome_banner_animation = false
 autocopy_to_clipboard = true
 file_watcher_for_autocomplete = false

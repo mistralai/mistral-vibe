@@ -13,6 +13,7 @@ from textual.reactive import reactive
 from textual.widgets import Input
 
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
+from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
 from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 
 _INPUT_GRACE_PERIOD_S = 0.5
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 from vibe.core.tools.builtins.ask_user_question import Answer
 
 
-class QuestionApp(Container):
+class QuestionApp(VimNavigationMixin, Container):
     MAX_OPTIONS: ClassVar[int] = 4
 
     can_focus = True
@@ -307,9 +308,9 @@ class QuestionApp(Container):
         if not self.help_widget:
             return
         if self._current_question.multi_select:
-            help_text = "↑↓ navigate  Enter toggle  Esc cancel"
+            help_text = "↑↓/jk navigate  Enter toggle  Esc cancel"
         else:
-            help_text = "↑↓ navigate  Enter select  Esc cancel"
+            help_text = "↑↓/jk navigate  Enter select  Esc cancel"
         if len(self.questions) > 1:
             help_text = "←→ questions  " + help_text
         self.help_widget.update(help_text)
@@ -483,9 +484,13 @@ class QuestionApp(Container):
         if self._handle_number_key(event):
             return
 
+        other_input_focused = bool(self.other_input and self.other_input.has_focus)
+        if not other_input_focused and self._handle_vim_navigation_key(event):
+            return
+
         if len(self.questions) <= 1:
             return
-        if self.other_input and self.other_input.has_focus:
+        if other_input_focused:
             return
         if event.key == "left":
             self.action_prev_question()

@@ -67,6 +67,10 @@ class EventHandler:
         self._hook_containers: dict[str, HookRunContainer] = {}
         # Per-tool-call anchor for correct widget ordering during concurrent calls.
         self._tool_call_anchors: dict[str, Widget] = {}
+        # Errored results shown muted while their verdict is unknown: a follow-up
+        # tool call confirms them recoverable (stay muted), turn end escalates
+        # them to hard errors.
+        self._pending_error_results: list[ToolResultMessage] = []
 
     async def _handle_hook_event(
         self, event: HookEvent, loading_widget: LoadingWidget | None = None
@@ -206,6 +210,8 @@ class EventHandler:
             existing_tool_call.update_event(event)
             tool_call = existing_tool_call
         else:
+            # A follow-up tool call is the recovery signal: leave prior errors muted.
+            self._resolve_pending_errors(escalate=False)
             tool_call = ToolCallMessage(event)
             if tool_call_id:
                 self.tool_calls[tool_call_id] = tool_call
@@ -228,10 +234,23 @@ class EventHandler:
         tool_result = ToolResultMessage(event, call_widget)
         await self.mount_callback(tool_result, after=anchor)
 
+        if event.error and not event.skipped and not event.cancelled:
+            self._pending_error_results.append(tool_result)
+
         if tool_call_id:
             self._tool_call_anchors[tool_call_id] = tool_result
             if tool_call_id in self.tool_calls:
                 del self.tool_calls[tool_call_id]
+
+    def _resolve_pending_errors(self, *, escalate: bool) -> None:
+        if escalate:
+            for result in self._pending_error_results:
+                result.escalate_error()
+        self._pending_error_results.clear()
+
+    def escalate_unresolved_errors(self) -> None:
+        # Called at turn end: errors not followed by a tool call were terminal.
+        self._resolve_pending_errors(escalate=True)
 
     async def _handle_tool_stream(self, event: ToolStreamEvent) -> None:
         tool_call = self.tool_calls.get(event.tool_call_id)
@@ -290,12 +309,20 @@ class EventHandler:
             await self.current_streaming_message.stop_stream()
             self.current_streaming_message = None
 
-    def stop_current_tool_call(self, success: bool = True) -> None:
+    def stop_current_tool_call(
+        self, success: bool = True, *, cancelled: bool = False
+    ) -> None:
         for tool_call in self.tool_calls.values():
-            tool_call.stop_spinning(success=success)
+            if cancelled:
+                # A user interrupt is neutral, not a failure: hold a grey square.
+                tool_call.show_muted()
+            else:
+                tool_call.stop_spinning(success=success)
         self.tool_calls.clear()
         self._tool_call_anchors.clear()
         self._hook_containers.clear()
+        # On cancel nothing is terminal -- leave prior errors muted too.
+        self._resolve_pending_errors(escalate=not cancelled)
 
     def stop_current_compact(self) -> None:
         if self.current_compact:

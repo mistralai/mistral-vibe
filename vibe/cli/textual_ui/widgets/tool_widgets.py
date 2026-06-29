@@ -8,6 +8,7 @@ from typing import ClassVar
 from pydantic import BaseModel
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalGroup
+from textual.content import Content
 from textual.widget import Widget
 from textual.widgets import Markdown, Static
 
@@ -18,7 +19,7 @@ from vibe.cli.textual_ui.widgets.diff_rendering import (
     locate_snippets_in_file,
     render_edit_diff,
 )
-from vibe.cli.textual_ui.widgets.links import LinkStatic, link_markup
+from vibe.cli.textual_ui.widgets.links import LinkStatic, link_content
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.tools.builtins.ask_user_question import AskUserQuestionResult
 from vibe.core.tools.builtins.bash import BashArgs, BashResult
@@ -385,9 +386,9 @@ class AskUserQuestionResultWidget(ToolResultWidget[AskUserQuestionResult]):
 
 class WebSearchResultWidget(ToolResultWidget[WebSearchResult]):
     @staticmethod
-    def _source_markup(source: WebSearchSource) -> str:
+    def _source_content(source: WebSearchSource) -> Content:
         label = source.title or source.url
-        return link_markup(label, source.url)
+        return Content("  • ") + link_content(label, source.url)
 
     def compose(self) -> ComposeResult:
         if not self.result:
@@ -401,8 +402,8 @@ class WebSearchResultWidget(ToolResultWidget[WebSearchResult]):
             yield NoMarkupStatic("")
             if len(result.sources) > 1:
                 yield NoMarkupStatic("Sources:", classes="tool-result-detail")
-            lines = [f"  • {self._source_markup(s)}" for s in result.sources]
-            yield LinkStatic("\n".join(lines), classes="tool-result-detail")
+            lines = [self._source_content(s) for s in result.sources]
+            yield LinkStatic(Content("\n").join(lines), classes="tool-result-detail")
         yield from self._footer()
 
 
@@ -413,7 +414,7 @@ class WebFetchResultWidget(ToolResultWidget[WebFetchResult]):
             return
         yield from self._yield_truncated_text(self.result.content)
         yield NoMarkupStatic("")
-        link = link_markup(self.result.url, self.result.url)
+        link = link_content(self.result.url, self.result.url)
         yield LinkStatic(link, classes="tool-result-detail")
         yield from self._footer()
 

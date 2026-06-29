@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.2] - 2026-06-29
+
+### Added
+
+- Sentry crash reporting for unhandled exceptions in the TUI (gated by `enable_telemetry`; off when telemetry is disabled)
+
+### Changed
+
+- Recoverable tool-call errors are now muted in the UI; only terminal errors render as a hard failure
+
+### Fixed
+
+- MarkupError crash when tool output contained square brackets
+- OpenTelemetry chat/LLM spans missing after Mistral Python SDK 2.4.10+ telemetry opt-in gate
+
+
 ## [2.18.1] - 2026-06-26
 
 ### Added

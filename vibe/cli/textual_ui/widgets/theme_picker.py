@@ -12,6 +12,7 @@ from textual.timer import Timer
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
 PREVIEW_DEBOUNCE_SECONDS = 0.1
@@ -69,9 +70,9 @@ class ThemePickerApp(Container):
         ]
         with Vertical(id="themepicker-content"):
             yield NoMarkupStatic("Select Theme", classes="themepicker-title")
-            yield OptionList(*options, id="themepicker-options")
+            yield NavigableOptionList(*options, id="themepicker-options")
             yield NoMarkupStatic(
-                "↑↓ Preview  Enter Select  Esc Cancel", classes="themepicker-help"
+                "↑↓/jk Preview  Enter Select  Esc Cancel", classes="themepicker-help"
             )
 
     def on_mount(self) -> None:

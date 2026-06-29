@@ -91,3 +91,28 @@ async def test_theme_picker_select_persists_and_applies() -> None:
         assert len(app.query(ThemePickerApp)) == 0
         assert app.config.theme == target
         assert app.theme == target
+
+
+@pytest.mark.asyncio
+async def test_theme_picker_jk_moves_cursor() -> None:
+    from textual.widgets import OptionList
+
+    config = build_test_vibe_config()
+    config.theme = "ansi-dark"
+    app = build_test_vibe_app(config=config)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_theme()
+        await pilot.pause(0.2)
+
+        option_list = app.query_one(ThemePickerApp).query_one(OptionList)
+        start = option_list.highlighted
+        assert start is not None
+
+        await pilot.press("j")
+        await pilot.pause(0.1)
+        assert option_list.highlighted == (start + 1) % option_list.option_count
+
+        await pilot.press("k")
+        await pilot.pause(0.1)
+        assert option_list.highlighted == start

@@ -5,7 +5,7 @@ from textual.app import App, ComposeResult
 
 from vibe.cli.textual_ui.widgets.links import (
     LinkStatic,
-    link_markup,
+    link_content,
     linkify_urls_in_text,
 )
 from vibe.cli.textual_ui.widgets.tool_widgets import WebSearchResultWidget
@@ -13,32 +13,41 @@ from vibe.cli.textual_ui.widgets.tools import ToolCallMessage
 from vibe.core.tools.builtins.websearch import WebSearchResult, WebSearchSource
 
 
-def test_link_markup_encodes_url_in_action_and_renders_label() -> None:
+def _click_actions(content: object) -> list[str]:
+    spans = getattr(content, "spans", [])
+    return [
+        span.style.meta["@click"]
+        for span in spans
+        if span.style.meta and "@click" in span.style.meta
+    ]
+
+
+def test_link_content_encodes_url_in_action_and_keeps_label() -> None:
     # The action arg is percent-encoded; the visible label is the page name.
-    assert (
-        link_markup("Example", "https://example.com")
-        == "[@click=open_url('https%3A%2F%2Fexample.com')]Example[/]"
-    )
+    content = link_content("Example", "https://example.com")
+    assert content.plain == "Example"
+    assert _click_actions(content) == ["open_url('https%3A%2F%2Fexample.com')"]
 
 
-def test_link_markup_only_links_http_schemes() -> None:
-    # Non-http(s) schemes render as the plain label, not a clickable @click span.
+def test_link_content_only_links_http_schemes() -> None:
+    # Non-http(s) schemes render as the plain label, with no clickable @click span.
     for url in ("file:///etc/passwd", "javascript:alert(1)", "vscode://x"):
-        assert link_markup(url, url) == url
-        assert "@click" not in link_markup(url, url)
+        content = link_content(url, url)
+        assert content.plain == url
+        assert _click_actions(content) == []
 
 
-def test_link_markup_handles_previously_unsafe_urls() -> None:
-    # Brackets, quotes, parens — all encoded into the action, never a fallback.
+def test_link_content_handles_previously_unsafe_urls() -> None:
+    # Brackets, quotes, parens live in the encoded action, never in the label text.
     for url in (
         "https://e.org/x[1]",
         "https://e.org/it's",
         "https://e.org/x)",
         "https://en.wikipedia.org/wiki/Python_(programming_language)",
     ):
-        markup = link_markup(url, url)
-        assert markup.startswith("[@click=open_url('")
-        assert "[1]" not in markup.split("]", 1)[0]  # raw bracket not in the tag
+        content = link_content(url, url)
+        assert content.plain == url  # literal text, never re-parsed as markup
+        assert len(_click_actions(content)) == 1
 
 
 class _Harness(App):
@@ -48,7 +57,7 @@ class _Harness(App):
         self.opened: list[str] = []
 
     def compose(self) -> ComposeResult:
-        yield LinkStatic(link_markup(self.url, self.url))
+        yield LinkStatic(link_content(self.url, self.url))
 
     def open_url(self, url: str, *, new_tab: bool = True) -> None:
         self.opened.append(url)
@@ -112,33 +121,36 @@ async def test_unsafe_schemes_are_rejected(scheme: str) -> None:
 def test_linkify_urls_in_text_auto_detects_url() -> None:
     # Once a tool is opted into linkification, URLs are found in the message
     # itself — the call site doesn't have to point at the URL span.
-    markup = linkify_urls_in_text("Fetched https://example.com (10 chars, text/html)")
-    assert markup.startswith("Fetched ")
-    assert (
-        "[@click=open_url('https%3A%2F%2Fexample.com')]https://example.com[/]" in markup
-    )
+    content = linkify_urls_in_text("Fetched https://example.com (10 chars, text/html)")
+    assert content.plain == "Fetched https://example.com (10 chars, text/html)"
+    assert _click_actions(content) == ["open_url('https%3A%2F%2Fexample.com')"]
 
 
 def test_linkify_urls_in_text_handles_multiple_urls() -> None:
-    markup = linkify_urls_in_text("see https://a.com and https://b.com here")
-    assert "[@click=open_url('https%3A%2F%2Fa.com')]https://a.com[/]" in markup
-    assert "[@click=open_url('https%3A%2F%2Fb.com')]https://b.com[/]" in markup
+    content = linkify_urls_in_text("see https://a.com and https://b.com here")
+    assert _click_actions(content) == [
+        "open_url('https%3A%2F%2Fa.com')",
+        "open_url('https%3A%2F%2Fb.com')",
+    ]
 
 
 def test_linkify_urls_in_text_keeps_balanced_parens_in_url() -> None:
     # Wikipedia-style URLs with `(…)` were the reason the @click action is
     # percent-encoded; Rich's URL detector already keeps them in the span.
     url = "https://en.wikipedia.org/wiki/Python_(programming_language)"
-    markup = linkify_urls_in_text(f"see {url} for details")
-    assert link_markup(url, url) in markup
+    content = linkify_urls_in_text(f"see {url} for details")
+    assert url in content.plain
+    assert _click_actions(content) == [
+        "open_url('https%3A%2F%2Fen.wikipedia.org%2Fwiki%2F"
+        "Python_%28programming_language%29')"
+    ]
 
 
-def test_linkify_urls_in_text_escapes_and_keeps_plain_when_no_url() -> None:
-    # Brackets must be escaped so raw tool text can't break the markup.
-    assert (
-        linkify_urls_in_text("Searched '[a]' (2 sources)")
-        == "Searched '\\[a]' (2 sources)"
-    )
+def test_linkify_urls_in_text_keeps_brackets_literal_when_no_url() -> None:
+    # Raw tool text with brackets stays literal (Content is never markup-parsed).
+    content = linkify_urls_in_text("Searched '[a]' (2 sources)")
+    assert content.plain == "Searched '[a]' (2 sources)"
+    assert _click_actions(content) == []
 
 
 async def _rendered_lines(widget: WebSearchResultWidget) -> list[str]:
@@ -216,7 +228,7 @@ async def test_tool_call_message_set_result_text_renders_clickable_url() -> None
 
 
 @pytest.mark.asyncio
-async def test_tool_call_message_set_result_text_escapes_when_linkify_off() -> None:
+async def test_tool_call_message_set_result_text_keeps_brackets_literal_off() -> None:
     call = ToolCallMessage(tool_name="bash")
 
     class _H(App):
@@ -234,3 +246,27 @@ async def test_tool_call_message_set_result_text_escapes_when_linkify_off() -> N
     assert "@click=open_url" not in rendered
     assert "https://example.com" in rendered
     assert "[exit 0]" in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("linkify", [False, True])
+async def test_tool_call_message_renders_malformed_markup_without_crashing(
+    linkify: bool,
+) -> None:
+    # A bash summary like `git tag [/foo bar]` reads as a broken Rich closing
+    # tag and used to raise MarkupError when rendered into a markup=True widget.
+    call = ToolCallMessage(tool_name="bash")
+
+    class _H(App):
+        def compose(self) -> ComposeResult:
+            yield call
+
+    text = "ran: git tag [/foo bar] && echo [done] https://example.com"
+    async with _H().run_test() as pilot:
+        await pilot.pause(0.1)
+        call.set_result_text(text, linkify=linkify)
+        await pilot.pause(0.1)
+        rendered = str(call._text_widget.render()) if call._text_widget else ""
+
+    assert "[/foo bar]" in rendered
+    assert "[done]" in rendered

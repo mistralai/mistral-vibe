@@ -14,6 +14,7 @@ from textual.widgets import OptionList
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker
 
+from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ConnectorConfig, VibeConfig
 from vibe.core.tools.connectors import ConnectorAuthAction, ConnectorRegistry
@@ -64,15 +65,15 @@ def collect_mcp_tool_index(
 
 
 _LIST_VIEW_HELP_TOOLS = (
-    "↑↓ Navigate  Enter Show tools  D Disable  E Enable  R Refresh  Esc Close"
+    "↑↓/jk Navigate  Enter Show tools  D Disable  E Enable  R Refresh  Esc Close"
 )
 _LIST_VIEW_HELP_AUTH = (
-    "↑↓ Navigate  Enter Connect  D Disable  E Enable  R Refresh  Esc Close"
+    "↑↓/jk Navigate  Enter Connect  D Disable  E Enable  R Refresh  Esc Close"
 )
 _DETAIL_VIEW_HELP = (
-    "↑↓ Navigate  D Disable  E Enable  Backspace Back  R Refresh  Esc Close"
+    "↑↓/jk Navigate  D Disable  E Enable  Backspace Back  R Refresh  Esc Close"
 )
-_DETAIL_VIEW_HELP_NO_TOOLS = "↑↓ Navigate  Backspace Back  R Refresh  Esc Close"
+_DETAIL_VIEW_HELP_NO_TOOLS = "↑↓/jk Navigate  Backspace Back  R Refresh  Esc Close"
 
 
 class MCPApp(Container):
@@ -163,7 +164,7 @@ class MCPApp(Container):
         with Vertical(id="mcp-content"):
             yield NoMarkupStatic("", id="mcp-title", classes="settings-title")
             yield NoMarkupStatic("")
-            yield OptionList(id="mcp-options")
+            yield NavigableOptionList(id="mcp-options")
             yield NoMarkupStatic("", id="mcp-help", classes="settings-help")
 
     def on_mount(self) -> None:

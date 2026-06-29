@@ -14,7 +14,7 @@ async def test_reads_env_vars() -> None:
     env = {
         "MISTRAL_API_KEY": "test-key",
         "VIBE_ACTIVE_MODEL": "mistral-large",
-        "VIBE_VIM_KEYBINDINGS": "true",
+        "VIBE_DISABLE_WELCOME_BANNER_ANIMATION": "true",
         "VIBE_ENABLE_TELEMETRY": "0",
         "VIBE_UNKNOWN_VAR": "ignored",
         "VIBE_SESSION_LOGGING__ENABLED": "false",
@@ -27,7 +27,7 @@ async def test_reads_env_vars() -> None:
 
     assert data.model_dump() == {
         "active_model": "mistral-large",
-        "vim_keybindings": True,
+        "disable_welcome_banner_animation": True,
         "enable_telemetry": False,
         "session_logging": {"enabled": False, "session_prefix": "mysession"},
         "api_timeout": 0.12,

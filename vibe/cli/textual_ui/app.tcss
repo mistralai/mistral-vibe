@@ -722,6 +722,14 @@ StatusMessage {
     &.error {
         color: $error;
     }
+
+    &.muted {
+        color: $text-muted;
+
+        &:ansi {
+            text-style: dim;
+        }
+    }
 }
 
 .status-indicator-text {

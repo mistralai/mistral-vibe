@@ -12,6 +12,7 @@ from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.session.resume_sessions import ResumeSessionInfo, short_session_id
 
@@ -279,9 +280,9 @@ class SessionPickerApp(Container):
             yield NoMarkupStatic(
                 _build_header_text(self._cwd), classes="sessionpicker-header"
             )
-            yield OptionList(*options, id="sessionpicker-options")
+            yield NavigableOptionList(*options, id="sessionpicker-options")
             yield NoMarkupStatic(
-                "↑↓ Navigate  Enter Select  D Delete  Esc Cancel",
+                "↑↓/jk Navigate  Enter Select  D Delete  Esc Cancel",
                 classes="sessionpicker-help",
             )
 

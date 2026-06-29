@@ -7,23 +7,29 @@ from typing import Annotated, Any
 from pydantic import AfterValidator, BeforeValidator, Field, model_validator
 
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config._settings import (
-    DEFAULT_ACTIVE_MODEL_CONFIG,
-    DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG,
-    DEFAULT_ACTIVE_TTS_MODEL_CONFIG,
+from vibe.core.config._defaults import (
     DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
     DEFAULT_API_TIMEOUT,
     DEFAULT_AUTO_COMPACT_THRESHOLD,
     DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_API_ENV_KEY,
+    DEFAULT_THEME,
+    DEFAULT_VIBE_BASE_URL,
+)
+from vibe.core.config._settings import (
+    DEFAULT_ACTIVE_MODEL_CONFIG,
+    DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG,
+    DEFAULT_ACTIVE_TTS_MODEL_CONFIG,
     DEFAULT_MODELS,
     DEFAULT_PROVIDERS,
-    DEFAULT_THEME,
     DEFAULT_TRANSCRIBE_MODELS,
     DEFAULT_TRANSCRIBE_PROVIDERS,
     DEFAULT_TTS_MODELS,
     DEFAULT_TTS_PROVIDERS,
-    DEFAULT_VIBE_BASE_URL,
+    resolve_api_key,
+    resolve_theme_name,
+)
+from vibe.core.config.models import (
     ConnectorConfig,
     ExperimentsConfig,
     MCPServer,
@@ -36,8 +42,6 @@ from vibe.core.config._settings import (
     TranscribeProviderConfig,
     TTSModelConfig,
     TTSProviderConfig,
-    resolve_api_key,
-    resolve_theme_name,
 )
 from vibe.core.config.schema import (
     ConfigSchema,
@@ -254,7 +258,6 @@ class VibeConfigSchema(ConfigSchema):
     applied_migrations: Annotated[list[str], WithConcatMerge()] = Field(
         default_factory=list
     )
-    vim_keybindings: Annotated[bool, WithReplaceMerge()] = False
     disable_welcome_banner_animation: Annotated[bool, WithReplaceMerge()] = False
     autocopy_to_clipboard: Annotated[bool, WithReplaceMerge()] = True
     file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = False
@@ -295,8 +298,7 @@ class VibeConfigSchema(ConfigSchema):
         default_factory=ExperimentsConfig
     )
 
-    @property
-    def active_model_config(self) -> ModelConfig:
+    def get_active_model(self) -> ModelConfig:
         if model := next(
             (m for m in self.models if m.alias == self.active_model), None
         ):
@@ -313,10 +315,6 @@ class VibeConfigSchema(ConfigSchema):
         raise ValueError(
             f"Provider '{model.provider}' for model '{model.name}' not found in configuration."
         )
-
-    @property
-    def active_provider_config(self) -> ProviderConfig:
-        return self.get_provider_for_model(self.active_model_config)
 
     @property
     def system_prompt(self) -> str:
@@ -350,7 +348,7 @@ class VibeConfigSchema(ConfigSchema):
 
         compaction_provider = self.get_provider_for_model(self.compaction_model)
         try:
-            active_provider = self.active_provider_config
+            active_provider = self.get_provider_for_model(self.get_active_model())
         except ValueError:
             return self
         if active_provider.name != compaction_provider.name:
@@ -364,7 +362,7 @@ class VibeConfigSchema(ConfigSchema):
     @model_validator(mode="after")
     def _check_api_key(self) -> VibeConfigSchema:
         try:
-            provider = self.active_provider_config
+            provider = self.get_provider_for_model(self.get_active_model())
             api_key_env = provider.api_key_env_var
             if api_key_env and not resolve_api_key(api_key_env):
                 raise MissingAPIKeyError(api_key_env, provider.name)

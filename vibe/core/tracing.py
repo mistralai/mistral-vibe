@@ -4,27 +4,74 @@ import atexit
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin
 
 from opentelemetry import baggage, context, trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+    DEFAULT_TRACES_EXPORT_PATH,
+)
 from opentelemetry.semconv._incubating.attributes import gen_ai_attributes
 from opentelemetry.trace import StatusCode
 
 from vibe import __version__
+from vibe.core.config import (
+    DEFAULT_MISTRAL_API_ENV_KEY,
+    DEFAULT_MISTRAL_SERVER_URL,
+    OtelSpanExporterConfig,
+    resolve_api_key,
+)
+from vibe.core.utils import get_server_url_from_api_base
 
 if TYPE_CHECKING:
-    from vibe.core.config import VibeConfig
+    from vibe.core.config import ProviderConfig, VibeConfig
 
 from vibe.core.logger import logger
 
 VIBE_TRACER_NAME = "mistral_vibe"
 VIBE_AGENT_NAME = "mistral-vibe"
+MISTRAL_OTEL_PATH = "/telemetry"
+
+
+def build_otel_span_exporter_config(
+    otel_endpoint: str | None, mistral_provider: ProviderConfig | None
+) -> OtelSpanExporterConfig | None:
+    # When otel_endpoint is set explicitly, authentication is the user's responsibility
+    # (via OTEL_EXPORTER_OTLP_* env vars), so headers are left empty.
+    # Otherwise endpoint and API key are derived from the given Mistral provider.
+    traces_export_path = DEFAULT_TRACES_EXPORT_PATH.lstrip("/")
+    if otel_endpoint:
+        return OtelSpanExporterConfig(
+            endpoint=urljoin(f"{otel_endpoint.rstrip('/')}/", traces_export_path)
+        )
+
+    if mistral_provider is not None:
+        server_url = get_server_url_from_api_base(mistral_provider.api_base)
+        api_key_env = mistral_provider.api_key_env_var or DEFAULT_MISTRAL_API_ENV_KEY
+    else:
+        server_url = None
+        api_key_env = DEFAULT_MISTRAL_API_ENV_KEY
+
+    endpoint = urljoin(
+        f"{urljoin(server_url or DEFAULT_MISTRAL_SERVER_URL, MISTRAL_OTEL_PATH).rstrip('/')}/",
+        traces_export_path,
+    )
+
+    if not (api_key := resolve_api_key(api_key_env)):
+        logger.warning("OTEL tracing enabled but %s is not set; skipping.", api_key_env)
+        return None
+
+    return OtelSpanExporterConfig(
+        endpoint=endpoint, headers={"Authorization": f"Bearer {api_key}"}
+    )
 
 
 def setup_tracing(config: VibeConfig) -> None:
     if not config.enable_telemetry or not config.enable_otel:
         return
 
-    exporter_cfg = config.otel_span_exporter_config
+    exporter_cfg = build_otel_span_exporter_config(
+        config.otel_endpoint, config.get_mistral_provider()
+    )
     if exporter_cfg is None:
         return
 

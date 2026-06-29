@@ -28,6 +28,7 @@ from textual.theme import BUILTIN_THEMES
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
+from textual.worker import Worker, WorkerFailed, WorkerState
 
 from vibe import __version__ as CORE_VERSION
 from vibe.cli.clipboard import copy_selection_to_clipboard, copy_text_to_clipboard
@@ -177,6 +178,7 @@ from vibe.core.log_reader import LogReader
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.rewind import RewindError
+from vibe.core.sentry import capture_sentry_exception
 from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image
 from vibe.core.session.resume_sessions import (
     ResumeSessionInfo,
@@ -1821,11 +1823,13 @@ class VibeApp(App):  # noqa: PLR0904
                 self._pending_question = None
                 await self._switch_to_input_app()
 
-    async def _handle_turn_error(self) -> None:
+    async def _handle_turn_error(self, *, cancelled: bool = False) -> None:
         if self._loading_widget and self._loading_widget.parent:
             await self._loading_widget.remove()
         if self.event_handler:
-            self.event_handler.stop_current_tool_call(success=False)
+            self.event_handler.stop_current_tool_call(
+                success=False, cancelled=cancelled
+            )
 
     async def _handle_agent_loop_init(self) -> None:
         show_init_spinner = not self.agent_loop.is_initialized
@@ -1900,7 +1904,7 @@ class VibeApp(App):  # noqa: PLR0904
             ) as events:
                 await self._handle_agent_loop_events(events)
         except asyncio.CancelledError:
-            await self._handle_turn_error()
+            await self._handle_turn_error(cancelled=True)
             self._narrator_manager.on_turn_cancel()
             raise
         except Exception as e:
@@ -1927,6 +1931,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._loading_widget = None
             if self.event_handler:
                 await self.event_handler.finalize_streaming()
+                self.event_handler.escalate_unresolved_errors()
             self._queue.notify_busy_changed()
             self._queue.start_drain_if_needed()
             await self._refresh_windowing_from_history()
@@ -2119,7 +2124,7 @@ class VibeApp(App):  # noqa: PLR0904
                 pass
 
         if self.event_handler:
-            self.event_handler.stop_current_tool_call(success=False)
+            self.event_handler.stop_current_tool_call(cancelled=True)
             self.event_handler.stop_current_compact()
             await self.event_handler.finalize_streaming()
 
@@ -3775,6 +3780,25 @@ class VibeApp(App):  # noqa: PLR0904
             config_getter=lambda: self.config,
             telemetry_client=self.agent_loop.telemetry_client,
         )
+
+    def _handle_exception(self, error: Exception) -> None:
+        if not isinstance(error, WorkerFailed):
+            capture_sentry_exception(
+                error, fatal=True, tags={"vibe_boundary": "textual_app"}
+            )
+        return super()._handle_exception(error)
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        error = event.worker.error
+        if event.state == WorkerState.ERROR and error:
+            capture_sentry_exception(
+                error,
+                fatal=False,
+                tags={
+                    "vibe_boundary": "textual_worker",
+                    "worker_name": event.worker.name or "",
+                },
+            )
 
 
 async def _run_app_with_cleanup(app: VibeApp) -> str | None:

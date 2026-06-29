@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.18.1"
+version = "2.18.2"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -65,7 +65,7 @@ dependencies = [
     "linkify-it-py==2.1.0",
     "markdown-it-py==4.0.0",
     "markdownify==1.2.2",
-    "mcp==1.28.0",
+    "mcp==1.28.1",
     "mdit-py-plugins==0.5.0",
     "mdurl==0.1.2",
     "mistralai==2.4.11",
@@ -101,6 +101,7 @@ dependencies = [
     "rich==15.0.0",
     "rpds-py==0.30.0",
     "secretstorage==3.5.0 ; sys_platform == 'linux'",
+    "sentry-sdk==2.63.0",
     "six==1.17.0",
     "smmap==5.0.3",
     "sounddevice==0.5.5",

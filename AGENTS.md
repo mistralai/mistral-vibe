@@ -76,6 +76,10 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 - They return `ReadSafeResult(text, encoding)` and try UTF-8, then BOM detection, then locale, then `charset_normalizer` lazily.
 - Pass `raise_on_error=True` only when callers must distinguish corrupt files from valid ones; the default replaces undecodable bytes with U+FFFD.
 
+## Widgets
+
+- For selectable lists, use `NavigableOptionList` from `vibe/cli/textual_ui/widgets/navigable_option_list.py` instead of Textual's `OptionList`. It adds `j`/`k` cursor navigation on top of the arrow keys; the bare `OptionList` only handles arrows.
+
 ## TCSS
 
 - When a rule sets `color: $text-muted;`, pair it with a nested `&:ansi { text-style: dim; }` so the muted intent survives under ANSI themes.

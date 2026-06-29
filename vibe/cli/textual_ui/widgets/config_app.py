@@ -12,6 +12,7 @@ from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
 if TYPE_CHECKING:
@@ -125,10 +126,10 @@ class ConfigApp(Container):
         with Vertical(id="config-content"):
             yield NoMarkupStatic("Settings", classes="settings-title")
             yield NoMarkupStatic("")
-            yield OptionList(*options, id="config-options")
+            yield NavigableOptionList(*options, id="config-options")
             yield NoMarkupStatic("")
             yield NoMarkupStatic(
-                "↑↓ Navigate  Enter Select/Toggle  Esc Exit", classes="settings-help"
+                "↑↓/jk Navigate  Enter Select/Toggle  Esc Exit", classes="settings-help"
             )
 
     def on_mount(self) -> None:

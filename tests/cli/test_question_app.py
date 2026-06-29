@@ -716,3 +716,66 @@ class TestMultiSelectSubmit:
         app.action_move_down()
 
         assert app.selected_option == 0
+
+
+class TestVimKeybindings:
+    def test_j_moves_down(self, single_question_args):
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        assert app.selected_option == 0
+
+        app.on_key(events.Key("j", "j"))
+
+        assert app.selected_option == 1
+
+    def test_k_moves_up(self, single_question_args):
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        assert app.selected_option == 0
+
+        app.on_key(events.Key("k", "k"))
+
+        # Wraps to last option (Other = index 2)
+        assert app.selected_option == 2
+
+    def test_j_k_ignored_when_other_input_focused(self, single_question_args):
+        from unittest.mock import MagicMock
+
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        app.other_input = MagicMock()
+        app.other_input.has_focus = True
+
+        app.on_key(events.Key("j", "j"))
+        assert app.selected_option == 0
+
+    def test_j_moves_down_for_single_question(self):
+        # Vim navigation must fire before the len <= 1 early return in on_key.
+        from textual import events
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        args = AskUserQuestionArgs(
+            questions=[
+                Question(
+                    question="Only question?",
+                    header="Q",
+                    options=[Choice(label="A"), Choice(label="B")],
+                )
+            ]
+        )
+        app = QuestionApp(args)
+        assert app.selected_option == 0
+
+        app.on_key(events.Key("j", "j"))
+
+        assert app.selected_option == 1
