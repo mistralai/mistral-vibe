@@ -1126,16 +1126,65 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         return None
 
-    async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
-        if self.enable_streaming:
-            async for event in self._stream_assistant_events():
-                yield event
-        else:
-            assistant_event = await self._get_assistant_event()
-            if assistant_event.content:
-                yield assistant_event
+    # Maximum number of consecutive reasoning-only (thought-only) turns before
+    # surfacing a warning and breaking out.  A single retry is usually sufficient
+    # for models that emit a thinking block followed by an empty assistant turn.
+    _MAX_REASONING_ONLY_RETRIES: int = 3
 
-        last_message = self.messages[-1]
+    @staticmethod
+    def _is_reasoning_only_message(message: LLMMessage) -> bool:
+        """Return True when the model emitted reasoning content but no actionable
+        response (no text content and no tool calls).  This happens with reasoning
+        models (e.g. Mistral Magistral) that sometimes finish a thinking block
+        without producing a visible reply, causing the agent loop to stall silently.
+        """
+        has_reasoning = bool(message.reasoning_content)
+        has_content = bool(message.content)
+        has_tool_calls = bool(message.tool_calls)
+        return has_reasoning and not has_content and not has_tool_calls
+
+    async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
+        reasoning_only_retries = 0
+
+        while True:
+            if self.enable_streaming:
+                async for event in self._stream_assistant_events():
+                    yield event
+            else:
+                assistant_event = await self._get_assistant_event()
+                if assistant_event.content:
+                    yield assistant_event
+
+            last_message = self.messages[-1]
+
+            # Detect the "thought-only stall": the model completed a reasoning
+            # block but produced neither text content nor tool calls.  Re-invoke
+            # it so the thinking can be used as context for the actual response.
+            if self._is_reasoning_only_message(last_message):
+                reasoning_only_retries += 1
+                if reasoning_only_retries <= self._MAX_REASONING_ONLY_RETRIES:
+                    from vibe.core.logger import logger  # local import to avoid cycles
+
+                    logger.debug(
+                        "Reasoning-only response detected (attempt %d/%d); "
+                        "re-invoking the model to obtain an actionable reply.",
+                        reasoning_only_retries,
+                        self._MAX_REASONING_ONLY_RETRIES,
+                    )
+                    continue
+
+                # Exceeded retry budget — surface a visible error and bail out.
+                yield AssistantEvent(
+                    content=(
+                        "⚠️  The model completed its reasoning phase but did not "
+                        "produce a response after "
+                        f"{self._MAX_REASONING_ONLY_RETRIES} retries.  "
+                        "Try rephrasing your request or switching to a different model."
+                    )
+                )
+                return
+
+            break  # Normal response received — exit the retry loop.
 
         parsed = self.format_handler.parse_message(last_message)
         resolved = self.format_handler.resolve_tool_calls(parsed, self.tool_manager)
@@ -2087,3 +2136,4 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         if reset_middleware:
             self._setup_middleware()
+        await self._reset_session()
