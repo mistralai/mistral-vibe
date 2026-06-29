@@ -6,3 +6,7 @@ Welcome to the Mistral Vibe documentation! For basic setup, see the [main README
 
 - **[ACP Setup](acp-setup.md)** - Setup instructions for using Mistral Vibe with various editors and IDEs that support the Agent Client Protocol.
 - **[Proxy Setup](proxy-setup.md)** - Configure proxy and SSL certificate settings for corporate networks or firewalls.
+
+## Skill Examples
+
+- **[LogosDB Memory](skills/logosdb-memory.md)** - Give Vibe persistent semantic memory across sessions using a local HNSW vector index. Provides `/ldb-index`, `/ldb-search`, and `/ldb-forget` slash commands.
