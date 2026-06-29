@@ -33,6 +33,7 @@ from vibe.core.hooks.config import HookConfigResult, load_hooks_from_fs
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.programmatic import run_programmatic
+from vibe.core.proxy_setup import sanitize_no_proxy
 from vibe.core.session import last_session_pointer
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
@@ -375,6 +376,7 @@ def run_cli(
     resolve_trusted_folder: Callable[[], None] | None = None,
 ) -> None:
     load_dotenv_values()
+    sanitize_no_proxy()
     bootstrap_config_files()
 
     if args.setup:
