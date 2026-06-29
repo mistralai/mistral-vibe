@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import MutableMapping
 from enum import StrEnum, auto
 import os
@@ -46,6 +45,7 @@ from vibe.core.prompts import (
 )
 from vibe.core.types import Backend
 from vibe.core.utils import configure_ssl_context, get_server_url_from_api_base
+from vibe.core.utils.concurrency import run_sync
 from vibe.core.utils.keyring import get_api_key_from_keyring
 
 
@@ -128,7 +128,14 @@ def _load_layered_toml_config() -> dict[str, Any]:
         builder.add_layers([UserConfigLayer(), ProjectConfigLayer()])
         return await builder.build_merged()
 
-    return asyncio.run(_load())
+    return run_sync(_load())
+
+
+def _load_persisted_toml_config() -> dict[str, Any]:
+    """Load the single on-disk config file targeted by save/migrate paths."""
+    mgr = get_harness_files_manager()
+    file = mgr.config_file or mgr.user_config_file
+    return _read_toml_file(file) if file.is_file() else {}
 
 
 class TomlFileSettingsSource(PydanticBaseSettingsSource):
@@ -1104,7 +1111,7 @@ class VibeConfig(BaseSettings):
                 self.models[i] = m.model_copy(update={"thinking": level})
                 break
 
-        current_config = TomlFileSettingsSource(type(self)).toml_data
+        current_config = _load_persisted_toml_config()
         models = current_config.get("models", [])
         for entry in models:
             if entry.get("alias", entry.get("name")) == model.alias:
@@ -1142,13 +1149,13 @@ class VibeConfig(BaseSettings):
 
     @classmethod
     def get_persisted_config(cls) -> dict[str, Any]:
-        return TomlFileSettingsSource(cls).toml_data
+        return _load_persisted_toml_config()
 
     @classmethod
     def save_updates(cls, updates: dict[str, Any]) -> None:
         if not get_harness_files_manager().persist_allowed:
             return
-        current_config = TomlFileSettingsSource(cls).toml_data
+        current_config = _load_persisted_toml_config()
         merged_config = deep_update(current_config, updates)
         cls.dump_config(merged_config)
 
