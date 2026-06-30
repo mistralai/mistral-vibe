@@ -714,8 +714,9 @@ class VibeApp(App):  # noqa: PLR0904
         context_progress = self.query_one(ContextProgress)
 
         def update_context_progress(stats: AgentStats) -> None:
+            active_model = self._active_model_or_none()
             context_progress.tokens = TokenState(
-                max_tokens=self.config.get_active_model().auto_compact_threshold,
+                max_tokens=active_model.auto_compact_threshold if active_model else 0,
                 current_tokens=stats.context_tokens,
             )
 
@@ -775,6 +776,15 @@ class VibeApp(App):  # noqa: PLR0904
             self._process_initial_prompt()
 
     def _show_config_issues(self) -> None:
+        if self._active_model_or_none() is None:
+            self.notify(
+                f"Active model '{self.config.active_model}' not found. "
+                "Use /model to select a different model "
+                "or update 'active_model' in your config.",
+                severity="error",
+                timeout=20,
+                markup=False,
+            )
         for issue in (
             *self.agent_loop.hook_config_issues,
             *self.agent_loop.skill_manager.config_issues,
