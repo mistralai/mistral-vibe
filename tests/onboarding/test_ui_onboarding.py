@@ -10,6 +10,7 @@ from typing import cast
 import keyring
 from keyring.errors import KeyringError
 import pytest
+from textual.content import Content
 from textual.events import Resize
 from textual.geometry import Size
 from textual.pilot import Pilot
@@ -22,6 +23,7 @@ from tests.browser_sign_in.stubs import (
     build_sign_in_process,
 )
 from tests.conftest import build_test_vibe_config
+from vibe.cli.textual_ui.shortcut_hints import SHORTCUT_STYLE
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.config._settings import (
@@ -190,6 +192,12 @@ def _browser_sign_in_step_text(card: Widget) -> str:
 
 def _browser_sign_in_hint(screen: Screen) -> str:
     return str(screen.query_one("#browser-sign-in-hint", NoMarkupStatic).render())
+
+
+def _assert_browser_sign_in_shortcuts_styled(screen: Screen) -> None:
+    text = screen.query_one("#browser-sign-in-hint", NoMarkupStatic).render()
+    assert isinstance(text, Content)
+    assert any(span.style == SHORTCUT_STYLE for span in text.spans)
 
 
 def _browser_sign_in_url_text(screen: Screen) -> str:
@@ -445,11 +453,15 @@ async def test_ui_shows_browser_sign_in_url_copy_prompt_without_raw_url() -> Non
             lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
         )
         url_text = _browser_sign_in_url_text(app.screen)
-        assert "If your browser did not open, copy this URL (press C)" in url_text
+        assert "If your browser did not open, copy this URL (press c)" in url_text
+        url_render = app.screen.query_one("#browser-sign-in-url", Static).render()
+        assert isinstance(url_render, Content)
+        assert any(span.style == SHORTCUT_STYLE for span in url_render.spans)
         assert "process-1" not in url_text
         assert _browser_sign_in_hint(app.screen) == (
-            "Press M to enter API key manually - Esc to cancel"
+            "Press m to enter API key manually - Esc to cancel"
         )
+        _assert_browser_sign_in_shortcuts_styled(app.screen)
 
 
 @pytest.mark.asyncio
@@ -603,10 +615,11 @@ async def test_ui_keeps_last_sign_in_url_copy_prompt_after_open_browser_failure(
             pilot,
         )
         assert _browser_sign_in_hint(app.screen) == (
-            "Press R to retry - Press M to enter API key manually - Esc to cancel"
+            "Press r to retry - Press m to enter API key manually - Esc to cancel"
         )
+        _assert_browser_sign_in_shortcuts_styled(app.screen)
         url_text = _browser_sign_in_url_text(app.screen)
-        assert "If your browser did not open, copy this URL (press C)" in url_text
+        assert "If your browser did not open, copy this URL (press c)" in url_text
         assert "process-1" not in url_text
 
 
@@ -686,8 +699,9 @@ async def test_ui_retry_hides_old_sign_in_url_and_uses_fresh_attempt_url() -> No
         assert "process-2" not in _browser_sign_in_url_text(app.screen)
         assert "process-1" not in _browser_sign_in_url_text(app.screen)
         assert _browser_sign_in_hint(app.screen) == (
-            "Press M to enter API key manually - Esc to cancel"
+            "Press m to enter API key manually - Esc to cancel"
         )
+        _assert_browser_sign_in_shortcuts_styled(app.screen)
         await pilot.press("c")
 
     assert copied_urls == [_expected_browser_sign_in_url(process_id="process-2")]
@@ -748,7 +762,7 @@ async def test_ui_preserves_completed_browser_sign_in_during_success_delay() -> 
         assert app.screen.state.variant == "success"
         hint = str(app.screen.query_one("#browser-sign-in-hint").render())
         assert "Finishing setup..." in hint
-        assert "Press M to enter API key manually - Esc to cancel" not in hint
+        assert "Press m to enter API key manually - Esc to cancel" not in hint
         assert app.return_value is None
         assert "sk-browser-onboarding-test-key" in _saved_env_contents()
         await pilot.press("m", "escape")
@@ -861,9 +875,10 @@ async def test_ui_shows_retryable_error_when_browser_sign_in_fails_unexpectedly(
         assert app.screen.state.variant == "error"
         assert _active_browser_sign_in_step_card(app.screen).has_class("active")
         assert (
-            "Press R to retry - Press M to enter API key manually - Esc to cancel"
+            "Press r to retry - Press m to enter API key manually - Esc to cancel"
             in str(app.screen.query_one("#browser-sign-in-hint").render())
         )
+        _assert_browser_sign_in_shortcuts_styled(app.screen)
         assert app.return_value is None
 
 
@@ -922,11 +937,12 @@ async def test_ui_waits_for_browser_sign_in_cleanup_before_retrying() -> None:
         )
         await _wait_for(
             lambda: (
-                "Press M to enter API key manually - Esc to cancel"
+                "Press m to enter API key manually - Esc to cancel"
                 in str(hint_widget.render())
             ),
             pilot,
         )
+        _assert_browser_sign_in_shortcuts_styled(app.screen)
 
         await pilot.press("r")
         await _wait_for(
@@ -940,7 +956,7 @@ async def test_ui_waits_for_browser_sign_in_cleanup_before_retrying() -> None:
         )
         await _wait_for(
             lambda: (
-                "Press M to enter API key manually - Esc to cancel"
+                "Press m to enter API key manually - Esc to cancel"
                 in str(hint_widget.render())
             ),
             pilot,

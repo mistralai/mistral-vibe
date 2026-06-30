@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.3] - 2026-06-30
+
+### Added
+
+- `j`/`k` navigation in selectable lists across the TUI (questions, theme picker, rewind, voice, MCP panels)
+- `ask_confirmation_on_exit` config option to prompt before quitting
+- Project-level `.vibe/config.toml` now persists config option changes
+
+### Changed
+
+- Consistent styling and casing for keyboard shortcut hints across the TUI
+- `ask_user_question` now supports more than 4 options and questions
+
+### Fixed
+
+- No longer prompts to log in for disabled MCP servers
+- Teleport diff no longer mutates the real git index
+
+
 ## [2.18.2] - 2026-06-29
 
 ### Added

@@ -12,6 +12,7 @@ from textual.containers import Horizontal
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.constants import MistralColors
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.spinner import SpinnerMixin, SpinnerType
 
@@ -143,16 +144,18 @@ class LoadingWidget(SpinnerMixin, Static):
             return
         self._queued_count = count
         if self.hint_widget is not None:
-            self.hint_widget.update(self._format_hint(max(self._last_elapsed, 0)))
+            self.hint_widget.update(
+                shortcut_hint(self._format_hint(max(self._last_elapsed, 0)))
+            )
 
     def _format_hint(self, elapsed: int) -> str:
         elapsed_str = _format_elapsed(elapsed)
         if self._queued_count > 0:
             return (
-                f"({elapsed_str} Esc to interrupt · "
-                "Ctrl+C to cancel last queued message)"
+                f"({elapsed_str} {shortcut('Esc')} to interrupt · "
+                f"{shortcut('Ctrl+C')} to cancel last queued message)"
             )
-        return f"({elapsed_str} Esc/Ctrl+C to interrupt)"
+        return f"({elapsed_str} {shortcut('Esc/Ctrl+C')} to interrupt)"
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="loading-container"):
@@ -166,7 +169,8 @@ class LoadingWidget(SpinnerMixin, Static):
 
             if self._show_hint:
                 self.hint_widget = NoMarkupStatic(
-                    "(0s Esc/Ctrl+C to interrupt)", classes="loading-hint"
+                    shortcut_hint(f"(0s {shortcut('Esc/Ctrl+C')} to interrupt)"),
+                    classes="loading-hint",
                 )
                 yield self.hint_widget
 
@@ -232,7 +236,7 @@ class LoadingWidget(SpinnerMixin, Static):
             elapsed = int(time() - self.start_time - paused)
             if elapsed != self._last_elapsed:
                 self._last_elapsed = elapsed
-                self.hint_widget.update(self._format_hint(elapsed))
+                self.hint_widget.update(shortcut_hint(self._format_hint(elapsed)))
 
 
 @contextmanager

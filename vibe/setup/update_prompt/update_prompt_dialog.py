@@ -11,6 +11,7 @@ from textual.binding import Binding, BindingType
 from textual.containers import CenterMiddle, Horizontal
 from textual.message import Message
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.update_notifier.update import do_update
@@ -97,7 +98,8 @@ class UpdatePromptDialog(CenterMiddle):
                     yield widget
 
             yield NoMarkupStatic(
-                "← → navigate  Enter select", classes="update-dialog-help"
+                shortcut_hint(f"{shortcut('←→')} navigate  {shortcut('Enter')} select"),
+                classes="update-dialog-help",
             )
 
             yield PetitChat(id="update-dialog-spinner")

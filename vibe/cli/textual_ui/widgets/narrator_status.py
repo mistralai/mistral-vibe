@@ -11,6 +11,7 @@ from vibe.cli.narrator_manager.narrator_manager_port import (
     NarratorManagerPort,
     NarratorState,
 )
+from vibe.cli.textual_ui.shortcut_hints import shortcut
 
 SHRINK_FRAMES = "█▇▆▅▄▃▂▁"
 BAR_FRAMES = ["▂▅▇", "▃▆▅", "▅▃▇", "▇▂▅", "▅▇▃", "▃▅▆"]
@@ -50,12 +51,14 @@ class NarratorStatus(NarratorManagerListener, Static):
             case NarratorState.SUMMARIZING:
                 char = SHRINK_FRAMES[self._frame % len(SHRINK_FRAMES)]
                 self.update(
-                    f"[bold orange]{char}[/bold orange] summarizing [dim]Esc/Ctrl+C to stop[/dim]"
+                    f"[bold orange]{char}[/bold orange] summarizing "
+                    f"[dim]{shortcut('Esc/Ctrl+C')} to stop[/dim]"
                 )
             case NarratorState.SPEAKING:
                 bars = BAR_FRAMES[self._frame % len(BAR_FRAMES)]
                 self.update(
-                    f"[bold orange]{bars}[/bold orange] speaking [dim]Esc/Ctrl+C to stop[/dim]"
+                    f"[bold orange]{bars}[/bold orange] speaking "
+                    f"[dim]{shortcut('Esc/Ctrl+C')} to stop[/dim]"
                 )
         self._frame += 1
 

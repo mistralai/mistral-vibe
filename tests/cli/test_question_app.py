@@ -72,6 +72,31 @@ class TestQuestionAppState:
         assert len(app.answers) == 0
         assert len(app.other_texts) == 0
 
+    def test_more_than_four_options_accepted_and_rendered(self):
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        args = AskUserQuestionArgs(
+            questions=[
+                Question(
+                    question="Pick an analysis type",
+                    header="Analysis",
+                    options=[
+                        Choice(label="Financial"),
+                        Choice(label="Operational"),
+                        Choice(label="Strategic"),
+                        Choice(label="Competitive"),
+                        Choice(label="Multi-source"),
+                    ],
+                )
+            ]
+        )
+
+        app = QuestionApp(args)
+
+        assert app.max_options == 5
+        # 5 options + Other = 6 (no Submit for single-select)
+        assert app._total_options == 6
+
     def test_total_options_single_select(self, single_question_args):
         from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 

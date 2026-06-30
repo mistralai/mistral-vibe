@@ -16,6 +16,7 @@ from textual.timer import Timer
 from textual.widgets import Static
 from textual.worker import Worker
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ProviderConfig
@@ -37,12 +38,17 @@ from vibe.setup.auth.api_key_persistence import (
 from vibe.setup.onboarding.base import OnboardingScreen
 from vibe.setup.onboarding.gradient_text import GRADIENT_COLORS, append_gradient_text
 
-PENDING_HINT = "Press M to enter API key manually - Esc to cancel"
-ERROR_HINT = "Press R to retry - Press M to enter API key manually - Esc to cancel"
+PENDING_HINT = (
+    f"Press {shortcut('m')} to enter API key manually - {shortcut('Esc')} to cancel"
+)
+ERROR_HINT = (
+    f"Press {shortcut('r')} to retry - Press {shortcut('m')} "
+    f"to enter API key manually - {shortcut('Esc')} to cancel"
+)
 SUCCESS_HINT = "Finishing setup..."
 SIGN_IN_URL_HELP_PREFIX = "If your browser did not open, "
 SIGN_IN_URL_COPY_LABEL = "copy this URL"
-SIGN_IN_URL_HELP_SUFFIX = " (press C)."
+SIGN_IN_URL_HELP_SUFFIX = f" (press {shortcut('c')})."
 SIGN_IN_URL_REVEAL_PREFIX = "Copy failed. Open this URL manually:"
 SUCCESS_EXIT_DELAY_SECONDS: float = 2.0
 SIGN_IN_URL_HELP_DELAY_SECONDS: float = 4.0
@@ -389,7 +395,7 @@ class BrowserSignInScreen(OnboardingScreen):
         if not self.is_mounted:
             return
 
-        self._hint_widget.update(state.hint)
+        self._hint_widget.update(shortcut_hint(state.hint))
         self._url_widget.update(self._build_url_text(state))
 
         for index, (widgets, (title, pending_detail, done_detail)) in enumerate(
@@ -487,7 +493,7 @@ class BrowserSignInScreen(OnboardingScreen):
         help_text = (
             f"{escape(SIGN_IN_URL_HELP_PREFIX)}"
             f"[@click='screen.copy_url']{escape(SIGN_IN_URL_COPY_LABEL)}[/]"
-            f"{escape(SIGN_IN_URL_HELP_SUFFIX)}"
+            f"{SIGN_IN_URL_HELP_SUFFIX}"
         )
         if not state.reveal_sign_in_url:
             return help_text

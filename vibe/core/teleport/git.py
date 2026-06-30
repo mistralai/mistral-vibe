@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
+import tempfile
 
 from git import InvalidGitRepositoryError, Repo
 from git.exc import GitCommandError
@@ -154,13 +156,21 @@ class GitRepository:
 
     async def _get_diff(self, repo: Repo) -> str:
         def get_full_diff() -> str:
-            # Mark untracked files as intent-to-add so they appear in diff
-            repo.git.add("-N", ".")
-            return repo.git.diff("HEAD", binary=True)
+            temporary_dir = Path(tempfile.mkdtemp(prefix="vibe-teleport-index-"))
+            temporary_index = temporary_dir / "index"
+            try:
+                index_path = Path(repo.index.path)
+                if index_path.exists():
+                    shutil.copy2(index_path, temporary_index)
+                with repo.git.custom_environment(GIT_INDEX_FILE=str(temporary_index)):
+                    repo.git.add("-N", ".")
+                    return repo.git.diff("HEAD", binary=True)
+            finally:
+                shutil.rmtree(temporary_dir, ignore_errors=True)
 
         try:
             return await self._executor.run(get_full_diff)
-        except (TimeoutError, GitCommandError):
+        except (TimeoutError, GitCommandError, OSError):
             return ""
 
     async def _branch_contains(self, repo: Repo, commit: str, remote: str) -> bool:

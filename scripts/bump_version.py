@@ -144,7 +144,9 @@ Step 3 — Fill vibe/whats_new.md (reuse the same context, do NOT re-inspect git
   * Do not copy or paraphrase the full changelog."""
     try:
         result = subprocess.run(
-            ["vibe", "-p", prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            ["vibe", "-p", prompt, "--auto-approve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             raise RuntimeError("Failed to auto-fill release notes")

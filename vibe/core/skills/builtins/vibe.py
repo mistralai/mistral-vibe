@@ -63,7 +63,9 @@ When in a trusted folder, Vibe also looks for project-local configuration:
 Chat input (case-insensitive): `/exit`, `exit`, `quit`, `:q`, `:quit`.
 Keyboard: `Ctrl+C` / `Ctrl+D` — press twice within ~1s to quit. For `Ctrl+C`,
 the first press instead interrupts the running job or clears the input if either
-is present. `Ctrl+Z` suspends on POSIX (resume with `fg`).
+is present. Set `ask_confirmation_on_exit = false` to make `Ctrl+D` quit on the
+first press (also toggleable in `/config`); `Ctrl+C` always requires a second
+press. `Ctrl+Z` suspends on POSIX (resume with `fg`).
 
 ### Update
 
@@ -114,6 +116,7 @@ active_model = "mistral-medium-3.5"  # Model alias to use (see [[models]])
 disable_welcome_banner_animation = false
 autocopy_to_clipboard = true
 file_watcher_for_autocomplete = false
+ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
 
 # Behavior
 bypass_tool_permissions = false    # Skip tool approval prompts
@@ -603,7 +606,7 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/mcp logout <alias>` - Log out from an MCP server and delete stored OAuth
   secrets
 - `/resume` (or `/continue`) - Browse and resume past sessions for the current
-  folder. The picker header shows the folder being listed. Press `D` twice to
+  folder. The picker header shows the folder being listed. Press `d` twice to
   delete a saved session; the active session cannot be deleted here.
 - `/rewind` - Rewind to a previous message
 - `/loop <interval> <prompt>` - Schedule a recurring prompt (e.g. `/loop 30s ping`).

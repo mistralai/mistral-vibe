@@ -9,6 +9,7 @@ from textual.containers import Container, Vertical
 from textual.message import Message
 from textual.widgets import Input, Static
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 from vibe.core.proxy_setup import (
@@ -59,7 +60,11 @@ class ProxySetupApp(Container):
                 yield input_widget
 
             yield NoMarkupStatic(
-                "↑↓ navigate  Enter save & exit  ESC cancel", classes="settings-help"
+                shortcut_hint(
+                    f"{shortcut('↑↓')} navigate  {shortcut('Enter')} save & exit  "
+                    f"{shortcut('Esc')} cancel"
+                ),
+                classes="settings-help",
             )
 
     def focus(self, scroll_visible: bool = True) -> ProxySetupApp:

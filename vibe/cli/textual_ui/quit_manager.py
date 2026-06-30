@@ -6,6 +6,7 @@ from typing import Literal
 from textual.app import App
 from textual.timer import Timer
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
 
 QuitConfirmKey = Literal["Ctrl+C", "Ctrl+D"]
@@ -37,12 +38,12 @@ class QuitManager:
             self._confirm_timer = None
         self._confirm_time = time.monotonic()
         self._confirm_key = key
-        prompt = f"Press {key} again to quit"
+        prompt = f"Press {shortcut(key)} again to quit"
         if extra:
             prompt = f"{prompt} ({extra})"
         try:
             path_display = self._app.query_one(PathDisplay)
-            path_display.update(prompt)
+            path_display.update(shortcut_hint(prompt))
         except Exception:
             pass
         self._confirm_timer = self._app.set_timer(

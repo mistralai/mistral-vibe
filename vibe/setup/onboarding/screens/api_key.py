@@ -10,6 +10,7 @@ from textual.validation import Length
 from textual.widgets import Input, Link
 
 from vibe.cli.clipboard import copy_selection_to_clipboard
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import DEFAULT_VIBE_BASE_URL, ProviderConfig
@@ -110,7 +111,7 @@ class ApiKeyScreen(OnboardingScreen):
         feedback.remove_class("error", "success")
 
         if event.validation_result.is_valid:
-            feedback.update("Press Enter to submit ↵")
+            feedback.update(shortcut_hint(f"Press {shortcut('Enter')} to submit ↵"))
             feedback.add_class("success")
             input_box.add_class("valid")
             return

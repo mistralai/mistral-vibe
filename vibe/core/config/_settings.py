@@ -242,6 +242,7 @@ class VibeConfig(BaseSettings):
     disable_welcome_banner_animation: bool = False
     autocopy_to_clipboard: bool = True
     file_watcher_for_autocomplete: bool = False
+    ask_confirmation_on_exit: bool = True
     displayed_workdir: str = ""
     context_warnings: bool = False
     voice_mode_enabled: bool = False

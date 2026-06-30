@@ -11,6 +11,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from vibe.cli.commands import ALT_KEY
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
 
@@ -86,7 +87,11 @@ class RewindApp(VimNavigationMixin, Container):
                 yield widget
             yield NoMarkupStatic("")
             yield NoMarkupStatic(
-                f"{ALT_KEY}+↑↓ or Ctrl+P/N browse messages  ↑↓/jk pick option  Enter confirm  ESC cancel",
+                shortcut_hint(
+                    f"{shortcut(f'{ALT_KEY}+↑↓')} or {shortcut('Ctrl+P/N')} "
+                    f"browse messages  {shortcut('↑↓/jk')} pick option  "
+                    f"{shortcut('Enter')} confirm  {shortcut('Esc')} cancel"
+                ),
                 classes="rewind-help",
             )
 

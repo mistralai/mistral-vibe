@@ -7,6 +7,7 @@ import pytest
 from rich.text import Text
 from textual.widgets import OptionList
 
+from vibe.cli.textual_ui.shortcut_hints import SHORTCUT_STYLE
 from vibe.cli.textual_ui.widgets.session_picker import (
     SessionPickerApp,
     _format_relative_time,
@@ -170,7 +171,7 @@ class TestSessionPickerAppBindings:
 
     def test_has_delete_binding(self) -> None:
         assert "d" in self._get_binding_keys()
-        assert "D" in self._get_binding_keys()
+        assert "D" not in self._get_binding_keys()
 
 
 class TestSessionPickerSessionRemoval:
@@ -192,9 +193,9 @@ class TestSessionPickerSessionRemoval:
 
         assert_delete_state(picker, kind="confirmation", option_id="session-a")
         assert option_list.replaced_prompts[-1].option_id == "session-a"
-        assert (
-            "Press D again to delete" in option_list.replaced_prompts[-1].prompt.plain
-        )
+        prompt = option_list.replaced_prompts[-1].prompt
+        assert "Press d again to delete" in prompt.plain
+        assert any(span.style == SHORTCUT_STYLE for span in prompt.spans)
         assert posted_messages == []
 
     def test_second_delete_request_posts_delete_message(

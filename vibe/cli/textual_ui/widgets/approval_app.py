@@ -12,6 +12,7 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
@@ -114,7 +115,11 @@ class ApprovalApp(VimNavigationMixin, Container):
                 self.option_widgets.append(widget)
                 yield widget
             self.help_widget = NoMarkupStatic(
-                "↑↓/jk navigate  Enter select  ESC reject", classes="approval-help"
+                shortcut_hint(
+                    f"{shortcut('↑↓/jk')} navigate  {shortcut('Enter')} select  "
+                    f"{shortcut('Esc')} reject"
+                ),
+                classes="approval-help",
             )
             yield self.help_widget
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from git import Repo
 import pytest
 
 from vibe.core.teleport.errors import (
@@ -37,8 +38,19 @@ def make_mock_repo(
     mock.git.branch.return_value = ""
     mock.git.rev_list.return_value = "0"
     mock.git.rev_parse.return_value = "abc123"
+    mock.index.path = str(Path("/tmp/mock-index"))
     mock.remote.return_value = make_mock_remote(urls[0] if urls else "")
     return mock
+
+
+def make_real_repo(workdir: Path) -> Repo:
+    repo = Repo.init(workdir, initial_branch="main")
+    repo.config_writer().set_value("user", "name", "Tester").release()
+    repo.config_writer().set_value("user", "email", "t@example.com").release()
+    (workdir / "tracked.txt").write_text("base\n")
+    repo.index.add(["tracked.txt"])
+    repo.index.commit("initial")
+    return repo
 
 
 class TestGitRepositoryParseGithubUrl:
@@ -190,6 +202,22 @@ class TestGitRepositoryGetInfo:
         with patch.object(repo, "_repo_or_raise", return_value=mock):
             info = await repo.get_info()
             assert info.branch is None
+
+
+class TestGitRepositoryGetDiff:
+    @pytest.mark.asyncio
+    async def test_includes_untracked_files_without_mutating_index(
+        self, tmp_path: Path
+    ) -> None:
+        source_repo = make_real_repo(tmp_path)
+        (tmp_path / "new.txt").write_text("hello\n")
+        status_before = source_repo.git.status("--short")
+
+        async with GitRepository(tmp_path) as git_repo:
+            diff = await git_repo._get_diff(source_repo)
+
+        assert "diff --git a/new.txt b/new.txt" in diff
+        assert source_repo.git.status("--short") == status_before
 
 
 class TestGitRepositoryIsCommitPushed:

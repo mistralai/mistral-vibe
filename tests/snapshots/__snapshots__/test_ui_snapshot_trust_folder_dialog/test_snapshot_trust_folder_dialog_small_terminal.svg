@@ -39,7 +39,8 @@
 .terminal-r5 { fill: #608ab1 }
 .terminal-r6 { fill: #868887;font-weight: bold }
 .terminal-r7 { fill: #c5c8c6;font-weight: bold }
-.terminal-r8 { fill: #868887 }
+.terminal-r8 { fill: #6b753d;font-weight: bold }
+.terminal-r9 { fill: #868887 }
     </style>
 
     <defs>
@@ -147,7 +148,7 @@
 </text><text class="terminal-r2" x="61" y="434.8" textLength="12.2" clip-path="url(#terminal-line-17)">│</text><text class="terminal-r2" x="902.8" y="434.8" textLength="12.2" clip-path="url(#terminal-line-17)">│</text><text class="terminal-r1" x="976" y="434.8" textLength="12.2" clip-path="url(#terminal-line-17)">
 </text><text class="terminal-r2" x="61" y="459.2" textLength="12.2" clip-path="url(#terminal-line-18)">│</text><text class="terminal-r1" x="292.8" y="459.2" textLength="170.8" clip-path="url(#terminal-line-18)">&#160;&#160;Trust&#160;folder</text><text class="terminal-r7" x="500.2" y="459.2" textLength="158.6" clip-path="url(#terminal-line-18)">›&#160;Don&#x27;t&#160;trust</text><text class="terminal-r2" x="902.8" y="459.2" textLength="12.2" clip-path="url(#terminal-line-18)">│</text><text class="terminal-r1" x="976" y="459.2" textLength="12.2" clip-path="url(#terminal-line-18)">
 </text><text class="terminal-r2" x="61" y="483.6" textLength="12.2" clip-path="url(#terminal-line-19)">│</text><text class="terminal-r2" x="902.8" y="483.6" textLength="12.2" clip-path="url(#terminal-line-19)">│</text><text class="terminal-r1" x="976" y="483.6" textLength="12.2" clip-path="url(#terminal-line-19)">
-</text><text class="terminal-r2" x="61" y="508" textLength="12.2" clip-path="url(#terminal-line-20)">│</text><text class="terminal-r8" x="317.2" y="508" textLength="317.2" clip-path="url(#terminal-line-20)">←&#160;→&#160;navigate&#160;&#160;Enter&#160;select</text><text class="terminal-r2" x="829.6" y="508" textLength="12.2" clip-path="url(#terminal-line-20)">▆</text><text class="terminal-r2" x="902.8" y="508" textLength="12.2" clip-path="url(#terminal-line-20)">│</text><text class="terminal-r1" x="976" y="508" textLength="12.2" clip-path="url(#terminal-line-20)">
+</text><text class="terminal-r2" x="61" y="508" textLength="12.2" clip-path="url(#terminal-line-20)">│</text><text class="terminal-r8" x="329.4" y="508" textLength="24.4" clip-path="url(#terminal-line-20)">←→</text><text class="terminal-r9" x="353.8" y="508" textLength="134.2" clip-path="url(#terminal-line-20)">&#160;navigate&#160;&#160;</text><text class="terminal-r8" x="488" y="508" textLength="61" clip-path="url(#terminal-line-20)">Enter</text><text class="terminal-r9" x="549" y="508" textLength="85.4" clip-path="url(#terminal-line-20)">&#160;select</text><text class="terminal-r2" x="829.6" y="508" textLength="12.2" clip-path="url(#terminal-line-20)">▆</text><text class="terminal-r2" x="902.8" y="508" textLength="12.2" clip-path="url(#terminal-line-20)">│</text><text class="terminal-r1" x="976" y="508" textLength="12.2" clip-path="url(#terminal-line-20)">
 </text><text class="terminal-r2" x="61" y="532.4" textLength="12.2" clip-path="url(#terminal-line-21)">│</text><text class="terminal-r2" x="902.8" y="532.4" textLength="12.2" clip-path="url(#terminal-line-21)">│</text><text class="terminal-r1" x="976" y="532.4" textLength="12.2" clip-path="url(#terminal-line-21)">
 </text><text class="terminal-r2" x="61" y="556.8" textLength="12.2" clip-path="url(#terminal-line-22)">│</text><text class="terminal-r2" x="902.8" y="556.8" textLength="12.2" clip-path="url(#terminal-line-22)">│</text><text class="terminal-r1" x="976" y="556.8" textLength="12.2" clip-path="url(#terminal-line-22)">
 </text><text class="terminal-r2" x="61" y="581.2" textLength="854" clip-path="url(#terminal-line-23)">╰────────────────────────────────────────────────────────────────────╯</text>

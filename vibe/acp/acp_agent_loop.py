@@ -748,14 +748,16 @@ class VibeAcpAgentLoop(AcpAgent):
             pass
 
     async def _notify_mcp_auth_required(self, session: AcpSessionLoop) -> None:
+        """Show a notice if any enabled MCP servers require OAuth authentication."""
         registry = session.agent_loop.mcp_registry
         if registry is None:
             return
         statuses = registry.status()
+        disabled = registry.disabled_aliases()
         aliases = sorted(
             alias
             for alias, status in statuses.items()
-            if status is AuthStatus.NEEDS_AUTH
+            if status is AuthStatus.NEEDS_AUTH and alias not in disabled
         )
         if not aliases:
             return

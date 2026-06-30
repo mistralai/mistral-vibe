@@ -334,6 +334,9 @@ class MCPRegistry:
             self._oauth_locks[alias] = asyncio.Lock()
         return self._oauth_locks[alias]
 
+    def disabled_aliases(self) -> set[str]:
+        return {alias for alias, srv in self._servers_by_alias.items() if srv.disabled}
+
     def status(self) -> dict[str, AuthStatus]:
         statuses: dict[str, AuthStatus] = {}
         for alias, srv in self._servers_by_alias.items():

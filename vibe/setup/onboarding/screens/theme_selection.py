@@ -8,6 +8,7 @@ from textual.containers import Center, Container, Horizontal, Vertical
 from textual.events import Resize
 from textual.widgets import Markdown, Static
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.theme_picker import sorted_theme_names
 from vibe.core.config import MissingAPIKeyError, VibeConfig
 from vibe.core.logger import logger
@@ -73,9 +74,14 @@ class ThemeSelectionScreen(OnboardingScreen):
                 yield Static("Select your preferred theme", id="theme-title")
                 yield Center(
                     Horizontal(
-                        Static("Navigate ↑ ↓", id="nav-hint"),
+                        Static(
+                            shortcut_hint(f"Navigate {shortcut('↑↓')}"), id="nav-hint"
+                        ),
                         Vertical(*self._compose_theme_list(), id="theme-list"),
-                        Static("Press Enter ↵", id="enter-hint"),
+                        Static(
+                            shortcut_hint(f"Press {shortcut('Enter')} ↵"),
+                            id="enter-hint",
+                        ),
                         id="theme-row",
                     )
                 )

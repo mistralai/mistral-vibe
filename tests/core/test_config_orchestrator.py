@@ -665,14 +665,17 @@ async def test_apply_patch_end_to_end_routes_default_writes_to_project_layer(
         reason="update runtime defaults",
     )
 
-    failure = assert_single_failure(result, NotImplementedError)
-    assert str(failure) == "ProjectConfigLayer patch persistence is not implemented yet"
+    assert result == []
     with project_config_path.open("rb") as file:
-        assert tomllib.load(file) == {"default_agent": "plan"}
+        assert tomllib.load(file) == {
+            "default_agent": "auto-approve",
+            "active_model": "persisted-in-project-file",
+        }
     with user_config_path.open("rb") as file:
         assert tomllib.load(file) == {"default_agent": "accept-edits"}
+    # active_model stays env-model: the environment layer outranks the project file.
     assert orch.config.active_model == "env-model"
-    assert orch.config.default_agent == "plan"
+    assert orch.config.default_agent == "auto-approve"
     assert orch.config.enabled_tools == ["read"]
 
 

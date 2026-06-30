@@ -261,6 +261,7 @@ class VibeConfigSchema(ConfigSchema):
     disable_welcome_banner_animation: Annotated[bool, WithReplaceMerge()] = False
     autocopy_to_clipboard: Annotated[bool, WithReplaceMerge()] = True
     file_watcher_for_autocomplete: Annotated[bool, WithReplaceMerge()] = False
+    ask_confirmation_on_exit: Annotated[bool, WithReplaceMerge()] = True
     displayed_workdir: Annotated[str, WithReplaceMerge()] = ""
     context_warnings: Annotated[bool, WithReplaceMerge()] = False
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False

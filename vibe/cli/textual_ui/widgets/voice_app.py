@@ -9,6 +9,7 @@ from textual.containers import Container, Vertical
 from textual.message import Message
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
 
@@ -87,7 +88,11 @@ class VoiceApp(VimNavigationMixin, Container):
             yield NoMarkupStatic("")
 
             self.help_widget = NoMarkupStatic(
-                "↑↓/jk navigate  Space/Enter toggle  ESC exit", classes="settings-help"
+                shortcut_hint(
+                    f"{shortcut('↑↓/jk')} navigate  {shortcut('Space/Enter')} toggle  "
+                    f"{shortcut('Esc')} exit"
+                ),
+                classes="settings-help",
             )
             yield self.help_widget
 

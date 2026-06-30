@@ -10,6 +10,7 @@ from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
@@ -56,7 +57,11 @@ class ModelPickerApp(Container):
             yield NoMarkupStatic("Select Model", classes="modelpicker-title")
             yield NavigableOptionList(*options, id="modelpicker-options")
             yield NoMarkupStatic(
-                "↑↓/jk Navigate  Enter Select  Esc Cancel", classes="modelpicker-help"
+                shortcut_hint(
+                    f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Select  "
+                    f"{shortcut('Esc')} Cancel"
+                ),
+                classes="modelpicker-help",
             )
 
     def on_mount(self) -> None:

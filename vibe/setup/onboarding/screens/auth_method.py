@@ -7,6 +7,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Center, Horizontal, Vertical
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ProviderConfig
@@ -120,4 +121,9 @@ class AuthMethodScreen(OnboardingScreen):
                 marker.add_class("selected")
                 widget.add_class("selected")
 
-        self._help_widget.update("Use arrows to navigate - Enter Select - Esc Cancel")
+        self._help_widget.update(
+            shortcut_hint(
+                f"Use {shortcut('↑↓')} to navigate - {shortcut('Enter')} Select - "
+                f"{shortcut('Esc')} Cancel"
+            )
+        )

@@ -41,7 +41,8 @@
 .terminal-r7 { fill: #292929 }
 .terminal-r8 { fill: #98a84b;font-weight: bold }
 .terminal-r9 { fill: #cc555a }
-.terminal-r10 { fill: #868887 }
+.terminal-r10 { fill: #6b753d;font-weight: bold }
+.terminal-r11 { fill: #868887 }
     </style>
 
     <defs>
@@ -214,9 +215,9 @@
 </text><text class="terminal-r1" x="0" y="849.6" textLength="12.2" clip-path="url(#terminal-line-34)">│</text><text class="terminal-r1" x="1451.8" y="849.6" textLength="12.2" clip-path="url(#terminal-line-34)">│</text><text class="terminal-r1" x="1464" y="849.6" textLength="12.2" clip-path="url(#terminal-line-34)">
 </text><text class="terminal-r1" x="0" y="874" textLength="12.2" clip-path="url(#terminal-line-35)">│</text><text class="terminal-r9" x="24.4" y="874" textLength="109.8" clip-path="url(#terminal-line-35)">&#160;&#160;4.&#160;Deny</text><text class="terminal-r1" x="1451.8" y="874" textLength="12.2" clip-path="url(#terminal-line-35)">│</text><text class="terminal-r1" x="1464" y="874" textLength="12.2" clip-path="url(#terminal-line-35)">
 </text><text class="terminal-r1" x="0" y="898.4" textLength="12.2" clip-path="url(#terminal-line-36)">│</text><text class="terminal-r1" x="1451.8" y="898.4" textLength="12.2" clip-path="url(#terminal-line-36)">│</text><text class="terminal-r1" x="1464" y="898.4" textLength="12.2" clip-path="url(#terminal-line-36)">
-</text><text class="terminal-r1" x="0" y="922.8" textLength="12.2" clip-path="url(#terminal-line-37)">│</text><text class="terminal-r10" x="24.4" y="922.8" textLength="488" clip-path="url(#terminal-line-37)">↑↓/jk&#160;navigate&#160;&#160;Enter&#160;select&#160;&#160;ESC&#160;reject</text><text class="terminal-r1" x="1451.8" y="922.8" textLength="12.2" clip-path="url(#terminal-line-37)">│</text><text class="terminal-r1" x="1464" y="922.8" textLength="12.2" clip-path="url(#terminal-line-37)">
+</text><text class="terminal-r1" x="0" y="922.8" textLength="12.2" clip-path="url(#terminal-line-37)">│</text><text class="terminal-r10" x="24.4" y="922.8" textLength="61" clip-path="url(#terminal-line-37)">↑↓/jk</text><text class="terminal-r11" x="85.4" y="922.8" textLength="134.2" clip-path="url(#terminal-line-37)">&#160;navigate&#160;&#160;</text><text class="terminal-r10" x="219.6" y="922.8" textLength="61" clip-path="url(#terminal-line-37)">Enter</text><text class="terminal-r11" x="280.6" y="922.8" textLength="109.8" clip-path="url(#terminal-line-37)">&#160;select&#160;&#160;</text><text class="terminal-r10" x="390.4" y="922.8" textLength="36.6" clip-path="url(#terminal-line-37)">Esc</text><text class="terminal-r11" x="427" y="922.8" textLength="85.4" clip-path="url(#terminal-line-37)">&#160;reject</text><text class="terminal-r1" x="1451.8" y="922.8" textLength="12.2" clip-path="url(#terminal-line-37)">│</text><text class="terminal-r1" x="1464" y="922.8" textLength="12.2" clip-path="url(#terminal-line-37)">
 </text><text class="terminal-r1" x="0" y="947.2" textLength="1464" clip-path="url(#terminal-line-38)">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</text><text class="terminal-r1" x="1464" y="947.2" textLength="12.2" clip-path="url(#terminal-line-38)">
-</text><text class="terminal-r10" x="0" y="971.6" textLength="158.6" clip-path="url(#terminal-line-39)">/test/workdir</text><text class="terminal-r10" x="1244.4" y="971.6" textLength="219.6" clip-path="url(#terminal-line-39)">0/200k&#160;tokens&#160;(0%)</text>
+</text><text class="terminal-r11" x="0" y="971.6" textLength="158.6" clip-path="url(#terminal-line-39)">/test/workdir</text><text class="terminal-r11" x="1244.4" y="971.6" textLength="219.6" clip-path="url(#terminal-line-39)">0/200k&#160;tokens&#160;(0%)</text>
     </g>
     </g>
 </svg>

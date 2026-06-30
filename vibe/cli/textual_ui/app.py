@@ -819,16 +819,18 @@ class VibeApp(App):  # noqa: PLR0904
                 pass
 
     async def _show_mcp_auth_required_notice(self) -> None:
+        """Show a notice if any enabled MCP servers require OAuth authentication."""
         registry = self.agent_loop.mcp_registry
         if registry is None:
             return
         from vibe.core.tools.mcp import AuthStatus
 
         statuses = registry.status()
+        disabled = registry.disabled_aliases()
         aliases = sorted(
             alias
             for alias, status in statuses.items()
-            if status is AuthStatus.NEEDS_AUTH
+            if status is AuthStatus.NEEDS_AUTH and alias not in disabled
         )
         if not aliases:
             return
@@ -1215,7 +1217,7 @@ class VibeApp(App):  # noqa: PLR0904
                 if desired:
                     await self._mount_and_scroll(
                         UserCommandMessage(
-                            "Voice mode enabled. Press ctrl+r to start recording."
+                            "Voice mode enabled. Press **Ctrl+R** to start recording."
                         )
                     )
                 else:
@@ -3485,6 +3487,10 @@ class VibeApp(App):  # noqa: PLR0904
         if (container := self._get_chat_input()) and container.value:
             if container.input_widget:
                 container.input_widget.action_delete_right()
+            return
+
+        if not self.config.ask_confirmation_on_exit:
+            self._force_quit()
             return
 
         if self._quit_manager.is_confirmed("Ctrl+D"):

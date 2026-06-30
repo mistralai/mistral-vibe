@@ -216,7 +216,7 @@ jobs:
           done
 
       - name: Attach binaries to release
-        uses: softprops/action-gh-release@2bb465e97f322d3cb2a965294d483e0d26a67aa9 # v3.0.1
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: release-assets/*.zip
         env:

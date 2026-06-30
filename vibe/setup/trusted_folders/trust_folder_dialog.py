@@ -16,6 +16,7 @@ from textual.containers import (
 from textual.message import Message
 from textual.widgets import Static
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.paths import TRUSTED_FOLDERS_FILE
 from vibe.core.trusted_folders import WorkspaceTrustDecision
@@ -166,7 +167,10 @@ class TrustFolderDialog(CenterMiddle):
                         yield widget
 
                 yield NoMarkupStatic(
-                    "← → navigate  Enter select", classes="trust-dialog-help"
+                    shortcut_hint(
+                        f"{shortcut('←→')} navigate  {shortcut('Enter')} select"
+                    ),
+                    classes="trust-dialog-help",
                 )
 
                 yield NoMarkupStatic(

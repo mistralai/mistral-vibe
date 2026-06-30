@@ -12,6 +12,7 @@ from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from vibe.cli.textual_ui.shortcut_hints import SHORTCUT_STYLE, shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.session.resume_sessions import ResumeSessionInfo, short_session_id
@@ -79,7 +80,7 @@ class SessionPickerApp(Container):
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "cancel", "Cancel", show=False),
-        Binding("d,D", "request_delete", "Delete", show=False),
+        Binding("d", "request_delete", "Delete", show=False),
     ]
 
     class SessionSelected(Message):
@@ -164,7 +165,9 @@ class SessionPickerApp(Container):
 
     def _delete_confirmation_option_text(self, session: ResumeSessionInfo) -> Text:
         text = _build_option_text(session, "")
-        text.append("Press D again to delete")
+        text.append("Press ")
+        text.append("d", style=SHORTCUT_STYLE)
+        text.append(" again to delete")
         return text
 
     def _delete_feedback_option_text(self, session: ResumeSessionInfo) -> Text:
@@ -282,7 +285,10 @@ class SessionPickerApp(Container):
             )
             yield NavigableOptionList(*options, id="sessionpicker-options")
             yield NoMarkupStatic(
-                "↑↓/jk Navigate  Enter Select  D Delete  Esc Cancel",
+                shortcut_hint(
+                    f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Select  "
+                    f"{shortcut('d')} Delete  {shortcut('Esc')} Cancel"
+                ),
                 classes="sessionpicker-help",
             )
 

@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.18.2"
+version = "2.18.3"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -42,7 +42,7 @@ dependencies = [
     "eval-type-backport==0.3.1",
     "gitdb==4.0.12",
     "gitpython==3.1.50",
-    "giturlparse==0.14.0",
+    "giturlparse==0.15.0",
     "google-auth==2.49.2",
     "googleapis-common-protos==1.74.0",
     "h11==0.16.0",
@@ -119,7 +119,7 @@ dependencies = [
     "uc-micro-py==2.0.0",
     "urllib3==2.7.0",
     "uvicorn==0.46.0 ; sys_platform != 'emscripten'",
-    "watchfiles==1.1.1",
+    "watchfiles==1.2.0",
     "websockets==16.0",
     "zipp==3.23.1",
     "zstandard==0.25.0",
@@ -157,7 +157,7 @@ required-version = ">=0.8.0"
 [dependency-groups]
 dev = [
     "cryptography>=44.0.0",
-    "debugpy>=1.8.19",
+    "debugpy>=1.8.21",
     "pre-commit>=4.2.0",
     "pyinstrument>=5.1.2",
     "pyright>=1.1.403",
@@ -167,7 +167,7 @@ dev = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "respx>=0.22.0",
-    "ruff>=0.15.13",
+    "ruff>=0.15.18",
     "tomlkit>=0.13.0",
     "twine>=5.0.0",
     "typos>=1.34.0",

@@ -7,11 +7,13 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Container, Vertical
+from textual.content import Content
 from textual.events import DescendantBlur
 from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
@@ -72,6 +74,7 @@ class ConfigApp(Container):
                 "file_watcher_for_autocomplete",
                 "Autocomplete watcher (may delay first autocompletion)",
             ),
+            ("ask_confirmation_on_exit", "Confirm quit on Ctrl+D"),
         ]
 
     def _get_current_model(self) -> str:
@@ -103,15 +106,11 @@ class ConfigApp(Container):
         text.append(self._get_current_thinking().capitalize(), style="bold")
         return text
 
-    def _toggle_prompt(self, key: str, label: str) -> Text:
+    def _toggle_prompt(self, key: str, label: str) -> Content:
         value = self._get_toggle_value(key)
-        text = Text(no_wrap=True)
-        text.append(f"{label}: ")
         if value == "On":
-            text.append("On", style="green bold")
-        else:
-            text.append("Off", style="dim")
-        return text
+            return Content.assemble(f"{label}: ", ("On", "bold $success"))
+        return Content.assemble(f"{label}: ", ("Off", "dim"))
 
     def compose(self) -> ComposeResult:
         options: list[Option] = [
@@ -129,7 +128,11 @@ class ConfigApp(Container):
             yield NavigableOptionList(*options, id="config-options")
             yield NoMarkupStatic("")
             yield NoMarkupStatic(
-                "↑↓/jk Navigate  Enter Select/Toggle  Esc Exit", classes="settings-help"
+                shortcut_hint(
+                    f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Select/Toggle  "
+                    f"{shortcut('Esc')} Exit"
+                ),
+                classes="settings-help",
             )
 
     def on_mount(self) -> None:

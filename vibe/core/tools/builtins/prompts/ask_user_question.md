@@ -13,7 +13,7 @@ Use `ask_user_question` to gather information from the user when you need clarif
 Each question has these fields:
 
 - `question`: The full question text (be specific and clear)
-- `header`: A short label displayed as a chip (max 12 characters, e.g., "Auth", "Database", "Approach")
+- `header`: A short label displayed as a chip (max 20 characters, e.g., "Auth", "Database", "Approach")
 - `options`: 2-4 choices (an "Other" option is automatically added for free text)
 - `multi_select`: Set to `true` if user can pick multiple options (default: `false`)
 
@@ -70,7 +70,7 @@ Each option has:
 
 ## Key Constraints
 
-- **Header max length**: 12 characters (keeps UI clean)
+- **Header max length**: 20 characters (keeps UI clean)
 - **Options count**: 2-4 per question (plus automatic "Other")
 - **Questions count**: 1-4 per call
 - **Label length**: Keep to 1-5 words for readability

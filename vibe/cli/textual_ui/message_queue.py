@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from textual.widget import Widget
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.messages import (
     BashOutputMessage,
     ErrorMessage,
@@ -378,8 +379,11 @@ class QueueController:
         await self._ensure_header()
         await self._ports.mount_and_scroll(
             ErrorMessage(
-                f"Model `{active_model.alias}` does not support images. "
-                f"Switch with /model, then press Enter to resume the queue.",
+                shortcut_hint(
+                    f"Model `{active_model.alias}` does not support images. "
+                    f"Switch with /model, then press {shortcut('Enter')} "
+                    "to resume the queue."
+                ),
                 show_border=False,
             )
         )

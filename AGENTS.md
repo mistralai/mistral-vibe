@@ -97,8 +97,14 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 
 - Never use `git commit --amend`, `git push --force`, or `git push --force-with-lease`.
 - Always create new commits and push with a plain `git push`.
-- If a push is rejected due to upstream changes, rebase onto the updated remote branch — never merge and never force-push.
+- Reconciling with the upstream of the current branch (e.g. push rejected because `origin/<current-branch>` advanced): rebase the current branch onto its upstream — do not merge the upstream branch into the current one, never force-push.
+- Reconciling with the base branch (e.g. `origin/main`) once the PR is open: merge the base branch into the current branch — do not rebase, since rebasing rewrites already-pushed history and would require a force-push.
 - Run git commands through `uv run` (e.g. `uv run git commit`, `uv run git push`) so pre-commit hooks resolve the project's venv — bare `git commit` fails pre-commit with `reportMissingImports` because pyright can't find third-party packages.
+
+## CI / GitHub Actions
+
+- Pin every `uses:` to a full **commit SHA** with an exact version comment: `uses: owner/action@<commit-sha> # vX.Y.Z`.
+- Resolve to the commit, not the annotated-tag object: take the `refs/tags/vX^{}` line from `git ls-remote --tags`, or `gh api repos/<owner>/<repo>/git/refs/tags/<tag> --jq .object` peeled to a commit. Check with `git cat-file -t <sha>` → `commit`, not `tag`. Never pin a moving major tag (`v9`).
 
 ## Editor tip
 

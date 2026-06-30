@@ -42,7 +42,7 @@ async def _wait_for_error_message_containing(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for error in vibe_app.query(ErrorMessage):
-            if text in error._error:
+            if text in str(error._error):
                 return error
         await pilot.pause(0.05)
     raise TimeoutError(

@@ -28,7 +28,7 @@ jobs:
               continue-on-error: true
 
             - name: Apply component label
-              uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9.0.0
+              uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
               env:
                   BUG_COMPONENT: ${{ steps.parse-bug.outputs.issueparser_component }}
                   FEATURE_COMPONENT: ${{ steps.parse-feature.outputs.issueparser_component }}

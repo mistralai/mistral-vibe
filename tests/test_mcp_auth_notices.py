@@ -16,7 +16,7 @@ from vibe.core.config import MCPOAuth, MCPStreamableHttp
 from vibe.core.tools.mcp import MCPRegistry
 
 
-def _registry_with_uncached_oauth(alias: str) -> MCPRegistry:
+def _registry_with_uncached_oauth(alias: str, *, disabled: bool = False) -> MCPRegistry:
     registry = MCPRegistry()
     registry.sync_active_servers([
         MCPStreamableHttp(
@@ -24,6 +24,7 @@ def _registry_with_uncached_oauth(alias: str) -> MCPRegistry:
             transport="streamable-http",
             url="https://mcp.example.com/mcp",
             auth=MCPOAuth(type="oauth", scopes=["read"]),
+            disabled=disabled,
         )
     ])
     assert registry.needs_auth == set()
@@ -51,6 +52,49 @@ async def test_tui_mcp_auth_notice_uses_status_for_uncached_oauth() -> None:
     message = args.args[0]
     assert isinstance(message, UserCommandMessage)
     assert "sentry" in message._content
+
+
+@pytest.mark.asyncio
+async def test_tui_mcp_auth_notice_skips_disabled_servers() -> None:
+    mount = AsyncMock()
+    app = cast(
+        VibeApp,
+        SimpleNamespace(
+            agent_loop=SimpleNamespace(
+                mcp_registry=_registry_with_uncached_oauth("sentry", disabled=True)
+            ),
+            _mount_and_scroll=mount,
+        ),
+    )
+
+    await VibeApp._show_mcp_auth_required_notice(app)
+
+    mount.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_acp_mcp_auth_notice_skips_disabled_servers() -> None:
+    agent = VibeAcpAgentLoop()
+    client = FakeClient()
+    agent.on_connect(client)
+    session = cast(
+        AcpSessionLoop,
+        SimpleNamespace(
+            id="session-id",
+            agent_loop=SimpleNamespace(
+                mcp_registry=_registry_with_uncached_oauth("sentry", disabled=True)
+            ),
+        ),
+    )
+
+    await agent._notify_mcp_auth_required(session)
+
+    messages = [
+        notification.update
+        for notification in client._session_updates
+        if isinstance(notification.update, AgentMessageChunk)
+    ]
+    assert messages == []
 
 
 @pytest.mark.asyncio

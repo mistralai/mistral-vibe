@@ -14,6 +14,7 @@ from textual.widgets import OptionList
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker
 
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint, with_status
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ConnectorConfig, VibeConfig
@@ -65,15 +66,24 @@ def collect_mcp_tool_index(
 
 
 _LIST_VIEW_HELP_TOOLS = (
-    "↑↓/jk Navigate  Enter Show tools  D Disable  E Enable  R Refresh  Esc Close"
+    f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Show tools  "
+    f"{shortcut('d')} Disable  {shortcut('e')} Enable  "
+    f"{shortcut('r')} Refresh  {shortcut('Esc')} Close"
 )
 _LIST_VIEW_HELP_AUTH = (
-    "↑↓/jk Navigate  Enter Connect  D Disable  E Enable  R Refresh  Esc Close"
+    f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Connect  "
+    f"{shortcut('d')} Disable  {shortcut('e')} Enable  "
+    f"{shortcut('r')} Refresh  {shortcut('Esc')} Close"
 )
 _DETAIL_VIEW_HELP = (
-    "↑↓/jk Navigate  D Disable  E Enable  Backspace Back  R Refresh  Esc Close"
+    f"{shortcut('↑↓/jk')} Navigate  {shortcut('d')} Disable  "
+    f"{shortcut('e')} Enable  {shortcut('Backspace')} Back  "
+    f"{shortcut('r')} Refresh  {shortcut('Esc')} Close"
 )
-_DETAIL_VIEW_HELP_NO_TOOLS = "↑↓/jk Navigate  Backspace Back  R Refresh  Esc Close"
+_DETAIL_VIEW_HELP_NO_TOOLS = (
+    f"{shortcut('↑↓/jk')} Navigate  {shortcut('Backspace')} Back  "
+    f"{shortcut('r')} Refresh  {shortcut('Esc')} Close"
+)
 
 
 class MCPApp(Container):
@@ -274,9 +284,9 @@ class MCPApp(Container):
         return _LIST_VIEW_HELP_TOOLS
 
     def _set_help_text(self, text: str) -> None:
-        if self._status_message:
-            text = f"{self._status_message}  {text}"
-        self.query_one("#mcp-help", NoMarkupStatic).update(text)
+        self.query_one("#mcp-help", NoMarkupStatic).update(
+            with_status(self._status_message, shortcut_hint(text))
+        )
 
     def _sync_mcp_registry(self) -> None:
         if self._mcp_registry is None:
@@ -630,8 +640,10 @@ class MCPApp(Container):
                     case ConnectorAuthAction.CREDENTIALS_SETUP:
                         option_list.add_option(
                             Option(
-                                "Set up credentials in the Mistral dashboard, "
-                                "then press R to refresh.",
+                                shortcut_hint(
+                                    "Set up credentials in the Mistral dashboard, "
+                                    f"then press {shortcut('r')} to refresh."
+                                ),
                                 disabled=True,
                             )
                         )
@@ -646,7 +658,10 @@ class MCPApp(Container):
                     case _:
                         option_list.add_option(
                             Option(
-                                "Connector unavailable; press R to refresh.",
+                                shortcut_hint(
+                                    f"Connector unavailable; press {shortcut('r')} "
+                                    "to refresh."
+                                ),
                                 disabled=True,
                             )
                         )
