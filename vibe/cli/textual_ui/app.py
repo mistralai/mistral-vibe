@@ -219,7 +219,7 @@ _VSCODE_FAMILY_TERMINALS = {Terminal.VSCODE, Terminal.VSCODE_INSIDERS, Terminal.
 
 def _safe_cwd() -> Path:
     try:
-        return _safe_cwd()
+        return Path.cwd()
     except FileNotFoundError:
         return Path.home()
 
