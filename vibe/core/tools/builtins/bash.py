@@ -89,7 +89,7 @@ def _get_base_env() -> dict[str, str]:
         base_env["GIT_PAGER"] = "cat"
         base_env["PAGER"] = "cat"
         base_env["LESS"] = "-FX"
-        base_env["LC_ALL"] = "en_US.UTF-8"
+        base_env["LC_CTYPE"] = "en_US.UTF-8"
 
     return base_env
 
