@@ -66,3 +66,17 @@ Add Mistral Vibe in the acp_providers section of your configuration
   }
 }
 ```
+
+## Xcode version 26.6 or later
+
+1. Open Xcode > Settings and select Intelligence in the sidebar.
+2. Under Agents, click “Add an agent...”
+3. Enter agent name
+4. Enter path to ACP agent executable
+
+To get absolute path to Vibe agent you can use the following command on macOS/Linux:
+```
+which vibe-acp
+```
+
+5. Add agent and try a conversation with your new agent
