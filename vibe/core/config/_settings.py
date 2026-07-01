@@ -245,6 +245,7 @@ class VibeConfig(BaseSettings):
     ask_confirmation_on_exit: bool = True
     displayed_workdir: str = ""
     context_warnings: bool = False
+    show_clear_context_on_plan_accept: bool = False
     voice_mode_enabled: bool = False
     narrator_enabled: bool = False
     active_transcribe_model: str = DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG.alias

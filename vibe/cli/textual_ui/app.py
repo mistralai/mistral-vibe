@@ -708,6 +708,7 @@ class VibeApp(App):  # noqa: PLR0904
             mount_callback=self._mount_and_scroll,
             get_tools_collapsed=lambda: self._tools_collapsed,
             on_profile_changed=self._on_profile_changed,
+            on_context_cleared=self._on_context_cleared,
         )
 
         self._chat_input_container = self.query_one(ChatInputContainer)
@@ -2671,15 +2672,24 @@ class VibeApp(App):  # noqa: PLR0904
         })
         await self._reload_config()
 
+    async def _reset_message_widgets(self) -> None:
+        """Tear down the on-screen conversation widgets and UI state.
+
+        Shared by ``/clear`` and the clear-context-on-plan-accept flow. Does not
+        touch the agent loop's message history — callers decide whether the core
+        history also needs clearing.
+        """
+        self._reset_ui_state()
+        if self._chat_input_container:
+            self._chat_input_container.set_custom_border(None)
+        if self.event_handler:
+            await self.event_handler.finalize_streaming()
+        await self._messages_area.remove_children()
+
     async def _clear_history(self, **kwargs: Any) -> None:
         try:
-            self._reset_ui_state()
-            if self._chat_input_container:
-                self._chat_input_container.set_custom_border(None)
             await self.agent_loop.clear_history()
-            if self.event_handler:
-                await self.event_handler.finalize_streaming()
-            await self._messages_area.remove_children()
+            await self._reset_message_widgets()
 
             await self._messages_area.mount(SlashCommandMessage("clear"))
             await self._mount_and_scroll(
@@ -2693,6 +2703,18 @@ class VibeApp(App):  # noqa: PLR0904
                     f"Failed to clear history: {e}", collapsed=self._tools_collapsed
                 )
             )
+
+    async def _on_context_cleared(self) -> None:
+        """React to a ContextClearedEvent emitted during plan accept.
+
+        Core already cleared the agent loop's history, so this only resets the
+        on-screen widgets and posts a notice that implementation is starting.
+        """
+        await self._reset_message_widgets()
+        await self._mount_and_scroll(
+            UserCommandMessage("Context cleared. Implementing the approved plan...")
+        )
+        self._chat_widget.scroll_home(animate=False)
 
     async def _show_log_path(self, **kwargs: Any) -> None:
         if not self.agent_loop.session_logger.enabled:
