@@ -13,14 +13,16 @@ from vibe.core.teleport.errors import (
 from vibe.core.teleport.git import GitRepoInfo, GitRepository
 
 
-def make_mock_remote(url: str) -> MagicMock:
+def make_mock_remote(url: str, name: str = "origin") -> MagicMock:
     remote = MagicMock()
+    remote.name = name
     remote.urls = [url]
     return remote
 
 
 def make_mock_repo(
     urls: list[str] | None = None,
+    remote_names: list[str] | None = None,
     commit: str | None = "abc123",
     branch: str | None = "main",
     is_detached: bool = False,
@@ -28,7 +30,13 @@ def make_mock_repo(
 ) -> MagicMock:
     mock = MagicMock()
     if urls:
-        mock.remotes = [make_mock_remote(url) for url in urls]
+        names = remote_names or [
+            "origin" if index == 0 else f"remote-{index}"
+            for index, _ in enumerate(urls)
+        ]
+        mock.remotes = [
+            make_mock_remote(url, names[index]) for index, url in enumerate(urls)
+        ]
     else:
         mock.remotes = []
     mock.head.commit.hexsha = commit
@@ -184,6 +192,7 @@ class TestGitRepositoryGetInfo:
         with patch.object(repo, "_repo_or_raise", return_value=mock):
             info = await repo.get_info()
             assert info == GitRepoInfo(
+                remote_name="origin",
                 remote_url="https://github.com/owner/repo.git",
                 owner="owner",
                 repo="repo",
@@ -191,6 +200,19 @@ class TestGitRepositoryGetInfo:
                 commit="abc123def456",
                 diff="diff content",
             )
+
+    @pytest.mark.asyncio
+    async def test_returns_matched_github_remote_name(
+        self, repo: GitRepository
+    ) -> None:
+        mock = make_mock_repo(
+            urls=["git@gitlab.com:owner/repo.git", "git@github.com:owner/repo.git"],
+            remote_names=["origin", "hub"],
+        )
+        with patch.object(repo, "_repo_or_raise", return_value=mock):
+            info = await repo.get_info()
+            assert info.remote_name == "hub"
+            assert info.remote_url == "https://github.com/owner/repo.git"
 
     @pytest.mark.asyncio
     async def test_handles_detached_head(self, repo: GitRepository) -> None:

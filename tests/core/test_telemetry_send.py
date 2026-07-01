@@ -10,6 +10,7 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_tool import FakeTool, FakeToolArgs
+from vibe import __version__
 from vibe.core.agent_loop import ToolDecision, ToolExecutionResponse
 from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.telemetry.build_metadata import (
@@ -19,13 +20,13 @@ from vibe.core.telemetry.build_metadata import (
 from vibe.core.telemetry.send import TelemetryClient, _extract_file_extension
 from vibe.core.telemetry.types import (
     AttachmentKind,
-    EntrypointMetadata,
+    LaunchContext,
     TelemetryRequestMetadata,
     TerminalEmulator,
 )
 from vibe.core.tools.base import BaseTool, ToolPermission
 from vibe.core.types import Backend
-from vibe.core.utils import get_user_agent
+from vibe.core.utils import get_platform_id, get_platform_version, get_user_agent
 
 _original_send_telemetry_event = TelemetryClient.send_telemetry_event
 from vibe.core.tools.builtins.edit import Edit, EditArgs
@@ -68,6 +69,32 @@ def _run_telemetry_tasks() -> None:
         loop.run_until_complete(asyncio.sleep(0))
     finally:
         loop.close()
+
+
+def _expected_system_metadata(
+    terminal_emulator: TerminalEmulator | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"os": get_platform_id(), "version": __version__}
+    if os_version := get_platform_version():
+        metadata["os_version"] = os_version
+    if terminal_emulator is not None:
+        metadata["terminal_emulator"] = terminal_emulator
+    return metadata
+
+
+def _assert_system_metadata(
+    properties: dict[str, Any], terminal_emulator: TerminalEmulator | None = None
+) -> None:
+    assert properties["os"] == get_platform_id()
+    assert properties["version"] == __version__
+    if os_version := get_platform_version():
+        assert properties["os_version"] == os_version
+    else:
+        assert "os_version" not in properties
+    if terminal_emulator is None:
+        assert "terminal_emulator" not in properties
+        return
+    assert properties["terminal_emulator"] == terminal_emulator
 
 
 class TestExtractFileExtension:
@@ -164,7 +191,10 @@ class TestTelemetryClient:
 
         mock_post.assert_called_once_with(
             "https://api.mistral.ai/v1/datalake/events",
-            json={"event": "vibe.test_event", "properties": {"key": "value"}},
+            json={
+                "event": "vibe.test_event",
+                "properties": {**_expected_system_metadata(), "key": "value"},
+            },
             headers={
                 "Content-Type": "application/json",
                 "Authorization": "Bearer sk-test",
@@ -380,6 +410,7 @@ class TestTelemetryClient:
         assert len(telemetry_events) == 1
         assert telemetry_events[0]["event_name"] == "vibe.at_mention_inserted"
         assert telemetry_events[0]["properties"] == {
+            **_expected_system_metadata(),
             "nb_mentions": 2,
             "context_types": {"file": 1, "folder": 1},
             "file_extensions": {".py": 1},
@@ -452,10 +483,44 @@ class TestTelemetryClient:
         assert len(telemetry_events) == 1
         assert telemetry_events[0]["event_name"] == "vibe.auto_compact_triggered"
         assert telemetry_events[0]["properties"] == {
+            **_expected_system_metadata(),
             "nb_context_tokens_before": 123,
             "auto_compact_threshold": 100,
             "status": "success",
         }
+
+    def test_send_compaction_failed_payload(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_compaction_failed(reason="tool_call")
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.compaction_failed"
+        assert telemetry_events[0]["properties"] == {
+            **_expected_system_metadata(),
+            "reason": "tool_call",
+        }
+
+    def test_send_compaction_failed_includes_session_ids(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_compaction_failed(
+            reason="empty_summary",
+            session_id="session-id",
+            parent_session_id="parent-session-id",
+        )
+
+        assert len(telemetry_events) == 1
+        properties = telemetry_events[0]["properties"]
+        assert properties["reason"] == "empty_summary"
+        assert properties["session_id"] == "session-id"
+        assert properties["parent_session_id"] == "parent-session-id"
 
     def test_send_slash_command_used_payload(
         self, telemetry_events: list[dict[str, Any]]
@@ -484,6 +549,7 @@ class TestTelemetryClient:
         assert len(telemetry_events) == 1
         assert telemetry_events[0]["event_name"] == "vibe.teleport_completed"
         assert telemetry_events[0]["properties"] == {
+            **_expected_system_metadata(),
             "push_required": True,
             "nb_session_messages": 4,
         }
@@ -504,6 +570,7 @@ class TestTelemetryClient:
         assert len(telemetry_events) == 1
         assert telemetry_events[0]["event_name"] == "vibe.teleport_failed"
         assert telemetry_events[0]["properties"] == {
+            **_expected_system_metadata(),
             "stage": "push",
             "error_class": "ServiceTeleportError",
             "push_required": True,
@@ -526,6 +593,7 @@ class TestTelemetryClient:
 
         assert telemetry_events[0]["event_name"] == "vibe.teleport_failed"
         assert telemetry_events[0]["properties"] == {
+            **_expected_system_metadata(),
             "stage": "workflow_start",
             "error_class": "ServiceTeleportError",
             "push_required": False,
@@ -538,17 +606,19 @@ class TestTelemetryClient:
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
         config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
+        client = TelemetryClient(
+            config_getter=lambda: config,
+            launch_context=LaunchContext(
+                agent_entrypoint="cli",
+                agent_version=__version__,
+                client_name="vscode",
+                client_version="1.96.0",
+                terminal_emulator=TerminalEmulator.VSCODE,
+            ),
+        )
 
         client.send_new_session(
-            has_agents_md=True,
-            nb_skills=2,
-            nb_mcp_servers=1,
-            nb_models=3,
-            entrypoint="cli",
-            client_name="vscode",
-            client_version="1.96.0",
-            terminal_emulator=TerminalEmulator.VSCODE,
+            has_agents_md=True, nb_skills=2, nb_mcp_servers=1, nb_models=3
         )
 
         assert len(telemetry_events) == 1
@@ -563,7 +633,8 @@ class TestTelemetryClient:
         assert properties["client_name"] == "vscode"
         assert properties["client_version"] == "1.96.0"
         assert properties["terminal_emulator"] == "vscode"
-        assert "version" in properties
+        assert type(properties["terminal_emulator"]) is str
+        _assert_system_metadata(properties, TerminalEmulator.VSCODE)
 
     @pytest.mark.asyncio
     async def test_send_session_closed_payload(
@@ -579,11 +650,12 @@ class TestTelemetryClient:
             config_getter=lambda: config,
             session_id_getter=lambda: "current-session",
             parent_session_id_getter=lambda: "current-parent-session",
-            entrypoint_metadata_getter=lambda: EntrypointMetadata(
+            launch_context=LaunchContext(
                 agent_entrypoint="cli",
                 agent_version="1.0.0",
                 client_name="vibe_cli",
                 client_version="1.0.0",
+                terminal_emulator=TerminalEmulator.VSCODE,
             ),
         )
         mock_post = AsyncMock(return_value=MagicMock(status_code=204))
@@ -599,6 +671,7 @@ class TestTelemetryClient:
             json={
                 "event": "vibe.session_closed",
                 "properties": {
+                    **_expected_system_metadata(TerminalEmulator.VSCODE),
                     "agent_entrypoint": "cli",
                     "agent_version": "1.0.0",
                     "client_name": "vibe_cli",
@@ -616,17 +689,19 @@ class TestTelemetryClient:
 
     def test_build_base_metadata_includes_entrypoint_and_session(self) -> None:
         metadata = build_base_metadata(
-            entrypoint_metadata=EntrypointMetadata(
+            launch_context=LaunchContext(
                 agent_entrypoint="cli",
                 agent_version="1.0.0",
                 client_name="vibe_cli",
                 client_version="1.0.0",
+                terminal_emulator=TerminalEmulator.VSCODE,
             ),
             session_id="session-123",
             parent_session_id="parent-session-456",
         )
 
         assert metadata == {
+            **_expected_system_metadata(TerminalEmulator.VSCODE),
             "agent_entrypoint": "cli",
             "agent_version": "1.0.0",
             "client_name": "vibe_cli",
@@ -634,14 +709,16 @@ class TestTelemetryClient:
             "session_id": "session-123",
             "parent_session_id": "parent-session-456",
         }
+        assert type(metadata["terminal_emulator"]) is str
 
     def test_build_request_metadata_includes_all_telemetry_metadata(self) -> None:
         metadata = build_request_metadata(
-            entrypoint_metadata=EntrypointMetadata(
+            launch_context=LaunchContext(
                 agent_entrypoint="cli",
                 agent_version="1.0.0",
                 client_name="vibe_cli",
                 client_version="1.0.0",
+                terminal_emulator=TerminalEmulator.VSCODE,
             ),
             session_id="session-123",
             parent_session_id="parent-session-456",
@@ -650,6 +727,7 @@ class TestTelemetryClient:
         )
 
         assert metadata == TelemetryRequestMetadata(
+            **_expected_system_metadata(TerminalEmulator.VSCODE),
             agent_entrypoint="cli",
             agent_version="1.0.0",
             client_name="vibe_cli",
@@ -691,6 +769,7 @@ class TestTelemetryClient:
             json={
                 "event": "vibe.test_event",
                 "properties": {
+                    **_expected_system_metadata(),
                     "session_id": "session-123",
                     "parent_session_id": "parent-session-456",
                     "key": "value",
@@ -729,7 +808,11 @@ class TestTelemetryClient:
             "https://api.mistral.ai/v1/datalake/events",
             json={
                 "event": "vibe.test_event",
-                "properties": {"session_id": session_id, "key": "value"},
+                "properties": {
+                    **_expected_system_metadata(),
+                    "session_id": session_id,
+                    "key": "value",
+                },
             },
             headers={
                 "Content-Type": "application/json",
@@ -759,7 +842,10 @@ class TestTelemetryClient:
 
         mock_post.assert_called_once_with(
             "https://api.mistral.ai/v1/datalake/events",
-            json={"event": "vibe.test_event", "properties": {"key": "value"}},
+            json={
+                "event": "vibe.test_event",
+                "properties": {**_expected_system_metadata(), "key": "value"},
+            },
             headers={
                 "Content-Type": "application/json",
                 "Authorization": "Bearer sk-test",
@@ -828,7 +914,9 @@ class TestTelemetryClient:
 
         assert len(telemetry_events) == 1
         assert telemetry_events[0]["event_name"] == "vibe.ready"
-        assert telemetry_events[0]["properties"]["init_duration_ms"] == 1240
+        properties = telemetry_events[0]["properties"]
+        assert properties["init_duration_ms"] == 1240
+        _assert_system_metadata(properties)
 
     def test_send_request_sent_payload(
         self, telemetry_events: list[dict[str, Any]]
@@ -855,6 +943,7 @@ class TestTelemetryClient:
         assert properties["call_type"] == "main_call"
         assert properties["message_id"] is None
         assert properties["attachment_counts"] == {}
+        _assert_system_metadata(properties)
 
     def test_send_request_sent_payload_with_attachments(
         self, telemetry_events: list[dict[str, Any]]

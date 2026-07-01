@@ -10,8 +10,8 @@ from vibe.core.config import VibeConfig
 from vibe.core.hooks.models import HookConfigResult
 from vibe.core.logger import logger
 from vibe.core.output_formatters import create_formatter
-from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
-from vibe.core.telemetry.types import ClientMetadata
+from vibe.core.telemetry.build_metadata import build_launch_context
+from vibe.core.telemetry.types import ClientMetadata, TerminalEmulator
 from vibe.core.teleport.types import (
     TeleportPushRequiredEvent,
     TeleportPushResponseEvent,
@@ -37,6 +37,7 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
     teleport: bool = False,
     headless: bool = False,
     hook_config_result: HookConfigResult | None = None,
+    terminal_emulator: TerminalEmulator | None = None,
 ) -> str | None:
     formatter = create_formatter(output_format)
 
@@ -49,11 +50,12 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
         max_session_tokens=max_session_tokens,
         enable_streaming=False,
         headless=headless,
-        entrypoint_metadata=build_entrypoint_metadata(
+        launch_context=build_launch_context(
             agent_entrypoint="programmatic",
             agent_version=__version__,
             client_name=client_metadata.name,
             client_version=client_metadata.version,
+            terminal_emulator=terminal_emulator,
         ),
         hook_config_result=hook_config_result,
     )

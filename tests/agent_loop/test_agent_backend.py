@@ -17,9 +17,10 @@ from tests.conftest import (
 )
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
+from vibe import __version__
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
-from vibe.core.telemetry.types import EntrypointMetadata
+from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
     Backend,
@@ -32,6 +33,7 @@ from vibe.core.types import (
     StopInfo,
     ToolCall,
 )
+from vibe.core.utils import get_platform_id, get_platform_version
 
 
 def _two_model_vibe_config(active_model: str) -> VibeConfig:
@@ -191,19 +193,20 @@ async def test_passes_parent_session_id_to_backend_after_reset(vibe_config: Vibe
 
 
 @pytest.mark.asyncio
-async def test_passes_entrypoint_metadata_to_backend(vibe_config: VibeConfig):
-    metadata = EntrypointMetadata(
+async def test_passes_launch_context_to_backend(vibe_config: VibeConfig):
+    launch_context = LaunchContext(
         agent_entrypoint="acp",
         agent_version="2.0.0",
         client_name="vibe_ide",
         client_version="0.5.0",
+        terminal_emulator=TerminalEmulator.GHOSTTY,
     )
     backend = FakeBackend([mock_llm_chunk(content="Response")])
     agent = build_test_agent_loop(
         config=vibe_config,
         backend=backend,
         enable_streaming=True,
-        entrypoint_metadata=metadata,
+        launch_context=launch_context,
     )
 
     [_ async for _ in agent.act("Hello")]
@@ -215,6 +218,13 @@ async def test_passes_entrypoint_metadata_to_backend(vibe_config: VibeConfig):
     assert meta["agent_version"] == "2.0.0"
     assert meta["client_name"] == "vibe_ide"
     assert meta["client_version"] == "0.5.0"
+    assert meta["os"] == get_platform_id()
+    if os_version := get_platform_version():
+        assert meta["os_version"] == os_version
+    else:
+        assert "os_version" not in meta
+    assert meta["version"] == __version__
+    assert meta["terminal_emulator"] == TerminalEmulator.GHOSTTY
     assert meta["session_id"] == agent.session_id
     assert "message_id" in meta
     assert meta["call_type"] == "main_call"
@@ -272,11 +282,12 @@ async def test_mcp_sampling_handler_uses_updated_config_when_agent_config_change
 
 @pytest.mark.asyncio
 async def test_mcp_sampling_handler_sends_secondary_call_telemetry_metadata():
-    metadata = EntrypointMetadata(
+    launch_context = LaunchContext(
         agent_entrypoint="acp",
         agent_version="2.0.0",
         client_name="vibe_ide",
         client_version="0.5.0",
+        terminal_emulator=TerminalEmulator.GHOSTTY,
     )
     backend = FakeBackend([
         [mock_llm_chunk(content="Response")],
@@ -285,7 +296,7 @@ async def test_mcp_sampling_handler_sends_secondary_call_telemetry_metadata():
     agent = build_test_agent_loop(
         config=_two_model_vibe_config("devstral-latest"),
         backend=backend,
-        entrypoint_metadata=metadata,
+        launch_context=launch_context,
     )
 
     [_ async for _ in agent.act("Hello")]
@@ -302,6 +313,13 @@ async def test_mcp_sampling_handler_sends_secondary_call_telemetry_metadata():
     assert sampling_metadata["agent_version"] == "2.0.0"
     assert sampling_metadata["client_name"] == "vibe_ide"
     assert sampling_metadata["client_version"] == "0.5.0"
+    assert sampling_metadata["os"] == get_platform_id()
+    if os_version := get_platform_version():
+        assert sampling_metadata["os_version"] == os_version
+    else:
+        assert "os_version" not in sampling_metadata
+    assert sampling_metadata["version"] == __version__
+    assert sampling_metadata["terminal_emulator"] == TerminalEmulator.GHOSTTY
     assert sampling_metadata["session_id"] == agent.session_id
     assert sampling_metadata["parent_session_id"] == "parent-session-456"
     assert sampling_metadata["message_id"] == next(

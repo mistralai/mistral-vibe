@@ -119,6 +119,7 @@ class TestTeleportServiceCheckSupported:
     ) -> None:
         service._git.get_info = AsyncMock(
             return_value=GitRepoInfo(
+                remote_name="origin",
                 remote_url="https://github.com/owner/repo.git",
                 owner="owner",
                 repo="repo",
@@ -171,6 +172,7 @@ class TestTeleportServiceExecute:
         request = service._build_nuage_request(
             prompt="test prompt",
             git_info=GitRepoInfo(
+                remote_name="origin",
                 remote_url="https://github.com/owner/repo",
                 owner="owner",
                 repo="repo",
@@ -192,6 +194,7 @@ class TestTeleportServiceExecute:
         request = service._build_nuage_request(
             prompt="test prompt",
             git_info=GitRepoInfo(
+                remote_name="origin",
                 remote_url="https://github.com/owner/repo",
                 owner="owner",
                 repo="repo",
@@ -232,6 +235,7 @@ class TestTeleportServiceExecute:
             service._git.fetch = AsyncMock()
             service._git.get_info = AsyncMock(
                 return_value=GitRepoInfo(
+                    remote_name="upstream",
                     remote_url="https://github.com/owner/repo",
                     owner="owner",
                     repo="repo",
@@ -265,6 +269,13 @@ class TestTeleportServiceExecute:
         assert repos[0]["diff"]["compression"] == "zstd"
         assert len(repos[0]["diff"]["content"]) > 0
         assert "idempotencyKey" in seen_body
+        service._git.fetch.assert_awaited_once_with("upstream")
+        service._git.is_commit_pushed.assert_awaited_once_with(
+            "abc123", remote="upstream", fetch=False
+        )
+        service._git.is_branch_pushed.assert_awaited_once_with(
+            remote="upstream", fetch=False
+        )
 
     @pytest.mark.asyncio
     async def test_execute_requires_branch(self, tmp_path: Path) -> None:
@@ -272,6 +283,7 @@ class TestTeleportServiceExecute:
         service._git.fetch = AsyncMock()
         service._git.get_info = AsyncMock(
             return_value=GitRepoInfo(
+                remote_name="origin",
                 remote_url="https://github.com/owner/repo",
                 owner="owner",
                 repo="repo",
@@ -303,6 +315,7 @@ class TestTeleportServiceExecute:
             service._git.fetch = AsyncMock()
             service._git.get_info = AsyncMock(
                 return_value=GitRepoInfo(
+                    remote_name="github",
                     remote_url="https://github.com/owner/repo",
                     owner="owner",
                     repo="repo",
@@ -328,7 +341,8 @@ class TestTeleportServiceExecute:
             )
             events = [event async for event in gen]
 
-        service._git.push_current_branch.assert_awaited_once()
+        service._git.get_unpushed_commit_count.assert_awaited_once_with("github")
+        service._git.push_current_branch.assert_awaited_once_with("github")
         assert isinstance(events[0], TeleportStartingWorkflowEvent)
         assert isinstance(events[1], TeleportCompleteEvent)
 
@@ -338,6 +352,7 @@ class TestTeleportServiceExecute:
         service._git.fetch = AsyncMock()
         service._git.get_info = AsyncMock(
             return_value=GitRepoInfo(
+                remote_name="origin",
                 remote_url="https://github.com/owner/repo",
                 owner="owner",
                 repo="repo",

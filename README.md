@@ -137,8 +137,8 @@ custom agent file in `~/.vibe/agents/` or the project's `.vibe/agents/`
 directory. Subagents such as `explore` are not accepted.
 
 > Note: `default_agent` applies in both interactive and programmatic
-> (`-p` / `--prompt`) sessions. Pass `--auto-approve` or `--yolo` when
-> a run should approve all tool calls without prompting.
+> (`-p` / `--prompt`) sessions. Pass `--auto-approve` or `--yolo` with any
+> agent when a run should approve all tool calls without prompting.
 
 ### Subagents and Task Delegation
 
@@ -277,7 +277,7 @@ When using `--prompt`, you can specify additional options:
 - **`--max-price DOLLARS`**: Set a maximum cost limit in dollars. The session will be interrupted if the cost exceeds this limit.
 - **`--max-tokens N`**: Set a maximum cumulative LLM token budget for the session, counting both prompt and completion tokens. The session will be interrupted if usage exceeds this limit.
 - **`--agent NAME`**: Select the agent profile for this run.
-- **`--auto-approve`, `--yolo`**: Shortcut for `--agent auto-approve`. Approves all tool calls without prompting, including in interactive sessions.
+- **`--auto-approve`, `--yolo`**: Approves all tool calls without prompting, including in interactive sessions. Can be combined with any `--agent` value.
 - **`--enabled-tools TOOL`**: Enable specific tools. In programmatic mode, this disables all other tools. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
 - **`--output FORMAT`**: Set the output format. Options:
   - `text` (default): Human-readable text output

@@ -9,12 +9,14 @@ import pytest
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.conftest import build_test_vibe_app, build_test_vibe_config
 from tests.constants import OPENAI_BASE_URL
+from vibe import __version__
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.messages import ErrorMessage
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.types import Backend
+from vibe.core.utils import get_platform_id, get_platform_version
 
 
 def _chat_plan_gateway(*, prompt_switching_to_pro_plan: bool) -> FakeWhoAmIGateway:
@@ -38,6 +40,13 @@ async def _wait_until(pause, predicate, timeout: float = 2.0) -> None:
             return
         await pause(0.02)
     raise AssertionError("Condition was not met within the timeout")
+
+
+def _expected_system_metadata() -> dict[str, Any]:
+    metadata: dict[str, Any] = {"os": get_platform_id(), "version": __version__}
+    if os_version := get_platform_version():
+        metadata["os_version"] = os_version
+    return metadata
 
 
 def _teleport_failed_events(
@@ -114,6 +123,7 @@ async def test_teleport_command_without_history_sends_early_failure_telemetry(
         {
             "event_name": "vibe.teleport_failed",
             "properties": {
+                **_expected_system_metadata(),
                 "stage": "no_history",
                 "error_class": "TeleportNoHistoryError",
                 "push_required": False,
@@ -156,6 +166,7 @@ async def test_teleport_command_visible_but_errors_when_key_not_eligible(
         {
             "event_name": "vibe.teleport_failed",
             "properties": {
+                **_expected_system_metadata(),
                 "stage": "ineligible",
                 "error_class": "TeleportIneligibleError",
                 "push_required": False,

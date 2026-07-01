@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
     from vibe.core.hooks.models import HookConfigResult
     from vibe.core.skills.manager import SkillManager
-    from vibe.core.telemetry.types import EntrypointMetadata, TerminalEmulator
+    from vibe.core.telemetry.types import LaunchContext
     from vibe.core.tools.mcp.pool import MCPConnectionPool
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
     from vibe.core.tools.permissions import PermissionContext, PermissionStore
@@ -52,7 +52,7 @@ class InvokeContext:
     user_input_callback: UserInputCallback | None = field(default=None)
     sampling_callback: MCPSamplingHandler | None = field(default=None)
     session_dir: Path | None = field(default=None)
-    entrypoint_metadata: EntrypointMetadata | None = field(default=None)
+    launch_context: LaunchContext | None = field(default=None)
     plan_file_path: Path | None = field(default=None)
     switch_agent_callback: SwitchAgentCallback | None = field(default=None)
     skill_manager: SkillManager | None = field(default=None)
@@ -61,7 +61,6 @@ class InvokeContext:
     hook_config_result: HookConfigResult | None = field(default=None)
     session_id: str | None = field(default=None)
     mcp_pool: MCPConnectionPool | None = field(default=None)
-    terminal_emulator: TerminalEmulator | None = field(default=None)
 
 
 class ToolError(Exception):

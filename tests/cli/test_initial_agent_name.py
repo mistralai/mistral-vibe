@@ -55,8 +55,15 @@ def test_programmatic_mode_keeps_explicit_agent_arg() -> None:
     assert get_initial_agent_name(args, config) == "accept-edits"
 
 
-def test_auto_approve_flag_selects_auto_approve_agent() -> None:
+def test_auto_approve_flag_keeps_config_default_agent() -> None:
     config = VibeConfig.model_construct(default_agent=BuiltinAgentName.PLAN)
     args = _make_args(agent=None, prompt="hello", auto_approve=True)
 
-    assert get_initial_agent_name(args, config) == BuiltinAgentName.AUTO_APPROVE
+    assert get_initial_agent_name(args, config) == BuiltinAgentName.PLAN
+
+
+def test_auto_approve_flag_keeps_explicit_agent_arg() -> None:
+    config = VibeConfig.model_construct(default_agent=BuiltinAgentName.PLAN)
+    args = _make_args(agent="lean", prompt="hello", auto_approve=True)
+
+    assert get_initial_agent_name(args, config) == BuiltinAgentName.LEAN

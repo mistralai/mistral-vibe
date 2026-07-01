@@ -75,10 +75,9 @@ from vibe.core.telemetry.build_metadata import (
 )
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import (
-    EntrypointMetadata,
+    LaunchContext,
     TelemetryCallType,
     TelemetryRequestMetadata,
-    TerminalEmulator,
 )
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.telemetry import TeleportTelemetryTracker
@@ -306,8 +305,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         max_session_tokens: int | None = None,
         backend: BackendLike | None = None,
         enable_streaming: bool = False,
-        entrypoint_metadata: EntrypointMetadata | None = None,
-        terminal_emulator: TerminalEmulator | None = None,
+        launch_context: LaunchContext | None = None,
         is_subagent: bool = False,
         defer_heavy_init: bool = False,
         headless: bool = False,
@@ -315,8 +313,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         permission_store: PermissionStore | None = None,
         mcp_registry: MCPRegistry | None = None,
         cache_store: VibeCodeCacheStore | None = None,
+        force_bypass_tool_permissions: bool = False,
     ) -> None:
         self._base_config = config
+        self._force_bypass_tool_permissions = force_bypass_tool_permissions
+        self._apply_forced_bypass()
         self._headless = headless
         self.cache_store = cache_store or InMemoryVibeCodeCacheStore()
 
@@ -390,8 +391,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.stats = AgentStats()
         self.approval_callback: ApprovalCallback | None = None
         self.user_input_callback: UserInputCallback | None = None
-        self.entrypoint_metadata = entrypoint_metadata
-        self.terminal_emulator = terminal_emulator
+        self.launch_context = launch_context
 
         try:
             active_model = config.get_active_model()
@@ -415,7 +415,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             config_getter=lambda: self.config,
             session_id_getter=lambda: self.session_id,
             parent_session_id_getter=lambda: self.parent_session_id,
-            entrypoint_metadata_getter=lambda: self.entrypoint_metadata,
+            launch_context=self.launch_context,
             experiments_getter=lambda: self.experiment_manager.assignments(),
         )
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
@@ -518,8 +518,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def bypass_tool_permissions(self) -> bool:
         return self.config.bypass_tool_permissions
 
+    def _apply_forced_bypass(self) -> None:
+        if self._force_bypass_tool_permissions:
+            self._base_config.bypass_tool_permissions = True
+
     def refresh_config(self) -> None:
         self._base_config = VibeConfig.load()
+        self._apply_forced_bypass()
         self.agent_manager.invalidate_config()
         if self.mcp_registry is not None:
             self.mcp_registry.sync_active_servers(self.config.mcp_servers)
@@ -585,8 +590,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             config=self.config,
             manager=self.experiment_manager,
             session_logger=self.session_logger,
-            entrypoint_metadata=self.entrypoint_metadata,
-            terminal_emulator=self.terminal_emulator,
+            launch_context=self.launch_context,
         )
         if updated:
             with contextlib.suppress(Exception):
@@ -603,19 +607,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 await self.refresh_system_prompt()
 
     def emit_new_session_telemetry(self) -> None:
-        entrypoint = (
-            self.entrypoint_metadata.agent_entrypoint
-            if self.entrypoint_metadata
-            else "unknown"
-        )
-        client_name = (
-            self.entrypoint_metadata.client_name if self.entrypoint_metadata else None
-        )
-        client_version = (
-            self.entrypoint_metadata.client_version
-            if self.entrypoint_metadata
-            else None
-        )
         has_agents_md = has_agents_md_file(Path.cwd())
         nb_skills = len(self.skill_manager.available_skills)
         nb_mcp_servers = len(self.config.mcp_servers)
@@ -626,10 +617,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             nb_skills=nb_skills,
             nb_mcp_servers=nb_mcp_servers,
             nb_models=nb_models,
-            entrypoint=entrypoint,
-            client_name=client_name,
-            client_version=client_version,
-            terminal_emulator=self.terminal_emulator,
         )
 
     def emit_ready_telemetry(self, init_duration_ms: int) -> None:
@@ -1008,7 +995,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self, call_type: TelemetryCallType | None = None
     ) -> TelemetryRequestMetadata:
         return build_request_metadata(
-            entrypoint_metadata=self.entrypoint_metadata,
+            launch_context=self.launch_context,
             session_id=self.session_id,
             parent_session_id=self.parent_session_id,
             call_type=(
@@ -1452,7 +1439,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 tool_call_id=tool_call.call_id,
                 agent_manager=self.agent_manager,
                 session_dir=self.session_logger.session_dir,
-                entrypoint_metadata=self.entrypoint_metadata,
+                launch_context=self.launch_context,
                 approval_callback=self.approval_callback,
                 user_input_callback=self.user_input_callback,
                 sampling_callback=self._sampling_handler,
@@ -1464,7 +1451,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 hook_config_result=self._hook_config_result,
                 session_id=self.session_id,
                 mcp_pool=self._mcp_pool,
-                terminal_emulator=self.terminal_emulator,
             ),
             **tool_call.args_dict,
         ):
@@ -1882,8 +1868,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             max_tokens=self._max_tokens,
             max_session_tokens=self._max_session_tokens,
             enable_streaming=self.enable_streaming,
-            entrypoint_metadata=self.entrypoint_metadata,
-            terminal_emulator=self.terminal_emulator,
+            launch_context=self.launch_context,
             defer_heavy_init=True,
             hook_config_result=self._hook_config_result,
             cache_store=self.cache_store,
@@ -1995,8 +1980,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             summary_content = (summary_result.message.content or "").strip()
             has_tool_calls = bool(summary_result.message.tool_calls)
             if has_tool_calls or not summary_content:
+                reason: Literal["tool_call", "empty_summary"] = (
+                    "tool_call" if has_tool_calls else "empty_summary"
+                )
+                self.telemetry_client.send_compaction_failed(
+                    reason=reason,
+                    session_id=self.session_id,
+                    parent_session_id=self.parent_session_id,
+                )
                 if self.config.raise_on_compaction_failure:
-                    reason = "tool_call" if has_tool_calls else "empty_summary"
                     raise CompactionFailedError(reason)
                 summary_content = summary_content or "(no summary available)"
 
@@ -2067,6 +2059,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         if base_config is not None:
             self._base_config = base_config
+            self._apply_forced_bypass()
             self.agent_manager.invalidate_config()
 
         self.backend = self.backend_factory()

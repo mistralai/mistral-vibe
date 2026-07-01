@@ -230,17 +230,18 @@ def test_get_result_display() -> None:
     assert "foo.py" in display.message
 
 
-def test_ui_start_lines_not_part_of_model_contract() -> None:
+def test_ui_hints_not_part_of_model_contract() -> None:
     result = EditResult(file="/x", message="m", old_string="a", new_string="b")
-    result._ui_start_lines = [42]
+    result._ui_occurrences = [(42, "a", "b")]
 
     assert result.ui_start_lines == [42]
-    assert "ui_start_lines" not in result.model_dump()
-    assert "_ui_start_lines" not in result.model_dump()
-    assert "ui_start_lines" not in result.model_dump_json()
-    assert "ui_start_lines" not in EditResult.model_fields
-    assert "ui_start_lines" not in EditResult.model_json_schema().get("properties", {})
-    assert "ui_start_lines" not in dict(result)
+    assert result.ui_occurrences == [(42, "a", "b")]
+    for key in ("ui_start_lines", "ui_occurrences", "_ui_occurrences"):
+        assert key not in result.model_dump()
+        assert key not in result.model_dump_json()
+        assert key not in dict(result)
+    assert "ui_occurrences" not in EditResult.model_fields
+    assert "ui_occurrences" not in EditResult.model_json_schema().get("properties", {})
 
 
 @pytest.mark.asyncio
@@ -305,3 +306,62 @@ async def test_ui_start_lines_single_entry_without_replace_all(
     )
 
     assert result.ui_start_lines == [2]
+
+
+def test_ui_occurrences_fall_back_to_snippet_when_unset() -> None:
+    result = EditResult(file="/x", message="m", old_string="a", new_string="b")
+
+    assert result.ui_occurrences == [(None, "a", "b")]
+
+
+@pytest.mark.asyncio
+async def test_ui_occurrences_expand_mid_line_snippet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "f.txt", "foo = bar + baz\n")
+    edit = _make_edit()
+
+    result = await collect_result(
+        edit.run(EditArgs(file_path="f.txt", old_string="bar", new_string="qux"))
+    )
+
+    assert result.ui_occurrences == [(1, "foo = bar + baz", "foo = qux + baz")]
+
+
+@pytest.mark.asyncio
+async def test_ui_occurrences_for_pure_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "f.txt", "keep1\nkeep2\nremove\nkeep3\n")
+    edit = _make_edit()
+
+    result = await collect_result(
+        edit.run(EditArgs(file_path="f.txt", old_string="remove\n", new_string=""))
+    )
+
+    assert result.ui_occurrences == [(3, "remove\n", "")]
+
+
+@pytest.mark.asyncio
+async def test_ui_occurrences_use_per_occurrence_lines_for_replace_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "f.txt", "x = bar + 1\ny = bar - 2\nz = bar\n")
+    edit = _make_edit()
+
+    result = await collect_result(
+        edit.run(
+            EditArgs(
+                file_path="f.txt", old_string="bar", new_string="qux", replace_all=True
+            )
+        )
+    )
+
+    assert result.ui_occurrences == [
+        (1, "x = bar + 1", "x = qux + 1"),
+        (2, "y = bar - 2", "y = qux - 2"),
+        (3, "z = bar", "z = qux"),
+    ]

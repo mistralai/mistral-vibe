@@ -22,6 +22,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "enabled_tools": None,
         "output": "text",
         "agent": "default",
+        "auto_approve": False,
         "check_upgrade": False,
         "setup": False,
         "workdir": None,
@@ -299,6 +300,35 @@ def test_run_cli_passes_max_tokens_to_run_programmatic(
 
     assert exc_info.value.code == 0
     assert call["max_session_tokens"] == 123
+
+
+def test_run_cli_auto_approve_sets_config_without_changing_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _make_args(agent="lean", auto_approve=True)
+    call: dict[str, object] = {}
+    config = build_test_vibe_config(default_agent="plan")
+
+    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "load_config_or_exit", lambda interactive: config)
+    monkeypatch.setattr(cli_mod, "load_hooks_from_fs", lambda _config: None)
+    monkeypatch.setattr(cli_mod, "setup_tracing", lambda _config: None)
+    monkeypatch.setattr(cli_mod, "load_session", lambda _args, _config: None)
+    monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
+    monkeypatch.setattr(cli_mod, "warn_if_workdir_trust_is_unset", lambda: None)
+
+    def fake_run_programmatic(**kwargs: object) -> str:
+        call.update(kwargs)
+        return "done"
+
+    monkeypatch.setattr(cli_mod, "run_programmatic", fake_run_programmatic)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.run_cli(args)
+
+    assert exc_info.value.code == 0
+    assert call["agent_name"] == "lean"
+    assert config.bypass_tool_permissions is True
 
 
 def test_run_cli_runs_update_prompt_before_trust_resolver(

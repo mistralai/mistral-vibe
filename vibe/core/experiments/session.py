@@ -12,7 +12,7 @@ from vibe.core.utils import get_platform_id
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
     from vibe.core.session.session_logger import SessionLogger
-    from vibe.core.telemetry.types import EntrypointMetadata, TerminalEmulator
+    from vibe.core.telemetry.types import LaunchContext
 
 
 async def initialize_experiments(
@@ -20,8 +20,7 @@ async def initialize_experiments(
     config: VibeConfig,
     manager: ExperimentManager,
     session_logger: SessionLogger,
-    entrypoint_metadata: EntrypointMetadata | None,
-    terminal_emulator: TerminalEmulator | None = None,
+    launch_context: LaunchContext | None,
 ) -> bool:
     if not config.enable_telemetry or not config.experiments.enable:
         return False
@@ -29,9 +28,7 @@ async def initialize_experiments(
     if provider_and_key is None:
         return False
     _, api_key = provider_and_key
-    attributes = _build_attributes(
-        config, api_key, entrypoint_metadata, terminal_emulator
-    )
+    attributes = _build_attributes(config, api_key, launch_context)
     await manager.initialize(attributes)
     state = manager.export_state()
     if state is None:
@@ -57,21 +54,15 @@ async def hydrate_experiments_from_session(
 
 
 def _build_attributes(
-    config: VibeConfig,
-    api_key: str,
-    entrypoint_metadata: EntrypointMetadata | None,
-    terminal_emulator: TerminalEmulator | None,
+    config: VibeConfig, api_key: str, launch_context: LaunchContext | None
 ) -> ExperimentAttributes:
     from vibe.core.config import VibeConfig as _VibeConfig
 
-    entrypoint = (
-        entrypoint_metadata.agent_entrypoint if entrypoint_metadata else "unknown"
-    )
-    client_name = entrypoint_metadata.client_name if entrypoint_metadata else None
-    client_version = entrypoint_metadata.client_version if entrypoint_metadata else None
-    agent_version = (
-        entrypoint_metadata.agent_version if entrypoint_metadata else __version__
-    )
+    entrypoint = launch_context.agent_entrypoint if launch_context else "unknown"
+    client_name = launch_context.client_name if launch_context else None
+    client_version = launch_context.client_version if launch_context else None
+    agent_version = launch_context.agent_version if launch_context else __version__
+    terminal_emulator = launch_context.terminal_emulator if launch_context else None
     default_prompt_id = _VibeConfig.model_fields["system_prompt_id"].default
     return ExperimentAttributes(
         userId=hash_api_key(api_key),

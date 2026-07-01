@@ -344,6 +344,15 @@ class TestAgentProfileOverrides:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.AUTO_APPROVE].overrides
         assert overrides.get("bypass_tool_permissions") is True
 
+    def test_lean_agent_keeps_tool_permissions_configurable(self) -> None:
+        overrides = BUILTIN_AGENTS[BuiltinAgentName.LEAN].overrides
+        assert "bypass_tool_permissions" not in overrides
+
+    def test_lean_agent_uses_latest_model(self) -> None:
+        overrides = BUILTIN_AGENTS[BuiltinAgentName.LEAN].overrides
+        models = overrides["models"]
+        assert models[0]["name"] == "labs-leanstral-1-5"
+
     def test_plan_agent_restricts_tools(self) -> None:
         overrides = BUILTIN_AGENTS[BuiltinAgentName.PLAN].overrides
         assert "tools" in overrides

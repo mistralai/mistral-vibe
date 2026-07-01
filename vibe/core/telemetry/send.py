@@ -14,15 +14,13 @@ from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.logger import logger
 from vibe.core.telemetry.build_metadata import build_base_metadata
 from vibe.core.telemetry.types import (
-    AgentEntrypoint,
     AttachmentKind,
-    EntrypointMetadata,
+    LaunchContext,
     TelemetryCallType,
     TeleportCompletedPayload,
     TeleportFailedPayload,
     TeleportFailureDetails,
     TeleportFailureStage,
-    TerminalEmulator,
 )
 from vibe.core.utils import get_server_url_from_api_base, get_user_agent
 from vibe.core.utils.http import build_ssl_context
@@ -71,14 +69,13 @@ class TelemetryClient:
         config_getter: Callable[[], VibeConfig],
         session_id_getter: Callable[[], str | None] | None = None,
         parent_session_id_getter: Callable[[], str | None] | None = None,
-        entrypoint_metadata_getter: Callable[[], EntrypointMetadata | None]
-        | None = None,
+        launch_context: LaunchContext | None = None,
         experiments_getter: Callable[[], dict[str, str]] | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._session_id_getter = session_id_getter
         self._parent_session_id_getter = parent_session_id_getter
-        self._entrypoint_metadata_getter = entrypoint_metadata_getter
+        self._launch_context = launch_context
         self._experiments_getter = experiments_getter
         self._client: httpx.AsyncClient | None = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
@@ -131,11 +128,7 @@ class TelemetryClient:
             self._experiments_getter() if self._experiments_getter is not None else None
         )
         return build_base_metadata(
-            entrypoint_metadata=(
-                self._entrypoint_metadata_getter()
-                if self._entrypoint_metadata_getter is not None
-                else None
-            ),
+            launch_context=self._launch_context,
             session_id=self.session_id,
             parent_session_id=self.parent_session_id,
             experiments=experiments,
@@ -279,6 +272,19 @@ class TelemetryClient:
             payload["parent_session_id"] = parent_session_id
         self.send_telemetry_event("vibe.auto_compact_triggered", payload)
 
+    def send_compaction_failed(
+        self,
+        *,
+        reason: Literal["tool_call", "empty_summary"],
+        session_id: str | None = None,
+        parent_session_id: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"reason": reason}
+        if session_id is not None:
+            payload["session_id"] = session_id
+            payload["parent_session_id"] = parent_session_id
+        self.send_telemetry_event("vibe.compaction_failed", payload)
+
     def send_slash_command_used(
         self, command: str, command_type: Literal["builtin", "skill"]
     ) -> None:
@@ -286,26 +292,23 @@ class TelemetryClient:
         self.send_telemetry_event("vibe.slash_command_used", payload)
 
     def send_new_session(
-        self,
-        has_agents_md: bool,
-        nb_skills: int,
-        nb_mcp_servers: int,
-        nb_models: int,
-        entrypoint: AgentEntrypoint,
-        client_name: str | None,
-        client_version: str | None,
-        terminal_emulator: TerminalEmulator | None = None,
+        self, has_agents_md: bool, nb_skills: int, nb_mcp_servers: int, nb_models: int
     ) -> None:
+        lc = self._launch_context
         payload = {
             "has_agents_md": has_agents_md,
             "nb_skills": nb_skills,
             "nb_mcp_servers": nb_mcp_servers,
             "nb_models": nb_models,
-            "entrypoint": entrypoint,
+            "entrypoint": lc.agent_entrypoint if lc else "unknown",
             "version": __version__,
-            "client_name": client_name,
-            "client_version": client_version,
-            "terminal_emulator": terminal_emulator,
+            "client_name": lc.client_name if lc else None,
+            "client_version": lc.client_version if lc else None,
+            "terminal_emulator": (
+                lc.terminal_emulator.value
+                if lc and lc.terminal_emulator is not None
+                else None
+            ),
         }
         self.send_telemetry_event("vibe.new_session", payload)
 

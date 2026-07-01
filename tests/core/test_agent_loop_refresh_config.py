@@ -26,6 +26,41 @@ def test_refresh_config_reconciles_mcp_registry_status(
     assert registry.status() == {"kept": AuthStatus.STATIC}
 
 
+def test_refresh_config_preserves_forced_bypass_tool_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A session-level forced bypass (e.g. CLI --yolo) must survive a config
+    # reload, which reads bypass_tool_permissions=False back from disk.
+    agent_loop = build_test_agent_loop(
+        config=build_test_vibe_config(bypass_tool_permissions=True),
+        force_bypass_tool_permissions=True,
+    )
+    assert agent_loop.bypass_tool_permissions is True
+
+    refreshed_config = build_test_vibe_config(bypass_tool_permissions=False)
+    monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
+    agent_loop.refresh_config()
+
+    assert agent_loop.bypass_tool_permissions is True
+
+
+def test_refresh_config_drops_disk_bypass_when_not_forced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Without a forced override, a disk-originated bypass value follows the
+    # reloaded config so the user can turn it off by editing their config.
+    agent_loop = build_test_agent_loop(
+        config=build_test_vibe_config(bypass_tool_permissions=True)
+    )
+    assert agent_loop.bypass_tool_permissions is True
+
+    refreshed_config = build_test_vibe_config(bypass_tool_permissions=False)
+    monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
+    agent_loop.refresh_config()
+
+    assert agent_loop.bypass_tool_permissions is False
+
+
 def test_refresh_config_does_not_mark_undiscovered_oauth_server_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

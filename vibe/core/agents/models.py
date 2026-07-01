@@ -178,7 +178,7 @@ LEAN = AgentProfile(
         ],
         "models": [
             {
-                "name": "labs-leanstral-2603",
+                "name": "labs-leanstral-1-5",
                 "provider": "mistral-testing",
                 "alias": "leanstral",
                 "thinking": "high",

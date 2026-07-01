@@ -25,6 +25,7 @@ from vibe.core.utils.paths import is_dangerous_directory
 from vibe.core.utils.platform import (
     get_platform_display_name,
     get_platform_id,
+    get_platform_version,
     is_windows,
 )
 from vibe.core.utils.retry import async_generator_retry, async_retry
@@ -61,6 +62,7 @@ __all__ = [
     "configure_ssl_context",
     "get_platform_display_name",
     "get_platform_id",
+    "get_platform_version",
     "get_server_url_from_api_base",
     "get_user_agent",
     "get_user_cancellation_message",

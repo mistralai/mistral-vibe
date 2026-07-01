@@ -49,12 +49,23 @@ def _call_event() -> ToolCallEvent:
     )
 
 
-def _error_result() -> ToolResultEvent:
+def _error_result(error: str = "boom") -> ToolResultEvent:
     return ToolResultEvent(
         tool_name="stub_tool",
         tool_class=FakeTool,
         result=None,
-        error="boom",
+        error=error,
+        tool_call_id="a",
+    )
+
+
+def _skipped_result() -> ToolResultEvent:
+    return ToolResultEvent(
+        tool_name="stub_tool",
+        tool_class=FakeTool,
+        result=None,
+        skipped=True,
+        skip_reason="User declined",
         tool_call_id="a",
     )
 
@@ -85,6 +96,40 @@ async def test_error_renders_muted_then_escalates_icon_and_styling() -> None:
         assert icon.has_class("error")
         assert not icon.has_class("muted")
         assert not result_widget.has_class("error-text")
+
+
+@pytest.mark.asyncio
+async def test_declined_call_renders_muted_square() -> None:
+    app = _ToolApp(_call_event(), _skipped_result())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        call_widget = app.call_widget
+        assert call_widget is not None
+
+        icon = call_widget._indicator_widget
+        assert icon is not None
+        assert _rendered(icon).plain == "□"
+        assert icon.has_class("muted")
+        assert not icon.has_class("error")
+
+
+@pytest.mark.asyncio
+async def test_error_with_square_brackets_does_not_raise_markup_error() -> None:
+    error = (
+        "Validation error in tool ask_user_question: 1 validation error for "
+        "AskUserQuestionArgs\nquestions.0.header\n  Value error "
+        "[type=value_error, input_value={'questions[0].header': 'x'}, "
+        "input_type=dict]"
+    )
+    app = _ToolApp(_call_event(), _error_result(error))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        result_widget = app.result_widget
+        assert result_widget is not None
+
+        detail = result_widget.query_one(CollapsibleSection).query_one(Static)
+        content = _rendered(detail)
+        assert content.plain == f"Error: {error}"
 
 
 @pytest.mark.asyncio

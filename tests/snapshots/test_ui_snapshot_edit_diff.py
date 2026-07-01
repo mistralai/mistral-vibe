@@ -45,9 +45,10 @@ REPLACE_ALL_CONTENT = "\n".join([
     "        count = count + 1",
     "    return count",
     "",
-    "def reset():",
-    "    count = 0",
-    "    return count",
+    "class Counter:",
+    "    def reset(self):",
+    "        count = 0  # start over",
+    "        return count",
 ])
 
 
@@ -65,6 +66,28 @@ class EditReplaceAllApprovalApp(BaseSnapshotTestApp):
             old_string="count = 0",
             new_string="count = 1",
             replace_all=True,
+        )
+        await self._switch_to_approval_app("edit", args)
+
+
+LONG_OLD = "    message = " + " + ".join(f'"word_{i}"' for i in range(40))
+LONG_NEW = "    message = " + " + ".join(f'"token_{i}"' for i in range(40))
+OVERFLOW_CONTENT = "\n".join(["def build_message():", LONG_OLD, "    return message"])
+
+
+class EditOverflowApprovalApp(BaseSnapshotTestApp):
+    _diff_theme: str = "tokyo-night"
+
+    async def on_ready(self) -> None:
+        await super().on_ready()
+        self.theme = self._diff_theme
+        path = Path("src/message.py")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(OVERFLOW_CONTENT)
+        args = EditArgs(
+            file_path="src/message.py",
+            old_string=f"{LONG_OLD}\n    return message",
+            new_string=f"{LONG_NEW}\n    return message.upper()",
         )
         await self._switch_to_approval_app("edit", args)
 
@@ -97,6 +120,19 @@ def test_snapshot_edit_approval_diff_replace_all(snap_compare: SnapCompare) -> N
 
     assert snap_compare(
         "test_ui_snapshot_edit_diff.py:EditReplaceAllApprovalApp",
+        terminal_size=(100, 30),
+        run_before=run_before,
+    )
+
+
+def test_snapshot_edit_approval_diff_horizontal_overflow(
+    snap_compare: SnapCompare,
+) -> None:
+    async def run_before(pilot: Pilot) -> None:
+        await pilot.pause(0.3)
+
+    assert snap_compare(
+        "test_ui_snapshot_edit_diff.py:EditOverflowApprovalApp",
         terminal_size=(100, 30),
         run_before=run_before,
     )

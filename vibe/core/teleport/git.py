@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from configparser import NoOptionError, NoSectionError
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
@@ -17,7 +18,15 @@ from vibe.core.utils import AsyncExecutor
 
 
 @dataclass
+class GitHubRemoteInfo:
+    name: str
+    owner: str
+    repo: str
+
+
+@dataclass
 class GitRepoInfo:
+    remote_name: str
     remote_url: str
     owner: str
     repo: str
@@ -65,11 +74,13 @@ class GitRepository:
         if not commit:
             raise ServiceTeleportNotSupportedError("Could not determine current commit")
 
-        owner, repo_name = parsed
+        owner = parsed.owner
+        repo_name = parsed.repo
         branch = None if repo.head.is_detached else repo.active_branch.name
         diff = await self._get_diff(repo)
 
         return GitRepoInfo(
+            remote_name=parsed.name,
             remote_url=self._to_https_url(owner, repo_name),
             owner=owner,
             repo=repo_name,
@@ -141,12 +152,31 @@ class GitRepository:
                 ) from e
         return self._repo
 
-    def _find_github_remote(self, repo: Repo) -> tuple[str, str] | None:
+    def _find_github_remote(self, repo: Repo) -> GitHubRemoteInfo | None:
         for remote in repo.remotes:
-            for url in remote.urls:
+            for url in self._remote_urls(remote):
                 if parsed := self._parse_github_url(url):
-                    return parsed
+                    owner, repo_name = parsed
+                    return GitHubRemoteInfo(
+                        name=remote.name, owner=owner, repo=repo_name
+                    )
         return None
+
+    @staticmethod
+    def _remote_urls(remote: object) -> list[str]:
+        urls: list[str] = []
+        config_reader = getattr(remote, "config_reader", None)
+        try:
+            raw_url = config_reader.get("url") if config_reader is not None else None
+        except (AttributeError, NoOptionError, NoSectionError, TypeError, ValueError):
+            raw_url = None
+        if isinstance(raw_url, str):
+            urls.append(raw_url)
+
+        for url in getattr(remote, "urls", ()):
+            if isinstance(url, str) and url not in urls:
+                urls.append(url)
+        return urls
 
     async def _fetch(self, repo: Repo, remote: str) -> None:
         try:

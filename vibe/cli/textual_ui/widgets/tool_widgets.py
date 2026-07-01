@@ -14,9 +14,10 @@ from textual.widgets import Markdown, Static
 
 from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection, lines_label
 from vibe.cli.textual_ui.widgets.diff_rendering import (
+    DiffOccurrence,
     diff_border_colors,
+    edit_diff_inputs,
     language_for_path,
-    locate_snippets_in_file,
     render_edit_diff,
 )
 from vibe.cli.textual_ui.widgets.links import LinkStatic, link_content
@@ -219,27 +220,35 @@ class WriteFileResultWidget(ToolResultWidget[WriteFileResult]):
 
 
 class EditApprovalWidget(ToolApprovalWidget[EditArgs]):
+    _diff_container: Vertical
+
     def compose(self) -> ComposeResult:
         yield NoMarkupStatic(
             f"File: {self.args.file_path}", classes="approval-description"
         )
         yield NoMarkupStatic("")
-
-        # Approximate: queued edits ahead of this one may shift the real lines.
-        start_lines = locate_snippets_in_file(self.args.file_path, self.args.old_string)
-        if not self.args.replace_all:
-            start_lines = start_lines[:1]
-        yield from render_edit_diff(
-            self.args.old_string,
-            self.args.new_string,
-            language_for_path(self.args.file_path),
-            start_lines,
-            ansi=self.app.native_ansi_color,
-            dark=self.app.current_theme.dark,
-        )
+        self._diff_container = Vertical(classes="diff-scroll")
+        yield self._diff_container
 
         if self.args.replace_all:
             yield NoMarkupStatic("(replace_all)", classes="approval-description")
+
+    async def on_mount(self) -> None:
+        # Approximate: queued edits ahead of this one may shift the real lines.
+        occurrences = await edit_diff_inputs(
+            self.args.file_path,
+            self.args.old_string,
+            self.args.new_string,
+            replace_all=self.args.replace_all,
+        )
+        await self._diff_container.mount_all(
+            render_edit_diff(
+                occurrences,
+                language_for_path(self.args.file_path),
+                ansi=self.app.native_ansi_color,
+                dark=self.app.current_theme.dark,
+            )
+        )
 
 
 class EditResultWidget(ToolResultWidget[EditResult]):
@@ -253,18 +262,20 @@ class EditResultWidget(ToolResultWidget[EditResult]):
             NoMarkupStatic(f"⚠ {w}", classes="tool-result-warning")
             for w in self.warnings
         ]
+        occurrences = [
+            DiffOccurrence(start, old_lines, new_lines)
+            for start, old_lines, new_lines in self.result.ui_occurrences
+        ]
         rows.extend(
             render_edit_diff(
-                self.result.old_string,
-                self.result.new_string,
+                occurrences,
                 language_for_path(self.result.file),
-                self.result.ui_start_lines,
                 ansi=self.app.native_ansi_color,
                 dark=self.app.current_theme.dark,
             )
         )
         self.border_row_colors = diff_border_colors(rows)
-        yield from self._yield_truncated_widgets(rows)
+        yield Vertical(*self._yield_truncated_widgets(rows), classes="diff-scroll")
         yield from self._footer()
 
 

@@ -40,6 +40,7 @@ def _detect_terminal_from_env() -> Terminal | None:
         "ALACRITTY_SOCKET": Terminal.ALACRITTY,
         "ALACRITTY_LOG": Terminal.ALACRITTY,
         "WT_SESSION": Terminal.WINDOWS_TERMINAL,
+        "WT_PROFILE_ID": Terminal.WINDOWS_TERMINAL,
     }
     for var, terminal in env_markers.items():
         if os.environ.get(var):
@@ -60,6 +61,7 @@ def detect_terminal() -> Terminal:
         return _detect_vscode_terminal()
 
     term_map: dict[str, Terminal] = {
+        "apple_terminal": Terminal.APPLE_TERMINAL,
         "iterm.app": Terminal.ITERM2,
         "wezterm": Terminal.WEZTERM,
         "ghostty": Terminal.GHOSTTY,

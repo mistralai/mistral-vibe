@@ -133,8 +133,7 @@ class Task(
         subagent_loop = AgentLoop(
             config=base_config,
             agent_name=args.agent,
-            entrypoint_metadata=ctx.entrypoint_metadata,
-            terminal_emulator=ctx.terminal_emulator,
+            launch_context=ctx.launch_context,
             is_subagent=True,
             defer_heavy_init=True,
             permission_store=ctx.permission_store,

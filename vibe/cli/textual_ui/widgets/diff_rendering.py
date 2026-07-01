@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 import difflib
 from pathlib import Path
 import re
+from typing import NamedTuple
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
@@ -21,8 +22,8 @@ from vibe.cli.textual_ui.widgets.no_markup_static import (
     NoMarkupStatic,
     NonSelectableStatic,
 )
-from vibe.core.utils.io import read_safe
-from vibe.core.utils.text import snippet_start_lines
+from vibe.core.utils.io import read_safe_async
+from vibe.core.utils.text import line_contexts
 
 _HUNK_HEADER_RE = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
@@ -44,15 +45,37 @@ DIFF_BORDER_COLOR_BY_CLASS: dict[str, str] = {
 }
 
 
+class DiffOccurrence(NamedTuple):
+    # old_lines/new_lines are the changed snippet expanded to whole lines so the
+    # diff shows full lines; start_line is None when the location is unknown.
+    start_line: int | None
+    old_lines: str
+    new_lines: str
+
+
 def language_for_path(file_path: str) -> str:
     return Path(file_path).suffix.lstrip(".") or "text"
 
 
-def locate_snippets_in_file(file_path: str, snippet: str) -> list[int]:
+async def edit_diff_inputs(
+    file_path: str, old_string: str, new_string: str, *, replace_all: bool
+) -> list[DiffOccurrence]:
+    """One whole-line diff occurrence per match, from a single pre-edit read."""
     path = Path(file_path)
     if not path.is_file():
-        return []
-    return snippet_start_lines(read_safe(path).text, snippet)
+        return [DiffOccurrence(None, old_string, new_string)]
+    content = (await read_safe_async(path)).text
+    contexts = line_contexts(content, old_string)
+    if not replace_all:
+        contexts = contexts[:1]
+    if not contexts:
+        return [DiffOccurrence(None, old_string, new_string)]
+    return [
+        DiffOccurrence(
+            start, prefix + old_string + suffix, prefix + new_string + suffix
+        )
+        for start, prefix, suffix in contexts
+    ]
 
 
 def _pick_theme(*, ansi: bool, dark: bool) -> type[HighlightTheme]:
@@ -69,7 +92,7 @@ def _highlight_line(code: str, language: str, theme: type[HighlightTheme]) -> Co
 def _gutter_styles(prefix_char: str, *, ansi: bool) -> tuple[str, str]:
     if prefix_char == "-":
         if ansi:
-            return f"bold {_REMOVED_STYLE}", f"bold {_REMOVED_STYLE}"
+            return _REMOVED_STYLE, _REMOVED_STYLE
         return _REMOVED_STYLE, _DIM_MUTED_STYLE
     if prefix_char == "+":
         sign_style = _ADDED_STYLE
@@ -125,36 +148,30 @@ class _DiffRow(Horizontal):
 
 
 def render_edit_diff(
-    old_string: str,
-    new_string: str,
-    language: str,
-    start_lines: list[int] | None,
-    *,
-    ansi: bool,
-    dark: bool,
+    occurrences: Sequence[DiffOccurrence], language: str, *, ansi: bool, dark: bool
 ) -> list[Widget]:
     theme = _pick_theme(ansi=ansi, dark=dark)
-    diff_lines = list(
-        difflib.unified_diff(
-            old_string.strip("\n").split("\n"),
-            new_string.strip("\n").split("\n"),
-            lineterm="",
-            n=2,
-        )
-    )[2:]
-
-    # No known locations: render the hunk once without gutter line numbers.
-    if not start_lines:
-        return _render_occurrence(diff_lines, None, language, ansi=ansi, theme=theme)
-
-    # replace_all repeats the same change at each match; render one block per
-    # occurrence, anchored at its own line number, with a gap in between.
+    # Each occurrence carries its own whole-line old/new content, so the diff is
+    # computed per occurrence and anchored at its line number, with a gap between.
     widgets: list[Widget] = []
-    for index, start_line in enumerate(start_lines):
+    for index, occurrence in enumerate(occurrences):
         if index > 0:
             widgets.append(NoMarkupStatic("⋯", classes="diff-gap"))
+        # rstrip only: a trailing newline yields a phantom next-line element to
+        # drop, but a leading newline is a real (empty) first line anchored at
+        # start_line, so stripping it would desync the gutter line numbers.
+        diff_lines = list(
+            difflib.unified_diff(
+                occurrence.old_lines.rstrip("\n").split("\n"),
+                occurrence.new_lines.rstrip("\n").split("\n"),
+                lineterm="",
+                n=2,
+            )
+        )[2:]
         widgets.extend(
-            _render_occurrence(diff_lines, start_line, language, ansi=ansi, theme=theme)
+            _render_occurrence(
+                diff_lines, occurrence.start_line, language, ansi=ansi, theme=theme
+            )
         )
     return widgets
 
