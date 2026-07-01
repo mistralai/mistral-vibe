@@ -539,9 +539,9 @@ Tool, skill, and agent names support three matching modes:
 vibe [PROMPT]                       # Start interactive session with optional prompt
 vibe -p TEXT / --prompt TEXT         # Programmatic mode using `default_agent`, one-shot, exit
 vibe -p TEXT --auto-approve          # Programmatic mode with all tool calls approved
-vibe -p TEXT --yolo                  # Alias for `--auto-approve`
+vibe -p TEXT --agent lean --yolo      # Lean mode with all tool calls approved
 vibe --agent NAME                   # Select agent profile (falls back to `default_agent` config)
-vibe --auto-approve / --yolo         # Shortcut for `--agent auto-approve`
+vibe --auto-approve / --yolo         # Approve all tool calls for the selected agent
 vibe --workdir DIR                  # Change working directory
 vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
 vibe --trust                        # Trust cwd for this invocation only (not persisted)
@@ -572,7 +572,8 @@ There are two kinds of agents:
 - **accept-edits**: Auto-approves file edits but asks for other tools
 - **auto-approve**: Auto-approves all tool calls
 - **lean**: Specialized Lean 4 proof assistant. Not available by default — must be
-  installed with `/leanstall` (removed with `/unleanstall`)
+  installed with `/leanstall` (removed with `/unleanstall`). Use `--agent lean
+  --auto-approve` or `--agent lean --yolo` to run Lean mode without tool prompts.
 
 ### Subagents
 

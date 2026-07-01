@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 from textual.content import Content
 from textual.highlight import HighlightTheme
 from textual.widget import Widget
 
 from vibe.cli.textual_ui.widgets.diff_rendering import (
+    DiffOccurrence,
     _build_diff_line,
     diff_border_colors,
+    edit_diff_inputs,
     language_for_path,
     render_edit_diff,
 )
@@ -20,14 +25,12 @@ def _build(
     )
 
 
-def _render(*args, **kwargs):
-    kwargs.setdefault("dark", True)
-    args = list(args)
-    # Tests pass a single start line as an int for readability; the renderer
-    # expects a list of occurrences.
-    if len(args) >= 4 and isinstance(args[3], int):
-        args[3] = [args[3]]
-    return render_edit_diff(*args, **kwargs)
+def _render(old_string, new_string, language, start, *, ansi, dark=True):
+    # Tests pass the same old/new at a single start line (int/None) or, for
+    # replace_all, at a list of start lines; build one occurrence per location.
+    starts = start if isinstance(start, list) else [start]
+    occurrences = [DiffOccurrence(s, old_string, new_string) for s in starts]
+    return render_edit_diff(occurrences, language, ansi=ansi, dark=dark)
 
 
 def _render_with_colors(*args, **kwargs):
@@ -80,14 +83,20 @@ class TestBuildDiffLine:
         styles = _styles_at(content, 0)
         assert "$text-success" in styles
         assert all("dim" not in s for s in styles)
+        assert all("bold" not in s for s in styles)
 
-    def test_removed_line_number_and_sign_bright_in_ansi(self) -> None:
+    def test_removed_line_number_not_bold_in_ansi(self) -> None:
         content = _build("x = 1", "-", 10, "py", ansi=True)
         lineno_styles = _styles_at(content, 0)
-        sign_styles = _styles_at(content, 5)
-        assert any("bold" in s and "$text-error" in s for s in lineno_styles)
-        assert any("bold" in s and "$text-error" in s for s in sign_styles)
+        assert any("$text-error" in s for s in lineno_styles)
+        assert all("bold" not in s for s in lineno_styles)
         assert all("dim" not in s for s in lineno_styles)
+
+    def test_removed_sign_not_bold_in_ansi(self) -> None:
+        content = _build("x = 1", "-", 10, "py", ansi=True)
+        sign_styles = _styles_at(content, 5)
+        assert any("$text-error" in s for s in sign_styles)
+        assert all("bold" not in s for s in sign_styles)
         assert all("dim" not in s for s in sign_styles)
 
     def test_line_number_dimmed_for_unchanged_rows_in_ansi(self) -> None:
@@ -139,6 +148,26 @@ class TestRenderEditDiff:
         widgets = _render("x = 100", "x = 200", "py", 42, ansi=False)
         assert any("42" in _plain(w) for w in widgets)
 
+    @pytest.mark.asyncio
+    async def test_leading_newline_snippet_gutter_matches_file_lines(
+        self, tmp_path: Path
+    ) -> None:
+        # A leading-newline snippet starts modifying the previous line; the
+        # whole-line diff must show that line and number the hunk against the
+        # real file lines, not skip the leading newline and drift by one.
+        f = tmp_path / "f.py"
+        f.write_text("aa\nbab\ncc\n")
+        occurrences = await edit_diff_inputs(
+            str(f), "\nbab\nc", "Z\nbab\nC", replace_all=False
+        )
+        widgets = render_edit_diff(occurrences, "py", ansi=False, dark=True)
+        file_lines = ["aa", "bab", "cc"]
+        for w in widgets:
+            plain = _plain(w)
+            if plain[5:6] in (" ", "-"):
+                lineno = int(plain[:4])
+                assert plain[7:] == file_lines[lineno - 1]
+
     def test_multi_hunk_line_numbers(self) -> None:
         search = "A\nB\nC\nD\nE\nF\nG\nH"
         replace = "Z\nB\nC\nD\nE\nF\nG\nY"
@@ -164,30 +193,44 @@ class TestRenderEditDiff:
         assert any(_plain(w).rstrip().endswith("Z") for w in added)
 
     def test_replace_all_renders_each_occurrence(self) -> None:
-        widgets = render_edit_diff(
-            "foo", "bar", "py", [3, 10, 25], ansi=False, dark=True
-        )
+        widgets = _render("foo", "bar", "py", [3, 10, 25], ansi=False)
         removed = [w for w in widgets if "diff-removed" in w.classes]
         added = [w for w in widgets if "diff-added" in w.classes]
         assert len(removed) == 3
         assert len(added) == 3
 
     def test_replace_all_uses_each_start_line(self) -> None:
-        widgets = render_edit_diff(
-            "foo", "bar", "py", [3, 10, 25], ansi=False, dark=True
-        )
+        widgets = _render("foo", "bar", "py", [3, 10, 25], ansi=False)
         joined = "\n".join(_plain(w) for w in widgets)
         assert "3" in joined
         assert "10" in joined
         assert "25" in joined
 
     def test_replace_all_separates_occurrences_with_gap(self) -> None:
-        widgets = render_edit_diff("foo", "bar", "py", [3, 10], ansi=False, dark=True)
+        widgets = _render("foo", "bar", "py", [3, 10], ansi=False)
         assert sum("diff-gap" in w.classes for w in widgets) == 1
 
     def test_single_occurrence_has_no_gap(self) -> None:
-        widgets = render_edit_diff("foo", "bar", "py", [3], ansi=False, dark=True)
+        widgets = _render("foo", "bar", "py", [3], ansi=False)
         assert all("diff-gap" not in w.classes for w in widgets)
+
+    def test_per_occurrence_full_lines(self) -> None:
+        # Each occurrence carries its own whole-line content with its own line.
+        widgets = render_edit_diff(
+            [
+                DiffOccurrence(2, "x = bar + 1", "x = qux + 1"),
+                DiffOccurrence(7, "y = bar - 2", "y = qux - 2"),
+            ],
+            "py",
+            ansi=False,
+            dark=True,
+        )
+        removed = [_plain(w) for w in widgets if "diff-removed" in w.classes]
+        added = [_plain(w) for w in widgets if "diff-added" in w.classes]
+        assert any("x = bar + 1" in r for r in removed)
+        assert any("y = bar - 2" in r for r in removed)
+        assert any("x = qux + 1" in a for a in added)
+        assert any("y = qux - 2" in a for a in added)
 
 
 class TestBorderColors:

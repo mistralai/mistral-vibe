@@ -651,6 +651,17 @@ class VibeConfig(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_mcp_server_uniqueness(self) -> VibeConfig:
+        seen_names: set[str] = set()
+        for server in self.mcp_servers:
+            if server.name in seen_names:
+                raise ValueError(
+                    f"Duplicate MCP server name found: '{server.name}'. Names must be unique."
+                )
+            seen_names.add(server.name)
+        return self
+
+    @model_validator(mode="after")
     def _check_system_prompt(self) -> VibeConfig:
         _ = self.system_prompt
         return self

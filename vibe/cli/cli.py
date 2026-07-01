@@ -25,7 +25,6 @@ from vibe.cli.update_notifier import (
     mark_update_as_dismissed,
 )
 from vibe.core.agent_loop import AgentLoop, TeleportError
-from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.cache_store import FileSystemVibeCodeCacheStore
 from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
 from vibe.core.config.harness_files import get_harness_files_manager
@@ -36,8 +35,8 @@ from vibe.core.programmatic import run_programmatic
 from vibe.core.sentry import init_sentry
 from vibe.core.session import last_session_pointer
 from vibe.core.session.session_loader import SessionLoader
-from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
-from vibe.core.telemetry.types import EntrypointMetadata
+from vibe.core.telemetry.build_metadata import build_launch_context
+from vibe.core.telemetry.types import LaunchContext
 from vibe.core.tracing import setup_tracing
 from vibe.core.trusted_folders import find_trustable_files, trusted_folders_manager
 from vibe.core.types import LLMMessage, OutputFormat, Role
@@ -51,19 +50,17 @@ from vibe.setup.update_prompt import (
 )
 
 
-def _build_cli_entrypoint_metadata() -> EntrypointMetadata:
-    return build_entrypoint_metadata(
+def _build_cli_launch_context() -> LaunchContext:
+    return build_launch_context(
         agent_entrypoint="cli",
         agent_version=__version__,
         client_name="vibe_cli",
         client_version=__version__,
+        terminal_emulator=detect_terminal(),
     )
 
 
 def get_initial_agent_name(args: argparse.Namespace, config: VibeConfig) -> str:
-    if args.auto_approve:
-        return BuiltinAgentName.AUTO_APPROVE
-
     return args.agent or config.default_agent
 
 
@@ -101,7 +98,7 @@ def load_config_or_exit(*, interactive: bool) -> VibeConfig:
                 file=sys.stderr,
             )
             sys.exit(1)
-        run_onboarding(entrypoint_metadata=_build_cli_entrypoint_metadata())
+        run_onboarding(launch_context=_build_cli_launch_context())
         return VibeConfig.load()
     except ValidationError as e:
         rprint(f"[yellow]{_format_config_validation_error(e)}[/]")
@@ -253,6 +250,7 @@ def _run_programmatic_mode(
             teleport=args.teleport and config.vibe_code_enabled,
             headless=True,
             hook_config_result=hook_config_result,
+            terminal_emulator=detect_terminal(),
         )
         if final_response:
             print(final_response)
@@ -381,7 +379,7 @@ def run_cli(
     bootstrap_config_files()
 
     if args.setup:
-        run_onboarding(entrypoint_metadata=_build_cli_entrypoint_metadata())
+        run_onboarding(launch_context=_build_cli_launch_context())
         sys.exit(0)
 
     try:
@@ -404,9 +402,11 @@ def run_cli(
         sentry_enabled = init_sentry(
             config,
             headless=not is_interactive,
-            entrypoint_metadata=_build_cli_entrypoint_metadata(),
+            launch_context=_build_cli_launch_context(),
         )
         initial_agent_name = get_initial_agent_name(args, config)
+        if args.auto_approve:
+            config.bypass_tool_permissions = True
         hook_config_result = load_hooks_from_fs(config)
         setup_tracing(config)
 
@@ -422,11 +422,11 @@ def run_cli(
                     config,
                     agent_name=initial_agent_name,
                     enable_streaming=True,
-                    entrypoint_metadata=_build_cli_entrypoint_metadata(),
-                    terminal_emulator=detect_terminal(),
+                    launch_context=_build_cli_launch_context(),
                     defer_heavy_init=True,
                     hook_config_result=hook_config_result,
                     cache_store=FileSystemVibeCodeCacheStore(),
+                    force_bypass_tool_permissions=args.auto_approve,
                 )
             except ValueError as e:
                 rprint(f"[red]Error:[/] {e}")

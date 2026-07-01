@@ -128,7 +128,7 @@ from vibe.core.agent_loop import (
     CompactionFailedError,
     ImagesNotSupportedError,
 )
-from vibe.core.agents.models import CHAT as CHAT_AGENT, BuiltinAgentName
+from vibe.core.agents.models import CHAT as CHAT_AGENT
 from vibe.core.auth import MCPOAuthError
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.cache_store import FileSystemVibeCodeCacheStore
@@ -157,9 +157,9 @@ from vibe.core.session.saved_sessions import (
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.session.title_format import format_session_title
 from vibe.core.skills.manager import SkillManager
-from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
+from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.telemetry.send import TelemetryClient
-from vibe.core.telemetry.types import EntrypointMetadata
+from vibe.core.telemetry.types import LaunchContext
 from vibe.core.tools.mcp import AuthStatus
 from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.trusted_folders import (
@@ -669,8 +669,8 @@ class VibeAcpAgentLoop(AcpAgent):
 
         raise InvalidRequestError(f"Unsupported auth method: {method_id}")
 
-    def _build_entrypoint_metadata(self) -> EntrypointMetadata:
-        return build_entrypoint_metadata(
+    def _build_launch_context(self) -> LaunchContext:
+        return build_launch_context(
             agent_entrypoint="acp",
             agent_version=__version__,
             client_name=self.client_info.name if self.client_info else "",
@@ -783,7 +783,7 @@ class VibeAcpAgentLoop(AcpAgent):
             config=config,
             agent_name=agent_name,
             enable_streaming=True,
-            entrypoint_metadata=self._build_entrypoint_metadata(),
+            launch_context=self._build_launch_context(),
             defer_heavy_init=True,
             hook_config_result=hook_config_result,
             cache_store=FileSystemVibeCodeCacheStore(),
@@ -938,7 +938,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
         try:
             agent_loop = self._create_agent_loop(
-                config, BuiltinAgentName.DEFAULT, hook_config_result=hook_config_result
+                config, config.default_agent, hook_config_result=hook_config_result
             )
             # NOTE: For now, we pin session.id to agent_loop.session_id right after init time.
             # We should just use agent_loop.session_id everywhere, but it can still change during
@@ -1232,9 +1232,12 @@ class VibeAcpAgentLoop(AcpAgent):
         except Exception as e:
             raise SessionLoadError(session_id, str(e)) from e
 
-        agent_loop = self._create_agent_loop(
-            config, BuiltinAgentName.DEFAULT, hook_config_result=hook_config_result
-        )
+        try:
+            agent_loop = self._create_agent_loop(
+                config, config.default_agent, hook_config_result=hook_config_result
+            )
+        except Exception as e:
+            raise ConfigurationError(str(e)) from e
         loaded_session_id = metadata.get("session_id", agent_loop.session_id)
         agent_loop.session_id = loaded_session_id
         agent_loop.parent_session_id = metadata.get("parent_session_id")

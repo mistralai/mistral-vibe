@@ -3,4 +3,4 @@ from __future__ import annotations
 from pathlib import Path
 
 VIBE_ROOT = Path(__file__).parent
-__version__ = "2.18.3"
+__version__ = "2.18.4"

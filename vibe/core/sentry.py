@@ -5,7 +5,7 @@ from typing import Any
 
 from vibe import __version__
 from vibe.core.config import VibeConfig
-from vibe.core.telemetry.types import EntrypointMetadata
+from vibe.core.telemetry.types import LaunchContext
 
 # Injected at build time
 _SENTRY_DSN = None
@@ -13,7 +13,7 @@ _SERVER_NAME = "vibe-cli"
 
 
 def init_sentry(
-    config: VibeConfig, *, headless: bool, entrypoint_metadata: EntrypointMetadata
+    config: VibeConfig, *, headless: bool, launch_context: LaunchContext
 ) -> bool:
     if not config.enable_telemetry:
         return False
@@ -36,9 +36,7 @@ def init_sentry(
         "headless": "true" if headless else "false",
         "os": platform.system().lower(),
         "arch": platform.machine().lower(),
-        "entrypoint": entrypoint_metadata.agent_entrypoint,
-        "client_name": entrypoint_metadata.client_name,
-    }
+    } | launch_context.sentry_tags()
     for key, value in global_tags.items():
         sentry_sdk.set_tag(key, value)
     return True

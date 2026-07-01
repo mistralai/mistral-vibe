@@ -218,3 +218,96 @@ async def test_start_raises_for_invalid_json_response() -> None:
         "failure_kind": "invalid_json",
         "http_status_code": 200,
     }
+
+
+@pytest.mark.asyncio
+async def test_start_retries_ambiguous_gateway_timeout_with_same_request() -> None:
+    seen_bodies: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_bodies.append(json.loads(request.content))
+        if len(seen_bodies) == 1:
+            return httpx.Response(504, text="Gateway timeout")
+        return httpx.Response(
+            200,
+            json={
+                "sessionId": "controller-session-id",
+                "webSessionId": "web-session-id",
+                "projectId": "project-id",
+                "status": "running",
+                "url": "https://chat.example.com/code/project-id/web-session-id",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        nuage = NuageClient(
+            "https://chat.example.com",
+            "api-key",
+            client=client,
+            retry_delay_seconds=0.0,
+        )
+        response = await nuage.start(_request())
+
+    assert response.status == "running"
+    assert [body["idempotencyKey"] for body in seen_bodies] == ["idem-1", "idem-1"]
+
+
+@pytest.mark.asyncio
+async def test_start_retries_timeout_with_same_request() -> None:
+    seen_bodies: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_bodies.append(json.loads(request.content))
+        if len(seen_bodies) == 1:
+            raise httpx.ReadTimeout("read timed out", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "sessionId": "controller-session-id",
+                "webSessionId": "web-session-id",
+                "projectId": "project-id",
+                "status": "running",
+                "url": "https://chat.example.com/code/project-id/web-session-id",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        nuage = NuageClient(
+            "https://chat.example.com",
+            "api-key",
+            client=client,
+            retry_delay_seconds=0.0,
+        )
+        response = await nuage.start(_request())
+
+    assert response.status == "running"
+    assert [body["idempotencyKey"] for body in seen_bodies] == ["idem-1", "idem-1"]
+
+
+@pytest.mark.asyncio
+async def test_start_raises_retry_guidance_after_ambiguous_create_exhausted() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(504, text="Gateway timeout")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        nuage = NuageClient(
+            "https://chat.example.com",
+            "api-key",
+            client=client,
+            max_start_attempts=2,
+            retry_delay_seconds=0.0,
+        )
+        with pytest.raises(
+            ServiceTeleportError, match="did not confirm session creation"
+        ) as exc_info:
+            await nuage.start(_request())
+
+    assert calls == 2
+    assert exc_info.value.telemetry_details == {
+        "failure_kind": "ambiguous_create",
+        "http_status_code": 504,
+    }

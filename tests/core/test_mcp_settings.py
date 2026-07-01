@@ -193,3 +193,21 @@ def test_add_oauth_mcp_server_persists_http_transport() -> None:
 def test_parse_mcp_add_transport_rejects_unsupported_transport() -> None:
     with pytest.raises(MCPServerAddError, match="http, streamable-http"):
         parse_mcp_add_transport("sse")
+
+
+def test_vibe_config_rejects_duplicate_mcp_server_names() -> None:
+    with pytest.raises(ValueError, match="Duplicate MCP server name found: 'figma'"):
+        VibeConfig.model_validate({
+            "mcp_servers": [
+                {
+                    "name": "figma",
+                    "transport": "streamable-http",
+                    "url": "https://a.example.com/mcp",
+                },
+                {
+                    "name": "figma",
+                    "transport": "streamable-http",
+                    "url": "https://b.example.com/mcp",
+                },
+            ]
+        })

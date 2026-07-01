@@ -99,7 +99,7 @@ class TurnSummaryTracker(TurnSummaryPort):
 
     def _build_metadata(self, data: TurnSummaryData) -> dict[str, str]:
         default_metadata = build_request_metadata(
-            entrypoint_metadata=None,
+            launch_context=None,
             session_id=None,
             call_type="secondary_call",
             message_id=data.message_id,

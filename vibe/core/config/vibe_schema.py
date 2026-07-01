@@ -153,7 +153,11 @@ class VibeConfigSchema(ConfigSchema):
             " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
-    mcp_servers: Annotated[list[MCPServer], WithUnionMerge(merge_key="name")] = Field(
+    mcp_servers: Annotated[
+        list[MCPServer],
+        WithUnionMerge(merge_key="name"),
+        AfterValidator(_unique_by("name")),
+    ] = Field(
         default_factory=list, description="Preferred MCP server configuration entries."
     )
     enable_connectors: Annotated[bool, WithReplaceMerge()] = True

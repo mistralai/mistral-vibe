@@ -35,8 +35,9 @@ from vibe.core.config.harness_files import (
     reset_harness_files_manager,
 )
 from vibe.core.paths import GLOBAL_ENV_FILE, VIBE_HOME
-from vibe.core.telemetry.build_metadata import build_entrypoint_metadata
+from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.telemetry.send import TelemetryClient
+from vibe.core.telemetry.types import TerminalEmulator
 from vibe.core.types import Backend
 from vibe.setup.auth import (
     BrowserSignInError,
@@ -1273,7 +1274,7 @@ def test_persist_api_key_returns_env_var_error_for_empty_env_var_name() -> None:
     assert result == "env_var_error:<empty>"
 
 
-def test_persist_api_key_sends_onboarding_telemetry_with_entrypoint_metadata(
+def test_persist_api_key_sends_onboarding_telemetry_with_launch_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorded_metadata: dict[str, str] = {}
@@ -1293,11 +1294,12 @@ def test_persist_api_key_sends_onboarding_telemetry_with_entrypoint_metadata(
     result = persist_api_key(
         provider,
         "secret",
-        entrypoint_metadata=build_entrypoint_metadata(
+        launch_context=build_launch_context(
             agent_entrypoint="cli",
             agent_version="1.0.0",
             client_name="vibe_cli",
             client_version="1.0.0",
+            terminal_emulator=TerminalEmulator.APPLE_TERMINAL,
         ),
     )
 
@@ -1306,4 +1308,5 @@ def test_persist_api_key_sends_onboarding_telemetry_with_entrypoint_metadata(
     assert recorded_metadata["agent_version"] == "1.0.0"
     assert recorded_metadata["client_name"] == "vibe_cli"
     assert recorded_metadata["client_version"] == "1.0.0"
+    assert recorded_metadata["terminal_emulator"] == "apple_terminal"
     assert "session_id" not in recorded_metadata

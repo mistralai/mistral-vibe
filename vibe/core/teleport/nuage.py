@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import types
 from typing import Literal
 
@@ -11,6 +12,14 @@ from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.utils.http import build_ssl_context
 
 DEFAULT_NUAGE_PROJECT_NAME = "Vibe CLI"
+_AMBIGUOUS_CREATE_STATUS_CODES = frozenset({504})
+_AMBIGUOUS_REQUEST_ERRORS: tuple[type[httpx.RequestError], ...] = (
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+)
 
 
 class NuageTextPart(BaseModel):
@@ -88,12 +97,16 @@ class NuageClient:
         *,
         client: httpx.AsyncClient | None = None,
         timeout: float = 60.0,
+        max_start_attempts: int = 3,
+        retry_delay_seconds: float = 0.5,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
+        self._max_start_attempts = max(1, max_start_attempts)
+        self._retry_delay_seconds = max(0.0, retry_delay_seconds)
 
     async def __aenter__(self) -> NuageClient:
         if self._client is None:
@@ -128,11 +141,37 @@ class NuageClient:
         }
 
     async def start(self, request: NuageRequest) -> NuageResponse:
-        response = await self._http_client.post(
-            f"{self._base_url}/api/v1/code/sessions",
-            headers=self._headers(),
-            json=request.model_dump(mode="json", by_alias=True, exclude_none=True),
-        )
+        response: httpx.Response | None = None
+        for attempt in range(self._max_start_attempts):
+            try:
+                response = await self._http_client.post(
+                    f"{self._base_url}/api/v1/code/sessions",
+                    headers=self._headers(),
+                    json=request.model_dump(
+                        mode="json", by_alias=True, exclude_none=True
+                    ),
+                )
+            except _AMBIGUOUS_REQUEST_ERRORS as e:
+                if attempt < self._max_start_attempts - 1:
+                    await asyncio.sleep(self._retry_delay_seconds)
+                    continue
+                raise self._ambiguous_create_error() from e
+
+            if (
+                response.status_code in _AMBIGUOUS_CREATE_STATUS_CODES
+                and attempt < self._max_start_attempts - 1
+            ):
+                await asyncio.sleep(self._retry_delay_seconds)
+                continue
+
+            break
+
+        if response is None:
+            raise self._ambiguous_create_error()
+
+        if response.status_code in _AMBIGUOUS_CREATE_STATUS_CODES:
+            raise self._ambiguous_create_error(http_status_code=response.status_code)
+
         if not response.is_success:
             raise ServiceTeleportError(
                 f"Vibe Code Web start failed "
@@ -158,3 +197,16 @@ class NuageClient:
                     failure_kind="invalid_json", http_status_code=response.status_code
                 ),
             ) from e
+
+    @staticmethod
+    def _ambiguous_create_error(
+        http_status_code: int | None = None,
+    ) -> ServiceTeleportError:
+        details = TeleportFailureDetails(failure_kind="ambiguous_create")
+        if http_status_code is not None:
+            details["http_status_code"] = http_status_code
+        return ServiceTeleportError(
+            "Vibe Code Web did not confirm session creation after retrying. "
+            "Check Vibe Code Web before trying again.",
+            telemetry_details=details,
+        )

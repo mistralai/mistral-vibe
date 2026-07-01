@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 import sys
 from typing import Final
 
@@ -34,6 +35,27 @@ def get_platform_id() -> str:
     raw ``sys.platform`` value for unknown platforms.
     """
     return _PLATFORM_IDS.get(sys.platform, sys.platform)
+
+
+def get_platform_version() -> str | None:
+    match get_platform_id():
+        case "darwin":
+            version = platform.mac_ver()[0] or platform.release()
+        case "windows":
+            version = platform.version() or platform.release()
+        case "linux":
+            version = _linux_os_version() or platform.release()
+        case _:
+            version = platform.release() or platform.version()
+    return version or None
+
+
+def _linux_os_version() -> str | None:
+    try:
+        os_release = platform.freedesktop_os_release()
+    except OSError:
+        return None
+    return os_release.get("VERSION_ID") or os_release.get("VERSION")
 
 
 def get_platform_display_name() -> str:

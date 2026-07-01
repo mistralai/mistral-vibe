@@ -17,7 +17,8 @@ def test_help_shows_auto_approve_flag(
     output = capsys.readouterr().out
     assert "--auto-approve" in output
     assert "--yolo" in output
-    assert "Shortcut for --agent auto-approve" in output
+    assert "Approves all tool calls without prompting" in output
+    assert "selected agent" in output
 
 
 def test_help_shows_check_upgrade_flag(
@@ -47,13 +48,12 @@ def test_yolo_alias_selects_auto_approve(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.parametrize("flag", ["--auto-approve", "--yolo"])
-def test_auto_approve_aliases_conflict_with_agent(
-    flag: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_auto_approve_aliases_can_be_combined_with_agent(
+    flag: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("sys.argv", ["vibe", "--agent", "plan", flag])
+    monkeypatch.setattr("sys.argv", ["vibe", "--agent", "lean", flag])
 
-    with pytest.raises(SystemExit) as exc_info:
-        parse_arguments()
+    args = parse_arguments()
 
-    assert exc_info.value.code == 2
-    assert "not allowed with argument --agent" in capsys.readouterr().err
+    assert args.agent == "lean"
+    assert args.auto_approve is True

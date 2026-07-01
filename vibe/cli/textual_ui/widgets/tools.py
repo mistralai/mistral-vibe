@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from rich.markup import escape
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.content import Content
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.collapsible import (
@@ -17,7 +17,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import (
     NoMarkupStatic,
     NonSelectableStatic,
 )
-from vibe.cli.textual_ui.widgets.status_message import StatusMessage
+from vibe.cli.textual_ui.widgets.status_message import IndicatorState, StatusMessage
 from vibe.cli.textual_ui.widgets.tool_widgets import (
     LINKIFY_RESULT_TOOLS,
     ToolResultWidget,
@@ -126,16 +126,12 @@ class ToolCallMessage(StatusMessage):
 
     def show_muted(self) -> None:
         # Neutral grey square with the call summary -- used for an error whose
-        # verdict is still unknown and for a user-cancelled call.
-        self.muted = True
-        self.success = True
-        self.stop_spinning(success=True)
+        # verdict is still unknown, a user-declined call, and a cancelled call.
+        self.settle(IndicatorState.MUTED)
 
     def escalate_error(self) -> None:
         # No recovery followed: promote the held square to a hard red cross.
-        self.muted = False
-        self.success = False
-        self.update_display()
+        self.settle(IndicatorState.ERROR)
 
 
 class ToolResultMessage(ClickWithoutDragMixin, Static):
@@ -177,6 +173,11 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             if self._event is not None and self._event.error:
                 # Start muted; the verdict (recoverable vs terminal) lands later.
                 self._call_widget.show_muted()
+            elif self._event is not None and self._event.skipped:
+                # A declined/denied call is the user's choice, not a failure.
+                self._call_widget.show_muted()
+                result_text, result_suffix = self._get_result_text()
+                self._call_widget.set_result_text(result_text, result_suffix)
             else:
                 success = self._determine_success()
                 self._call_widget.stop_spinning(success=success)
@@ -251,7 +252,9 @@ class ToolResultMessage(ClickWithoutDragMixin, Static):
             # Only the inline "Error" span is ever colored; escalation changes the
             # call icon to a red cross but leaves this folded body untouched.
             line_count = len(self._event.error.strip("\n").split("\n"))
-            detail = Static(f"[$error]Error[/]: {escape(self._event.error)}")
+            detail = Static(
+                Content.from_markup("[$error]Error[/]: ") + Content(self._event.error)
+            )
             await self._content_container.mount(
                 CollapsibleSection(detail, collapsed_label=lines_label(line_count))
             )

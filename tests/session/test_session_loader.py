@@ -217,6 +217,26 @@ class TestSessionLoaderFindLatestSession:
         )
         assert result == expected
 
+    def test_find_latest_session_matches_unnormalized_stored_cwd(
+        self, session_config: SessionLoggingConfig, create_test_session, tmp_path: Path
+    ) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        unnormalized = project.parent / "sub" / ".." / "project"
+
+        expected = create_test_session(
+            Path(session_config.save_dir),
+            "unnormalized-session",
+            working_directory=unnormalized,
+        )
+
+        assert str(unnormalized) != str(project.resolve())
+
+        result = SessionLoader.find_latest_session(
+            session_config, working_directory=project.resolve()
+        )
+        assert result == expected
+
     def test_find_latest_session_nonexistent_save_dir(self) -> None:
         """Test finding latest session when save directory doesn't exist."""
         # Modify config to point to non-existent directory

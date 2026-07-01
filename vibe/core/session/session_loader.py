@@ -40,6 +40,17 @@ class SessionLoader:
         return messages or None
 
     @staticmethod
+    def _same_working_directory(stored: Any, working_directory: Path) -> bool:
+        if not isinstance(stored, str):
+            return False
+        if stored == str(working_directory):
+            return True
+        try:
+            return Path(stored).resolve() == working_directory.resolve()
+        except OSError:
+            return False
+
+    @staticmethod
     def _read_validated_session(
         session_dir: Path, working_directory: Path | None = None
     ) -> dict[str, Any] | None:
@@ -57,7 +68,9 @@ class SessionLoader:
                 session_working_directory = (metadata.get("environment") or {}).get(
                     "working_directory"
                 )
-                if session_working_directory != str(working_directory):
+                if not SessionLoader._same_working_directory(
+                    session_working_directory, working_directory
+                ):
                     return None
 
             messages = SessionLoader._parse_message_lines(read_safe(messages_path).text)

@@ -62,6 +62,53 @@ def acp_agent_with_session_config(
     return vibe_acp_agent, client
 
 
+@pytest.mark.asyncio
+async def test_load_session_honors_default_agent(
+    backend: FakeBackend,
+    temp_session_dir: Path,
+    create_test_session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_config = SessionLoggingConfig(
+        save_dir=str(temp_session_dir), session_prefix="session", enabled=True
+    )
+    config = build_test_vibe_config(
+        default_agent=BuiltinAgentName.PLAN,
+        models=[
+            ModelConfig(
+                name="devstral-latest", provider="mistral", alias="devstral-latest"
+            )
+        ],
+        session_logging=session_config,
+    )
+
+    class PatchedAgentLoop(AgentLoop):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **{**kwargs, "backend": backend})
+            self._base_config = config
+            self.agent_manager.invalidate_config()
+
+    monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)
+    monkeypatch.setattr(VibeAcpAgentLoop, "_load_config", lambda self: config)
+
+    vibe_acp_agent = VibeAcpAgentLoop()
+    client = FakeClient()
+    vibe_acp_agent.on_connect(client)
+    client.on_connect(vibe_acp_agent)
+
+    session_id = "test-sess-12345678"
+    cwd = str(Path.cwd())
+    create_test_session(temp_session_dir, session_id, cwd)
+
+    response = await vibe_acp_agent.load_session(
+        cwd=cwd, mcp_servers=[], session_id=session_id
+    )
+
+    assert response is not None
+    assert response.modes is not None
+    assert response.modes.current_mode_id == BuiltinAgentName.PLAN
+
+
 class TestLoadSession:
     @pytest.mark.asyncio
     async def test_load_session_response_structure(

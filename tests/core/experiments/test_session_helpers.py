@@ -12,7 +12,7 @@ from vibe.core.experiments.session import (
     hydrate_experiments_from_session,
     initialize_experiments,
 )
-from vibe.core.telemetry.types import TerminalEmulator
+from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
 
 
 class _StubClient(RemoteEvalClient):
@@ -50,7 +50,7 @@ async def test_initialize_returns_false_when_telemetry_disabled(
         config=_make_config(enable_telemetry=False),
         manager=manager,
         session_logger=session_logger,
-        entrypoint_metadata=None,
+        launch_context=None,
     )
 
     assert result is False
@@ -73,7 +73,7 @@ async def test_initialize_returns_false_when_experiments_disabled(
         config=_make_config(enable_experiments=False),
         manager=manager,
         session_logger=session_logger,
-        entrypoint_metadata=None,
+        launch_context=None,
     )
 
     assert result is False
@@ -97,7 +97,7 @@ async def test_initialize_returns_false_when_no_mistral_provider(
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
-        entrypoint_metadata=None,
+        launch_context=None,
     )
 
     assert result is False
@@ -131,7 +131,7 @@ async def test_initialize_returns_false_when_remote_eval_fails(
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
-        entrypoint_metadata=None,
+        launch_context=None,
     )
 
     assert result is False
@@ -164,7 +164,7 @@ async def test_initialize_returns_true_and_persists_when_remote_eval_succeeds(
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
-        entrypoint_metadata=None,
+        launch_context=None,
     )
 
     assert result is True
@@ -192,8 +192,13 @@ async def test_initialize_uses_provided_terminal_emulator(
         config=_make_config(),
         manager=manager,
         session_logger=session_logger,
-        entrypoint_metadata=None,
-        terminal_emulator=TerminalEmulator.VSCODE,
+        launch_context=LaunchContext(
+            agent_entrypoint="cli",
+            agent_version="1.0.0",
+            client_name="vibe_cli",
+            client_version="1.0.0",
+            terminal_emulator=TerminalEmulator.VSCODE,
+        ),
     )
 
     assert result is True

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.4] - 2026-07-01
+
+### Changed
+
+- Whole-line content now shown in the edit diff
+- Declined or skipped tool calls now render as a muted square
+- Auto-approve now works in lean mode
+
+### Fixed
+
+- Session resume with `--continue` now matches the resolved working directory
+- Long tool call titles now wrap instead of being cropped
+- Duplicate `mcp_servers` names in config are now rejected
+- MarkupError crash when a tool error contained square brackets
+- Teleport now uses the matched GitHub remote
+- Raw compaction user messages are now preserved
+- ACP now honors `default_agent` on new and resumed sessions
+- Ambiguous teleport session creates are now retried
+
+
 ## [2.18.3] - 2026-06-30
 
 ### Added

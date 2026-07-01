@@ -65,11 +65,11 @@ class TestTeleportAgentLoopTelemetry:
 
         assert isinstance(events[-1], TeleportCompleteEvent)
         assert telemetry_events[-1]["event_name"] == "vibe.teleport_completed"
-        assert telemetry_events[-1]["properties"] == {
+        assert {
             "push_required": True,
             "nb_session_messages": 1,
             "session_id": agent_loop.session_id,
-        }
+        }.items() <= telemetry_events[-1]["properties"].items()
 
     @pytest.mark.asyncio
     async def test_teleport_to_vibe_code_sends_failed_stage(
@@ -101,14 +101,14 @@ class TestTeleportAgentLoopTelemetry:
                 pass
 
         assert telemetry_events[-1]["event_name"] == "vibe.teleport_failed"
-        assert telemetry_events[-1]["properties"] == {
+        assert {
             "stage": "workflow_start",
             "error_class": "ServiceTeleportError",
             "push_required": False,
             "nb_session_messages": 1,
             "http_status_code": 502,
             "session_id": agent_loop.session_id,
-        }
+        }.items() <= telemetry_events[-1]["properties"].items()
         assert "api-key-123" not in str(telemetry_events[-1]["properties"])
 
     @pytest.mark.asyncio
@@ -146,13 +146,13 @@ class TestTeleportAgentLoopTelemetry:
             await gen.asend(TeleportPushResponseEvent(approved=False))
 
         assert telemetry_events[-1]["event_name"] == "vibe.teleport_failed"
-        assert telemetry_events[-1]["properties"] == {
+        assert {
             "stage": "cancelled",
             "error_class": "ServiceTeleportError",
             "push_required": True,
             "nb_session_messages": 1,
             "session_id": agent_loop.session_id,
-        }
+        }.items() <= telemetry_events[-1]["properties"].items()
 
     @pytest.mark.asyncio
     async def test_teleport_to_vibe_code_sends_failed_when_task_cancelled(
@@ -181,13 +181,13 @@ class TestTeleportAgentLoopTelemetry:
             await gen.asend(None)
 
         assert telemetry_events[-1]["event_name"] == "vibe.teleport_failed"
-        assert telemetry_events[-1]["properties"] == {
+        assert {
             "stage": "cancelled",
             "error_class": "CancelledError",
             "push_required": False,
             "nb_session_messages": 1,
             "session_id": agent_loop.session_id,
-        }
+        }.items() <= telemetry_events[-1]["properties"].items()
 
     @pytest.mark.asyncio
     async def test_teleport_to_vibe_code_sends_failed_when_consumer_closes_generator(
@@ -215,10 +215,10 @@ class TestTeleportAgentLoopTelemetry:
         await gen.aclose()
 
         assert telemetry_events[-1]["event_name"] == "vibe.teleport_failed"
-        assert telemetry_events[-1]["properties"] == {
+        assert {
             "stage": "cancelled",
             "error_class": "CancelledError",
             "push_required": False,
             "nb_session_messages": 1,
             "session_id": agent_loop.session_id,
-        }
+        }.items() <= telemetry_events[-1]["properties"].items()

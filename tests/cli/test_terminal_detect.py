@@ -37,6 +37,7 @@ def test_detects_cursor_from_vscode_environment() -> None:
 @pytest.mark.parametrize(
     ("term_program", "terminal"),
     [
+        ("Apple_Terminal", Terminal.APPLE_TERMINAL),
         ("iterm.app", Terminal.ITERM2),
         ("wezterm", Terminal.WEZTERM),
         ("ghostty", Terminal.GHOSTTY),
@@ -58,6 +59,7 @@ def test_detects_term_program_mapping(term_program: str, terminal: Terminal) -> 
         ("ALACRITTY_SOCKET", Terminal.ALACRITTY),
         ("ALACRITTY_LOG", Terminal.ALACRITTY),
         ("WT_SESSION", Terminal.WINDOWS_TERMINAL),
+        ("WT_PROFILE_ID", Terminal.WINDOWS_TERMINAL),
     ],
 )
 def test_detects_environment_marker_fallback(env_var: str, terminal: Terminal) -> None:

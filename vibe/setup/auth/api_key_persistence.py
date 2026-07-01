@@ -9,7 +9,7 @@ from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig, VibeConfig
 from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.telemetry.send import TelemetryClient
-from vibe.core.telemetry.types import EntrypointMetadata
+from vibe.core.telemetry.types import LaunchContext
 from vibe.core.types import Backend
 from vibe.core.utils.keyring import delete_api_key_from_keyring, set_api_key_in_keyring
 
@@ -48,7 +48,7 @@ def persist_api_key(
     provider: ProviderConfig,
     api_key: str,
     *,
-    entrypoint_metadata: EntrypointMetadata | None = None,
+    launch_context: LaunchContext | None = None,
 ) -> str:
     env_key = provider.api_key_env_var
     if not env_key:
@@ -75,8 +75,7 @@ def persist_api_key(
     if provider.backend == Backend.MISTRAL:
         try:
             telemetry = TelemetryClient(
-                config_getter=VibeConfig,
-                entrypoint_metadata_getter=lambda: entrypoint_metadata,
+                config_getter=VibeConfig, launch_context=launch_context
             )
             telemetry.send_onboarding_api_key_added()
         except Exception:

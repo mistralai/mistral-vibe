@@ -365,3 +365,35 @@ class TestACPNewSession:
 
         assert session_response.models is not None
         assert session_response.models.current_model_id == "devstral-small"
+
+
+@pytest.mark.asyncio
+async def test_new_session_honors_default_agent(
+    backend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = build_test_vibe_config(
+        default_agent=BuiltinAgentName.PLAN,
+        models=[
+            ModelConfig(
+                name="devstral-latest", provider="mistral", alias="devstral-latest"
+            )
+        ],
+    )
+
+    class PatchedAgentLoop(AgentLoop):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **{**kwargs, "backend": backend})
+            self._base_config = config
+            self.agent_manager.invalidate_config()
+
+    monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)
+    monkeypatch.setattr(VibeAcpAgentLoop, "_load_config", lambda self: config)
+
+    acp_agent_loop = _create_acp_agent()
+
+    session_response = await acp_agent_loop.new_session(
+        cwd=str(Path.cwd()), mcp_servers=[]
+    )
+
+    assert session_response.modes is not None
+    assert session_response.modes.current_mode_id == BuiltinAgentName.PLAN

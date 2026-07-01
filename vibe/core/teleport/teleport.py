@@ -118,14 +118,15 @@ class TeleportService:
         if git_info.branch is None:
             raise ServiceTeleportError("Teleport requires a checked-out branch.")
 
+        remote = git_info.remote_name
         yield TeleportCheckingGitEvent()
-        await self._git.fetch()
+        await self._git.fetch(remote)
         commit_pushed, branch_pushed = await asyncio.gather(
-            self._git.is_commit_pushed(git_info.commit, fetch=False),
-            self._git.is_branch_pushed(fetch=False),
+            self._git.is_commit_pushed(git_info.commit, remote=remote, fetch=False),
+            self._git.is_branch_pushed(remote=remote, fetch=False),
         )
         if not commit_pushed or not branch_pushed:
-            unpushed_count = await self._git.get_unpushed_commit_count()
+            unpushed_count = await self._git.get_unpushed_commit_count(remote)
             response = yield TeleportPushRequiredEvent(
                 unpushed_count=max(1, unpushed_count),
                 branch_not_pushed=not branch_pushed,
@@ -137,7 +138,7 @@ class TeleportService:
                 raise ServiceTeleportError("Teleport cancelled: changes not pushed.")
 
             yield TeleportPushingEvent()
-            await self._push_or_fail()
+            await self._push_or_fail(remote)
 
         yield TeleportStartingWorkflowEvent()
 
@@ -146,9 +147,9 @@ class TeleportService:
         )
         yield TeleportCompleteEvent(url=result.url)
 
-    async def _push_or_fail(self) -> None:
-        if not await self._git.push_current_branch():
-            raise ServiceTeleportError("Failed to push current branch to remote.")
+    async def _push_or_fail(self, remote: str) -> None:
+        if not await self._git.push_current_branch(remote):
+            raise ServiceTeleportError(f"Failed to push current branch to {remote}.")
 
     def _validate_config(self) -> None:
         if not self._vibe_code_api_key:

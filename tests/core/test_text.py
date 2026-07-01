@@ -1,52 +1,31 @@
 from __future__ import annotations
 
-from vibe.core.utils.text import snippet_start_line, snippet_start_lines
+from vibe.core.utils.text import line_contexts
 
 
-class TestSnippetStartLine:
-    def test_finds_line_number(self) -> None:
-        assert snippet_start_line("a\nb\nc\nd\n", "c") == 3
-
-    def test_first_line(self) -> None:
-        assert snippet_start_line("hello\nworld", "hello") == 1
-
-    def test_multiline_snippet(self) -> None:
-        assert snippet_start_line("a\nb\nc", "\nb\n") == 2
-
-    def test_first_occurrence_when_repeated(self) -> None:
-        assert snippet_start_line("x\nx\nx", "x") == 1
-
-    def test_leading_newline_anchors_first_content_line(self) -> None:
-        assert snippet_start_line("bar\nx\nbar", "\nbar") == 3
-
-    def test_returns_none_when_exact_snippet_absent(self) -> None:
-        assert snippet_start_line("a\nb\nfoo", "foo\n") is None
-
-    def test_not_found(self) -> None:
-        assert snippet_start_line("hello\nworld", "missing") is None
-
-    def test_blank_snippet(self) -> None:
-        assert snippet_start_line("hello", "\n") is None
-
-
-class TestSnippetStartLines:
+class TestLineContexts:
     def test_single_occurrence(self) -> None:
-        assert snippet_start_lines("a\nb\nc", "b") == [2]
+        assert line_contexts("foo = bar + baz", "bar") == [(1, "foo = ", " + baz")]
 
-    def test_all_occurrences(self) -> None:
-        assert snippet_start_lines("x\ny\nx\nz\nx", "x") == [1, 3, 5]
+    def test_per_occurrence_distinct_context(self) -> None:
+        content = "x = bar + 1\ny = bar - 2\nz = bar\n"
+        assert line_contexts(content, "bar") == [
+            (1, "x = ", " + 1"),
+            (2, "y = ", " - 2"),
+            (3, "z = ", ""),
+        ]
 
-    def test_repeated_on_same_line(self) -> None:
-        assert snippet_start_lines("x x x", "x") == [1, 1, 1]
+    def test_snippet_ending_on_newline_has_empty_suffix(self) -> None:
+        content = "keep1\nremove\nkeep2\n"
+        assert line_contexts(content, "remove\n") == [(2, "", "")]
 
-    def test_non_overlapping(self) -> None:
-        assert snippet_start_lines("aaaa", "aa") == [1, 1]
-
-    def test_multiline_snippet_occurrences(self) -> None:
-        assert snippet_start_lines("a\nb\nc\na\nb", "a\nb") == [1, 4]
+    def test_leading_newline_anchors_at_match_position(self) -> None:
+        # The leading newline belongs to lineA, so the whole-line expansion must
+        # include lineA (the line the edit starts modifying) anchored at line 1.
+        assert line_contexts("lineA\nlineB", "\nlineB") == [(1, "lineA", "")]
 
     def test_not_found(self) -> None:
-        assert snippet_start_lines("hello\nworld", "missing") == []
+        assert line_contexts("hello\nworld", "missing") == []
 
     def test_blank_snippet(self) -> None:
-        assert snippet_start_lines("hello", "\n") == []
+        assert line_contexts("hello", "\n") == []
