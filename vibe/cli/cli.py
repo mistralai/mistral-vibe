@@ -71,14 +71,15 @@ def get_prompt_from_stdin() -> str | None:
     if sys.stdin.isatty():
         return None
     try:
-        if content := sys.stdin.read().strip():
-            sys.stdin = sys.__stdin__ = open("/dev/tty")
-            return content
+        content = sys.stdin.read().strip()
     except KeyboardInterrupt:
-        pass
-    except OSError:
         return None
-
+    if content:
+        try:
+            sys.stdin = sys.__stdin__ = open("/dev/tty")
+        except OSError:
+            pass
+        return content
     return None
 
 
