@@ -1235,6 +1235,16 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_model_picker_app_model_selected(
         self, message: ModelPickerApp.ModelSelected
     ) -> None:
+        # Grab new model
+        new_model = next(m for m in self.config.models if m.alias == message.alias)
+        current_model = self.config.get_active_model()
+        
+        # Downgrade check: reasoning -> non-reasoning with history
+        if (current_model.thinking != "off" and new_model.thinking == "off" and len(self.agent_loop.messages) > 1): # >1 because index 0 is system message
+        	# clear history automatically
+        	await self._clear_history()
+        	await self._mount_and_scroll(WarningMessage("History cleared: selected model doesn't support reasoning"))
+        
         VibeConfig.save_updates({"active_model": message.alias})
         await self._reload_config()
         await self._switch_to_input_app()
@@ -1247,6 +1257,16 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_thinking_picker_app_thinking_selected(
         self, message: ThinkingPickerApp.ThinkingSelected
     ) -> None:
+        current_model = self.config.get_active_model()
+        current_thinking = current_model.thinking
+        new_thinking = message.level
+
+        # Downgrade check: reasoning -> off with history
+        if (current_thinking != "off" and new_thinking == "off" and len(self.agent_loop.messages) > 1):
+            # clear history automatically
+            await self._clear_history()
+            await self._mount_and_scroll(WarningMessage("History cleared: reasoning disabled"))
+
         self.config.set_thinking(message.level)
         await self._reload_config()
         await self._switch_to_input_app()
