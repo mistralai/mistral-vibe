@@ -112,21 +112,23 @@ class OpenAIAdapter(APIAdapter):
         thinking: str = "off",
     ) -> PreparedRequest:
         field_name = provider.reasoning_field_name
+        exclude = {
+            "message_id",
+            "reasoning_message_id",
+            "reasoning_state",
+            "injected",
+            "images",
+            "user_display_content",
+        }
+        # Models with thinking disabled can reject reasoning input (e.g. after
+        # switching from a reasoning model mid-session), so past reasoning
+        # content is dropped from the request.
+        if thinking == "off":
+            exclude.add("reasoning_content")
         converted_messages = [
             self._user_with_images_to_parts(
                 self._reasoning_to_api(
-                    msg.model_dump(
-                        exclude_none=True,
-                        exclude={
-                            "message_id",
-                            "reasoning_message_id",
-                            "reasoning_state",
-                            "injected",
-                            "images",
-                            "user_display_content",
-                        },
-                    ),
-                    field_name,
+                    msg.model_dump(exclude_none=True, exclude=exclude), field_name
                 ),
                 msg,
             )

@@ -22,7 +22,9 @@ from vibe.core.types import (
 class ReasoningAdapter(APIAdapter):
     endpoint: ClassVar[str] = "/chat/completions"
 
-    def _convert_message(self, msg: LLMMessage) -> dict[str, Any]:
+    def _convert_message(
+        self, msg: LLMMessage, *, include_reasoning: bool
+    ) -> dict[str, Any]:
         match msg.role:
             case Role.system:
                 return {"role": "system", "content": msg.content or ""}
@@ -38,7 +40,9 @@ class ReasoningAdapter(APIAdapter):
                     return {"role": "user", "content": parts}
                 return {"role": "user", "content": msg.content or ""}
             case Role.assistant:
-                return self._convert_assistant_message(msg)
+                return self._convert_assistant_message(
+                    msg, include_reasoning=include_reasoning
+                )
             case Role.tool:
                 result: dict[str, Any] = {
                     "role": "tool",
@@ -49,10 +53,12 @@ class ReasoningAdapter(APIAdapter):
                     result["name"] = msg.name
                 return result
 
-    def _convert_assistant_message(self, msg: LLMMessage) -> dict[str, Any]:
+    def _convert_assistant_message(
+        self, msg: LLMMessage, *, include_reasoning: bool
+    ) -> dict[str, Any]:
         result: dict[str, Any] = {"role": "assistant"}
 
-        if msg.reasoning_content:
+        if include_reasoning and msg.reasoning_content:
             content: list[dict[str, Any]] = [
                 {
                     "type": "thinking",
@@ -130,7 +136,13 @@ class ReasoningAdapter(APIAdapter):
         api_key: str | None = None,
         thinking: str = "off",
     ) -> PreparedRequest:
-        converted_messages = [self._convert_message(msg) for msg in messages]
+        # Models with thinking disabled reject thinking blocks in the input
+        # (e.g. after switching from a reasoning model mid-session), so past
+        # reasoning content is dropped from the request.
+        converted_messages = [
+            self._convert_message(msg, include_reasoning=thinking != "off")
+            for msg in messages
+        ]
 
         payload = self._build_payload(
             model_name=model_name,
