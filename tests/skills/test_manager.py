@@ -51,6 +51,16 @@ class TestSkillManagerDiscovery:
         assert "skill-two" in manager.available_skills
         assert "skill-three" in manager.available_skills
 
+    def test_discovers_skill_with_dots_in_name(self, skills_dir: Path) -> None:
+        create_skill(
+            skills_dir, "ama.accounting.mailbox.vendor-receipts", "A namespaced skill"
+        )
+
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        manager = SkillManager(lambda: config)
+
+        assert "ama.accounting.mailbox.vendor-receipts" in manager.available_skills
+
     def test_ignores_directories_without_skill_md(self, skills_dir: Path) -> None:
         # Create a directory that's not a skill
         not_a_skill = skills_dir / "not-a-skill"

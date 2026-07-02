@@ -59,6 +59,22 @@ class TestSkillMetadata:
             SkillMetadata(name="-test-skill-", description="A test skill")
         assert "name" in str(exc_info.value).lower()
 
+    def test_accepts_dots_in_name(self) -> None:
+        meta = SkillMetadata(
+            name="ama.accounting.mailbox.vendor-receipts", description="A test skill"
+        )
+        assert meta.name == "ama.accounting.mailbox.vendor-receipts"
+
+    def test_raises_error_for_consecutive_dots(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            SkillMetadata(name="test..skill", description="A test skill")
+        assert "name" in str(exc_info.value).lower()
+
+    def test_raises_error_for_leading_trailing_dots(self) -> None:
+        with pytest.raises(ValidationError) as exc_info:
+            SkillMetadata(name=".test.skill.", description="A test skill")
+        assert "name" in str(exc_info.value).lower()
+
     def test_parses_allowed_tools_from_space_delimited_string(self) -> None:
         meta = SkillMetadata(
             name="test",
