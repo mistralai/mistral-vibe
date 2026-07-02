@@ -3,11 +3,10 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 import html
-import os
 from pathlib import Path
 from string import Template
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from vibe.core.config import VibeConfig
 from vibe.core.config.harness_files import get_harness_files_manager
@@ -17,6 +16,7 @@ from vibe.core.paths import VIBE_HOME
 from vibe.core.prompts import MissingPromptFileError, UtilityPrompt, load_system_prompt
 from vibe.core.utils import (
     get_platform_display_name,
+    get_shell_executable,
     is_dangerous_directory,
     is_windows,
 )
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from vibe.core.config import ProjectContextConfig
     from vibe.core.experiments import ExperimentManager
     from vibe.core.skills.manager import SkillManager
+    from vibe.core.tools.builtins.bash import BashToolConfig
     from vibe.core.tools.manager import ToolManager
 
 _git_status_cache: dict[Path, str] = {}
@@ -148,24 +149,23 @@ class ProjectContextProvider:
         )
 
 
-def _get_default_shell() -> str:
-    """Get the default shell used by asyncio.create_subprocess_shell.
+def _get_os_system_prompt(tool_manager: ToolManager | None = None) -> str:
+    bash_config: BashToolConfig | None = None
+    if tool_manager is not None:
+        try:
+            from vibe.core.tools.builtins.bash import BashToolConfig as BTC
 
-    On Unix, uses $SHELL env var and default to sh.
-    On Windows, this is COMSPEC or cmd.exe.
-    """
-    if is_windows():
-        return os.environ.get("COMSPEC", "cmd.exe")
-    return os.environ.get("SHELL", "sh")
+            config = tool_manager.get_tool_config("bash")
+            bash_config = cast(BTC, config)
+        except Exception:
+            pass
 
-
-def _get_os_system_prompt() -> str:
-    shell = _get_default_shell()
+    shell = get_shell_executable(bash_config)
     platform_name = get_platform_display_name()
     prompt = f"The operating system is {platform_name} with shell `{shell}`"
 
     if is_windows():
-        prompt += "\n" + _get_windows_system_prompt()
+        prompt += "\n" + _get_windows_system_prompt(bash_config)
     return prompt
 
 
@@ -174,15 +174,27 @@ def _format_current_date() -> str:
     return f"{today.isoformat()} ({today.strftime('%A')})"
 
 
-def _get_windows_system_prompt() -> str:
+def _get_windows_system_prompt(bash_config: BashToolConfig | None = None) -> str:
+    shell_executable = get_shell_executable(bash_config)
+    if not is_windows() or (shell_executable and "sh" in Path(shell_executable).name):
+        rules = (
+            f"- {shell_executable} is available ({'Git Bash / Mingw64 / Cygwin' if is_windows() else 'POSIX shell'}) — Unix commands like `ls`, `grep`, `cat` work\n"
+            "- Use forward slashes (`/`) in paths for bash, backslashes (`\\\\`) for cmd\n"
+            "- Check command availability with: `which command`\n"
+        )
+    else:
+        rules = (
+            "- DO NOT use Unix commands like `ls`, `grep`, `cat` - they won't work on Windows\n"
+            "- Use: `dir` (Windows) for directory listings\n"
+            "- Use: backslashes (\\\\) for paths\n"
+            "- Check command availability with: `where command` (Windows)\n"
+            "- Script shebang: Not applicable on Windows\n"
+        )
+
     return (
-        "### COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
-        "- DO NOT use Unix commands like `ls`, `grep`, `cat` - they won't work on Windows\n"
-        "- Use: `dir` (Windows) for directory listings\n"
-        "- Use: backslashes (\\\\) for paths\n"
-        "- Check command availability with: `where command` (Windows)\n"
-        "- Script shebang: Not applicable on Windows\n"
-        "### ALWAYS verify commands work on the detected platform before suggesting them"
+        "COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
+        + rules
+        + "### ALWAYS verify commands work on the detected platform before suggesting them"
     )
 
 
@@ -327,7 +339,7 @@ def get_universal_system_prompt(  # noqa: PLR0912
         sections.append(f"Your model name is: `{config.active_model}`")
 
     if config.include_prompt_detail:
-        sections.append(_get_os_system_prompt())
+        sections.append(_get_os_system_prompt(tool_manager))
         tool_prompts = []
         for tool_class in tool_manager.available_tools.values():
             if prompt := tool_class.get_tool_prompt():
