@@ -411,7 +411,11 @@ class GenericBackend:
                 await response.aread()
             response.raise_for_status()
             async for line in iter_sse_lines(response):
-                if line.strip() == "":
+                stripped = line.strip()
+                # Skip blank lines and SSE comment lines: per the SSE spec any
+                # line beginning with ":" is a comment (e.g. keep-alive
+                # heartbeats), so ignore them instead of raising below.
+                if stripped == "" or stripped.startswith(":"):
                     continue
 
                 DELIM_CHAR = ":"
