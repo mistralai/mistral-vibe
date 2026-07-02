@@ -291,7 +291,13 @@ class Bash(
     BaseTool[BashArgs, BashResult, BashToolConfig, BaseToolState],
     ToolUIData[BashArgs, BashResult],
 ):
-    description: ClassVar[str] = "Run a one-off bash command and capture its output."
+    description: ClassVar[str] = (
+        "Run a one-off shell command and capture its output. Commands execute "
+        "directly on the user's machine, in the current working directory, with "
+        "the user's permissions. There is no sandbox or isolation layer: commands "
+        "can read and modify the user's files and affect the host system. Never "
+        "describe this tool as sandboxed or isolated."
+    )
 
     @classmethod
     def format_call_display(cls, args: BashArgs) -> ToolCallDisplay:
