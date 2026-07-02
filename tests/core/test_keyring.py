@@ -441,6 +441,108 @@ def test_delete_raises_missing_when_all_services_are_missing(
     assert deleted == [(service, "CUSTOM_API_KEY") for service in _ALL_SERVICES]
 
 
+class _FakeWindowsCredentialStore:
+    """In-memory stand-in for WinVaultKeyring enforcing the credential blob limit."""
+
+    def __init__(self) -> None:
+        self.store: dict[tuple[str, str], str] = {}
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        if len(password.encode("utf-16-le")) > 2400:
+            raise OSError(1783, "CredWrite", "The stub received bad data.")
+        self.store[(service, username)] = password
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.store.get((service, username))
+
+    def delete_password(self, service: str, username: str) -> None:
+        if (service, username) not in self.store:
+            raise PasswordDeleteError()
+        del self.store[(service, username)]
+
+
+@pytest.fixture
+def windows_credential_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> _FakeWindowsCredentialStore:
+    fake = _FakeWindowsCredentialStore()
+    monkeypatch.setattr(keyring, "set_password", fake.set_password)
+    monkeypatch.setattr(keyring, "get_password", fake.get_password)
+    monkeypatch.setattr(keyring, "delete_password", fake.delete_password)
+    monkeypatch.setattr(
+        keyring_utils, "_uses_windows_credential_chunking", lambda: True
+    )
+    return fake
+
+
+_OVERSIZED_TOKEN = "t" * 3000
+
+
+def test_windows_oversized_secret_is_chunked_and_reads_back(
+    windows_credential_store: _FakeWindowsCredentialStore,
+) -> None:
+    set_api_key_in_keyring("CUSTOM_API_KEY", _OVERSIZED_TOKEN)
+    keyring_utils.clear_api_key_keyring_cache()
+
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") == _OVERSIZED_TOKEN
+    marker = windows_credential_store.store[(_CURRENT_SERVICE, "CUSTOM_API_KEY")]
+    assert marker == "__vibe-chunked-v1__:5"
+    assert all(
+        len(value.encode("utf-16-le")) <= 2400
+        for value in windows_credential_store.store.values()
+    )
+
+
+def test_windows_small_secret_is_stored_directly(
+    windows_credential_store: _FakeWindowsCredentialStore,
+) -> None:
+    set_api_key_in_keyring("CUSTOM_API_KEY", "small-key")
+
+    assert windows_credential_store.store == {
+        (_CURRENT_SERVICE, "CUSTOM_API_KEY"): "small-key"
+    }
+
+
+def test_windows_rewrite_with_fewer_chunks_removes_stale_entries(
+    windows_credential_store: _FakeWindowsCredentialStore,
+) -> None:
+    set_api_key_in_keyring("CUSTOM_API_KEY", _OVERSIZED_TOKEN)
+    set_api_key_in_keyring("CUSTOM_API_KEY", "u" * 1300)
+    keyring_utils.clear_api_key_keyring_cache()
+
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") == "u" * 1300
+    chunk_keys = [
+        username
+        for service, username in windows_credential_store.store
+        if service == _CURRENT_SERVICE and "__chunk_" in username
+    ]
+    assert sorted(chunk_keys) == [
+        "CUSTOM_API_KEY__chunk_0",
+        "CUSTOM_API_KEY__chunk_1",
+        "CUSTOM_API_KEY__chunk_2",
+    ]
+
+
+def test_windows_delete_removes_marker_and_chunks(
+    windows_credential_store: _FakeWindowsCredentialStore,
+) -> None:
+    set_api_key_in_keyring("CUSTOM_API_KEY", _OVERSIZED_TOKEN)
+
+    delete_api_key_from_keyring("CUSTOM_API_KEY")
+
+    assert windows_credential_store.store == {}
+
+
+def test_windows_missing_chunk_reads_as_absent(
+    windows_credential_store: _FakeWindowsCredentialStore,
+) -> None:
+    set_api_key_in_keyring("CUSTOM_API_KEY", _OVERSIZED_TOKEN)
+    keyring_utils.clear_api_key_keyring_cache()
+    del windows_credential_store.store[(_CURRENT_SERVICE, "CUSTOM_API_KEY__chunk_2")]
+
+    assert get_api_key_from_keyring("CUSTOM_API_KEY") is None
+
+
 def test_macos_set_recreates_item_with_security_stdin_and_unrestricted_acl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
