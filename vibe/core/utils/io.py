@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 from collections.abc import AsyncIterator, Iterator
 import contextlib
 from contextlib import asynccontextmanager
@@ -123,6 +124,46 @@ def decode_safe(
         text = raw.decode(encoding, errors=errors)
     text, newline = normalize_newlines(text)
     return ReadSafeResult(text, encoding, newline)
+
+
+class IncrementalSafeDecoder:
+    """Streaming counterpart of :func:`decode_safe`.
+
+    Decodes chunks optimistically as UTF-8 and, on the first invalid byte,
+    switches permanently to the subprocess/locale encoding (Windows OEM code
+    page for console output) with undecodable bytes replaced. Bytes buffered
+    across chunk boundaries are re-decoded with the fallback codec, so no
+    output is lost on the switch.
+    """
+
+    def __init__(self, *, from_subprocess: bool = False) -> None:
+        self._utf8 = codecs.getincrementaldecoder("utf-8")()
+        self._fallback: codecs.IncrementalDecoder | None = None
+        self._from_subprocess = from_subprocess
+
+    def _fallback_decoder(self) -> codecs.IncrementalDecoder:
+        preferred = _windows_oem_encoding() if self._from_subprocess else None
+        for encoding in (preferred, locale.getpreferredencoding(False)):
+            if not encoding:
+                continue
+            try:
+                return codecs.getincrementaldecoder(encoding)("replace")
+            except LookupError:
+                continue
+        return codecs.getincrementaldecoder("utf-8")("replace")
+
+    def decode(self, chunk: bytes, *, final: bool = False) -> str:
+        if self._fallback is not None:
+            return self._fallback.decode(chunk, final)
+        try:
+            return self._utf8.decode(chunk, final)
+        except UnicodeDecodeError:
+            # The strict UTF-8 decoder leaves its internal buffer untouched
+            # when it raises, so buffered tail bytes plus this chunk are
+            # exactly the bytes not yet turned into text.
+            pending = bytes(self._utf8.getstate()[0]) + chunk
+            self._fallback = self._fallback_decoder()
+            return self._fallback.decode(pending, final)
 
 
 def read_safe(path: Path, *, raise_on_error: bool = False) -> ReadSafeResult:
