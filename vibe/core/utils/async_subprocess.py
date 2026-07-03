@@ -60,6 +60,11 @@ async def kill_async_subprocess(
                     exc_info=True,
                 )
 
-        await proc.wait()
+        # Process.wait() only resolves once every pipe has hit EOF
+        # (BaseSubprocessTransport._try_finish); a detached grandchild holding
+        # an inherited pipe would stall it forever even though the child was
+        # just killed. returncode is set on process exit, so poll it instead.
+        while proc.returncode is None:
+            await asyncio.sleep(0.02)
     except (ProcessLookupError, PermissionError, OSError):
         pass

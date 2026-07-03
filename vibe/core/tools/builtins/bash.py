@@ -77,6 +77,37 @@ def _get_shell_executable() -> str | None:
     return os.environ.get("SHELL")
 
 
+_PIPE_DRAIN_GRACE_SECONDS = 2.0
+_PIPE_READ_CHUNK_BYTES = 65536
+
+
+async def _pump_stream(
+    stream: asyncio.StreamReader | None, buffer: bytearray, max_bytes: int
+) -> None:
+    # Reading continues past max_bytes (discarding) so a chatty child never
+    # blocks on a full pipe and can reach EOF.
+    if stream is None:
+        return
+    while chunk := await stream.read(_PIPE_READ_CHUNK_BYTES):
+        if len(buffer) < max_bytes:
+            buffer.extend(chunk[: max_bytes - len(buffer)])
+
+
+async def _wait_for_returncode(proc: asyncio.subprocess.Process, timeout: int) -> None:
+    # Process.wait() only resolves once every pipe has hit EOF
+    # (BaseSubprocessTransport._try_finish), so a detached child inheriting
+    # the pipes stalls it long after the command itself exited. returncode is
+    # set as soon as the process exits, so poll it instead.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    delay = 0.01
+    while proc.returncode is None:
+        if loop.time() >= deadline:
+            raise TimeoutError
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 0.25)
+
+
 def _get_base_env() -> dict[str, str]:
     base_env = {**os.environ, "CI": "true", "NONINTERACTIVE": "1", "NO_TTY": "1"}
 
@@ -530,22 +561,31 @@ class Bash(
                 **kwargs,
             )
 
+            stdout_buf = bytearray()
+            stderr_buf = bytearray()
+            pumps = [
+                asyncio.create_task(_pump_stream(proc.stdout, stdout_buf, max_bytes)),
+                asyncio.create_task(_pump_stream(proc.stderr, stderr_buf, max_bytes)),
+            ]
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
+                await _wait_for_returncode(proc, timeout)
             except TimeoutError:
                 await kill_async_subprocess(proc)
                 raise self._build_timeout_error(args.command, timeout)
+            finally:
+                await asyncio.wait(pumps, timeout=_PIPE_DRAIN_GRACE_SECONDS)
+                for pump in pumps:
+                    pump.cancel()
+                await asyncio.gather(*pumps, return_exceptions=True)
 
             stdout = (
-                decode_safe(stdout_bytes, from_subprocess=True).text[:max_bytes]
-                if stdout_bytes
+                decode_safe(bytes(stdout_buf), from_subprocess=True).text[:max_bytes]
+                if stdout_buf
                 else ""
             )
             stderr = (
-                decode_safe(stderr_bytes, from_subprocess=True).text[:max_bytes]
-                if stderr_bytes
+                decode_safe(bytes(stderr_buf), from_subprocess=True).text[:max_bytes]
+                if stderr_buf
                 else ""
             )
 
