@@ -1241,6 +1241,7 @@ class VibeAcpAgentLoop(AcpAgent):
         loaded_session_id = metadata.get("session_id", agent_loop.session_id)
         agent_loop.session_id = loaded_session_id
         agent_loop.parent_session_id = metadata.get("parent_session_id")
+        agent_loop.stats.restore_from_session(metadata.get("stats"))
         agent_loop.session_logger.resume_existing_session(
             loaded_session_id, session_dir
         )

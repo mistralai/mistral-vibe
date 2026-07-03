@@ -23,6 +23,7 @@ from pydantic import (
     Field,
     JsonValue,
     PrivateAttr,
+    ValidationError,
     computed_field,
     field_validator,
     model_validator,
@@ -89,6 +90,17 @@ class AgentStats(BaseModel):
         fresh = AgentStats()
         fresh._listeners = previous._listeners.copy()
         return fresh
+
+    def restore_from_session(self, data: Any) -> None:
+        """Restore persisted stat values in place so registered listeners fire
+        and existing references stay valid. Invalid payloads are ignored.
+        """
+        try:
+            restored = AgentStats.model_validate(data)
+        except ValidationError:
+            return
+        for field in type(self).model_fields:
+            setattr(self, field, getattr(restored, field))
 
     @computed_field
     @property
