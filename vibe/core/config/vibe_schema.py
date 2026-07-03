@@ -268,6 +268,13 @@ class VibeConfigSchema(ConfigSchema):
     ask_confirmation_on_exit: Annotated[bool, WithReplaceMerge()] = True
     displayed_workdir: Annotated[str, WithReplaceMerge()] = ""
     context_warnings: Annotated[bool, WithReplaceMerge()] = False
+    show_clear_context_on_plan_accept: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "When accepting a plan, offer to clear the conversation context before "
+            "implementing. The approved plan is re-injected into the fresh context."
+        ),
+    )
     voice_mode_enabled: Annotated[bool, WithReplaceMerge()] = False
     narrator_enabled: Annotated[bool, WithReplaceMerge()] = False
     bypass_tool_permissions: Annotated[bool, WithReplaceMerge()] = False
