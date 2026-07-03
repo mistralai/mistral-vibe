@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+import time
+
 import pytest
 
 from tests.mock.utils import collect_result
@@ -52,6 +55,27 @@ async def test_handles_timeout(bash):
         await collect_result(bash.run(BashArgs(command="sleep 2", timeout=1)))
 
     assert "Command timed out after 1s" in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_returns_promptly_when_detached_child_keeps_pipes_open(bash, tmp_path):
+    script = tmp_path / "spawn_detached.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(15)'])\n"
+        "print('parent done')\n",
+        encoding="utf-8",
+    )
+
+    start = time.monotonic()
+    result = await collect_result(
+        bash.run(BashArgs(command=f'"{sys.executable}" "{script}"', timeout=30))
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.returncode == 0
+    assert "parent done" in result.stdout
+    assert elapsed < 10
 
 
 @pytest.mark.asyncio
