@@ -42,7 +42,13 @@ from vibe.core.hooks.models import (
     PostAgentTurnInvocation,
     build_invocation,
 )
-from vibe.core.types import AssistantEvent, FunctionCall, ToolCall, ToolResultEvent
+from vibe.core.types import (
+    ApprovalResponse,
+    AssistantEvent,
+    FunctionCall,
+    ToolCall,
+    ToolResultEvent,
+)
 
 _AnyHookYield = (
     HookEvent
@@ -1157,6 +1163,53 @@ def _stub_tool_call(call_id: str = "call_1", arguments: str = "{}") -> ToolCall:
     )
 
 
+def _bash_tool_call(command: str, *, call_id: str = "call_1") -> ToolCall:
+    return ToolCall(
+        id=call_id,
+        index=0,
+        function=FunctionCall(
+            name="bash", arguments=json.dumps({"command": command})
+        ),
+    )
+
+
+class TestPermissionContextMerge:
+    def test_never_wins_over_always(self) -> None:
+        from vibe.core.agent_loop import AgentLoop
+        from vibe.core.tools.base import ToolPermission
+        from vibe.core.tools.permissions import PermissionContext
+
+        never = PermissionContext(permission=ToolPermission.NEVER, reason="blocked")
+        always = PermissionContext(permission=ToolPermission.ALWAYS)
+        merged = AgentLoop._merge_permission_contexts(always, never)
+        assert merged.permission is ToolPermission.NEVER
+
+    def test_ask_wins_over_allowlist_always(self) -> None:
+        from vibe.core.agent_loop import AgentLoop
+        from vibe.core.tools.base import ToolPermission
+        from vibe.core.tools.permissions import (
+            PermissionContext,
+            PermissionScope,
+            RequiredPermission,
+        )
+
+        ask = PermissionContext(
+            permission=ToolPermission.ASK,
+            required_permissions=[
+                RequiredPermission(
+                    scope=PermissionScope.COMMAND_PATTERN,
+                    invocation_pattern="touch foo",
+                    session_pattern="touch *",
+                    label="touch *",
+                )
+            ],
+        )
+        always = PermissionContext(permission=ToolPermission.ALWAYS)
+        merged = AgentLoop._merge_permission_contexts(ask, always)
+        assert merged.permission is ToolPermission.ASK
+        assert len(merged.required_permissions) == 1
+
+
 class TestStructuredResponseParsing:
     def test_empty_stdout_returns_none(self) -> None:
         # Empty stdout is the only legitimate "passthrough" signal — the
@@ -1783,6 +1836,61 @@ class TestAgentLoopIntegration:
         assert "failed validation" in tool_results[0].skip_reason
         assert "bad-rewriter" in tool_results[0].skip_reason
         assert agent_loop.stats.tool_calls_hook_denied == 1
+
+    @pytest.mark.asyncio
+    async def test_before_tool_rewrite_does_not_bypass_bash_allowlist(self) -> None:
+        from vibe.core.tools.builtins.bash import default_read_only_commands
+
+        approval_requests: list[str] = []
+
+        async def track_approval(
+            tool_name: str,
+            args: object,
+            tool_call_id: str,
+            required_permissions: object,
+        ) -> tuple[ApprovalResponse, str | None]:
+            approval_requests.append(tool_name)
+            return ApprovalResponse.YES, None
+
+        tool_call = _bash_tool_call("touch foo", call_id="call_rtk")
+        config = build_test_vibe_config(
+            enabled_tools=["bash"],
+            tools={
+                "bash": {
+                    "allowlist": ["rtk", *default_read_only_commands()],
+                }
+            },
+        )
+        script = (
+            f'{sys.executable} -c "'
+            "import json,sys; "
+            "inv=json.load(sys.stdin); "
+            "cmd=inv.get('tool_input',{}).get('command',''); "
+            "json.dump({'hook_specific_output': "
+            "{'tool_input': {'command': 'rtk ' + cmd}}}, sys.stdout)"
+            '"'
+        )
+        hooks = [
+            _make_tool_hook(
+                "rtk-wrapper", script, type=HookType.BEFORE_TOOL, match="bash"
+            )
+        ]
+        backend = FakeBackend([
+            [mock_llm_chunk(content="Running touch.", tool_calls=[tool_call])],
+            [mock_llm_chunk(content="done")],
+        ])
+        agent_loop = build_test_agent_loop(
+            config=config,
+            agent_name=BuiltinAgentName.DEFAULT,
+            backend=backend,
+            hook_config_result=HookConfigResult(hooks=hooks, issues=[]),
+        )
+        agent_loop.set_approval_callback(track_approval)
+
+        async for _ev in agent_loop.act("touch a file"):
+            pass
+
+        assert approval_requests == ["bash"]
 
     @pytest.mark.asyncio
     async def test_invalid_intermediate_rewrite_stops_subsequent_hooks(self) -> None:

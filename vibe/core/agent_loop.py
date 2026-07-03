@@ -94,6 +94,7 @@ from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.permissions import (
     ApprovedRule,
     PermissionContext,
+    PermissionScope,
     PermissionStore,
     RequiredPermission,
 )
@@ -1323,6 +1324,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             yield self._tool_failure_event(tool_call, error_msg, span=span)
             return
 
+        original_args = tool_call.validated_args
+
         try:
             tool_input = self._serialize_tool_input(tool_call)
         except Exception as exc:
@@ -1355,7 +1358,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         tool_started = False
         try:
             decision = await self._should_execute_tool(
-                tool_instance, tool_call.validated_args, tool_call.call_id
+                tool_instance,
+                tool_call.validated_args,
+                tool_call.call_id,
+                pre_hook_args=original_args,
             )
 
             if decision.verdict == ToolExecutionResponse.SKIP:
@@ -1494,8 +1500,52 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             yield ev
         self.stats.tool_calls_succeeded += 1
 
+    def _get_effective_permission_context(
+        self, tool: BaseTool, args: BaseModel
+    ) -> PermissionContext:
+        tool_name = tool.get_name()
+        ctx = tool.resolve_permission(args)
+        if ctx is None:
+            config_perm = self.tool_manager.get_tool_config(tool_name).permission
+            return PermissionContext(permission=config_perm)
+        return ctx
+
+    @staticmethod
+    def _merge_permission_contexts(
+        a: PermissionContext, b: PermissionContext
+    ) -> PermissionContext:
+        if a.permission == ToolPermission.NEVER:
+            return a
+        if b.permission == ToolPermission.NEVER:
+            return b
+
+        permission = (
+            ToolPermission.ASK
+            if ToolPermission.ASK in {a.permission, b.permission}
+            else ToolPermission.ALWAYS
+        )
+
+        seen: set[tuple[PermissionScope, str]] = set()
+        merged: list[RequiredPermission] = []
+        for rp in a.required_permissions + b.required_permissions:
+            key = (rp.scope, rp.session_pattern)
+            if key not in seen:
+                seen.add(key)
+                merged.append(rp)
+
+        return PermissionContext(
+            permission=permission,
+            required_permissions=merged,
+            reason=a.reason or b.reason,
+        )
+
     async def _should_execute_tool(
-        self, tool: BaseTool, args: BaseModel, tool_call_id: str
+        self,
+        tool: BaseTool,
+        args: BaseModel,
+        tool_call_id: str,
+        *,
+        pre_hook_args: BaseModel | None = None,
     ) -> ToolDecision:
         if self.bypass_tool_permissions:
             return ToolDecision(
@@ -1505,11 +1555,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         async with self._permission_store.lock:
             tool_name = tool.get_name()
-            ctx = tool.resolve_permission(args)
-
-            if ctx is None:
-                config_perm = self.tool_manager.get_tool_config(tool_name).permission
-                ctx = PermissionContext(permission=config_perm)
+            ctx = self._get_effective_permission_context(tool, args)
+            if (
+                pre_hook_args is not None
+                and pre_hook_args.model_dump() != args.model_dump()
+            ):
+                original_ctx = self._get_effective_permission_context(
+                    tool, pre_hook_args
+                )
+                ctx = self._merge_permission_contexts(original_ctx, ctx)
 
             match ctx.permission:
                 case ToolPermission.ALWAYS:
