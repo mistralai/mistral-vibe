@@ -10,7 +10,7 @@ from tests.agent_loop.e2e.conftest import MistralAPI, build_e2e_agent_loop
 from tests.backend.data.mistral import mistral_completion
 from tests.conftest import build_test_vibe_config
 from vibe.core.tools.builtins.grep import GrepResult
-from vibe.core.tools.builtins.read import ReadResult
+from vibe.core.tools.builtins.read_file import ReadFileResult
 from vibe.core.tools.builtins.todo import TodoResult
 from vibe.core.types import BaseEvent, ToolResultEvent
 
@@ -45,7 +45,9 @@ async def _run_tool(
 async def test_write_file_tool_creates_file(mistral_api: MistralAPI) -> None:
     target = Path.cwd() / "note.txt"
 
-    await _run_tool(mistral_api, "write_file", {"path": str(target), "content": "hi\n"})
+    await _run_tool(
+        mistral_api, "write_file", {"file_path": str(target), "content": "hi\n"}
+    )
 
     assert target.read_text() == "hi\n"
 
@@ -55,9 +57,9 @@ async def test_read_tool_returns_file_content(mistral_api: MistralAPI) -> None:
     target = Path.cwd() / "note.txt"
     target.write_text("hello world\n")
 
-    result = await _run_tool(mistral_api, "read", {"file_path": str(target)})
+    result = await _run_tool(mistral_api, "read_file", {"file_path": str(target)})
 
-    assert "hello world" in cast(ReadResult, result.result).content
+    assert "hello world" in cast(ReadFileResult, result.result).content
 
 
 @pytest.mark.asyncio

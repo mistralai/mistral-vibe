@@ -83,7 +83,7 @@ class TestACPForkSession:
                         id="call-1",
                         index=0,
                         function=FunctionCall(
-                            name="read", arguments='{"file_path":"a.txt"}'
+                            name="read_file", arguments='{"file_path":"a.txt"}'
                         ),
                     )
                 ],

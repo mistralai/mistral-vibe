@@ -18,7 +18,7 @@ from tests.conftest import build_test_vibe_config
 from tests.mock.utils import collect_result
 from vibe.core.config import ProviderConfig, VibeConfig
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
-from vibe.core.tools.builtins.websearch import (
+from vibe.core.tools.builtins.web_search import (
     WebSearch,
     WebSearchArgs,
     WebSearchConfig,
@@ -171,7 +171,7 @@ async def test_run_uses_mistral_provider_api_key_env_var(monkeypatch):
     )
     response = _make_response(content=[TextChunk(text="The answer")])
 
-    with patch("vibe.core.tools.builtins.websearch.Mistral") as mistral_cls:
+    with patch("vibe.core.tools.builtins.web_search.Mistral") as mistral_cls:
         client = mistral_cls.return_value
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
@@ -195,7 +195,7 @@ async def test_run_falls_back_to_default_api_key_env_var_when_provider_env_var_e
     ctx = _ctx_with_config(build_test_vibe_config(providers=[_mistral_provider("")]))
     response = _make_response(content=[TextChunk(text="The answer")])
 
-    with patch("vibe.core.tools.builtins.websearch.Mistral") as mistral_cls:
+    with patch("vibe.core.tools.builtins.web_search.Mistral") as mistral_cls:
         client = mistral_cls.return_value
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)

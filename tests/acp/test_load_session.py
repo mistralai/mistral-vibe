@@ -371,7 +371,7 @@ class TestLoadSession:
                         "id": "call_123",
                         "type": "function",
                         "function": {
-                            "name": "read",
+                            "name": "read_file",
                             "arguments": '{"file_path": "/tmp/test.txt"}',
                         },
                     }
@@ -380,7 +380,7 @@ class TestLoadSession:
             {
                 "role": "tool",
                 "tool_call_id": "call_123",
-                "name": "read",
+                "name": "read_file",
                 "content": "file contents",
             },
         ]
@@ -399,7 +399,7 @@ class TestLoadSession:
         # historical, so they must carry one.
         assert start.status == "completed"
         assert start.field_meta is not None
-        assert start.field_meta["tool_name"] == "read"
+        assert start.field_meta["tool_name"] == "read_file"
 
         tool_results = [
             u for u in client._session_updates if isinstance(u.update, ToolCallProgress)
@@ -411,7 +411,7 @@ class TestLoadSession:
         # The host drops tool_call_update events without a kind.
         assert result.kind == "read"
         assert result.field_meta is not None
-        assert result.field_meta["tool_name"] == "read"
+        assert result.field_meta["tool_name"] == "read_file"
 
     @pytest.mark.asyncio
     async def test_load_session_skips_result_whose_call_was_not_replayed(
@@ -432,7 +432,7 @@ class TestLoadSession:
             {
                 "role": "tool",
                 "tool_call_id": "call_orphan",
-                "name": "read",
+                "name": "read_file",
                 "content": "file contents",
             },
         ]

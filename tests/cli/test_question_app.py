@@ -468,6 +468,21 @@ class TestMultiSelectOtherBehavior:
 
         assert 0 not in app.answers
 
+    def test_multi_select_submit_without_selection_is_noop(self, multi_select_args):
+        from unittest.mock import MagicMock
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(multi_select_args)
+        app.selected_option = app._submit_option_idx
+        app._submit = MagicMock()
+
+        # Submitting with no option selected must not raise StopIteration/RuntimeError
+        app._handle_multi_select_action()
+
+        assert 0 not in app.answers
+        app._submit.assert_not_called()
+
 
 class TestSingleSelectOtherBehavior:
     def test_single_select_other_with_text_saves(self, single_question_args):

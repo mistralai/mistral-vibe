@@ -193,8 +193,12 @@ cython_debug/
 result
 result-*
 
-# Vibe runtime/session files; keep tools as part of repo when needed
+# Vibe runtime/session files; keep selected project skills as part of repo
 .vibe/*
+!.vibe/skills/
+.vibe/skills/*
+!.vibe/skills/instrument-feature-analytics/
+!.vibe/skills/instrument-feature-analytics/**
 
 # Tests run the agent in the playground, we don't need to keep the session files
 tests/playground/*

@@ -1,73 +1,10 @@
-Use the `bash` tool to run one-off shell commands.
+Use `bash` to run a one-off shell command and capture its output.
 
-**Key characteristics:**
-- **Stateless**: Each command runs independently in a fresh environment
-
-**Timeout:**
-- The `timeout` argument controls how long the command can run before being killed
-- When `timeout` is not specified (or set to `None`), the config default is used
-- If a command is timing out, do not hesitate to increase the timeout using the `timeout` argument
-
-**IMPORTANT: Use dedicated tools if available instead of these bash commands:**
-
-**File Operations - DO NOT USE:**
-- `cat filename` → Use `read(file_path="filename")`
-- `head -n 20 filename` → Use `read(file_path="filename", limit=20)`
-- `tail -n 20 filename` → Read with offset: `read(file_path="filename", offset=<line_number>, limit=20)`
-- `sed -n '100,200p' filename` → Use `read(file_path="filename", offset=100, limit=101)`
-- `less`, `more`, `vim`, `nano` → Use `read` with offset/limit for navigation
-- `echo "content" > file` → Use `write_file(path="file", content="content")`
-- `echo "content" >> existing_file` → Read first, then use `edit` to append (write_file refuses to overwrite)
-
-**Search Operations - DO NOT USE:**
-- `grep -r "pattern" .` → Use `grep(pattern="pattern", path=".")`
-- `find . -name "*.py"` → Use `bash("ls -la")` for current dir or `grep` with appropriate pattern
-- `ag`, `ack`, `rg` commands → Use the `grep` tool
-- `locate` → Use `grep` tool
-
-**File Modification - DO NOT USE:**
-- `sed -i 's/old/new/g' file` → Use `edit` tool
-- `awk` for file editing → Use `edit` tool
-- Any in-place file editing → Use `edit` tool
-
-**APPROPRIATE bash uses:**
-- System information: `pwd`, `whoami`, `date`, `uname -a`
-- Directory listings: `ls -la`, `tree` (if available)
-- Git operations: `git status`, `git log --oneline -10`, `git diff`
-- Process info: `ps aux | grep process`, `top -n 1`
-- Network checks: `ping -c 1 google.com`, `curl -I https://example.com`
-- Package management: `pip list`, `npm list`
-- Environment checks: `env | grep VAR`, `which python`
-- File metadata: `stat filename`, `file filename`, `wc -l filename`
-
-**Example: Reading a large file efficiently**
-
-WRONG:
-```bash
-bash("cat large_file.txt")  # May hit size limits
-bash("head -1000 large_file.txt")  # Inefficient
-```
-
-RIGHT:
-```python
-# First chunk
-read(file_path="large_file.txt", limit=1000)
-# If output is truncated, read next chunk
-read(file_path="large_file.txt", offset=1001, limit=1000)
-```
-
-**Example: Searching for patterns**
-
-WRONG:
-```bash
-bash("grep -r 'TODO' src/")  # Don't use bash for grep
-bash("find . -type f -name '*.py' | xargs grep 'import'")  # Too complex
-```
-
-RIGHT:
-```python
-grep(pattern="TODO", path="src/")
-grep(pattern="import", path=".")
-```
-
-**Remember:** Bash is best for quick system checks and git operations. For file operations, searching, and editing, always use the dedicated tools when they are available.
+Usage:
+- Each command runs independently in a fresh, stateless environment.
+- Use the `timeout` parameter (defaults to the configured limit) to control how long a command may run; raise it for long-running commands.
+- Prefer the dedicated tools over their shell equivalents:
+  - reading files → `read_file` (not `cat`, `head`, `tail`, `sed`, `less`)
+  - creating files → `write_file` (not `echo >`); modifying files → `edit` (not `sed -i`, `awk`)
+  - searching → `grep` (not `grep -r`, `find`, `rg`, `ag`)
+- Appropriate uses: git operations, running tests and build tools, package management, and quick system checks (`pwd`, `ls`, `which`, `stat`).

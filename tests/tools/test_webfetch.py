@@ -6,7 +6,7 @@ import respx
 
 from tests.mock.utils import collect_result
 from vibe.core.tools.base import BaseToolState, ToolError
-from vibe.core.tools.builtins.webfetch import (
+from vibe.core.tools.builtins.web_fetch import (
     WebFetch,
     WebFetchArgs,
     WebFetchConfig,

@@ -17,7 +17,7 @@ from vibe.acp.tools.session_update import (
     fallback_tool_call,
     resolve_kind,
 )
-from vibe.core.tools.builtins.webfetch import (
+from vibe.core.tools.builtins.web_fetch import (
     WebFetch as CoreWebFetchTool,
     WebFetchArgs,
     WebFetchResult,

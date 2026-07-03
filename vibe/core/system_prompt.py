@@ -305,7 +305,7 @@ def _get_headless_section() -> str:
     )
 
 
-def get_universal_system_prompt(  # noqa: PLR0912
+def get_universal_system_prompt(
     tool_manager: ToolManager,
     config: VibeConfig,
     skill_manager: SkillManager,
@@ -328,12 +328,6 @@ def get_universal_system_prompt(  # noqa: PLR0912
 
     if config.include_prompt_detail:
         sections.append(_get_os_system_prompt())
-        tool_prompts = []
-        for tool_class in tool_manager.available_tools.values():
-            if prompt := tool_class.get_tool_prompt():
-                tool_prompts.append(prompt)
-        if tool_prompts:
-            sections.append("\n---\n".join(tool_prompts))
 
         skills_section = _get_available_skills_section(skill_manager)
         if skills_section:

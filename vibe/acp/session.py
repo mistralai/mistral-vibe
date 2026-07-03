@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import AsyncIterator, Coroutine
+from contextlib import asynccontextmanager
 from typing import Any
 
 from vibe.acp.commands import AcpCommandRegistry
+from vibe.acp.exceptions import InvalidRequestError
 from vibe.core.agent_loop import AgentLoop
 
 
@@ -25,12 +27,33 @@ class AcpSessionLoop:
         self._closed = False
         self._tasks: set[asyncio.Task[None]] = set()
         self._prompt_task: asyncio.Task[None] | None = None
+        self._mutation_lock = asyncio.Lock()
 
     # -- public API ------------------------------------------------------------
 
     @property
     def prompt_task(self) -> asyncio.Task[None] | None:
         return self._prompt_task
+
+    @asynccontextmanager
+    async def mutating(self, operation: str) -> AsyncIterator[None]:
+        """Run a session-mutating operation under the session lock, rejecting
+        it while a prompt turn is in flight (the turn does not hold the lock).
+        """
+        async with self._mutation_lock:
+            if self._prompt_task is not None and not self._prompt_task.done():
+                raise InvalidRequestError(
+                    f"Cannot {operation} while the agent loop is running"
+                )
+            yield
+
+    @asynccontextmanager
+    async def reading(self) -> AsyncIterator[None]:
+        """Serialize a read against mutating operations without rejecting it
+        while a prompt turn is in flight.
+        """
+        async with self._mutation_lock:
+            yield
 
     def spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None] | None:
         """Launch a background coroutine tied to this session."""

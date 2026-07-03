@@ -246,5 +246,5 @@ class TestSkillMeta:
         assert Skill.get_name() == "skill"
 
     def test_description_is_set(self) -> None:
-        assert "skill" in Skill.description.lower()
-        assert len(Skill.description) > 20
+        assert "skill" in Skill.get_full_description().lower()
+        assert len(Skill.get_full_description()) > 20

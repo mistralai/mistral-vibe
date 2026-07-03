@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC
@@ -149,6 +149,7 @@ from vibe.core.proxy_setup import (
     set_proxy_var,
     unset_proxy_var,
 )
+from vibe.core.rewind import RewindError
 from vibe.core.session.saved_sessions import (
     delete_saved_session,
     update_saved_session_title,
@@ -305,6 +306,35 @@ class WorkspaceTrustStatusResponse(BaseModel):
 
     trust_status: WorkspaceTrustStatus = Field(alias="trust_status")
     details: WorkspaceTrustDetails | None = None
+
+
+class RewindPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    session_id: str = Field(alias="sessionId")
+    message_id: str = Field(alias="messageId")
+
+
+class RewindPreviewResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    paths: list[str]
+
+
+class RewindToRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    session_id: str = Field(alias="sessionId")
+    message_id: str = Field(alias="messageId")
+    restore_files: bool = Field(default=True, alias="restoreFiles")
+
+
+class RewindToResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    message_content: str = Field(alias="messageContent")
+    restore_errors: list[str] = Field(alias="restoreErrors")
+    restored_paths: list[str] = Field(alias="restoredPaths")
 
 
 class AuthStatusResponse(BaseModel):
@@ -969,7 +999,7 @@ class VibeAcpAgentLoop(AcpAgent):
             if self.client_capabilities.fs:
                 fs = self.client_capabilities.fs
                 if fs.read_text_file:
-                    overrides.append("read")
+                    overrides.append("read_file")
                 if fs.write_text_file:
                     overrides.extend(["write_file", "edit"])
 
@@ -1456,8 +1486,10 @@ class VibeAcpAgentLoop(AcpAgent):
             ):
                 await self.client.session_update(session_id=session.id, update=update)
 
-        try:
+        async with session.mutating("start a new prompt"):
             task = session.set_prompt_task(agent_loop_task())
+
+        try:
             await task
 
         except asyncio.CancelledError:
@@ -1756,18 +1788,14 @@ class VibeAcpAgentLoop(AcpAgent):
             message_id = ForkSessionParams.model_validate(kwargs).message_id
         except ValidationError as e:
             raise InvalidRequestError(f"Invalid fork parameters: {e}") from e
-        if (
-            source_session.prompt_task is not None
-            and not source_session.prompt_task.done()
-        ):
-            raise InvalidRequestError(
-                "Cannot fork a session while the agent loop is running"
-            )
 
         try:
-            agent_loop = await source_session.agent_loop.fork(message_id)
-            agent_loop.agent_manager.register_agent(CHAT_AGENT)
-            session = await self._create_acp_session(agent_loop.session_id, agent_loop)
+            async with source_session.mutating("fork a session"):
+                agent_loop = await source_session.agent_loop.fork(message_id)
+                agent_loop.agent_manager.register_agent(CHAT_AGENT)
+                session = await self._create_acp_session(
+                    agent_loop.session_id, agent_loop
+                )
         except InvalidRequestError:
             raise
         except ValueError as e:
@@ -1928,6 +1956,58 @@ class VibeAcpAgentLoop(AcpAgent):
         )
         return {}
 
+    def _live_session_for_rewind(self, session_id: str) -> AcpSessionLoop:
+        live_session = self._find_live_session_by_requested_session_id(session_id)
+        if live_session is None:
+            raise SessionNotFoundError(session_id)
+        return live_session
+
+    async def _handle_rewind_preview(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request = RewindPreviewRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP rewind preview request: {exc}"
+            ) from exc
+
+        session = self._live_session_for_rewind(request.session_id)
+        rewind_manager = session.agent_loop.rewind_manager
+        try:
+            async with session.reading():
+                index = rewind_manager.index_for_message_id(request.message_id)
+                paths = rewind_manager.restorable_paths_at(index)
+        except RewindError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+
+        response = RewindPreviewResponse(paths=paths)
+        return response.model_dump(mode="json", by_alias=True)
+
+    async def _handle_rewind_to(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request = RewindToRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(f"Invalid ACP rewind request: {exc}") from exc
+
+        session = self._live_session_for_rewind(request.session_id)
+        rewind_manager = session.agent_loop.rewind_manager
+        try:
+            async with session.mutating("rewind a session"):
+                index = rewind_manager.index_for_message_id(request.message_id)
+                (
+                    content,
+                    errors,
+                    restored_paths,
+                ) = await rewind_manager.rewind_to_message(
+                    index, restore_files=request.restore_files
+                )
+        except RewindError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+
+        response = RewindToResponse(
+            messageContent=content, restoreErrors=errors, restoredPaths=restored_paths
+        )
+        return response.model_dump(mode="json", by_alias=True)
+
     def _assess_current_auth_state(self) -> tuple[ProviderConfig, AuthState]:
         load_dotenv_values(env_path=GLOBAL_ENV_FILE.path)
         provider = self._load_onboarding_context().provider
@@ -1964,23 +2044,21 @@ class VibeAcpAgentLoop(AcpAgent):
     async def ext_method(self, method: str, params: dict) -> dict:
         if method == "auth/status":
             return self._handle_auth_status()
-
         if method == "auth/signOut":
             return self._handle_auth_sign_out()
 
-        if method == "session/set_title":
-            return await self._handle_session_set_title(params)
-
-        if method == "session/delete":
-            return await self._handle_session_delete(params)
-
-        if method == "trust/status":
-            return await self._handle_workspace_trust_status(params)
-
-        if method == "trust/decision":
-            return await self._handle_workspace_trust_decision(params)
-
-        raise NotImplementedMethodError(method)
+        handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
+            "session/set_title": self._handle_session_set_title,
+            "session/delete": self._handle_session_delete,
+            "trust/status": self._handle_workspace_trust_status,
+            "trust/decision": self._handle_workspace_trust_decision,
+            "rewind/preview": self._handle_rewind_preview,
+            "rewind/to": self._handle_rewind_to,
+        }
+        handler = handlers.get(method)
+        if handler is None:
+            raise NotImplementedMethodError(method)
+        return await handler(params)
 
     @override
     async def ext_notification(self, method: str, params: dict) -> None:
@@ -2184,7 +2262,8 @@ class VibeAcpAgentLoop(AcpAgent):
         )
 
         try:
-            await session.agent_loop.compact(extra_instructions=cmd_args.strip())
+            async with session.mutating("compact a session"):
+                await session.agent_loop.compact(extra_instructions=cmd_args.strip())
         except CompactionFailedError as e:
             raise CompactionError.from_core(e) from e
 

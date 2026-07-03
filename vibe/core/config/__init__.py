@@ -20,6 +20,7 @@ from vibe.core.config._settings import (
     resolve_api_key,
     resolve_theme_name,
 )
+from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.layer import (
     ConfigLayer,
     ConfigLayerError,
@@ -151,6 +152,7 @@ __all__ = [
     "WithReplaceMerge",
     "WithShallowMerge",
     "WithUnionMerge",
+    "build_default_orchestrator",
     "load_dotenv_values",
     "resolve_api_key",
     "resolve_theme_name",

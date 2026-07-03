@@ -10,7 +10,7 @@ from textual.pilot import Pilot
 from tests.snapshots.snap_compare import SnapCompare
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage
-from vibe.core.tools.builtins.read import Read, ReadArgs
+from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs
 from vibe.core.types import ToolCallEvent
 
 
@@ -26,7 +26,7 @@ class ToolCallStreamingUpdateTest(App):
             tool_call_id="tc_streaming",
             tool_call_index=0,
             tool_name="read",
-            tool_class=Read,
+            tool_class=ReadFile,
             args=None,
         )
         self._widget = ToolCallMessage(partial_event)
@@ -42,8 +42,8 @@ class ToolCallStreamingUpdateTest(App):
             tool_call_id="tc_streaming",
             tool_call_index=0,
             tool_name="read",
-            tool_class=Read,
-            args=ReadArgs(file_path="/test/example.py"),
+            tool_class=ReadFile,
+            args=ReadFileArgs(file_path="/test/example.py"),
         )
         self._widget.update_event(full_event)
 

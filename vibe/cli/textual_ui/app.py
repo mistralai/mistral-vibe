@@ -555,6 +555,11 @@ class VibeApp(App):  # noqa: PLR0904
     def _input_queue(self) -> MessageQueue:
         return self._queue.queue
 
+    def _next_user_message_index(self) -> int:
+        messages = self.agent_loop.messages
+        has_system = len(messages) > 0 and messages[0].role == Role.system
+        return len(messages) + (0 if has_system else 1)
+
     def _build_queue_ports(self) -> QueuePorts:
         return QueuePorts(
             mount_and_scroll=self._mount_and_scroll,
@@ -564,15 +569,15 @@ class VibeApp(App):  # noqa: PLR0904
             remove_loading_widget=self._remove_loading_widget,
             set_loading_queue_count=self._set_loading_queue_count,
             inject_user_context=self.agent_loop.inject_user_context,
-            next_message_index=lambda: len(self.agent_loop.messages),
+            next_message_index=self._next_user_message_index,
             start_agent_turn=self._start_queued_agent_turn,
             await_agent_turn=self._await_agent_turn,
             run_bash=self._start_queued_bash,
             maybe_show_feedback_bar=self._maybe_show_feedback_bar,
             send_skill_telemetry=self._send_skill_telemetry,
             send_at_mention_telemetry=self._send_at_mention_telemetry,
-            render_payload=lambda payload: render_path_prompt_from_payload(
-                payload, skip_images=True
+            render_payload=lambda payload: asyncio.to_thread(
+                render_path_prompt_from_payload, payload, skip_images=True
             ),
         )
 
@@ -962,7 +967,9 @@ class VibeApp(App):  # noqa: PLR0904
     async def _enqueue_prompt_with_resources(
         self, content: str, *, skill_name: str | None = None
     ) -> bool:
-        payload = build_path_prompt_payload(content, base_dir=Path.cwd())
+        payload = await asyncio.to_thread(
+            build_path_prompt_payload, content, base_dir=Path.cwd()
+        )
         images = await self._prepare_images_or_abort(payload)
         if images is None:
             return False
@@ -1099,7 +1106,11 @@ class VibeApp(App):  # noqa: PLR0904
         attachments: list[ImageAttachment] = []
         session_dir = self.agent_loop.session_logger.session_dir
         for resource in image_resources:
-            result = self._snapshot_single_image(resource, session_dir)
+            # Reads, hashes, and copies up to MAX_IMAGE_BYTES per image; keep
+            # it off the UI thread.
+            result = await asyncio.to_thread(
+                self._snapshot_single_image, resource, session_dir
+            )
             if isinstance(result, str):
                 return _ImageAttachmentRejection(result)
             attachments.append(result)
@@ -1658,7 +1669,9 @@ class VibeApp(App):  # noqa: PLR0904
     async def _handle_user_message(
         self, message: str, *, title_source: str | None = None
     ) -> None:
-        prompt_payload = build_path_prompt_payload(message, base_dir=Path.cwd())
+        prompt_payload = await asyncio.to_thread(
+            build_path_prompt_payload, message, base_dir=Path.cwd()
+        )
         images = await self._prepare_images_or_abort(prompt_payload)
         if images is None:
             input_widget = self.query_one(ChatInputContainer)
@@ -1668,7 +1681,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         # message_index is where the user message will land in agent_loop.messages
         # (checkpoint is created in agent_loop.act())
-        message_index = len(self.agent_loop.messages)
+        message_index = self._next_user_message_index()
         user_message = UserMessage(
             message, message_index=message_index, images=images or None
         )
@@ -1874,26 +1887,24 @@ class VibeApp(App):  # noqa: PLR0904
             await self._handle_agent_loop_init()
             await self._ensure_loading_widget()
             message_id = str(uuid4())
-            prompt_payload = prebuilt_payload or build_path_prompt_payload(
-                prompt, base_dir=Path.cwd()
+            # Payload building, prompt rendering, and title segmentation all
+            # stat or read @-mentioned files; keep them off the UI thread.
+            prompt_payload = prebuilt_payload or await asyncio.to_thread(
+                build_path_prompt_payload, prompt, base_dir=Path.cwd()
             )
             self._send_at_mention_telemetry(prompt_payload, message_id)
             images = await self._resolve_turn_images(prompt_payload, prebuilt_images)
             if images is None:
                 return
-            rendered_prompt = render_path_prompt_from_payload(
-                prompt_payload, skip_images=True
+            rendered_prompt = await asyncio.to_thread(
+                render_path_prompt_from_payload, prompt_payload, skip_images=True
             )
             auto_title: str | None = None
             if self.agent_loop.session_logger.needs_initial_auto_title():
-                auto_title = (
-                    format_session_title(
-                        build_title_segments(
-                            title_source or prompt, base_dir=Path.cwd()
-                        )
-                    )
-                    or None
+                title_segments = await asyncio.to_thread(
+                    build_title_segments, title_source or prompt, base_dir=Path.cwd()
                 )
+                auto_title = format_session_title(title_segments) or None
             self._narrator_manager.cancel()
             self._narrator_manager.on_turn_start(rendered_prompt)
             async with aclosing(
@@ -3193,6 +3204,7 @@ class VibeApp(App):  # noqa: PLR0904
                 (
                     message_content,
                     restore_errors,
+                    _,
                 ) = await self.agent_loop.rewind_manager.rewind_to_message(
                     msg_index, restore_files=restore_files
                 )

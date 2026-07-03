@@ -11,7 +11,12 @@ from vibe.core.tools.builtins.bash import (
     BashToolConfig,
     _collect_outside_dirs,
 )
-from vibe.core.tools.builtins.read import Read, ReadArgs, ReadConfig, ReadState
+from vibe.core.tools.builtins.read_file import (
+    ReadFile,
+    ReadFileArgs,
+    ReadFileConfig,
+    ReadFileState,
+)
 from vibe.core.tools.builtins.write_file import (
     WriteFile,
     WriteFileArgs,
@@ -31,7 +36,7 @@ class TestFileToolScratchpadPermissions:
         assert sp is not None
         tool = WriteFile(config_getter=lambda: WriteFileConfig(), state=BaseToolState())
         result = tool.resolve_permission(
-            WriteFileArgs(path=str(sp / "draft.py"), content="x")
+            WriteFileArgs(file_path=str(sp / "draft.py"), content="x")
         )
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ALWAYS
@@ -39,8 +44,8 @@ class TestFileToolScratchpadPermissions:
     def test_read_scratchpad_always_allowed(self):
         sp = scratchpad_mod.get_scratchpad_dir("test-session")
         assert sp is not None
-        tool = Read(config_getter=lambda: ReadConfig(), state=ReadState())
-        result = tool.resolve_permission(ReadArgs(file_path=str(sp / "notes.txt")))
+        tool = ReadFile(config_getter=lambda: ReadFileConfig(), state=ReadFileState())
+        result = tool.resolve_permission(ReadFileArgs(file_path=str(sp / "notes.txt")))
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ALWAYS
 
@@ -50,7 +55,7 @@ class TestFileToolScratchpadPermissions:
         assert sp is not None
         tool = WriteFile(config_getter=lambda: WriteFileConfig(), state=BaseToolState())
         result = tool.resolve_permission(
-            WriteFileArgs(path=str(sp / ".env"), content="SECRET=x")
+            WriteFileArgs(file_path=str(sp / ".env"), content="SECRET=x")
         )
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ALWAYS
@@ -58,7 +63,7 @@ class TestFileToolScratchpadPermissions:
     def test_non_scratchpad_outside_dir_still_asks(self):
         tool = WriteFile(config_getter=lambda: WriteFileConfig(), state=BaseToolState())
         result = tool.resolve_permission(
-            WriteFileArgs(path="/tmp/not-scratchpad/file.txt", content="x")
+            WriteFileArgs(file_path="/tmp/not-scratchpad/file.txt", content="x")
         )
         assert isinstance(result, PermissionContext)
         assert result.permission is ToolPermission.ASK

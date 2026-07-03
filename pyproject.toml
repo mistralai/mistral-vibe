@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.18.4"
+version = "2.19.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,7 +29,7 @@ classifiers = [
 dependencies = [
     "agent-client-protocol==0.10.1",
     "annotated-types==0.7.0",
-    "anyio==4.13.0",
+    "anyio==4.14.1",
     "attrs==26.1.0",
     "beautifulsoup4==4.14.3",
     "cachetools==7.0.6",
@@ -49,7 +49,7 @@ dependencies = [
     "httpcore==1.0.9",
     "httpx==0.28.1",
     "httpx-sse==0.4.3",
-    "humanize==4.15.0",
+    "humanize==4.16.0",
     "idna==3.18",
     "importlib-metadata==8.7.1",
     "jaraco-classes==3.4.0",
@@ -68,7 +68,7 @@ dependencies = [
     "mcp==1.28.1",
     "mdit-py-plugins==0.5.0",
     "mdurl==0.1.2",
-    "mistralai==2.4.11",
+    "mistralai==2.5.0",
     "more-itertools==11.0.2",
     "opentelemetry-api==1.39.1",
     "opentelemetry-exporter-otlp-proto-common==1.39.1",
@@ -84,8 +84,8 @@ dependencies = [
     "pyasn1==0.6.3",
     "pyasn1-modules==0.4.2",
     "pycparser==3.0 ; implementation_name != 'PyPy'",
-    "pydantic==2.13.3",
-    "pydantic-core==2.46.3",
+    "pydantic==2.13.4",
+    "pydantic-core==2.46.4",
     "pydantic-settings==2.14.2",
     "pygments==2.20.0",
     "pyjwt==2.13.0",
@@ -97,18 +97,18 @@ dependencies = [
     "pywin32-ctypes==0.2.3 ; sys_platform == 'win32'",
     "pyyaml==6.0.3",
     "referencing==0.37.0",
-    "requests==2.33.1",
+    "requests==2.34.2",
     "rich==15.0.0",
     "rpds-py==0.30.0",
     "secretstorage==3.5.0 ; sys_platform == 'linux'",
-    "sentry-sdk==2.63.0",
+    "sentry-sdk==2.64.0",
     "six==1.17.0",
     "smmap==5.0.3",
     "sounddevice==0.5.5",
     "soupsieve==2.8.3",
     "sse-starlette==3.4.1",
     "starlette==1.0.0",
-    "textual==8.2.7",
+    "textual==8.2.8",
     "textual-speedups==0.2.1",
     "tomli-w==1.2.0",
     "tree-sitter==0.25.2",
@@ -156,7 +156,7 @@ required-version = ">=0.8.0"
 
 [dependency-groups]
 dev = [
-    "cryptography>=44.0.0",
+    "cryptography>=48.0.0",
     "debugpy>=1.8.21",
     "pre-commit>=4.2.0",
     "pyinstrument>=5.1.2",

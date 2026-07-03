@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from enum import StrEnum, auto
-from typing import ClassVar
 
 from pydantic import BaseModel, Field
 
@@ -32,16 +31,27 @@ class TodoPriority(StrEnum):
 
 
 class TodoItem(BaseModel):
-    id: str
-    content: str
-    status: TodoStatus = TodoStatus.PENDING
-    priority: TodoPriority = TodoPriority.MEDIUM
+    id: str = Field(
+        description="Stable unique identifier for the task, reused across updates"
+    )
+    content: str = Field(description="Brief description of the task")
+    status: TodoStatus = Field(
+        default=TodoStatus.PENDING,
+        description="Current status of the task: pending, in_progress, completed, cancelled",
+    )
+    priority: TodoPriority = Field(
+        default=TodoPriority.MEDIUM,
+        description="Priority level of the task: high, medium, low",
+    )
 
 
 class TodoArgs(BaseModel):
-    action: str = Field(description="Either 'read' or 'write'")
+    action: str = Field(
+        description="Required on every call: 'read' to view the current list, or 'write' to replace it"
+    )
     todos: list[TodoItem] | None = Field(
-        default=None, description="Complete list of todos when writing."
+        default=None,
+        description="Required when action='write': the full todo list, which replaces the previous one",
     )
 
 
@@ -64,10 +74,6 @@ class Todo(
     BaseTool[TodoArgs, TodoResult, TodoConfig, TodoState],
     ToolUIData[TodoArgs, TodoResult],
 ):
-    description: ClassVar[str] = (
-        "Manage todos. Use action='read' to view, action='write' with complete list to update."
-    )
-
     @classmethod
     def format_call_display(cls, args: TodoArgs) -> ToolCallDisplay:
         match args.action:

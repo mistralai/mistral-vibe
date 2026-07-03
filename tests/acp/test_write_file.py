@@ -70,11 +70,11 @@ class TestAcpWriteFileExecution:
         self, acp_write_file_tool: WriteFile, mock_client: MockClient, tmp_path: Path
     ) -> None:
         test_file = tmp_path / "test_file.txt"
-        args = WriteFileArgs(path=str(test_file), content="Hello, world!")
+        args = WriteFileArgs(file_path=str(test_file), content="Hello, world!")
         result = await collect_result(acp_write_file_tool.run(args))
 
         assert isinstance(result, WriteFileResult)
-        assert result.path == str(test_file)
+        assert result.file_path == str(test_file)
         assert result.content == "Hello, world!"
         assert result.bytes_written == len(b"Hello, world!")
         assert mock_client._write_text_file_called
@@ -99,7 +99,7 @@ class TestAcpWriteFileExecution:
 
         test_file = tmp_path / "existing_file.txt"
         test_file.touch()
-        args = WriteFileArgs(path=str(test_file), content="New content")
+        args = WriteFileArgs(file_path=str(test_file), content="New content")
         with pytest.raises(ToolError, match="already exists"):
             await collect_result(tool.run(args))
 
@@ -127,7 +127,7 @@ class TestAcpWriteFileExecution:
 
         test_file = tmp_path / "test.txt"
         content = input_newline.join(["line 1", "line 2", "line 3"])
-        args = WriteFileArgs(path=str(test_file), content=content)
+        args = WriteFileArgs(file_path=str(test_file), content=content)
         await collect_result(tool.run(args))
 
         assert mock_client._last_write_params["content"] == os_newline.join([
@@ -151,7 +151,7 @@ class TestAcpWriteFileExecution:
 
         test_file = tmp_path / "test.txt"
         args = WriteFileArgs(
-            path=str(test_file), content="line 1\r\nline 2\nline 3\rline 4"
+            file_path=str(test_file), content="line 1\r\nline 2\nline 3\rline 4"
         )
         await collect_result(tool.run(args))
 
@@ -175,7 +175,7 @@ class TestAcpWriteFileExecution:
         )
 
         test_file = tmp_path / "test.txt"
-        args = WriteFileArgs(path=str(test_file), content="test")
+        args = WriteFileArgs(file_path=str(test_file), content="test")
         with pytest.raises(ToolError) as exc_info:
             await collect_result(tool.run(args))
 
@@ -193,7 +193,7 @@ class TestAcpWriteFileExecution:
             ),
         )
 
-        args = WriteFileArgs(path=str(tmp_path / "test.txt"), content="test")
+        args = WriteFileArgs(file_path=str(tmp_path / "test.txt"), content="test")
         with pytest.raises(ToolError) as exc_info:
             await collect_result(tool.run(args))
 
@@ -215,7 +215,7 @@ class TestAcpWriteFileExecution:
             ),
         )
 
-        args = WriteFileArgs(path=str(tmp_path / "test.txt"), content="test")
+        args = WriteFileArgs(file_path=str(tmp_path / "test.txt"), content="test")
         with pytest.raises(ToolError) as exc_info:
             await collect_result(tool.run(args))
 
@@ -230,7 +230,7 @@ class TestAcpWriteFileSessionUpdates:
         event = ToolCallEvent(
             tool_name="write_file",
             tool_call_id="test_call_123",
-            args=WriteFileArgs(path="/tmp/test.txt", content="Hello"),
+            args=WriteFileArgs(file_path="/tmp/test.txt", content="Hello"),
             tool_class=WriteFile,
         )
 
@@ -259,7 +259,7 @@ class TestAcpWriteFileSessionUpdates:
         event = ToolCallEvent(
             tool_name="write_file",
             tool_call_id="test_call_123",
-            args=WriteFileArgs(path="/tmp/test.txt", content=content),
+            args=WriteFileArgs(file_path="/tmp/test.txt", content=content),
             tool_class=WriteFile,
         )
 
@@ -292,7 +292,9 @@ class TestAcpWriteFileSessionUpdates:
         assert update.title == "write_file"
 
     def test_tool_result_session_update(self) -> None:
-        result = WriteFileResult(path="/tmp/test.txt", content="Hello", bytes_written=5)
+        result = WriteFileResult(
+            file_path="/tmp/test.txt", content="Hello", bytes_written=5
+        )
 
         event = ToolResultEvent(
             tool_name="write_file",

@@ -4,7 +4,7 @@ from collections.abc import MutableMapping
 import os
 from pathlib import Path
 import tomllib
-from typing import Any, ClassVar
+from typing import Any
 
 from dotenv import dotenv_values
 from pydantic import Field, field_validator, model_validator
@@ -31,6 +31,7 @@ from vibe.core.config._defaults import (
     DEFAULT_THEME,
     DEFAULT_VIBE_BASE_URL,
 )
+from vibe.core.config._migration import migrate_config
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.models import (
     THINKING_LEVELS as THINKING_LEVELS,
@@ -757,105 +758,8 @@ class VibeConfig(BaseSettings):
         except (FileNotFoundError, tomllib.TOMLDecodeError, OSError):
             return
 
-        changed = False
-
-        bash_tools = data.get("tools", {}).get("bash", {})
-        allowlist = bash_tools.get("allowlist")
-        if allowlist is not None and "find" not in allowlist:
-            allowlist.append("find")
-            allowlist.sort()
-            changed = True
-
-        if allowlist is not None and any(p.endswith(" *") for p in allowlist):
-            stripped = [_strip_bash_pattern_wildcard(p) for p in allowlist]
-            deduped = sorted(set(stripped))
-            bash_tools["allowlist"] = deduped
-            allowlist = deduped
-            changed = True
-
-        applied: list[str] = data.get("applied_migrations", [])
-        if allowlist is not None and cls._BASH_READ_ONLY_MIGRATION not in applied:
-            from vibe.core.tools.builtins.bash import default_read_only_commands
-
-            bash_tools["allowlist"] = sorted(
-                set(allowlist) | set(default_read_only_commands())
-            )
-            data["applied_migrations"] = [*applied, cls._BASH_READ_ONLY_MIGRATION]
-            changed = True
-
-        for model in data.get("models", []):
-            if (
-                model.get("name") == "mistral-vibe-cli-latest"
-                and model.get("alias") == "devstral-2"
-            ):
-                model["alias"] = "mistral-medium-3.5"
-                model["temperature"] = 1.0
-                model["input_price"] = 1.5
-                model["output_price"] = 7.5
-                model["thinking"] = "high"
-                changed = True
-
-            if (
-                model.get("name") == "mistral-vibe-cli-latest"
-                and model.get("alias") == "mistral-medium-3.5"
-                and "supports_images" not in model
-            ):
-                model["supports_images"] = True
-                changed = True
-
-        if data.get("active_model") == "devstral-2":
-            data["active_model"] = "mistral-medium-3.5"
-            changed = True
-
-        if cls._migrate_renamed_tools(data):
-            changed = True
-
-        if changed:
+        if migrate_config(data):
             cls.dump_config(data)
-
-    # One-shot id: syncs an existing bash allowlist up to the current default
-    # read-only commands once, so users keep the ability to remove any of them.
-    _BASH_READ_ONLY_MIGRATION: ClassVar[str] = "bash_read_only_defaults_v1"
-
-    # Old tool name -> new tool name. The new tools replaced these in-place, so
-    # existing user configs keyed by the old names need their settings moved over.
-    _RENAMED_TOOLS: ClassVar[dict[str, str]] = {
-        "read_file": "read",
-        "search_replace": "edit",
-    }
-    # Options on the old tool that have no equivalent on the new one; dropped on migrate.
-    _DROPPED_TOOL_OPTIONS: ClassVar[dict[str, tuple[str, ...]]] = {
-        "edit": ("max_content_size", "create_backup")
-    }
-
-    @classmethod
-    def _migrate_renamed_tools(cls, data: dict[str, Any]) -> bool:
-        changed = False
-
-        tools = data.get("tools")
-        if isinstance(tools, dict):
-            for old, new in cls._RENAMED_TOOLS.items():
-                if old not in tools:
-                    continue
-                old_config = tools.pop(old)
-                changed = True
-                # Prefer an already-present new key; don't clobber it.
-                if new not in tools:
-                    if isinstance(old_config, dict):
-                        for dropped in cls._DROPPED_TOOL_OPTIONS.get(new, ()):
-                            old_config.pop(dropped, None)
-                    tools[new] = old_config
-
-        for list_key in ("enabled_tools", "disabled_tools"):
-            names = data.get(list_key)
-            if not isinstance(names, list):
-                continue
-            renamed = [cls._RENAMED_TOOLS.get(name, name) for name in names]
-            if renamed != names:
-                data[list_key] = renamed
-                changed = True
-
-        return changed
 
     @classmethod
     def load(cls, **overrides: Any) -> VibeConfig:

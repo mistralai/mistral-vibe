@@ -39,7 +39,7 @@ def _write_file_factory(
         return single_tool_call_chunks(
             call_id=WRITE_APPROVED_CALL_ID,
             tool_name="write_file",
-            arguments={"path": APPROVED_FILE, "content": "approved content\n"},
+            arguments={"file_path": APPROVED_FILE, "content": "approved content\n"},
             created=120,
         )
     if request_index == 1:
@@ -48,7 +48,7 @@ def _write_file_factory(
         return single_tool_call_chunks(
             call_id=WRITE_REJECTED_CALL_ID,
             tool_name="write_file",
-            arguments={"path": REJECTED_FILE, "content": "rejected content\n"},
+            arguments={"file_path": REJECTED_FILE, "content": "rejected content\n"},
             created=140,
         )
 

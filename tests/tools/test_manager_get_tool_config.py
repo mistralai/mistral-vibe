@@ -58,11 +58,11 @@ def test_falls_back_to_base_config_for_unknown_tool(tool_manager):
 
 def test_partial_override_preserves_tool_defaults():
     vibe_config = build_test_vibe_config(
-        tools={"read": {"sensitive_patterns": ["**/*.key"]}}
+        tools={"read_file": {"sensitive_patterns": ["**/*.key"]}}
     )
     manager = ToolManager(lambda: vibe_config)
 
-    config = manager.get_tool_config("read")
+    config = manager.get_tool_config("read_file")
 
     assert (
         config.permission == ToolPermission.ALWAYS
@@ -79,7 +79,7 @@ class TestToolManagerFiltering:
         assert len(tools) < len(manager._all_tools)
         assert "bash" in tools
         assert "grep" in tools
-        assert "read" not in tools
+        assert "read_file" not in tools
         assert "write_file" not in tools
 
     def test_disabled_tools_excludes_disabled(self):
@@ -91,7 +91,7 @@ class TestToolManagerFiltering:
         assert "bash" not in tools
         assert "write_file" not in tools
         assert "grep" in tools
-        assert "read" in tools
+        assert "read_file" in tools
 
     def test_enabled_tools_takes_precedence_over_disabled(self):
         vibe_config = build_test_vibe_config(
@@ -147,7 +147,7 @@ class TestToolManagerFiltering:
         tools = manager.available_tools
         assert "bash" in tools
         assert "grep" in tools
-        assert "read" in tools
+        assert "read_file" in tools
 
     def test_tool_paths_with_file_and_directory(self, tmp_path: Path):
         """Should handle a mix of file and directory paths in tool_paths."""

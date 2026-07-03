@@ -1,24 +1,9 @@
-Use `task` to delegate work to a subagent for independent execution.
+Use `task` to launch a subagent that handles a complex, multi-step task autonomously.
 
-## When to Use This Tool
-
-- **Context management**: Delegate tasks that would consume too much main conversation context
-- **Specialized work**: Use the appropriate subagent for the type of task (exploration, research, etc.)
-- **Parallel execution**: Launch multiple subagents for independent tasks
-- **Autonomous work**: Tasks that don't require back-and-forth with the user
-
-## Best Practices
-
-1. **Write clear, detailed task descriptions** - The subagent works autonomously, so provide enough context for it to succeed independently
-
-2. **Choose the right subagent** - Match the subagent to the task type (see available subagents in system prompt)
-
-3. **Prefer direct tools for simple operations** - If you know exactly which file to read or pattern to search, use those tools directly instead of spawning a subagent
-
-4. **Trust the subagent's judgment** - Let it explore and find information without micromanaging the approach
-
-## Limitations
-
-- Subagents cannot write or modify files
-- Subagents cannot ask the user questions
-- Results are returned as text when the subagent completes
+Usage:
+- Specify the `agent` (subagent type) that best fits the work; see the available subagents in your system prompt.
+- Provide a detailed, self-contained task description and state exactly what the subagent should return, since it runs autonomously and its only output is a final message.
+- Prefer direct tools for simple lookups: to read a specific file use `read_file`, and to find a specific symbol use `grep`, rather than spawning a subagent.
+- Launch multiple subagents in parallel for independent work; once delegated, do not duplicate that work yourself.
+- The subagent's result is not shown to the user — summarize it back to them yourself.
+- Subagents run read-only: they cannot modify files or ask the user questions.

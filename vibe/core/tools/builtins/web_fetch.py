@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 import functools
-from typing import TYPE_CHECKING, ClassVar, final
+from typing import TYPE_CHECKING, final
 from urllib.parse import urlparse
 
 import httpx
@@ -46,9 +46,9 @@ def _make_converter_class() -> type:
 
 
 class WebFetchArgs(BaseModel):
-    url: str = Field(description="URL to fetch (http/https)")
+    url: str = Field(description="The URL to fetch content from")
     timeout: int | None = Field(
-        default=None, description="Timeout in seconds (max 120)"
+        default=None, description="Optional timeout in seconds (max 120)"
     )
 
 
@@ -81,10 +81,6 @@ class WebFetch(
     BaseTool[WebFetchArgs, WebFetchResult, WebFetchConfig, BaseToolState],
     ToolUIData[WebFetchArgs, WebFetchResult],
 ):
-    description: ClassVar[str] = (
-        "Fetch content from a URL. Converts HTML to markdown for readability."
-    )
-
     @staticmethod
     def _normalize_url(url: str) -> str:
         """Normalise a URL to always have an http(s) scheme.
@@ -216,9 +212,9 @@ class WebFetch(
     @classmethod
     def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
         if event.args is None:
-            return ToolCallDisplay(summary="webfetch")
+            return ToolCallDisplay(summary="web_fetch")
         if not isinstance(event.args, WebFetchArgs):
-            return ToolCallDisplay(summary="webfetch")
+            return ToolCallDisplay(summary="web_fetch")
 
         parsed = urlparse(event.args.url)
         domain = parsed.netloc or event.args.url[:50]

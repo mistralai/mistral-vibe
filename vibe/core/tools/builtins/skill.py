@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import ClassVar
 
 from pydantic import BaseModel, Field
 
@@ -21,7 +20,7 @@ _MAX_LISTED_FILES = 10
 
 
 class SkillArgs(BaseModel):
-    name: str = Field(description="The name of the skill to load from available_skills")
+    name: str = Field(description="The name of the skill from available_skills")
 
 
 class SkillResult(BaseModel):
@@ -40,14 +39,6 @@ class Skill(
     BaseTool[SkillArgs, SkillResult, SkillToolConfig, BaseToolState],
     ToolUIData[SkillArgs, SkillResult],
 ):
-    description: ClassVar[str] = (
-        "Load a specialized skill that provides domain-specific instructions and workflows. "
-        "When you recognize that a task matches one of the available skills listed in your system prompt, "
-        "use this tool to load the full skill instructions. "
-        "The skill will inject detailed instructions, workflows, and access to bundled resources "
-        "(scripts, references, templates) into the conversation context."
-    )
-
     @classmethod
     def format_call_display(cls, args: SkillArgs) -> ToolCallDisplay:
         return ToolCallDisplay(summary=f"Loading skill: {args.name}")

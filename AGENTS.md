@@ -4,6 +4,14 @@ Conventions for AI agents and humans contributing to **Mistral Vibe** — a Pyth
 
 Layout: `vibe/core` is the engine (agent loop, tools, LLM backends, config); `vibe/cli` is the Textual TUI; `vibe/acp` bridges to the Agent Client Protocol; `vibe/setup` runs first-run wizards. Tests live in `tests/` with autouse fixtures in `conftest.py` and test doubles in `tests/stubs/`.
 
+## Architecture Decisions
+
+Before architecture-affecting changes, read the matching ADRs. If a change fits the current code but conflicts with ADR direction, flag it to the user before implementing.
+
+| Change area | ADR |
+| --- | --- |
+| Adding or changing analytics instrumentation, telemetry events, or event properties | [0008 Feature Instrumentation](docs/adr/0008-feature-instrumentation.md) |
+
 ## Commands
 
 Always go through `uv` — never invoke bare `python` or `pip`.

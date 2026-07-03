@@ -26,10 +26,10 @@ from vibe.core.tools.builtins.ask_user_question import AskUserQuestionResult
 from vibe.core.tools.builtins.bash import BashArgs, BashResult
 from vibe.core.tools.builtins.edit import EditArgs, EditResult
 from vibe.core.tools.builtins.grep import GrepArgs, GrepResult
-from vibe.core.tools.builtins.read import ReadArgs, ReadResult
+from vibe.core.tools.builtins.read_file import ReadFileArgs, ReadFileResult
 from vibe.core.tools.builtins.todo import TodoArgs, TodoResult
-from vibe.core.tools.builtins.webfetch import WebFetchResult
-from vibe.core.tools.builtins.websearch import WebSearchResult, WebSearchSource
+from vibe.core.tools.builtins.web_fetch import WebFetchResult
+from vibe.core.tools.builtins.web_search import WebSearchResult, WebSearchSource
 from vibe.core.tools.builtins.write_file import WriteFileArgs, WriteFileResult
 
 _LINE_NUMBER_PREFIX = re.compile(r"^ *\d+→")
@@ -198,10 +198,14 @@ class BashResultWidget(ToolResultWidget[BashResult]):
 
 class WriteFileApprovalWidget(ToolApprovalWidget[WriteFileArgs]):
     def compose(self) -> ComposeResult:
-        yield NoMarkupStatic(f"File: {self.args.path}", classes="approval-description")
+        yield NoMarkupStatic(
+            f"File: {self.args.file_path}", classes="approval-description"
+        )
         yield NoMarkupStatic("")
         yield Markdown(
-            _fenced_code_block(self.args.content, language_for_path(self.args.path))
+            _fenced_code_block(
+                self.args.content, language_for_path(self.args.file_path)
+            )
         )
 
 
@@ -214,7 +218,7 @@ class WriteFileResultWidget(ToolResultWidget[WriteFileResult]):
             return
         if self.result.content:
             yield from self._yield_truncated_markdown(
-                self.result.content, ext=language_for_path(self.result.path)
+                self.result.content, ext=language_for_path(self.result.file_path)
             )
         yield from self._footer()
 
@@ -321,7 +325,7 @@ class TodoResultWidget(ToolResultWidget[TodoResult]):
         return icons.get(status, "☐")
 
 
-class ReadApprovalWidget(ToolApprovalWidget[ReadArgs]):
+class ReadApprovalWidget(ToolApprovalWidget[ReadFileArgs]):
     def compose(self) -> ComposeResult:
         yield NoMarkupStatic(
             f"file_path: {self.args.file_path}", classes="approval-description"
@@ -336,7 +340,7 @@ class ReadApprovalWidget(ToolApprovalWidget[ReadArgs]):
             )
 
 
-class ReadResultWidget(ToolResultWidget[ReadResult]):
+class ReadResultWidget(ToolResultWidget[ReadFileResult]):
     def compose(self) -> ComposeResult:
         if not self.result:
             yield from self._footer()
@@ -432,7 +436,7 @@ class WebFetchResultWidget(ToolResultWidget[WebFetchResult]):
 
 APPROVAL_WIDGETS: dict[str, type[ToolApprovalWidget]] = {
     "bash": BashApprovalWidget,
-    "read": ReadApprovalWidget,
+    "read_file": ReadApprovalWidget,
     "write_file": WriteFileApprovalWidget,
     "edit": EditApprovalWidget,
     "grep": GrepApprovalWidget,
@@ -441,7 +445,7 @@ APPROVAL_WIDGETS: dict[str, type[ToolApprovalWidget]] = {
 
 RESULT_WIDGETS: dict[str, type[ToolResultWidget]] = {
     "bash": BashResultWidget,
-    "read": ReadResultWidget,
+    "read_file": ReadResultWidget,
     "write_file": WriteFileResultWidget,
     "edit": EditResultWidget,
     "grep": GrepResultWidget,

@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from vibe.cli.textual_ui.message_queue import MessageQueue, QueuedItem, QueuedItemKind
+from vibe.cli.textual_ui.message_queue import (
+    MessageQueue,
+    QueueController,
+    QueuedItem,
+    QueuedItemKind,
+    QueuePorts,
+)
+from vibe.cli.textual_ui.widgets.messages import UserMessage
+from vibe.core.autocompletion.path_prompt import PathPromptPayload
 
 
 def test_empty_queue_is_falsy() -> None:
@@ -147,3 +157,71 @@ def test_item_kinds_round_trip(kind: QueuedItemKind, content: str) -> None:
     assert item is not None
     assert item.kind == kind
     assert item.content == content
+
+
+@pytest.mark.asyncio
+async def test_inject_head_item_awaits_async_payload_renderer() -> None:
+    payload = PathPromptPayload(
+        display_text="display", prompt_text="prompt", resources=[], all_resources=[]
+    )
+    injected: dict[str, object] = {}
+    telemetry: dict[str, object] = {}
+
+    async def noop_async(*args, **kwargs) -> None:
+        return None
+
+    def noop_task(*args, **kwargs) -> asyncio.Task[None]:
+        return asyncio.create_task(noop_async())
+
+    async def render_payload(received: PathPromptPayload) -> str:
+        await asyncio.sleep(0)
+        assert received is payload
+        return "rendered prompt"
+
+    async def inject_user_context(content: str, **kwargs) -> None:
+        injected["content"] = content
+        injected["as_message"] = kwargs["as_message"]
+        injected["client_message_id"] = kwargs["client_message_id"]
+
+    def send_skill_telemetry(skill_name: str | None) -> None:
+        telemetry["skill_name"] = skill_name
+
+    def send_at_mention_telemetry(received: PathPromptPayload, message_id: str) -> None:
+        telemetry["payload"] = received
+        telemetry["message_id"] = message_id
+
+    controller = QueueController(
+        QueuePorts(
+            mount_and_scroll=noop_async,
+            agent_running=lambda: False,
+            bash_task=lambda: None,
+            active_model=lambda: None,
+            remove_loading_widget=noop_async,
+            set_loading_queue_count=lambda count: None,
+            inject_user_context=inject_user_context,
+            next_message_index=lambda: 42,
+            start_agent_turn=noop_task,
+            await_agent_turn=noop_async,
+            run_bash=noop_task,
+            maybe_show_feedback_bar=lambda: None,
+            send_skill_telemetry=send_skill_telemetry,
+            send_at_mention_telemetry=send_at_mention_telemetry,
+            render_payload=render_payload,
+        )
+    )
+    item = QueuedItem(
+        QueuedItemKind.PROMPT, "raw prompt", skill_name="skill", payload=payload
+    )
+    widget = UserMessage("raw prompt", pending=True)
+
+    await controller._inject_head_item(item, widget)
+
+    assert widget.message_index == 42
+    assert injected["content"] == "rendered prompt"
+    assert injected["as_message"] is True
+    assert isinstance(injected["client_message_id"], str)
+    assert telemetry == {
+        "skill_name": "skill",
+        "payload": payload,
+        "message_id": injected["client_message_id"],
+    }

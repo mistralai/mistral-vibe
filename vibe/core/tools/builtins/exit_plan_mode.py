@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import ClassVar, cast
+from typing import cast
 
 from pydantic import BaseModel
 
@@ -40,13 +40,6 @@ class ExitPlanMode(
     BaseTool[ExitPlanModeArgs, ExitPlanModeResult, ExitPlanModeConfig, BaseToolState],
     ToolUIData[ExitPlanModeArgs, ExitPlanModeResult],
 ):
-    description: ClassVar[str] = (
-        "Signal that your plan is complete and you are ready to start implementing. "
-        "This will ask the user to confirm switching from plan mode to accept-edits mode. "
-        "Only use this tool when you have finished writing your plan to the plan file "
-        "and are ready for user approval to begin implementation."
-    )
-
     @classmethod
     def format_call_display(cls, args: ExitPlanModeArgs) -> ToolCallDisplay:
         return ToolCallDisplay(summary="Ready to exit plan mode")

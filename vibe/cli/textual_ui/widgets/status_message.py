@@ -5,6 +5,7 @@ from typing import Any, ClassVar
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.visual import VisualType
 from textual.widgets import Static
 
 from vibe.cli.textual_ui.widgets.no_markup_static import (
@@ -51,7 +52,7 @@ class StatusMessage(SpinnerMixin, NoMarkupStatic):
                 self._spinner.current_frame(), classes="status-indicator-icon"
             )
             yield self._indicator_widget
-            self._text_widget = NoMarkupStatic("", classes="status-indicator-text")
+            self._text_widget = self._make_text_widget()
             yield self._text_widget
 
     def on_mount(self) -> None:
@@ -82,7 +83,10 @@ class StatusMessage(SpinnerMixin, NoMarkupStatic):
 
         self._text_widget.update(self._format_text(self.get_content()))
 
-    def _format_text(self, content: str) -> str:
+    def _make_text_widget(self) -> Static:
+        return NoMarkupStatic("", classes="status-indicator-text")
+
+    def _format_text(self, content: str) -> VisualType:
         return content
 
     def get_content(self) -> str:

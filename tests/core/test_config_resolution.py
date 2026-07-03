@@ -12,6 +12,7 @@ import tomli_w
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config._migration import BASH_READ_ONLY_MIGRATION
 from vibe.core.config._settings import (
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
@@ -343,7 +344,7 @@ class TestMigrateLeavesFindInBashAllowlist:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
         data = {
-            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "applied_migrations": [BASH_READ_ONLY_MIGRATION],
             "tools": {"bash": {"allowlist": ["echo", "ls"]}},
         }
         with config_file.open("wb") as f:
@@ -363,7 +364,7 @@ class TestMigrateLeavesFindInBashAllowlist:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
         data = {
-            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "applied_migrations": [BASH_READ_ONLY_MIGRATION],
             "tools": {"bash": {"allowlist": ["echo", "find", "ls"]}},
         }
         with config_file.open("wb") as f:
@@ -402,7 +403,7 @@ class TestMigrateStripsBashAllowlistWildcardSuffix:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
         data = {
-            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "applied_migrations": [BASH_READ_ONLY_MIGRATION],
             "tools": {"bash": {"allowlist": ["git commit *", "npm install *", "echo"]}},
         }
         with config_file.open("wb") as f:
@@ -427,7 +428,7 @@ class TestMigrateStripsBashAllowlistWildcardSuffix:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
         data = {
-            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "applied_migrations": [BASH_READ_ONLY_MIGRATION],
             "tools": {"bash": {"allowlist": ["git commit *", "git commit", "find"]}},
         }
         with config_file.open("wb") as f:
@@ -447,7 +448,7 @@ class TestMigrateStripsBashAllowlistWildcardSuffix:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
         data = {
-            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "applied_migrations": [BASH_READ_ONLY_MIGRATION],
             "tools": {"bash": {"allowlist": ["echo", "find", "ls"]}},
         }
         with config_file.open("wb") as f:
@@ -484,7 +485,7 @@ class TestMigrateBashReadOnlyDefaults:
         assert "git commit" in allowlist
         for cmd in default_read_only_commands():
             assert cmd in allowlist
-        assert VibeConfig._BASH_READ_ONLY_MIGRATION in result["applied_migrations"]
+        assert BASH_READ_ONLY_MIGRATION in result["applied_migrations"]
 
     def test_does_not_readd_removed_command_after_migration(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -492,7 +493,7 @@ class TestMigrateBashReadOnlyDefaults:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
         data = {
-            "applied_migrations": [VibeConfig._BASH_READ_ONLY_MIGRATION],
+            "applied_migrations": [BASH_READ_ONLY_MIGRATION],
             "tools": {"bash": {"allowlist": ["echo", "find"]}},
         }
         with config_file.open("wb") as f:
@@ -1478,14 +1479,14 @@ class TestIsActiveModelMistral:
 
 
 class TestMigrateRenamedTools:
-    def test_renames_read_file_and_search_replace_keys(
+    def test_renames_read_and_search_replace_keys(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
         data = {
             "tools": {
-                "read_file": {
+                "read": {
                     "permission": "always",
                     "allowlist": ["src/**"],
                     "max_read_bytes": 64000,
@@ -1507,9 +1508,9 @@ class TestMigrateRenamedTools:
         with config_file.open("rb") as f:
             result = tomllib.load(f)
         tools = result["tools"]
-        assert "read_file" not in tools
+        assert "read" not in tools
         assert "search_replace" not in tools
-        assert tools["read"] == {
+        assert tools["read_file"] == {
             "permission": "always",
             "allowlist": ["src/**"],
             "max_read_bytes": 64000,
@@ -1524,8 +1525,8 @@ class TestMigrateRenamedTools:
         config_file = tmp_path / "config.toml"
         data = {
             "tools": {
-                "read_file": {"permission": "always"},
                 "read": {"permission": "ask"},
+                "read_file": {"permission": "always"},
             }
         }
         with config_file.open("wb") as f:
@@ -1537,18 +1538,15 @@ class TestMigrateRenamedTools:
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
-        assert "read_file" not in result["tools"]
-        assert result["tools"]["read"] == {"permission": "ask"}
+        assert "read" not in result["tools"]
+        assert result["tools"]["read_file"] == {"permission": "always"}
 
     def test_renames_entries_in_enabled_and_disabled_lists(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
-        data = {
-            "enabled_tools": ["read_file", "grep"],
-            "disabled_tools": ["search_replace"],
-        }
+        data = {"enabled_tools": ["read", "grep"], "disabled_tools": ["search_replace"]}
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
 
@@ -1558,7 +1556,7 @@ class TestMigrateRenamedTools:
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
-        assert result["enabled_tools"] == ["read", "grep"]
+        assert result["enabled_tools"] == ["read_file", "grep"]
         assert result["disabled_tools"] == ["edit"]
 
     def test_noop_when_no_legacy_tool_names(
@@ -1566,7 +1564,7 @@ class TestMigrateRenamedTools:
     ) -> None:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
         config_file = tmp_path / "config.toml"
-        data = {"tools": {"read": {"permission": "always"}}}
+        data = {"tools": {"read_file": {"permission": "always"}}}
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
 
@@ -1576,4 +1574,4 @@ class TestMigrateRenamedTools:
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
-        assert result["tools"] == {"read": {"permission": "always"}}
+        assert result["tools"] == {"read_file": {"permission": "always"}}

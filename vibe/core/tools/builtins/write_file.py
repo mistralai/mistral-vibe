@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import ClassVar, final
+from typing import final
 
 import anyio
 from pydantic import BaseModel, Field
@@ -24,12 +24,14 @@ from vibe.core.types import ToolResultEvent, ToolStreamEvent
 
 
 class WriteFileArgs(BaseModel):
-    path: str
-    content: str
+    file_path: str = Field(
+        description="The absolute path to the file to write (must be absolute, not relative)"
+    )
+    content: str = Field(description="The content to write to the file")
 
 
 class WriteFileResult(BaseModel):
-    path: str
+    file_path: str
     bytes_written: int
     content: str
 
@@ -48,24 +50,22 @@ class WriteFile(
     BaseTool[WriteFileArgs, WriteFileResult, WriteFileConfig, BaseToolState],
     ToolUIData[WriteFileArgs, WriteFileResult],
 ):
-    description: ClassVar[str] = (
-        "Create a UTF-8 file. Fails if the file already exists; use edit to modify."
-    )
-
     @classmethod
     def format_call_display(cls, args: WriteFileArgs) -> ToolCallDisplay:
-        suffix = "(scratchpad)" if is_scratchpad_path(args.path) else ""
+        suffix = "(scratchpad)" if is_scratchpad_path(args.file_path) else ""
         return ToolCallDisplay(
-            summary=f"Writing {args.path}", content=args.content, suffix=suffix
+            summary=f"Writing {args.file_path}", content=args.content, suffix=suffix
         )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
         if isinstance(event.result, WriteFileResult):
-            suffix = "(scratchpad)" if is_scratchpad_path(event.result.path) else ""
+            suffix = (
+                "(scratchpad)" if is_scratchpad_path(event.result.file_path) else ""
+            )
             return ToolResultDisplay(
                 success=True,
-                message=f"Created {Path(event.result.path).name}",
+                message=f"Created {Path(event.result.file_path).name}",
                 suffix=suffix,
             )
 
@@ -76,11 +76,11 @@ class WriteFile(
         return "Writing file"
 
     def get_file_snapshot(self, args: WriteFileArgs) -> FileSnapshot | None:
-        return self.get_file_snapshot_for_path(args.path)
+        return self.get_file_snapshot_for_path(args.file_path)
 
     def resolve_permission(self, args: WriteFileArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
-            args.path,
+            args.file_path,
             tool_name=self.get_name(),
             allowlist=self.config.allowlist,
             denylist=self.config.denylist,
@@ -97,11 +97,11 @@ class WriteFile(
         await self._write_file(args, file_path)
 
         yield WriteFileResult(
-            path=str(file_path), bytes_written=content_bytes, content=args.content
+            file_path=str(file_path), bytes_written=content_bytes, content=args.content
         )
 
     def _prepare_and_validate_path(self, args: WriteFileArgs) -> tuple[Path, int]:
-        if not args.path.strip():
+        if not args.file_path.strip():
             raise ToolError("Path cannot be empty")
 
         content_bytes = len(args.content.encode("utf-8"))
@@ -110,7 +110,7 @@ class WriteFile(
                 f"Content exceeds {self.config.max_write_bytes} bytes limit"
             )
 
-        file_path = Path(args.path).expanduser()
+        file_path = Path(args.file_path).expanduser()
         if not file_path.is_absolute():
             file_path = Path.cwd() / file_path
         file_path = file_path.resolve()

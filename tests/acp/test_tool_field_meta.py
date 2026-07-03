@@ -8,7 +8,7 @@ from acp.schema import ToolCallProgress, ToolCallStart
 from pydantic import BaseModel
 
 from vibe.acp.tools.builtins.grep import Grep
-from vibe.acp.tools.builtins.read import Read
+from vibe.acp.tools.builtins.read_file import ReadFile
 from vibe.acp.tools.builtins.skill import Skill
 from vibe.acp.tools.builtins.task import Task
 from vibe.acp.tools.builtins.web_fetch import WebFetch
@@ -19,11 +19,11 @@ from vibe.acp.tools.session_update import (
     tool_result_session_update,
 )
 from vibe.core.tools.builtins.grep import GrepArgs, GrepResult
-from vibe.core.tools.builtins.read import ReadArgs, ReadResult
+from vibe.core.tools.builtins.read_file import ReadFileArgs, ReadFileResult
 from vibe.core.tools.builtins.skill import SkillArgs, SkillResult
 from vibe.core.tools.builtins.task import TaskArgs, TaskResult
-from vibe.core.tools.builtins.webfetch import WebFetchArgs, WebFetchResult
-from vibe.core.tools.builtins.websearch import (
+from vibe.core.tools.builtins.web_fetch import WebFetchArgs, WebFetchResult
+from vibe.core.tools.builtins.web_search import (
     WebSearchArgs,
     WebSearchResult,
     WebSearchSource,
@@ -102,7 +102,9 @@ class TestGrepFieldMeta:
 class TestReadFieldMeta:
     def test_call_location_has_offset_and_limit(self) -> None:
         event = _call_event(
-            "read", Read, ReadArgs(file_path="/tmp/f.txt", offset=10, limit=50)
+            "read_file",
+            ReadFile,
+            ReadFileArgs(file_path="/tmp/f.txt", offset=10, limit=50),
         )
         update = tool_call_session_update(event)
 
@@ -110,10 +112,10 @@ class TestReadFieldMeta:
         assert update.locations is not None
         loc = update.locations[0]
         assert loc.field_meta == {"type": "file_range", "offset": 10, "limit": 50}
-        assert update.field_meta == {"tool_name": "read"}
+        assert update.field_meta == {"tool_name": "read_file"}
 
     def test_whole_file_read_emits_plain_file_location(self) -> None:
-        event = _call_event("read", Read, ReadArgs(file_path="/tmp/f.txt"))
+        event = _call_event("read_file", ReadFile, ReadFileArgs(file_path="/tmp/f.txt"))
         update = tool_call_session_update(event)
 
         assert isinstance(update, ToolCallStart)
@@ -123,7 +125,9 @@ class TestReadFieldMeta:
         assert loc.line is None
 
     def test_read_from_offset_to_end_emits_file_location_with_line(self) -> None:
-        event = _call_event("read", Read, ReadArgs(file_path="/tmp/f.txt", offset=42))
+        event = _call_event(
+            "read_file", ReadFile, ReadFileArgs(file_path="/tmp/f.txt", offset=42)
+        )
         update = tool_call_session_update(event)
 
         assert isinstance(update, ToolCallStart)
@@ -133,7 +137,7 @@ class TestReadFieldMeta:
         assert loc.line == 42
 
     def test_result_location_has_start_line_and_num_lines(self) -> None:
-        result = ReadResult(
+        result = ReadFileResult(
             file_path="/tmp/f.txt",
             content="     1→line1\n     2→line2\n     3→line3",
             num_lines=3,
@@ -141,7 +145,7 @@ class TestReadFieldMeta:
             total_lines=20,
             requested_limit=50,
         )
-        event = _result_event("read", Read, result)
+        event = _result_event("read_file", ReadFile, result)
         update = tool_result_session_update(event)
 
         assert isinstance(update, ToolCallProgress)
@@ -150,14 +154,14 @@ class TestReadFieldMeta:
         assert loc.field_meta == {"type": "file_range", "offset": 10, "limit": 3}
 
     def test_whole_file_result_emits_plain_file_location(self) -> None:
-        result = ReadResult(
+        result = ReadFileResult(
             file_path="/tmp/f.txt",
             content="     1→line1\n     2→line2",
             num_lines=2,
             start_line=1,
             total_lines=2,
         )
-        event = _result_event("read", Read, result)
+        event = _result_event("read_file", ReadFile, result)
         update = tool_result_session_update(event)
 
         assert isinstance(update, ToolCallProgress)
@@ -169,7 +173,7 @@ class TestReadFieldMeta:
     def test_truncated_default_limit_result_emits_range(self) -> None:
         # No limit given, but the file exceeded the default limit: the read was
         # partial, so the chip must show the range, not imply the whole file.
-        result = ReadResult(
+        result = ReadFileResult(
             file_path="/tmp/f.txt",
             content="     1→line1",
             num_lines=2000,
@@ -177,7 +181,7 @@ class TestReadFieldMeta:
             total_lines=None,
             was_truncated=True,
         )
-        event = _result_event("read", Read, result)
+        event = _result_event("read_file", ReadFile, result)
         update = tool_result_session_update(event)
 
         assert isinstance(update, ToolCallProgress)
@@ -186,7 +190,7 @@ class TestReadFieldMeta:
         assert loc.field_meta == {"type": "file_range", "offset": 1, "limit": 2000}
 
     def test_offset_to_end_result_emits_file_location_with_line(self) -> None:
-        result = ReadResult(
+        result = ReadFileResult(
             file_path="/tmp/f.txt",
             content="    42→line42",
             num_lines=1,
@@ -194,7 +198,7 @@ class TestReadFieldMeta:
             total_lines=42,
             requested_offset=42,
         )
-        event = _result_event("read", Read, result)
+        event = _result_event("read_file", ReadFile, result)
         update = tool_result_session_update(event)
 
         assert isinstance(update, ToolCallProgress)
@@ -204,7 +208,7 @@ class TestReadFieldMeta:
         assert loc.line == 42
 
     def test_bounded_result_clamps_limit_to_lines_read(self) -> None:
-        result = ReadResult(
+        result = ReadFileResult(
             file_path="/tmp/f.txt",
             content="     1→line1",
             num_lines=1,
@@ -212,7 +216,7 @@ class TestReadFieldMeta:
             total_lines=1,
             requested_limit=100,
         )
-        event = _result_event("read", Read, result)
+        event = _result_event("read_file", ReadFile, result)
         update = tool_result_session_update(event)
 
         assert isinstance(update, ToolCallProgress)
@@ -352,7 +356,7 @@ class TestTaskFieldMeta:
 class TestWriteFileFieldMeta:
     def test_call_meta_contains_tool_name(self) -> None:
         event = _call_event(
-            "write_file", WriteFile, WriteFileArgs(path="out.txt", content="hello")
+            "write_file", WriteFile, WriteFileArgs(file_path="out.txt", content="hello")
         )
         update = tool_call_session_update(event)
 
@@ -362,7 +366,7 @@ class TestWriteFileFieldMeta:
 
     def test_call_location_is_resolved_path(self) -> None:
         event = _call_event(
-            "write_file", WriteFile, WriteFileArgs(path="out.txt", content="hello")
+            "write_file", WriteFile, WriteFileArgs(file_path="out.txt", content="hello")
         )
         update = tool_call_session_update(event)
 
@@ -371,7 +375,7 @@ class TestWriteFileFieldMeta:
         assert update.locations[0].path == str(Path("out.txt").resolve())
 
     def test_result_location_is_resolved_path(self) -> None:
-        result = WriteFileResult(path="out.txt", content="hello", bytes_written=5)
+        result = WriteFileResult(file_path="out.txt", content="hello", bytes_written=5)
         event = _result_event("write_file", WriteFile, result)
         update = tool_result_session_update(event)
 

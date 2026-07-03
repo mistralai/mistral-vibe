@@ -94,7 +94,7 @@ class AgentProfile:
         )
 
 
-CHAT_AGENT_TOOLS = ["grep", "read", "ask_user_question", "task"]
+CHAT_AGENT_TOOLS = ["grep", "read_file", "ask_user_question", "task"]
 
 
 def _plan_overrides() -> dict[str, Any]:
@@ -155,7 +155,7 @@ EXPLORE = AgentProfile(
     description="Read-only subagent for codebase exploration",
     safety=AgentSafety.SAFE,
     agent_type=AgentType.SUBAGENT,
-    overrides={"enabled_tools": ["grep", "read"], "system_prompt_id": "explore"},
+    overrides={"enabled_tools": ["grep", "read_file"], "system_prompt_id": "explore"},
 )
 
 LEAN = AgentProfile(
@@ -183,7 +183,7 @@ LEAN = AgentProfile(
                 "alias": "leanstral",
                 "thinking": "high",
                 "temperature": 1.0,
-                "auto_compact_threshold": 168_000,
+                "auto_compact_threshold": 200_000,
             }
         ],
         "compaction_model": {

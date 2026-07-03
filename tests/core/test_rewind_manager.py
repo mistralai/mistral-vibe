@@ -148,15 +148,45 @@ class TestRewind:
         # Index 3 is the injected message — it must be skipped
         assert result[1] == (4, "world")
 
+    def test_index_for_message_id_resolves_user_message(self) -> None:
+        messages = MessageList([LLMMessage(role=Role.system, content="system")])
+        messages.append(LLMMessage(role=Role.user, content="hello", message_id="u1"))
+        messages.append(LLMMessage(role=Role.assistant, content="reply"))
+        messages.append(LLMMessage(role=Role.user, content="world", message_id="u2"))
+        mgr, _, _ = _make_manager(messages)
+
+        assert mgr.index_for_message_id("u1") == 1
+        assert mgr.index_for_message_id("u2") == 3
+
+    def test_index_for_message_id_skips_injected(self) -> None:
+        messages = MessageList([LLMMessage(role=Role.system, content="system")])
+        messages.append(
+            LLMMessage(role=Role.user, content="ctx", message_id="inj", injected=True)
+        )
+        mgr, _, _ = _make_manager(messages)
+
+        with pytest.raises(RewindError, match="No rewindable user message"):
+            mgr.index_for_message_id("inj")
+
+    def test_index_for_message_id_unknown_raises(self) -> None:
+        messages = _make_messages("hello")
+        mgr, _, _ = _make_manager(messages)
+
+        with pytest.raises(RewindError, match="No rewindable user message"):
+            mgr.index_for_message_id("ghost")
+
     @pytest.mark.asyncio
     async def test_rewind_to_message(self) -> None:
         messages = _make_messages("hello", "world")
         mgr, save_calls, reset_calls = _make_manager(messages)
 
-        content, errors = await mgr.rewind_to_message(3, restore_files=False)
+        content, errors, restored_paths = await mgr.rewind_to_message(
+            3, restore_files=False
+        )
 
         assert content == "world"
         assert errors == []
+        assert restored_paths == []
         assert len(save_calls) == 1
         assert len(reset_calls) == 1
         assert len(messages) == 3
@@ -496,6 +526,30 @@ class TestRewindScenarios:
 
         assert f.read_bytes() == original
 
+    async def test_restored_paths_excludes_unchanged_files(
+        self, tmp_path: Path
+    ) -> None:
+        mgr, _, turn = self._setup()
+        changed = tmp_path / "changed.txt"
+        unchanged = tmp_path / "unchanged.txt"
+        changed.write_text("before", encoding="utf-8")
+        unchanged.write_text("same", encoding="utf-8")
+
+        turn.begin("turn1")
+        mgr.add_snapshot(_snap(changed))
+        mgr.add_snapshot(_snap(unchanged))
+        changed.write_text("after", encoding="utf-8")
+        turn.end()
+
+        turn1_idx = mgr.get_rewindable_messages()[0][0]
+        _, _, restored_paths = await mgr.rewind_to_message(
+            turn1_idx, restore_files=True
+        )
+
+        assert restored_paths == [str(changed.resolve())]
+        assert changed.read_text(encoding="utf-8") == "before"
+        assert unchanged.read_text(encoding="utf-8") == "same"
+
     async def test_create_edit_delete_full_lifecycle(self, tmp_path: Path) -> None:
         """File goes through create → edit → delete. Rewind to each point
         restores the correct state.
@@ -587,8 +641,11 @@ class TestRewindScenarios:
             "vibe.core.rewind.manager.os.remove",
             side_effect=OSError("mocked removal failure"),
         ):
-            _, errors = await mgr.rewind_to_message(turn1_idx, restore_files=True)
+            _, errors, restored_paths = await mgr.rewind_to_message(
+                turn1_idx, restore_files=True
+            )
 
         assert len(errors) == 1
+        assert restored_paths == []
         assert "Failed to delete file" in errors[0]
         assert "locked.txt" in errors[0]

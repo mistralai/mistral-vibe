@@ -4,12 +4,14 @@ import argparse
 from collections.abc import Callable
 from pathlib import Path
 
+from git import Repo
 import pytest
 
 from tests.conftest import build_test_vibe_config
 from vibe.cli import cli as cli_mod, entrypoint as entrypoint_mod
 from vibe.core.config import MissingAPIKeyError
 from vibe.core.trusted_folders import trusted_folders_manager
+from vibe.core.worktree import prepare_worktree_session
 
 
 def _make_args(**overrides: object) -> argparse.Namespace:
@@ -26,6 +28,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "check_upgrade": False,
         "setup": False,
         "workdir": None,
+        "worktree": None,
         "add_dir": [],
         "trust": False,
         "teleport": False,
@@ -34,6 +37,16 @@ def _make_args(**overrides: object) -> argparse.Namespace:
     }
     base.update(overrides)
     return argparse.Namespace(**base)
+
+
+def _init_repo(workdir: Path) -> Repo:
+    repo = Repo.init(workdir, initial_branch="main")
+    repo.config_writer().set_value("user", "name", "Tester").release()
+    repo.config_writer().set_value("user", "email", "t@example.com").release()
+    (workdir / "file.txt").write_text("hello\n", encoding="utf-8")
+    repo.index.add(["file.txt"])
+    repo.index.commit("initial")
+    return repo
 
 
 def test_programmatic_mode_does_not_run_onboarding_on_missing_api_key(
@@ -220,6 +233,254 @@ def test_check_upgrade_does_not_pass_trust_resolver(
         entrypoint_mod.main()
 
     assert exc_info.value.code == 0
+
+
+@pytest.mark.parametrize("flag", ["check_upgrade", "setup"])
+def test_exit_only_modes_do_not_prepare_worktree(
+    flag: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt=None, worktree="feature", **{flag: True})
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+    )
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit) as exc_info:
+        entrypoint_mod.main()
+
+    assert exc_info.value.code == 0
+    assert Path.cwd() == project
+
+
+def test_worktree_start_prints_progress_to_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    repo = _init_repo(project)
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt=None, worktree="feature")
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+    )
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit) as exc_info:
+        entrypoint_mod.main()
+
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Preparing worktree 'feature'..." in captured.err
+    assert "Using worktree:" in captured.err
+    assert "Removing worktree:" in captured.err
+    assert "Removed worktree:" in captured.err
+    assert "feature" not in (h.name for h in repo.heads)
+
+
+def test_worktree_cleanup_prompt_keeps_dirty_worktree_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    repo = _init_repo(project)
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt=None, worktree="feature")
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+    )
+    monkeypatch.setattr("builtins.input", lambda: "")
+    worktree_path: list[Path] = []
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        path = Path.cwd()
+        worktree_path.append(path)
+        (path / "new.txt").write_text("keep me\n", encoding="utf-8")
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit):
+        entrypoint_mod.main()
+
+    captured = capsys.readouterr()
+    assert "untracked files" in captured.err
+    assert "Keeping worktree:" in captured.err
+    assert worktree_path[0].exists()
+    assert "feature" in (h.name for h in repo.heads)
+
+
+def test_worktree_cleanup_prompt_removes_dirty_worktree_when_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    repo = _init_repo(project)
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt=None, worktree="feature")
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+    )
+    monkeypatch.setattr("builtins.input", lambda: "remove")
+    worktree_path: list[Path] = []
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        path = Path.cwd()
+        worktree_path.append(path)
+        (path / "new.txt").write_text("discard me\n", encoding="utf-8")
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit):
+        entrypoint_mod.main()
+
+    captured = capsys.readouterr()
+    assert "untracked files" in captured.err
+    assert "Removing worktree:" in captured.err
+    assert "Removed worktree:" in captured.err
+    assert not worktree_path[0].exists()
+    assert "feature" not in (h.name for h in repo.heads)
+
+
+def test_programmatic_worktree_is_not_cleaned_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    repo = _init_repo(project)
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt="run", worktree="feature")
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+    )
+    worktree_path: list[Path] = []
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        worktree_path.append(Path.cwd())
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit):
+        entrypoint_mod.main()
+
+    assert worktree_path[0].exists()
+    assert "feature" in (h.name for h in repo.heads)
+
+
+def test_worktree_cleanup_skips_failed_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    repo = _init_repo(project)
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt=None, worktree="feature")
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+    )
+    worktree_path: list[Path] = []
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        worktree_path.append(Path.cwd())
+        raise SystemExit(1)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit) as exc_info:
+        entrypoint_mod.main()
+
+    assert exc_info.value.code == 1
+    assert worktree_path[0].exists()
+    assert "Removing worktree:" not in capsys.readouterr().err
+    assert "feature" in (h.name for h in repo.heads)
+
+
+def test_reused_worktree_is_not_cleaned_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    repo = _init_repo(project)
+    monkeypatch.chdir(project)
+    prepare_worktree_session("feature", project)
+
+    args = _make_args(prompt=None, worktree="feature")
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+    )
+    worktree_path: list[Path] = []
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        worktree_path.append(Path.cwd())
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit):
+        entrypoint_mod.main()
+
+    assert worktree_path[0].exists()
+    assert "Removing worktree:" not in capsys.readouterr().err
+    assert "feature" in (h.name for h in repo.heads)
+
+
+def test_attached_branch_is_kept_on_cleanup_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "repo"
+    project.mkdir()
+    repo = _init_repo(project)
+    repo.create_head("feature")
+    monkeypatch.chdir(project)
+
+    args = _make_args(prompt=None, worktree="feature")
+    monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
+    monkeypatch.setattr(
+        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+    )
+    monkeypatch.setattr("builtins.input", lambda: "")
+    worktree_path: list[Path] = []
+
+    def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        worktree_path.append(Path.cwd())
+        raise SystemExit(0)
+
+    monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
+
+    with pytest.raises(SystemExit):
+        entrypoint_mod.main()
+
+    captured = capsys.readouterr()
+    assert "Removed worktree:" in captured.err
+    assert "Kept branch: feature" in captured.err
+    assert not worktree_path[0].exists()
+    assert "feature" in (h.name for h in repo.heads)
 
 
 def test_interactive_start_passes_trust_resolver_to_cli(

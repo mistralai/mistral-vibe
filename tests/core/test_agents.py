@@ -20,7 +20,7 @@ class TestAgentProfile:
         """Test that EXPLORE agent has expected enabled tools."""
         enabled_tools = EXPLORE.overrides.get("enabled_tools", [])
         assert "grep" in enabled_tools
-        assert "read" in enabled_tools
+        assert "read_file" in enabled_tools
 
     def test_builtin_agents_contains_explore(self) -> None:
         """Test that BUILTIN_AGENTS includes explore."""

@@ -30,7 +30,7 @@ from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.hooks.config import HookConfigResult, load_hooks_from_fs
 from vibe.core.logger import logger
-from vibe.core.paths import HISTORY_FILE
+from vibe.core.paths import HISTORY_FILE, WORKTREES_DIR
 from vibe.core.programmatic import run_programmatic
 from vibe.core.sentry import init_sentry
 from vibe.core.session import last_session_pointer
@@ -178,6 +178,11 @@ def load_session(
                 f"[red]No previous sessions found in "
                 f"{config.session_logging.save_dir} for {cwd=}[/]"
             )
+            if cwd.is_relative_to(WORKTREES_DIR.path.resolve()):
+                rprint(
+                    "[yellow]This worktree has no sessions yet. Start a new one, "
+                    "or use --resume <ID> to continue an existing session here.[/]"
+                )
             sys.exit(1)
     elif args.resume is True:
         return None

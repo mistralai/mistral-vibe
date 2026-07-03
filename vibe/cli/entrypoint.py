@@ -5,6 +5,7 @@ from collections.abc import Callable
 import os
 from pathlib import Path
 import sys
+from typing import TYPE_CHECKING
 
 from rich import print as rprint
 
@@ -19,6 +20,9 @@ from vibe.setup.trusted_folders.trust_folder_dialog import (
     TrustDialogQuitException,
     ask_trust_folder,
 )
+
+if TYPE_CHECKING:
+    from vibe.core.worktree import PreparedWorktree, WorktreeCleanupState
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -121,6 +125,13 @@ def parse_arguments() -> argparse.Namespace:
         help="Change to this directory before running",
     )
     parser.add_argument(
+        "--worktree",
+        metavar="NAME",
+        help="Create (or reuse) a git worktree under $VIBE_HOME/worktrees on "
+        "a branch named NAME and run inside it. Implicitly trusted for the "
+        "session. Ignored with --setup and --check-upgrade.",
+    )
+    parser.add_argument(
         "--add-dir",
         action="append",
         metavar="DIR",
@@ -183,8 +194,80 @@ def check_and_resolve_trusted_folder(cwd: Path) -> None:
         apply_workspace_trust_decision(prompt, decision)
 
 
+def _prompt_remove_worktree(
+    worktree: PreparedWorktree, cleanup_state: WorktreeCleanupState
+) -> bool:
+    reasons = ", ".join(cleanup_state.reasons)
+    rprint(f"[yellow]Worktree {worktree.name!r} has {reasons}.[/]", file=sys.stderr)
+    rprint(
+        "[yellow]Remove it and delete its branch? This discards worktree changes, "
+        "untracked files, and commits.[/]",
+        file=sys.stderr,
+    )
+    sys.stderr.write("Remove worktree? [y/N] ")
+    sys.stderr.flush()
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        sys.stderr.write("\n")
+        return False
+    return answer in {"y", "yes", "remove"}
+
+
+def _prompt_delete_attached_branch(worktree: PreparedWorktree) -> bool:
+    rprint(
+        f"[yellow]Branch {worktree.branch!r} existed before this session "
+        f"and was attached, not created by Vibe.[/]",
+        file=sys.stderr,
+    )
+    sys.stderr.write(f"Also delete branch {worktree.branch!r}? [y/N] ")
+    sys.stderr.flush()
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        sys.stderr.write("\n")
+        return False
+    return answer in {"y", "yes", "delete"}
+
+
+def _cleanup_worktree_on_exit(worktree: PreparedWorktree) -> None:
+    from vibe.core.worktree import (
+        WorktreeError,
+        inspect_worktree_for_cleanup,
+        remove_worktree,
+    )
+
+    try:
+        cleanup_state = inspect_worktree_for_cleanup(worktree)
+    except WorktreeError as e:
+        rprint(
+            f"[yellow]Could not inspect worktree for cleanup: {e}[/]", file=sys.stderr
+        )
+        return
+
+    if not cleanup_state.is_clean and not _prompt_remove_worktree(
+        worktree, cleanup_state
+    ):
+        rprint(f"[dim]Keeping worktree: {worktree.root}[/]", file=sys.stderr)
+        return
+
+    delete_branch = worktree.branch_created or _prompt_delete_attached_branch(worktree)
+
+    try:
+        rprint(f"[dim]Removing worktree: {worktree.root}[/]", file=sys.stderr)
+        remove_worktree(worktree, delete_branch=delete_branch)
+    except WorktreeError as e:
+        rprint(f"[yellow]Could not remove worktree: {e}[/]", file=sys.stderr)
+        return
+
+    rprint(f"[dim]Removed worktree: {worktree.root}[/]", file=sys.stderr)
+    if not delete_branch:
+        rprint(f"[dim]Kept branch: {worktree.branch}[/]", file=sys.stderr)
+
+
 def main() -> None:
     args = parse_arguments()
+    worktree_session: PreparedWorktree | None = None
 
     if args.workdir:
         workdir = args.workdir.expanduser().resolve()
@@ -194,6 +277,21 @@ def main() -> None:
             )
             sys.exit(1)
         os.chdir(workdir)
+
+    # Must run before `cwd` is read and before run_cli so that session lookups
+    # (-c / --resume picker) scope to the worktree directory.
+    if args.worktree and not (args.setup or args.check_upgrade):
+        from vibe.core.worktree import WorktreeError, prepare_worktree_session
+
+        rprint(f"[dim]Preparing worktree {args.worktree!r}...[/]", file=sys.stderr)
+        try:
+            worktree_session = prepare_worktree_session(args.worktree, Path.cwd())
+        except WorktreeError as e:
+            rprint(f"[red]Error: {e}[/]")
+            sys.exit(1)
+        target = worktree_session.path
+        rprint(f"[dim]Using worktree: {target}[/]", file=sys.stderr)
+        os.chdir(target)
 
     try:
         cwd = Path.cwd()
@@ -206,7 +304,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    if args.trust:
+    if args.trust or args.worktree:
         trusted_folders_manager.trust_for_session(cwd)
 
     additional_dirs: list[Path] = []
@@ -223,8 +321,6 @@ def main() -> None:
 
     init_harness_files_manager("user", "project", additional_dirs=additional_dirs)
 
-    from vibe.cli.cli import run_cli
-
     resolve_trusted_folder: Callable[[], None] | None = None
     if args.prompt is None and not args.check_upgrade:
 
@@ -233,7 +329,34 @@ def main() -> None:
 
         resolve_trusted_folder = _resolve_trusted_folder
 
-    run_cli(args, resolve_trusted_folder=resolve_trusted_folder)
+    _run_cli_with_worktree_cleanup(args, worktree_session, resolve_trusted_folder)
+
+
+def _run_cli_with_worktree_cleanup(
+    args: argparse.Namespace,
+    worktree_session: PreparedWorktree | None,
+    resolve_trusted_folder: Callable[[], None] | None,
+) -> None:
+    from vibe.cli.cli import run_cli
+
+    session_started = False
+    try:
+        run_cli(args, resolve_trusted_folder=resolve_trusted_folder)
+        session_started = True
+    except SystemExit as e:
+        session_started = e.code in {0, None}
+        raise
+    finally:
+        # Only auto-clean worktrees Vibe created this run, and only once a
+        # session actually ran — a startup failure (bad config, --continue with
+        # no sessions) must not delete a reused worktree or its branch.
+        if (
+            worktree_session is not None
+            and worktree_session.created
+            and args.prompt is None
+            and session_started
+        ):
+            _cleanup_worktree_on_exit(worktree_session)
 
 
 if __name__ == "__main__":

@@ -382,6 +382,8 @@ class QuestionApp(VimNavigationMixin, Container):
         """Handle Enter key in multi-select mode: toggle option or submit."""
         if self._is_submit_selected:
             self._save_current_answer()
+            if self.current_question_idx not in self.answers:
+                return
             self._advance_or_submit()
         elif self._is_other_selected:
             if self.other_input:

@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.0] - 2026-07-03
+
+### Added
+
+- `--worktree NAME` option to create or reuse a git worktree and run inside it
+- Rewind support over ACP for both the agent and the host
+
+### Changed
+
+- Teleport URL in the CLI is now clickable
+- Raised the Leanstral context limit
+- Sentry auto integrations are now disabled
+
+### Fixed
+
+- Path prompt work is now offloaded from the UI thread
+- StopIteration crash in `QuestionApp` when submitting an empty multi-select
+- User message index now accounts for the deferred system prompt
+- No longer reports benign Sentry noise (KeyboardInterrupt and destroyed pending tasks)
+
+
 ## [2.18.4] - 2026-07-01
 
 ### Changed

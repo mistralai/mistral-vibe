@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, ClassVar, final
+from typing import TYPE_CHECKING, final
 
 import httpx
 from mistralai.client import Mistral
@@ -37,7 +37,7 @@ class WebSearchSource(BaseModel):
 
 
 class WebSearchArgs(BaseModel):
-    query: str = Field(min_length=1)
+    query: str = Field(min_length=1, description="The search query")
 
 
 class WebSearchResult(BaseModel):
@@ -59,10 +59,6 @@ class WebSearch(
     BaseTool[WebSearchArgs, WebSearchResult, WebSearchConfig, BaseToolState],
     ToolUIData[WebSearchArgs, WebSearchResult],
 ):
-    description: ClassVar[str] = (
-        "Search the web for current information using Mistral's web search."
-    )
-
     @classmethod
     def is_available(cls, config: VibeConfig | None = None) -> bool:
         if config is None:
@@ -166,9 +162,9 @@ class WebSearch(
     @classmethod
     def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
         if event.args is None:
-            return ToolCallDisplay(summary="websearch")
+            return ToolCallDisplay(summary="web_search")
         if not isinstance(event.args, WebSearchArgs):
-            return ToolCallDisplay(summary="websearch")
+            return ToolCallDisplay(summary="web_search")
         return ToolCallDisplay(summary=f"Searching the web: {event.args.query!r}")
 
     @classmethod

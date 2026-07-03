@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import ClassVar, cast
+from typing import cast
 
 from pydantic import BaseModel, Field
 
@@ -77,12 +77,6 @@ class AskUserQuestion(
     ],
     ToolUIData[AskUserQuestionArgs, AskUserQuestionResult],
 ):
-    description: ClassVar[str] = (
-        "Ask the user one or more questions and wait for their responses. "
-        "Each question has 2-4 choices plus an automatic 'Other' option for free text. "
-        "Use this to gather preferences, clarify requirements, or get decisions."
-    )
-
     @classmethod
     def format_call_display(cls, args: AskUserQuestionArgs) -> ToolCallDisplay:
         count = len(args.questions)

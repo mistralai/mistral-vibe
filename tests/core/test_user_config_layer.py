@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from vibe.core.config._migration import migrate_config_layers
 from vibe.core.config.fingerprint import create_file_fingerprint
 from vibe.core.config.layer import LayerImplementationError, LayerNotLoadedError
 from vibe.core.config.layers.user import UserConfigLayer
@@ -351,3 +352,59 @@ async def test_empty_toml_file(tmp_working_directory: Path) -> None:
     layer = UserConfigLayer(path=path)
     data = await layer.load()
     assert data.model_extra == {}
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_persists_changes(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(
+        """\
+active_model = "devstral-2"
+
+[[models]]
+name = "mistral-vibe-cli-latest"
+alias = "devstral-2"
+provider = "mistral"
+"""
+    )
+
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["active_model"] == "mistral-medium-3.5"
+    assert persisted["models"][0]["alias"] == "mistral-medium-3.5"
+    migrated_data = await layer.load()
+    assert migrated_data.model_extra is not None
+    assert migrated_data.model_extra["active_model"] == "mistral-medium-3.5"
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_is_noop_when_config_is_current(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('active_model = "current"\n')
+
+    layer = UserConfigLayer(path=path)
+    before = path.read_bytes()
+
+    await migrate_config_layers([layer])
+
+    assert path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_does_not_create_missing_file_without_changes(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    assert not path.exists()

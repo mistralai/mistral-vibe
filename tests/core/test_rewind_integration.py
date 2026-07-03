@@ -27,7 +27,7 @@ async def _act_and_collect(agent_loop, prompt: str) -> list[BaseEvent]:
 def _write_file_tool_call(
     path: str, content: str, *, call_id: str = "call_1"
 ) -> ToolCall:
-    args = json.dumps({"path": path, "content": content})
+    args = json.dumps({"file_path": path, "content": content})
     return ToolCall(
         id=call_id, index=0, function=FunctionCall(name="write_file", arguments=args)
     )

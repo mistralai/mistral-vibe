@@ -11,14 +11,14 @@ from vibe.core.config.harness_files import (
     reset_harness_files_manager,
 )
 from vibe.core.tools.base import ToolError
-from vibe.core.tools.builtins.read import (
+from vibe.core.tools.builtins.read_file import (
     DEFAULT_LINE_LIMIT,
     MAX_BYTES,
-    Read,
-    ReadArgs,
-    ReadConfig,
-    ReadResult,
-    ReadState,
+    ReadFile,
+    ReadFileArgs,
+    ReadFileConfig,
+    ReadFileResult,
+    ReadFileState,
     _add_line_numbers,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
@@ -27,8 +27,8 @@ from vibe.core.types import ToolResultEvent
 from vibe.core.utils import VIBE_WARNING_TAG
 
 
-def _make_read() -> Read:
-    return Read(config_getter=lambda: ReadConfig(), state=ReadState())
+def _make_read() -> ReadFile:
+    return ReadFile(config_getter=lambda: ReadFileConfig(), state=ReadFileState())
 
 
 @pytest.mark.asyncio
@@ -40,7 +40,7 @@ async def test_reads_entire_small_file(
     tool = _make_read()
 
     result = await collect_result(
-        tool.run(ReadArgs(file_path=str(tmp_path / "hello.txt")))
+        tool.run(ReadFileArgs(file_path=str(tmp_path / "hello.txt")))
     )
 
     assert result.num_lines == 2
@@ -60,7 +60,7 @@ async def test_reads_with_offset_and_limit(
     tool = _make_read()
 
     result = await collect_result(
-        tool.run(ReadArgs(file_path=str(tmp_path / "f.txt"), offset=3, limit=2))
+        tool.run(ReadFileArgs(file_path=str(tmp_path / "f.txt"), offset=3, limit=2))
     )
 
     assert result.num_lines == 2
@@ -83,7 +83,7 @@ async def test_empty_file_returns_warning(
     tool = _make_read()
 
     result = await collect_result(
-        tool.run(ReadArgs(file_path=str(tmp_path / "empty.txt")))
+        tool.run(ReadFileArgs(file_path=str(tmp_path / "empty.txt")))
     )
 
     assert result.num_lines == 0
@@ -100,7 +100,7 @@ async def test_offset_beyond_file_returns_warning(
     tool = _make_read()
 
     result = await collect_result(
-        tool.run(ReadArgs(file_path=str(tmp_path / "short.txt"), offset=100))
+        tool.run(ReadFileArgs(file_path=str(tmp_path / "short.txt"), offset=100))
     )
 
     assert result.num_lines == 0
@@ -120,7 +120,9 @@ async def test_exceeds_max_bytes_raises(
     tool = _make_read()
 
     with pytest.raises(ToolError, match="exceeds maximum allowed size"):
-        await collect_result(tool.run(ReadArgs(file_path=str(tmp_path / "big.txt"))))
+        await collect_result(
+            tool.run(ReadFileArgs(file_path=str(tmp_path / "big.txt")))
+        )
 
 
 @pytest.mark.asyncio
@@ -133,7 +135,7 @@ async def test_truncated_when_more_lines_than_limit(
     tool = _make_read()
 
     result = await collect_result(
-        tool.run(ReadArgs(file_path=str(tmp_path / "f.txt"), limit=10))
+        tool.run(ReadFileArgs(file_path=str(tmp_path / "f.txt"), limit=10))
     )
 
     assert result.num_lines == 10
@@ -150,7 +152,9 @@ async def test_single_oversized_line_raises(
     tool = _make_read()
 
     with pytest.raises(ToolError, match="exceeds maximum allowed size"):
-        await collect_result(tool.run(ReadArgs(file_path=str(tmp_path / "wide.txt"))))
+        await collect_result(
+            tool.run(ReadFileArgs(file_path=str(tmp_path / "wide.txt")))
+        )
 
 
 @pytest.mark.asyncio
@@ -161,7 +165,9 @@ async def test_file_not_found_raises(
     tool = _make_read()
 
     with pytest.raises(ToolError, match="File not found"):
-        await collect_result(tool.run(ReadArgs(file_path=str(tmp_path / "nope.txt"))))
+        await collect_result(
+            tool.run(ReadFileArgs(file_path=str(tmp_path / "nope.txt")))
+        )
 
 
 @pytest.mark.asyncio
@@ -172,7 +178,7 @@ async def test_empty_path_raises(
     tool = _make_read()
 
     with pytest.raises(ToolError, match="file_path cannot be empty"):
-        await collect_result(tool.run(ReadArgs(file_path="")))
+        await collect_result(tool.run(ReadFileArgs(file_path="")))
 
 
 @pytest.mark.asyncio
@@ -184,7 +190,7 @@ async def test_directory_raises(
     tool = _make_read()
 
     with pytest.raises(ToolError, match="directory"):
-        await collect_result(tool.run(ReadArgs(file_path=str(tmp_path / "adir"))))
+        await collect_result(tool.run(ReadFileArgs(file_path=str(tmp_path / "adir"))))
 
 
 @pytest.mark.asyncio
@@ -196,7 +202,7 @@ async def test_relative_path_resolved(
     (tmp_path / "sub" / "f.txt").write_text("ok\n", encoding="utf-8")
     tool = _make_read()
 
-    result = await collect_result(tool.run(ReadArgs(file_path="sub/f.txt")))
+    result = await collect_result(tool.run(ReadFileArgs(file_path="sub/f.txt")))
 
     assert result.num_lines == 1
     assert str(tmp_path / "sub" / "f.txt") == result.file_path
@@ -214,23 +220,23 @@ def test_default_limit_is_2000() -> None:
 
 
 def test_format_call_display() -> None:
-    args = ReadArgs(file_path="/some/file.py")
-    display = Read.format_call_display(args)
+    args = ReadFileArgs(file_path="/some/file.py")
+    display = ReadFile.format_call_display(args)
 
     assert isinstance(display, ToolCallDisplay)
     assert "file.py" in display.summary
 
 
 def test_format_call_display_with_offset_limit() -> None:
-    args = ReadArgs(file_path="/some/file.py", offset=10, limit=50)
-    display = Read.format_call_display(args)
+    args = ReadFileArgs(file_path="/some/file.py", offset=10, limit=50)
+    display = ReadFile.format_call_display(args)
 
     assert "from line 10" in display.summary
     assert "limit 50" in display.summary
 
 
 def test_get_result_display() -> None:
-    result = ReadResult(
+    result = ReadFileResult(
         file_path="/path/to/foo.py",
         content="...",
         num_lines=10,
@@ -240,7 +246,7 @@ def test_get_result_display() -> None:
     event = ToolResultEvent(
         tool_call_id="test", tool_name="read", tool_class=None, result=result
     )
-    display = Read.get_result_display(event)
+    display = ReadFile.get_result_display(event)
 
     assert isinstance(display, ToolResultDisplay)
     assert display.success is True
@@ -248,7 +254,7 @@ def test_get_result_display() -> None:
 
 
 def test_get_result_display_truncated() -> None:
-    result = ReadResult(
+    result = ReadFileResult(
         file_path="/path/to/foo.py",
         content="...",
         num_lines=10,
@@ -258,13 +264,13 @@ def test_get_result_display_truncated() -> None:
     event = ToolResultEvent(
         tool_call_id="test", tool_name="read", tool_class=None, result=result
     )
-    display = Read.get_result_display(event)
+    display = ReadFile.get_result_display(event)
 
     assert "truncated" in display.suffix
 
 
 def test_get_result_display_truncated_via_flag() -> None:
-    result = ReadResult(
+    result = ReadFileResult(
         file_path="/path/to/foo.py",
         content="...",
         num_lines=10,
@@ -275,7 +281,7 @@ def test_get_result_display_truncated_via_flag() -> None:
     event = ToolResultEvent(
         tool_call_id="test", tool_name="read", tool_class=None, result=result
     )
-    display = Read.get_result_display(event)
+    display = ReadFile.get_result_display(event)
 
     assert "truncated" in display.suffix
 
@@ -302,7 +308,7 @@ def test_agents_md_injection(tmp_path: Path) -> None:
     target.write_text("hello", encoding="utf-8")
 
     tool = _make_read()
-    result = ReadResult(
+    result = ReadFileResult(
         file_path=str(target), content="hello", num_lines=1, start_line=1, total_lines=1
     )
     annotation = tool.get_result_extra(result)
@@ -321,7 +327,7 @@ def test_agents_md_deduplicates(tmp_path: Path) -> None:
 
     tool = _make_read()
 
-    r1 = ReadResult(
+    r1 = ReadFileResult(
         file_path=str(sub / "a.py"),
         content="a",
         num_lines=1,
@@ -330,7 +336,7 @@ def test_agents_md_deduplicates(tmp_path: Path) -> None:
     )
     assert tool.get_result_extra(r1) is not None
 
-    r2 = ReadResult(
+    r2 = ReadFileResult(
         file_path=str(sub / "b.py"),
         content="b",
         num_lines=1,
@@ -343,7 +349,7 @@ def test_agents_md_deduplicates(tmp_path: Path) -> None:
 def test_agents_md_returns_none_when_not_initialized(tmp_path: Path) -> None:
     reset_harness_files_manager()
     tool = _make_read()
-    result = ReadResult(
+    result = ReadFileResult(
         file_path=str(tmp_path / "file.py"),
         content="",
         num_lines=0,

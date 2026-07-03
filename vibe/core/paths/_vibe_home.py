@@ -28,6 +28,7 @@ def _get_vibe_home() -> Path:
 VIBE_HOME = GlobalPath(_get_vibe_home)
 GLOBAL_ENV_FILE = GlobalPath(lambda: VIBE_HOME.path / ".env")
 SESSION_LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs" / "session")
+WORKTREES_DIR = GlobalPath(lambda: VIBE_HOME.path / "worktrees")
 TRUSTED_FOLDERS_FILE = GlobalPath(lambda: VIBE_HOME.path / "trusted_folders.toml")
 LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs")
 LOG_FILE = GlobalPath(lambda: VIBE_HOME.path / "logs" / "vibe.log")

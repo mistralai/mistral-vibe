@@ -200,14 +200,14 @@ class TelemetryClient:
                 case "write_file":
                     nb_files_created = 1
                     file_extension = _extract_file_extension(
-                        tool_call.args_dict.get("path")
+                        tool_call.args_dict.get("file_path")
                     )
                 case "edit":
                     nb_files_modified = 1
                     file_extension = _extract_file_extension(
                         tool_call.args_dict.get("file_path")
                     )
-                case "read":
+                case "read_file":
                     file_extension = _extract_file_extension(
                         tool_call.args_dict.get("file_path")
                     )

@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 from enum import StrEnum, auto
 from pathlib import Path
 import shutil
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -84,8 +84,11 @@ class GrepToolConfig(BaseToolConfig):
 
 
 class GrepArgs(BaseModel):
-    pattern: str
-    path: str = "."
+    pattern: str = Field(description="The regex pattern to search for in file contents")
+    path: str = Field(
+        default=".",
+        description="The file or directory to search in. Defaults to the current working directory.",
+    )
     max_matches: int | None = Field(
         default=None, description="Override the default maximum number of matches."
     )
@@ -151,11 +154,6 @@ class Grep(
     BaseTool[GrepArgs, GrepResult, GrepToolConfig, BaseToolState],
     ToolUIData[GrepArgs, GrepResult],
 ):
-    description: ClassVar[str] = (
-        "Recursively search files for a regex pattern using ripgrep (rg) or grep. "
-        "Respects .gitignore and .codeignore files by default when using ripgrep."
-    )
-
     def resolve_permission(self, args: GrepArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.path,

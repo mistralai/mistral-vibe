@@ -14,13 +14,13 @@ WF_CONTENT_SHORT = "line_001 = 7"
 
 class WriteApprovalLongContentApp(BaseSnapshotTestApp):
     async def on_ready(self) -> None:
-        args = WriteFileArgs(path="src/example.py", content=WF_CONTENT_LONG)
+        args = WriteFileArgs(file_path="src/example.py", content=WF_CONTENT_LONG)
         await self._switch_to_approval_app("write_file", args)
 
 
 class WriteApprovalShortContentApp(BaseSnapshotTestApp):
     async def on_ready(self) -> None:
-        args = WriteFileArgs(path="src/example.py", content=WF_CONTENT_SHORT)
+        args = WriteFileArgs(file_path="src/example.py", content=WF_CONTENT_SHORT)
         await self._switch_to_approval_app("write_file", args)
 
 

@@ -41,7 +41,7 @@ def _cancellation_raw_output(event: ToolResultEvent) -> str | None:
 
 
 TOOL_KIND_MAP: dict[str, ToolKind] = {
-    "read": "read",
+    "read_file": "read",
     "grep": "search",
     "web_search": "search",
     "web_fetch": "fetch",

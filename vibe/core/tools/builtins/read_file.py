@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, final
+from typing import TYPE_CHECKING, final
 
 from humanize import naturalsize
 from pydantic import BaseModel, Field
@@ -42,27 +42,21 @@ def _warning(message: str) -> str:
     return f"<{VIBE_WARNING_TAG}>{message}</{VIBE_WARNING_TAG}>"
 
 
-class ReadArgs(BaseModel):
-    file_path: str = Field(description="The absolute path to the file to read.")
+class ReadFileArgs(BaseModel):
+    file_path: str = Field(description="The absolute path to the file to read")
     offset: int | None = Field(
         default=None,
         ge=1,
-        description=(
-            "The line number to start reading from (1-indexed). "
-            "Only provide if the file is too large to read at once."
-        ),
+        description="The line number to start reading from (1-indexed)",
     )
     limit: int = Field(
         default=DEFAULT_LINE_LIMIT,
         gt=0,
-        description=(
-            "The number of lines to read. Lower it to read a smaller portion "
-            "of a large file."
-        ),
+        description="The maximum number of lines to read",
     )
 
 
-class ReadResult(BaseModel):
+class ReadFileResult(BaseModel):
     file_path: str
     content: str
     num_lines: int
@@ -73,7 +67,7 @@ class ReadResult(BaseModel):
     was_truncated: bool = False
 
 
-class ReadConfig(BaseToolConfig):
+class ReadFileConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ALWAYS
     sensitive_patterns: list[str] = Field(
         default=["**/.env", "**/.env.*"],
@@ -86,20 +80,15 @@ class ReadConfig(BaseToolConfig):
     )
 
 
-class ReadState(BaseToolState):
+class ReadFileState(BaseToolState):
     injected_agents_md: set[str] = Field(default_factory=set)
 
 
-class Read(
-    BaseTool[ReadArgs, ReadResult, ReadConfig, ReadState],
-    ToolUIData[ReadArgs, ReadResult],
+class ReadFile(
+    BaseTool[ReadFileArgs, ReadFileResult, ReadFileConfig, ReadFileState],
+    ToolUIData[ReadFileArgs, ReadFileResult],
 ):
-    description: ClassVar[str] = (
-        "Read a text file with line numbers. "
-        "Results are formatted with line number prefixes for easy reference."
-    )
-
-    def resolve_permission(self, args: ReadArgs) -> PermissionContext | None:
+    def resolve_permission(self, args: ReadFileArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.file_path,
             tool_name=self.get_name(),
@@ -109,7 +98,7 @@ class Read(
             sensitive_patterns=self.config.sensitive_patterns,
         )
 
-    def get_result_extra(self, result: ReadResult) -> str | None:
+    def get_result_extra(self, result: ReadFileResult) -> str | None:
         try:
             mgr = get_harness_files_manager()
         except RuntimeError:
@@ -131,7 +120,7 @@ class Read(
         return f"<{VIBE_WARNING_TAG}>\n{'\n\n'.join(sections)}\n</{VIBE_WARNING_TAG}>"
 
     async def _read_file(
-        self, args: ReadArgs, file_path: Path
+        self, args: ReadFileArgs, file_path: Path
     ) -> tuple[list[str], int | None, bool]:
         start_line = args.offset or 1
         try:
@@ -147,8 +136,8 @@ class Read(
 
     @final
     async def run(
-        self, args: ReadArgs, ctx: InvokeContext | None = None
-    ) -> AsyncGenerator[ToolStreamEvent | ReadResult, None]:
+        self, args: ReadFileArgs, ctx: InvokeContext | None = None
+    ) -> AsyncGenerator[ToolStreamEvent | ReadFileResult, None]:
         file_path = self._resolve_path(args.file_path)
 
         start_line = args.offset or 1
@@ -175,7 +164,7 @@ class Read(
                 f"Use offset and limit to read a smaller portion of the file."
             )
 
-        yield ReadResult(
+        yield ReadFileResult(
             file_path=str(file_path),
             content=content,
             num_lines=len(selected),
@@ -202,7 +191,7 @@ class Read(
         return path
 
     @classmethod
-    def format_call_display(cls, args: ReadArgs) -> ToolCallDisplay:
+    def format_call_display(cls, args: ReadFileArgs) -> ToolCallDisplay:
         suffix = "(scratchpad)" if is_scratchpad_path(args.file_path) else ""
         summary = f"Reading {args.file_path}"
         extras: list[str] = []
@@ -216,7 +205,7 @@ class Read(
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
-        if not isinstance(event.result, ReadResult):
+        if not isinstance(event.result, ReadFileResult):
             return ToolResultDisplay(
                 success=False, message=event.error or event.skip_reason or "No result"
             )

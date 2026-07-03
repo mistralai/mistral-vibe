@@ -18,7 +18,7 @@ class TestPlanAgentWriteFileResolvePermission:
         tool = agent.tool_manager.get("write_file")
         from vibe.core.tools.builtins.write_file import WriteFileArgs
 
-        args = WriteFileArgs(path="/some/random/file.py", content="hello")
+        args = WriteFileArgs(file_path="/some/random/file.py", content="hello")
 
         ctx = tool.resolve_permission(args)
 
@@ -35,7 +35,7 @@ class TestPlanAgentWriteFileResolvePermission:
         from vibe.core.tools.builtins.write_file import WriteFileArgs
 
         plan_path = str(PLANS_DIR.path / "my-plan.md")
-        args = WriteFileArgs(path=plan_path, content="# Plan")
+        args = WriteFileArgs(file_path=plan_path, content="# Plan")
 
         ctx = tool.resolve_permission(args)
 
@@ -74,7 +74,7 @@ class TestAcceptEditsAgentResolvePermission:
 
         # Use a workdir-relative path; outside-workdir always requires ASK
         # regardless of agent permission.
-        args = WriteFileArgs(path="file.py", content="hello")
+        args = WriteFileArgs(file_path="file.py", content="hello")
 
         ctx = tool.resolve_permission(args)
 
@@ -93,7 +93,7 @@ class TestAgentOverrideNotLeakedAcrossSwitches:
         tool = agent.tool_manager.get("write_file")
         from vibe.core.tools.builtins.write_file import WriteFileArgs
 
-        args = WriteFileArgs(path="/some/file.py", content="hello")
+        args = WriteFileArgs(file_path="/some/file.py", content="hello")
 
         # In plan mode: should be NEVER
         ctx_plan = tool.resolve_permission(args)

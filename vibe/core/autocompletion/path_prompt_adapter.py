@@ -93,6 +93,13 @@ def _try_embed_text_resource(
     resource: PathResource, max_embed_bytes: int | None
 ) -> ResourceBlock | None:
     try:
+        # Check the size before reading: never load an oversized file into
+        # memory just to discard it.
+        if (
+            max_embed_bytes is not None
+            and resource.path.stat().st_size > max_embed_bytes
+        ):
+            return None
         data = resource.path.read_bytes()
     except OSError:
         return None

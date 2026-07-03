@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import ClassVar, final
+from typing import final
 
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -75,12 +75,6 @@ class Edit(
     BaseTool[EditArgs, EditResult, EditConfig, BaseToolState],
     ToolUIData[EditArgs, EditResult],
 ):
-    description: ClassVar[str] = (
-        "Perform exact string replacements in files. "
-        "Supports single or bulk (replace_all) substitutions "
-        "with atomic, concurrent-safe writes."
-    )
-
     def resolve_permission(self, args: EditArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.file_path,

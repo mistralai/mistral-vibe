@@ -1,15 +1,38 @@
 from __future__ import annotations
 
 import platform
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vibe import __version__
 from vibe.core.config import VibeConfig
 from vibe.core.telemetry.types import LaunchContext
 
+if TYPE_CHECKING:
+    from sentry_sdk.types import Event, Hint
+
 # Injected at build time
 _SENTRY_DSN = None
 _SERVER_NAME = "vibe-cli"
+
+# Benign exceptions to drop before reporting (e.g. clean Ctrl-C quit).
+_FILTERED_EXCEPTIONS: tuple[type[BaseException], ...] = (KeyboardInterrupt,)
+
+# Benign log-message prefixes to drop (e.g. asyncio GC'ing a pending task on teardown).
+_FILTERED_LOG_PREFIXES: tuple[str, ...] = ("Task was destroyed but it is pending!",)
+
+
+def _before_send(event: Event, hint: Hint) -> Event | None:
+    exc_info = hint.get("exc_info")
+    if exc_info is not None and isinstance(exc_info[1], _FILTERED_EXCEPTIONS):
+        return None
+
+    log_record = hint.get("log_record")
+    if log_record is not None and log_record.getMessage().startswith(
+        _FILTERED_LOG_PREFIXES
+    ):
+        return None
+
+    return event
 
 
 def init_sentry(
@@ -25,8 +48,10 @@ def init_sentry(
         dsn=_SENTRY_DSN,
         release=f"vibe@{__version__}",
         integrations=[AsyncioIntegration()],
+        auto_enabling_integrations=False,
         server_name=_SERVER_NAME,  # default is socket.gethostname(). It leaks host machine's name
         include_local_variables=False,
+        before_send=_before_send,
     )
 
     if not sentry_sdk.is_initialized():

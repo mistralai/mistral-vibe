@@ -67,12 +67,14 @@ class WriteFile(CoreWriteFileTool, BaseAcpTool[AcpWriteFileState]):
             content=[
                 FileEditToolCallContent(
                     type="diff",
-                    path=event.args.path,
+                    path=event.args.file_path,
                     old_text=None,
                     new_text=event.args.content,
                 )
             ],
-            locations=[ToolCallLocation(path=str(Path(event.args.path).resolve()))],
+            locations=[
+                ToolCallLocation(path=str(Path(event.args.file_path).resolve()))
+            ],
             raw_input=event.args.model_dump_json(),
             field_meta={"tool_name": event.tool_name},
         )
@@ -93,12 +95,12 @@ class WriteFile(CoreWriteFileTool, BaseAcpTool[AcpWriteFileState]):
             content=[
                 FileEditToolCallContent(
                     type="diff",
-                    path=result.path,
+                    path=result.file_path,
                     old_text=None,
                     new_text=result.content,
                 )
             ],
-            locations=[ToolCallLocation(path=str(Path(result.path).resolve()))],
+            locations=[ToolCallLocation(path=str(Path(result.file_path).resolve()))],
             raw_output=result.model_dump_json(),
             field_meta={"tool_name": event.tool_name},
         )

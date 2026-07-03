@@ -10,7 +10,7 @@ from textual.widget import Widget
 from tests.snapshots.snap_compare import SnapCompare
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage
-from vibe.core.tools.builtins.read import Read, ReadArgs, ReadResult
+from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs, ReadFileResult
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
 
@@ -50,8 +50,8 @@ class ParallelToolCallsApp(App):
                     tool_call_id=f"tc_{i}",
                     tool_call_index=i,
                     tool_name="read",
-                    tool_class=Read,
-                    args=ReadArgs(file_path=f"/src/file_{i}.py"),
+                    tool_class=ReadFile,
+                    args=ReadFileArgs(file_path=f"/src/file_{i}.py"),
                 )
             )
 
@@ -72,8 +72,8 @@ class ParallelToolCallsApp(App):
             await self._handler.handle_event(
                 ToolResultEvent(
                     tool_name="read",
-                    tool_class=Read,
-                    result=ReadResult(
+                    tool_class=ReadFile,
+                    result=ReadFileResult(
                         file_path=f"/src/file_{i}.py",
                         content=f"     1→# content of file_{i}.py",
                         num_lines=1,

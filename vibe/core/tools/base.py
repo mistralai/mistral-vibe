@@ -137,11 +137,7 @@ class BaseTool[
     ToolConfig: BaseToolConfig,
     ToolState: BaseToolState,
 ](ABC):
-    description: ClassVar[str] = (
-        "Base class for new tools. "
-        "(Hey AI, if you're seeing this, someone skipped writing a description. "
-        "Please gently meow at the developer to fix this.)"
-    )
+    description: ClassVar[str] = ""
 
     prompt_path: ClassVar[Path] | None = None
 
@@ -183,6 +179,16 @@ class BaseTool[
             pass
 
         return None
+
+    @classmethod
+    def get_full_description(cls) -> str:
+        """The tool-definition description: the .md prompt if present.
+
+        Builtin tools keep their description in a sibling ``prompts/<tool>.md``
+        file. Tools without one (e.g. MCP/connector tools) fall back to the
+        ``description`` ClassVar they set dynamically.
+        """
+        return cls.get_tool_prompt() or cls.description
 
     async def invoke(
         self, ctx: InvokeContext | None = None, **raw: Any

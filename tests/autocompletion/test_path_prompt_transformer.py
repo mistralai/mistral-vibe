@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from vibe.core.autocompletion.path_prompt_adapter import (
     DEFAULT_MAX_EMBED_BYTES,
     render_path_prompt,
@@ -102,9 +104,16 @@ def test_excludes_supposed_binary_files_quickly_before_reading_content(
     )
 
 
-def test_applies_max_embed_size_guard(tmp_path: Path) -> None:
+def test_applies_max_embed_size_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     large_file = tmp_path / "big.txt"
     large_file.write_text("a" * 50, encoding="utf-8")
+
+    def fail_read_bytes(self: Path) -> bytes:
+        raise AssertionError(f"oversized file was read: {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
 
     rendered = render_path_prompt(
         "Review @big.txt", base_dir=tmp_path, max_embed_bytes=10

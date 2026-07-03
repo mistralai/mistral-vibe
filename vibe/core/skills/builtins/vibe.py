@@ -195,10 +195,10 @@ alias = "local"
 tool_paths = ["/path/to/custom/tools"]
 
 # Enable only specific tools (glob and regex supported)
-enabled_tools = ["bash", "read", "grep"]
+enabled_tools = ["bash", "read_file", "grep"]
 
 # Disable specific tools
-disabled_tools = ["webfetch"]
+disabled_tools = ["web_fetch"]
 
 # Per-tool configuration
 [tools.bash]
@@ -529,7 +529,7 @@ non-conforming stdout) emits a UI warning and lets the gated action proceed
 ### Pattern Matching
 
 Tool, skill, and agent names support three matching modes:
-- **Exact**: `"bash"`, `"read"`
+- **Exact**: `"bash"`, `"read_file"`
 - **Glob**: `"bash*"`, `"mcp_*"`
 - **Regex**: `"re:^serena_.*$"` (full match, case-insensitive)
 
@@ -543,6 +543,7 @@ vibe -p TEXT --agent lean --yolo      # Lean mode with all tool calls approved
 vibe --agent NAME                   # Select agent profile (falls back to `default_agent` config)
 vibe --auto-approve / --yolo         # Approve all tool calls for the selected agent
 vibe --workdir DIR                  # Change working directory
+vibe --worktree NAME                # Create/reuse a git worktree under $VIBE_HOME/worktrees on branch NAME and run inside it. Auto-cleanup only for worktrees Vibe created this run and only after a session started; reused worktrees and attached (pre-existing) branches are kept unless confirmed. -p sessions keep worktrees. Ignored with --setup/--check-upgrade.
 vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
 vibe --trust                        # Trust cwd for this invocation only (not persisted)
 vibe -c / --continue                # Continue most recent session in this terminal (TTY-scoped, falls back to latest in cwd)

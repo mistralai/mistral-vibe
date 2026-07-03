@@ -32,6 +32,22 @@ if loaded:
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_importing_cli_entrypoint_does_not_import_git() -> None:
+    code = """
+import sys
+import vibe.cli.entrypoint
+
+if "git" in sys.modules:
+    raise SystemExit("unexpected git module loaded")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", code], check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_importing_agent_loop_does_not_import_remote_tool_modules() -> None:
     code = """
 import sys

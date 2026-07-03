@@ -10,7 +10,7 @@ from vibe.cli.textual_ui.widgets.links import (
 )
 from vibe.cli.textual_ui.widgets.tool_widgets import WebSearchResultWidget
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage
-from vibe.core.tools.builtins.websearch import WebSearchResult, WebSearchSource
+from vibe.core.tools.builtins.web_search import WebSearchResult, WebSearchSource
 
 
 def _click_actions(content: object) -> list[str]:

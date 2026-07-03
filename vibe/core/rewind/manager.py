@@ -74,12 +74,19 @@ class RewindManager:
             if all(s.path != snapshot.path for s in cp.files):
                 cp.files.append(snapshot)
 
-    def has_file_changes_at(self, message_index: int) -> bool:
-        """Check if files have changed since the checkpoint at *message_index*."""
+    def restorable_paths_at(self, message_index: int) -> list[str]:
+        """Paths whose on-disk content would change if rewinding to this turn."""
         checkpoint = self._get_checkpoint(message_index)
         if checkpoint is None:
-            return False
-        return self._has_changes_since(checkpoint)
+            return []
+        return [
+            snap.path
+            for snap in checkpoint.files
+            if self._read_snapshot(snap.path).content != snap.content
+        ]
+
+    def has_file_changes_at(self, message_index: int) -> bool:
+        return bool(self.restorable_paths_at(message_index))
 
     # -- Rewind operations -----------------------------------------------------
 
@@ -91,15 +98,30 @@ class RewindManager:
             if msg.role == Role.user and msg.content and not msg.injected
         ]
 
+    def index_for_message_id(self, message_id: str) -> int:
+        """Resolve a rewindable user message id to its index.
+
+        Raises:
+            RewindError: If no non-injected user message carries this id.
+        """
+        for index, msg in enumerate(self._messages):
+            if (
+                msg.role == Role.user
+                and not msg.injected
+                and msg.message_id == message_id
+            ):
+                return index
+        raise RewindError(f"No rewindable user message with id: {message_id}")
+
     async def rewind_to_message(
         self, message_index: int, *, restore_files: bool
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str, list[str], list[str]]:
         """Rewind the session to the given user message index.
 
         Saves the current session, truncates messages, optionally restores
         files, and forks to a new session.
 
-        Returns a tuple of (message_content, restore_errors).
+        Returns a tuple of (message_content, restore_errors, restored_paths).
 
         Raises:
             RewindError: If the message index is invalid or not a user message.
@@ -114,11 +136,12 @@ class RewindManager:
 
         message_content = user_msg.content or ""
         restore_errors: list[str] = []
+        restored_paths: list[str] = []
 
         if restore_files:
             checkpoint = self._get_checkpoint(message_index)
             if checkpoint:
-                restore_errors = self._restore_checkpoint(checkpoint)
+                restore_errors, restored_paths = self._restore_checkpoint(checkpoint)
 
         await self._save_messages()
         self._checkpoints = [
@@ -131,7 +154,7 @@ class RewindManager:
             self._is_rewinding = False
         await self._reset_session()
 
-        return message_content, restore_errors
+        return message_content, restore_errors, restored_paths
 
     # -- Private helpers -------------------------------------------------------
 
@@ -141,39 +164,32 @@ class RewindManager:
                 return cp
         return None
 
-    def _restore_checkpoint(self, checkpoint: Checkpoint) -> list[str]:
-        """Restore files on disk to match the checkpoint state.
-
-        Returns a list of human-readable error messages for files that
-        could not be restored (empty when everything succeeded).
-        """
+    def _restore_checkpoint(
+        self, checkpoint: Checkpoint
+    ) -> tuple[list[str], list[str]]:
+        """Restore files on disk to match the checkpoint state."""
         errors: list[str] = []
+        restored_paths: list[str] = []
         for snap in checkpoint.files:
             path = Path(snap.path)
             if snap.content is None:
-                if path.exists():
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        errors.append(f"Failed to delete file: {snap.path}")
+                if not path.exists():
+                    continue
+                try:
+                    os.remove(path)
+                    restored_paths.append(snap.path)
+                except Exception:
+                    errors.append(f"Failed to delete file: {snap.path}")
             else:
+                if self._read_snapshot(snap.path).content == snap.content:
+                    continue
                 try:
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(snap.content)
+                    restored_paths.append(snap.path)
                 except Exception:
                     errors.append(f"Failed to restore file: {snap.path}")
-        return errors
-
-    @staticmethod
-    def _has_changes_since(checkpoint: Checkpoint) -> bool:
-        for snap in checkpoint.files:
-            try:
-                current: bytes | None = Path(snap.path).read_bytes()
-            except FileNotFoundError:
-                current = None
-            if current != snap.content:
-                return True
-        return False
+        return errors, restored_paths
 
     @staticmethod
     def _read_snapshot(path: str) -> FileSnapshot:

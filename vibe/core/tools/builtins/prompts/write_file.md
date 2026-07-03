@@ -1,27 +1,9 @@
-Use `write_file` to create a new file.
+Use `write_file` to write a file to the local filesystem.
 
-**Arguments:**
-- `path`: The file path (relative or absolute)
-- `content`: The content to write to the file
-
-**BEHAVIOR:**
-
-- `write_file` can ONLY create new files.
-- If the file already exists, the tool returns an error. Use `edit` to modify existing files.
+Usage:
+- This tool creates a new file; it returns an error if the file already exists. Use `edit` to modify existing files.
+- The `file_path` must be an absolute path.
 - Parent directories are created automatically if they don't exist.
-
-**BEST PRACTICES:**
-
-- **NEVER** use `write_file` to modify an existing file — it will fail. Use `edit` instead.
-- **NEVER** write new files unless explicitly required — prefer modifying existing files via `edit`.
-- **NEVER** proactively create documentation files (*.md) or README files unless explicitly requested.
-- **AVOID** using emojis in file content unless the user explicitly requests them.
-
-**Usage Example:**
-
-```python
-write_file(
-    path="src/new_module.py",
-    content="def hello():\n    return 'Hello World'"
-)
-```
+- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the user.
+- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.

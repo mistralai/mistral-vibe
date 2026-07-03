@@ -21,35 +21,35 @@ from vibe.acp.tools.session_update import (
     resolve_kind,
 )
 from vibe.core.tools.base import ToolError
-from vibe.core.tools.builtins.read import (
+from vibe.core.tools.builtins.read_file import (
     DEFAULT_LINE_LIMIT,
-    Read as CoreReadTool,
-    ReadArgs,
-    ReadResult,
-    ReadState,
+    ReadFile as CoreReadTool,
+    ReadFileArgs,
+    ReadFileResult,
+    ReadFileState,
 )
 from vibe.core.types import ToolCallEvent, ToolResultEvent
 
 
-class AcpReadState(ReadState, AcpToolState):
+class AcpReadFileState(ReadFileState, AcpToolState):
     pass
 
 
-class Read(
+class ReadFile(
     CoreReadTool,
-    BaseAcpTool[AcpReadState],
+    BaseAcpTool[AcpReadFileState],
     ToolCallSessionUpdateProtocol,
     ToolResultSessionUpdateProtocol,
 ):
-    state: AcpReadState
-    prompt_path = VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "read.md"
+    state: AcpReadFileState
+    prompt_path = VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "read_file.md"
 
     @classmethod
-    def _get_tool_state_class(cls) -> type[AcpReadState]:
-        return AcpReadState
+    def _get_tool_state_class(cls) -> type[AcpReadFileState]:
+        return AcpReadFileState
 
     async def _read_file(
-        self, args: ReadArgs, file_path: Path
+        self, args: ReadFileArgs, file_path: Path
     ) -> tuple[list[str], int | None, bool]:
         client, session_id = self._load_state()
 
@@ -71,8 +71,8 @@ class Read(
 
     @classmethod
     def tool_call_session_update(cls, event: ToolCallEvent) -> SessionUpdate | None:
-        if not isinstance(event.args, ReadArgs):
-            return fallback_tool_call(event, "read")
+        if not isinstance(event.args, ReadFileArgs):
+            return fallback_tool_call(event, "read_file")
 
         resolved = str(Path(event.args.file_path).resolve())
 
@@ -87,7 +87,7 @@ class Read(
         )
 
     @staticmethod
-    def _call_location(resolved: str, args: ReadArgs) -> ToolCallLocation:
+    def _call_location(resolved: str, args: ReadFileArgs) -> ToolCallLocation:
         # Only range explicitly bounded reads; a whole-file read's default
         # limit would render a misleading "L1-L<default>" chip.
         if args.limit != DEFAULT_LINE_LIMIT:
@@ -104,7 +104,7 @@ class Read(
         )
 
     @staticmethod
-    def _result_location(resolved: str, result: ReadResult) -> ToolCallLocation:
+    def _result_location(resolved: str, result: ReadFileResult) -> ToolCallLocation:
         # Mirror the start-event logic: a whole-file read points at the file with
         # no line (requested_offset is None), so it renders "Read foo.ts" rather
         # than a stray "L1". A default-limit read that got truncated only read
@@ -126,11 +126,11 @@ class Read(
 
     @classmethod
     def tool_result_session_update(cls, event: ToolResultEvent) -> SessionUpdate | None:
-        if failure := failed_tool_result(event, ReadResult):
+        if failure := failed_tool_result(event, ReadFileResult):
             return failure
 
         result = event.result
-        assert isinstance(result, ReadResult)
+        assert isinstance(result, ReadFileResult)
         resolved = str(Path(result.file_path).resolve())
         locations = [cls._result_location(resolved, result)]
 

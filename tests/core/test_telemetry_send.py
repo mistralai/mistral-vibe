@@ -30,7 +30,7 @@ from vibe.core.utils import get_platform_id, get_platform_version, get_user_agen
 
 _original_send_telemetry_event = TelemetryClient.send_telemetry_event
 from vibe.core.tools.builtins.edit import Edit, EditArgs
-from vibe.core.tools.builtins.read import Read, ReadArgs
+from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs
 from vibe.core.tools.builtins.write_file import WriteFile, WriteFileArgs
 
 
@@ -42,7 +42,7 @@ def _make_resolved_tool_call(
     match tool_name:
         case "write_file":
             validated = WriteFileArgs(
-                path=args_dict.get("path", "foo.txt"), content="x"
+                file_path=args_dict.get("file_path", "foo.txt"), content="x"
             )
             cls = WriteFile
         case "edit":
@@ -52,9 +52,9 @@ def _make_resolved_tool_call(
                 new_string="b",
             )
             cls = Edit
-        case "read":
-            validated = ReadArgs(file_path=args_dict.get("file_path", "foo.txt"))
-            cls = Read
+        case "read_file":
+            validated = ReadFileArgs(file_path=args_dict.get("file_path", "foo.txt"))
+            cls = ReadFile
         case _:
             validated = FakeToolArgs()
             cls = FakeTool
@@ -258,7 +258,7 @@ class TestTelemetryClient:
     ) -> None:
         config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("write_file", {"path": "/tmp/foo.PY"})
+        tool_call = _make_resolved_tool_call("write_file", {"file_path": "/tmp/foo.PY"})
 
         client.send_tool_call_finished(
             tool_call=tool_call,
@@ -300,7 +300,7 @@ class TestTelemetryClient:
     ) -> None:
         config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("read", {"file_path": "/tmp/lib.rs"})
+        tool_call = _make_resolved_tool_call("read_file", {"file_path": "/tmp/lib.rs"})
 
         client.send_tool_call_finished(
             tool_call=tool_call,
@@ -320,7 +320,9 @@ class TestTelemetryClient:
     ) -> None:
         config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("write_file", {"path": "/tmp/Makefile"})
+        tool_call = _make_resolved_tool_call(
+            "write_file", {"file_path": "/tmp/Makefile"}
+        )
 
         client.send_tool_call_finished(
             tool_call=tool_call,
@@ -338,7 +340,7 @@ class TestTelemetryClient:
     ) -> None:
         config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("write_file", {"path": "/tmp/foo.py"})
+        tool_call = _make_resolved_tool_call("write_file", {"file_path": "/tmp/foo.py"})
 
         client.send_tool_call_finished(
             tool_call=tool_call,

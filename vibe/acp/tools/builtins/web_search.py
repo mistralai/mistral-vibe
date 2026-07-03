@@ -17,7 +17,7 @@ from vibe.acp.tools.session_update import (
     fallback_tool_call,
     resolve_kind,
 )
-from vibe.core.tools.builtins.websearch import (
+from vibe.core.tools.builtins.web_search import (
     WebSearch as CoreWebSearchTool,
     WebSearchArgs,
     WebSearchResult,

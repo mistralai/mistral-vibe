@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from textual.content import Content
+from textual.visual import VisualType
+from textual.widgets import Static
+
+from vibe.cli.textual_ui.widgets.links import LinkStatic, link_content
 from vibe.cli.textual_ui.widgets.status_message import StatusMessage
 
 
@@ -17,6 +22,16 @@ class TeleportMessage(StatusMessage):
         if self._final_url:
             return f"Teleported to Vibe Code Web: {self._final_url}"
         return self._status
+
+    def _make_text_widget(self) -> Static:
+        return LinkStatic("", classes="status-indicator-text")
+
+    def _format_text(self, content: str) -> VisualType:
+        if not self._final_url or self._error:
+            return content
+        return Content("Teleported to ") + link_content(
+            "Vibe Code Web", self._final_url
+        )
 
     def set_status(self, status: str) -> None:
         self._status = status

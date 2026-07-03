@@ -8,6 +8,7 @@ from tests.stubs.fake_backend import FakeBackend
 from vibe.cli.textual_ui.app import BottomApp, VibeApp
 from vibe.cli.textual_ui.widgets.chat_input.container import ChatInputContainer
 from vibe.cli.textual_ui.widgets.messages import UserMessage
+from vibe.core.types import LLMMessage, Role
 
 
 def _make_app(num_responses: int = 3) -> VibeApp:
@@ -258,6 +259,23 @@ async def test_rewind_does_not_activate_while_agent_running() -> None:
         await pilot.pause(0.1)
 
         assert app._rewind_mode is False
+
+
+def test_next_user_message_index_accounts_for_pending_system_prompt() -> None:
+    app = _make_app()
+    # Simulate deferred init not yet complete: system prompt not inserted.
+    app.agent_loop.messages.reset([])
+    # The system prompt will be inserted at index 0, so the user message lands at 1.
+    assert app._next_user_message_index() == 1
+
+
+def test_next_user_message_index_when_system_prompt_present() -> None:
+    app = _make_app()
+    app.agent_loop.messages.reset([
+        LLMMessage(role=Role.system, content="sys"),
+        LLMMessage(role=Role.user, content="hi"),
+    ])
+    assert app._next_user_message_index() == 2
 
 
 @pytest.mark.asyncio

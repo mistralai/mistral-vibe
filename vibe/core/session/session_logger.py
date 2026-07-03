@@ -313,7 +313,7 @@ class SessionLogger:
                     "type": "function",
                     "function": {
                         "name": tool_class.get_name(),
-                        "description": tool_class.description,
+                        "description": tool_class.get_full_description(),
                         "parameters": tool_class.get_parameters(),
                     },
                 }
