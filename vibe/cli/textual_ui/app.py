@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 from collections.abc import AsyncGenerator
 from contextlib import aclosing, suppress
 from dataclasses import dataclass
@@ -239,6 +238,7 @@ from vibe.core.utils import (
     get_user_cancellation_message,
     is_dangerous_directory,
 )
+from vibe.core.utils.io import IncrementalSafeDecoder
 
 _VSCODE_FAMILY_TERMINALS = {Terminal.VSCODE, Terminal.VSCODE_INSIDERS, Terminal.CURSOR}
 
@@ -1464,7 +1464,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         if not stream:
             return
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        decoder = IncrementalSafeDecoder(from_subprocess=True)
         while True:
             chunk = await stream.read(4096)
             if not chunk:

@@ -9,6 +9,7 @@ from vibe.core.utils import compact_complete_display, get_server_url_from_api_ba
 import vibe.core.utils.io as io_utils
 from vibe.core.utils.io import (
     _FILE_WRITE_LOCKS,
+    IncrementalSafeDecoder,
     decode_safe,
     file_write_lock,
     read_lines_safe,
@@ -218,6 +219,57 @@ class TestReadSafeResultEncoding:
         assert got.encoding == "utf-16-le"
         # utf-16-le leaves the BOM as U+FEFF in the string (unlike utf-8-sig).
         assert got.text == "\ufeffa\n"
+
+
+class TestIncrementalSafeDecoder:
+    def test_utf8_multibyte_split_across_chunks(self) -> None:
+        decoder = IncrementalSafeDecoder(from_subprocess=True)
+        raw = "héllo wörld".encode()
+        text = "".join(decoder.decode(bytes([b])) for b in raw)
+        text += decoder.decode(b"", final=True)
+        assert text == "héllo wörld"
+
+    def test_falls_back_to_oem_code_page_for_console_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(io_utils, "_windows_oem_encoding", lambda: "cp949")
+        decoder = IncrementalSafeDecoder(from_subprocess=True)
+        raw = "'ls'은(는) 내부 또는 외부 명령이 아닙니다.".encode("cp949")
+        chunks = [raw[i : i + 5] for i in range(0, len(raw), 5)]
+        text = "".join(decoder.decode(chunk) for chunk in chunks)
+        text += decoder.decode(b"", final=True)
+        assert text == "'ls'은(는) 내부 또는 외부 명령이 아닙니다."
+
+    def test_ascii_prefix_then_oem_bytes_keeps_prefix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(io_utils, "_windows_oem_encoding", lambda: "cp850")
+        decoder = IncrementalSafeDecoder(from_subprocess=True)
+        text = decoder.decode(b"ok: ")
+        text += decoder.decode("répertoire".encode("cp850"), final=True)
+        assert text == "ok: répertoire"
+
+    def test_undecodable_bytes_are_replaced_not_raised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(io_utils, "_windows_oem_encoding", lambda: None)
+        monkeypatch.setattr(
+            io_utils.locale, "getpreferredencoding", lambda _false: "ascii"
+        )
+        decoder = IncrementalSafeDecoder(from_subprocess=True)
+        text = decoder.decode(b"a\xff\xfeb", final=True)
+        assert text == "a��b"
+
+    def test_truncated_utf8_tail_replaced_on_final(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(io_utils, "_windows_oem_encoding", lambda: None)
+        monkeypatch.setattr(
+            io_utils.locale, "getpreferredencoding", lambda _false: "ascii"
+        )
+        decoder = IncrementalSafeDecoder(from_subprocess=True)
+        text = decoder.decode("é".encode()[:1], final=True)
+        assert text == "�"
 
 
 class TestReadSafeAsync:
