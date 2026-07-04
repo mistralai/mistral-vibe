@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from functools import lru_cache
+import logging
 import os
 from pathlib import Path
 from typing import Literal, final
@@ -29,8 +30,10 @@ from vibe.core.tools.permissions import (
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import is_path_within_workdir
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils import is_windows, kill_async_subprocess
+from vibe.core.utils import get_shell_executable, is_windows, kill_async_subprocess
 from vibe.core.utils.io import decode_safe
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -69,12 +72,6 @@ def _extract_commands(command: str) -> list[str]:
 
     find_commands(tree.root_node)
     return commands
-
-
-def _get_shell_executable() -> str | None:
-    if is_windows():
-        return None
-    return os.environ.get("SHELL")
 
 
 def _get_base_env() -> dict[str, str]:
@@ -270,6 +267,10 @@ class BashToolConfig(BaseToolConfig):
     sensitive_patterns: list[str] = Field(
         default=["sudo"],
         description="Command prefixes that always ASK regardless of arity approval.",
+    )
+    preferred_shell: str | None = Field(
+        default=None,
+        description="Preferred shell executable (e.g., 'bash.exe' or 'C:\\Program Files\\Git\\bin\\bash.exe').",
     )
 
 
@@ -518,15 +519,35 @@ class Bash(
                 {} if is_windows() else {"start_new_session": True}
             )
 
-            proc = await asyncio.create_subprocess_shell(
-                args.command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.DEVNULL,
-                env=_get_base_env(),
-                executable=_get_shell_executable(),
-                **kwargs,
-            )
+            executable = get_shell_executable(self.config)
+
+            if is_windows() and executable:
+                # For custom shells on Windows, use create_subprocess_exec
+                # to avoid shell interpretation issues with paths containing spaces.
+                # bash requires -c, cmd.exe requires /c.
+                logger.debug(
+                    f"Executing shell command, executable: {executable}, command: {args.command}"
+                )
+                proc = await asyncio.create_subprocess_exec(
+                    executable,
+                    "-c" if "bash" in executable else "/c",
+                    args.command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    env=_get_base_env(),
+                    start_new_session=True,
+                )
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    args.command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    env=_get_base_env(),
+                    executable=executable or None,
+                    **kwargs,
+                )
 
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(

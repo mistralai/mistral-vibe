@@ -203,7 +203,14 @@ disabled_tools = ["web_fetch"]
 # Per-tool configuration
 [tools.bash]
 allowlist = ["git", "npm", "python"]
+preferred_shell = "C:\\Program Files\\Git\\bin\\bash.exe"  # Windows: path to preferred shell
 ```
+
+**Shell Selection:** On Windows, you can specify a preferred shell executable via:
+- Config: `[tools.bash]` section with `preferred_shell` field (TOML string)
+- Environment variable: `VIBE_SHELL` (takes precedence over config)
+
+If not specified, Vibe auto-detects bash from PATH, git.exe location, or common installation paths.
 
 **Special case — `find` command:** Even if `find` is in the bash allowlist,
 Vibe detects `-exec`, `-execdir`, `-ok`, and `-okdir` predicates and will

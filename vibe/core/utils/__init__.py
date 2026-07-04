@@ -26,6 +26,8 @@ from vibe.core.utils.platform import (
     get_platform_display_name,
     get_platform_id,
     get_platform_version,
+    get_shell_executable,
+    get_windows_bash_path,
     is_windows,
 )
 from vibe.core.utils.retry import async_generator_retry, async_retry
@@ -64,8 +66,10 @@ __all__ = [
     "get_platform_id",
     "get_platform_version",
     "get_server_url_from_api_base",
+    "get_shell_executable",
     "get_user_agent",
     "get_user_cancellation_message",
+    "get_windows_bash_path",
     "is_dangerous_directory",
     "is_user_cancellation_event",
     "is_windows",
