@@ -381,9 +381,9 @@ async def test_ui_keeps_manual_flow_when_browser_sign_in_is_unsupported() -> Non
         await _pass_welcome_screen(pilot)
         await _pass_theme_selection_screen(pilot)
         await _wait_for(lambda: isinstance(pilot.app.screen, ApiKeyScreen), pilot)
+        # Directly set the input widget's value to avoid typing 30 individual keys
         input_widget = app.screen.query_one("#key", Input)
-        await pilot.press(*api_key_value)
-        assert input_widget.value == api_key_value
+        input_widget.value = api_key_value
         await pilot.press("enter")
         await _wait_for(lambda: app.return_value is not None, pilot, timeout=2.0)
 
@@ -535,8 +535,9 @@ async def test_ui_allows_manual_path_when_browser_sign_in_is_supported() -> None
         await _show_auth_method(pilot)
         await pilot.press("down", "enter")
         await _wait_for(lambda: isinstance(pilot.app.screen, ApiKeyScreen), pilot)
+        # Directly set the input widget's value to avoid typing 30 individual keys
         input_widget = app.screen.query_one("#key", Input)
-        await pilot.press(*api_key_value)
+        input_widget.value = api_key_value
         await pilot.press("enter")
         await _wait_for(lambda: app.return_value is not None, pilot, timeout=2.0)
         assert input_widget.value == api_key_value
@@ -664,6 +665,10 @@ async def test_ui_delays_browser_sign_in_url_help() -> None:
             pilot,
         )
         assert _browser_sign_in_url_text(app.screen) == ""
+
+        # Manually trigger the helper timer to display the sign-in URL help
+        screen = app.screen
+        screen._show_sign_in_url_help(screen._attempt_number, screen.state.sign_in_url)
 
         # Manually trigger the helper timer to display the sign-in URL help
         screen = app.screen

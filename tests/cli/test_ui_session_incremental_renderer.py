@@ -75,6 +75,7 @@ def _load_more_remaining(app: VibeApp) -> int:
     return int(remainder.rstrip(")"))
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_ui_mount_defers_history_resume(
     vibe_config: VibeConfigSchema, monkeypatch: pytest.MonkeyPatch
@@ -204,6 +205,7 @@ async def test_ui_session_incremental_loader_load_more_batches_until_done(
         )
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_ui_session_incremental_loader_pages_before_initial_snapshot(
     vibe_config: VibeConfigSchema,
