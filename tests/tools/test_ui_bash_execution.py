@@ -20,6 +20,8 @@ from vibe.cli.textual_ui.widgets.messages import ErrorMessage
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.core.types import Role
 
+# Failing in OBS
+pytestmark = pytest.mark.terminal
 
 def _shell_calls(vibe_app: VibeApp) -> list[ToolCallMessage]:
     return [

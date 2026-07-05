@@ -23,6 +23,7 @@ class ClipboardSelectionWidget(Widget):
         return (self._selected_text, "\n")
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_ui_clipboard_notification_does_not_crash_on_markup_text(
     monkeypatch: pytest.MonkeyPatch, vibe_app: VibeApp

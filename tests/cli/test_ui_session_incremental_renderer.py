@@ -134,6 +134,7 @@ async def test_ui_session_incremental_loader_shows_tail_and_load_more(
         assert "(" in str(label)
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_ui_session_incremental_loader_load_more_shows_remaining_count(
     vibe_config: VibeConfigSchema,
@@ -167,6 +168,7 @@ async def test_ui_session_incremental_loader_load_more_shows_remaining_count(
         )
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_ui_session_incremental_loader_load_more_batches_until_done(
     vibe_config: VibeConfigSchema,

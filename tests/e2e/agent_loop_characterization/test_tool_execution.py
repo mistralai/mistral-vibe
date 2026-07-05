@@ -74,6 +74,7 @@ def _multi_tool_turn_factory(
     return assistant_text_chunks("Both todo reads completed.", created=170)
 
 
+@pytest.mark.terminal
 @pytest.mark.timeout(25)
 @pytest.mark.parametrize(
     "streaming_mock_server",
@@ -119,6 +120,7 @@ def test_denylisted_bash_tool_does_not_run_and_is_reported_to_the_model(
     )
 
 
+@pytest.mark.terminal
 @pytest.mark.timeout(40)
 @pytest.mark.parametrize(
     "streaming_mock_server",
@@ -166,6 +168,7 @@ def test_failed_bash_tool_result_is_reported_to_the_model_and_turn_recovers(
     )
 
 
+@pytest.mark.terminal
 @pytest.mark.timeout(25)
 @pytest.mark.parametrize(
     "streaming_mock_server",

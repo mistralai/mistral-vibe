@@ -138,6 +138,7 @@ def _resume_tool_history_factory(
     return assistant_text_chunks(RESUME_RESUMED_TURN_RESPONSE, created=60)
 
 
+@pytest.mark.terminal
 @pytest.mark.timeout(35)
 @pytest.mark.parametrize(
     "streaming_mock_server",

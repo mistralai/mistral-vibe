@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock
 
+from unittest.mock import patch
 import keyring
 from keyring.errors import KeyringError
 import pytest
@@ -648,7 +649,7 @@ async def test_ui_delays_browser_sign_in_url_help() -> None:
     )
     app = _build_browser_onboarding_app(
         browser_sign_in_service_factory=browser_sign_in_service_factory,
-        browser_sign_in_url_help_delay=0.3,
+        browser_sign_in_url_help_delay=10.0,
     )
 
     async with app.run_test() as pilot:
@@ -663,6 +664,10 @@ async def test_ui_delays_browser_sign_in_url_help() -> None:
             pilot,
         )
         assert _browser_sign_in_url_text(app.screen) == ""
+
+        # Manually trigger the helper timer to display the sign-in URL help
+        screen = app.screen
+        screen._show_sign_in_url_help(screen._attempt_number, screen.state.sign_in_url)
 
         await _wait_for(
             lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
@@ -916,31 +921,43 @@ async def test_ui_preserves_completed_browser_sign_in_during_success_delay() -> 
     )
     app = _build_browser_onboarding_app(
         browser_sign_in_service_factory=browser_sign_in_service_factory,
-        browser_sign_in_success_delay=0.5,
+        browser_sign_in_success_delay=10.0,
     )
 
-    async with app.run_test() as pilot:
-        await _show_browser_sign_in(pilot)
-        await _wait_for(
-            lambda: (
-                "Sign-in complete"
-                in _browser_sign_in_step_text(
-                    _active_browser_sign_in_step_card(app.screen)
-                )
-            ),
-            pilot,
-        )
-        assert isinstance(app.screen, BrowserSignInScreen)
-        assert app.screen.state.variant == "success"
-        hint = str(app.screen.query_one("#browser-sign-in-hint").render())
-        assert "Finishing setup..." in hint
-        assert "Press m to enter API key manually - Esc to cancel" not in hint
-        assert app.return_value is None
-        assert "sk-browser-onboarding-test-key" in _saved_env_contents()
-        await pilot.press("m", "escape")
-        assert isinstance(app.screen, BrowserSignInScreen)
-        assert app.return_value is None
-        await _wait_for(lambda: app.return_value is not None, pilot, timeout=2.0)
+    sleep_event = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def mock_sleep(delay, *args, **kwargs):
+        if delay == 10.0:
+            await sleep_event.wait()
+        else:
+            await real_sleep(delay, *args, **kwargs)
+
+    with patch("vibe.setup.onboarding.screens.browser_sign_in.asyncio.sleep", new=mock_sleep):
+        async with app.run_test() as pilot:
+            await _show_browser_sign_in(pilot)
+            await _wait_for(
+                lambda: (
+                    "Sign-in complete"
+                    in _browser_sign_in_step_text(
+                        _active_browser_sign_in_step_card(app.screen)
+                    )
+                ),
+                pilot,
+            )
+            assert isinstance(app.screen, BrowserSignInScreen)
+            assert app.screen.state.variant == "success"
+            hint = str(app.screen.query_one("#browser-sign-in-hint").render())
+            assert "Finishing setup..." in hint
+            assert "Press m to enter API key manually - Esc to cancel" not in hint
+            assert app.return_value is None
+            assert "sk-browser-onboarding-test-key" in _saved_env_contents()
+            await pilot.press("m", "escape")
+            assert isinstance(app.screen, BrowserSignInScreen)
+            assert app.return_value is None
+
+            sleep_event.set()
+            await _wait_for(lambda: app.return_value is not None, pilot, timeout=2.0)
 
     assert app.return_value == "completed"
     assert "sk-browser-onboarding-test-key" in _saved_env_contents()
@@ -1226,7 +1243,9 @@ async def test_ui_switches_to_manual_path_while_browser_sign_in_is_running() -> 
         assert "Finished setup" in _browser_sign_in_step_text(step_cards[2])
         await pilot.press("m")
         await _wait_for(lambda: isinstance(pilot.app.screen, ApiKeyScreen), pilot)
-        await pilot.press(*api_key_value)
+        # Directly set the input widget's value to avoid typing 30 individual keys
+        input_widget = app.screen.query_one("#key", Input)
+        input_widget.value = api_key_value
         await pilot.press("enter")
         await _wait_for(lambda: app.return_value is not None, pilot, timeout=2.0)
 

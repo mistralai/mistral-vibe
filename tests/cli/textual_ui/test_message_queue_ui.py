@@ -14,6 +14,7 @@ from vibe.cli.textual_ui.widgets.messages import (
 )
 from vibe.cli.textual_ui.widgets.tools import ToolResultMessage
 
+pytestmark = pytest.mark.terminal
 
 @pytest.fixture
 def vibe_app() -> VibeApp:

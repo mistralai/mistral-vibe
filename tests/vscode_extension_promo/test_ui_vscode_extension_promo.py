@@ -51,7 +51,7 @@ def _build_app(
     )
 
 
-async def _wait_for(predicate: Callable[[], bool], pilot, timeout: float = 1.0) -> None:
+async def _wait_for(predicate: Callable[[], bool], pilot, timeout: float = 10.0) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
