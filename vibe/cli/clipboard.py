@@ -128,6 +128,7 @@ def _copy_to_clipboard(text: str) -> None:
 
     if all_strategies_failed:
         raise RuntimeError("All clipboard strategies failed")
+    raise RuntimeError("Clipboard copy succeeded but verification failed")
 
 
 def _get_selected_texts(app: App) -> list[str]:
