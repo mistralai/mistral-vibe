@@ -51,7 +51,7 @@
 .terminal-r17 { fill: #b1b1b5 }
 .terminal-r18 { fill: #9ece6a;font-weight: bold }
 .terminal-r19 { fill: #f6768e }
-.terminal-r20 { fill: #fe9e64;font-weight: bold }
+.terminal-r20 { fill: #bb9af7;font-weight: bold }
     </style>
 
     <defs>

@@ -10,7 +10,7 @@ from uuid import uuid4
 import httpx
 import zstandard
 
-from vibe.core.config import VibeConfig
+from vibe.core.config import AnyVibeConfig
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.git import GitRepoInfo, GitRepository
@@ -33,7 +33,7 @@ from vibe.core.teleport.types import (
     TeleportStartingWorkflowEvent,
     TeleportYieldEvent,
 )
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 
 class TeleportService:
@@ -44,8 +44,8 @@ class TeleportService:
         vibe_code_api_key: str,
         workdir: Path | None = None,
         *,
-        vibe_config: VibeConfig | None = None,
-        client: httpx.AsyncClient | None = None,
+        vibe_config: AnyVibeConfig | None = None,
+        client: VibeAsyncHTTPClient | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._session_logger = session_logger
@@ -60,7 +60,7 @@ class TeleportService:
 
     async def __aenter__(self) -> TeleportService:
         if self._client is None:
-            self._client = httpx.AsyncClient(
+            self._client = VibeAsyncHTTPClient(
                 timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
             )
         self._nuage_client_instance = NuageClient(
@@ -83,9 +83,9 @@ class TeleportService:
             self._client = None
 
     @property
-    def _http_client(self) -> httpx.AsyncClient:
+    def _http_client(self) -> VibeAsyncHTTPClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(
+            self._client = VibeAsyncHTTPClient(
                 timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
             )
             self._owns_client = True

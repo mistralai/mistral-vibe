@@ -3,7 +3,7 @@ from __future__ import annotations
 from rich.markup import escape
 from textual.content import Content
 
-SHORTCUT_STYLE = "b $accent"
+SHORTCUT_STYLE = "b not dim $primary"
 
 
 def shortcut(key: str) -> str:

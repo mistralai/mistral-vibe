@@ -17,7 +17,9 @@ from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.types import BaseEvent, FunctionCall, ToolCall
+from vibe.core.config import SessionLoggingConfig
+from vibe.core.session.session_loader import SessionLoader
+from vibe.core.types import BaseEvent, FunctionCall, Role, ToolCall
 
 
 async def _act_and_collect(agent_loop, prompt: str) -> list[BaseEvent]:
@@ -298,3 +300,35 @@ class TestRewindIntegration:
         await rm.rewind_to_message(rewindable[1][0], restore_files=True)
         assert target.exists()
         assert target.read_text() == "precious data"
+
+    async def test_rewind_in_place_then_reprompt_persists_to_disk(
+        self, tmp_path: Path, tmp_working_directory: Path
+    ) -> None:
+        config = build_test_vibe_config(
+            session_logging=SessionLoggingConfig(
+                save_dir=str(tmp_path / "sessions"), session_prefix="test", enabled=True
+            )
+        )
+        backend = FakeBackend([
+            [mock_llm_chunk(content="response A")],
+            [mock_llm_chunk(content="response A-bis")],
+        ])
+        agent_loop = build_test_agent_loop(
+            config=config, agent_name=BuiltinAgentName.AUTO_APPROVE, backend=backend
+        )
+
+        await _act_and_collect(agent_loop, "message A")
+
+        rm = agent_loop.rewind_manager
+        rewindable = rm.get_rewindable_messages()
+        assert len(rewindable) == 1
+        await rm.rewind_to_message(rewindable[0][0], restore_files=False, inplace=True)
+
+        await _act_and_collect(agent_loop, "message A-bis")
+
+        # Reloading from disk simulates closing and reopening the session.
+        session_dir = agent_loop.session_logger.session_dir
+        assert session_dir is not None
+        loaded, _ = SessionLoader.load_session(session_dir)
+        user_contents = [m.content for m in loaded if m.role == Role.user]
+        assert user_contents == ["message A-bis"]

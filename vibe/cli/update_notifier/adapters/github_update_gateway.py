@@ -8,7 +8,7 @@ from vibe.cli.update_notifier.ports.update_gateway import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 
 class GitHubUpdateGateway(UpdateGateway):
@@ -18,7 +18,7 @@ class GitHubUpdateGateway(UpdateGateway):
         repository: str,
         *,
         token: str | None = None,
-        client: httpx.AsyncClient | None = None,
+        client: VibeAsyncHTTPClient | None = None,
         timeout: float = 5.0,
         base_url: str = "https://api.github.com",
     ) -> None:
@@ -47,7 +47,7 @@ class GitHubUpdateGateway(UpdateGateway):
                     timeout=self._timeout,
                 )
             else:
-                async with httpx.AsyncClient(
+                async with VibeAsyncHTTPClient(
                     base_url=self._base_url,
                     timeout=self._timeout,
                     verify=build_ssl_context(),

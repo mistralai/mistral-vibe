@@ -15,7 +15,9 @@ class OverridesLayer(ConfigLayer[RawConfig]):
     Used by CLI and ACP entry points to inject runtime overrides.
     """
 
-    def __init__(self, *, data: dict[str, Any], name: str = "overrides") -> None:
+    NAME = "overrides"
+
+    def __init__(self, *, data: dict[str, Any], name: str = NAME) -> None:
         super().__init__(name=name)
         self._data = data
 

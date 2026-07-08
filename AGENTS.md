@@ -10,6 +10,13 @@ Before architecture-affecting changes, read the matching ADRs. If a change fits 
 
 | Change area | ADR |
 | --- | --- |
+| Architecture principles, module boundaries, startup/runtime speed, simple changes | [0001 Architecture Principles](docs/adr/0001-architecture-principles.md) |
+| Core engine, Textual CLI, ACP, setup, or programmatic surfaces | [0002 Core Engine And Delivery Surfaces](docs/adr/0002-core-engine-and-delivery-surfaces.md) |
+| Agent loop orchestration, streaming, typed events, cancellation, or responsiveness | [0003 Event Driven Agent Loop](docs/adr/0003-event-driven-agent-loop.md) |
+| Tool contracts, permissions, tool output, UI metadata, or tool adapters | [0004 Typed Permissioned Tools](docs/adr/0004-typed-permissioned-tools.md) |
+| Config models, layering, defaults, migrations, reloads, or runtime overrides | [0005 Layered Configuration](docs/adr/0005-layered-configuration.md) |
+| Session logging, resume, rewind, transcript metadata, or migrations | [0006 Local Sessions](docs/adr/0006-local-sessions.md) |
+| Skills, agents, subagents, hooks, MCP, connectors, custom tools, or discovery | [0007 Extension Mechanisms](docs/adr/0007-extension-mechanisms.md) |
 | Adding or changing analytics instrumentation, telemetry events, or event properties | [0008 Feature Instrumentation](docs/adr/0008-feature-instrumentation.md) |
 
 ## Commands
@@ -60,9 +67,10 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 ## Async
 
 - `asyncio` is the orchestration runtime in the agent loop and tool execution. Use `asyncio.create_task` + queues for concurrent work, not blanket `gather`.
+- Never run CPU-heavy or I/O-bound code on the UI thread. The Textual TUI and the agent loop share one event loop, so anything blocking (large JSON/Pydantic serialization, `os.fsync`, subprocess calls, recursive globs) freezes the UI — offload it with `asyncio.to_thread`. Async file wrappers don't make blocking syscalls non-blocking.
 - Use `anyio.Path` for file I/O on async paths.
 - Streaming surfaces return `AsyncGenerator[Event, None]`, not coroutines.
-- HTTP via `httpx.AsyncClient`; mock with `respx` in tests.
+- When Vibe owns an HTTP client, use `VibeAsyncHTTPClient` from `vibe.core.utils.http` instead of `httpx.AsyncClient` so proxy env vars are handled consistently. Its CIDR `NO_PROXY` matching applies only to IP-literal request hosts; do not resolve DNS before proxy selection. Mock outbound HTTP with `respx` in tests.
 
 ## Tools
 
@@ -87,6 +95,7 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 ## Widgets
 
 - For selectable lists, use `NavigableOptionList` from `vibe/cli/textual_ui/widgets/navigable_option_list.py` instead of Textual's `OptionList`. It adds `j`/`k` cursor navigation on top of the arrow keys; the bare `OptionList` only handles arrows.
+- Keep feature-specific Textual state and helper functions with the feature's widget package. `app.py` should orchestrate mounting and message handling, not accumulate feature-local state models, defaulting helpers, or import factories.
 
 ## TCSS
 
@@ -113,6 +122,15 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 
 - Pin every `uses:` to a full **commit SHA** with an exact version comment: `uses: owner/action@<commit-sha> # vX.Y.Z`.
 - Resolve to the commit, not the annotated-tag object: take the `refs/tags/vX^{}` line from `git ls-remote --tags`, or `gh api repos/<owner>/<repo>/git/refs/tags/<tag> --jq .object` peeled to a commit. Check with `git cat-file -t <sha>` → `commit`, not `tag`. Never pin a moving major tag (`v9`).
+
+## Supply-chain pinning
+
+Every external input to the build, CI, or install path must be pinned to an immutable identifier — never a mutable tag or an unverified download. Add a human-readable comment next to each pin.
+
+- **Container images**: reference by `@sha256:<digest>`, never a bare tag (`:latest`, `:8`). Resolve the digest via the registry's `Docker-Content-Digest` header (`curl -sI -H 'Accept: application/vnd.oci.image.index.v1+json' <registry>/v2/<repo>/manifests/<tag>`). When the image lives inside a JSON matrix string, document the tag→digest mapping in an adjacent comment.
+- **pre-commit hooks** (`.pre-commit-config.yaml`): pin every `rev:` to a full commit SHA with a `# vX.Y.Z` comment. Run `pre-commit autoupdate --freeze` to refresh, and resolve to the peeled commit ref (`refs/tags/vX^{}`), not the annotated-tag object — same rule as `uses:` above.
+- **Build-system deps** (`pyproject.toml` `[build-system] requires`): pin `hatchling`, `hatch-vcs`, `editables` (and any addition) to exact `==` versions. These execute during source builds and are not covered by `uv.lock`.
+- **External binary downloads** (e.g. `patchelf` in `scripts/ci/`): never pipe an unverified download straight into `tar`/`sh`. Download to a temp file, verify `sha256sum -c` against a known-good hash keyed by version (and arch when relevant), then extract. Hard-fail when no hash is registered for the requested version/arch so a bump forces updating the hash.
 
 ## Editor tip
 

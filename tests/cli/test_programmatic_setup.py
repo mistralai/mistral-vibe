@@ -9,9 +9,12 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from vibe.cli import cli as cli_mod, entrypoint as entrypoint_mod
-from vibe.core.config import MissingAPIKeyError
+from vibe.core import programmatic as programmatic_mod
+from vibe.core.config import MissingAPIKeyError, VibeConfig, harness_files
+from vibe.core.tools.manager import ToolManager
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.worktree import prepare_worktree_session
+from vibe.setup import onboarding as onboarding_mod, update_prompt as update_prompt_mod
 
 
 def _make_args(**overrides: object) -> argparse.Namespace:
@@ -22,6 +25,7 @@ def _make_args(**overrides: object) -> argparse.Namespace:
         "max_price": None,
         "max_tokens": None,
         "enabled_tools": None,
+        "disabled_tools": None,
         "output": "text",
         "agent": "default",
         "auto_approve": False,
@@ -62,7 +66,7 @@ def test_programmatic_mode_does_not_run_onboarding_on_missing_api_key(
     def fail_onboarding(*_args: object, **_kwargs: object) -> None:
         sentinel["called"] = True
 
-    monkeypatch.setattr(cli_mod, "run_onboarding", fail_onboarding)
+    monkeypatch.setattr(onboarding_mod, "run_onboarding", fail_onboarding)
 
     with pytest.raises(SystemExit) as exc_info:
         cli_mod.load_config_or_exit(interactive=False)
@@ -90,7 +94,7 @@ def test_interactive_mode_still_runs_onboarding_on_missing_api_key(
 
     onboarding_called: list[bool] = []
     monkeypatch.setattr(
-        cli_mod, "run_onboarding", lambda *a, **k: onboarding_called.append(True)
+        onboarding_mod, "run_onboarding", lambda *a, **k: onboarding_called.append(True)
     )
 
     result = cli_mod.load_config_or_exit(interactive=True)
@@ -151,7 +155,7 @@ def test_trust_flag_trusts_cwd_for_session_only(
     args = _make_args(trust=True, prompt=None)
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
     # Stop main() before it runs the actual CLI.
@@ -185,7 +189,7 @@ def test_trust_flag_works_in_programmatic_mode(
         lambda _cwd: pytest.fail("must not prompt in -p mode"),
     )
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
     def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
@@ -216,7 +220,7 @@ def test_check_upgrade_does_not_pass_trust_resolver(
         lambda _cwd: pytest.fail("check-upgrade must not prompt for trust"),
     )
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
     def fake_run_cli(
@@ -246,7 +250,7 @@ def test_exit_only_modes_do_not_prepare_worktree(
     args = _make_args(prompt=None, worktree="feature", **{flag: True})
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
     def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
@@ -272,7 +276,7 @@ def test_worktree_start_prints_progress_to_stderr(
     args = _make_args(prompt=None, worktree="feature")
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
     def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
@@ -304,7 +308,7 @@ def test_worktree_cleanup_prompt_keeps_dirty_worktree_by_default(
     args = _make_args(prompt=None, worktree="feature")
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
     monkeypatch.setattr("builtins.input", lambda: "")
     worktree_path: list[Path] = []
@@ -338,7 +342,7 @@ def test_worktree_cleanup_prompt_removes_dirty_worktree_when_confirmed(
     args = _make_args(prompt=None, worktree="feature")
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
     monkeypatch.setattr("builtins.input", lambda: "remove")
     worktree_path: list[Path] = []
@@ -373,7 +377,7 @@ def test_programmatic_worktree_is_not_cleaned_up(
     args = _make_args(prompt="run", worktree="feature")
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
     worktree_path: list[Path] = []
 
@@ -401,7 +405,7 @@ def test_worktree_cleanup_skips_failed_startup(
     args = _make_args(prompt=None, worktree="feature")
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
     worktree_path: list[Path] = []
 
@@ -432,7 +436,7 @@ def test_reused_worktree_is_not_cleaned_up(
     args = _make_args(prompt=None, worktree="feature")
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
     worktree_path: list[Path] = []
 
@@ -462,7 +466,7 @@ def test_attached_branch_is_kept_on_cleanup_by_default(
     args = _make_args(prompt=None, worktree="feature")
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
     monkeypatch.setattr("builtins.input", lambda: "")
     worktree_path: list[Path] = []
@@ -499,7 +503,7 @@ def test_interactive_start_passes_trust_resolver_to_cli(
         lambda _cwd: calls.append("trust"),
     )
     monkeypatch.setattr(
-        entrypoint_mod, "init_harness_files_manager", lambda *a, **k: None
+        harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
     def fake_run_cli(
@@ -554,7 +558,7 @@ def test_run_cli_passes_max_tokens_to_run_programmatic(
         call.update(kwargs)
         return "done"
 
-    monkeypatch.setattr(cli_mod, "run_programmatic", fake_run_programmatic)
+    monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
 
     with pytest.raises(SystemExit) as exc_info:
         cli_mod.run_cli(args)
@@ -582,7 +586,7 @@ def test_run_cli_auto_approve_sets_config_without_changing_agent(
         call.update(kwargs)
         return "done"
 
-    monkeypatch.setattr(cli_mod, "run_programmatic", fake_run_programmatic)
+    monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
 
     with pytest.raises(SystemExit) as exc_info:
         cli_mod.run_cli(args)
@@ -590,6 +594,66 @@ def test_run_cli_auto_approve_sets_config_without_changing_agent(
     assert exc_info.value.code == 0
     assert call["agent_name"] == "lean"
     assert config.bypass_tool_permissions is True
+
+
+def _patch_run_cli_for_config(
+    monkeypatch: pytest.MonkeyPatch, config: VibeConfig
+) -> None:
+    monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
+    monkeypatch.setattr(cli_mod, "load_config_or_exit", lambda interactive: config)
+    monkeypatch.setattr(cli_mod, "load_hooks_from_fs", lambda _config: None)
+    monkeypatch.setattr(cli_mod, "setup_tracing", lambda _config: None)
+    monkeypatch.setattr(cli_mod, "load_session", lambda _args, _config: None)
+    monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
+    monkeypatch.setattr(cli_mod, "warn_if_workdir_trust_is_unset", lambda: None)
+    monkeypatch.setattr(cli_mod, "get_initial_agent_name", lambda _args, _config: "x")
+    monkeypatch.setattr(programmatic_mod, "run_programmatic", lambda **kwargs: "done")
+
+
+def test_run_cli_disabled_tools_filter_enabled_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _make_args(enabled_tools=["bash"], disabled_tools=["bash"])
+    config = build_test_vibe_config()
+    _patch_run_cli_for_config(monkeypatch, config)
+
+    with pytest.raises(SystemExit):
+        cli_mod.run_cli(args)
+
+    assert config.enabled_tools == ["bash"]
+    assert "bash" in config.disabled_tools
+    assert ToolManager(lambda: config).available_tools == {}
+
+
+def test_run_cli_programmatic_disabled_tools_filter_enabled_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _make_args(enabled_tools=["ask_user_question", "exit_plan_mode", "grep"])
+    config = build_test_vibe_config()
+    _patch_run_cli_for_config(monkeypatch, config)
+
+    with pytest.raises(SystemExit):
+        cli_mod.run_cli(args)
+
+    available_tools = ToolManager(lambda: config).available_tools
+    assert "ask_user_question" not in available_tools
+    assert "exit_plan_mode" not in available_tools
+    assert "grep" in available_tools
+
+
+def test_run_cli_disabled_tools_concatenated_when_no_enabled_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _make_args(disabled_tools=["bash"])
+    config = build_test_vibe_config(disabled_tools=["webfetch"])
+    _patch_run_cli_for_config(monkeypatch, config)
+
+    with pytest.raises(SystemExit):
+        cli_mod.run_cli(args)
+
+    assert config.enabled_tools == []
+    assert "webfetch" in config.disabled_tools
+    assert "bash" in config.disabled_tools
 
 
 def test_run_cli_runs_update_prompt_before_trust_resolver(
@@ -630,7 +694,9 @@ def test_run_cli_check_upgrade_exits_before_loading_config(
         "load_config_or_exit",
         lambda interactive: pytest.fail("check-upgrade should not load config"),
     )
-    monkeypatch.setattr(cli_mod, "load_update_prompt_theme", lambda: "dracula")
+    monkeypatch.setattr(
+        update_prompt_mod, "load_update_prompt_theme", lambda: "dracula"
+    )
 
     def fake_run_check_upgrade(_repository: object, *, theme: str | None) -> None:
         call["theme"] = theme

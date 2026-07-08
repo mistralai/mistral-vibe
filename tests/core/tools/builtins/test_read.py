@@ -10,7 +10,7 @@ from vibe.core.config.harness_files import (
     init_harness_files_manager,
     reset_harness_files_manager,
 )
-from vibe.core.tools.base import ToolError
+from vibe.core.tools.base import InvokeContext, ToolError
 from vibe.core.tools.builtins.read_file import (
     DEFAULT_LINE_LIMIT,
     MAX_BYTES,
@@ -23,7 +23,7 @@ from vibe.core.tools.builtins.read_file import (
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay
 from vibe.core.trusted_folders import trusted_folders_manager
-from vibe.core.types import ToolResultEvent
+from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import VIBE_WARNING_TAG
 
 
@@ -344,6 +344,30 @@ def test_agents_md_deduplicates(tmp_path: Path) -> None:
         total_lines=1,
     )
     assert tool.get_result_extra(r2) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_setup_manager")
+async def test_agents_md_stream_event_concatenates_new_docs(tmp_path: Path) -> None:
+    sub = tmp_path / "sub"
+    nested = sub / "nested"
+    nested.mkdir(parents=True)
+    (sub / "AGENTS.md").write_text("# Sub", encoding="utf-8")
+    (nested / "AGENTS.md").write_text("# Nested", encoding="utf-8")
+    target = nested / "file.py"
+    target.write_text("hello", encoding="utf-8")
+
+    tool = _make_read()
+    ctx = InvokeContext(tool_call_id="call-1")
+
+    events: list[ToolStreamEvent | ReadFileResult] = []
+    async for item in tool.run(ReadFileArgs(file_path=str(target)), ctx):
+        events.append(item)
+
+    stream_events = [e for e in events if isinstance(e, ToolStreamEvent)]
+    assert len(stream_events) == 1
+    assert stream_events[0].message == "Discovered sub/AGENTS.md, sub/nested/AGENTS.md"
+    assert stream_events[0].tool_call_id == "call-1"
 
 
 def test_agents_md_returns_none_when_not_initialized(tmp_path: Path) -> None:

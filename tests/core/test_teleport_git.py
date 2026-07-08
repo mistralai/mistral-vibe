@@ -202,6 +202,22 @@ class TestGitRepositoryGetInfo:
             )
 
     @pytest.mark.asyncio
+    async def test_returns_remote_default_branch_on_success(
+        self, repo: GitRepository
+    ) -> None:
+        mock = make_mock_repo(urls=["git@github.com:owner/repo.git"], branch="feature")
+        with (
+            patch.object(repo, "_repo_or_raise", return_value=mock),
+            patch.object(
+                repo, "_get_remote_default_branch", AsyncMock(return_value="origin/dev")
+            ),
+        ):
+            info = await repo.get_info()
+
+        assert info.branch == "feature"
+        assert info.default_branch == "dev"
+
+    @pytest.mark.asyncio
     async def test_returns_matched_github_remote_name(
         self, repo: GitRepository
     ) -> None:

@@ -30,13 +30,14 @@ from vibe.core.teleport.types import (
     TeleportPushResponseEvent,
     TeleportStartingWorkflowEvent,
 )
+from vibe.core.utils.http import VibeAsyncHTTPClient
 
 
 def _reimport_agent_loop() -> Any:
     to_clear = ("vibe.core.agent_loop", "git", "vibe.core.teleport")
     for k in [k for k in sys.modules if any(k.startswith(m) for m in to_clear)]:
         del sys.modules[k]
-    return importlib.import_module("vibe.core.agent_loop")
+    return importlib.import_module("vibe.core.agent_loop._loop")
 
 
 def _make_service(tmp_path: Path, **kwargs: Any) -> TeleportService:
@@ -226,7 +227,9 @@ class TestTeleportServiceExecute:
                 },
             )
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with VibeAsyncHTTPClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
             service = _make_service(
                 tmp_path,
                 vibe_code_sessions_base_url="https://chat.example.com",
@@ -255,6 +258,7 @@ class TestTeleportServiceExecute:
         assert events[2].url == TELEPORT_COMPLETE_URL
         assert seen_url == f"https://chat.example.com{TELEPORT_SESSIONS_PATH}"
         assert seen_body is not None
+        assert seen_body["project_name"] == DEFAULT_NUAGE_PROJECT_NAME
         assert seen_body["message"] == {
             "role": "user",
             "parts": [{"type": "text", "text": "test prompt"}],
@@ -308,7 +312,7 @@ class TestTeleportServiceExecute:
 
     @pytest.mark.asyncio
     async def test_execute_push_confirmation_approved(self, tmp_path: Path) -> None:
-        async with httpx.AsyncClient(
+        async with VibeAsyncHTTPClient(
             transport=httpx.MockTransport(_mock_handler())
         ) as client:
             service = _make_service(tmp_path, client=client)

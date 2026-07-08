@@ -9,7 +9,7 @@ from vibe.core.agents import AgentProfile
 from vibe.core.utils import VIBE_WARNING_TAG
 
 if TYPE_CHECKING:
-    from vibe.core.config import VibeConfig
+    from vibe.core.config import AnyVibeConfig
     from vibe.core.types import AgentStats, MessageList
 
 
@@ -29,7 +29,7 @@ class ResetReason(StrEnum):
 class ConversationContext:
     messages: MessageList
     stats: AgentStats
-    config: VibeConfig
+    config: AnyVibeConfig
 
 
 @dataclass
@@ -102,13 +102,7 @@ class AutoCompactMiddleware:
         threshold = context.config.get_active_model().auto_compact_threshold
 
         if threshold > 0 and context.stats.context_tokens >= threshold:
-            return MiddlewareResult(
-                action=MiddlewareAction.COMPACT,
-                metadata={
-                    "old_tokens": context.stats.context_tokens,
-                    "threshold": threshold,
-                },
-            )
+            return MiddlewareResult(action=MiddlewareAction.COMPACT)
         return MiddlewareResult()
 
     def reset(self, reset_reason: ResetReason = ResetReason.STOP) -> None:

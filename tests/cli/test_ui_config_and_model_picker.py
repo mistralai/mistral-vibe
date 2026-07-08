@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -9,7 +9,13 @@ from vibe.cli.textual_ui.app import BottomApp
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.model_picker import ModelPickerApp
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
-from vibe.core.config._settings import THINKING_LEVELS, ModelConfig
+from vibe.core.config._settings import THINKING_LEVELS, ModelConfig, VibeConfig
+
+
+def _persisted_thinking(save_updates: MagicMock, alias: str) -> str:
+    payload = save_updates.call_args.args[0]
+    entry = next(m for m in payload["models"] if m.get("alias", m.get("name")) == alias)
+    return entry["thinking"]
 
 
 def _make_config_with_models():
@@ -342,13 +348,16 @@ async def test_thinking_picker_select_level() -> None:
 
         # Navigate down to "low" (second item) and select
         await pilot.press("down")
-        with patch.object(app, "_reload_config", new=AsyncMock()):
+        with (
+            patch.object(app, "_reload_config", new=AsyncMock()),
+            patch.object(VibeConfig, "save_updates") as save_updates,
+        ):
             await pilot.press("enter")
             await pilot.pause(0.2)
 
         assert app._current_bottom_app == BottomApp.Input
         assert len(app.query(ThinkingPickerApp)) == 0
-        assert app.config.get_active_model().thinking == "low"
+        assert _persisted_thinking(save_updates, "alpha") == "low"
 
 
 @pytest.mark.asyncio
@@ -363,11 +372,14 @@ async def test_thinking_picker_select_high() -> None:
         await pilot.press("down")
         await pilot.press("down")
         await pilot.press("down")
-        with patch.object(app, "_reload_config", new=AsyncMock()):
+        with (
+            patch.object(app, "_reload_config", new=AsyncMock()),
+            patch.object(VibeConfig, "save_updates") as save_updates,
+        ):
             await pilot.press("enter")
             await pilot.pause(0.2)
 
-        assert app.config.get_active_model().thinking == "high"
+        assert _persisted_thinking(save_updates, "alpha") == "high"
 
 
 # --- config -> thinking picker flow ---
@@ -429,9 +441,12 @@ async def test_config_to_thinking_picker_select_returns_to_input() -> None:
         # Select "medium" (3rd item = 2 downs from "off")
         await pilot.press("down")
         await pilot.press("down")
-        with patch.object(app, "_reload_config", new=AsyncMock()):
+        with (
+            patch.object(app, "_reload_config", new=AsyncMock()),
+            patch.object(VibeConfig, "save_updates") as save_updates,
+        ):
             await pilot.press("enter")
             await pilot.pause(0.2)
 
         assert app._current_bottom_app == BottomApp.Input
-        assert app.config.get_active_model().thinking == "medium"
+        assert _persisted_thinking(save_updates, "alpha") == "medium"

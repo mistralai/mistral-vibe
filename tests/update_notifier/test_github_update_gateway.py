@@ -10,6 +10,7 @@ from vibe.cli.update_notifier import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
+from vibe.core.utils.http import VibeAsyncHTTPClient
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -30,7 +31,7 @@ async def test_retrieves_latest_version_when_available() -> None:
         )
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(
+    async with VibeAsyncHTTPClient(
         transport=transport, base_url=GITHUB_API_URL
     ) as client:
         notifier = GitHubUpdateGateway("owner", "repo", token="token", client=client)
@@ -49,7 +50,7 @@ async def test_strips_uppercase_prefix_from_tag_name() -> None:
         )
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(
+    async with VibeAsyncHTTPClient(
         transport=transport, base_url=GITHUB_API_URL
     ) as client:
         notifier = GitHubUpdateGateway("owner", "repo", client=client)
@@ -72,7 +73,7 @@ async def test_considers_no_update_available_when_no_releases_are_found() -> Non
         return httpx.Response(status_code=httpx.codes.OK, json=[])
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(
+    async with VibeAsyncHTTPClient(
         transport=transport, base_url=GITHUB_API_URL
     ) as client:
         notifier = GitHubUpdateGateway("owner", "repo", client=client)
@@ -95,7 +96,7 @@ async def test_considers_no_update_available_when_only_drafts_and_prereleases_ar
         )
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(
+    async with VibeAsyncHTTPClient(
         transport=transport, base_url=GITHUB_API_URL
     ) as client:
         notifier = GitHubUpdateGateway("owner", "repo", client=client)
@@ -144,7 +145,7 @@ async def test_picks_the_most_recently_published_non_prerelease_and_non_draft() 
         )
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(
+    async with VibeAsyncHTTPClient(
         transport=transport, base_url=GITHUB_API_URL
     ) as client:
         notifier = GitHubUpdateGateway("owner", "repo", client=client)
@@ -169,7 +170,7 @@ async def test_ignores_draft_releases_and_prereleases(
         return httpx.Response(status_code=httpx.codes.OK, json=payload)
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(
+    async with VibeAsyncHTTPClient(
         transport=transport, base_url=GITHUB_API_URL
     ) as client:
         notifier = GitHubUpdateGateway("owner", "repo", client=client)
@@ -233,7 +234,7 @@ async def test_retrieves_nothing_when_fetching_update_fails(
     expected_custom_message: str | None,
 ) -> None:
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(
+    async with VibeAsyncHTTPClient(
         transport=transport, base_url=GITHUB_API_URL
     ) as client:
         notifier = GitHubUpdateGateway("owner", "repo", client=client)

@@ -4,7 +4,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import AfterValidator, BeforeValidator, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    BeforeValidator,
+    Field,
+    PrivateAttr,
+    model_validator,
+)
 
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config._defaults import (
@@ -26,6 +32,8 @@ from vibe.core.config._settings import (
     DEFAULT_TRANSCRIBE_PROVIDERS,
     DEFAULT_TTS_MODELS,
     DEFAULT_TTS_PROVIDERS,
+    _strip_bash_pattern_wildcard,
+    get_persisted_config,
     resolve_api_key,
     resolve_theme_name,
 )
@@ -38,6 +46,7 @@ from vibe.core.config.models import (
     ProjectContextConfig,
     ProviderConfig,
     SessionLoggingConfig,
+    ThinkingLevel,
     TranscribeModelConfig,
     TranscribeProviderConfig,
     TTSModelConfig,
@@ -46,16 +55,18 @@ from vibe.core.config.models import (
 from vibe.core.config.schema import (
     ConfigSchema,
     WithConcatMerge,
+    WithDeepMerge,
     WithReplaceMerge,
-    WithShallowMerge,
     WithUnionMerge,
 )
+from vibe.core.logger import logger
 from vibe.core.prompts import (
     SystemPrompt,
     UtilityPrompt,
     load_prompt,
     load_system_prompt,
 )
+from vibe.core.types import Backend
 
 
 def _unique_by(key: str) -> Callable[[list[Any]], list[Any]]:
@@ -71,6 +82,14 @@ def _unique_by(key: str) -> Callable[[list[Any]], list[Any]]:
     return check
 
 
+def _non_empty(items: list[Any]) -> list[Any]:
+    if not items:
+        raise ValueError(
+            "No models are configured. Define at least one model under [[models]]."
+        )
+    return items
+
+
 def _expand_paths(v: Any) -> list[Path]:
     if not v:
         return []
@@ -84,6 +103,12 @@ def _normalize_tool_configs(v: Any) -> dict[str, dict[str, Any]]:
 
 
 class VibeConfigSchema(ConfigSchema):
+    _validation_warnings: list[str] = PrivateAttr(default_factory=list)
+
+    @property
+    def validation_warnings(self) -> tuple[str, ...]:
+        return tuple(self._validation_warnings)
+
     # Models
     active_model: Annotated[str, WithReplaceMerge()] = DEFAULT_ACTIVE_MODEL_CONFIG.alias
     providers: Annotated[list[ProviderConfig], WithUnionMerge(merge_key="name")] = (
@@ -92,6 +117,7 @@ class VibeConfigSchema(ConfigSchema):
     models: Annotated[
         list[ModelConfig],
         WithUnionMerge(merge_key="alias"),
+        AfterValidator(_non_empty),
         AfterValidator(_unique_by("alias")),
     ] = Field(default_factory=lambda: list(DEFAULT_MODELS))
     compaction_model: Annotated[ModelConfig | None, WithReplaceMerge()] = None
@@ -124,7 +150,7 @@ class VibeConfigSchema(ConfigSchema):
     # Tools
     tools: Annotated[
         dict[str, dict[str, Any]],
-        WithShallowMerge(),
+        WithDeepMerge(),
         BeforeValidator(_normalize_tool_configs),
     ] = Field(default_factory=dict)
     tool_paths: Annotated[
@@ -138,7 +164,7 @@ class VibeConfigSchema(ConfigSchema):
             "while files are loaded directly if valid."
         ),
     )
-    enabled_tools: Annotated[list[str], WithConcatMerge()] = Field(
+    enabled_tools: Annotated[list[str], WithReplaceMerge()] = Field(
         default_factory=list,
         description=(
             "An explicit list of tool names/patterns to enable. If set, only these"
@@ -149,8 +175,8 @@ class VibeConfigSchema(ConfigSchema):
     disabled_tools: Annotated[list[str], WithConcatMerge()] = Field(
         default_factory=list,
         description=(
-            "A list of tool names/patterns to disable. Ignored if 'enabled_tools'"
-            " is set. Supports glob patterns and regex with 're:' prefix."
+            "A list of tool names/patterns to disable after 'enabled_tools' filtering. "
+            "Supports glob patterns and regex with 're:' prefix."
         ),
     )
     mcp_servers: Annotated[
@@ -247,10 +273,21 @@ class VibeConfigSchema(ConfigSchema):
         DEFAULT_MISTRAL_API_ENV_KEY
     )
     vibe_code_project_name: Annotated[str | None, WithReplaceMerge()] = None
+    experimental_vibe_code_project_picker_enabled: Annotated[
+        bool, WithReplaceMerge()
+    ] = False
     enable_otel: Annotated[bool, WithReplaceMerge()] = False
     otel_endpoint: Annotated[str, WithReplaceMerge()] = ""
     console_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_CONSOLE_BASE_URL
     enable_experimental_hooks: Annotated[bool, WithReplaceMerge()] = False
+    experimental_bash_tool: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Use the experimental managed bash implementation instead of the "
+            "legacy one-off bash tool."
+        ),
+    )
+    enable_config_orchestrator: Annotated[bool, WithReplaceMerge()] = False
 
     # Top-level scalars
     theme: Annotated[str, WithReplaceMerge(), BeforeValidator(resolve_theme_name)] = (
@@ -322,6 +359,126 @@ class VibeConfigSchema(ConfigSchema):
         )
 
     @property
+    def vibe_code_api_key(self) -> str:
+        return resolve_api_key(self.vibe_code_api_key_env_var) or ""
+
+    def get_compaction_model(self) -> ModelConfig:
+        if self.compaction_model is not None:
+            return self.compaction_model
+        return self.get_active_model()
+
+    def connectors_by_name(self) -> dict[str, ConnectorConfig]:
+        return {c.name: c for c in self.connectors}
+
+    def get_active_provider(self) -> ProviderConfig:
+        return self.get_provider_for_model(self.get_active_model())
+
+    def get_mistral_provider(self) -> ProviderConfig | None:
+        try:
+            active_provider = self.get_active_provider()
+            if active_provider.backend == Backend.MISTRAL:
+                return active_provider
+        except ValueError:
+            pass
+        return next((p for p in self.providers if p.backend == Backend.MISTRAL), None)
+
+    def is_active_model_mistral(self) -> bool:
+        try:
+            return self.get_active_provider().backend == Backend.MISTRAL
+        except ValueError:
+            return False
+
+    def get_active_transcribe_model(self) -> TranscribeModelConfig:
+        if model := next(
+            (
+                m
+                for m in self.transcribe_models
+                if m.alias == self.active_transcribe_model
+            ),
+            None,
+        ):
+            return model
+        raise ValueError(
+            f"Active transcribe model '{self.active_transcribe_model}' not found in configuration."
+        )
+
+    def get_transcribe_provider_for_model(
+        self, model: TranscribeModelConfig
+    ) -> TranscribeProviderConfig:
+        if provider := next(
+            (p for p in self.transcribe_providers if p.name == model.provider), None
+        ):
+            return provider
+        raise ValueError(
+            f"Transcribe provider '{model.provider}' for transcribe model '{model.name}' not found in configuration."
+        )
+
+    def get_active_tts_model(self) -> TTSModelConfig:
+        if model := next(
+            (m for m in self.tts_models if m.alias == self.active_tts_model), None
+        ):
+            return model
+        raise ValueError(
+            f"Active TTS model '{self.active_tts_model}' not found in configuration."
+        )
+
+    def get_tts_provider_for_model(self, model: TTSModelConfig) -> TTSProviderConfig:
+        if provider := next(
+            (p for p in self.tts_providers if p.name == model.provider), None
+        ):
+            return provider
+        raise ValueError(
+            f"TTS provider '{model.provider}' for TTS model '{model.name}' not found in configuration."
+        )
+
+    def build_thinking_update(self, level: ThinkingLevel) -> dict[str, Any]:
+        """Compute the persist payload that sets the active model's thinking level.
+
+        The schema is immutable and does not persist; callers apply the returned
+        payload (e.g. via ``save_updates``) and reload the config.
+        """
+        model = self.get_active_model()
+        current_config = get_persisted_config()
+        models = current_config.get("models", [])
+        for entry in models:
+            if entry.get("alias", entry.get("name")) == model.alias:
+                entry["thinking"] = level
+                break
+        else:
+            models = [
+                {
+                    "name": m.name,
+                    "provider": m.provider,
+                    "alias": m.alias,
+                    "thinking": level if m.alias == model.alias else m.thinking,
+                    **({"supports_images": True} if m.supports_images else {}),
+                }
+                for m in self.models
+            ]
+        return {"models": models}
+
+    def build_tool_allowlist_update(
+        self, tool_name: str, patterns: list[str]
+    ) -> dict[str, Any] | None:
+        """Extend a tool's allowlist in memory and return the persist payload.
+
+        Returns ``None`` when every pattern is already allowlisted. Callers
+        persist the returned payload; the in-memory config is kept current so
+        repeated calls merge from fresh state.
+        """
+        if tool_name == "bash":
+            patterns = [_strip_bash_pattern_wildcard(p) for p in patterns]
+        current_allowlist: list[str] = list(
+            self.tools.get(tool_name, {}).get("allowlist", [])
+        )
+        new_patterns = [p for p in patterns if p not in current_allowlist]
+        if not new_patterns:
+            return None
+        merged = sorted(current_allowlist + new_patterns)
+        self.tools.setdefault(tool_name, {})["allowlist"] = merged
+        return {"tools": {tool_name: {"allowlist": merged}}}
+
+    @property
     def system_prompt(self) -> str:
         return load_system_prompt(self.system_prompt_id)
 
@@ -344,6 +501,24 @@ class VibeConfigSchema(ConfigSchema):
             for model in self.models
         ]
         object.__setattr__(self, "models", models)
+        return self
+
+    @model_validator(mode="after")
+    def _apply_active_model_fallback(self) -> VibeConfigSchema:
+        aliases = {model.alias for model in self.models}
+        if self.active_model not in aliases:
+            unknown = self.active_model
+            fallback = self.models[0].alias
+            logger.warning(
+                "Active model '%s' is not in your configured models; defaulting to '%s'.",
+                unknown,
+                fallback,
+            )
+            self._validation_warnings.append(
+                f"Active model '{unknown}' is not in your configured models "
+                f"— defaulting to '{fallback}'."
+            )
+            object.__setattr__(self, "active_model", fallback)
         return self
 
     @model_validator(mode="after")

@@ -14,7 +14,14 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from pydantic import ValidationError
 
-from vibe.core.config import MCPHttp, MCPOAuth, MCPServer, MCPStreamableHttp, VibeConfig
+from vibe.core.config import (
+    AnyVibeConfig,
+    MCPHttp,
+    MCPOAuth,
+    MCPServer,
+    MCPStreamableHttp,
+    VibeConfig,
+)
 
 MCPAddTransport = Literal["http", "streamable-http"]
 
@@ -44,7 +51,7 @@ def updated_tool_list(tools: list[str], name: str, disabled: bool) -> list[str]:
 
 
 def persist_mcp_toggle(
-    config: VibeConfig,
+    config: AnyVibeConfig,
     *,
     name: str,
     is_connector: bool,
@@ -101,7 +108,7 @@ def _persist_connector_toggle(
 
 
 def persist_oauth_mcp_server(
-    config: VibeConfig,
+    config: AnyVibeConfig,
     *,
     url: str,
     name: str | None = None,

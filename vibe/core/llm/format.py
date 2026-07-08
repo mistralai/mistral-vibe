@@ -6,13 +6,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.tools.base import BaseTool
-from vibe.core.types import (
-    AvailableFunction,
-    AvailableTool,
-    LLMMessage,
-    Role,
-    StrToolChoice,
-)
+from vibe.core.types import AvailableTool, LLMMessage, Role, StrToolChoice
 
 if TYPE_CHECKING:
     from vibe.core.tools.manager import ToolManager
@@ -62,14 +56,7 @@ class APIToolFormatHandler:
 
     def get_available_tools(self, tool_manager: ToolManager) -> list[AvailableTool]:
         return [
-            AvailableTool(
-                function=AvailableFunction(
-                    name=tool_class.get_name(),
-                    description=tool_class.get_full_description(),
-                    parameters=tool_class.get_parameters(),
-                )
-            )
-            for tool_class in tool_manager.available_tools.values()
+            AvailableTool(function=fn) for fn in tool_manager.available_tool_specs()
         ]
 
     def get_tool_choice(self) -> StrToolChoice | AvailableTool:

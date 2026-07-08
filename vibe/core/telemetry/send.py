@@ -9,7 +9,7 @@ from urllib.parse import urljoin
 import httpx
 
 from vibe import __version__
-from vibe.core.config import ProviderConfig, VibeConfig, resolve_api_key
+from vibe.core.config import AnyVibeConfig, ProviderConfig, resolve_api_key
 from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.logger import logger
 from vibe.core.telemetry.build_metadata import build_base_metadata
@@ -23,7 +23,7 @@ from vibe.core.telemetry.types import (
     TeleportFailureStage,
 )
 from vibe.core.utils import get_server_url_from_api_base, get_user_agent
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.agent_loop import ToolDecision
@@ -33,7 +33,7 @@ _DATALAKE_EVENTS_PATH = "/v1/datalake/events"
 
 
 def get_mistral_provider_and_api_key(
-    config: VibeConfig,
+    config: AnyVibeConfig,
 ) -> tuple[ProviderConfig, str] | None:
     """Resolve a Mistral provider and its API key, or None.
 
@@ -66,7 +66,7 @@ def _extract_file_extension(path: object) -> str | None:
 class TelemetryClient:
     def __init__(
         self,
-        config_getter: Callable[[], VibeConfig],
+        config_getter: Callable[[], AnyVibeConfig],
         session_id_getter: Callable[[], str | None] | None = None,
         parent_session_id_getter: Callable[[], str | None] | None = None,
         launch_context: LaunchContext | None = None,
@@ -77,7 +77,7 @@ class TelemetryClient:
         self._parent_session_id_getter = parent_session_id_getter
         self._launch_context = launch_context
         self._experiments_getter = experiments_getter
-        self._client: httpx.AsyncClient | None = None
+        self._client: VibeAsyncHTTPClient | None = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self.last_correlation_id: str | None = None
 
@@ -102,9 +102,9 @@ class TelemetryClient:
         return self._is_enabled() and self._get_mistral_api_key() is not None
 
     @property
-    def client(self) -> httpx.AsyncClient:
+    def client(self) -> VibeAsyncHTTPClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(
+            self._client = VibeAsyncHTTPClient(
                 timeout=httpx.Timeout(5.0),
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
                 verify=build_ssl_context(),
@@ -133,6 +133,12 @@ class TelemetryClient:
             parent_session_id=self.parent_session_id,
             experiments=experiments,
         )
+
+    def _is_experimental_bash_tool_enabled(self) -> bool:
+        try:
+            return self._config_getter().experimental_bash_tool
+        except Exception:
+            return False
 
     def send_telemetry_event(
         self,
@@ -309,6 +315,7 @@ class TelemetryClient:
                 if lc and lc.terminal_emulator is not None
                 else None
             ),
+            "experimental_bash_tool": self._is_experimental_bash_tool_enabled(),
         }
         self.send_telemetry_event("vibe.new_session", payload)
 

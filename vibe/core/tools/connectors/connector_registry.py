@@ -26,7 +26,7 @@ from vibe.core.tools.remote import MCPTool, MCPToolResult, RemoteTool, _OpenArgs
 from vibe.core.tools.ui import ToolResultDisplay
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import run_sync
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -384,7 +384,7 @@ class ConnectorRegistry:
         url = f"{base_url}/v1/connectors/bootstrap"
         headers = {"Authorization": f"Bearer {self._api_key}"}
         params = {"include_auth_actionable_connectors": "true"}
-        async with httpx.AsyncClient(
+        async with VibeAsyncHTTPClient(
             timeout=_BOOTSTRAP_TIMEOUT, verify=build_ssl_context()
         ) as http:
             response = await http.get(url, headers=headers, params=params)
@@ -623,7 +623,7 @@ class ConnectorRegistry:
         if connector_id is None:
             return None
         try:
-            http_client = httpx.AsyncClient(
+            http_client = VibeAsyncHTTPClient(
                 verify=build_ssl_context(), follow_redirects=True
             )
             try:

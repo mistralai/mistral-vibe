@@ -10,6 +10,7 @@ from tests.backend.data.mistral import mistral_completion
 from tests.conftest import build_test_vibe_config
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.tools.builtins.ask_user_question import (
+    Answer,
     AskUserQuestionArgs,
     AskUserQuestionResult,
 )
@@ -143,3 +144,29 @@ async def test_plan_mode_injects_updated_plan_when_file_changed(
         m.content and VIBE_WARNING_TAG in m.content and "# Updated plan" in m.content
         for m in injected
     )
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_exit_switches_agent_mid_turn(mistral_api: MistralAPI) -> None:
+    # Approving exit_plan_mode runs a real agent switch inside act(). The reload
+    # mutates shared AgentLoop state, so it must apply atomically relative to the
+    # in-flight turn rather than interleaving with it.
+    agent = _plan_agent(mistral_api)
+
+    async def approve(_: AskUserQuestionArgs) -> AskUserQuestionResult:
+        return AskUserQuestionResult(
+            cancelled=False,
+            answers=[
+                Answer(
+                    question="q",
+                    answer="Yes, and request approval for edits",
+                    is_other=False,
+                )
+            ],
+        )
+
+    agent.set_user_input_callback(approve)
+
+    _ = [event async for event in agent.act("Make a plan")]
+
+    assert agent.agent_profile.name == BuiltinAgentName.DEFAULT

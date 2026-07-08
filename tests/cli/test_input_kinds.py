@@ -11,7 +11,9 @@ from vibe.cli.textual_ui.widgets.chat_input.input_kinds import (
 
 
 def _classify(value: str) -> object:
-    return classify(value, commands=CommandRegistry(), expand_skill=lambda _value: None)
+    return classify(
+        value, commands=CommandRegistry(), resolve_skill=lambda _value: None
+    )
 
 
 @pytest.mark.parametrize("alias", ["/exit", "exit", "quit", ":q", ":quit"])

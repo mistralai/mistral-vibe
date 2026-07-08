@@ -14,7 +14,7 @@ from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
 
 if TYPE_CHECKING:
-    from vibe.core.config import VibeConfig
+    from vibe.core.config import AnyVibeConfig
 
 
 class SettingDefinition(TypedDict):
@@ -46,7 +46,7 @@ class VoiceApp(VimNavigationMixin, Container):
             super().__init__()
             self.changes = changes
 
-    def __init__(self, config: VibeConfig) -> None:
+    def __init__(self, config: AnyVibeConfig) -> None:
         super().__init__(id="voice-app")
         self.config = config
         self.selected_index = 0

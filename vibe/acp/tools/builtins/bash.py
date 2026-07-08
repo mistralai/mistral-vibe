@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from acp.schema import (
     ContentToolCallContent,
@@ -21,6 +22,9 @@ from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.bash import Bash as CoreBashTool, BashArgs, BashResult
 from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 
+if TYPE_CHECKING:
+    from vibe.core.config import AnyVibeConfig
+
 _TERMINAL_CLEANUP_TIMEOUT = 10
 
 
@@ -35,6 +39,10 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
     @classmethod
     def _get_tool_state_class(cls) -> type[AcpBashState]:
         return AcpBashState
+
+    @classmethod
+    def is_available(cls, config: AnyVibeConfig | None = None) -> bool:
+        return not bool(config and config.experimental_bash_tool)
 
     async def run(
         self, args: BashArgs, ctx: InvokeContext | None = None

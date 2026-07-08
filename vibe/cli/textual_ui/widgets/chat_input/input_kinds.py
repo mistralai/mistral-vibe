@@ -18,7 +18,7 @@ class SlashCommand:
 
 @dataclass(frozen=True, slots=True)
 class Skill:
-    expanded_prompt: str
+    command: str
     name: str
 
 
@@ -44,15 +44,15 @@ def classify(
     value: str,
     *,
     commands: CommandRegistry,
-    expand_skill: Callable[[str], Skill | None],
+    resolve_skill: Callable[[str], Skill | None],
 ) -> ClassifiedInput:
     if value.startswith("&") and commands.has_command("teleport"):
         return Teleport(target=value[1:])
     if commands.parse_command(value) is not None:
         return SlashCommand()
     if value.startswith("/"):
-        if (expanded := expand_skill(value)) is not None:
-            return expanded
+        if (skill := resolve_skill(value)) is not None:
+            return skill
     if value.startswith("!"):
         cmd = value[1:]
         return EmptyBash() if not cmd else Bash(command=cmd)

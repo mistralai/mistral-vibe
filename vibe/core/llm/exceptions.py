@@ -6,12 +6,9 @@ import json
 from typing import Any
 
 import httpx
-from mistralai.client.errors import SDKError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from vibe.core.types import AvailableTool, LLMMessage, StrToolChoice
-
-type HttpError = SDKError | httpx.HTTPStatusError
 
 _CONTEXT_TOO_LONG_SUBSTRINGS = (
     "context too long",
@@ -145,14 +142,19 @@ class BackendErrorBuilder:
         *,
         provider: str,
         endpoint: str,
-        error: HttpError,
+        error: Exception,
+        response: httpx.Response,
         model: str,
         messages: Sequence[LLMMessage],
         temperature: float,
         has_tools: bool,
         tool_choice: StrToolChoice | AvailableTool | None,
     ) -> BackendError:
-        response = error.raw_response if isinstance(error, SDKError) else error.response
+        """Build a BackendError from an HTTP error.
+
+        `response` is the HTTP response carried by `error`; the caller extracts
+        it since each client library stores it under a different attribute.
+        """
         body_text = cls._read_response_body(response, error)
 
         return BackendError(
@@ -197,7 +199,7 @@ class BackendErrorBuilder:
         )
 
     @staticmethod
-    def _read_response_body(response: httpx.Response, error: HttpError) -> str | None:
+    def _read_response_body(response: httpx.Response, error: Exception) -> str | None:
         try:
             response.read()
             return response.text

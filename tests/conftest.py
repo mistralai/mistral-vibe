@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -25,17 +26,21 @@ from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
     DEFAULT_MODELS,
+    AnyVibeConfig,
     ModelConfig,
     SessionLoggingConfig,
     VibeConfig,
 )
+from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
     init_harness_files_manager,
     reset_harness_files_manager,
 )
+from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.llm.types import BackendLike
 from vibe.core.utils import keyring as keyring_utils
+from vibe.core.utils.concurrency import run_sync
 
 
 class _EmptyKeyring(KeyringBackend):
@@ -51,6 +56,26 @@ class _EmptyKeyring(KeyringBackend):
 
     def delete_password(self, service: str, username: str) -> None:
         raise keyring.errors.PasswordDeleteError()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the suite off the developer's git config.
+
+    Tests create throwaway repos and real commits; without this, settings from
+    ~/.gitconfig leak in: commit.gpgsign=true makes every test commit ping the
+    developer's signing agent (and fail where the agent can't prompt). Repos
+    that need an identity set user.name/email themselves.
+
+    Redirecting the global/system config is not enough on every git build, so we
+    also inject commit.gpgsign=false through GIT_CONFIG_COUNT, which git applies
+    after all config files and thus overrides any leaked signing setting.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "false")
 
 
 @pytest.fixture(autouse=True)
@@ -293,15 +318,15 @@ def make_test_models(auto_compact_threshold: int) -> list[ModelConfig]:
     ]
 
 
-def build_test_vibe_config(**kwargs) -> VibeConfig:
+def _prepare_test_config_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     session_logging = kwargs.pop("session_logging", None)
-    resolved_session_logging = (
+    kwargs["session_logging"] = (
         SessionLoggingConfig(enabled=False)
         if session_logging is None
         else session_logging
     )
     enable_update_checks = kwargs.pop("enable_update_checks", None)
-    resolved_enable_update_checks = (
+    kwargs["enable_update_checks"] = (
         False if enable_update_checks is None else enable_update_checks
     )
     if kwargs.get("models"):
@@ -315,11 +340,56 @@ def build_test_vibe_config(**kwargs) -> VibeConfig:
     # detail unless a test opts in.
     kwargs.setdefault("include_project_context", False)
     kwargs.setdefault("include_prompt_detail", False)
-    return VibeConfig(
-        session_logging=resolved_session_logging,
-        enable_update_checks=resolved_enable_update_checks,
-        **kwargs,
-    )
+    return kwargs
+
+
+def build_test_vibe_config(**kwargs) -> VibeConfig:
+    return VibeConfig(**_prepare_test_config_kwargs(kwargs))
+
+
+def build_test_vibe_config_schema(**kwargs) -> VibeConfigSchema:
+    return VibeConfigSchema(**_prepare_test_config_kwargs(kwargs))
+
+
+type ConfigBuilder = Callable[..., AnyVibeConfig]
+
+
+@pytest.fixture(
+    params=[build_test_vibe_config, build_test_vibe_config_schema],
+    ids=["vibe_config", "vibe_config_schema"],
+)
+def build_config(request: pytest.FixtureRequest) -> ConfigBuilder:
+    """Parametrized builder that yields both the legacy VibeConfig and the schema.
+
+    Use in tests exercising the shared API surface so each assertion runs against
+    both config types.
+    """
+    return request.param
+
+
+type ConfigLoader = Callable[[], AnyVibeConfig]
+
+
+def _load_vibe_config() -> VibeConfig:
+    return VibeConfig.load()
+
+
+def _load_vibe_config_schema() -> VibeConfigSchema:
+    return run_sync(build_default_orchestrator()).config
+
+
+@pytest.fixture(
+    params=[_load_vibe_config, _load_vibe_config_schema],
+    ids=["vibe_config", "vibe_config_schema"],
+)
+def load_config(request: pytest.FixtureRequest) -> ConfigLoader:
+    """Parametrized loader that reads the persisted config for both types.
+
+    ``VibeConfig`` reads TOML via ``load``; the schema is built through the
+    standard orchestrator layer stack. Use when a test wants the config to
+    reflect on-disk state rather than in-memory construction.
+    """
+    return request.param
 
 
 def build_test_agent_loop(

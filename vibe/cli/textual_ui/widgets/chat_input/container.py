@@ -203,8 +203,13 @@ class ChatInputContainer(Vertical):
 
     @switching_mode.setter
     def switching_mode(self, value: bool) -> None:
+        self.set_switching_mode(value)
+
+    def set_switching_mode(
+        self, value: bool, *, show_indicator: bool | None = None
+    ) -> None:
         if self._body:
-            self._body.switching_mode = value
+            self._body.set_switching_mode(value, show_indicator=show_indicator)
 
     def set_safety(self, safety: AgentSafety) -> None:
         self._safety = safety

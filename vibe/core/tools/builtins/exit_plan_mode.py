@@ -22,6 +22,11 @@ from vibe.core.tools.builtins.ask_user_question import (
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 
+LABEL_CLEAR_AUTO = "Yes, clear context and auto approve edits"
+LABEL_AUTO = "Yes, and auto approve edits"
+LABEL_MANUAL = "Yes, and request approval for edits"
+LABEL_NO = "No"
+
 
 class ExitPlanModeArgs(BaseModel):
     pass
@@ -64,6 +69,24 @@ class ExitPlanMode(
         if ctx.user_input_callback is None:
             raise ToolError("ExitPlanMode requires an interactive UI.")
 
+        options = [
+            Choice(
+                label=LABEL_CLEAR_AUTO,
+                description="Clear the planning context, then switch to accept-edits mode",
+            ),
+            Choice(
+                label=LABEL_AUTO,
+                description="Switch to accept-edits mode with auto-approve permissions",
+            ),
+            Choice(
+                label=LABEL_MANUAL,
+                description="Switch to default agent mode (manual approval for edits)",
+            ),
+            Choice(
+                label=LABEL_NO, description="Stay in plan mode and continue planning"
+            ),
+        ]
+
         plan_path = str(ctx.plan_file_path) if ctx.plan_file_path else ""
         confirmation = AskUserQuestionArgs(
             footer_note=f"Plan: {plan_path} (Ctrl+G to edit)",
@@ -71,20 +94,7 @@ class ExitPlanMode(
                 Question(
                     question="Plan is complete. Switch to accept-edits mode and start implementing?",
                     header="Plan ready",
-                    options=[
-                        Choice(
-                            label="Yes, and auto approve edits",
-                            description="Switch to accept-edits mode with auto-approve permissions",
-                        ),
-                        Choice(
-                            label="Yes, and request approval for edits",
-                            description="Switch to default agent mode (manual approval for edits)",
-                        ),
-                        Choice(
-                            label="No",
-                            description="Stay in plan mode and continue planning",
-                        ),
-                    ],
+                    options=options,
                 )
             ],
         )
@@ -100,31 +110,41 @@ class ExitPlanMode(
 
         answer = result.answers[0]
         answer_lower = answer.answer.lower()
-        if answer_lower == "yes, and auto approve edits":
-            if ctx.switch_agent_callback:
-                await ctx.switch_agent_callback(BuiltinAgentName.ACCEPT_EDITS)
-            else:
-                ctx.agent_manager.switch_profile(BuiltinAgentName.ACCEPT_EDITS)
-            yield ExitPlanModeResult(
-                switched=True,
-                message="Switched to accept-edits mode. You can now start implementing the plan.",
+        is_clear = answer_lower == LABEL_CLEAR_AUTO.lower()
+        if answer_lower in {LABEL_CLEAR_AUTO.lower(), LABEL_AUTO.lower()}:
+            target = BuiltinAgentName.ACCEPT_EDITS
+            base_message = "Switched to accept-edits mode. You can now start implementing the plan."
+            clear_message = (
+                "Switched to accept-edits mode. Clearing the planning context and "
+                "starting implementation from the approved plan."
             )
-        elif answer_lower == "yes, and request approval for edits":
-            if ctx.switch_agent_callback:
-                await ctx.switch_agent_callback(BuiltinAgentName.DEFAULT)
-            else:
-                ctx.agent_manager.switch_profile(BuiltinAgentName.DEFAULT)
-            yield ExitPlanModeResult(
-                switched=True,
-                message="Switched to default agent mode. Edits will require your approval.",
+        elif answer_lower == LABEL_MANUAL.lower():
+            target = BuiltinAgentName.DEFAULT
+            base_message = (
+                "Switched to default agent mode. Edits will require your approval."
             )
+            clear_message = base_message
         elif answer.is_other:
             yield ExitPlanModeResult(
                 switched=False,
                 message=f"Staying in plan mode. User feedback: {answer.answer}",
             )
+            return
         else:
             yield ExitPlanModeResult(
                 switched=False,
                 message="Staying in plan mode. Continue refining the plan.",
             )
+            return
+
+        if ctx.switch_agent_callback:
+            await ctx.switch_agent_callback(target)
+        else:
+            ctx.agent_manager.switch_profile(target)
+
+        if is_clear and ctx.request_clear_context_callback is not None:
+            await ctx.request_clear_context_callback()
+
+        yield ExitPlanModeResult(
+            switched=True, message=clear_message if is_clear else base_message
+        )

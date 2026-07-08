@@ -6,11 +6,11 @@ from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
     from vibe.core.agents.models import AgentProfile
-    from vibe.core.config import VibeConfig
+    from vibe.core.config import AnyVibeConfig
 
 
 def excluded_agent_message(
-    name: str, config: VibeConfig, discovered: dict[str, AgentProfile]
+    name: str, config: AnyVibeConfig, discovered: dict[str, AgentProfile]
 ) -> str:
     """Generate a message explaining why an agent is not available based on the config."""
     profile = discovered.get(name)

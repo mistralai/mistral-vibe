@@ -125,7 +125,7 @@ class QueuePorts:
     active_model: Callable[[], ModelConfig | None]
     remove_loading_widget: Callable[[], Awaitable[None]]
     set_loading_queue_count: Callable[[int], None]
-    inject_user_context: Callable[..., Awaitable[None]]
+    inject_queued_prompt: Callable[..., Awaitable[None]]
     next_message_index: Callable[[], int]
     start_agent_turn: Callable[..., asyncio.Task]
     await_agent_turn: Callable[[], Awaitable[None]]
@@ -396,8 +396,8 @@ class QueueController:
             rendered = await self._ports.render_payload(item.payload)
         else:
             rendered = item.content
-        await self._ports.inject_user_context(
-            rendered, as_message=True, images=item.images, client_message_id=message_id
+        await self._ports.inject_queued_prompt(
+            rendered, images=item.images, client_message_id=message_id
         )
         self._ports.send_skill_telemetry(item.skill_name)
         if item.payload is not None and message_id is not None:

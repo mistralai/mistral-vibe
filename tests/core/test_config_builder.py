@@ -12,6 +12,7 @@ from vibe.core.config.schema import (
     ConfigSchema,
     WithConcatMerge,
     WithConflictMerge,
+    WithDeepMerge,
     WithReplaceMerge,
     WithShallowMerge,
     WithUnionMerge,
@@ -154,6 +155,45 @@ async def test_shallow_merge_single_layer() -> None:
     builder.add_layer(FakeLayer(name="only", data={"settings": {"x": 1}}))
     config = await builder.build()
     assert config.settings == {"x": 1}
+
+
+# --- DEEP_MERGE (recursive dict merge) ---
+
+
+class DeepMergeSchema(ConfigSchema):
+    tools: Annotated[dict[str, dict[str, Any]], WithDeepMerge()] = Field(
+        default_factory=dict
+    )
+
+
+@pytest.mark.asyncio
+async def test_deep_merge_preserves_nested_tool_fields_across_layers() -> None:
+    builder = ConfigBuilder(DeepMergeSchema)
+    builder.add_layer(
+        FakeLayer(
+            name="base",
+            data={
+                "tools": {"bash": {"permission": "ask", "allowlist": ["git status"]}}
+            },
+        )
+    )
+    builder.add_layer(
+        FakeLayer(
+            name="override", data={"tools": {"bash": {"allowlist": ["git diff"]}}}
+        )
+    )
+    builder.add_layer(
+        FakeLayer(
+            name="extra-tool", data={"tools": {"read_file": {"permission": "always"}}}
+        )
+    )
+
+    config = await builder.build()
+
+    assert config.tools == {
+        "bash": {"permission": "ask", "allowlist": ["git diff"]},
+        "read_file": {"permission": "always"},
+    }
 
 
 # --- CONFLICT ---

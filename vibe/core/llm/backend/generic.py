@@ -23,7 +23,7 @@ from vibe.core.types import (
     StrToolChoice,
 )
 from vibe.core.utils import async_generator_retry, async_retry
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.core.utils.sse import iter_sse_lines
 
 if TYPE_CHECKING:
@@ -212,14 +212,14 @@ class GenericBackend:
     def __init__(
         self,
         *,
-        client: httpx.AsyncClient | None = None,
+        client: VibeAsyncHTTPClient | None = None,
         provider: ProviderConfig,
         timeout: float = 720.0,
     ) -> None:
         """Initialize the backend.
 
         Args:
-            client: Optional httpx client to use. If not provided, one will be created.
+            client: Optional Vibe HTTP client to use. If not provided, one will be created.
         """
         self._client = client
         self._owns_client = client is None
@@ -228,7 +228,7 @@ class GenericBackend:
 
     async def __aenter__(self) -> GenericBackend:
         if self._client is None:
-            self._client = httpx.AsyncClient(
+            self._client = VibeAsyncHTTPClient(
                 timeout=httpx.Timeout(self._timeout),
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
                 verify=build_ssl_context(),
@@ -245,9 +245,9 @@ class GenericBackend:
             await self._client.aclose()
             self._client = None
 
-    def _get_client(self) -> httpx.AsyncClient:
+    def _get_client(self) -> VibeAsyncHTTPClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(
+            self._client = VibeAsyncHTTPClient(
                 timeout=httpx.Timeout(self._timeout),
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
                 verify=build_ssl_context(),
@@ -301,6 +301,7 @@ class GenericBackend:
                 provider=self._provider.name,
                 endpoint=url,
                 error=e,
+                response=e.response,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -365,6 +366,7 @@ class GenericBackend:
                 provider=self._provider.name,
                 endpoint=url,
                 error=e,
+                response=e.response,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,

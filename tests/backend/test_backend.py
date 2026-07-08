@@ -793,7 +793,9 @@ class TestBuildHttpErrorBodyReading:
             request=httpx.Request("POST", "https://api.test.com"),
         )
         err = BackendErrorBuilder.build_http_error(
-            error=self._make_sdk_error(response), **self._COMMON_KWARGS
+            error=self._make_sdk_error(response),
+            response=response,
+            **self._COMMON_KWARGS,
         )
         assert err.status == 400
         assert err.parsed_error == "invalid temperature"
@@ -806,7 +808,9 @@ class TestBuildHttpErrorBodyReading:
             request=httpx.Request("POST", "https://api.test.com"),
         )
         err = BackendErrorBuilder.build_http_error(
-            error=self._make_http_status_error(response), **self._COMMON_KWARGS
+            error=self._make_http_status_error(response),
+            response=response,
+            **self._COMMON_KWARGS,
         )
         assert err.status == 400
         assert err.parsed_error == "invalid temperature"
@@ -821,7 +825,9 @@ class TestBuildHttpErrorBodyReading:
         sdk_err = SDKError(
             "sdk error", response, body='{"message": "context too long"}'
         )
-        err = BackendErrorBuilder.build_http_error(error=sdk_err, **self._COMMON_KWARGS)
+        err = BackendErrorBuilder.build_http_error(
+            error=sdk_err, response=response, **self._COMMON_KWARGS
+        )
         assert err.parsed_error == "context too long"
         assert "context too long" in err.body_text
 
@@ -832,7 +838,9 @@ class TestBuildHttpErrorBodyReading:
             request=httpx.Request("POST", "https://api.test.com"),
         )
         err = BackendErrorBuilder.build_http_error(
-            error=self._make_http_status_error(response), **self._COMMON_KWARGS
+            error=self._make_http_status_error(response),
+            response=response,
+            **self._COMMON_KWARGS,
         )
         assert err.parsed_error == "context too long"
         assert "context too long" in err.body_text
@@ -846,7 +854,9 @@ class TestBuildHttpErrorBodyReading:
         response.read.side_effect = Exception("closed")
 
         sdk_err = SDKError("sdk msg", response, body='{"message": "context too long"}')
-        err = BackendErrorBuilder.build_http_error(error=sdk_err, **self._COMMON_KWARGS)
+        err = BackendErrorBuilder.build_http_error(
+            error=sdk_err, response=response, **self._COMMON_KWARGS
+        )
         assert err.body_text == '{"message": "context too long"}'
         assert err.parsed_error == "context too long"
 
@@ -863,6 +873,6 @@ class TestBuildHttpErrorBodyReading:
             "http error with details", request=response.request, response=response
         )
         err = BackendErrorBuilder.build_http_error(
-            error=http_err, **self._COMMON_KWARGS
+            error=http_err, response=response, **self._COMMON_KWARGS
         )
         assert "http error with details" in err.body_text

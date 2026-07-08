@@ -53,7 +53,7 @@ def test_no_op_when_update_checks_are_disabled(
     config = build_test_vibe_config(enable_update_checks=False)
     _write_pending_update(repository, "999.0.0")
 
-    with patch("vibe.cli.cli.ask_update_prompt") as mock_ask:
+    with patch("vibe.setup.update_prompt.ask_update_prompt") as mock_ask:
         _maybe_run_startup_update_prompt(config, repository)
 
     mock_ask.assert_not_called()
@@ -64,7 +64,7 @@ def test_no_op_when_no_pending_update_is_cached(
 ) -> None:
     config = build_test_vibe_config(enable_update_checks=True)
 
-    with patch("vibe.cli.cli.ask_update_prompt") as mock_ask:
+    with patch("vibe.setup.update_prompt.ask_update_prompt") as mock_ask:
         _maybe_run_startup_update_prompt(config, repository)
 
     mock_ask.assert_not_called()
@@ -77,7 +77,8 @@ def test_prompt_is_shown_and_continue_returns_without_exiting(
     _write_pending_update(repository, "999.0.0")
 
     with patch(
-        "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.CONTINUE
+        "vibe.setup.update_prompt.ask_update_prompt",
+        return_value=UpdatePromptResult.CONTINUE,
     ) as mock_ask:
         _maybe_run_startup_update_prompt(config, repository)
 
@@ -89,7 +90,10 @@ def test_quit_exits_zero(repository: FileSystemUpdateCacheRepository) -> None:
     _write_pending_update(repository, "999.0.0")
 
     with (
-        patch("vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.QUIT),
+        patch(
+            "vibe.setup.update_prompt.ask_update_prompt",
+            return_value=UpdatePromptResult.QUIT,
+        ),
         pytest.raises(SystemExit) as excinfo,
     ):
         _maybe_run_startup_update_prompt(config, repository)
@@ -105,7 +109,8 @@ def test_successful_update_exits_zero(
 
     with (
         patch(
-            "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.UPDATED
+            "vibe.setup.update_prompt.ask_update_prompt",
+            return_value=UpdatePromptResult.UPDATED,
         ),
         pytest.raises(SystemExit) as excinfo,
     ):
@@ -120,7 +125,7 @@ def test_failed_update_exits_one(repository: FileSystemUpdateCacheRepository) ->
 
     with (
         patch(
-            "vibe.cli.cli.ask_update_prompt",
+            "vibe.setup.update_prompt.ask_update_prompt",
             return_value=UpdatePromptResult.UPDATE_FAILED,
         ),
         pytest.raises(SystemExit) as excinfo,
@@ -134,7 +139,7 @@ def test_no_op_when_cache_read_raises_oserror() -> None:
     config = build_test_vibe_config(enable_update_checks=True)
     repository = _BrokenRepository()
 
-    with patch("vibe.cli.cli.ask_update_prompt") as mock_ask:
+    with patch("vibe.setup.update_prompt.ask_update_prompt") as mock_ask:
         _maybe_run_startup_update_prompt(config, repository)
 
     mock_ask.assert_not_called()
@@ -146,7 +151,8 @@ def test_check_upgrade_fetches_and_prompts_when_update_is_available(
     notifier = FakeUpdateGateway(update=Update(latest_version="999.0.0"))
 
     with patch(
-        "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.CONTINUE
+        "vibe.setup.update_prompt.ask_update_prompt",
+        return_value=UpdatePromptResult.CONTINUE,
     ) as mock_ask:
         _run_check_upgrade(repository, update_notifier=notifier, theme="textual-light")
 
@@ -166,7 +172,8 @@ def test_check_upgrade_cancel_does_not_dismiss_update(
     notifier = FakeUpdateGateway(update=Update(latest_version="999.0.0"))
 
     with patch(
-        "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.CONTINUE
+        "vibe.setup.update_prompt.ask_update_prompt",
+        return_value=UpdatePromptResult.CONTINUE,
     ):
         _run_check_upgrade(repository, update_notifier=notifier)
 
@@ -175,7 +182,8 @@ def test_check_upgrade_cancel_does_not_dismiss_update(
     assert cache.dismissed_version is None
 
     with patch(
-        "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.CONTINUE
+        "vibe.setup.update_prompt.ask_update_prompt",
+        return_value=UpdatePromptResult.CONTINUE,
     ) as mock_ask:
         _maybe_run_startup_update_prompt(config, repository)
 
@@ -187,7 +195,7 @@ def test_check_upgrade_prints_up_to_date_when_no_update_exists(
 ) -> None:
     notifier = FakeUpdateGateway(update=None)
 
-    with patch("vibe.cli.cli.ask_update_prompt") as mock_ask:
+    with patch("vibe.setup.update_prompt.ask_update_prompt") as mock_ask:
         _run_check_upgrade(repository, update_notifier=notifier)
 
     mock_ask.assert_not_called()
@@ -217,7 +225,8 @@ def test_continue_marks_version_as_dismissed_and_prevents_reprompt(
     _write_pending_update(repository, "999.0.0")
 
     with patch(
-        "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.CONTINUE
+        "vibe.setup.update_prompt.ask_update_prompt",
+        return_value=UpdatePromptResult.CONTINUE,
     ) as mock_ask:
         _maybe_run_startup_update_prompt(config, repository)
         _maybe_run_startup_update_prompt(config, repository)
@@ -232,7 +241,8 @@ def test_continue_reprompts_when_a_newer_version_appears(
     _write_pending_update(repository, "999.0.0")
 
     with patch(
-        "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.CONTINUE
+        "vibe.setup.update_prompt.ask_update_prompt",
+        return_value=UpdatePromptResult.CONTINUE,
     ) as mock_ask:
         _maybe_run_startup_update_prompt(config, repository)
         _write_pending_update(repository, "1000.0.0")
@@ -249,7 +259,8 @@ def test_successful_update_prints_restart_hint(
 
     with (
         patch(
-            "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.UPDATED
+            "vibe.setup.update_prompt.ask_update_prompt",
+            return_value=UpdatePromptResult.UPDATED,
         ),
         pytest.raises(SystemExit),
     ):
@@ -268,7 +279,7 @@ def test_failed_update_prints_error_message(
 
     with (
         patch(
-            "vibe.cli.cli.ask_update_prompt",
+            "vibe.setup.update_prompt.ask_update_prompt",
             return_value=UpdatePromptResult.UPDATE_FAILED,
         ),
         pytest.raises(SystemExit),
@@ -288,7 +299,7 @@ def test_failed_update_does_not_dismiss_so_user_is_reprompted_on_next_launch(
 
     with (
         patch(
-            "vibe.cli.cli.ask_update_prompt",
+            "vibe.setup.update_prompt.ask_update_prompt",
             return_value=UpdatePromptResult.UPDATE_FAILED,
         ),
         pytest.raises(SystemExit),
@@ -300,7 +311,8 @@ def test_failed_update_does_not_dismiss_so_user_is_reprompted_on_next_launch(
     assert cache.dismissed_version is None
 
     with patch(
-        "vibe.cli.cli.ask_update_prompt", return_value=UpdatePromptResult.CONTINUE
+        "vibe.setup.update_prompt.ask_update_prompt",
+        return_value=UpdatePromptResult.CONTINUE,
     ) as mock_ask:
         _maybe_run_startup_update_prompt(config, repository)
 

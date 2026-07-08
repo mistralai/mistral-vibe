@@ -52,7 +52,7 @@
 .terminal-r18 { fill: #a8aaaa }
 .terminal-r19 { fill: #9ece6a;font-weight: bold }
 .terminal-r20 { fill: #f6768e }
-.terminal-r21 { fill: #fe9e64;font-weight: bold }
+.terminal-r21 { fill: #bb9af7;font-weight: bold }
     </style>
 
     <defs>

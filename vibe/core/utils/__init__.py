@@ -14,6 +14,7 @@ from vibe.core.utils.concurrency import (
 )
 from vibe.core.utils.display import compact_complete_display
 from vibe.core.utils.http import (
+    VibeAsyncHTTPClient,
     build_ssl_context,
     configure_ssl_context,
     get_server_url_from_api_base,
@@ -55,6 +56,7 @@ __all__ = [
     "MergeConflictError",
     "MergeStrategy",
     "TaggedText",
+    "VibeAsyncHTTPClient",
     "async_generator_retry",
     "async_retry",
     "build_ssl_context",

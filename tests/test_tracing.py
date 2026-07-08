@@ -49,13 +49,13 @@ def _otel_provider(monkeypatch: pytest.MonkeyPatch):
 class TestSetupTracing:
     def test_noop_when_disabled(self) -> None:
         config = MagicMock(enable_telemetry=True, enable_otel=False)
-        with patch("vibe.core.tracing.trace.set_tracer_provider") as mock_set:
+        with patch("opentelemetry.trace.set_tracer_provider") as mock_set:
             setup_tracing(config)
         mock_set.assert_not_called()
 
     def test_noop_when_telemetry_disabled(self) -> None:
         config = MagicMock(enable_telemetry=False, enable_otel=True)
-        with patch("vibe.core.tracing.trace.set_tracer_provider") as mock_set:
+        with patch("opentelemetry.trace.set_tracer_provider") as mock_set:
             setup_tracing(config)
         mock_set.assert_not_called()
 
@@ -65,7 +65,7 @@ class TestSetupTracing:
             patch(
                 "vibe.core.tracing.build_otel_span_exporter_config", return_value=None
             ),
-            patch("vibe.core.tracing.trace.set_tracer_provider") as mock_set,
+            patch("opentelemetry.trace.set_tracer_provider") as mock_set,
         ):
             setup_tracing(config)
         mock_set.assert_not_called()
@@ -84,7 +84,7 @@ class TestSetupTracing:
             patch(
                 "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
             ) as mock_exporter,
-            patch("vibe.core.tracing.trace.set_tracer_provider") as mock_set,
+            patch("opentelemetry.trace.set_tracer_provider") as mock_set,
         ):
             setup_tracing(config)
 
@@ -108,7 +108,7 @@ class TestSetupTracing:
             patch(
                 "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter"
             ) as mock_exporter,
-            patch("vibe.core.tracing.trace.set_tracer_provider") as mock_set,
+            patch("opentelemetry.trace.set_tracer_provider") as mock_set,
         ):
             setup_tracing(config)
 

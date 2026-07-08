@@ -1,11 +1,43 @@
 from __future__ import annotations
 
+import json
+import subprocess
+from typing import cast
+
+from pydantic import ValidationError
 import pytest
 
 from tests.mock.utils import collect_result
 from vibe.core.tools.base import BaseToolState, ToolError, ToolPermission
 from vibe.core.tools.builtins.bash import Bash, BashArgs, BashToolConfig
+from vibe.core.tools.builtins.experimental_bash import (
+    BashLogFile,
+    BashLogFileArgs,
+    BashLogFileConfig,
+    BashLogFileResult,
+    BashOutput,
+    BashOutputArgs,
+    BashOutputConfig,
+    BashOutputResult,
+    BashSessions,
+    BashSessionsArgs,
+    BashSessionsConfig,
+    BashSessionsResult,
+    BashStdin,
+    BashStdinArgs,
+    BashStdinConfig,
+    BashStdinResult,
+    ExperimentalBash,
+    ExperimentalBashArgs,
+    ExperimentalBashToolConfig,
+    TerminalSession,
+    TerminalSessionManager,
+)
+from vibe.core.tools.builtins.managed_bash.backend import ManagedBashBackend
 from vibe.core.tools.permissions import PermissionContext
+from vibe.core.tools.ui import ToolUIDataAdapter
+from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.utils import is_windows
 
 
 @pytest.fixture
@@ -68,6 +100,22 @@ async def test_truncates_output_to_max_bytes(bash):
     assert result.returncode == 0
 
 
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+@pytest.mark.asyncio
+async def test_experimental_bash_keeps_compatibility_stderr_empty():
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+
+    result = await collect_result(
+        tool.run(ExperimentalBashArgs(command="printf err >&2"))
+    )
+
+    assert result.stdout == "err"
+    assert result.output == "err"
+    assert result.stderr == ""
+
+
 @pytest.mark.asyncio
 async def test_cat_preserves_accents_from_latin1_encoded_file(bash, tmp_path):
     file = tmp_path / "menu.txt"
@@ -78,6 +126,544 @@ async def test_cat_preserves_accents_from_latin1_encoded_file(bash, tmp_path):
     assert result.returncode == 0
     assert "\ufffd" not in result.stdout
     assert result.stdout == "café au lait\nthé glacé\n"
+
+
+class _SplitReadBackend:
+    def __init__(self, fragments: list[bytes]) -> None:
+        self._fragments = fragments
+
+    def wait_readable(self, master_fd: int, timeout_seconds: float) -> bool:
+        return bool(self._fragments)
+
+    def read(self, master_fd: int, size: int) -> bytes:
+        return self._fragments.pop(0) if self._fragments else b""
+
+    def close_fd(self, fd: int) -> None:
+        pass
+
+    def terminate_process_group(
+        self, process: subprocess.Popen[bytes], *, force: bool, grace_seconds: float
+    ) -> None:
+        pass
+
+
+class _CompletedProcess:
+    returncode = 0
+
+    def poll(self) -> int:
+        return 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+class _RunningProcess:
+    returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        raise subprocess.TimeoutExpired("running", timeout or 0)
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
+def test_posix_shell_resolution_prefers_zsh_fallback_but_honors_overrides(monkeypatch):
+    from vibe.core.tools.builtins.managed_bash import _posix
+
+    backend = _posix.PosixManagedBashBackend()
+    calls: list[str] = []
+    resolved_shells = {
+        "requested": "/mock/requested",
+        "configured": "/mock/configured",
+        "/bin/zsh": "/bin/zsh",
+        "bash": "/mock/bash",
+    }
+
+    def fake_resolve_executable(candidate: str) -> str | None:
+        calls.append(candidate)
+        return resolved_shells.get(candidate)
+
+    monkeypatch.setattr(_posix, "_resolve_executable", fake_resolve_executable)
+
+    assert backend.resolve_shell("requested", "configured") == "/mock/requested"
+    assert calls == ["requested"]
+
+    calls.clear()
+    assert backend.resolve_shell(None, "configured") == "/mock/configured"
+    assert calls == ["configured"]
+
+    calls.clear()
+    assert backend.resolve_shell(None, None) == "/bin/zsh"
+    assert calls == ["zsh", "/bin/zsh"]
+
+
+def test_reader_loop_preserves_multibyte_split_across_chunks(tmp_path):
+    snowman = "☃".encode()
+    backend = _SplitReadBackend([snowman[:2], snowman[2:]])
+    manager = TerminalSessionManager(backend=cast(ManagedBashBackend, backend))
+    output_path = tmp_path / "out.log"
+    output_path.touch()
+    session = TerminalSession(
+        session_id="split",
+        command="cmd",
+        cwd=tmp_path,
+        shell="/bin/sh",
+        process=cast(subprocess.Popen[bytes], _CompletedProcess()),
+        master_fd=1,
+        output_path=output_path,
+        manifest_path=tmp_path / "split.json",
+        created_at=0.0,
+    )
+
+    manager._reader_loop(session)
+
+    chunk = manager._read_file_chunk(output_path, cursor=0, max_bytes=64)
+    assert chunk.output == "☃"
+    assert "\ufffd" not in chunk.output
+
+
+def test_read_file_chunk_does_not_split_multibyte_at_page_boundary(tmp_path):
+    manager = TerminalSessionManager()
+    output_path = tmp_path / "out.log"
+    # "a" * 4 then a 3-byte snowman then "b": with max_bytes=5 the window ends
+    # one byte into the snowman.
+    output_path.write_bytes(b"aaaa" + "☃".encode() + b"b")
+
+    first = manager._read_file_chunk(output_path, cursor=0, max_bytes=5)
+    assert first.output == "aaaa"
+    assert "\ufffd" not in first.output
+    assert first.truncated is True
+
+    second = manager._read_file_chunk(
+        output_path, cursor=first.next_cursor, max_bytes=5
+    )
+    assert second.output == "☃b"
+    assert "\ufffd" not in second.output
+    assert second.truncated is False
+
+
+def test_running_read_output_defers_incomplete_utf8_at_current_eof(tmp_path):
+    manager = TerminalSessionManager()
+    output_path = tmp_path / "out.log"
+    snowman = "☃".encode()
+    output_path.write_bytes(b"a" + snowman[:2])
+    session = TerminalSession(
+        session_id="running",
+        command="cmd",
+        cwd=tmp_path,
+        shell="/bin/sh",
+        process=cast(subprocess.Popen[bytes], _RunningProcess()),
+        master_fd=1,
+        output_path=output_path,
+        manifest_path=tmp_path / "running.json",
+        created_at=0.0,
+    )
+    manager._sessions[session.session_id] = session
+
+    _info, first = manager.read_output(
+        session_id="running", cursor=0, wait_seconds=0, max_bytes=64
+    )
+
+    assert first.output == "a"
+    assert "\ufffd" not in first.output
+    assert first.next_cursor == 1
+    assert first.truncated is True
+
+    output_path.write_bytes(b"a" + snowman + b"z")
+    _info, second = manager.read_output(
+        session_id="running", cursor=first.next_cursor, wait_seconds=0, max_bytes=64
+    )
+
+    assert second.output == "☃z"
+    assert "\ufffd" not in second.output
+    assert second.next_cursor == output_path.stat().st_size
+    assert second.truncated is False
+
+
+def test_inspect_session_does_not_split_multibyte_at_tail_boundary(tmp_path):
+    manager = TerminalSessionManager()
+    output_path = tmp_path / "out.log"
+    output_path.write_bytes(b"aa" + "☃".encode() + b"z")
+    session = TerminalSession(
+        session_id="tail",
+        command="cmd",
+        cwd=tmp_path,
+        shell="/bin/sh",
+        process=cast(subprocess.Popen[bytes], _CompletedProcess()),
+        master_fd=1,
+        output_path=output_path,
+        manifest_path=tmp_path / "tail.json",
+        created_at=0.0,
+        status="completed",
+        exit_code=0,
+    )
+    manager._sessions[session.session_id] = session
+
+    _info, chunk = manager.inspect_session("tail", max_bytes=3)
+
+    assert chunk.output == "z"
+    assert "\ufffd" not in chunk.output
+    assert chunk.next_cursor == output_path.stat().st_size
+    assert chunk.truncated is False
+
+
+def test_bash_stdin_requires_exactly_one_input_source():
+    BashStdinArgs(session_id="s", text="hi")
+    BashStdinArgs(session_id="s", control=["ctrl_c"])
+
+    with pytest.raises(ValidationError):
+        BashStdinArgs(session_id="s")
+    with pytest.raises(ValidationError):
+        BashStdinArgs(session_id="s", text="hi", control=["ctrl_c"])
+
+
+def test_bash_stdin_control_field_rejects_unknown_keys():
+    BashStdinArgs(session_id="s", control=["ctrl_c", "enter"])
+
+    with pytest.raises(ValidationError):
+        BashStdinArgs.model_validate({"session_id": "s", "control": ["not_a_real_key"]})
+
+
+def test_bash_byte_limit_models_accept_legacy_max_chars_alias():
+    assert (
+        BashOutputArgs.model_validate({"session_id": "s", "max_chars": 12}).max_bytes
+        == 12
+    )
+    assert (
+        BashSessionsArgs.model_validate({
+            "action": "inspect",
+            "max_chars": 13,
+        }).max_bytes
+        == 13
+    )
+    assert (
+        BashLogFileArgs.model_validate({"action": "read", "max_chars": 14}).max_bytes
+        == 14
+    )
+
+
+def test_bash_config_models_accept_legacy_max_inline_chars_alias():
+    assert (
+        ExperimentalBashToolConfig.model_validate({
+            "max_inline_chars": 12
+        }).max_inline_bytes
+        == 12
+    )
+    assert (
+        BashOutputConfig.model_validate({"max_inline_chars": 13}).max_inline_bytes == 13
+    )
+    assert (
+        BashSessionsConfig.model_validate({"max_inline_chars": 14}).max_inline_bytes
+        == 14
+    )
+    assert (
+        BashLogFileConfig.model_validate({"max_inline_chars": 15}).max_inline_bytes
+        == 15
+    )
+
+
+def test_bash_output_display_describes_polling_and_running_result():
+    adapter = ToolUIDataAdapter(BashOutput)
+    call = adapter.get_call_display(
+        ToolCallEvent(
+            tool_call_id="call",
+            tool_name="bash_output",
+            tool_class=BashOutput,
+            args=BashOutputArgs(session_id="bash_1", wait_seconds=1),
+        )
+    )
+    result = adapter.get_result_display(
+        ToolResultEvent(
+            tool_call_id="call",
+            tool_name="bash_output",
+            tool_class=BashOutput,
+            result=BashOutputResult(
+                session_id="bash_1",
+                status="running",
+                output="",
+                next_cursor=0,
+                truncated=True,
+                output_path="/tmp/bash_1.log",
+            ),
+        )
+    )
+
+    assert call.summary == "Waiting for bash session bash_1"
+    assert result.success is True
+    assert result.message == "Session bash_1 is still running"
+    assert result.suffix == "truncated"
+
+
+def test_bash_stdin_display_describes_bytes_written():
+    adapter = ToolUIDataAdapter(BashStdin)
+    call = adapter.get_call_display(
+        ToolCallEvent(
+            tool_call_id="call",
+            tool_name="bash_stdin",
+            tool_class=BashStdin,
+            args=BashStdinArgs(session_id="bash_1", text="ok\n"),
+        )
+    )
+    result = adapter.get_result_display(
+        ToolResultEvent(
+            tool_call_id="call",
+            tool_name="bash_stdin",
+            tool_class=BashStdin,
+            result=BashStdinResult(
+                session_id="bash_1", bytes_written=3, status="running"
+            ),
+        )
+    )
+
+    assert call.summary == "Sending input to bash session bash_1"
+    assert result.success is True
+    assert result.message == "Sent 3 bytes to running session bash_1"
+
+    completed = adapter.get_result_display(
+        ToolResultEvent(
+            tool_call_id="call",
+            tool_name="bash_stdin",
+            tool_class=BashStdin,
+            result=BashStdinResult(
+                session_id="bash_1", bytes_written=3, status="completed"
+            ),
+        )
+    )
+
+    assert completed.success is True
+    assert completed.message == "Sent 3 bytes to completed session bash_1"
+
+
+def test_bash_sessions_display_describes_actions():
+    adapter = ToolUIDataAdapter(BashSessions)
+    call = adapter.get_call_display(
+        ToolCallEvent(
+            tool_call_id="call",
+            tool_name="bash_sessions",
+            tool_class=BashSessions,
+            args=BashSessionsArgs(action="kill", session_id="bash_1"),
+        )
+    )
+    result = adapter.get_result_display(
+        ToolResultEvent(
+            tool_call_id="call",
+            tool_name="bash_sessions",
+            tool_class=BashSessions,
+            result=BashSessionsResult(action="reset", sessions=[]),
+        )
+    )
+
+    assert call.summary == "Killing bash session bash_1"
+    assert result.success is True
+    assert result.message == "Reset bash sessions; stopped 0 sessions"
+
+
+def test_bash_log_file_display_describes_actions_and_truncation():
+    adapter = ToolUIDataAdapter(BashLogFile)
+    call = adapter.get_call_display(
+        ToolCallEvent(
+            tool_call_id="call",
+            tool_name="bash_log_file",
+            tool_class=BashLogFile,
+            args=BashLogFileArgs(action="read", session_id="bash_1"),
+        )
+    )
+    result = adapter.get_result_display(
+        ToolResultEvent(
+            tool_call_id="call",
+            tool_name="bash_log_file",
+            tool_class=BashLogFile,
+            result=BashLogFileResult(
+                action="read",
+                path="/tmp/bash_1.log",
+                content="output",
+                next_cursor=10,
+                truncated=True,
+            ),
+        )
+    )
+
+    assert call.summary == "Reading bash log bash_1"
+    assert result.success is True
+    assert result.message == "Read bash log bash_1.log"
+    assert result.suffix == "truncated"
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
+@pytest.mark.asyncio
+async def test_foreground_killed_session_is_reported_as_failure():
+    tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+    started = await collect_result(
+        tool.run(ExperimentalBashArgs(command="sleep 30", background=True))
+    )
+    sessions = BashSessions(
+        config_getter=lambda: BashSessionsConfig(), state=BaseToolState()
+    )
+    await collect_result(
+        sessions.run(BashSessionsArgs(action="kill", session_id=started.session_id))
+    )
+
+    with pytest.raises(ToolError):
+        tool._result_from_session(
+            started.session_id, background=False, max_bytes=1000, enforce_success=True
+        )
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash is POSIX-only")
+def test_reset_clear_logs_kills_running_sessions(tmp_path):
+    manager = TerminalSessionManager()
+    shell = manager.resolve_shell(None, None)
+    session = manager.start(
+        command="sleep 30", cwd=tmp_path, env=None, shell=shell, background=True
+    )
+
+    killed = manager.reset(clear_logs=True)
+
+    assert any(info.session_id == session.session_id for info in killed)
+    assert manager._sessions == {}
+    assert session.process.poll() is not None
+
+
+def test_manager_does_not_list_orphans_from_previous_vibe_session(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    sessions_dir = tmp_path / "bash-tool" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    output_path = sessions_dir / "old.log"
+    manifest_path = sessions_dir / "old.json"
+    output_path.write_text("old output", encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps({
+            "session_id": "old",
+            "command": "echo old",
+            "cwd": str(tmp_path),
+            "shell": "/bin/sh",
+            "status": "orphaned",
+            "exit_code": None,
+            "output_path": str(output_path),
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "reader_error": None,
+        }),
+        encoding="utf-8",
+    )
+
+    manager = TerminalSessionManager()
+
+    assert manager.list_sessions() == []
+    assert output_path.exists()
+    assert manifest_path.exists()
+
+
+def test_resolve_timeout_uses_shared_bash_default_timeout():
+    config = ExperimentalBashToolConfig(default_timeout=300, max_timeout_seconds=600)
+    bash_tool = ExperimentalBash(config_getter=lambda: config, state=BaseToolState())
+
+    assert bash_tool._resolve_timeout(None) == 300
+    assert bash_tool._resolve_timeout(50) == 50
+    assert bash_tool._resolve_timeout(10_000) == 600
+
+
+def test_build_env_neutralizes_pagers_but_keeps_interactive_term(monkeypatch):
+    monkeypatch.delenv("TERM", raising=False)
+    manager = TerminalSessionManager()
+
+    env = manager._build_env(None)
+
+    assert env["GIT_PAGER"] == "cat"
+    assert env["PAGER"] == "cat"
+    assert env["LESS"] == "-FX"
+    assert env["TERM"] == "xterm-256color"
+
+
+@pytest.mark.asyncio
+async def test_background_session_can_be_polled_and_killed():
+    managed_bash = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+    result = await collect_result(
+        managed_bash.run(
+            ExperimentalBashArgs(command="printf ready; sleep 30", background=True)
+        )
+    )
+    output_tool = BashOutput(
+        config_getter=lambda: BashOutputConfig(), state=BaseToolState()
+    )
+    sessions_tool = BashSessions(
+        config_getter=lambda: BashSessionsConfig(), state=BaseToolState()
+    )
+
+    try:
+        assert result.session_id
+        assert result.background is True
+        assert result.status == "running"
+
+        output = await collect_result(
+            output_tool.run(
+                BashOutputArgs(session_id=result.session_id, cursor=0, wait_seconds=1)
+            )
+        )
+
+        assert output.session_id == result.session_id
+        assert "ready" in output.output
+    finally:
+        killed = await collect_result(
+            sessions_tool.run(
+                BashSessionsArgs(action="kill", session_id=result.session_id)
+            )
+        )
+        assert killed.session is not None
+        assert killed.session.status in {"killed", "completed"}
+
+
+@pytest.mark.asyncio
+async def test_stdin_can_drive_interactive_session():
+    managed_bash = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+    result = await collect_result(
+        managed_bash.run(
+            ExperimentalBashArgs(
+                command='read value; printf "answer=$value\\n"', background=True
+            )
+        )
+    )
+    stdin_tool = BashStdin(
+        config_getter=lambda: BashStdinConfig(), state=BaseToolState()
+    )
+    output_tool = BashOutput(
+        config_getter=lambda: BashOutputConfig(), state=BaseToolState()
+    )
+    sessions_tool = BashSessions(
+        config_getter=lambda: BashSessionsConfig(), state=BaseToolState()
+    )
+
+    try:
+        await collect_result(
+            stdin_tool.run(BashStdinArgs(session_id=result.session_id, text="ok\n"))
+        )
+        output = await collect_result(
+            output_tool.run(
+                BashOutputArgs(
+                    session_id=result.session_id,
+                    cursor=result.next_cursor,
+                    wait_seconds=1,
+                )
+            )
+        )
+
+        assert output.status == "completed"
+        assert "answer=ok" in output.output
+    finally:
+        await collect_result(
+            sessions_tool.run(
+                BashSessionsArgs(action="kill", session_id=result.session_id)
+            )
+        )
 
 
 @pytest.mark.parametrize("predicate", ["-exec", "-execdir", "-ok", "-okdir"])
@@ -126,6 +712,46 @@ def test_find_execution_predicate_does_not_override_denylist():
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.NEVER
     assert "matches denylist pattern 'passwd'" in (permission.reason or "")
+
+
+@pytest.mark.skipif(is_windows(), reason="outside-dir permissions are POSIX-only")
+def test_legacy_bash_quoted_outside_path_requires_approval(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    outside = tmp_path.parent / "outside.txt"
+    bash_tool = Bash(
+        config_getter=lambda: BashToolConfig(permission=ToolPermission.ASK),
+        state=BaseToolState(),
+    )
+
+    permission = bash_tool.resolve_permission(BashArgs(command=f'cat "{outside}"'))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        str(outside.parent) in required.label
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+def test_experimental_bash_quoted_outside_path_requires_approval(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    outside = tmp_path.parent / "outside.txt"
+    bash_tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(permission=ToolPermission.ASK),
+        state=BaseToolState(),
+    )
+
+    permission = bash_tool.resolve_permission(
+        ExperimentalBashArgs(command=f'cat "{outside}"')
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        str(outside.parent) in required.label
+        for required in permission.required_permissions
+    )
 
 
 def test_resolve_permission():
@@ -403,3 +1029,24 @@ def test_new_read_only_commands_are_allowlisted():
         assert permission.permission is ToolPermission.ALWAYS, (
             f"Command '{cmd}' should be always allowed"
         )
+
+
+@pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 << 'EOF'\nprint(42)\nEOF",
+        "python3 - << 'EOF'\nprint(42)\nEOF",
+        "python3 <<'PYEOF'\nimport sys\nprint('hello')\nPYEOF",
+        "python3 < input.txt",
+    ],
+)
+def test_experimental_bash_standalone_denylisted_with_redirect_not_denied(command):
+    bash_tool = ExperimentalBash(
+        config_getter=lambda: ExperimentalBashToolConfig(), state=BaseToolState()
+    )
+    result = bash_tool.resolve_permission(ExperimentalBashArgs(command=command))
+    assert isinstance(result, PermissionContext)
+    assert result.permission is not ToolPermission.NEVER, (
+        f"Command with redirect should not be denied: {command!r}"
+    )

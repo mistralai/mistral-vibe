@@ -16,7 +16,7 @@ from vibe.core.audio_recorder.audio_recorder_port import (
     NoAudioInputDeviceError,
     RecordingMode,
 )
-from vibe.core.config import VibeConfig
+from vibe.core.config import AnyVibeConfig, VibeConfig
 from vibe.core.logger import logger
 from vibe.core.transcribe.transcribe_client_port import (
     TranscribeDone,
@@ -40,7 +40,7 @@ TRANSCRIPTION_DRAIN_TIMEOUT = 10.0
 class VoiceManager:
     def __init__(
         self,
-        config_getter: Callable[[], VibeConfig],
+        config_getter: Callable[[], AnyVibeConfig],
         audio_recorder: AudioRecorderPort,
         transcribe_client: TranscribeClientPort | None,
         telemetry_client: TelemetryClient | None = None,

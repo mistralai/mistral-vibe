@@ -1,17 +1,35 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from vibe.core.llm.backend.generic import GenericBackend
-from vibe.core.llm.backend.mistral import MistralBackend
 from vibe.core.types import Backend
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from vibe.core.config import ProviderConfig
     from vibe.core.llm.types import BackendLike
 
 
-BACKEND_FACTORY = {Backend.MISTRAL: MistralBackend, Backend.GENERIC: GenericBackend}
+def _create_mistral_backend(**kwargs: Any) -> BackendLike:
+    from vibe.core.llm.backend.mistral import MistralBackend
+
+    return MistralBackend(**kwargs)
+
+
+def _create_generic_backend(**kwargs: Any) -> BackendLike:
+    from vibe.core.llm.backend.generic import GenericBackend
+
+    return GenericBackend(**kwargs)
+
+
+# The factories import the backend modules on first use rather than at module
+# level: the backends pull in heavy dependencies that would otherwise slow CLI
+# startup.
+BACKEND_FACTORY: dict[Backend, Callable[..., BackendLike]] = {
+    Backend.MISTRAL: _create_mistral_backend,
+    Backend.GENERIC: _create_generic_backend,
+}
 
 
 def create_backend(

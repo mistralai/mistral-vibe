@@ -26,6 +26,38 @@ _PREVIOUS_USER_MESSAGE_RE = re.compile(
     re.DOTALL,
 )
 
+_SUMMARY_OPEN = "<summary>"
+_SUMMARY_CLOSE = "</summary>"
+_SUMMARY_RE = re.compile(
+    rf"{re.escape(_SUMMARY_OPEN)}(.*?){re.escape(_SUMMARY_CLOSE)}", re.DOTALL
+)
+
+
+def extract_summary(text: str) -> str | None:
+    match = _SUMMARY_RE.search(text)
+    if match is None:
+        return None
+    return match.group(1).strip() or None
+
+
+def drop_oldest_round(messages: Sequence[LLMMessage]) -> list[LLMMessage] | None:
+    """Copy of ``messages`` without the oldest round after the system prompt.
+
+    A round is a run of user messages (the real turn plus any injected ones)
+    together with everything they trigger — assistant replies and tool results
+    — up to the next user message. Dropping the whole round reclaims the tool
+    payloads too and leaves a clean user-first head. Returns None when only the
+    system prompt and the most recent round remain (nothing older to drop).
+    """
+    index = 1  # keep the system prompt
+    while index < len(messages) and messages[index].role == Role.user:
+        index += 1  # the round's opening user message(s)
+    while index < len(messages) and messages[index].role != Role.user:
+        index += 1  # the assistant replies and tool results they triggered
+    if index >= len(messages):
+        return None
+    return [messages[0], *messages[index:]]
+
 
 def render_compaction_context(
     previous_user_messages: Sequence[LLMMessage], summary: str

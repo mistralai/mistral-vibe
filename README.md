@@ -94,7 +94,7 @@ pip install mistral-vibe
 - **Interactive Chat**: A conversational AI agent that understands your requests and breaks down complex tasks.
 - **Powerful Toolset**: A suite of tools for file manipulation, code searching, version control, and command execution, right from the chat prompt.
   - Read, write, and patch files (`read`, `write_file`, `edit`).
-  - Execute shell commands in a stateful terminal (`bash`).
+  - Execute shell commands (`bash`), with an experimental managed PTY mode for polling and stdin helpers.
   - Recursively search code with `grep` (with `ripgrep` support).
   - Manage a `todo` list to track the agent's work.
   - Ask interactive questions to gather user input (`ask_user_question`).
@@ -279,6 +279,7 @@ When using `--prompt`, you can specify additional options:
 - **`--agent NAME`**: Select the agent profile for this run.
 - **`--auto-approve`, `--yolo`**: Approves all tool calls without prompting, including in interactive sessions. Can be combined with any `--agent` value.
 - **`--enabled-tools TOOL`**: Enable specific tools. In programmatic mode, this disables all other tools. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
+- **`--disabled-tools TOOL`**: Disable specific tools after `--enabled-tools` filtering. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
 - **`--output FORMAT`**: Set the output format. Options:
   - `text` (default): Human-readable text output
   - `json`: All messages as JSON at the end
@@ -515,10 +516,25 @@ Note: This implies that you have set up a redteam prompt named `~/.vibe/prompts/
 
 ### Tool Management
 
+The built-in `bash` tool runs one-off shell commands by default. Set
+`experimental_bash_tool = true` to replace it with the experimental managed PTY
+implementation under the same `bash` tool name. In that mode, `bash` returns a
+`session_id`, inline output, a cursor for polling more output with `bash_output`,
+and a log path under `~/.vibe/bash-tool/`. Long-running commands can be left
+alive with `background = true`, and interactive commands can be driven with
+`bash_stdin`. Both implementations use the same permissions, allowlists, and
+denylists from `[tools.bash]`.
+
+```toml
+experimental_bash_tool = true
+```
+
 #### Enable/Disable Tools with Patterns
 
 You can control which tools are active using `enabled_tools` and `disabled_tools`.
 These fields support exact names, glob patterns, and regular expressions.
+When both are set, `enabled_tools` first narrows the tool set, then
+`disabled_tools` removes matching tools from that set.
 
 Examples:
 

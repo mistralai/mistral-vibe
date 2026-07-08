@@ -11,6 +11,7 @@ from vibe.cli.update_notifier.ports.update_gateway import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
+from vibe.core.utils.http import VibeAsyncHTTPClient
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -25,7 +26,9 @@ async def test_retrieves_nothing_when_no_versions_are_available() -> None:
         )
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(transport=transport, base_url=PYPI_API_URL) as client:
+    async with VibeAsyncHTTPClient(
+        transport=transport, base_url=PYPI_API_URL
+    ) as client:
         gateway = PyPIUpdateGateway(project_name="mistral-vibe", client=client)
         update = await gateway.fetch_update()
 
@@ -56,7 +59,9 @@ async def test_retrieves_the_latest_non_yanked_version() -> None:
         )
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(transport=transport, base_url=PYPI_API_URL) as client:
+    async with VibeAsyncHTTPClient(
+        transport=transport, base_url=PYPI_API_URL
+    ) as client:
         gateway = PyPIUpdateGateway(project_name="mistral-vibe", client=client)
         update = await gateway.fetch_update()
 
@@ -77,7 +82,9 @@ async def test_retrieves_nothing_when_only_yanked_versions_are_available() -> No
         )
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(transport=transport, base_url=PYPI_API_URL) as client:
+    async with VibeAsyncHTTPClient(
+        transport=transport, base_url=PYPI_API_URL
+    ) as client:
         gateway = PyPIUpdateGateway(project_name="mistral-vibe", client=client)
         update = await gateway.fetch_update()
 
@@ -101,7 +108,9 @@ async def test_does_not_match_versions_by_substring() -> None:
         )
 
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(transport=transport, base_url=PYPI_API_URL) as client:
+    async with VibeAsyncHTTPClient(
+        transport=transport, base_url=PYPI_API_URL
+    ) as client:
         gateway = PyPIUpdateGateway(project_name="mistral-vibe", client=client)
         update = await gateway.fetch_update()
 
@@ -145,7 +154,9 @@ async def test_retrieves_nothing_when_fetching_update_fails(
     expected_message: str | None,
 ) -> None:
     transport = httpx.MockTransport(handler)
-    async with httpx.AsyncClient(transport=transport, base_url=PYPI_API_URL) as client:
+    async with VibeAsyncHTTPClient(
+        transport=transport, base_url=PYPI_API_URL
+    ) as client:
         gateway = PyPIUpdateGateway(project_name="mistral-vibe", client=client)
         with pytest.raises(UpdateGatewayError) as excinfo:
             await gateway.fetch_update()

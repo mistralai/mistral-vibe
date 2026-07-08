@@ -553,6 +553,12 @@ class AgentProfileChangedEvent(BaseEvent):
     agent_name: str
 
 
+class ContextClearedEvent(BaseEvent):
+    """Emitted after the context is cleared on plan accept."""
+
+    plan_file_path: Path | None = None
+
+
 class SessionTitleUpdatedEvent(BaseEvent):
     title: str
 
@@ -572,6 +578,8 @@ type ApprovalCallback = Callable[
 type UserInputCallback = Callable[[BaseModel], Awaitable[BaseModel]]
 
 type SwitchAgentCallback = Callable[[str], Awaitable[None]]
+
+type ClearContextCallback = Callable[[], Awaitable[None]]
 
 
 class MessageList(Sequence[LLMMessage]):

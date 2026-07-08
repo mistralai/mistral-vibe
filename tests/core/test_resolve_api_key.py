@@ -4,7 +4,7 @@ import keyring
 from keyring.errors import KeyringError
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import ConfigBuilder, build_test_vibe_config
 from vibe.core.config import MissingAPIKeyError, ProviderConfig, resolve_api_key
 from vibe.core.llm.backend.mistral import MistralBackend
 from vibe.core.types import Backend
@@ -164,26 +164,26 @@ def test_mistral_backend_reads_keyring_only_key(
 
 
 def test_vibe_code_api_key_resolves_from_keyring(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, build_config: ConfigBuilder
 ) -> None:
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.setattr(
         keyring, "get_password", lambda service, username: "keyring-key"
     )
 
-    config = build_test_vibe_config()
+    config = build_config()
 
     assert config.vibe_code_api_key == "keyring-key"
 
 
 def test_vibe_code_api_key_reuses_cached_keyring_value(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, build_config: ConfigBuilder
 ) -> None:
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.setattr(
         keyring, "get_password", lambda service, username: "keyring-key"
     )
-    config = build_test_vibe_config()
+    config = build_config()
 
     monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
 
@@ -191,13 +191,13 @@ def test_vibe_code_api_key_reuses_cached_keyring_value(
 
 
 def test_vibe_code_api_key_empty_when_cache_cleared_and_unresolved(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, build_config: ConfigBuilder
 ) -> None:
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.setattr(
         keyring, "get_password", lambda service, username: "keyring-key"
     )
-    config = build_test_vibe_config()
+    config = build_config()
 
     clear_api_key_keyring_cache()
     monkeypatch.setattr(keyring, "get_password", lambda service, username: None)

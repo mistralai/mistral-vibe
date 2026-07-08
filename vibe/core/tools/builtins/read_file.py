@@ -42,6 +42,13 @@ def _warning(message: str) -> str:
     return f"<{VIBE_WARNING_TAG}>{message}</{VIBE_WARNING_TAG}>"
 
 
+def _display_relative(path: Path, base: Path) -> Path:
+    try:
+        return path.relative_to(base)
+    except ValueError:
+        return path
+
+
 class ReadFileArgs(BaseModel):
     file_path: str = Field(description="The absolute path to the file to read")
     offset: int | None = Field(
@@ -98,17 +105,20 @@ class ReadFile(
             sensitive_patterns=self.config.sensitive_patterns,
         )
 
-    def get_result_extra(self, result: ReadFileResult) -> str | None:
+    def _find_undiscovered_agents_md(self, file_path: Path) -> list[tuple[Path, str]]:
         try:
             mgr = get_harness_files_manager()
         except RuntimeError:
-            return None
-        docs = mgr.find_subdirectory_agents_md(Path(result.file_path))
-        new_docs = [
+            return []
+        docs = mgr.find_subdirectory_agents_md(file_path)
+        return [
             (d, c)
             for d, c in docs
             if str(d.resolve()) not in self.state.injected_agents_md
         ]
+
+    def get_result_extra(self, result: ReadFileResult) -> str | None:
+        new_docs = self._find_undiscovered_agents_md(Path(result.file_path))
         if not new_docs:
             return None
         for d, _ in new_docs:
@@ -163,6 +173,17 @@ class ReadFile(
                 f"allowed size ({naturalsize(self.config.max_read_bytes, binary=True)}). "
                 f"Use offset and limit to read a smaller portion of the file."
             )
+
+        if ctx is not None:
+            new_docs = self._find_undiscovered_agents_md(file_path)
+            if new_docs:
+                cwd = Path.cwd()
+                parts = [f"{_display_relative(d, cwd)}/AGENTS.md" for d, _ in new_docs]
+                yield ToolStreamEvent(
+                    tool_name=self.get_name(),
+                    tool_call_id=ctx.tool_call_id,
+                    message=f"Discovered {', '.join(parts)}",
+                )
 
         yield ReadFileResult(
             file_path=str(file_path),

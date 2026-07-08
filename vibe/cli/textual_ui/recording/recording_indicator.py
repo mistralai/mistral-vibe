@@ -16,7 +16,7 @@ PEAK_POLL_INTERVAL = 0.05
 
 class RecordingIndicator(VoiceManagerListener, Static):
     def __init__(self, voice_manager: VoiceManagerPort) -> None:
-        super().__init__(PEAK_BLOCKS[0], id="recording-indicator")
+        super().__init__(PEAK_BLOCKS[0], classes="recording-indicator")
         self._voice_manager = voice_manager
         self._peak_timer: Timer | None = None
         self._flushing_animation_timer: Timer | None = None

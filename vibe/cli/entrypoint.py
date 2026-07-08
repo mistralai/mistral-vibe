@@ -7,19 +7,11 @@ from pathlib import Path
 import sys
 from typing import TYPE_CHECKING
 
-from rich import print as rprint
-
 from vibe import __version__
-from vibe.core.config.harness_files import init_harness_files_manager
-from vibe.core.trusted_folders import (
-    apply_workspace_trust_decision,
-    maybe_build_workspace_trust_prompt,
-    trusted_folders_manager,
-)
-from vibe.setup.trusted_folders.trust_folder_dialog import (
-    TrustDialogQuitException,
-    ask_trust_folder,
-)
+
+# Anything heavier than argparse is imported inside the functions below, after
+# argument parsing, so that --help/--version don't pay for the config stack
+# (pydantic, textual, rich) at import time.
 
 if TYPE_CHECKING:
     from vibe.core.worktree import PreparedWorktree, WorktreeCleanupState
@@ -85,6 +77,14 @@ def parse_arguments() -> argparse.Namespace:
         metavar="TOOL",
         help="Enable specific tools. In programmatic mode (-p), this disables "
         "all other tools. "
+        "Can use exact names, glob patterns (e.g., 'bash*'), or "
+        "regex with 're:' prefix. Can be specified multiple times.",
+    )
+    parser.add_argument(
+        "--disabled-tools",
+        action="append",
+        metavar="TOOL",
+        help="Disable specific tools after --enabled-tools filtering. "
         "Can use exact names, glob patterns (e.g., 'bash*'), or "
         "regex with 're:' prefix. Can be specified multiple times.",
     )
@@ -171,6 +171,17 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def check_and_resolve_trusted_folder(cwd: Path) -> None:
+    from rich import print as rprint
+
+    from vibe.core.trusted_folders import (
+        apply_workspace_trust_decision,
+        maybe_build_workspace_trust_prompt,
+    )
+    from vibe.setup.trusted_folders.trust_folder_dialog import (
+        TrustDialogQuitException,
+        ask_trust_folder,
+    )
+
     prompt = maybe_build_workspace_trust_prompt(cwd)
     if prompt is None:
         return
@@ -197,6 +208,8 @@ def check_and_resolve_trusted_folder(cwd: Path) -> None:
 def _prompt_remove_worktree(
     worktree: PreparedWorktree, cleanup_state: WorktreeCleanupState
 ) -> bool:
+    from rich import print as rprint
+
     reasons = ", ".join(cleanup_state.reasons)
     rprint(f"[yellow]Worktree {worktree.name!r} has {reasons}.[/]", file=sys.stderr)
     rprint(
@@ -215,6 +228,8 @@ def _prompt_remove_worktree(
 
 
 def _prompt_delete_attached_branch(worktree: PreparedWorktree) -> bool:
+    from rich import print as rprint
+
     rprint(
         f"[yellow]Branch {worktree.branch!r} existed before this session "
         f"and was attached, not created by Vibe.[/]",
@@ -231,6 +246,8 @@ def _prompt_delete_attached_branch(worktree: PreparedWorktree) -> bool:
 
 
 def _cleanup_worktree_on_exit(worktree: PreparedWorktree) -> None:
+    from rich import print as rprint
+
     from vibe.core.worktree import (
         WorktreeError,
         inspect_worktree_for_cleanup,
@@ -268,6 +285,11 @@ def _cleanup_worktree_on_exit(worktree: PreparedWorktree) -> None:
 def main() -> None:
     args = parse_arguments()
     worktree_session: PreparedWorktree | None = None
+
+    from rich import print as rprint
+
+    from vibe.core.config.harness_files import init_harness_files_manager
+    from vibe.core.trusted_folders import trusted_folders_manager
 
     if args.workdir:
         workdir = args.workdir.expanduser().resolve()

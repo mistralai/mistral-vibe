@@ -16,7 +16,7 @@ async def test_auto_compaction_preserves_user_message_and_embeds_summary(
 ) -> None:
     mistral_api.reply(
         # First: the compaction summary
-        mistral_completion("A summary of what happened so far"),
+        mistral_completion("<summary>A summary of what happened so far</summary>"),
         # Then: the final answer to user message
         mistral_completion("final answer"),
     )
@@ -38,9 +38,9 @@ async def test_repeated_auto_compaction_preserves_earlier_user_messages(
     mistral_api: MistralAPI,
 ) -> None:
     mistral_api.reply(
-        mistral_completion("summary one"),
+        mistral_completion("<summary>summary one</summary>"),
         mistral_completion("reply one"),
-        mistral_completion("summary two"),
+        mistral_completion("<summary>summary two</summary>"),
         mistral_completion("reply two"),
     )
     agent = build_e2e_agent_loop(
@@ -63,9 +63,9 @@ async def test_oversized_user_message_is_middle_truncated_in_compaction(
 ) -> None:
     huge_message = "alpha " * 20_000
     mistral_api.reply(
-        mistral_completion("summary intro"),
+        mistral_completion("<summary>summary intro</summary>"),
         mistral_completion("reply intro"),
-        mistral_completion("summary huge"),
+        mistral_completion("<summary>summary huge</summary>"),
         mistral_completion("reply huge"),
     )
     agent = build_e2e_agent_loop(

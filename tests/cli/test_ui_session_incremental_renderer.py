@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import time
+from unittest.mock import Mock
 
 import pytest
 from textual.widgets import Button
@@ -59,6 +61,50 @@ def _load_more_remaining(app: VibeApp) -> int:
     text = str(label)
     _, _, remainder = text.rpartition("(")
     return int(remainder.rstrip(")"))
+
+
+@pytest.mark.asyncio
+async def test_ui_mount_defers_history_resume(
+    vibe_config: VibeConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
+    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    history_started = asyncio.Event()
+    history_release = asyncio.Event()
+    restore_from_session = Mock()
+    loop_start = Mock()
+    initialize_experiments = Mock()
+
+    async def resume_history() -> None:
+        history_started.set()
+        await history_release.wait()
+
+    monkeypatch.setattr(app, "_resume_history_from_messages", resume_history)
+    monkeypatch.setattr(app._loop_runner, "restore_from_session", restore_from_session)
+    monkeypatch.setattr(app._loop_runner, "start", loop_start)
+    monkeypatch.setattr(
+        agent_loop, "start_initialize_experiments", initialize_experiments
+    )
+
+    async with asyncio.timeout(5):
+        async with app.run_test() as pilot:
+            await _wait_until(pilot.pause, history_started.is_set, timeout=2.0)
+
+            app.query_one(ChatScroll)
+            restore_from_session.assert_not_called()
+            loop_start.assert_not_called()
+            initialize_experiments.assert_not_called()
+
+            history_release.set()
+            await _wait_until(
+                pilot.pause,
+                lambda: (
+                    restore_from_session.call_count == 1
+                    and loop_start.call_count == 1
+                    and initialize_experiments.call_count == 1
+                ),
+                timeout=2.0,
+            )
 
 
 @pytest.mark.asyncio
@@ -179,3 +225,40 @@ async def test_ui_session_incremental_loader_keeps_top_alignment_when_not_scroll
         chat = app.query_one("#chat", ChatScroll)
         assert chat.max_scroll_y == 0
         assert chat.scroll_y == 0
+
+
+@pytest.mark.asyncio
+async def test_chat_scroll_does_not_reanchor_during_text_selection(
+    vibe_config: VibeConfig,
+) -> None:
+    agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
+    agent_loop.messages.extend([
+        LLMMessage(role=Role.user, content=f"msg-{idx}") for idx in range(40)
+    ])
+
+    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+
+    async with app.run_test(size=(80, 20)) as pilot:
+        await _wait_until(pilot.pause, lambda: app.query_one("#chat", ChatScroll))
+        chat = app.query_one("#chat", ChatScroll)
+        await _wait_until(pilot.pause, lambda: chat.max_scroll_y > 0)
+
+        chat.anchor()
+        await pilot.pause()
+        assert chat.is_at_bottom
+
+        app.screen._selecting = True
+
+        # A selection drag scrolling up must release the anchor so the view
+        # can move away from the bottom instead of snapping back.
+        chat.scroll_y = chat.scroll_y - 1
+        assert chat._anchor_released
+
+        # Re-anchoring is suppressed while a selection is in progress.
+        chat.anchor()
+        assert chat._anchor_released
+
+        # Once the selection ends, anchoring works again.
+        app.screen._selecting = False
+        chat.anchor()
+        assert not chat._anchor_released

@@ -457,7 +457,7 @@ class TestPerformOAuthLogin:
             pass
 
         with patch(
-            "vibe.core.auth.mcp_oauth.httpx.AsyncClient", new=OAuthFlowFailingClient
+            "vibe.core.auth.mcp_oauth.VibeAsyncHTTPClient", new=OAuthFlowFailingClient
         ):
             with pytest.raises(MCPOAuthLoginFailed, match="cancelled"):
                 await perform_oauth_login(srv, on_url=on_url)

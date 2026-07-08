@@ -211,7 +211,7 @@ OptionList, OptionList:focus {
 
 #prompt,
 #prompt-spinner,
-#recording-indicator {
+.recording-indicator {
     width: auto;
     background: transparent;
     color: $mistral_orange;
@@ -757,7 +757,8 @@ StatusMessage {
 }
 
 .tool-call-header .status-indicator-text {
-    width: 1fr;
+    width: auto;
+    max-width: 100%;
     text-wrap: wrap;
 }
 
@@ -1485,6 +1486,157 @@ NarratorStatus {
 }
 
 .sessionpicker-help {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#vibecodeprojectpicker-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid $foreground-muted;
+    padding: 0 1;
+    margin: 0;
+}
+
+#vibecodeprojectpicker-content {
+    width: 100%;
+    height: auto;
+}
+
+.vibecodeprojectpicker-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+}
+
+.vibecodeprojectpicker-repo {
+    width: 100%;
+    height: auto;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+.vibecodeprojectpicker-scope {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+.vibecodeprojectpicker-search-row {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.vibecodeprojectpicker-search-label {
+    width: auto;
+    height: auto;
+    color: $text-muted;
+    margin-right: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#vibecodeprojectpicker-search {
+    width: 1fr;
+    height: auto;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+#vibecodeprojectpicker-options {
+    width: 100%;
+    max-height: 50vh;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    border: none;
+}
+
+#vibecodeprojectpicker-options:focus {
+    border: none;
+}
+
+.vibecodeprojectpicker-help {
+    width: 100%;
+    height: auto;
+    color: $text-muted;
+    margin-top: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#vibecodeprojectcreate-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid $foreground-muted;
+    padding: 0 1;
+    margin: 0;
+}
+
+#vibecodeprojectcreate-content {
+    width: 100%;
+    height: auto;
+}
+
+.vibecodeprojectcreate-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+}
+
+.vibecodeprojectcreate-repo {
+    width: 100%;
+    height: auto;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    margin-bottom: 1;
+}
+
+.vibecodeprojectcreate-input-row {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.vibecodeprojectcreate-input-label {
+    width: 15;
+    height: auto;
+    color: $text-muted;
+    margin-right: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#vibecodeprojectcreate-name,
+#vibecodeprojectcreate-default-branch {
+    width: 1fr;
+    height: auto;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+.vibecodeprojectcreate-help {
     width: 100%;
     height: auto;
     color: $text-muted;

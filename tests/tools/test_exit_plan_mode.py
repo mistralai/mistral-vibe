@@ -15,6 +15,10 @@ from vibe.core.tools.builtins.ask_user_question import (
     AskUserQuestionResult,
 )
 from vibe.core.tools.builtins.exit_plan_mode import (
+    LABEL_AUTO,
+    LABEL_CLEAR_AUTO,
+    LABEL_MANUAL,
+    LABEL_NO,
     ExitPlanMode,
     ExitPlanModeArgs,
     ExitPlanModeConfig,
@@ -22,8 +26,14 @@ from vibe.core.tools.builtins.exit_plan_mode import (
 
 
 @dataclass
+class MockConfig:
+    pass
+
+
+@dataclass
 class MockAgentManager:
     active_profile: AgentProfile
+    config: MockConfig = field(default_factory=MockConfig)
     _switched_to: list[str] = field(default_factory=list)
 
     def switch_profile(self, name: str) -> None:
@@ -119,6 +129,110 @@ class MockSwitchAgentCallback:
 
     async def __call__(self, name: str) -> None:
         self.calls.append(name)
+
+
+class MockClearContextCallback:
+    def __init__(self) -> None:
+        self.calls: int = 0
+
+    async def __call__(self) -> None:
+        self.calls += 1
+
+
+def _answer(label: str) -> AskUserQuestionResult:
+    return AskUserQuestionResult(
+        answers=[Answer(question="q", answer=label, is_other=False)], cancelled=False
+    )
+
+
+class TestClearContextOption:
+    @pytest.mark.asyncio
+    async def test_always_prepends_clear_option(
+        self, tool: ExitPlanMode, plan_manager: MockAgentManager
+    ) -> None:
+        cb = MockCallback(AskUserQuestionResult(answers=[], cancelled=True))
+        ctx = InvokeContext(
+            tool_call_id="t1",
+            agent_manager=plan_manager,  # type: ignore[arg-type]
+            user_input_callback=cb,
+        )
+        await collect_result(tool.run(ExitPlanModeArgs(), ctx))
+        assert isinstance(cb.received_args, AskUserQuestionArgs)
+        labels = [c.label for c in cb.received_args.questions[0].options]
+        assert labels == [LABEL_CLEAR_AUTO, LABEL_AUTO, LABEL_MANUAL, LABEL_NO]
+
+    @pytest.mark.asyncio
+    async def test_clear_auto_switches_and_requests_clear(
+        self, tool: ExitPlanMode, plan_manager: MockAgentManager
+    ) -> None:
+        switch_cb = MockSwitchAgentCallback()
+        clear_cb = MockClearContextCallback()
+        ctx = InvokeContext(
+            tool_call_id="t1",
+            agent_manager=plan_manager,  # type: ignore[arg-type]
+            user_input_callback=MockCallback(_answer(LABEL_CLEAR_AUTO)),
+            switch_agent_callback=switch_cb,
+            request_clear_context_callback=clear_cb,
+        )
+        result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
+        assert result.switched is True
+        assert switch_cb.calls == [BuiltinAgentName.ACCEPT_EDITS]
+        assert clear_cb.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_manual_switches_to_default_without_clear(
+        self, tool: ExitPlanMode, plan_manager: MockAgentManager
+    ) -> None:
+        switch_cb = MockSwitchAgentCallback()
+        clear_cb = MockClearContextCallback()
+        ctx = InvokeContext(
+            tool_call_id="t1",
+            agent_manager=plan_manager,  # type: ignore[arg-type]
+            user_input_callback=MockCallback(_answer(LABEL_MANUAL)),
+            switch_agent_callback=switch_cb,
+            request_clear_context_callback=clear_cb,
+        )
+        result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
+        assert result.switched is True
+        assert switch_cb.calls == [BuiltinAgentName.DEFAULT]
+        assert clear_cb.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_non_clear_yes_does_not_request_clear(
+        self, tool: ExitPlanMode, plan_manager: MockAgentManager
+    ) -> None:
+        switch_cb = MockSwitchAgentCallback()
+        clear_cb = MockClearContextCallback()
+        ctx = InvokeContext(
+            tool_call_id="t1",
+            agent_manager=plan_manager,  # type: ignore[arg-type]
+            user_input_callback=MockCallback(_answer(LABEL_AUTO)),
+            switch_agent_callback=switch_cb,
+            request_clear_context_callback=clear_cb,
+        )
+        result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
+        assert result.switched is True
+        assert switch_cb.calls == [BuiltinAgentName.ACCEPT_EDITS]
+        assert clear_cb.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_clear_result_message_excludes_plan_body(
+        self, tool: ExitPlanMode, plan_manager: MockAgentManager, tmp_path: Path
+    ) -> None:
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("# My Plan\n\n- Step 1\n")
+        ctx = InvokeContext(
+            tool_call_id="t1",
+            agent_manager=plan_manager,  # type: ignore[arg-type]
+            user_input_callback=MockCallback(_answer(LABEL_CLEAR_AUTO)),
+            switch_agent_callback=MockSwitchAgentCallback(),
+            request_clear_context_callback=MockClearContextCallback(),
+            plan_file_path=plan_file,
+        )
+        result = await collect_result(tool.run(ExitPlanModeArgs(), ctx))
+        assert result.switched is True
+        assert "# My Plan" not in result.message
+        assert "source of truth" not in result.message
 
 
 class TestAnswerHandling:

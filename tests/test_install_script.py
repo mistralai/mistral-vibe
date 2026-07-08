@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shlex
 import stat
 import subprocess
 from textwrap import dedent
 
 INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "install.sh"
+
+
+def _pinned_uv_installer_sha256() -> str:
+    match = re.search(
+        r'^UV_INSTALLER_SHA256="([0-9a-f]+)"', INSTALL_SCRIPT.read_text(), re.MULTILINE
+    )
+    assert match is not None, "could not find UV_INSTALLER_SHA256 in install.sh"
+    return match.group(1)
+
 
 _FAKE_VIBE_SCRIPT = """#!/usr/bin/env bash
 exit 0
@@ -76,7 +86,41 @@ def _write_fake_curl(path: Path, payload_path: Path) -> None:
         path,
         f"""\
         #!/usr/bin/env bash
-        cat {shlex.quote(str(payload_path))}
+        output=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            -o) output="$2"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        if [[ -n "$output" ]]; then
+          cat {shlex.quote(str(payload_path))} >"$output"
+        else
+          cat {shlex.quote(str(payload_path))}
+        fi
+        """,
+    )
+
+
+def _write_fake_checksum_tools(bin_dir: Path, sha256: str) -> None:
+    for name in ("sha256sum", "shasum"):
+        _write_executable(
+            bin_dir / name,
+            f"""\
+            #!/usr/bin/env bash
+            file="${{@: -1}}"
+            echo "{sha256}  $file"
+            """,
+        )
+
+
+def _write_fake_mktemp(path: Path, installer_tmp: Path) -> None:
+    _write_executable(
+        path,
+        f"""\
+        #!/usr/bin/env bash
+        touch {shlex.quote(str(installer_tmp))}
+        printf '%s\\n' {shlex.quote(str(installer_tmp))}
         """,
     )
 
@@ -109,8 +153,11 @@ def test_install_reports_missing_path_for_uv_tool_bin(tmp_path: Path) -> None:
     fake_bin.mkdir()
 
     installer_payload = tmp_path / "fake-uv-installer.sh"
+    installer_tmp = tmp_path / "downloaded-uv-installer.sh"
     _write_fake_uv_installer(installer_payload)
     _write_fake_curl(fake_bin / "curl", installer_payload)
+    _write_fake_checksum_tools(fake_bin, _pinned_uv_installer_sha256())
+    _write_fake_mktemp(fake_bin / "mktemp", installer_tmp)
 
     uv_bin_dir = home / ".local" / "bin"
     result = _run_install_script(home, [fake_bin], {"UV_TOOL_BIN_DIR": str(uv_bin_dir)})
@@ -129,6 +176,7 @@ def test_install_reports_missing_path_for_uv_tool_bin(tmp_path: Path) -> None:
     assert (
         "uv was installed but not found in PATH for this session" not in result.stdout
     )
+    assert not installer_tmp.exists()
 
 
 def test_install_succeeds_when_uv_bin_dir_is_already_on_path(tmp_path: Path) -> None:

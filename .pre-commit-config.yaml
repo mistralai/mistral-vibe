@@ -1,12 +1,12 @@
 ---
 repos:
   - repo: https://github.com/mpalmer/action-validator
-    rev: v0.7.0
+    rev: 7fa61514fb806fc9afd664b909e83584aca84f78 # v0.7.0
     hooks:
       - id: action-validator
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b # v5.0.0
     hooks:
       - id: check-toml
       - id: check-yaml
@@ -15,12 +15,12 @@ repos:
         exclude: tests/snapshots/.*\.svg$
 
   - repo: https://github.com/fsouza/mirrors-pyright
-    rev: v1.1.407
+    rev: 35d1c990dba50abf6fabe1becfa0c289042b2073 # v1.1.407
     hooks:
       - id: pyright
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.13
+    rev: 5e2fb545eba1ea9dc051f6f962d52fe8f76a9794 # v0.15.13
     hooks:
       - id: ruff-check
         args: [--fix, --unsafe-fixes]
@@ -28,7 +28,7 @@ repos:
         args: [--check]
 
   - repo: https://github.com/crate-ci/typos
-    rev: v1.34.0
+    rev: 392b78fe18a52790c53f42456e46124f77346842 # v1.34.0
     hooks:
       - id: typos
         args: [--write-changes]

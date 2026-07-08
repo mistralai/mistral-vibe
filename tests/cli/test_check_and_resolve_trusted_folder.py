@@ -7,6 +7,7 @@ import pytest
 
 from vibe.cli import entrypoint as entrypoint_mod
 from vibe.core.trusted_folders import trusted_folders_manager
+from vibe.setup.trusted_folders import trust_folder_dialog
 from vibe.setup.trusted_folders.trust_folder_dialog import TrustDecision
 
 
@@ -53,7 +54,7 @@ def _patch_ask(
         captured["repo_explicitly_untrusted"] = repo_explicitly_untrusted
         return decision
 
-    monkeypatch.setattr(entrypoint_mod, "ask_trust_folder", fake_ask)
+    monkeypatch.setattr(trust_folder_dialog, "ask_trust_folder", fake_ask)
     return captured
 
 

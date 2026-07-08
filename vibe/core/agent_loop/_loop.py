@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Generator, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Sequence
 import contextlib
 import copy
+from dataclasses import dataclass
 from enum import StrEnum, auto
 from functools import wraps
 from http import HTTPStatus
 import inspect
+import json
 import os
 from pathlib import Path
 import shutil
@@ -17,15 +19,23 @@ import time
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
-from opentelemetry import trace
 from pydantic import BaseModel
 
 from vibe.core.agent_loop_hooks import AgentLoopHooksMixin
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
 from vibe.core.cache_store import InMemoryVibeCodeCacheStore, VibeCodeCacheStore
-from vibe.core.compaction import collect_prior_user_messages, render_compaction_context
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig, resolve_api_key
+from vibe.core.compaction import (
+    CompactionFailedError as CompactionFailedError,
+    CompactionManager,
+)
+from vibe.core.config import (
+    AnyVibeConfig,
+    ModelConfig,
+    ProviderConfig,
+    VibeConfig,
+    resolve_api_key,
+)
 from vibe.core.experiments import ExperimentManager
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.session import (
@@ -61,7 +71,6 @@ from vibe.core.middleware import (
     make_plan_agent_reminder,
 )
 from vibe.core.plan_session import PlanSession
-from vibe.core.prompts import UtilityPrompt
 from vibe.core.rewind import RewindManager
 from vibe.core.scratchpad import init_scratchpad
 from vibe.core.session.session_id import extract_suffix, generate_session_id
@@ -90,6 +99,12 @@ from vibe.core.tools.base import (
     ToolPermission,
     ToolPermissionError,
 )
+from vibe.core.tools.builtins.skill import (
+    Skill as SkillTool,
+    SkillArgs,
+    select_skill_result,
+    skill_content_marker,
+)
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.permissions import (
     ApprovedRule,
@@ -110,10 +125,13 @@ from vibe.core.types import (
     ApprovalCallback,
     ApprovalResponse,
     AssistantEvent,
+    AvailableTool,
     BaseEvent,
     CompactEndEvent,
     CompactStartEvent,
+    ContextClearedEvent,
     ContextTooLongError,
+    FunctionCall,
     ImageAttachment,
     LLMChunk,
     LLMMessage,
@@ -127,6 +145,7 @@ from vibe.core.types import (
     ResponseTooLongError,
     Role,
     SessionTitleUpdatedEvent,
+    StrToolChoice,
     ToolCall,
     ToolCallEvent,
     ToolResultEvent,
@@ -172,6 +191,8 @@ def _load_teleport_service() -> type[TeleportService]:
 
 
 if TYPE_CHECKING:
+    from opentelemetry import trace
+
     from vibe.core.teleport.teleport import TeleportService
     from vibe.core.teleport.types import TeleportPushResponseEvent, TeleportYieldEvent
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
@@ -191,6 +212,34 @@ class ToolDecision(BaseModel):
     feedback: str | None = None
 
 
+class _SwappableConfigSource:
+    """Config getter for reload-prepared managers.
+
+    Points at the target agent's config while preparation runs off-loop, then is
+    repointed to the live config inside the synchronous commit. The prepared
+    managers are not shared with the running turn until commit, so the running
+    turn only ever observes the live getter.
+    """
+
+    def __init__(self, getter: Callable[[], AnyVibeConfig]) -> None:
+        self._getter = getter
+
+    def get(self) -> AnyVibeConfig:
+        return self._getter()
+
+    def point_to(self, getter: Callable[[], AnyVibeConfig]) -> None:
+        self._getter = getter
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedReload:
+    backend: BackendLike
+    tool_manager: ToolManager
+    skill_manager: SkillManager
+    system_prompt: str
+    config_source: _SwappableConfigSource
+
+
 class AgentLoopError(Exception):
     """Base exception for AgentLoop errors."""
 
@@ -201,14 +250,6 @@ class AgentLoopStateError(AgentLoopError):
 
 class AgentLoopLLMResponseError(AgentLoopError):
     """Raised when LLM response is malformed or missing expected data."""
-
-
-class CompactionFailedError(AgentLoopError):
-    """Raised when a compaction turn did not produce a usable summary."""
-
-    def __init__(self, reason: str) -> None:
-        self.reason = reason  # "tool_call" | "empty_summary"
-        super().__init__(f"Compaction did not produce a summary (reason={reason}).")
 
 
 class ImagesNotSupportedError(AgentLoopError):
@@ -295,7 +336,7 @@ def requires_init(fn: Callable[..., Any]) -> Callable[..., Any]:
 class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def __init__(  # noqa: PLR0913, PLR0915
         self,
-        config: VibeConfig,
+        config: AnyVibeConfig,
         *,
         agent_name: str = BuiltinAgentName.DEFAULT,
         message_observer: Callable[[LLMMessage], None] | None = None,
@@ -327,6 +368,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._init_error: Exception | None = None
         self._init_start_time = time.monotonic()
         self._experiments_task: asyncio.Task[None] | None = None
+        self._reload_generation: int = 0
         self._pending_new_session_telemetry: bool = False
         self._ready_telemetry_pending: bool = defer_heavy_init
 
@@ -365,7 +407,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         self.format_handler = APIToolFormatHandler()
 
-        self.backend_factory = lambda: backend or self._select_backend()
+        self._injected_backend = backend
         self.backend = self.backend_factory()
         self._sampling_handler = self._create_sampling_handler(
             backend_getter=lambda: self.backend,
@@ -402,7 +444,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         self._current_user_message_id: str | None = None
         self._is_user_prompt_call: bool = False
+        self._reactive_recovery_used: bool = False
         self._pending_injected_messages: list[LLMMessage] = []
+        self._pending_clear_context: bool = False
 
         self.experiment_manager = ExperimentManager(
             client=RemoteEvalClient.from_settings(
@@ -431,6 +475,20 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             messages=self.messages,
             save_messages=self._save_messages,
             reset_session=self._reset_session,
+        )
+        self.compaction_manager = CompactionManager(
+            messages=self.messages,
+            stats_getter=lambda: self.stats,
+            config_getter=lambda: self.config,
+            complete=self._complete,
+            available_tools=lambda: self.format_handler.get_available_tools(
+                self.tool_manager
+            ),
+            tool_choice=self.format_handler.get_tool_choice,
+            save=self._save_messages,
+            reset_session=self._reset_session,
+            telemetry_client=self.telemetry_client,
+            session_ids=lambda: (self.session_id, self.parent_session_id),
         )
         self._teleport_service: TeleportService | None = None
 
@@ -507,12 +565,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         return self.agent_manager.active_profile
 
     @property
-    def base_config(self) -> VibeConfig:
+    def base_config(self) -> AnyVibeConfig:
         return self._base_config
 
     @property
-    def config(self) -> VibeConfig:
+    def config(self) -> AnyVibeConfig:
         return self.agent_manager.config
+
+    def experimental_vibe_code_project_picker_enabled(self) -> bool:
+        return self._base_config.experimental_vibe_code_project_picker_enabled
 
     @property
     def bypass_tool_permissions(self) -> bool:
@@ -569,10 +630,12 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                         session_pattern=rp.session_pattern,
                     )
                 )
-            if save_permanently:
-                self.config.add_tool_allowlist_patterns(
+            if save_permanently and (
+                allowlist_update := self.config.build_tool_allowlist_update(
                     tool_name, [rp.session_pattern for rp in required_permissions]
                 )
+            ):
+                VibeConfig.save_updates(allowlist_update)
         else:
             self.set_tool_permission(
                 tool_name, ToolPermission.ALWAYS, save_permanently=save_permanently
@@ -684,7 +747,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def _create_sampling_handler(
         *,
         backend_getter: Callable[[], BackendLike],
-        config_getter: Callable[[], VibeConfig],
+        config_getter: Callable[[], AnyVibeConfig],
         metadata_getter: Callable[[], dict[str, Any]],
         extra_headers_getter: Callable[[], dict[str, str]],
     ) -> MCPSamplingHandler:
@@ -706,45 +769,58 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         # Only ever invoked as a callable, never attribute-accessed.
         return cast("MCPSamplingHandler", lazy_handler)
 
-    def _build_system_prompt(self) -> str:
+    def _render_system_prompt(
+        self,
+        tool_manager: ToolManager,
+        skill_manager: SkillManager,
+        config: AnyVibeConfig | None = None,
+    ) -> str:
         return get_universal_system_prompt(
-            self.tool_manager,
-            self.config,
-            self.skill_manager,
+            tool_manager,
+            config or self.config,
+            skill_manager,
             self.agent_manager,
             scratchpad_dir=self.scratchpad_dir,
             headless=self._headless,
             experiment_manager=self.experiment_manager,
         )
 
+    def _build_system_prompt(self) -> str:
+        return self._render_system_prompt(self.tool_manager, self.skill_manager)
+
     @requires_init
     async def refresh_system_prompt(self) -> None:
         """Rebuild and replace the system prompt with current tool/skill state."""
         self.messages.update_system_prompt(self._build_system_prompt())
 
-    def _select_backend(self) -> BackendLike:
-        provider = self.config.get_active_provider()
+    def backend_factory(self, config: AnyVibeConfig | None = None) -> BackendLike:
+        return self._injected_backend or self._select_backend(config)
+
+    def _select_backend(self, config: AnyVibeConfig | None = None) -> BackendLike:
+        config = config or self.config
+        provider = config.get_active_provider()
         return create_backend(
             provider=provider,
-            timeout=self.config.api_timeout,
-            retry_max_elapsed_time=self.config.api_retry_max_elapsed_time,
+            timeout=config.api_timeout,
+            retry_max_elapsed_time=config.api_retry_max_elapsed_time,
             enable_otel=(
-                self.config.enable_telemetry
-                and self.config.enable_otel
+                config.enable_telemetry
+                and config.enable_otel
                 and build_otel_span_exporter_config(
-                    self.config.otel_endpoint, self.config.get_mistral_provider()
+                    config.otel_endpoint, config.get_mistral_provider()
                 )
                 is not None
             ),
         )
 
-    async def _save_messages(self) -> None:
+    async def _save_messages(self, *, allow_empty: bool = False) -> None:
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,
             self._base_config,
             self.tool_manager,
             self.agent_profile,
+            allow_empty=allow_empty,
         )
 
     @requires_init
@@ -753,8 +829,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         content: str,
         *,
         as_message: bool = False,
+        inject_invoked_skill: bool = False,
         images: list[ImageAttachment] | None = None,
         client_message_id: str | None = None,
+        on_event: Callable[[BaseEvent], Awaitable[None]] | None = None,
     ) -> None:
         if as_message:
             self.messages.append(
@@ -765,6 +843,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     images=images or None,
                 )
             )
+            if inject_invoked_skill:
+                async for event in self._inject_invoked_skill(content):
+                    if on_event is not None:
+                        await on_event(event)
         else:
             self.messages.append(
                 LLMMessage(
@@ -942,49 +1024,57 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     self.messages.append(injected_message)
 
             case MiddlewareAction.COMPACT:
-                old_tokens = result.metadata.get(
-                    "old_tokens", self.stats.context_tokens
-                )
-                threshold = result.metadata.get(
-                    "threshold", self.config.get_active_model().auto_compact_threshold
-                )
-                old_session_id = self.session_id
-                old_parent_session_id = self.parent_session_id
-                tool_call_id = str(uuid4())
-
-                yield CompactStartEvent(
-                    tool_call_id=tool_call_id,
-                    current_context_tokens=old_tokens,
-                    threshold=threshold,
-                )
-
-                compact_status: Literal["success", "failure", "cancelled"] = "success"
-                try:
-                    summary = await self.compact()
-                except asyncio.CancelledError:
-                    compact_status = "cancelled"
-                    raise
-                except Exception:
-                    compact_status = "failure"
-                    raise
-                finally:
-                    self.telemetry_client.send_auto_compact_triggered(
-                        nb_context_tokens_before=old_tokens,
-                        auto_compact_threshold=threshold,
-                        status=compact_status,
-                        session_id=old_session_id,
-                        parent_session_id=old_parent_session_id,
-                    )
-
-                yield CompactEndEvent(
-                    tool_call_id=tool_call_id,
-                    summary_length=len(summary),
-                    old_session_id=old_session_id,
-                    new_session_id=self.session_id,
-                )
+                async for event in self._run_compaction():
+                    yield event
 
             case MiddlewareAction.CONTINUE:
                 pass
+
+    async def _run_compaction(self) -> AsyncGenerator[BaseEvent]:
+        # Auto/reactive compaction: emit boundary events, compact, report status.
+        old_tokens = self.stats.context_tokens
+        threshold = self.config.get_active_model().auto_compact_threshold
+        old_session_id = self.session_id
+        old_parent_session_id = self.parent_session_id
+        tool_call_id = str(uuid4())
+
+        yield CompactStartEvent(
+            tool_call_id=tool_call_id,
+            current_context_tokens=old_tokens,
+            threshold=threshold,
+        )
+
+        compact_status: Literal["success", "failure", "cancelled"] = "success"
+        try:
+            summary = await self.compact()
+        except asyncio.CancelledError:
+            compact_status = "cancelled"
+            raise
+        except Exception:
+            compact_status = "failure"
+            raise
+        finally:
+            self.telemetry_client.send_auto_compact_triggered(
+                nb_context_tokens_before=old_tokens,
+                auto_compact_threshold=threshold,
+                status=compact_status,
+                session_id=old_session_id,
+                parent_session_id=old_parent_session_id,
+            )
+
+        yield CompactEndEvent(
+            tool_call_id=tool_call_id,
+            summary_length=len(summary),
+            old_session_id=old_session_id,
+            new_session_id=self.session_id,
+        )
+
+    def _should_self_heal(self) -> bool:
+        # Recover from an overflow at most once per turn; strict mode surfaces it.
+        return (
+            not self._reactive_recovery_used
+            and not self.config.raise_on_compaction_failure
+        )
 
     def _get_context(self) -> ConversationContext:
         return ConversationContext(
@@ -1015,11 +1105,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         headers["x-affinity"] = self.session_id
         return headers
 
-    async def _conversation_loop(
+    async def _open_user_turn(
         self,
         user_msg: str,
-        client_message_id: str | None = None,
         *,
+        client_message_id: str | None = None,
         auto_title: str | None = None,
         images: list[ImageAttachment] | None = None,
         user_display_content: UserDisplayContentMetadata | None = None,
@@ -1040,6 +1130,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         yield UserMessageEvent(content=user_msg, message_id=user_message.message_id)
 
+        async for event in self._inject_invoked_skill(user_msg):
+            yield event
+
         if auto_title is not None and self.session_logger.set_initial_auto_title(
             auto_title
         ):
@@ -1048,9 +1141,28 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if self._hooks_manager:
             self._hooks_manager.reset_retry_count()
 
+    async def _conversation_loop(
+        self,
+        user_msg: str,
+        client_message_id: str | None = None,
+        *,
+        auto_title: str | None = None,
+        images: list[ImageAttachment] | None = None,
+        user_display_content: UserDisplayContentMetadata | None = None,
+    ) -> AsyncGenerator[BaseEvent]:
+        async for event in self._open_user_turn(
+            user_msg,
+            client_message_id=client_message_id,
+            auto_title=auto_title,
+            images=images,
+            user_display_content=user_display_content,
+        ):
+            yield event
+
         try:
             should_break_loop = False
             first_llm_turn = True
+            self._reactive_recovery_used = False
             while not should_break_loop:
                 self._is_user_prompt_call = False
                 result = await self.middleware_pipeline.run_before_turn(
@@ -1062,25 +1174,39 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 if result.action == MiddlewareAction.STOP:
                     return
 
-                self.stats.steps += 1
                 user_cancelled = False
-                if first_llm_turn:
-                    self._is_user_prompt_call = True
-                    first_llm_turn = False
-                async for event in self._perform_llm_turn():
-                    if is_user_cancellation_event(event):
-                        user_cancelled = True
-                    yield event
+                self._is_user_prompt_call = first_llm_turn
+                try:
+                    async for event in self._perform_llm_turn():
+                        if is_user_cancellation_event(event):
+                            user_cancelled = True
+                        yield event
+                except ContextTooLongError:
+                    if not self._should_self_heal():
+                        raise
+                    self._reactive_recovery_used = True
+                    async for event in self._run_compaction():
+                        yield event
+                    continue  # retry the turn — still the user's first response
+                # A turn ran to completion: count it against the turn budget (so
+                # an overflow-and-retry never does) and mark later turns as
+                # follow-ups.
+                self.stats.steps += 1
+                first_llm_turn = False
                 # Per-turn save so the on-disk log stays fresh; after the
                 # inner loop so before_tool rewrites land in the snapshot.
                 await self._save_messages()
                 self._is_user_prompt_call = False
 
-                last_message = self.messages[-1]
-                should_break_loop = last_message.role != Role.tool
-
-                if self._drain_pending_injections():
+                if self._pending_clear_context:
+                    async for event in self._clear_context_after_plan_accept():
+                        yield event
                     should_break_loop = False
+                    continue
+
+                last_message = self.messages[-1]
+                drained = self._drain_pending_injections()
+                should_break_loop = last_message.role != Role.tool and not drained
 
                 if user_cancelled:
                     return
@@ -1089,12 +1215,76 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     retry_msg, hook_events = await self._dispatch_post_turn_hooks()
                     for hook_event in hook_events:
                         yield hook_event
-                    if retry_msg is not None:
-                        self.messages.append(retry_msg)
-                        should_break_loop = False
+                    should_break_loop = self._queue_post_turn_retry(retry_msg)
 
         finally:
             await self._save_messages()
+
+    def _queue_post_turn_retry(self, retry_msg: LLMMessage | None) -> bool:
+        # Returns whether the loop should still break (no retry queued).
+        if retry_msg is None:
+            return True
+        self.messages.append(retry_msg)
+        return False
+
+    def _skill_already_loaded(self, name: str) -> bool:
+        marker = skill_content_marker(name)
+        return any(
+            m.role == Role.tool and m.name == "skill" and marker in (m.content or "")
+            for m in self.messages
+        )
+
+    async def _inject_invoked_skill(
+        self, user_msg: str
+    ) -> AsyncGenerator[BaseEvent, None]:
+        parsed = self.skill_manager.parse_skill_command(user_msg)
+        if parsed is None:
+            return
+        skill_info = self.skill_manager.get_skill(parsed.name)
+        if skill_info is None:
+            return
+
+        result = select_skill_result(
+            skill_info, already_loaded=self._skill_already_loaded(parsed.name)
+        )
+        call_id = str(uuid4())
+        tool_class = self.tool_manager.available_tools.get("skill", SkillTool)
+
+        self.messages.append(
+            LLMMessage(
+                role=Role.assistant,
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id=call_id,
+                        index=0,
+                        function=FunctionCall(
+                            name="skill", arguments=json.dumps({"name": parsed.name})
+                        ),
+                    )
+                ],
+            )
+        )
+        result_text = "\n".join(f"{k}: {v}" for k, v in result.model_dump().items())
+        self.messages.append(
+            LLMMessage(
+                role=Role.tool, tool_call_id=call_id, name="skill", content=result_text
+            )
+        )
+
+        yield ToolCallEvent(
+            tool_call_id=call_id,
+            tool_call_index=0,
+            tool_name="skill",
+            tool_class=tool_class,
+            args=SkillArgs(name=parsed.name),
+        )
+        yield ToolResultEvent(
+            tool_name="skill",
+            tool_class=tool_class,
+            result=result,
+            tool_call_id=call_id,
+        )
 
     def _handle_plan_review_ended(self) -> None:
         if not self._plan_session.has_content_changed():
@@ -1445,7 +1635,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 sampling_callback=self._sampling_handler,
                 plan_file_path=self._plan_session.plan_file_path,
                 switch_agent_callback=self.switch_agent,
+                request_clear_context_callback=self._request_clear_context,
                 skill_manager=self.skill_manager,
+                is_skill_loaded=self._skill_already_loaded,
                 scratchpad_dir=self.scratchpad_dir,
                 permission_store=self._permission_store,
                 hook_config_result=self._hook_config_result,
@@ -1611,14 +1803,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             tool_call_id=tool_call.call_id,
         )
 
-    def _messages_for_backend(self, active_model: ModelConfig) -> Sequence[LLMMessage]:
+    def _messages_for_backend(
+        self, messages: Sequence[LLMMessage], active_model: ModelConfig
+    ) -> Sequence[LLMMessage]:
         if active_model.supports_images:
-            return self.messages
-        if not any(m.images for m in self.messages):
-            return self.messages
+            return messages
+        if not any(m.images for m in messages):
+            return messages
         return [
-            m.model_copy(update={"images": None}) if m.images else m
-            for m in self.messages
+            m.model_copy(update={"images": None}) if m.images else m for m in messages
         ]
 
     def count_history_images_unsupported_by_active_model(self) -> int:
@@ -1630,36 +1823,51 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             return 0
         return sum(1 for m in self.messages if m.images)
 
-    async def _chat(self, model_override: ModelConfig | None = None) -> LLMChunk:
-        active_model = model_override or self.config.get_active_model()
-        provider = self.config.get_provider_for_model(active_model)
-        backend_metadata = self._build_backend_metadata()
+    async def _complete(
+        self,
+        *,
+        model: ModelConfig,
+        messages: Sequence[LLMMessage],
+        tools: list[AvailableTool] | None,
+        tool_choice: StrToolChoice | AvailableTool | None,
+        call_type: TelemetryCallType | None,
+    ) -> LLMChunk:
+        """Make one accounted, non-streaming model call.
 
-        available_tools = self.format_handler.get_available_tools(self.tool_manager)
-        tool_choice = self.format_handler.get_tool_choice()
+        Sends request telemetry, calls the backend, updates stats, and maps
+        backend errors. Does NOT append to self.messages or raise on refusal —
+        those are the caller's concern. This is the single path every
+        non-streaming call (including compaction) goes through, so usage
+        accounting can never be skipped.
+        """
+        provider = self.config.get_provider_for_model(model)
+        backend_metadata = self._build_backend_metadata(call_type)
 
-        last_user_message = self._last_user_message()
+        last_user_message = next(
+            (m for m in reversed(messages) if m.role == Role.user and not m.injected),
+            None,
+        )
         self.telemetry_client.send_request_sent(
-            model=active_model.alias,
-            nb_context_chars=sum(len(m.content or "") for m in self.messages),
-            nb_context_messages=len(self.messages),
+            model=model.alias,
+            nb_context_chars=sum(len(m.content or "") for m in messages),
+            nb_context_messages=len(messages),
             nb_prompt_chars=len(last_user_message.content or "")
             if last_user_message
             else 0,
             call_type=backend_metadata.call_type,
             message_id=backend_metadata.message_id,
             attachment_counts=build_attachment_counts(
-                last_user_message, supports_images=active_model.supports_images
+                last_user_message, supports_images=model.supports_images
             ),
         )
 
         try:
             start_time = time.perf_counter()
             result = await self.backend.complete(
-                model=active_model,
-                messages=self._messages_for_backend(active_model),
-                temperature=active_model.temperature,
-                tools=available_tools,
+                model=model,
+                messages=self._messages_for_backend(messages, model),
+                temperature=model.temperature,
+                tools=tools,
                 tool_choice=tool_choice,
                 extra_headers=self._get_extra_headers(provider),
                 max_tokens=self._max_tokens,
@@ -1679,9 +1887,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             processed_message = self.format_handler.process_api_response_message(
                 result.message
             )
-            self.messages.append(processed_message)
-            if result.stop and result.stop.is_refusal:
-                raise _refusal_error(provider.name, active_model.name, result)
             return LLMChunk(
                 message=processed_message, usage=result.usage, stop=result.stop
             )
@@ -1690,17 +1895,37 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             if isinstance(e, RefusalError):
                 raise
             if _should_raise_rate_limit_error(e):
-                raise RateLimitError(provider.name, active_model.name) from e
+                raise RateLimitError(provider.name, model.name) from e
             if _is_context_too_long_error(e):
-                raise ContextTooLongError(provider.name, active_model.name) from e
+                raise ContextTooLongError(provider.name, model.name) from e
             if _is_response_too_long_error(e):
-                raise ResponseTooLongError(provider.name, active_model.name) from e
+                raise ResponseTooLongError(provider.name, model.name) from e
             if _is_non_retryable_error(e):
                 raise
 
             raise RuntimeError(
-                f"API error from {provider.name} (model: {active_model.name}): {e}"
+                f"API error from {provider.name} (model: {model.name}): {e}"
             ) from e
+
+    async def _chat(
+        self,
+        model_override: ModelConfig | None = None,
+        *,
+        call_type: TelemetryCallType | None = None,
+    ) -> LLMChunk:
+        active_model = model_override or self.config.get_active_model()
+        result = await self._complete(
+            model=active_model,
+            messages=self.messages,
+            tools=self.format_handler.get_available_tools(self.tool_manager),
+            tool_choice=self.format_handler.get_tool_choice(),
+            call_type=call_type,
+        )
+        self.messages.append(result.message)
+        if result.stop and result.stop.is_refusal:
+            provider = self.config.get_provider_for_model(active_model)
+            raise _refusal_error(provider.name, active_model.name, result)
+        return result
 
     async def _chat_streaming(self) -> AsyncGenerator[LLMChunk]:
         active_model = self.config.get_active_model()
@@ -1731,7 +1956,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             chunk_agg: LLMChunk | None = None
             async for chunk in self.backend.complete_streaming(
                 model=active_model,
-                messages=self._messages_for_backend(active_model),
+                messages=self._messages_for_backend(self.messages, active_model),
                 temperature=active_model.temperature,
                 tools=available_tools,
                 tool_choice=tool_choice,
@@ -1943,111 +2168,75 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     @requires_init
     async def compact(self, extra_instructions: str = "") -> str:
+        # Summary generation + envelope + session reset live in the manager; the
+        # loop keeps the surrounding lifecycle (clean history, save, middleware).
         try:
             self._clean_message_history()
-            await self.session_logger.save_interaction(
-                self.messages,
-                self.stats,
-                self._base_config,
-                self.tool_manager,
-                self.agent_profile,
-            )
-
-            summary_prefix = UtilityPrompt.COMPACT_SUMMARY_PREFIX.read()
-            prior_user_messages = collect_prior_user_messages(
-                list(self.messages), summary_prefix
-            )
-
-            summary_request = self.config.compaction_prompt
-            if extra_instructions:
-                summary_request += (
-                    f"\n\n## Additional Instructions\n{extra_instructions}"
-                )
-            self.stats.steps += 1
-
-            with self.messages.silent():
-                self.messages.append(
-                    LLMMessage(role=Role.user, content=summary_request)
-                )
-                summary_result = await self._chat(
-                    model_override=self.config.get_compaction_model()
-                )
-
-            if summary_result.usage is None:
-                raise AgentLoopLLMResponseError(
-                    "Usage data missing in compaction summary response"
-                )
-            summary_content = (summary_result.message.content or "").strip()
-            has_tool_calls = bool(summary_result.message.tool_calls)
-            if has_tool_calls or not summary_content:
-                reason: Literal["tool_call", "empty_summary"] = (
-                    "tool_call" if has_tool_calls else "empty_summary"
-                )
-                self.telemetry_client.send_compaction_failed(
-                    reason=reason,
-                    session_id=self.session_id,
-                    parent_session_id=self.parent_session_id,
-                )
-                if self.config.raise_on_compaction_failure:
-                    raise CompactionFailedError(reason)
-                summary_content = summary_content or "(no summary available)"
-
-            system_message = self.messages[0]
-            compaction_context = render_compaction_context(
-                prior_user_messages, summary_content
-            )
-            compaction_context_message = LLMMessage(
-                role=Role.user, content=compaction_context, injected=True
-            )
-            self.messages.reset([system_message, compaction_context_message])
-
-            await self._reset_session()
-
-            # Context size is unknown without an API call; reset to 0. The next
-            # LLM turn recomputes it accurately from real usage (_update_stats).
-            self.stats.context_tokens = 0
-            await self.session_logger.save_interaction(
-                self.messages,
-                self.stats,
-                self._base_config,
-                self.tool_manager,
-                self.agent_profile,
-            )
-
+            await self._save_messages()
+            summary = await self.compaction_manager.compact(extra_instructions)
             self.middleware_pipeline.reset(reset_reason=ResetReason.COMPACT)
-
-            return summary_content
-
+            return summary
         except Exception:
-            await self.session_logger.save_interaction(
-                self.messages,
-                self.stats,
-                self._base_config,
-                self.tool_manager,
-                self.agent_profile,
-            )
+            await self._save_messages()
             raise
+
+    async def _request_clear_context(self) -> None:
+        """Signal that the context should be cleared at the next turn boundary.
+
+        The actual clear is deferred so the in-flight tool turn can finish
+        appending its tool-result before ``self.messages`` is wiped.
+        """
+        self._pending_clear_context = True
+
+    async def _clear_context_after_plan_accept(self) -> AsyncGenerator[BaseEvent, None]:
+        """Clear the conversation after a plan accept, then re-seed the plan.
+
+        Runs at a turn boundary (never mid-tool) so the tool-result message has
+        already landed before ``self.messages`` is reset. The approved plan is
+        re-injected as a system-reminder so the implementing agent keeps going,
+        and emitted in a ``ContextClearedEvent`` with its path so the UI can keep
+        the plan on screen.
+        """
+        self._pending_clear_context = False
+        self._pending_injected_messages.clear()
+        plan_content = self._plan_session.read()
+        await self.clear_history()
+        if not plan_content:
+            yield ContextClearedEvent(plan_file_path=None)
+            return
+        self.messages.append(
+            LLMMessage(
+                role=Role.user,
+                content=(
+                    f"<{VIBE_WARNING_TAG}>The conversation context was cleared "
+                    f"after the plan was approved. Implement the approved plan "
+                    f"below -- it is the source of truth:\n\n{plan_content}"
+                    f"</{VIBE_WARNING_TAG}>"
+                ),
+                injected=True,
+            )
+        )
+        yield ContextClearedEvent(plan_file_path=self._plan_session.plan_file_path)
 
     @requires_init
     async def switch_agent(self, agent_name: str) -> None:
         if agent_name == self.agent_profile.name:
             return
-        self.agent_manager.switch_profile(agent_name)
-        await self.reload_with_initial_messages(reset_middleware=False)
+        await self.reload_with_initial_messages(
+            reset_middleware=False, switch_to_agent=agent_name
+        )
 
     @requires_init
     async def reload_with_initial_messages(
         self,
-        base_config: VibeConfig | None = None,
+        base_config: AnyVibeConfig | None = None,
         max_turns: int | None = None,
         max_price: float | None = None,
         reset_middleware: bool = True,
+        switch_to_agent: str | None = None,
     ) -> None:
-        # Force an immediate yield to allow the UI to update before heavy sync work.
-        # When there are no messages, save_interaction returns early without any await,
-        # so the coroutine would run synchronously through ToolManager, SkillManager,
-        # and system prompt generation without yielding control to the event loop.
-        await asyncio.sleep(0)
+        self._reload_generation += 1
+        generation = self._reload_generation
 
         await self.session_logger.save_interaction(
             self.messages,
@@ -2057,28 +2246,80 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             self.agent_profile,
         )
 
+        # A newer reload superseded us while we were saving; don't mutate state.
+        if generation != self._reload_generation:
+            return
+
+        # Cheap on-loop setup; warm the config cache so the worker thread only reads it.
         if base_config is not None:
             self._base_config = base_config
             self._apply_forced_bypass()
             self.agent_manager.invalidate_config()
-
-        self.backend = self.backend_factory()
-
         if max_turns is not None:
             self._max_turns = max_turns
         if max_price is not None:
             self._max_price = max_price
-
         self._ensure_remote_registries()
-        self.tool_manager = ToolManager(
-            lambda: self.config,
+        _ = self.config
+
+        # Resolve the config the reloaded objects should reflect. For an agent switch
+        # this is the target agent's config, computed without mutating the active
+        # profile -- so an in-flight turn keeps seeing the old, self-consistent config
+        # until the synchronous commit flips profile and objects together.
+        target_config = (
+            self.agent_manager.preview_config(switch_to_agent)
+            if switch_to_agent is not None
+            else self.config
+        )
+
+        # Off-loop: skill discovery and system prompt I/O. reload() is awaited within a
+        # turn, so that turn is suspended here -- nothing mutates the shared state this
+        # reads, and the new objects are built locally before the commit below.
+        prepared = await asyncio.to_thread(self._prepare_reload, target_config)
+
+        # A newer reload superseded us; let it own the commit.
+        if generation != self._reload_generation:
+            return
+
+        # Synchronous swap: no await, so an in-flight turn can't observe a partial
+        # update. Keep it that way -- don't make it async or move it off-thread.
+        self._commit_reload(prepared, reset_middleware, switch_to_agent)
+
+    def _prepare_reload(self, target_config: AnyVibeConfig) -> _PreparedReload:
+        config_source = _SwappableConfigSource(lambda: target_config)
+        tool_manager = ToolManager(
+            config_source.get,
             mcp_registry=self.mcp_registry,
             connector_registry=self.connector_registry,
             permission_getter=self._permission_store.get_tool_permission,
         )
-        self.skill_manager = SkillManager(lambda: self.config)
+        skill_manager = SkillManager(config_source.get)
+        system_prompt = self._render_system_prompt(
+            tool_manager, skill_manager, target_config
+        )
+        return _PreparedReload(
+            backend=self.backend_factory(target_config),
+            tool_manager=tool_manager,
+            skill_manager=skill_manager,
+            system_prompt=system_prompt,
+            config_source=config_source,
+        )
 
-        self.messages.update_system_prompt(self._build_system_prompt())
+    def _commit_reload(
+        self,
+        prepared: _PreparedReload,
+        reset_middleware: bool,
+        switch_to_agent: str | None,
+    ) -> None:
+        if switch_to_agent is not None:
+            self.agent_manager.switch_profile(switch_to_agent)
+        # Now that the profile is live, the prepared managers should track the live
+        # config so later refreshes (refresh_config) propagate to them.
+        prepared.config_source.point_to(lambda: self.config)
+        self.backend = prepared.backend
+        self.tool_manager = prepared.tool_manager
+        self.skill_manager = prepared.skill_manager
+        self.messages.update_system_prompt(prepared.system_prompt)
 
         if len(self.messages) == 1:
             self.stats.reset_context_state()

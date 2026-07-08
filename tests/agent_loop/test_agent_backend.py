@@ -390,7 +390,7 @@ async def test_mistral_metadata_header_call_type_per_turn() -> None:
 async def test_auto_compact_emits_summary_and_next_turn_metadata() -> None:
     """Compact emits summary then user-turn backend metadata in order."""
     backend = FakeBackend([
-        [mock_llm_chunk(content="<summary>")],
+        [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
     config = build_test_vibe_config(

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import platform
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vibe import __version__
-from vibe.core.config import VibeConfig
+from vibe.core.config import AnyVibeConfig
+from vibe.core.pii import scrub_paths
 from vibe.core.telemetry.types import LaunchContext
 
 if TYPE_CHECKING:
@@ -21,6 +22,23 @@ _FILTERED_EXCEPTIONS: tuple[type[BaseException], ...] = (KeyboardInterrupt,)
 _FILTERED_LOG_PREFIXES: tuple[str, ...] = ("Task was destroyed but it is pending!",)
 
 
+def _scrub_pii(event: Event) -> None:
+    """Scrub personally identifiable information (PII) from the event before
+    sending it to Sentry.
+    """
+    event_dict = cast(dict[str, Any], event)
+
+    user = event_dict.get("user")
+    if isinstance(user, dict):
+        user.pop("ip_address", None)
+
+    # Breadcrumbs will contain sensitive information, e.g. tool inputs, so we drop them entirely.
+    event_dict.pop("breadcrumbs", None)
+
+    for key, value in event_dict.items():
+        event_dict[key] = scrub_paths(value)
+
+
 def _before_send(event: Event, hint: Hint) -> Event | None:
     exc_info = hint.get("exc_info")
     if exc_info is not None and isinstance(exc_info[1], _FILTERED_EXCEPTIONS):
@@ -32,11 +50,12 @@ def _before_send(event: Event, hint: Hint) -> Event | None:
     ):
         return None
 
+    _scrub_pii(event)
     return event
 
 
 def init_sentry(
-    config: VibeConfig, *, headless: bool, launch_context: LaunchContext
+    config: AnyVibeConfig, *, headless: bool, launch_context: LaunchContext
 ) -> bool:
     if not config.enable_telemetry:
         return False

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -134,7 +135,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
         if not self.history or not self.input_widget:
             return
 
-        if self.history._current_index == -1:
+        if not self.history.is_navigating():
             self.input_widget._original_text = self.input_widget.text
 
         previous = self.history.get_previous(self.input_widget._original_text)
@@ -144,9 +145,6 @@ class ChatInputBody(VoiceManagerListener, Widget):
 
     def on_chat_text_area_history_next(self, _event: ChatTextArea.HistoryNext) -> None:
         if not self.history or not self.input_widget:
-            return
-
-        if self.history._current_index == -1:
             return
 
         next_entry = self.history.get_next()
@@ -177,6 +175,11 @@ class ChatInputBody(VoiceManagerListener, Widget):
             if self.history:
                 self.history.add(value)
                 self.history.reset_navigation()
+                self.run_worker(
+                    partial(self.history.persist, value),
+                    group="history_persist",
+                    thread=True,
+                )
 
             self.input_widget.clear_text()
             self._update_prompt()
@@ -191,8 +194,18 @@ class ChatInputBody(VoiceManagerListener, Widget):
 
     @switching_mode.setter
     def switching_mode(self, value: bool) -> None:
+        self.set_switching_mode(value)
+
+    def set_switching_mode(
+        self, value: bool, *, show_indicator: bool | None = None
+    ) -> None:
         self._switching_mode = value
-        if value:
+        self._set_switching_indicator(
+            value if show_indicator is None else show_indicator
+        )
+
+    def _set_switching_indicator(self, visible: bool) -> None:
+        if visible:
             if self.prompt_widget:
                 self.prompt_widget.display = False
             if not self.query(_PromptSpinner):
@@ -255,6 +268,9 @@ class ChatInputBody(VoiceManagerListener, Widget):
 
     def _start_recording_ui(self) -> None:
         if not self._voice_manager:
+            return
+        # Don't stack a second indicator if one is already showing (VIBE-3435).
+        if self._recording_indicator is not None:
             return
 
         try:

@@ -475,6 +475,15 @@ class TestParseSkillCommand:
         assert parsed is not None
         assert parsed.name == "my-skill"
 
+    def test_non_user_invocable_skill_returns_none(
+        self, skills_dir: Path, skill_config: VibeConfig
+    ) -> None:
+        create_skill(skills_dir, "hidden-skill", user_invocable=False)
+        manager = SkillManager(lambda: skill_config)
+
+        assert manager.get_skill("hidden-skill") is not None
+        assert manager.parse_skill_command("/hidden-skill") is None
+
 
 class TestSkillManagerConfigIssues:
     def test_invalid_frontmatter_records_config_issue(self, skills_dir: Path) -> None:
@@ -509,23 +518,23 @@ class TestSkillManagerConfigIssues:
         assert "good-skill" in manager.available_skills
 
 
-class TestBuildSkillPrompt:
+class TestParseSkillCommandExtras:
     def test_without_args(self, skills_dir: Path, skill_config: VibeConfig) -> None:
         create_skill(skills_dir, "my-skill", body="Do the thing.")
         manager = SkillManager(lambda: skill_config)
 
         parsed = manager.parse_skill_command("/my-skill")
         assert parsed is not None
-        prompt = SkillManager.build_skill_prompt("/my-skill", parsed)
-        assert prompt == parsed.content
+        assert parsed.name == "my-skill"
+        assert parsed.content == "Do the thing."
+        assert parsed.extra_instructions is None
 
     def test_with_args(self, skills_dir: Path, skill_config: VibeConfig) -> None:
         create_skill(skills_dir, "my-skill", body="Do the thing.")
         manager = SkillManager(lambda: skill_config)
 
-        text = "/my-skill fix the bug"
-        parsed = manager.parse_skill_command(text)
+        parsed = manager.parse_skill_command("/my-skill fix the bug")
         assert parsed is not None
-        prompt = SkillManager.build_skill_prompt(text, parsed)
-        assert prompt.startswith("/my-skill fix the bug")
-        assert "Do the thing." in prompt
+        assert parsed.name == "my-skill"
+        assert parsed.content == "Do the thing."
+        assert parsed.extra_instructions == "fix the bug"

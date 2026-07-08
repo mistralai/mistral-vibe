@@ -35,7 +35,7 @@ agents, prompts, logs, and session data live here.
   agents/              # Custom agent profiles (*.toml)
   prompts/             # Custom prompts (*.md)
   skills/              # User-level skills (each skill is a subdirectory with SKILL.md)
-  tools/               # Custom tool definitions
+  tools/               # Custom tools (<name>.py); descriptions & overrides in tools/prompts/<name>.md
   logs/
     vibe.log           # Main log file
     session/           # Session log files
@@ -51,10 +51,19 @@ When in a trusted folder, Vibe also looks for project-local configuration:
 - `.vibe/config.toml` - Project-specific config (overrides user config)
 - `.vibe/hooks.toml` - Project-specific hooks (requires trusted folder)
 - `.vibe/skills/` - Project-specific skills
-- `.vibe/tools/` - Project-specific tools
+- `.vibe/tools/` - Project-specific tools (`<name>.py`); a `prompts/<name>.md` beside them sets or overrides the description of the tool named `<name>` — builtin, MCP, or custom (e.g. `.vibe/tools/prompts/bash.md` re-describes `bash`). Same `tools/*.py` + `tools/prompts/*.md` layout as the builtins.
 - `.vibe/agents/` - Project-specific agents
 - `.vibe/prompts/` - Project-specific prompts
 - `.agents/skills/` - Standard agent skills directory
+
+### AGENTS.md Discovery
+
+`AGENTS.md` files provide directory-scoped instructions to the model. At startup,
+Vibe loads `~/.vibe/AGENTS.md` and every `AGENTS.md` from the project root up
+through the trust chain. `AGENTS.md` files in subdirectories are discovered
+lazily: when `read_file` reads a file below the project root, any `AGENTS.md`
+between the file's parent and the project root is injected into
+context.
 
 ## Lifecycle: Exit, Update, Version, Resume
 
@@ -197,13 +206,25 @@ tool_paths = ["/path/to/custom/tools"]
 # Enable only specific tools (glob and regex supported)
 enabled_tools = ["bash", "read_file", "grep"]
 
-# Disable specific tools
+# Disable specific tools after enabled_tools filtering
 disabled_tools = ["web_fetch"]
+
+# Opt into the managed PTY bash experiment
+experimental_bash_tool = true
 
 # Per-tool configuration
 [tools.bash]
 allowlist = ["git", "npm", "python"]
 ```
+
+The built-in `bash` tool runs one-off shell commands by default. Set
+`experimental_bash_tool = true` to replace it with the experimental managed PTY
+implementation under the same `bash` tool name, which also enables the companion
+tools `bash_output`, `bash_stdin`, `bash_sessions`, and `bash_log_file` and
+persists session logs under `~/.vibe/bash-tool/`. Both implementations read
+permissions and allow/deny lists from `[tools.bash]`. Output polling uses byte
+offset cursors (`cursor` / `next_cursor`), `max_bytes` caps per-call inline
+output, and `max_inline_bytes` configures the default cap.
 
 **Special case — `find` command:** Even if `find` is in the bash allowlist,
 Vibe detects `-exec`, `-execdir`, `-ok`, and `-okdir` predicates and will
@@ -555,6 +576,7 @@ vibe --max-turns N                  # Max assistant turns (programmatic mode)
 vibe --max-price DOLLARS            # Max cost limit (programmatic mode)
 vibe --max-tokens N                 # Max total session tokens (programmatic mode)
 vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
+vibe --disabled-tools TOOL          # Disable specific tools (repeatable)
 vibe --output text|json|streaming   # Output format (programmatic mode)
 ```
 
@@ -709,6 +731,20 @@ Detailed instructions for the model...
 3. `.agents/skills/` in trusted project directory
 4. `~/.vibe/skills/` (user global)
 5. `~/.agents/skills/` (user global, Agent Skills standard)
+
+### Invoking Skills
+
+Two entry points:
+- The model loads a skill on demand via the `skill` tool.
+- The user invokes a `user-invocable` skill by typing `/skill-name` (optionally
+  followed by extra instructions). The user turn stays the literal `/skill-name`
+  text; the skill is loaded programmatically and appears to the model as a
+  synthetic `skill` tool call and result immediately after that turn — the model
+  does not call the tool itself.
+
+Skills with `user-invocable: false` are model-only: they are hidden from the
+slash menu and `/skill-name` will not resolve them (it is treated as a plain
+prompt). The model can still load them via the `skill` tool.
 
 ## Environment Variables
 

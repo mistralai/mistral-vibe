@@ -10,7 +10,7 @@ from vibe.cli.update_notifier.ports.update_gateway import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 _STATUS_CAUSES: dict[int, UpdateGatewayCause] = {
     httpx.codes.NOT_FOUND: UpdateGatewayCause.NOT_FOUND,
@@ -24,7 +24,7 @@ class PyPIUpdateGateway(UpdateGateway):
         self,
         project_name: str,
         *,
-        client: httpx.AsyncClient | None = None,
+        client: VibeAsyncHTTPClient | None = None,
         timeout: float = 5.0,
         base_url: str = "https://pypi.org",
     ) -> None:
@@ -81,7 +81,7 @@ class PyPIUpdateGateway(UpdateGateway):
                     timeout=self._timeout,
                 )
 
-            async with httpx.AsyncClient(
+            async with VibeAsyncHTTPClient(
                 base_url=self._base_url,
                 timeout=self._timeout,
                 verify=build_ssl_context(),
