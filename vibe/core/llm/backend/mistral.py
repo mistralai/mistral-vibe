@@ -48,7 +48,7 @@ from vibe.core.types import (
     ToolCall,
 )
 from vibe.core.utils import get_server_url_from_api_base
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
@@ -205,7 +205,7 @@ class MistralBackend:
         enable_otel: bool = False,
     ) -> None:
         self._client: Mistral | None = None
-        self._http_client: httpx.AsyncClient | None = None
+        self._http_client: VibeAsyncHTTPClient | None = None
         self._provider = provider
         self._enable_otel = enable_otel
         self._mapper = MistralMapper()
@@ -271,7 +271,7 @@ class MistralBackend:
         await self.__aexit__(None, None, None)
 
     def _create_mistral_client(self) -> Mistral:
-        self._http_client = httpx.AsyncClient(
+        self._http_client = VibeAsyncHTTPClient(
             verify=build_ssl_context(), follow_redirects=True
         )
         client = Mistral(
@@ -354,6 +354,7 @@ class MistralBackend:
                 provider=self._provider.name,
                 endpoint=self._server_url,
                 error=e,
+                response=e.raw_response,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,
@@ -443,6 +444,7 @@ class MistralBackend:
                 provider=self._provider.name,
                 endpoint=self._server_url,
                 error=e,
+                response=e.raw_response,
                 model=model.name,
                 messages=messages,
                 temperature=temperature,

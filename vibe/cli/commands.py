@@ -10,7 +10,13 @@ from vibe.cli.constants import CLIPBOARD_IMAGE_PASTE_SUPPORTED_SYSTEM
 ALT_KEY = "⌥" if sys.platform == "darwin" else "Alt"
 
 
-CommandAvailability = Callable[[bool], bool]
+@dataclass(frozen=True)
+class CommandContext:
+    vibe_code_enabled: bool = False
+    experimental_vibe_code_project_picker_enabled: bool = False
+
+
+CommandAvailability = Callable[[CommandContext], bool]
 
 
 @dataclass
@@ -27,12 +33,17 @@ class CommandRegistry:
         self,
         excluded_commands: list[str] | None = None,
         vibe_code_enabled: bool = False,
+        experimental_vibe_code_project_picker_enabled: bool = False,
     ) -> None:
         if excluded_commands is None:
             excluded_commands = []
         self._disabled_commands = set(excluded_commands)
         self._commands: dict[str, Command] = {}
-        self.refresh(vibe_code_enabled)
+        self.refresh(
+            CommandContext(
+                vibe_code_enabled, experimental_vibe_code_project_picker_enabled
+            )
+        )
 
     def _build_commands(self) -> dict[str, Command]:
         return {
@@ -109,7 +120,16 @@ class CommandRegistry:
                 aliases=frozenset(["/teleport"]),
                 description="Teleport session to Vibe Code Web",
                 handler="_teleport_command",
-                is_available=lambda vibe_code_enabled: vibe_code_enabled,
+                is_available=lambda ctx: ctx.vibe_code_enabled,
+            ),
+            "remote-project": Command(
+                aliases=frozenset(["/remote-project"]),
+                description="Preview the Vibe Code Web project picker",
+                handler="_vibe_code_project_command",
+                is_available=lambda ctx: (
+                    ctx.vibe_code_enabled
+                    and ctx.experimental_vibe_code_project_picker_enabled
+                ),
             ),
             "proxy-setup": Command(
                 aliases=frozenset(["/proxy-setup"]),
@@ -180,8 +200,8 @@ class CommandRegistry:
     def commands(self) -> dict[str, Command]:
         return self._commands
 
-    def refresh(self, vibe_code_enabled: bool = False) -> None:
-        self._vibe_code_enabled = vibe_code_enabled
+    def refresh(self, context: CommandContext | None = None) -> None:
+        self._context = context or CommandContext()
         self._commands = {
             name: command
             for name, command in self._build_commands().items()
@@ -192,7 +212,7 @@ class CommandRegistry:
     def _is_command_available(self, command: Command) -> bool:
         if command.is_available is None:
             return True
-        return command.is_available(self._vibe_code_enabled)
+        return command.is_available(self._context)
 
     def _alias_map(self) -> dict[str, str]:
         return {

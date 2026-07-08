@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.telemetry.types import TeleportFailureDetails
 from vibe.core.teleport.errors import ServiceTeleportError
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 DEFAULT_NUAGE_PROJECT_NAME = "Vibe CLI"
 _AMBIGUOUS_CREATE_STATUS_CODES = frozenset({504})
@@ -95,7 +95,7 @@ class NuageClient:
         base_url: str,
         api_key: str,
         *,
-        client: httpx.AsyncClient | None = None,
+        client: VibeAsyncHTTPClient | None = None,
         timeout: float = 60.0,
         max_start_attempts: int = 3,
         retry_delay_seconds: float = 0.5,
@@ -110,7 +110,7 @@ class NuageClient:
 
     async def __aenter__(self) -> NuageClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(
+            self._client = VibeAsyncHTTPClient(
                 timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
             )
         return self
@@ -126,9 +126,9 @@ class NuageClient:
             self._client = None
 
     @property
-    def _http_client(self) -> httpx.AsyncClient:
+    def _http_client(self) -> VibeAsyncHTTPClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(
+            self._client = VibeAsyncHTTPClient(
                 timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
             )
             self._owns_client = True

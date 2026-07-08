@@ -15,17 +15,140 @@ from tests.conftest import (
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agent_loop import CompactionFailedError
+from vibe.core.compaction import parse_previous_user_messages
 from vibe.core.config import ModelConfig
+from vibe.core.llm.exceptions import BackendError, PayloadSummary
+from vibe.core.prompts import UtilityPrompt
 from vibe.core.types import (
     AssistantEvent,
     CompactEndEvent,
     CompactStartEvent,
+    ContextTooLongError,
     FunctionCall,
+    LLMChunk,
     LLMMessage,
     Role,
     ToolCall,
     UserMessageEvent,
 )
+
+
+def _ctx_too_long_error() -> BackendError:
+    return BackendError(
+        provider="mistral",
+        endpoint="/chat/completions",
+        status=400,
+        reason="Bad Request",
+        headers={},
+        body_text="context too long",
+        parsed_error=None,
+        model="test",
+        payload_summary=PayloadSummary(
+            model="test",
+            message_count=1,
+            approx_chars=1,
+            temperature=0.0,
+            has_tools=False,
+            tool_choice=None,
+        ),
+    )
+
+
+def _tool_call_chunk() -> LLMChunk:
+    return mock_llm_chunk(
+        content="",
+        tool_calls=[
+            ToolCall(
+                id="t1", index=0, function=FunctionCall(name="bash", arguments="{}")
+            )
+        ],
+    )
+
+
+class _ScriptedBackend(FakeBackend):
+    """FakeBackend that can raise per call index and records tools/model."""
+
+    def __init__(self, streams=None, *, raises_at=None):
+        super().__init__(streams)
+        self._raises_at = dict(raises_at or {})
+        self._calls = 0
+        self.requested_models: list[ModelConfig] = []
+        self.requested_tools: list[object] = []
+        self.requested_tool_choices: list[object] = []
+
+    def _advance(
+        self,
+        *,
+        model,
+        messages,
+        tools,
+        tool_choice,
+        extra_headers,
+        metadata,
+        max_tokens,
+    ):
+        index = self._calls
+        self._calls += 1
+        if index in self._raises_at:
+            raise self._raises_at[index]
+        self._requests_messages.append(list(messages))
+        self._requests_extra_headers.append(extra_headers)
+        self._requests_metadata.append(metadata)
+        self._requests_max_tokens.append(max_tokens)
+        self.requested_models.append(model)
+        self.requested_tools.append(tools)
+        self.requested_tool_choices.append(tool_choice)
+        return self._streams.pop(0) if self._streams else [mock_llm_chunk(content="")]
+
+    async def complete(
+        self,
+        *,
+        model,
+        messages,
+        temperature,
+        tools,
+        tool_choice,
+        extra_headers,
+        max_tokens,
+        metadata=None,
+    ):
+        stream = self._advance(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            extra_headers=extra_headers,
+            metadata=metadata,
+            max_tokens=max_tokens,
+        )
+        agg = LLMChunk(message=LLMMessage(role=Role.assistant))
+        for chunk in stream:
+            agg += chunk
+        return agg
+
+    async def complete_streaming(
+        self,
+        *,
+        model,
+        messages,
+        temperature,
+        tools,
+        tool_choice,
+        extra_headers,
+        max_tokens,
+        metadata=None,
+    ):
+        stream = self._advance(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            extra_headers=extra_headers,
+            metadata=metadata,
+            max_tokens=max_tokens,
+        )
+        for chunk in stream:
+            yield chunk
 
 
 def _get_auto_compact_properties(
@@ -55,7 +178,7 @@ def _get_compaction_failed_properties(
 @pytest.mark.asyncio
 async def test_auto_compact_emits_correct_events(telemetry_events: list[dict]) -> None:
     backend = FakeBackend([
-        [mock_llm_chunk(content="<summary>")],
+        [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
@@ -151,7 +274,7 @@ async def test_auto_compact_observer_sees_user_msg_not_summary() -> None:
         observed.append((msg.role, msg.content))
 
     backend = FakeBackend([
-        [mock_llm_chunk(content="<summary>")],
+        [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
@@ -177,7 +300,7 @@ async def test_auto_compact_observer_does_not_see_summary_request() -> None:
         observed.append((msg.role, msg.content))
 
     backend = FakeBackend([
-        [mock_llm_chunk(content="<summary>")],
+        [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
@@ -196,7 +319,7 @@ async def test_auto_compact_observer_does_not_see_summary_request() -> None:
 @pytest.mark.asyncio
 async def test_compact_replaces_messages_with_context() -> None:
     backend = FakeBackend([
-        [mock_llm_chunk(content="<summary>")],
+        [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
@@ -231,7 +354,7 @@ async def test_compact_uses_compaction_model() -> None:
         auto_compact_threshold=1,
     )
     backend = _ModelTrackingBackend([
-        [mock_llm_chunk(content="<summary>")],
+        [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
     cfg = build_test_vibe_config(
@@ -250,7 +373,7 @@ async def test_compact_uses_compaction_model() -> None:
 async def test_compact_uses_active_model_when_no_compaction_model() -> None:
     """Without compaction_model, compact() falls back to the active model."""
     backend = _ModelTrackingBackend([
-        [mock_llm_chunk(content="<summary>")],
+        [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))
@@ -266,7 +389,7 @@ async def test_compact_uses_active_model_when_no_compaction_model() -> None:
 
 @pytest.mark.asyncio
 async def test_compact_appends_extra_instructions_to_prompt() -> None:
-    backend = FakeBackend([[mock_llm_chunk(content="<summary>")]])
+    backend = FakeBackend([[mock_llm_chunk(content="<summary>done</summary>")]])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
     agent = build_test_agent_loop(config=cfg, backend=backend)
     agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
@@ -287,7 +410,7 @@ async def test_compact_uses_configured_compaction_prompt(
     project_prompts, _ = mock_prompts_dirs
     (project_prompts / "theorem_compact.md").write_text("Summarize theorem progress")
 
-    backend = FakeBackend([[mock_llm_chunk(content="<summary>")]])
+    backend = FakeBackend([[mock_llm_chunk(content="<summary>done</summary>")]])
     cfg = build_test_vibe_config(
         models=make_test_models(auto_compact_threshold=999),
         compaction_prompt_id="theorem_compact",
@@ -304,7 +427,7 @@ async def test_compact_uses_configured_compaction_prompt(
 
 @pytest.mark.asyncio
 async def test_compact_without_extra_instructions_has_no_additional_section() -> None:
-    backend = FakeBackend([[mock_llm_chunk(content="<summary>")]])
+    backend = FakeBackend([[mock_llm_chunk(content="<summary>done</summary>")]])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
     agent = build_test_agent_loop(config=cfg, backend=backend)
     agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
@@ -400,7 +523,9 @@ async def test_compact_message_shape_preserves_prior_user_messages() -> None:
     from vibe.core.prompts import UtilityPrompt
 
     summary_prefix = UtilityPrompt.COMPACT_SUMMARY_PREFIX.read()
-    backend = FakeBackend([[mock_llm_chunk(content="fresh summary body")]])
+    backend = FakeBackend([
+        [mock_llm_chunk(content="<summary>fresh summary body</summary>")]
+    ])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
     agent = build_test_agent_loop(config=cfg, backend=backend)
     system_message_before = agent.messages[0]
@@ -446,8 +571,8 @@ async def test_compact_preserves_user_messages_across_repeated_compactions() -> 
     from vibe.core.compaction import parse_previous_user_messages
 
     backend = FakeBackend([
-        [mock_llm_chunk(content="summary one")],
-        [mock_llm_chunk(content="summary two")],
+        [mock_llm_chunk(content="<summary>summary one</summary>")],
+        [mock_llm_chunk(content="<summary>summary two</summary>")],
     ])
     cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
     agent = build_test_agent_loop(config=cfg, backend=backend)
@@ -466,3 +591,231 @@ async def test_compact_preserves_user_messages_across_repeated_compactions() -> 
         "first ask",
         "second ask",
     ]
+
+
+@pytest.mark.asyncio
+async def test_compact_uses_fallback_when_primary_returns_tool_call(
+    telemetry_events: list[dict],
+) -> None:
+    backend = _ScriptedBackend([
+        [_tool_call_chunk()],  # primary attempt: invalid (tool call)
+        [mock_llm_chunk(content="<summary>recovered</summary>")],  # dedicated fallback
+    ])
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
+    agent.stats.context_tokens = 100
+
+    summary = await agent.compact()
+
+    assert summary == "recovered"
+    # The fallback (second call) runs without tools, with the summarizer prompt.
+    assert backend.requested_tools[1] is None
+    assert backend.requested_tool_choices[1] is None
+    assert backend.requested_models[1].thinking == "off"
+    fallback_messages = backend.requests_messages[1]
+    assert fallback_messages[0].role == Role.system
+    assert fallback_messages[0].content == UtilityPrompt.COMPACT_SYSTEM.read()
+    # The fallback recovered, so this is not a failure — no failure event fires.
+    assert not any(
+        e.get("event_name") == "vibe.compaction_failed" for e in telemetry_events
+    )
+    assert "recovered" in (agent.messages[1].content or "")
+
+
+@pytest.mark.asyncio
+async def test_compact_fallback_failure_returns_placeholder(
+    telemetry_events: list[dict],
+) -> None:
+    # Primary invalid and the fallback also yields nothing usable.
+    backend = _ScriptedBackend([[_tool_call_chunk()]])
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
+    agent.stats.context_tokens = 100
+
+    summary = await agent.compact()
+
+    assert summary == "(no summary available)"
+    # The terminal telemetry keeps the primary's failure mode, not the
+    # fallback's always-empty one.
+    assert _get_compaction_failed_properties(telemetry_events)["reason"] == "tool_call"
+
+
+@pytest.mark.asyncio
+async def test_compact_fallback_maps_context_too_long_error() -> None:
+    # The fallback goes through _complete, so a context-length backend error is
+    # surfaced as ContextTooLongError (not a raw backend/internal error).
+    backend = _ScriptedBackend(
+        [[_tool_call_chunk()]], raises_at={1: _ctx_too_long_error()}
+    )
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
+    agent.stats.context_tokens = 100
+
+    with pytest.raises(ContextTooLongError):
+        await agent.compact()
+
+
+@pytest.mark.asyncio
+async def test_reactive_compaction_recovers_from_overflow() -> None:
+    backend = _ScriptedBackend(
+        [
+            [mock_llm_chunk(content="<summary>done</summary>")],  # compaction summary
+            [mock_llm_chunk(content="<final>")],  # retried turn
+        ],
+        raises_at={0: _ctx_too_long_error()},  # the first turn overflows
+    )
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.stats.context_tokens = 0
+
+    events = [ev async for ev in agent.act("Hello")]
+
+    kinds = [type(ev) for ev in events]
+    assert CompactStartEvent in kinds
+    assert CompactEndEvent in kinds
+    assert any(
+        isinstance(ev, AssistantEvent) and ev.content == "<final>" for ev in events
+    )
+    assert agent.messages[-1].content == "<final>"
+    assert parse_previous_user_messages(agent.messages[1].content or "") == ["Hello"]
+    # The compaction summary is a utility call; the retried turn is the main one.
+    call_types = [(m or {}).get("call_type") for m in backend.requests_metadata]
+    assert call_types == ["secondary_call", "main_call"]
+
+
+@pytest.mark.asyncio
+async def test_reactive_recovery_does_not_consume_turn_budget() -> None:
+    # Regression: the failed overflow attempt must not eat a turn. With
+    # max_turns=1 the retried (compacted) turn must still run — if the failed
+    # attempt's step weren't rolled back, TurnLimitMiddleware would STOP the
+    # retry before it ever executes.
+    backend = _ScriptedBackend(
+        [
+            [mock_llm_chunk(content="<summary>done</summary>")],  # compaction summary
+            [mock_llm_chunk(content="<final>")],  # retried turn
+        ],
+        raises_at={0: _ctx_too_long_error()},  # the first turn overflows
+    )
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.set_max_turns(1)
+    agent.stats.context_tokens = 0
+
+    events = [ev async for ev in agent.act("Hello")]
+
+    # The compacted turn completed within the single-turn budget.
+    assert any(
+        isinstance(ev, AssistantEvent) and ev.content == "<final>" for ev in events
+    )
+    assert agent.messages[-1].content == "<final>"
+    # Exactly one productive turn was counted (user step + one LLM turn).
+    assert agent.stats.steps == 2
+
+
+@pytest.mark.asyncio
+async def test_reactive_compaction_disabled_in_strict_mode() -> None:
+    backend = _ScriptedBackend(
+        [[mock_llm_chunk(content="<final>")]], raises_at={0: _ctx_too_long_error()}
+    )
+    cfg = build_test_vibe_config(
+        models=make_test_models(auto_compact_threshold=999),
+        raise_on_compaction_failure=True,
+    )
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.stats.context_tokens = 0
+
+    with pytest.raises(ContextTooLongError):
+        async for _ in agent.act("Hello"):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_compact_trims_history_when_summary_overflows() -> None:
+    # First summary attempt overflows; after trimming the oldest round it fits.
+    backend = _ScriptedBackend(
+        [[mock_llm_chunk(content="<summary>ok</summary>")]],
+        raises_at={0: _ctx_too_long_error()},
+    )
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="oldest ask"))
+    agent.messages.append(LLMMessage(role=Role.assistant, content="work"))
+    agent.messages.append(LLMMessage(role=Role.user, content="newest ask"))
+    agent.stats.context_tokens = 100
+
+    summary = await agent.compact()
+
+    assert summary == "ok"
+    assert parse_previous_user_messages(agent.messages[1].content or "") == [
+        "oldest ask",
+        "newest ask",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compact_restores_history_when_summary_keeps_overflowing() -> None:
+    # Every summary attempt overflows, so PTL trimming eventually gives up.
+    backend = _ScriptedBackend(
+        [], raises_at={attempt: _ctx_too_long_error() for attempt in range(4)}
+    )
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="oldest ask"))
+    agent.messages.append(LLMMessage(role=Role.assistant, content="old work"))
+    agent.messages.append(LLMMessage(role=Role.user, content="middle ask"))
+    agent.messages.append(LLMMessage(role=Role.assistant, content="middle work"))
+    agent.messages.append(LLMMessage(role=Role.user, content="newest ask"))
+    agent.stats.context_tokens = 100
+    original_messages = list(agent.messages)
+
+    with pytest.raises(ContextTooLongError):
+        await agent.compact()
+
+    # The trimmed history must not persist after a failed compaction.
+    assert list(agent.messages) == original_messages
+
+
+@pytest.mark.asyncio
+async def test_compact_fallback_uses_trimmed_history_after_primary_overflow() -> None:
+    backend = _ScriptedBackend(
+        [
+            [_tool_call_chunk()],  # primary retry (post-trim) returns bad content
+            [mock_llm_chunk(content="<summary>recovered</summary>")],  # fallback
+        ],
+        raises_at={0: _ctx_too_long_error()},  # primary first attempt overflows
+    )
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="oldest ask"))
+    agent.messages.append(LLMMessage(role=Role.assistant, content="old work"))
+    agent.messages.append(LLMMessage(role=Role.user, content="newest ask"))
+    agent.stats.context_tokens = 100
+
+    summary = await agent.compact()
+
+    assert summary == "recovered"
+    # The fallback (2nd recorded request) summarizes the trimmed history.
+    fallback_prompt = backend.requests_messages[1][1].content or ""
+    assert "newest ask" in fallback_prompt
+    assert "oldest ask" not in fallback_prompt
+
+
+@pytest.mark.asyncio
+async def test_compact_fallback_rejects_empty_summary_tags() -> None:
+    # Primary fails, and the fallback returns an empty <summary></summary> block.
+    backend = _ScriptedBackend([
+        [_tool_call_chunk()],
+        [mock_llm_chunk(content="<summary></summary>")],
+    ])
+    cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=999))
+    agent = build_test_agent_loop(config=cfg, backend=backend)
+    agent.messages.append(LLMMessage(role=Role.user, content="Hello"))
+    agent.stats.context_tokens = 100
+
+    summary = await agent.compact()
+
+    assert summary == "(no summary available)"
+    assert "<summary>" not in (agent.messages[1].content or "")

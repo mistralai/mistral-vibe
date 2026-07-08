@@ -72,7 +72,9 @@ class TestRewindAcp:
             {"sessionId": session_id, "messageId": "m1", "restoreFiles": True},
         )
 
-        rewind_manager.rewind_to_message.assert_awaited_once_with(1, restore_files=True)
+        rewind_manager.rewind_to_message.assert_awaited_once_with(
+            1, restore_files=True, inplace=True
+        )
         assert result == {
             "messageContent": "first",
             "restoreErrors": ["could not restore x"],
@@ -93,7 +95,9 @@ class TestRewindAcp:
             "rewind/to", {"sessionId": session_id, "messageId": "m1"}
         )
 
-        rewind_manager.rewind_to_message.assert_awaited_once_with(1, restore_files=True)
+        rewind_manager.rewind_to_message.assert_awaited_once_with(
+            1, restore_files=True, inplace=True
+        )
 
     async def test_rewind_to_without_restore_skips_paths(
         self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
@@ -111,7 +115,7 @@ class TestRewindAcp:
         )
 
         rewind_manager.rewind_to_message.assert_awaited_once_with(
-            1, restore_files=False
+            1, restore_files=False, inplace=True
         )
         rewind_manager.restorable_paths_at.assert_not_called()
         assert result["restoredPaths"] == []
@@ -168,7 +172,7 @@ class TestRewindAcp:
             return 1
 
         async def rewind_to_message(
-            message_index: int, *, restore_files: bool
+            message_index: int, *, restore_files: bool, inplace: bool = False
         ) -> tuple[str, list[str], list[str]]:
             calls.append(f"start:{restore_files}")
             if restore_files:
@@ -246,7 +250,7 @@ class TestRewindAcp:
             return 1
 
         async def rewind_to_message(
-            message_index: int, *, restore_files: bool
+            message_index: int, *, restore_files: bool, inplace: bool = False
         ) -> tuple[str, list[str], list[str]]:
             calls.append("rewind:start")
             rewind_entered.set()
@@ -306,7 +310,7 @@ class TestRewindAcp:
         rewind_manager.index_for_message_id = lambda message_id: 1
 
         async def rewind_to_message(
-            message_index: int, *, restore_files: bool
+            message_index: int, *, restore_files: bool, inplace: bool = False
         ) -> tuple[str, list[str], list[str]]:
             order.append("rewind:start")
             rewind_entered.set()
@@ -362,7 +366,7 @@ class TestRewindAcp:
         rewind_manager.index_for_message_id = lambda message_id: 1
 
         async def rewind_to_message(
-            message_index: int, *, restore_files: bool
+            message_index: int, *, restore_files: bool, inplace: bool = False
         ) -> tuple[str, list[str], list[str]]:
             order.append("rewind:start")
             rewind_entered.set()

@@ -14,6 +14,10 @@ NC='\033[0m' # No Color
 
 ORIGINAL_PATH="${PATH}"
 
+# Bump both together when updating uv.
+UV_INSTALLER_VERSION="0.11.26"
+UV_INSTALLER_SHA256="92fa9085d24c214bb4445cc1da8c15ca9cca8cffb34726240fa08c5302e94ccc"
+
 function error() {
     echo -e "${RED}[ERROR]${NC} $1" >&2
 }
@@ -74,15 +78,48 @@ function check_uv_installed() {
     fi
 }
 
+function sha256_of() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$file" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
 function install_uv() {
-    info "Installing uv using the official Astral installer..."
+    info "Installing uv ${UV_INSTALLER_VERSION} using the official Astral installer..."
 
     if ! command -v curl &> /dev/null; then
         error "curl is required to install uv. Please install curl first."
         exit 1
     fi
 
-    if curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    local installer
+    installer=$(mktemp)
+    trap "rm -f $(printf '%q' "$installer")" EXIT
+
+    if ! curl -LsSf "https://astral.sh/uv/${UV_INSTALLER_VERSION}/install.sh" -o "$installer"; then
+        error "Failed to download the uv installer"
+        exit 1
+    fi
+
+    local actual_sha256
+    if ! actual_sha256=$(sha256_of "$installer"); then
+        error "No SHA-256 tool (sha256sum or shasum) available to verify the uv installer"
+        exit 1
+    fi
+
+    if [[ "$actual_sha256" != "$UV_INSTALLER_SHA256" ]]; then
+        error "uv installer checksum mismatch — refusing to execute an unverified installer."
+        error "  expected: $UV_INSTALLER_SHA256"
+        error "  actual:   $actual_sha256"
+        exit 1
+    fi
+
+    if sh "$installer"; then
         success "uv installed successfully"
 
         export PATH="$HOME/.local/bin:$PATH"

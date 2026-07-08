@@ -8,6 +8,12 @@ import pytest
 from vibe.cli.history_manager import HistoryManager
 
 
+def submit(manager: HistoryManager, text: str) -> None:
+    manager.add(text)
+    manager.reset_navigation()
+    manager.persist(text)
+
+
 def test_history_manager_normalizes_loaded_entries_like_numbers_to_strings(
     tmp_path: Path,
 ) -> None:
@@ -30,10 +36,10 @@ def test_history_manager_retains_a_fixed_number_of_entries(tmp_path: Path) -> No
     history_file = tmp_path / "history.jsonl"
     manager = HistoryManager(history_file, max_entries=3)
 
-    manager.add("first")
-    manager.add("second")
-    manager.add("third")
-    manager.add("fourth")
+    submit(manager, "first")
+    submit(manager, "second")
+    submit(manager, "third")
+    submit(manager, "fourth")
 
     reloaded = HistoryManager(history_file)
 
@@ -47,12 +53,12 @@ def test_history_manager_retains_a_fixed_number_of_entries(tmp_path: Path) -> No
 def test_history_manager_filters_invalid_and_duplicated_entries(tmp_path: Path) -> None:
     history_file = tmp_path / "history.jsonl"
     manager = HistoryManager(history_file, max_entries=5)
-    manager.add("")  # empty
-    manager.add("   ")  # is trimmed
-    manager.add("first")
-    manager.add("second")
-    manager.add("second")  # duplicate
-    manager.add("third")
+    submit(manager, "")  # empty
+    submit(manager, "   ")  # is trimmed
+    submit(manager, "first")
+    submit(manager, "second")
+    submit(manager, "second")  # duplicate
+    submit(manager, "third")
 
     reloaded = HistoryManager(history_file)
 
@@ -66,8 +72,8 @@ def test_history_manager_filters_invalid_and_duplicated_entries(tmp_path: Path) 
 def test_history_manager_stores_slash_prefixed_entries(tmp_path: Path) -> None:
     history_file = tmp_path / "history.jsonl"
     manager = HistoryManager(history_file, max_entries=5)
-    manager.add("first")
-    manager.add("/tool_call arg1 arg2")
+    submit(manager, "first")
+    submit(manager, "/tool_call arg1 arg2")
 
     reloaded = HistoryManager(history_file)
 
@@ -81,37 +87,99 @@ def test_history_manager_keeps_entries_when_reload_read_fails(
 ) -> None:
     history_file = tmp_path / "history.jsonl"
     manager = HistoryManager(history_file)
-    manager.add("first")
+    submit(manager, "first")
 
     def raise_os_error(*args: object, **kwargs: object) -> None:
         raise OSError
 
     monkeypatch.setattr("vibe.cli.history_manager.read_safe", raise_os_error)
 
-    manager.add("second")
+    submit(manager, "second")
 
     assert manager.get_previous(current_input="") == "second"
     assert manager.get_previous(current_input="") == "first"
 
 
-def test_history_manager_resets_navigation_when_add_is_duplicate(
+def test_history_manager_merges_other_sessions_entries_on_persist(
     tmp_path: Path,
 ) -> None:
     history_file = tmp_path / "history.jsonl"
     manager = HistoryManager(history_file, max_entries=2)
-    manager.add("a")
-    manager.add("b")
+    submit(manager, "a")
+    submit(manager, "b")
 
     other = HistoryManager(history_file, max_entries=10)
-    other.add("c")
-    other.add("d")
-    other.add("e")
+    submit(other, "c")
+    submit(other, "d")
+    submit(other, "e")
 
     assert manager.get_previous(current_input="") == "b"
-    manager.add("e")
+    submit(manager, "e")
 
     assert manager.get_previous(current_input="") == "e"
     assert manager.get_previous(current_input="") == "d"
+    assert manager.get_previous(current_input="") is None
+
+
+def test_history_manager_persists_pending_entries_in_submission_order(
+    tmp_path: Path,
+) -> None:
+    history_file = tmp_path / "history.jsonl"
+    manager = HistoryManager(history_file)
+
+    manager.add("first")
+    manager.reset_navigation()
+    manager.add("second")
+    manager.reset_navigation()
+    manager.persist("second")
+    manager.persist("first")
+
+    reloaded = HistoryManager(history_file)
+
+    assert reloaded.get_previous(current_input="") == "second"
+    assert reloaded.get_previous(current_input="") == "first"
+    assert reloaded.get_previous(current_input="") is None
+
+
+def test_history_manager_keeps_pending_entries_when_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    history_file = tmp_path / "history.jsonl"
+    manager = HistoryManager(history_file)
+    original_write_entries = manager._write_entries
+    calls = 0
+
+    def fail_once(entries: list[str]) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return False
+        return original_write_entries(entries)
+
+    monkeypatch.setattr(manager, "_write_entries", fail_once)
+
+    manager.add("first")
+    manager.persist("first")
+    manager.persist("first")
+
+    reloaded = HistoryManager(history_file)
+
+    assert reloaded.get_previous(current_input="") == "first"
+    assert reloaded.get_previous(current_input="") is None
+
+
+def test_history_manager_clamps_navigation_after_entries_shrink(tmp_path: Path) -> None:
+    history_file = tmp_path / "history.jsonl"
+    manager = HistoryManager(history_file)
+
+    manager.add("first")
+    manager.add("second")
+    manager.add("third")
+
+    assert manager.get_previous(current_input="") == "third"
+    manager._entries = ["only"]
+
+    assert manager.get_previous(current_input="") == "only"
     assert manager.get_previous(current_input="") is None
 
 

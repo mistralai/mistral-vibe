@@ -10,6 +10,7 @@ from vibe.cli.turn_summary.port import (
     TurnSummaryResult,
 )
 from vibe.core.config import ModelConfig
+from vibe.core.config.models import Backend
 from vibe.core.llm.types import BackendLike
 from vibe.core.logger import logger
 from vibe.core.prompts import UtilityPrompt
@@ -21,6 +22,7 @@ from vibe.core.types import (
     Role,
     UserMessageEvent,
 )
+from vibe.core.utils.http import get_user_agent
 
 
 def _empty_session_metadata() -> dict[str, Any]:
@@ -134,7 +136,7 @@ class TurnSummaryTracker(TurnSummaryPort):
                 tools=None,
                 tool_choice=None,
                 max_tokens=self._max_tokens,
-                extra_headers={},
+                extra_headers={"user-agent": get_user_agent(Backend.MISTRAL)},
                 metadata=self._build_metadata(data),
             )
 

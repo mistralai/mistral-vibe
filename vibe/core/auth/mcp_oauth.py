@@ -7,7 +7,6 @@ from typing import Final
 import urllib.parse
 
 import anyio.to_thread
-import httpx
 import keyring
 import keyring.backends.fail
 import keyring.errors
@@ -21,7 +20,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAu
 from pydantic import AnyUrl, BaseModel, ConfigDict
 
 from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.core.utils.keyring import (
     delete_api_key_from_keyring,
     get_api_key_from_keyring,
@@ -460,7 +459,7 @@ async def perform_oauth_login(
         server, redirect_handler=on_url, callback_handler=handler.serve_once
     )
     try:
-        async with httpx.AsyncClient(
+        async with VibeAsyncHTTPClient(
             auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
         ) as client:
             await client.get(server.url)

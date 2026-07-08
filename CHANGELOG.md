@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.1] - 2026-07-08
+
+### Added
+
+- Experimental managed bash tool for running and tracking shell sessions
+- `--disabled-tools` CLI flag to turn off specific tools for a run
+- Per-tool description overrides via `<tools-dir>/prompts/<name>.md`
+- Setting to clear context when a plan is accepted
+- Discovered `AGENTS.md` files are now surfaced during `read_file` tool calls
+
+### Changed
+
+- Reactive compaction with a dedicated summary fallback and stricter summaries
+- User-invoked skills now load as a synthetic tool call
+- Tool config now merges via deep merge
+- MCP panel now refreshes silently in the background
+- Debounced the agent-switch spinner
+- Neutral color for keyboard shortcut hints
+- Falls back to the first available model when the active model is unknown
+- HTTP requests now honor CIDR notation in `NO_PROXY`
+- History now loads lazily on resume, and session writes are off the event loop
+- Faster startup by deferring heavy imports
+- PII and identifying paths are now scrubbed from Sentry reports
+
+### Fixed
+
+- Rewind now happens in place instead of forking the session
+- No longer includes pydantic URLs in error messages
+- Text can now be scrolled while selecting at the chat bottom
+- Click text selection is now scoped to word and paragraph
+- DuplicateIds crash when the recording UI starts twice
+- Git subprocess output is now decoded as UTF-8
+- Corrected the truncated indicator position and removed a duplicate fetch link
+
+
 ## [2.19.0] - 2026-07-03
 
 ### Added

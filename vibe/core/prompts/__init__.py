@@ -32,6 +32,7 @@ class UtilityPrompt(Prompt):
     AGENTS_DOC = auto()
     COMPACT = auto()
     COMPACT_SUMMARY_PREFIX = auto()
+    COMPACT_SYSTEM = auto()
     DANGEROUS_DIRECTORY = auto()
     PROJECT_CONTEXT = auto()
     TURN_SUMMARY = auto()

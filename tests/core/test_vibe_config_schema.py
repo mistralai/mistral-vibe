@@ -40,6 +40,7 @@ disabled_tools = ["bash"]
 default_agent = "plan"
 enabled_skills = ["search"]
 enable_otel = true
+experimental_vibe_code_project_picker_enabled = true
 
 [[models]]
 alias = "codestral"
@@ -69,6 +70,7 @@ provider = "mistral"
     assert config.default_agent == "plan"
     assert "search" in config.enabled_skills
     assert config.enable_otel is True
+    assert config.experimental_vibe_code_project_picker_enabled is True
 
 
 def test_duplicate_model_alias_raises() -> None:
@@ -79,6 +81,35 @@ def test_duplicate_model_alias_raises() -> None:
                 ModelConfig(name="model-b", provider="mistral", alias="same"),
             ]
         )
+
+
+def test_unknown_active_model_falls_back_to_first(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING"):
+        config = VibeConfigSchema(active_model="does-not-exist")
+
+    assert config.active_model == config.models[0].alias
+    assert config.get_active_model().alias == config.models[0].alias
+    assert (
+        "Active model 'does-not-exist' is not in your configured models" in caplog.text
+    )
+
+
+def test_known_active_model_is_not_overridden(caplog: pytest.LogCaptureFixture) -> None:
+    models = [
+        ModelConfig(name="model-a", provider="mistral", alias="a"),
+        ModelConfig(name="model-b", provider="mistral", alias="b"),
+    ]
+    with caplog.at_level("WARNING"):
+        config = VibeConfigSchema(active_model="b", models=models)
+    assert config.active_model == "b"
+    assert "is not in your configured models" not in caplog.text
+
+
+def test_no_models_raises() -> None:
+    with pytest.raises(ValueError, match="No models are configured"):
+        VibeConfigSchema(models=[])
 
 
 def test_compaction_model_provider_must_match_active() -> None:

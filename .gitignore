@@ -197,8 +197,14 @@ result-*
 .vibe/*
 !.vibe/skills/
 .vibe/skills/*
+!.vibe/skills/create-vibe-feature/
+!.vibe/skills/create-vibe-feature/**
 !.vibe/skills/instrument-feature-analytics/
 !.vibe/skills/instrument-feature-analytics/**
+!.vibe/skills/write-vibe-adr/
+!.vibe/skills/write-vibe-adr/**
+!.vibe/skills/write-vibe-tests/
+!.vibe/skills/write-vibe-tests/**
 
 # Tests run the agent in the playground, we don't need to keep the session files
 tests/playground/*

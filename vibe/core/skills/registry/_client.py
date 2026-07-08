@@ -12,7 +12,7 @@ from vibe.core.skills.registry.models import (
     RegistrySkillItem,
     SkillVersionInfo,
 )
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 _MAX_PAGES = 50
 
@@ -44,10 +44,10 @@ class RegistrySkillsClient:
         self._skills_url = f"{base_url.rstrip('/')}/skills"
         self._api_key = api_key
         self._timeout = timeout
-        self._client: httpx.AsyncClient | None = None
+        self._client: VibeAsyncHTTPClient | None = None
 
     async def __aenter__(self) -> RegistrySkillsClient:
-        self._client = httpx.AsyncClient(
+        self._client = VibeAsyncHTTPClient(
             timeout=self._timeout,
             headers={
                 "Authorization": f"Bearer {self._api_key}",

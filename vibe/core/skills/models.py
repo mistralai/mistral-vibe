@@ -70,7 +70,10 @@ class SkillMetadata(BaseModel):
     user_invocable: bool = Field(
         default=True,
         validation_alias="user-invocable",
-        description="Controls whether the skill appears in the slash command menu.",
+        description=(
+            "When false, the skill is model-only: it is hidden from the slash "
+            "command menu and cannot be invoked by the user via /skill-name."
+        ),
     )
 
     @field_validator("allowed_tools", mode="before")

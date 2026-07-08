@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -74,6 +74,14 @@ class TestMistralTTSClient:
             input="Hello",
             voice_id="gb_jane_neutral",
             response_format="wav",
+            metadata=ANY,
+            http_headers=ANY,
+        )
+        kwargs = mock_complete_async.call_args.kwargs
+        assert kwargs["metadata"]["call_type"] == "secondary_call"
+        assert kwargs["metadata"]["call_source"] == "vibe_code"
+        assert kwargs["http_headers"]["user-agent"].startswith(
+            "mistral-client-python/Mistral-Vibe/"
         )
 
     @pytest.mark.asyncio

@@ -73,7 +73,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from vibe import VIBE_ROOT, __version__
 from vibe.acp.acp_logger import acp_message_observer
-from vibe.acp.commands import AcpCommandRegistry
+from vibe.acp.commands import AcpCommandContext, AcpCommandRegistry
 from vibe.acp.exceptions import (
     CompactionError,
     ConfigurationError,
@@ -157,7 +157,6 @@ from vibe.core.session.saved_sessions import (
 )
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.session.title_format import format_session_title
-from vibe.core.skills.manager import SkillManager
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import LaunchContext
@@ -740,7 +739,10 @@ class VibeAcpAgentLoop(AcpAgent):
         self, session_id: str, agent_loop: AgentLoop
     ) -> AcpSessionLoop:
         command_registry = AcpCommandRegistry(
-            vibe_code_enabled=agent_loop.base_config.vibe_code_enabled
+            vibe_code_enabled=agent_loop.base_config.vibe_code_enabled,
+            experimental_vibe_code_project_picker_enabled=(
+                agent_loop.base_config.experimental_vibe_code_project_picker_enabled
+            ),
         )
         session = AcpSessionLoop(
             id=session_id, agent_loop=agent_loop, command_registry=command_registry
@@ -1312,6 +1314,8 @@ class VibeAcpAgentLoop(AcpAgent):
 
     async def _reload_config(self, session: AcpSessionLoop) -> None:
         await self._reload_session_config(session)
+        if command_registry := getattr(session, "command_registry", None):
+            await command_registry.notify_changed()
 
     async def _apply_model_change(self, session: AcpSessionLoop, model_id: str) -> bool:
         model_aliases = [model.alias for model in session.agent_loop.config.models]
@@ -1325,7 +1329,7 @@ class VibeAcpAgentLoop(AcpAgent):
     async def _apply_thinking_change(
         self, session: AcpSessionLoop, level: ThinkingLevel
     ) -> bool:
-        session.agent_loop.config.set_thinking(level)
+        VibeConfig.save_updates(session.agent_loop.config.build_thinking_update(level))
         await self._reload_config(session)
         return True
 
@@ -1463,7 +1467,6 @@ class VibeAcpAgentLoop(AcpAgent):
             session.agent_loop.telemetry_client.send_slash_command_used(
                 skill.name, "skill"
             )
-            text_prompt = SkillManager.build_skill_prompt(text_prompt, skill)
 
         auto_title: str | None = None
         if session.agent_loop.session_logger.needs_initial_auto_title():
@@ -1998,7 +2001,7 @@ class VibeAcpAgentLoop(AcpAgent):
                     errors,
                     restored_paths,
                 ) = await rewind_manager.rewind_to_message(
-                    index, restore_files=request.restore_files
+                    index, restore_files=request.restore_files, inplace=True
                 )
         except RewindError as exc:
             raise InvalidRequestError(str(exc)) from exc
@@ -2285,6 +2288,15 @@ class VibeAcpAgentLoop(AcpAgent):
         self._apply_client_project_name(new_config)
         _merge_non_interactive_disabled_tools(new_config)
         await session.agent_loop.reload_with_initial_messages(base_config=new_config)
+        if command_registry := getattr(session, "command_registry", None):
+            command_registry.refresh(
+                AcpCommandContext(
+                    vibe_code_enabled=new_config.vibe_code_enabled,
+                    experimental_vibe_code_project_picker_enabled=(
+                        new_config.experimental_vibe_code_project_picker_enabled
+                    ),
+                )
+            )
 
     async def _reload_trusted_workspace_session(
         self, session: AcpSessionLoop, cwd: Path

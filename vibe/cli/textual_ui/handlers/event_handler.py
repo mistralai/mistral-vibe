@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -32,6 +32,7 @@ from vibe.core.types import (
     BaseEvent,
     CompactEndEvent,
     CompactStartEvent,
+    ContextClearedEvent,
     PlanReviewEndedEvent,
     PlanReviewRequestedEvent,
     ReasoningEvent,
@@ -54,10 +55,12 @@ class EventHandler:
         mount_callback: Callable,
         get_tools_collapsed: Callable[[], bool],
         on_profile_changed: Callable[[], None] | None = None,
+        on_context_cleared: Callable[[Path | None], Awaitable[None]] | None = None,
     ) -> None:
         self.mount_callback = mount_callback
         self.get_tools_collapsed = get_tools_collapsed
         self.on_profile_changed = on_profile_changed
+        self.on_context_cleared = on_context_cleared
         self.tool_calls: dict[str, ToolCallMessage] = {}
         self.current_compact: CompactMessage | None = None
         self.current_streaming_message: AssistantMessage | None = None
@@ -165,6 +168,10 @@ class EventHandler:
             case AgentProfileChangedEvent():
                 if self.on_profile_changed:
                     self.on_profile_changed()
+            case ContextClearedEvent():
+                await self.finalize_streaming()
+                if self.on_context_cleared:
+                    await self.on_context_cleared(event.plan_file_path)
             case SessionTitleUpdatedEvent():
                 pass
             case UserMessageEvent():

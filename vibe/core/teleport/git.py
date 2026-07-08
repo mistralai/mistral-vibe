@@ -33,6 +33,7 @@ class GitRepoInfo:
     branch: str | None
     commit: str
     diff: str
+    default_branch: str | None = None
 
 
 class GitRepository:
@@ -77,6 +78,9 @@ class GitRepository:
         owner = parsed.owner
         repo_name = parsed.repo
         branch = None if repo.head.is_detached else repo.active_branch.name
+        default_branch = _remote_ref_branch_name(
+            await self._get_remote_default_branch(repo, parsed.name), parsed.name
+        )
         diff = await self._get_diff(repo)
 
         return GitRepoInfo(
@@ -87,6 +91,7 @@ class GitRepository:
             branch=branch,
             commit=commit,
             diff=diff,
+            default_branch=default_branch,
         )
 
     async def fetch(self, remote: str = "origin") -> None:
@@ -260,3 +265,12 @@ class GitRepository:
     @staticmethod
     def _to_https_url(owner: str, repo: str) -> str:
         return f"https://github.com/{owner}/{repo}.git"
+
+
+def _remote_ref_branch_name(ref: str | None, remote: str) -> str | None:
+    if ref is None:
+        return None
+    prefix = f"{remote}/"
+    if ref.startswith(prefix):
+        return ref.removeprefix(prefix)
+    return ref

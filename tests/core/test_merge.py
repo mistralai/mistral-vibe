@@ -13,10 +13,11 @@ class TestMergeStrategyEnum:
         assert MergeStrategy.CONCAT == "concat"
         assert MergeStrategy.UNION == "union"
         assert MergeStrategy.MERGE == "merge"
+        assert MergeStrategy.DEEP_MERGE == "deep_merge"
         assert MergeStrategy.CONFLICT == "conflict"
 
     def test_all_strategies_exist(self) -> None:
-        assert len(MergeStrategy) == 5
+        assert len(MergeStrategy) == 6
 
     def test_unknown_strategy_raises_not_implemented(self) -> None:
         fake = MagicMock(spec=MergeStrategy)
@@ -141,6 +142,56 @@ class TestMerge:
         MergeStrategy.MERGE.apply(base, override)
         assert base == {"a": 1}
         assert override == {"b": 2}
+
+
+class TestDeepMerge:
+    def test_dicts_merged_recursively(self) -> None:
+        base = {
+            "bash": {"permission": "ask", "metadata": {"timeout": 30, "retries": 1}},
+            "read_file": {"permission": "always"},
+        }
+        override = {"bash": {"allowlist": ["git status"], "metadata": {"timeout": 60}}}
+
+        result = MergeStrategy.DEEP_MERGE.apply(base, override)
+
+        assert result == {
+            "bash": {
+                "permission": "ask",
+                "allowlist": ["git status"],
+                "metadata": {"timeout": 60, "retries": 1},
+            },
+            "read_file": {"permission": "always"},
+        }
+
+    def test_lists_are_replaced(self) -> None:
+        base = {"bash": {"allowlist": ["git status"], "permission": "ask"}}
+        override = {"bash": {"allowlist": ["git diff"]}}
+
+        result = MergeStrategy.DEEP_MERGE.apply(base, override)
+
+        assert result == {"bash": {"allowlist": ["git diff"], "permission": "ask"}}
+
+    def test_base_none_returns_override(self) -> None:
+        assert MergeStrategy.DEEP_MERGE.apply(None, {"a": 1}) == {"a": 1}
+
+    def test_override_none_returns_base(self) -> None:
+        assert MergeStrategy.DEEP_MERGE.apply({"a": 1}, None) == {"a": 1}
+
+    def test_both_none_returns_none(self) -> None:
+        assert MergeStrategy.DEEP_MERGE.apply(None, None) is None
+
+    def test_raises_type_error_for_non_dict(self) -> None:
+        with pytest.raises(TypeError, match="DEEP_MERGE requires dict operands"):
+            MergeStrategy.DEEP_MERGE.apply([1], {"a": 1})
+
+    def test_does_not_mutate_inputs(self) -> None:
+        base = {"bash": {"metadata": {"timeout": 30, "retries": 1}}}
+        override = {"bash": {"metadata": {"timeout": 60}}}
+
+        MergeStrategy.DEEP_MERGE.apply(base, override)
+
+        assert base == {"bash": {"metadata": {"timeout": 30, "retries": 1}}}
+        assert override == {"bash": {"metadata": {"timeout": 60}}}
 
 
 class TestConflict:

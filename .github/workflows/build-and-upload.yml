@@ -20,10 +20,11 @@ jobs:
         id: set-matrix
         run: |
           # Linux: manylinux_2_28 containers → binary works on glibc >= 2.28 (RHEL 8+, Ubuntu 20.04+)
+          # Container images pinned by digest (supply-chain integrity)
           matrix='{
             "include": [
-              {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64", "container": "quay.io/pypa/manylinux_2_28_x86_64"},
-              {"runner": "ubuntu-22.04-arm", "os": "linux", "arch": "aarch64", "container": "quay.io/pypa/manylinux_2_28_aarch64"},
+              {"runner": "ubuntu-22.04", "os": "linux", "arch": "x86_64", "container": "quay.io/pypa/manylinux_2_28_x86_64@sha256:65140ef21cef92d0c13d001708afd7d304d7a154f7120d039df99dac708f3ffb"},
+              {"runner": "ubuntu-22.04-arm", "os": "linux", "arch": "aarch64", "container": "quay.io/pypa/manylinux_2_28_aarch64@sha256:360bf4ec4349372e9bcfb123bf11bcc4f085072bfa4f3b946d98f5a28f9c03b0"},
               {"runner": "macos-15-intel", "os": "darwin", "arch": "x86_64"},
               {"runner": "macos-14", "os": "darwin", "arch": "aarch64"},
               {"runner": "windows-2022", "os": "windows", "arch": "x86_64"}
@@ -34,10 +35,11 @@ jobs:
           # download path gets Gatekeeper-assessed via quarantine and currently rejects
           # ad-hoc signed binaries, even though vibe-acp continues to work when bundled
           # through the VS Code extension.
+          # almalinux:8 pinned by digest in the matrix entry below (supply-chain integrity)
           smoke_matrix='{
             "include": [
               {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64"},
-              {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64", "tag": "old-glibc", "container": "almalinux:8"},
+              {"runner": "ubuntu-24.04", "os": "linux", "arch": "x86_64", "tag": "old-glibc", "container": "almalinux:8@sha256:4a87d2615a770506e204c27d6248ac97f4df67f4e41e2e9c47c81f0ed0be98cb"},
               {"runner": "ubuntu-24.04-arm", "os": "linux", "arch": "aarch64"},
               {"runner": "windows-latest", "os": "windows", "arch": "x86_64"}
             ]

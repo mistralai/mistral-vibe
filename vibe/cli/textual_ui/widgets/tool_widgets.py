@@ -428,9 +428,6 @@ class WebFetchResultWidget(ToolResultWidget[WebFetchResult]):
             yield from self._footer()
             return
         yield from self._yield_truncated_text(self.result.content)
-        yield NoMarkupStatic("")
-        link = link_content(self.result.url, self.result.url)
-        yield LinkStatic(link, classes="tool-result-detail")
         yield from self._footer()
 
 

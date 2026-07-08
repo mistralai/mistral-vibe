@@ -22,15 +22,22 @@ Once all variables are configured, **restart the conversation** for changes to t
 
 ## Supported Environment Variables
 
-Mistral Vibe uses [httpx](https://www.python-httpx.org/environment_variables/) for HTTP requests and supports the same environment variables:
+Mistral Vibe uses HTTPX under the hood through Vibe's shared HTTP client
+wrapper. Vibe-owned HTTP clients read the standard proxy and certificate
+environment variables below, and handle `NO_PROXY` CIDR rules without relying
+on HTTPX's environment parsing.
 
 | Variable | Description |
 |----------|-------------|
 | `HTTP_PROXY` | Proxy URL for HTTP requests |
 | `HTTPS_PROXY` | Proxy URL for HTTPS requests |
 | `ALL_PROXY` | Proxy URL for all requests (fallback when HTTP_PROXY/HTTPS_PROXY are not set) |
-| `NO_PROXY` | Comma-separated list of hosts that should bypass the proxy |
+| `NO_PROXY` | Comma-separated list of hosts, domains, IP literals, CIDR ranges, or `*` entries that should bypass the proxy |
 | `SSL_CERT_FILE` | Path to a custom SSL certificate file |
 | `SSL_CERT_DIR` | Path to a directory containing SSL certificates |
+
+CIDR `NO_PROXY` entries, such as `127.0.0.0/8` or `fc00::/7`, are matched only
+against IP-literal request hosts. Vibe does not resolve DNS names before proxy
+selection.
 
 These variables can also be set directly in your shell environment before launching the CLI (but will be overridden if set through the interactive form).

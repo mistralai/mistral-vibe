@@ -9,6 +9,13 @@ from vibe.core.tools.builtins.ask_user_question import AskUserQuestion
 from vibe.core.tools.builtins.bash import Bash
 from vibe.core.tools.builtins.edit import Edit
 from vibe.core.tools.builtins.exit_plan_mode import ExitPlanMode
+from vibe.core.tools.builtins.experimental_bash import (
+    BashLogFile,
+    BashOutput,
+    BashSessions,
+    BashStdin,
+    ExperimentalBash,
+)
 from vibe.core.tools.builtins.grep import Grep
 from vibe.core.tools.builtins.read_file import ReadFile
 from vibe.core.tools.builtins.skill import Skill
@@ -46,6 +53,25 @@ def test_every_builtin_description_uses_the_shared_pattern() -> None:
         assert description.startswith("Use `"), (
             f"{cls.__name__} description should start with 'Use `<tool>` to …'"
         )
+
+
+def test_experimental_bash_prompt_is_not_reused_by_companion_tools() -> None:
+    prompt = ExperimentalBash.get_tool_prompt()
+
+    assert prompt is not None
+    assert "Stateful sessions" in prompt
+    assert ExperimentalBash.get_full_description() == prompt
+
+    companion_tools: tuple[type[BaseTool], ...] = (
+        BashOutput,
+        BashStdin,
+        BashSessions,
+        BashLogFile,
+    )
+    for cls in companion_tools:
+        assert cls.get_tool_prompt() is None
+        assert cls.get_full_description() == cls.description
+        assert "Stateful sessions" not in cls.get_full_description()
 
 
 def test_file_tools_use_unified_file_path_argument() -> None:

@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator
 from functools import lru_cache
 import os
 from pathlib import Path
+import shlex
 from typing import Literal, final
 
 from pydantic import BaseModel, Field
@@ -197,6 +198,13 @@ _PATH_COMMANDS = {
 _FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
 
 
+def _split_command_tokens(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
 def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
     """Collect parent directories referenced outside the workdir.
 
@@ -209,7 +217,7 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
     """
     dirs: set[str] = set()
     for part in command_parts:
-        tokens = part.split()
+        tokens = _split_command_tokens(part)
         command = tokens[0] if tokens else None
         if not command or command not in _PATH_COMMANDS:
             continue

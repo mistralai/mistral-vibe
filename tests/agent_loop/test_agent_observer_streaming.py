@@ -54,13 +54,17 @@ class InjectBeforeMiddleware:
 
 
 def make_config(
-    *, enabled_tools: list[str] | None = None, tools: dict[str, dict] | None = None
+    *,
+    enabled_tools: list[str] | None = None,
+    tools: dict[str, dict] | None = None,
+    raise_on_compaction_failure: bool = False,
 ) -> VibeConfig:
     return build_test_vibe_config(
         include_model_info=False,
         include_commit_signature=False,
         enabled_tools=enabled_tools or [],
         tools=tools or {},
+        raise_on_compaction_failure=raise_on_compaction_failure,
     )
 
 
@@ -450,6 +454,7 @@ async def test_rate_limit(observer_capture) -> None:
         provider="mistral",
         endpoint="test",
         error=error,
+        response=response,
         model="test-model",
         messages=[],
         temperature=0.0,
@@ -485,6 +490,7 @@ def _build_context_too_long_backend_error() -> BackendError:
         provider="mistral",
         endpoint="test",
         error=error,
+        response=response,
         model="test-model",
         messages=[],
         temperature=0.0,
@@ -498,8 +504,9 @@ async def test_context_too_long_streaming(observer_capture) -> None:
     observed, observer = observer_capture
     backend_error = _build_context_too_long_backend_error()
     backend = FakeBackend(exception_to_raise=backend_error)
+    # Strict mode: no reactive compaction, so the overflow surfaces directly.
     agent = build_test_agent_loop(
-        config=make_config(),
+        config=make_config(raise_on_compaction_failure=True),
         backend=backend,
         message_observer=observer,
         enable_streaming=True,
@@ -518,8 +525,9 @@ async def test_context_too_long_non_streaming(observer_capture) -> None:
     observed, observer = observer_capture
     backend_error = _build_context_too_long_backend_error()
     backend = FakeBackend(exception_to_raise=backend_error)
+    # Strict mode: no reactive compaction, so the overflow surfaces directly.
     agent = build_test_agent_loop(
-        config=make_config(),
+        config=make_config(raise_on_compaction_failure=True),
         backend=backend,
         message_observer=observer,
         enable_streaming=False,

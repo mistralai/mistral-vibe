@@ -7,7 +7,6 @@ import re
 import shlex
 from typing import Annotated, Any, Literal, get_args
 
-from mistralai.client.models import SpeechOutputFormat
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -358,6 +357,12 @@ class TranscribeModelConfig(BaseModel):
     target_streaming_delay_ms: int = 500
 
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
+
+
+# Mirrors mistralai.client.models.SpeechOutputFormat, declared locally so the
+# config models don't pull the mistralai SDK into CLI startup. Compatibility
+# is type-checked where the value is passed to the SDK (MistralTTSClient).
+type SpeechOutputFormat = Literal["pcm", "wav", "mp3", "flac", "opus"]
 
 
 class TTSClient(StrEnum):

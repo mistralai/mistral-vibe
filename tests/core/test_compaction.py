@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from vibe.core.compaction import (
     collect_prior_user_messages,
+    drop_oldest_round,
+    extract_summary,
     parse_previous_user_messages,
     render_compaction_context,
 )
@@ -12,6 +14,83 @@ _PREFIX = "Another language model started to solve this problem"
 
 def _user(content: str, *, injected: bool = False) -> LLMMessage:
     return LLMMessage(role=Role.user, content=content, injected=injected)
+
+
+def _msg(role: Role, content: str) -> LLMMessage:
+    return LLMMessage(role=role, content=content)
+
+
+def test_drop_oldest_round_removes_whole_round_including_tools() -> None:
+    messages = [
+        _msg(Role.system, "sys"),
+        _user("oldest"),
+        _msg(Role.assistant, "calls tool"),
+        _msg(Role.tool, "big tool output"),
+        _msg(Role.assistant, "done"),
+        _user("newest"),
+    ]
+    trimmed = drop_oldest_round(messages)
+    assert trimmed is not None
+    # The whole oldest round — user turn, assistant replies and tool result — is
+    # dropped, keeping only the system prompt and the most recent round.
+    assert [m.content for m in trimmed] == ["sys", "newest"]
+
+
+def test_drop_oldest_round_drops_consecutive_leading_user_messages() -> None:
+    messages = [
+        _msg(Role.system, "sys"),
+        _user("real ask"),
+        _user("injected reminder", injected=True),
+        _msg(Role.assistant, "work"),
+        _msg(Role.tool, "output"),
+        _user("newest"),
+    ]
+    trimmed = drop_oldest_round(messages)
+    assert trimmed is not None
+    # All leading user messages (real + injected) belong to the same round.
+    assert [m.content for m in trimmed] == ["sys", "newest"]
+
+
+def test_drop_oldest_round_drops_leading_orphan_assistant_and_tools() -> None:
+    messages = [
+        _msg(Role.system, "sys"),
+        _msg(Role.assistant, "calls tool"),
+        _msg(Role.tool, "tool output"),
+        _user("newest"),
+    ]
+    trimmed = drop_oldest_round(messages)
+    assert trimmed is not None
+    assert [m.role for m in trimmed] == [Role.system, Role.user]
+
+
+def test_drop_oldest_round_returns_none_when_nothing_safe_to_drop() -> None:
+    assert drop_oldest_round([_msg(Role.system, "sys"), _user("only")]) is None
+    assert drop_oldest_round([_msg(Role.system, "sys")]) is None
+
+
+def test_extract_summary_returns_inner_block() -> None:
+    assert extract_summary("<summary>hello there</summary>") == "hello there"
+
+
+def test_extract_summary_strips_surrounding_text_and_whitespace() -> None:
+    text = "preamble\n<summary>\n  the body\n</summary>\ntrailing"
+    assert extract_summary(text) == "the body"
+
+
+def test_extract_summary_missing_tags_returns_none() -> None:
+    assert extract_summary("just some prose without tags") is None
+
+
+def test_extract_summary_empty_block_returns_none() -> None:
+    assert extract_summary("<summary>   </summary>") is None
+
+
+def test_extract_summary_first_block_wins() -> None:
+    assert extract_summary("<summary>one</summary><summary>two</summary>") == "one"
+
+
+def test_extract_summary_preserves_inner_markup() -> None:
+    assert extract_summary("<summary>a <b>c</b> d</summary>") == "a <b>c</b> d"
 
 
 def test_empty_messages() -> None:

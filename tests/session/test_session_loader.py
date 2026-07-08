@@ -599,6 +599,22 @@ class TestSessionLoaderLoadSession:
         with pytest.raises(ValueError, match="Session messages file is empty"):
             SessionLoader.load_session(session_folder)
 
+    def test_load_session_empty_messages_valid_when_metadata_records_zero(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        session_folder = session_dir / "test_20230101_120000_test123"
+        session_folder.mkdir()
+
+        (session_folder / "messages.jsonl").write_text("")
+        (session_folder / "meta.json").write_text(
+            json.dumps({"session_id": "test-session", "total_messages": 0})
+        )
+
+        messages, metadata = SessionLoader.load_session(session_folder)
+        assert messages == []
+        assert metadata["total_messages"] == 0
+
     def test_load_session_invalid_json_messages(
         self, session_config: SessionLoggingConfig
     ) -> None:

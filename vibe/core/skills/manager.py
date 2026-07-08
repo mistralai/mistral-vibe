@@ -19,11 +19,11 @@ from vibe.core.utils import name_matches
 from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
-    from vibe.core.config import VibeConfig
+    from vibe.core.config import AnyVibeConfig
 
 
 class SkillManager:
-    def __init__(self, config_getter: Callable[[], VibeConfig]) -> None:
+    def __init__(self, config_getter: Callable[[], AnyVibeConfig]) -> None:
         self._config_getter = config_getter
         self._search_paths = self._compute_search_paths(self._config)
         self._config_issues: list[SkillConfigIssue] = []
@@ -39,7 +39,7 @@ class SkillManager:
             )
 
     @property
-    def _config(self) -> VibeConfig:
+    def _config(self) -> AnyVibeConfig:
         return self._config_getter()
 
     @property
@@ -62,7 +62,7 @@ class SkillManager:
         return dict(skills)
 
     @staticmethod
-    def _compute_search_paths(config: VibeConfig) -> list[Path]:
+    def _compute_search_paths(config: AnyVibeConfig) -> list[Path]:
         paths: list[Path] = []
 
         for path in config.skill_paths:
@@ -175,7 +175,7 @@ class SkillManager:
 
         skill_name = parts[0].lower()
         skill_info = self.get_skill(skill_name)
-        if skill_info is None:
+        if skill_info is None or not skill_info.user_invocable:
             return None
 
         extra_instructions = parts[1] if len(parts) > 1 else None
@@ -185,9 +185,3 @@ class SkillManager:
             content=skill_info.prompt,
             extra_instructions=extra_instructions,
         )
-
-    @staticmethod
-    def build_skill_prompt(text_prompt: str, parsed: ParsedSkillCommand) -> str:
-        if parsed.extra_instructions is not None:
-            return f"{text_prompt}\n\n{parsed.content}"
-        return parsed.content

@@ -13,8 +13,8 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
-from vibe.core import agent_loop as agent_loop_module
 from vibe.core.agent_loop import AgentLoop
+import vibe.core.agent_loop._loop as agent_loop_module
 from vibe.core.config import MCPStdio
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
 from vibe.core.tools.manager import ToolManager
@@ -294,7 +294,7 @@ class TestDeferredInitPublicMethods:
             defer_heavy_init=True,
             backend=FakeBackend([
                 [mock_llm_chunk(content="hello")],
-                [mock_llm_chunk(content="summary")],
+                [mock_llm_chunk(content="<summary>summary</summary>")],
             ]),
         )
         [_ async for _ in loop.act("Hello")]

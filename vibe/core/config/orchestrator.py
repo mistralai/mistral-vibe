@@ -80,10 +80,16 @@ class ConfigOrchestrator[S: ConfigSchema]:
         self._config = await self._builder.build(force_load=True)
 
     async def set_field(
-        self, path: str, value: Any, reason: str = "No reason"
+        self,
+        path: str,
+        value: Any,
+        reason: str = "No reason",
+        *,
+        target_layer: str | None = None,
     ) -> list[BaseException]:
         return await self.apply_patch(
-            [AddOperationPatch(path=path, value=value)], reason=reason
+            [AddOperationPatch(path=path, value=value, target_layer_name=target_layer)],
+            reason=reason,
         )
 
     async def apply_patch(

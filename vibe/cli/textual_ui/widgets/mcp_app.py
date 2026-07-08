@@ -14,10 +14,10 @@ from textual.widgets import OptionList
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker
 
-from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint, with_status
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import ConnectorConfig, VibeConfig
+from vibe.core.config import AnyVibeConfig, ConnectorConfig
 from vibe.core.tools.connectors import ConnectorAuthAction, ConnectorRegistry
 from vibe.core.tools.mcp_settings import updated_tool_list
 from vibe.core.tools.remote import MCPTool
@@ -67,23 +67,19 @@ def collect_mcp_tool_index(
 
 _LIST_VIEW_HELP_TOOLS = (
     f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Show tools  "
-    f"{shortcut('d')} Disable  {shortcut('e')} Enable  "
-    f"{shortcut('r')} Refresh  {shortcut('Esc')} Close"
+    f"{shortcut('d')} Disable  {shortcut('e')} Enable  {shortcut('Esc')} Close"
 )
 _LIST_VIEW_HELP_AUTH = (
     f"{shortcut('↑↓/jk')} Navigate  {shortcut('Enter')} Connect  "
-    f"{shortcut('d')} Disable  {shortcut('e')} Enable  "
-    f"{shortcut('r')} Refresh  {shortcut('Esc')} Close"
+    f"{shortcut('d')} Disable  {shortcut('e')} Enable  {shortcut('Esc')} Close"
 )
 _DETAIL_VIEW_HELP = (
     f"{shortcut('↑↓/jk')} Navigate  {shortcut('d')} Disable  "
-    f"{shortcut('e')} Enable  {shortcut('Backspace')} Back  "
-    f"{shortcut('r')} Refresh  {shortcut('Esc')} Close"
+    f"{shortcut('e')} Enable  {shortcut('Backspace')} Back  {shortcut('Esc')} Close"
 )
-_DETAIL_VIEW_HELP_NO_TOOLS = (
-    f"{shortcut('↑↓/jk')} Navigate  {shortcut('Backspace')} Back  "
-    f"{shortcut('r')} Refresh  {shortcut('Esc')} Close"
-)
+_DETAIL_VIEW_HELP_NO_TOOLS = f"{shortcut('↑↓/jk')} Navigate  {shortcut('Backspace')} Back  {shortcut('Esc')} Close"
+
+_BACKGROUND_REFRESH_INTERVAL_SECONDS = 60.0
 
 
 class MCPApp(Container):
@@ -93,7 +89,6 @@ class MCPApp(Container):
         Binding("backspace", "back", "Back", show=False),
         Binding("d", "disable", "Disable", show=False),
         Binding("e", "enable", "Enable", show=False),
-        Binding("r", "refresh", "Refresh", show=False),
     ]
 
     class MCPClosed(Message):
@@ -144,7 +139,7 @@ class MCPApp(Container):
         initial_server: str = "",
         connector_registry: ConnectorRegistry | None = None,
         mcp_registry: MCPRegistry | None = None,
-        get_vibe_config: Callable[[], VibeConfig] | None = None,
+        get_vibe_config: Callable[[], AnyVibeConfig] | None = None,
         refresh_callback: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         super().__init__(id="mcp-app")
@@ -167,7 +162,6 @@ class MCPApp(Container):
         self._viewing_server: str | None = initial_server.strip() or None
         self._viewing_kind: MCPSourceKind | None = None
         self._refresh_callback = refresh_callback
-        self._status_message: str | None = None
         self._refreshing = False
 
     def compose(self) -> ComposeResult:
@@ -180,6 +174,9 @@ class MCPApp(Container):
     def on_mount(self) -> None:
         self._refresh_view(self._viewing_server)
         self.query_one(OptionList).focus()
+        if self._refresh_callback is not None:
+            self._start_refresh()
+            self.set_interval(_BACKGROUND_REFRESH_INTERVAL_SECONDS, self._start_refresh)
 
     def refresh_index(self) -> None:
         """Re-snapshot the tool index (e.g. after deferred MCP discovery)."""
@@ -222,48 +219,30 @@ class MCPApp(Container):
             self._set_help_text(self._list_help_for_option(event.option))
 
     def action_back(self) -> None:
-        if self._refreshing:
-            return
         if self._viewing_server is not None:
             self._refresh_view(None)
 
     def action_close(self) -> None:
-        if self._refreshing:
-            return
         self.post_message(self.MCPClosed())
 
-    async def action_refresh(self) -> None:
-        if self._refresh_callback is None:
+    def _start_refresh(self) -> None:
+        if self._refresh_callback is None or self._refreshing:
             return
-
-        self._status_message = "Refreshing..."
-        if self._viewing_server:
-            tools_source = (
-                self._index.connector_tools
-                if self._viewing_kind == MCPSourceKind.CONNECTOR
-                else self._index.server_tools
-            )
-            all_tools = tools_source.get(self._viewing_server, [])
-            help = _DETAIL_VIEW_HELP if all_tools else _DETAIL_VIEW_HELP_NO_TOOLS
-        else:
-            help = _LIST_VIEW_HELP_TOOLS
-        self._set_help_text(help)
-
         self._refreshing = True
         self.run_worker(self._run_refresh(), exclusive=True, group="refresh")
 
-    async def _run_refresh(self) -> str:
+    async def _run_refresh(self) -> None:
         if self._refresh_callback is None:
-            return ""
-        return await self._refresh_callback()
+            return
+        await self._refresh_callback()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.group != "refresh":
             return
         if event.worker.is_finished:
             self._refreshing = False
-            result = event.worker.result
-            self._status_message = result if isinstance(result, str) else "Refreshed."
+            if not self.is_attached:
+                return
             self.refresh_index()
 
     def _list_help_for_option(self, option: Option) -> str:
@@ -284,9 +263,7 @@ class MCPApp(Container):
         return _LIST_VIEW_HELP_TOOLS
 
     def _set_help_text(self, text: str) -> None:
-        self.query_one("#mcp-help", NoMarkupStatic).update(
-            with_status(self._status_message, shortcut_hint(text))
-        )
+        self.query_one("#mcp-help", NoMarkupStatic).update(shortcut_hint(text))
 
     def _sync_mcp_registry(self) -> None:
         if self._mcp_registry is None:

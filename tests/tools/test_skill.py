@@ -161,6 +161,25 @@ class TestSkillRun:
         assert f"Base directory for this skill: {skill_dir}" in result.content
 
     @pytest.mark.asyncio
+    async def test_returns_short_result_when_already_loaded(
+        self, tmp_path: Path, skill_tool: Skill
+    ) -> None:
+        info = _make_skill_dir(tmp_path, body="The full instructions.")
+        manager = _make_skill_manager({"my-skill": info})
+        ctx = InvokeContext(
+            tool_call_id="test-call",
+            skill_manager=manager,
+            is_skill_loaded=lambda _name: True,
+        )
+
+        result = await collect_result(skill_tool.run(SkillArgs(name="my-skill"), ctx))
+
+        assert isinstance(result, SkillResult)
+        assert "already loaded" in result.content
+        assert "The full instructions." not in result.content
+        assert "<skill_content" not in result.content
+
+    @pytest.mark.asyncio
     async def test_uses_in_memory_prompt_when_available(
         self, skill_tool: Skill
     ) -> None:

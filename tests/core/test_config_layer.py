@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Annotated, Any
 
 from jsonpointer import JsonPointerException
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 import pytest
 
 from vibe.core.config.layer import (
@@ -15,7 +15,11 @@ from vibe.core.config.layer import (
     TrustNotResolvedError,
     UntrustedLayerError,
 )
+from vibe.core.config.layers.agent_profile import AgentProfileLayer
+from vibe.core.config.layers.default import DefaultConfigLayer
+from vibe.core.config.layers.discovered import DiscoveredConfigLayer
 from vibe.core.config.patch import AddOperationPatch, ConfigPatch, ReplaceOperationPatch
+from vibe.core.config.schema import ConfigSchema, WithConcatMerge, WithReplaceMerge
 from vibe.core.config.types import (
     ConcurrencyConflictError,
     ConflictStrategy,
@@ -83,6 +87,13 @@ class SampleSchema(BaseModel):
     count: int = 0
 
 
+class DefaultLayerSchema(ConfigSchema):
+    name: Annotated[str, WithReplaceMerge()] = "default-name"
+    items: Annotated[list[str], WithConcatMerge()] = Field(
+        default_factory=lambda: ["default-item"]
+    )
+
+
 def test_abstract_build_config_snapshot_enforced() -> None:
     class IncompleteLayer(ConfigLayer[BaseModel]):
         pass
@@ -104,6 +115,95 @@ def test_layer_config_snapshot_strips_fingerprint() -> None:
 def test_layer_config_snapshot_rejects_empty_fingerprint() -> None:
     with pytest.raises(ValidationError):
         LayerConfigSnapshot(data={}, fingerprint=" ")
+
+
+@pytest.mark.asyncio
+async def test_default_config_layer_loads_schema_defaults() -> None:
+    layer = DefaultConfigLayer(schema=DefaultLayerSchema)
+
+    result = await layer.load()
+
+    assert result.model_dump() == {"name": "default-name", "items": ["default-item"]}
+
+
+@pytest.mark.asyncio
+async def test_default_config_layer_is_read_only() -> None:
+    layer = DefaultConfigLayer(schema=DefaultLayerSchema)
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    with pytest.raises(NotImplementedError, match="read-only"):
+        await layer.apply(
+            ConfigPatch(
+                ReplaceOperationPatch(path="/name", value="updated"),
+                fingerprint=fingerprint,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_discovered_config_layer_persists_to_memory() -> None:
+    layer = DiscoveredConfigLayer(data={"items": ["default"]})
+    initial = await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+    assert initial.model_extra is not None
+
+    initial.model_extra["items"].append("mutated")
+    await layer.apply(
+        ConfigPatch(
+            AddOperationPatch(path="/items/-", value="discovered"),
+            fingerprint=fingerprint,
+        )
+    )
+
+    assert (await layer.load(force=True)).model_dump() == {
+        "items": ["default", "discovered"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_profile_layer_replaces_full_payload() -> None:
+    layer = AgentProfileLayer(
+        data={
+            "enabled_tools": ["grep"],
+            "tools": {"write_file": {"permission": "never"}},
+        }
+    )
+
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert fingerprint is not None
+    await layer.apply(
+        ConfigPatch(
+            ReplaceOperationPatch(
+                path="", value={"disabled_tools": ["exit_plan_mode"]}
+            ),
+            fingerprint=fingerprint,
+            reason="agent profile changed",
+        )
+    )
+
+    assert (await layer.load()).model_dump() == {"disabled_tools": ["exit_plan_mode"]}
+
+
+@pytest.mark.asyncio
+async def test_agent_profile_layer_clear_removes_profile_overrides() -> None:
+    layer = AgentProfileLayer(data={"bypass_tool_permissions": True})
+
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert fingerprint is not None
+    await layer.apply(
+        ConfigPatch(
+            ReplaceOperationPatch(path="", value={}),
+            fingerprint=fingerprint,
+            reason="agent profile cleared",
+        )
+    )
+
+    assert (await layer.load()).model_dump() == {}
 
 
 @pytest.mark.asyncio

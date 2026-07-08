@@ -30,7 +30,7 @@ from vibe.core.tools.mcp_sampling import MCPSamplingHandler
 from vibe.core.tools.remote import MCPTool, MCPToolResult, RemoteTool, _OpenArgs
 from vibe.core.tools.ui import ToolResultDisplay
 from vibe.core.types import ToolStreamEvent
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.core.utils.io import decode_safe
 
 if TYPE_CHECKING:
@@ -118,8 +118,8 @@ def _parse_call_result(server: str, tool: str, result_obj: Any) -> MCPToolResult
 
 def create_vibe_mcp_http_client(
     headers: dict[str, str] | None, *, auth: httpx.Auth | None = None
-) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
+) -> VibeAsyncHTTPClient:
+    return VibeAsyncHTTPClient(
         follow_redirects=True,
         headers=headers,
         auth=auth,

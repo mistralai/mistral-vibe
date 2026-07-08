@@ -1,3 +1,4 @@
-# What's new in v2.19.0
+# What's new in v2.19.1
 
-- **Git worktrees**: New `--worktree NAME` flag creates or reuses a git worktree on a branch and runs Vibe inside it
+- **Disable tools**: New `--disabled-tools` flag to turn off specific tools for a run.
+- **Custom tool descriptions**: Override or extend a tool's description via `<tools-dir>/prompts/<name>.md`.

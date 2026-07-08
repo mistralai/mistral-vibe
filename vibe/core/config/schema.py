@@ -151,6 +151,13 @@ class WithShallowMerge(MergeFieldMetadata):
 
 
 @dataclass(frozen=True)
+class WithDeepMerge(MergeFieldMetadata):
+    """Dicts recursively merged, absent keys preserved."""
+
+    merge_strategy: MergeStrategy = field(default=MergeStrategy.DEEP_MERGE, init=False)
+
+
+@dataclass(frozen=True)
 class WithConflictMerge(MergeFieldMetadata):
     """Raises error if more than one layer provides a value."""
 

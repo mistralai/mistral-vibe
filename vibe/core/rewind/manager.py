@@ -4,9 +4,14 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+from typing import Protocol
 
 from vibe.core.logger import logger
 from vibe.core.types import LLMMessage, MessageList, Role
+
+
+class SaveMessages(Protocol):
+    async def __call__(self, *, allow_empty: bool = False) -> None: ...
 
 
 class RewindError(Exception):
@@ -33,12 +38,14 @@ class Checkpoint:
 
 
 class RewindManager:
-    """Manages conversation rewind: file snapshots, message truncation, and session forking."""
+    """Manages conversation rewind: file snapshots, message truncation, and
+    either in-place truncation or forking to a new session.
+    """
 
     def __init__(
         self,
         messages: MessageList,
-        save_messages: Callable[[], Awaitable[None]],
+        save_messages: SaveMessages,
         reset_session: Callable[[], Awaitable[None]],
     ) -> None:
         self._checkpoints: list[Checkpoint] = []
@@ -114,12 +121,19 @@ class RewindManager:
         raise RewindError(f"No rewindable user message with id: {message_id}")
 
     async def rewind_to_message(
-        self, message_index: int, *, restore_files: bool
+        self, message_index: int, *, restore_files: bool, inplace: bool = False
     ) -> tuple[str, list[str], list[str]]:
         """Rewind the session to the given user message index.
 
-        Saves the current session, truncates messages, optionally restores
-        files, and forks to a new session.
+        Optionally restores files, then applies one of two persistence
+        strategies:
+
+        - ``inplace=False`` (default, fork): save the full history under the
+          current session, truncate, then fork to a fresh session so the
+          original conversation is preserved as a parent.
+        - ``inplace=True``: truncate first, then persist the truncated history
+          under the *same* session. The rewound turns are dropped for good and
+          no new session is created.
 
         Returns a tuple of (message_content, restore_errors, restored_paths).
 
@@ -143,7 +157,21 @@ class RewindManager:
             if checkpoint:
                 restore_errors, restored_paths = self._restore_checkpoint(checkpoint)
 
-        await self._save_messages()
+        if inplace:
+            self._truncate_messages(messages, message_index)
+            await self._save_messages(allow_empty=True)
+        else:
+            await self._save_messages()
+            self._truncate_messages(messages, message_index)
+            await self._reset_session()
+
+        return message_content, restore_errors, restored_paths
+
+    # -- Private helpers -------------------------------------------------------
+
+    def _truncate_messages(
+        self, messages: Sequence[LLMMessage], message_index: int
+    ) -> None:
         self._checkpoints = [
             cp for cp in self._checkpoints if cp.message_index < message_index
         ]
@@ -152,11 +180,6 @@ class RewindManager:
             self._messages.reset(list(messages[:message_index]))
         finally:
             self._is_rewinding = False
-        await self._reset_session()
-
-        return message_content, restore_errors, restored_paths
-
-    # -- Private helpers -------------------------------------------------------
 
     def _get_checkpoint(self, message_index: int) -> Checkpoint | None:
         for cp in self._checkpoints:

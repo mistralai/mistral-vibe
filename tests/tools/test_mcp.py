@@ -157,7 +157,8 @@ class TestMCPHttpClient:
                 "vibe.core.tools.mcp.tools.build_ssl_context", return_value=ssl_context
             ),
             patch(
-                "vibe.core.tools.mcp.tools.httpx.AsyncClient", return_value=fake_client
+                "vibe.core.tools.mcp.tools.VibeAsyncHTTPClient",
+                return_value=fake_client,
             ) as async_client,
         ):
             client = create_vibe_mcp_http_client(headers)

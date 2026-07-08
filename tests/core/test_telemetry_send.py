@@ -635,8 +635,26 @@ class TestTelemetryClient:
         assert properties["client_name"] == "vscode"
         assert properties["client_version"] == "1.96.0"
         assert properties["terminal_emulator"] == "vscode"
+        assert properties["experimental_bash_tool"] is False
+        assert "version" in properties
         assert type(properties["terminal_emulator"]) is str
         _assert_system_metadata(properties, TerminalEmulator.VSCODE)
+
+    def test_send_new_session_payload_includes_experimental_bash_tool_flag(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(
+            enable_telemetry=True, experimental_bash_tool=True
+        )
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_new_session(
+            has_agents_md=False, nb_skills=0, nb_mcp_servers=0, nb_models=1
+        )
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.new_session"
+        assert telemetry_events[0]["properties"]["experimental_bash_tool"] is True
 
     @pytest.mark.asyncio
     async def test_send_session_closed_payload(

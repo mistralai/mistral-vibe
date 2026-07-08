@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 import pytest
@@ -401,6 +402,33 @@ class TestReloadPreservesMessages:
         assert len(observed) == 0
 
 
+class TestConcurrentReloads:
+    @pytest.mark.asyncio
+    async def test_superseded_reload_returns_without_cancelled_error(self) -> None:
+        config_first = make_config(system_prompt_id="tests")
+        config_last = make_config(system_prompt_id="cli")
+
+        reference = build_test_agent_loop(config=config_first, backend=FakeBackend([]))
+        await reference.reload_with_initial_messages(base_config=config_last)
+        winning_system_prompt = reference.messages[0].content
+
+        agent = build_test_agent_loop(
+            config=config_first, backend=FakeBackend(mock_llm_chunk(content="Response"))
+        )
+        async for _ in agent.act("Hello"):
+            pass
+
+        results = await asyncio.gather(
+            agent.reload_with_initial_messages(base_config=config_first),
+            agent.reload_with_initial_messages(base_config=config_last),
+            return_exceptions=True,
+        )
+
+        assert results == [None, None]
+        assert agent.messages[0].content == winning_system_prompt
+        assert agent._base_config.system_prompt_id == "cli"
+
+
 class TestCompactStatsHandling:
     @pytest.mark.asyncio
     async def test_compact_preserves_cumulative_stats(self) -> None:
@@ -419,10 +447,12 @@ class TestCompactStatsHandling:
 
         await agent.compact()
 
-        # Cumulative stats include the compact turn
+        # Cumulative token/cost stats include the compact turn's usage...
         assert agent.stats.session_prompt_tokens > tokens_before_compact
         assert agent.stats.session_completion_tokens > completions_before
-        assert agent.stats.steps > steps_before
+        # ...but compaction is a utility call and must not consume the turn
+        # budget (steps), or overflow recovery could trip the turn limit.
+        assert agent.stats.steps == steps_before
 
     @pytest.mark.asyncio
     async def test_compact_updates_context_tokens(self) -> None:
@@ -508,7 +538,7 @@ class TestAutoCompactIntegration:
             observed.append((msg.role, msg.content))
 
         backend = FakeBackend([
-            [mock_llm_chunk(content="<summary>")],
+            [mock_llm_chunk(content="<summary>done</summary>")],
             [mock_llm_chunk(content="<final>")],
         ])
         cfg = build_test_vibe_config(models=make_test_models(auto_compact_threshold=1))

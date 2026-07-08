@@ -6,11 +6,14 @@ from pathlib import Path
 import tomllib
 from typing import TYPE_CHECKING, Any
 
+from vibe.core.agents._migration import (
+    LEGACY_BASE_DISABLED_KEY,
+    migrate_agent_profile_config,
+)
 from vibe.core.paths import PLANS_DIR
-from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
-    from vibe.core.config import VibeConfig
+    from vibe.core.config import VibeConfigT
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -55,35 +58,22 @@ class AgentProfile:
     overrides: dict[str, Any] = field(default_factory=dict)
     install_required: bool = False
 
-    def apply_to_config(self, base: VibeConfig) -> VibeConfig:
-        from vibe.core.config import VibeConfig as VC
+    def apply_to_config(self, base: VibeConfigT) -> VibeConfigT:
+        merged = _deep_merge(base.model_dump(), self.overrides)
+        profile_disabled_tools = self.overrides.get("disabled_tools")
+        if isinstance(profile_disabled_tools, list):
+            merged["disabled_tools"] = list(
+                dict.fromkeys([*base.disabled_tools, *profile_disabled_tools])
+            )
 
-        merged = _deep_merge(
-            base.model_dump(),
-            {k: v for k, v in self.overrides.items() if k != "base_disabled"},
-        )
-        base_disabled = self.overrides.get("base_disabled")
-        if isinstance(base_disabled, list):
-            merged["disabled_tools"] = list({
-                *base_disabled,
-                *merged.get("disabled_tools", []),
-            })
-
-        # Environment-level disables (set by ACP/programmatic mode) must take
-        # precedence over an agent's enabled_tools allowlist
-        if base.disabled_tools and merged.get("enabled_tools"):
-            merged["enabled_tools"] = [
-                t
-                for t in merged["enabled_tools"]
-                if not name_matches(t, base.disabled_tools)
-            ]
-
-        return VC.model_validate(merged)
+        return type(base).model_validate(merged)
 
     @classmethod
     def from_toml(cls, path: Path) -> AgentProfile:
         with path.open("rb") as f:
             data = tomllib.load(f)
+        migrate_agent_profile_config(data)
+        data.pop(LEGACY_BASE_DISABLED_KEY, None)
         return cls(
             name=path.stem,
             display_name=data.pop("display_name", path.stem.replace("-", " ").title()),
@@ -112,7 +102,7 @@ DEFAULT = AgentProfile(
     "Default",
     "Requires approval for tool executions",
     AgentSafety.NEUTRAL,
-    overrides={"base_disabled": ["exit_plan_mode"]},
+    overrides={"disabled_tools": ["exit_plan_mode"]},
 )
 PLAN = AgentProfile(
     BuiltinAgentName.PLAN,
@@ -134,7 +124,7 @@ ACCEPT_EDITS = AgentProfile(
     "Auto-approves file edits only",
     AgentSafety.DESTRUCTIVE,
     overrides={
-        "base_disabled": ["exit_plan_mode"],
+        "disabled_tools": ["exit_plan_mode"],
         "tools": {
             "write_file": {"permission": "always"},
             "edit": {"permission": "always"},
@@ -146,7 +136,7 @@ AUTO_APPROVE = AgentProfile(
     "Auto Approve",
     "Auto-approves all tool executions",
     AgentSafety.YOLO,
-    overrides={"bypass_tool_permissions": True, "base_disabled": ["exit_plan_mode"]},
+    overrides={"bypass_tool_permissions": True, "disabled_tools": ["exit_plan_mode"]},
 )
 
 EXPLORE = AgentProfile(
@@ -194,7 +184,7 @@ LEAN = AgentProfile(
             "thinking": "off",
         },
         "tools": {"bash": {"default_timeout": 1200}},
-        "base_disabled": ["exit_plan_mode"],
+        "disabled_tools": ["exit_plan_mode"],
     },
 )
 

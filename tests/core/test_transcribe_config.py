@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import ConfigBuilder, build_test_vibe_config
 from vibe.core.config import (
     DEFAULT_TRANSCRIBE_MODELS,
     DEFAULT_TRANSCRIBE_PROVIDERS,
@@ -13,48 +13,52 @@ from vibe.core.config import (
 
 
 class TestTranscribeConfigDefaults:
-    def test_default_transcribe_providers_loaded(self) -> None:
-        config = build_test_vibe_config()
+    def test_default_transcribe_providers_loaded(
+        self, build_config: ConfigBuilder
+    ) -> None:
+        config = build_config()
         assert len(config.transcribe_providers) == len(DEFAULT_TRANSCRIBE_PROVIDERS)
         assert config.transcribe_providers[0].name == "mistral"
         assert config.transcribe_providers[0].api_base == "wss://api.mistral.ai"
 
-    def test_default_transcribe_models_loaded(self) -> None:
-        config = build_test_vibe_config()
+    def test_default_transcribe_models_loaded(
+        self, build_config: ConfigBuilder
+    ) -> None:
+        config = build_config()
         assert len(config.transcribe_models) == len(DEFAULT_TRANSCRIBE_MODELS)
         assert config.transcribe_models[0].alias == "voxtral-realtime"
         assert (
             config.transcribe_models[0].name == "voxtral-mini-transcribe-realtime-2602"
         )
 
-    def test_default_active_transcribe_model(self) -> None:
-        config = build_test_vibe_config()
+    def test_default_active_transcribe_model(self, build_config: ConfigBuilder) -> None:
+        config = build_config()
         assert config.active_transcribe_model == "voxtral-realtime"
 
 
 class TestGetActiveTranscribeModel:
-    def test_resolves_by_alias(self) -> None:
-        config = build_test_vibe_config()
+    def test_resolves_by_alias(self, build_config: ConfigBuilder) -> None:
+        config = build_config()
         model = config.get_active_transcribe_model()
         assert model.alias == "voxtral-realtime"
         assert model.name == "voxtral-mini-transcribe-realtime-2602"
 
-    def test_raises_for_unknown_alias(self) -> None:
-        config = build_test_vibe_config(active_transcribe_model="nonexistent")
+    def test_raises_for_unknown_alias(self, build_config: ConfigBuilder) -> None:
+        config = build_config(active_transcribe_model="nonexistent")
         with pytest.raises(ValueError, match="not found in configuration"):
             config.get_active_transcribe_model()
 
 
 class TestGetTranscribeProviderForModel:
-    def test_resolves_by_name(self) -> None:
-        config = build_test_vibe_config()
+    def test_resolves_by_name(self, build_config: ConfigBuilder) -> None:
+        config = build_config()
         model = config.get_active_transcribe_model()
         provider = config.get_transcribe_provider_for_model(model)
         assert provider.name == "mistral"
         assert provider.api_base == "wss://api.mistral.ai"
 
-    def test_raises_for_unknown_provider(self) -> None:
-        config = build_test_vibe_config(
+    def test_raises_for_unknown_provider(self, build_config: ConfigBuilder) -> None:
+        config = build_config(
             transcribe_models=[
                 TranscribeModelConfig(
                     name="test-model", provider="nonexistent", alias="test"

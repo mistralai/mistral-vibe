@@ -33,6 +33,7 @@ class MergeStrategy(StrEnum):
     CONCAT = auto()
     UNION = auto()
     MERGE = auto()
+    DEEP_MERGE = auto()
     CONFLICT = auto()
 
     def apply(
@@ -47,6 +48,8 @@ class MergeStrategy(StrEnum):
             return self._union(base, override, key_fn)
         if self is MergeStrategy.MERGE:
             return self._merge(base, override)
+        if self is MergeStrategy.DEEP_MERGE:
+            return self._deep_merge(base, override)
         if self is MergeStrategy.CONFLICT:
             return self._conflict(base, override)
         raise NotImplementedError(f"Merge strategy {self!r} is not implemented")
@@ -107,6 +110,24 @@ class MergeStrategy(StrEnum):
                 f"MERGE requires dict operands, got {type(base).__name__} and {type(override).__name__}"
             )
         return {**base, **override}
+
+    def _deep_merge(self, base: Any, override: Any) -> Any:
+        resolved, value = self._coalesce(base, override)
+        if resolved:
+            return value
+        if not isinstance(base, dict) or not isinstance(override, dict):
+            raise TypeError(
+                f"DEEP_MERGE requires dict operands, got {type(base).__name__} and {type(override).__name__}"
+            )
+
+        merged = base.copy()
+        for key, override_value in override.items():
+            base_value = merged.get(key)
+            if isinstance(base_value, dict) and isinstance(override_value, dict):
+                merged[key] = self._deep_merge(base_value, override_value)
+                continue
+            merged[key] = override_value
+        return merged
 
     def _conflict(self, base: Any, override: Any) -> Any:
         resolved, value = self._coalesce(base, override)

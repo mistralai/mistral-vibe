@@ -10,8 +10,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import tomli_w
 
-from tests.conftest import build_test_vibe_config
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from tests.conftest import ConfigBuilder, ConfigLoader, build_test_vibe_config
+from vibe.core.config import ConnectorConfig, ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.config._migration import BASH_READ_ONLY_MIGRATION
 from vibe.core.config._settings import (
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
@@ -270,7 +270,9 @@ class TestSystemTrustStoreConfig:
 
 
 class TestSetThinking:
-    def test_persists_thinking_to_toml(self, config_dir: Path) -> None:
+    def test_persists_thinking_to_toml(
+        self, config_dir: Path, load_config: ConfigLoader
+    ) -> None:
         config_file = config_dir / "config.toml"
         data = {
             "active_model": "my-model",
@@ -281,16 +283,17 @@ class TestSetThinking:
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
 
-        cfg = VibeConfig.load()
-        cfg.set_thinking("high")
+        cfg = load_config()
+        VibeConfig.save_updates(cfg.build_thinking_update("high"))
 
-        reloaded = VibeConfig.load()
-        assert reloaded.get_active_model().thinking == "high"
         with config_file.open("rb") as f:
             result = tomllib.load(f)
-        assert result["models"][0]["thinking"] == "high"
+        entry = next(m for m in result["models"] if m["alias"] == "my-model")
+        assert entry["thinking"] == "high"
 
-    def test_persists_thinking_for_correct_model(self, config_dir: Path) -> None:
+    def test_persists_thinking_for_correct_model(
+        self, config_dir: Path, load_config: ConfigLoader
+    ) -> None:
         config_file = config_dir / "config.toml"
         data = {
             "active_model": "model-b",
@@ -302,39 +305,42 @@ class TestSetThinking:
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
 
-        cfg = VibeConfig.load()
-        cfg.set_thinking("max")
+        cfg = load_config()
+        VibeConfig.save_updates(cfg.build_thinking_update("max"))
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
-        assert result["models"][0].get("thinking") is None
-        assert result["models"][1]["thinking"] == "max"
+        model_a = next(m for m in result["models"] if m["alias"] == "model-a")
+        model_b = next(m for m in result["models"] if m["alias"] == "model-b")
+        assert model_a.get("thinking") is None
+        assert model_b["thinking"] == "max"
 
     def test_preserves_supports_images_when_materializing_defaults(
-        self, config_dir: Path
+        self, config_dir: Path, load_config: ConfigLoader
     ) -> None:
         config_file = config_dir / "config.toml"
         data = {"active_model": "mistral-medium-3.5"}
         with config_file.open("wb") as f:
             tomli_w.dump(data, f)
 
-        cfg = VibeConfig.load()
-        cfg.set_thinking("low")
+        cfg = load_config()
+        VibeConfig.save_updates(cfg.build_thinking_update("low"))
 
-        reloaded = VibeConfig.load()
-        active = reloaded.get_active_model()
-        assert active.alias == "mistral-medium-3.5"
-        assert active.thinking == "low"
-        assert active.supports_images is True
         with config_file.open("rb") as f:
             result = tomllib.load(f)
-        active_entry = result["models"][0]
+        active_entry = next(
+            m for m in result["models"] if m["alias"] == "mistral-medium-3.5"
+        )
+        assert active_entry["thinking"] == "low"
         assert active_entry["supports_images"] is True
         assert "temperature" not in active_entry
         assert "input_price" not in active_entry
         assert "output_price" not in active_entry
         assert "auto_compact_threshold" not in active_entry
-        assert "supports_images" not in result["models"][1]
+        other_entry = next(
+            m for m in result["models"] if m["alias"] != "mistral-medium-3.5"
+        )
+        assert "supports_images" not in other_entry
 
 
 class TestMigrateLeavesFindInBashAllowlist:
@@ -1322,20 +1328,24 @@ class TestOnboardingContextResolution:
 
 
 class TestCompactionModel:
-    def test_get_compaction_model_returns_active_when_unset(self) -> None:
-        cfg = build_test_vibe_config()
+    def test_get_compaction_model_returns_active_when_unset(
+        self, build_config: ConfigBuilder
+    ) -> None:
+        cfg = build_config()
         assert cfg.get_compaction_model() == cfg.get_active_model()
 
-    def test_get_compaction_model_returns_configured_model(self) -> None:
+    def test_get_compaction_model_returns_configured_model(
+        self, build_config: ConfigBuilder
+    ) -> None:
         compaction = ModelConfig(
             name="compact-model", provider="mistral", alias="compact"
         )
-        cfg = build_test_vibe_config(compaction_model=compaction)
+        cfg = build_config(compaction_model=compaction)
         assert cfg.get_compaction_model().name == "compact-model"
 
-    def test_compaction_model_provider_must_match_active(self) -> None:
-        from vibe.core.config import ProviderConfig
-
+    def test_compaction_model_provider_must_match_active(
+        self, build_config: ConfigBuilder
+    ) -> None:
         compaction = ModelConfig(
             name="compact-model", provider="other", alias="compact"
         )
@@ -1352,9 +1362,11 @@ class TestCompactionModel:
             ),
         ]
         with pytest.raises(ValueError, match="must share the same provider"):
-            build_test_vibe_config(compaction_model=compaction, providers=providers)
+            build_config(compaction_model=compaction, providers=providers)
 
-    def test_compaction_model_provider_must_exist(self) -> None:
+    def test_compaction_model_provider_must_exist(
+        self, build_config: ConfigBuilder
+    ) -> None:
         compaction = ModelConfig(
             name="compact-model", provider="missing-provider", alias="compact"
         )
@@ -1362,7 +1374,7 @@ class TestCompactionModel:
             ValueError,
             match="Provider 'missing-provider' for model 'compact-model' not found in configuration",
         ):
-            build_test_vibe_config(compaction_model=compaction)
+            build_config(compaction_model=compaction)
 
     def test_compaction_model_excluded_from_model_dump_when_none(self) -> None:
         cfg = build_test_vibe_config()
@@ -1370,9 +1382,51 @@ class TestCompactionModel:
         assert "compaction_model" not in dumped
 
 
+class TestActiveModelValidation:
+    def test_unknown_active_model_falls_back_to_first(
+        self, build_config: ConfigBuilder, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            cfg = build_config(active_model="does-not-exist")
+
+        assert cfg.active_model == cfg.models[0].alias
+        assert cfg.get_active_model().alias == cfg.models[0].alias
+        assert (
+            "Active model 'does-not-exist' is not in your configured models"
+            in caplog.text
+        )
+        assert len(cfg.validation_warnings) == 1
+        assert "does-not-exist" in cfg.validation_warnings[0]
+
+    def test_known_active_model_is_not_overridden(
+        self, build_config: ConfigBuilder
+    ) -> None:
+        models = [
+            ModelConfig(name="model-a", provider="mistral", alias="a"),
+            ModelConfig(name="model-b", provider="mistral", alias="b"),
+        ]
+        cfg = build_config(active_model="b", models=models)
+        assert cfg.active_model == "b"
+        assert cfg.validation_warnings == ()
+
+    def test_no_models_raises(self, build_config: ConfigBuilder) -> None:
+        with pytest.raises(ValueError, match="No models are configured"):
+            build_config(models=[])
+
+    def test_duplicate_model_alias_raises(self, build_config: ConfigBuilder) -> None:
+        models = [
+            ModelConfig(name="model-a", provider="mistral", alias="same"),
+            ModelConfig(name="model-b", provider="mistral", alias="same"),
+        ]
+        with pytest.raises(ValueError, match="Duplicate .*alias"):
+            build_config(models=models)
+
+
 class TestGetMistralProvider:
-    def test_returns_active_provider_when_it_is_mistral(self) -> None:
-        cfg = build_test_vibe_config()
+    def test_returns_active_provider_when_it_is_mistral(
+        self, build_config: ConfigBuilder
+    ) -> None:
+        cfg = build_config()
         provider = cfg.get_mistral_provider()
         active = cfg.get_active_provider()
         assert provider is active
@@ -1380,7 +1434,7 @@ class TestGetMistralProvider:
         assert provider.backend == Backend.MISTRAL
 
     def test_falls_back_to_first_mistral_provider_when_active_is_not_mistral(
-        self,
+        self, build_config: ConfigBuilder
     ) -> None:
         mistral_provider = ProviderConfig(
             name="mistral",
@@ -1394,7 +1448,7 @@ class TestGetMistralProvider:
         llamacpp_model = ModelConfig(
             name="llama-local", provider="llamacpp", alias="llama-local"
         )
-        cfg = build_test_vibe_config(
+        cfg = build_config(
             providers=[llamacpp_provider, mistral_provider],
             models=[llamacpp_model],
             active_model="llama-local",
@@ -1402,21 +1456,25 @@ class TestGetMistralProvider:
         provider = cfg.get_mistral_provider()
         assert provider is mistral_provider
 
-    def test_returns_none_when_no_mistral_provider(self) -> None:
+    def test_returns_none_when_no_mistral_provider(
+        self, build_config: ConfigBuilder
+    ) -> None:
         llamacpp_provider = ProviderConfig(
             name="llamacpp", api_base="http://127.0.0.1:8080/v1", api_key_env_var=""
         )
         llamacpp_model = ModelConfig(
             name="llama-local", provider="llamacpp", alias="llama-local"
         )
-        cfg = build_test_vibe_config(
+        cfg = build_config(
             providers=[llamacpp_provider],
             models=[llamacpp_model],
             active_model="llama-local",
         )
         assert cfg.get_mistral_provider() is None
 
-    def test_falls_back_to_iterating_when_active_model_is_misconfigured(self) -> None:
+    def test_falls_back_to_iterating_when_active_model_is_misconfigured(
+        self, build_config: ConfigBuilder
+    ) -> None:
         mistral_provider = ProviderConfig(
             name="mistral",
             api_base="https://api.mistral.ai/v1",
@@ -1426,7 +1484,7 @@ class TestGetMistralProvider:
         llamacpp_model = ModelConfig(
             name="llama-local", provider="llamacpp", alias="llama-local"
         )
-        cfg = build_test_vibe_config(
+        cfg = build_config(
             providers=[mistral_provider],
             models=[llamacpp_model],
             active_model="llama-local",
@@ -1436,12 +1494,16 @@ class TestGetMistralProvider:
 
 
 class TestIsActiveModelMistral:
-    def test_returns_true_when_active_provider_is_mistral(self) -> None:
-        cfg = build_test_vibe_config()
+    def test_returns_true_when_active_provider_is_mistral(
+        self, build_config: ConfigBuilder
+    ) -> None:
+        cfg = build_config()
         assert cfg.is_active_model_mistral() is True
 
-    def test_returns_false_when_active_provider_is_not_mistral(self) -> None:
-        cfg = build_test_vibe_config(
+    def test_returns_false_when_active_provider_is_not_mistral(
+        self, build_config: ConfigBuilder
+    ) -> None:
+        cfg = build_config(
             providers=[
                 ProviderConfig(
                     name="llamacpp",
@@ -1458,8 +1520,10 @@ class TestIsActiveModelMistral:
         )
         assert cfg.is_active_model_mistral() is False
 
-    def test_returns_false_when_active_model_resolution_fails(self) -> None:
-        cfg = build_test_vibe_config(
+    def test_returns_false_when_active_model_resolution_fails(
+        self, build_config: ConfigBuilder
+    ) -> None:
+        cfg = build_config(
             providers=[
                 ProviderConfig(
                     name="mistral",
@@ -1476,6 +1540,65 @@ class TestIsActiveModelMistral:
             active_model="llama-local",
         )
         assert cfg.is_active_model_mistral() is False
+
+
+class TestConnectorsByName:
+    def test_maps_connectors_by_name(self, build_config: ConfigBuilder) -> None:
+        cfg = build_config(
+            connectors=[ConnectorConfig(name="github"), ConnectorConfig(name="linear")]
+        )
+        by_name = cfg.connectors_by_name()
+        assert set(by_name) == {"github", "linear"}
+        assert by_name["github"].name == "github"
+
+    def test_empty_by_default(self, build_config: ConfigBuilder) -> None:
+        assert build_config().connectors_by_name() == {}
+
+
+class TestAddToolAllowlistPatterns:
+    def test_strips_bash_wildcard(
+        self, config_dir: Path, build_config: ConfigBuilder
+    ) -> None:
+        cfg = build_config()
+        payload = cfg.build_tool_allowlist_update("bash", ["ls *"])
+        assert payload is not None
+        VibeConfig.save_updates(payload)
+
+        with (config_dir / "config.toml").open("rb") as f:
+            result = tomllib.load(f)
+        assert result["tools"]["bash"]["allowlist"] == ["ls"]
+
+    def test_merges_and_sorts_with_existing(
+        self, config_dir: Path, build_config: ConfigBuilder
+    ) -> None:
+        cfg = build_config(tools={"edit": {"allowlist": ["c"]}})
+        payload = cfg.build_tool_allowlist_update("edit", ["b", "a"])
+        assert payload is not None
+        VibeConfig.save_updates(payload)
+
+        with (config_dir / "config.toml").open("rb") as f:
+            result = tomllib.load(f)
+        assert result["tools"]["edit"]["allowlist"] == ["a", "b", "c"]
+
+    def test_noop_when_nothing_new(
+        self, config_dir: Path, build_config: ConfigBuilder
+    ) -> None:
+        cfg = build_config(tools={"edit": {"allowlist": ["a"]}})
+
+        assert cfg.build_tool_allowlist_update("edit", ["a"]) is None
+        with (config_dir / "config.toml").open("rb") as f:
+            persisted = tomllib.load(f)
+        assert "edit" not in persisted.get("tools", {})
+
+    def test_keeps_in_memory_config_current(self, build_config: ConfigBuilder) -> None:
+        cfg = build_config(tools={"edit": {"allowlist": ["a"]}})
+
+        first = cfg.build_tool_allowlist_update("edit", ["b"])
+        assert first == {"tools": {"edit": {"allowlist": ["a", "b"]}}}
+        assert cfg.tools["edit"]["allowlist"] == ["a", "b"]
+
+        second = cfg.build_tool_allowlist_update("edit", ["c"])
+        assert second == {"tools": {"edit": {"allowlist": ["a", "b", "c"]}}}
 
 
 class TestMigrateRenamedTools:

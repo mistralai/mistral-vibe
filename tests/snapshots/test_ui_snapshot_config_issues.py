@@ -4,6 +4,7 @@ from pathlib import Path
 
 from textual.pilot import Pilot
 
+from tests.conftest import build_test_vibe_config
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
 from tests.snapshots.snap_compare import SnapCompare
 from vibe.core.hooks.models import HookConfigIssue
@@ -32,6 +33,17 @@ class SnapshotTestAppWithHookConfigIssue(BaseSnapshotTestApp):
         ]
 
 
+class SnapshotTestAppWithActiveModelWarning(BaseSnapshotTestApp):
+    def __init__(self) -> None:
+        super().__init__(
+            config=build_test_vibe_config(
+                disable_welcome_banner_animation=True,
+                displayed_workdir="/test/workdir",
+                active_model="does-not-exist",
+            )
+        )
+
+
 def test_snapshot_shows_config_issue_notification(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
         await pilot.pause(0.3)
@@ -51,6 +63,19 @@ def test_snapshot_shows_hook_config_issue_notification(
 
     assert snap_compare(
         "test_ui_snapshot_config_issues.py:SnapshotTestAppWithHookConfigIssue",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
+def test_snapshot_shows_active_model_warning_notification(
+    snap_compare: SnapCompare,
+) -> None:
+    async def run_before(pilot: Pilot) -> None:
+        await pilot.pause(0.3)
+
+    assert snap_compare(
+        "test_ui_snapshot_config_issues.py:SnapshotTestAppWithActiveModelWarning",
         terminal_size=(120, 36),
         run_before=run_before,
     )

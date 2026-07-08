@@ -1,7 +1,7 @@
 """Hook orchestration mixin for AgentLoop.
 
 Provides before_tool, after_tool, and post_agent_turn hook lifecycle
-methods.  Extracted from ``agent_loop.py`` to keep the main module
+methods. Extracted from the AgentLoop implementation module to keep it
 focused on the core conversation loop and tool execution flow.
 
 Implicit dependencies on the host class (AgentLoop):
@@ -27,7 +27,6 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from opentelemetry import trace
 from pydantic import ValidationError
 
 from vibe.core.hooks.models import (
@@ -53,6 +52,8 @@ from vibe.core.utils import (
 )
 
 if TYPE_CHECKING:
+    from opentelemetry import trace
+
     from vibe.core.agent_loop import ToolDecision
     from vibe.core.hooks.manager import HooksManager
     from vibe.core.session.session_logger import SessionLogger

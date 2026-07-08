@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 import getpass
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal
-
-from anyio import NamedTemporaryFile, Path as AsyncPath
 
 from vibe.core.session.session_id import shorten_session_id
 from vibe.core.session.session_loader import (
@@ -21,11 +22,11 @@ from vibe.core.session.session_loader import (
 from vibe.core.session.title_format import MAX_TITLE_LENGTH
 from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
 from vibe.core.utils import is_windows, utc_now
-from vibe.core.utils.io import read_safe_async
+from vibe.core.utils.io import read_safe, read_safe_async
 
 if TYPE_CHECKING:
     from vibe.core.agents.models import AgentProfile
-    from vibe.core.config import SessionLoggingConfig, VibeConfig
+    from vibe.core.config import AnyVibeConfig, SessionLoggingConfig
     from vibe.core.experiments.models import EvalResponse
     from vibe.core.tools.manager import ToolManager
 
@@ -39,6 +40,9 @@ class SessionLogger:
         self.enabled = session_config.enabled
         self._last_tmp_cleanup_at: datetime | None = None
         self._tmp_cleanup_lock = Lock()
+        # Serializes writes so concurrent saves cannot interleave appends to
+        # messages.jsonl or race on the metadata read-modify-write.
+        self._save_lock = asyncio.Lock()
 
         if not self.enabled:
             self.save_dir: Path | None = None
@@ -104,6 +108,8 @@ class SessionLogger:
                 capture_output=True,
                 stdin=subprocess.DEVNULL if is_windows() else None,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5.0,
             )
             if result.returncode == 0 and result.stdout:
@@ -208,21 +214,21 @@ class SessionLogger:
         return title
 
     @staticmethod
-    async def persist_metadata(metadata: Any, session_dir: Path) -> None:
+    def _persist_metadata_sync(metadata: Any, session_dir: Path) -> None:
         temp_metadata_filepath = None
         metadata_filepath = session_dir / METADATA_FILENAME
         try:
-            async with NamedTemporaryFile(
+            with tempfile.NamedTemporaryFile(
                 mode="w",
                 suffix=".json.tmp",
                 dir=str(session_dir),
                 delete=False,
                 encoding="utf-8",
             ) as f:
-                temp_metadata_filepath = Path(str(f.name))
-                await f.write(json.dumps(metadata, indent=2, ensure_ascii=False))
-                await f.flush()
-                os.fsync(f.wrapped.fileno())
+                temp_metadata_filepath = Path(f.name)
+                f.write(json.dumps(metadata, indent=2, ensure_ascii=False))
+                f.flush()
+                os.fsync(f.fileno())
 
             os.replace(temp_metadata_filepath, str(metadata_filepath))
         except Exception as e:
@@ -238,40 +244,119 @@ class SessionLogger:
                 temp_metadata_filepath.unlink()
 
     @staticmethod
-    async def persist_messages(messages: list[dict], session_dir: Path) -> None:
+    async def persist_metadata(metadata: Any, session_dir: Path) -> None:
+        await asyncio.to_thread(
+            SessionLogger._persist_metadata_sync, metadata, session_dir
+        )
+
+    @staticmethod
+    def _persist_messages_sync(messages: list[dict], session_dir: Path) -> None:
         messages_filepath = session_dir / "messages.jsonl"
         try:
-            if not messages_filepath.exists():
-                messages_filepath.touch()
-
-            async with await AsyncPath(messages_filepath).open(
-                "a", encoding="utf-8"
-            ) as f:
+            with messages_filepath.open("a", encoding="utf-8") as f:
                 for message in messages:
-                    await f.write(json.dumps(message, ensure_ascii=False) + "\n")
-                    await f.flush()
-                    os.fsync(f.wrapped.fileno())
+                    f.write(json.dumps(message, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
         except Exception as e:
             raise RuntimeError(
                 f"Failed to persist session messages to {messages_filepath}: {e}"
             ) from e
 
+    @staticmethod
+    async def persist_messages(messages: list[dict], session_dir: Path) -> None:
+        await asyncio.to_thread(
+            SessionLogger._persist_messages_sync, messages, session_dir
+        )
+
+    @staticmethod
+    def _overwrite_messages_sync(messages: list[dict], session_dir: Path) -> None:
+        messages_filepath = session_dir / MESSAGES_FILENAME
+        temp_filepath = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".jsonl.tmp",
+                dir=str(session_dir),
+                delete=False,
+                encoding="utf-8",
+            ) as f:
+                temp_filepath = Path(f.name)
+                for message in messages:
+                    f.write(json.dumps(message, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.replace(temp_filepath, str(messages_filepath))
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to overwrite session messages at {messages_filepath}: {e}"
+            ) from e
+        finally:
+            if temp_filepath and temp_filepath.exists() and temp_filepath.is_file():
+                temp_filepath.unlink()
+
+    @staticmethod
+    def _message_fingerprint(message: LLMMessage) -> str:
+        payload = json.dumps(
+            message.model_dump(exclude_none=True, mode="json"), sort_keys=True
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     async def save_interaction(
         self,
         messages: Sequence[LLMMessage],
         stats: AgentStats,
-        base_config: VibeConfig,
+        base_config: AnyVibeConfig,
         tool_manager: ToolManager,
         agent_profile: AgentProfile,
+        *,
+        allow_empty: bool = False,
     ) -> None:
         session_info = self._get_session_info()
         if session_info is None:
             return
         session_dir, session_metadata = session_info
-        metadata_path = session_dir / METADATA_FILENAME
 
-        if not any(msg.role != Role.system for msg in messages):
+        non_system_messages = [m for m in messages if m.role != Role.system]
+
+        # Empty conversations are only persisted on explicit opt-in (rewind to
+        # the first message); otherwise an empty log would be unloadable.
+        if not non_system_messages and not allow_empty:
             return
+
+        # Snapshot the message list and resolve the title on the event loop,
+        # then hand everything to a worker thread: serialization and fsync are
+        # too slow to run on the UI thread after every agent turn.
+        messages_snapshot = list(messages)
+        title = self._resolve_title(messages_snapshot)
+        async with self._save_lock:
+            await asyncio.to_thread(
+                self._save_interaction_sync,
+                messages_snapshot,
+                stats,
+                base_config,
+                tool_manager,
+                agent_profile,
+                title,
+                session_dir,
+                session_metadata,
+                allow_empty,
+            )
+
+    def _save_interaction_sync(
+        self,
+        messages: list[LLMMessage],
+        stats: AgentStats,
+        base_config: AnyVibeConfig,
+        tool_manager: ToolManager,
+        agent_profile: AgentProfile,
+        title: str | None,
+        session_dir: Path,
+        session_metadata: SessionMetadata,
+        allow_empty: bool,
+    ) -> None:
+        metadata_path = session_dir / METADATA_FILENAME
 
         # If the session directory does not exist, create it
         try:
@@ -281,59 +366,74 @@ class SessionLogger:
                 f"Failed to create session directory at {session_dir}: {type(e).__name__}: {e}"
             ) from e
 
-        # Read old metadata and get total_messages
+        # Read old metadata to detect appends, rewinds, and edited tails.
         try:
             if metadata_path.exists():
-                raw = (await read_safe_async(metadata_path)).text
-                old_metadata = json.loads(raw)
+                old_metadata = json.loads(read_safe(metadata_path).text)
                 old_total_messages = old_metadata["total_messages"]
+                old_last_fingerprint = old_metadata.get("last_message_fingerprint")
             else:
                 old_total_messages = 0
+                old_last_fingerprint = None
         except Exception as e:
             raise RuntimeError(
                 f"Failed to read session metadata at {metadata_path}: {e}"
             ) from e
 
+        non_system_messages = [m for m in messages if m.role != Role.system]
+
+        if not non_system_messages and not allow_empty:
+            return
+
+        # A missing fingerprint (legacy session) can't verify the boundary, so
+        # it forces a full rewrite rather than a no-op or append.
+        boundary_unchanged = old_total_messages == 0 or (
+            old_last_fingerprint is not None
+            and old_total_messages <= len(non_system_messages)
+            and self._message_fingerprint(non_system_messages[old_total_messages - 1])
+            == old_last_fingerprint
+        )
+        if len(non_system_messages) == old_total_messages and boundary_unchanged:
+            return
+
         try:
-            non_system_messages = [m for m in messages if m.role != Role.system]
-            # Append new messages
-            new_messages = non_system_messages[old_total_messages:]
-
-            if len(new_messages) == 0:
-                return
-
-            messages_data = [
-                m.model_dump(exclude_none=True, mode="json") for m in new_messages
-            ]
-            await SessionLogger.persist_messages(messages_data, session_dir)
+            if len(non_system_messages) > old_total_messages and boundary_unchanged:
+                messages_data = [
+                    m.model_dump(exclude_none=True, mode="json")
+                    for m in non_system_messages[old_total_messages:]
+                ]
+                SessionLogger._persist_messages_sync(messages_data, session_dir)
+            else:
+                messages_data = [
+                    m.model_dump(exclude_none=True, mode="json")
+                    for m in non_system_messages
+                ]
+                SessionLogger._overwrite_messages_sync(messages_data, session_dir)
 
             # If message update succeeded, write metadata
             tools_available = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_class.get_name(),
-                        "description": tool_class.get_full_description(),
-                        "parameters": tool_class.get_parameters(),
-                    },
-                }
-                for tool_class in tool_manager.available_tools.values()
+                {"type": "function", "function": fn.model_dump()}
+                for fn in tool_manager.available_tool_specs()
             ]
 
-            title = self._resolve_title(messages)
             system_prompt = (
                 messages[0].model_dump()
                 if len(messages) > 0 and messages[0].role == Role.system
                 else None
             )
-            total_messages = len(non_system_messages)
+            last_message_fingerprint = (
+                self._message_fingerprint(non_system_messages[-1])
+                if non_system_messages
+                else None
+            )
 
             metadata_dump = {
                 **session_metadata.model_dump(),
                 "end_time": utc_now().isoformat(),
                 "stats": stats.model_dump(),
                 "title": title,
-                "total_messages": total_messages,
+                "total_messages": len(non_system_messages),
+                "last_message_fingerprint": last_message_fingerprint,
                 "tools_available": tools_available,
                 "config": base_config.model_dump(mode="json"),
                 "agent_profile": {
@@ -343,7 +443,7 @@ class SessionLogger:
                 "system_prompt": system_prompt,
             }
 
-            await SessionLogger.persist_metadata(metadata_dump, session_dir)
+            SessionLogger._persist_metadata_sync(metadata_dump, session_dir)
         except Exception as e:
             raise RuntimeError(f"Failed to save session to {session_dir}: {e}") from e
         finally:
@@ -357,17 +457,18 @@ class SessionLogger:
         metadata_path = session_dir / METADATA_FILENAME
         if not metadata_path.exists():
             return
-        try:
-            raw = (await read_safe_async(metadata_path)).text
-            metadata = json.loads(raw)
-        except (OSError, json.JSONDecodeError) as e:
-            raise RuntimeError(
-                f"Failed to read session metadata at {metadata_path}: {e}"
-            ) from e
-        metadata["loops"] = [
-            loop.model_dump(mode="json") for loop in session_metadata.loops
-        ]
-        await SessionLogger.persist_metadata(metadata, session_dir)
+        async with self._save_lock:
+            try:
+                raw = (await read_safe_async(metadata_path)).text
+                metadata = json.loads(raw)
+            except (OSError, json.JSONDecodeError) as e:
+                raise RuntimeError(
+                    f"Failed to read session metadata at {metadata_path}: {e}"
+                ) from e
+            metadata["loops"] = [
+                loop.model_dump(mode="json") for loop in session_metadata.loops
+            ]
+            await SessionLogger.persist_metadata(metadata, session_dir)
 
     async def persist_experiments(self, response: EvalResponse | None) -> None:
         session_info = self._get_session_info()
@@ -378,17 +479,18 @@ class SessionLogger:
         metadata_path = session_dir / METADATA_FILENAME
         if not metadata_path.exists():
             return
-        try:
-            raw = (await read_safe_async(metadata_path)).text
-            metadata = json.loads(raw)
-        except (OSError, json.JSONDecodeError) as e:
-            raise RuntimeError(
-                f"Failed to read session metadata at {metadata_path}: {e}"
-            ) from e
-        metadata["experiments"] = (
-            response.model_dump(mode="json") if response is not None else None
-        )
-        await SessionLogger.persist_metadata(metadata, session_dir)
+        async with self._save_lock:
+            try:
+                raw = (await read_safe_async(metadata_path)).text
+                metadata = json.loads(raw)
+            except (OSError, json.JSONDecodeError) as e:
+                raise RuntimeError(
+                    f"Failed to read session metadata at {metadata_path}: {e}"
+                ) from e
+            metadata["experiments"] = (
+                response.model_dump(mode="json") if response is not None else None
+            )
+            await SessionLogger.persist_metadata(metadata, session_dir)
 
     def reset_session(
         self, session_id: str, *, parent_session_id: str | None = None

@@ -10,7 +10,7 @@ from urllib.parse import SplitResult, unquote, urlsplit
 import httpx
 
 from vibe.core.logger import logger
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.setup.auth.browser_sign_in_gateway import (
     BrowserSignInError,
     BrowserSignInErrorCode,
@@ -47,7 +47,7 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
         browser_base_url: str,
         api_base_url: str,
         *,
-        client: httpx.AsyncClient | None = None,
+        client: VibeAsyncHTTPClient | None = None,
     ) -> None:
         self._browser_base_url = browser_base_url.rstrip("/")
         self._api_base_url = api_base_url.rstrip("/")
@@ -214,9 +214,9 @@ class HttpBrowserSignInGateway(BrowserSignInGateway):
             code=BrowserSignInErrorCode.MISSING_API_KEY,
         )
 
-    def _ensure_client(self) -> httpx.AsyncClient:
+    def _ensure_client(self) -> VibeAsyncHTTPClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(verify=build_ssl_context())
+            self._client = VibeAsyncHTTPClient(verify=build_ssl_context())
             self._should_manage_client = True
         return self._client
 

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import base64
 
-import httpx
 from mistralai.client import Mistral
 from mistralai.client.models import SpeechOutputFormat
 
 from vibe.core.config import TTSModelConfig, TTSProviderConfig, resolve_api_key
+from vibe.core.config.models import Backend
+from vibe.core.telemetry.build_metadata import build_request_metadata
 from vibe.core.tts.tts_client_port import TTSResult
-from vibe.core.utils.http import build_ssl_context
+from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context, get_user_agent
 
 
 class MistralTTSClient:
@@ -19,11 +20,11 @@ class MistralTTSClient:
         self._voice = model.voice
         self._response_format: SpeechOutputFormat = model.response_format
         self._client: Mistral | None = None
-        self._http_client: httpx.AsyncClient | None = None
+        self._http_client: VibeAsyncHTTPClient | None = None
 
     def _get_client(self) -> Mistral:
         if self._client is None:
-            self._http_client = httpx.AsyncClient(
+            self._http_client = VibeAsyncHTTPClient(
                 verify=build_ssl_context(), follow_redirects=True
             )
             self._client = Mistral(
@@ -35,11 +36,16 @@ class MistralTTSClient:
 
     async def speak(self, text: str) -> TTSResult:
         client = self._get_client()
+        metadata = build_request_metadata(
+            launch_context=None, session_id=None, call_type="secondary_call"
+        ).model_dump(exclude_none=True)
         response = await client.audio.speech.complete_async(
             model=self._model_name,
             input=text,
             voice_id=self._voice,
             response_format=self._response_format,
+            metadata=metadata,
+            http_headers={"user-agent": get_user_agent(Backend.MISTRAL)},
         )
         audio_bytes = base64.b64decode(response.audio_data)
         return TTSResult(audio_data=audio_bytes)

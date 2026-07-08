@@ -34,7 +34,7 @@ def _make_manager(
     save_calls: list[bool] = []
     reset_calls: list[bool] = []
 
-    async def save_messages() -> None:
+    async def save_messages(*, allow_empty: bool = False) -> None:
         save_calls.append(True)
 
     async def reset_session() -> None:
@@ -190,6 +190,77 @@ class TestRewind:
         assert len(save_calls) == 1
         assert len(reset_calls) == 1
         assert len(messages) == 3
+
+    @pytest.mark.asyncio
+    async def test_rewind_to_message_fork_saves_full_then_resets(self) -> None:
+        messages = _make_messages("hello", "world")
+        saved_lengths: list[int] = []
+        reset_calls: list[bool] = []
+
+        async def save_messages(*, allow_empty: bool = False) -> None:
+            saved_lengths.append(len(messages))
+
+        async def reset_session() -> None:
+            reset_calls.append(True)
+
+        mgr = RewindManager(
+            messages=messages, save_messages=save_messages, reset_session=reset_session
+        )
+
+        await mgr.rewind_to_message(3, restore_files=False)
+
+        # Fork persists the full history before truncating, then forks.
+        assert saved_lengths == [5]
+        assert reset_calls == [True]
+        assert len(messages) == 3
+
+    @pytest.mark.asyncio
+    async def test_rewind_to_message_inplace_saves_truncated_no_reset(self) -> None:
+        messages = _make_messages("hello", "world")
+        saved_lengths: list[int] = []
+        reset_calls: list[bool] = []
+
+        async def save_messages(*, allow_empty: bool = False) -> None:
+            saved_lengths.append(len(messages))
+
+        async def reset_session() -> None:
+            reset_calls.append(True)
+
+        mgr = RewindManager(
+            messages=messages, save_messages=save_messages, reset_session=reset_session
+        )
+
+        content, _, _ = await mgr.rewind_to_message(
+            3, restore_files=False, inplace=True
+        )
+
+        # In-place persists the truncated history under the same session.
+        assert content == "world"
+        assert saved_lengths == [3]
+        assert reset_calls == []
+        assert len(messages) == 3
+
+    @pytest.mark.asyncio
+    async def test_rewind_to_first_message_inplace_opts_into_empty_persist(
+        self,
+    ) -> None:
+        messages = _make_messages("hello", "world")
+        allow_empty_calls: list[bool] = []
+
+        async def save_messages(*, allow_empty: bool = False) -> None:
+            allow_empty_calls.append(allow_empty)
+
+        async def reset_session() -> None:
+            pass
+
+        mgr = RewindManager(
+            messages=messages, save_messages=save_messages, reset_session=reset_session
+        )
+
+        await mgr.rewind_to_message(1, restore_files=False, inplace=True)
+
+        assert allow_empty_calls == [True]
+        assert [m.role for m in messages] == [Role.system]
 
     @pytest.mark.asyncio
     async def test_rewind_to_message_invalid_index(self) -> None:
