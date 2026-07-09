@@ -210,6 +210,15 @@ class TestReadSafeResultEncoding:
         assert got.text == "ok\n"
         assert got.encoding == "utf-8"
 
+    def test_reports_utf8_sig_and_strips_bom_for_utf8_bom_file(
+        self, tmp_path: Path
+    ) -> None:
+        f = tmp_path / "bom.txt"
+        f.write_bytes(b"\xef\xbb\xbf---\nname: x\n---\n")
+        got = read_safe(f)
+        assert got.encoding == "utf-8-sig"
+        assert got.text == "---\nname: x\n---\n"
+
     @pytest.mark.asyncio
     async def test_async_reports_utf16_when_bom_present(self, tmp_path: Path) -> None:
         f = tmp_path / "u16.txt"

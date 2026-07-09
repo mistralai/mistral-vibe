@@ -51,6 +51,18 @@ class TestSkillManagerDiscovery:
         assert "skill-two" in manager.available_skills
         assert "skill-three" in manager.available_skills
 
+    def test_discovers_skill_with_utf8_bom(self, skills_dir: Path) -> None:
+        bom_skill_dir = skills_dir / "bom-skill"
+        bom_skill_dir.mkdir()
+        content = "---\nname: bom-skill\ndescription: A BOM skill\n---\n\nBody"
+        (bom_skill_dir / "SKILL.md").write_bytes(b"\xef\xbb\xbf" + content.encode())
+
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        manager = SkillManager(lambda: config)
+
+        assert "bom-skill" in manager.available_skills
+        assert manager.available_skills["bom-skill"].description == "A BOM skill"
+
     def test_ignores_directories_without_skill_md(self, skills_dir: Path) -> None:
         # Create a directory that's not a skill
         not_a_skill = skills_dir / "not-a-skill"

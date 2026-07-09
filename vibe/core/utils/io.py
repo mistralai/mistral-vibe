@@ -84,8 +84,11 @@ def _get_candidate_encodings(
             seen.add(key)
             yield encoding
 
-    yield from _emit("utf-8")
+    # BOM sniffing must run before the plain UTF-8 attempt: a UTF-8 BOM file
+    # decodes "successfully" as utf-8 but keeps U+FEFF at the start of the
+    # text, breaking startswith-style checks downstream (e.g. frontmatter).
     yield from _emit(_encodings_from_bom(raw))
+    yield from _emit("utf-8")
     yield from _emit(preferred_encoding)
     yield from _emit(locale.getpreferredencoding(False))
     yield from _emit(_encoding_from_best_match(raw))
