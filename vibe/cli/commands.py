@@ -176,6 +176,14 @@ class CommandRegistry:
                 description="Rewind to a previous message",
                 handler="_start_rewind_mode",
             ),
+            "fork": Command(
+                aliases=frozenset(["/fork"]),
+                description=(
+                    "Fork the current session into a new one with the same history. "
+                    "The original session is preserved on disk."
+                ),
+                handler="_fork_session",
+            ),
             "loop": Command(
                 aliases=frozenset(["/loop"]),
                 description=(

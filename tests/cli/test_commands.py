@@ -134,6 +134,28 @@ class TestCommandRegistry:
         assert cmd.handler == "_show_session_picker"
         assert cmd.description == "Browse, resume, or delete saved sessions"
 
+    def test_fork_command_registration(self) -> None:
+        registry = CommandRegistry()
+        assert registry.get_command_name("/fork") == "fork"
+        result = registry.parse_command("/fork")
+        assert result is not None
+        _, cmd, cmd_args = result
+        assert cmd.handler == "_fork_session"
+        assert cmd_args == ""
+
+    def test_fork_command_passes_message_id_arg(self) -> None:
+        registry = CommandRegistry()
+        result = registry.parse_command("/fork msg-123")
+        assert result is not None
+        _, cmd, cmd_args = result
+        assert cmd.handler == "_fork_session"
+        assert cmd_args == "msg-123"
+
+    def test_fork_command_excluded_when_disabled(self) -> None:
+        registry = CommandRegistry(excluded_commands=["fork"])
+        assert registry.get_command_name("/fork") is None
+        assert registry.parse_command("/fork") is None
+
     def test_rename_command_registration(self) -> None:
         registry = CommandRegistry()
         assert registry.get_command_name("/rename") == "rename"

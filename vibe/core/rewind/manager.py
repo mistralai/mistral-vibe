@@ -167,6 +167,16 @@ class RewindManager:
 
         return message_content, restore_errors, restored_paths
 
+    async def fork_from_latest(self) -> None:
+        """Fork the session preserving the full history.
+
+        Saves the current history under the existing session (preserving it
+        as parent on disk), then resets to a fresh session id. Unlike
+        ``rewind_to_message``, no truncation occurs.
+        """
+        await self._save_messages()
+        await self._reset_session()
+
     # -- Private helpers -------------------------------------------------------
 
     def _truncate_messages(

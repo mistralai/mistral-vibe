@@ -2869,6 +2869,31 @@ class VibeApp(App):  # noqa: PLR0904
             )
         )
 
+    async def _fork_session(self, cmd_args: str = "", **kwargs: Any) -> None:
+        if self._agent_running:
+            self.notify(
+                "Cannot fork while the agent is running. Interrupt it first.",
+                severity="warning",
+            )
+            return
+
+        old_session_id = self.agent_loop.session_id
+        await self.agent_loop.rewind_manager.fork_from_latest()
+
+        self._reset_ui_state()
+        await self._load_more.hide()
+        await self._messages_area.remove_children()
+        await self._resume_history_from_messages()
+        self._loop_runner.restore_from_session()
+
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                f"Forked to session `{short_session_id(self.agent_loop.session_id)}`. "
+                f"Original `{short_session_id(old_session_id)}` preserved "
+                f"(resume with: vibe --resume {short_session_id(old_session_id)})"
+            )
+        )
+
     async def _reload_config(self, **kwargs: Any) -> None:
         try:
             self._reset_ui_state()

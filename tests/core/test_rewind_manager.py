@@ -215,6 +215,28 @@ class TestRewind:
         assert len(messages) == 3
 
     @pytest.mark.asyncio
+    async def test_fork_from_latest_saves_full_then_resets_no_truncation(self) -> None:
+        messages = _make_messages("hello", "world")
+        saved_lengths: list[int] = []
+        reset_calls: list[bool] = []
+
+        async def save_messages(*, allow_empty: bool = False) -> None:
+            saved_lengths.append(len(messages))
+
+        async def reset_session() -> None:
+            reset_calls.append(True)
+
+        mgr = RewindManager(
+            messages=messages, save_messages=save_messages, reset_session=reset_session
+        )
+
+        await mgr.fork_from_latest()
+
+        assert saved_lengths == [5]
+        assert reset_calls == [True]
+        assert len(messages) == 5
+
+    @pytest.mark.asyncio
     async def test_rewind_to_message_inplace_saves_truncated_no_reset(self) -> None:
         messages = _make_messages("hello", "world")
         saved_lengths: list[int] = []
