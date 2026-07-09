@@ -5,6 +5,7 @@ import shlex
 import subprocess
 import sys
 from threading import Lock
+from typing import Final
 
 import keyring
 from keyring.errors import KeyringError, PasswordDeleteError
@@ -15,6 +16,15 @@ _DISABLE_KEYRING_ENV_VAR = "VIBE_TEST_DISABLE_KEYRING"
 _cache_lock = Lock()
 _api_key_cache: dict[str, str | None] = {}
 _SECURITY_NOT_FOUND = "could not be found"
+
+# The Windows Credential Manager rejects blobs over CRED_MAX_CREDENTIAL_BLOB_SIZE
+# (2560 bytes; keyring stores passwords as UTF-16). Larger secrets, such as MCP
+# OAuth token payloads, are split across `<username>__chunk_<i>` entries with the
+# main entry holding a marker recording the chunk count.
+_WIN_CRED_MAX_UTF16_BYTES: Final = 2400
+_WIN_CHUNK_CHARS: Final = 600
+_CHUNK_MARKER_PREFIX: Final = "__vibe-chunked-v1__:"
+_MAX_CHUNK_COUNT: Final = 100
 
 
 class _PasswordNotFoundError(KeyringError):
@@ -58,10 +68,81 @@ def _delete_macos_password(service: str, username: str) -> None:
         raise KeyringError("Can't delete password in macOS Keychain") from exc
 
 
+def _uses_windows_credential_chunking() -> bool:
+    return sys.platform == "win32"
+
+
+def _chunk_username(username: str, index: int) -> str:
+    return f"{username}__chunk_{index}"
+
+
+def _exceeds_windows_blob_limit(password: str) -> bool:
+    return len(password.encode("utf-16-le")) > _WIN_CRED_MAX_UTF16_BYTES
+
+
+def _parse_chunk_count(value: str) -> int | None:
+    if not value.startswith(_CHUNK_MARKER_PREFIX):
+        return None
+    suffix = value.removeprefix(_CHUNK_MARKER_PREFIX)
+    if not suffix.isdigit():
+        return None
+    count = int(suffix)
+    return count if 0 < count <= _MAX_CHUNK_COUNT else None
+
+
+def _delete_chunks(service: str, username: str, *, start: int) -> None:
+    for index in range(start, _MAX_CHUNK_COUNT):
+        try:
+            keyring.delete_password(service, _chunk_username(username, index))
+        except (PasswordDeleteError, KeyringError):
+            return
+
+
+def _set_chunked_password(service: str, username: str, password: str) -> None:
+    chunks = [
+        password[index : index + _WIN_CHUNK_CHARS]
+        for index in range(0, len(password), _WIN_CHUNK_CHARS)
+    ]
+    if len(chunks) > _MAX_CHUNK_COUNT:
+        raise KeyringError("Secret is too large for the Windows Credential Manager")
+    # The marker is deleted first and rewritten last so an interrupted write
+    # reads back as an absent secret, never as a mix of old and new chunks.
+    try:
+        keyring.delete_password(service, username)
+    except PasswordDeleteError:
+        pass
+    for index, chunk in enumerate(chunks):
+        keyring.set_password(service, _chunk_username(username, index), chunk)
+    keyring.set_password(service, username, f"{_CHUNK_MARKER_PREFIX}{len(chunks)}")
+    _delete_chunks(service, username, start=len(chunks))
+
+
+def _read_chunked_password(service: str, username: str, count: int) -> str | None:
+    parts: list[str] = []
+    for index in range(count):
+        part = keyring.get_password(service, _chunk_username(username, index))
+        if part is None:
+            return None
+        parts.append(part)
+    return "".join(parts)
+
+
+def _delete_password_with_chunks(service: str, username: str) -> None:
+    value = keyring.get_password(service, username)
+    keyring.delete_password(service, username)
+    if value is not None and _parse_chunk_count(value) is not None:
+        _delete_chunks(service, username, start=0)
+
+
 def _set_password(service: str, username: str, password: str) -> None:
     if not _should_use_macos_security():
         try:
-            keyring.set_password(service, username, password)
+            if _uses_windows_credential_chunking() and _exceeds_windows_blob_limit(
+                password
+            ):
+                _set_chunked_password(service, username, password)
+            else:
+                keyring.set_password(service, username, password)
         except ImportError as exc:
             raise KeyringError("Can't load keyring backend") from exc
         return
@@ -104,9 +185,12 @@ def _get_password(service: str, username: str) -> str | None:
         return result.stdout.removesuffix("\n")
 
     try:
-        return keyring.get_password(service, username)
+        value = keyring.get_password(service, username)
     except ImportError as exc:
         raise KeyringError("Can't load keyring backend") from exc
+    if value is None or (count := _parse_chunk_count(value)) is None:
+        return value
+    return _read_chunked_password(service, username, count)
 
 
 def _delete_password(service: str, username: str) -> None:
@@ -115,7 +199,10 @@ def _delete_password(service: str, username: str) -> None:
         return
 
     try:
-        keyring.delete_password(service, username)
+        if _uses_windows_credential_chunking():
+            _delete_password_with_chunks(service, username)
+        else:
+            keyring.delete_password(service, username)
     except ImportError as exc:
         raise KeyringError("Can't load keyring backend") from exc
 
