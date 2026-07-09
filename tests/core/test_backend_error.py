@@ -58,7 +58,7 @@ class TestBackendErrorFmt:
 
     def test_unauthorized_short_circuits(self) -> None:
         err = _make_error(status=401)
-        assert str(err) == "Invalid API key. Please check your API key and try again."
+        assert str(err) == "Invalid API key. Please check your API key and try again.  Try `vibe --setup` and re-authenticate"
 
     def test_rate_limit_short_circuits(self) -> None:
         err = _make_error(status=429)
