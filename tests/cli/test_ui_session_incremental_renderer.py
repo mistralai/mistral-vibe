@@ -205,7 +205,6 @@ async def test_ui_session_incremental_loader_load_more_batches_until_done(
         )
 
 
-@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_ui_session_incremental_loader_pages_before_initial_snapshot(
     vibe_config: VibeConfigSchema,
@@ -264,6 +263,7 @@ async def test_ui_session_incremental_loader_keeps_top_alignment_when_not_scroll
         assert chat.scroll_y == 0
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_chat_scroll_does_not_reanchor_during_text_selection(
     vibe_config: VibeConfigSchema,

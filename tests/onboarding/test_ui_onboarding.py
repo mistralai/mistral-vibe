@@ -670,10 +670,6 @@ async def test_ui_delays_browser_sign_in_url_help() -> None:
         screen = app.screen
         screen._show_sign_in_url_help(screen._attempt_number, screen.state.sign_in_url)
 
-        # Manually trigger the helper timer to display the sign-in URL help
-        screen = app.screen
-        screen._show_sign_in_url_help(screen._attempt_number, screen.state.sign_in_url)
-
         await _wait_for(
             lambda: "copy this URL" in _browser_sign_in_url_text(app.screen), pilot
         )

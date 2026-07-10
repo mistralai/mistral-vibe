@@ -63,8 +63,6 @@ async def _wait_for_running_shell(
         await pilot.pause(0.05)
     raise TimeoutError(f"Running shell effect did not appear within {timeout}s")
 
-# Failing in OBS
-pytestmark = pytest.mark.terminal
 
 def _result_output(message: ToolResultMessage) -> dict[str, JsonValue]:
     assert message._entry is not None

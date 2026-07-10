@@ -20,7 +20,6 @@ pytestmark = pytest.mark.terminal
 def vibe_app() -> VibeApp:
     return build_test_vibe_app()
 
-pytestmark = pytest.mark.terminal
 
 async def _wait_until(pilot, predicate, timeout: float = 2.0) -> bool:
     deadline = time.monotonic() + timeout

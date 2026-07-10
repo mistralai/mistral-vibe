@@ -234,6 +234,7 @@ async def test_popped_queued_skill_does_not_fire_telemetry(
             await _release_agent_job(vibe_app_with_skills, blocker, release)
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_queued_head_skill_injects_skill_tool_message(
     vibe_app_with_skills: VibeApp,
@@ -271,6 +272,7 @@ async def test_queued_head_skill_injects_skill_tool_message(
         assert _skill_effect_loaded(vibe_app_with_skills, "my-skill")
 
 
+@pytest.mark.terminal
 @pytest.mark.asyncio
 async def test_skill_prompt_flushed_before_bash_injects_skill_tool_message(
     vibe_app_with_skills: VibeApp,
