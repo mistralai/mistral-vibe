@@ -35,6 +35,7 @@ from vibe.core.config._migration import migrate_config
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.models import (
     THINKING_LEVELS as THINKING_LEVELS,
+    ConfigFileError,
     ConnectorConfig,
     ExperimentsConfig,
     MCPServer,
@@ -123,9 +124,9 @@ class TomlFileSettingsSource(PydanticBaseSettingsSource):
         except FileNotFoundError:
             return {}
         except tomllib.TOMLDecodeError as e:
-            raise RuntimeError(f"Invalid TOML in {file}: {e}") from e
+            raise ConfigFileError(file, f"Invalid TOML in {file}: {e}") from e
         except OSError as e:
-            raise RuntimeError(f"Cannot read {file}: {e}") from e
+            raise ConfigFileError(file, f"Cannot read {file}: {e}") from e
 
     def get_field_value(
         self, field: FieldInfo, field_name: str

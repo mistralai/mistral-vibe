@@ -181,7 +181,13 @@ from vibe.core.autocompletion.path_prompt_adapter import (
     extract_image_resources,
     render_path_prompt_from_payload,
 )
-from vibe.core.config import DEFAULT_THEME, AnyVibeConfig, ModelConfig, VibeConfig
+from vibe.core.config import (
+    DEFAULT_THEME,
+    AnyVibeConfig,
+    ConfigFileError,
+    ModelConfig,
+    VibeConfig,
+)
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.hooks.models import HookStartEvent
 from vibe.core.log_reader import LogReader
@@ -1507,13 +1513,17 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_mcpapp_mcptoggled(self, message: MCPApp.MCPToggled) -> None:
         from vibe.cli.textual_ui.widgets.mcp_app import MCPSourceKind
 
-        persist_mcp_toggle(
-            self.agent_loop.config,
-            name=message.name,
-            is_connector=message.kind == MCPSourceKind.CONNECTOR,
-            disabled=message.disabled,
-            tool_name=message.tool_name,
-        )
+        try:
+            persist_mcp_toggle(
+                self.agent_loop.config,
+                name=message.name,
+                is_connector=message.kind == MCPSourceKind.CONNECTOR,
+                disabled=message.disabled,
+                tool_name=message.tool_name,
+            )
+        except ConfigFileError as exc:
+            self.notify(str(exc), title="Could not save MCP setting", severity="error")
+            return
         self._refresh_config_from_disk()
         self.query_one(_get_mcp_app_class()).refresh_index()
         self._refresh_banner()

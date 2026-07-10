@@ -26,6 +26,12 @@ from vibe.core.paths import SESSION_LOG_DIR
 from vibe.core.types import Backend
 
 
+class ConfigFileError(RuntimeError):
+    def __init__(self, path: Path, message: str) -> None:
+        super().__init__(message)
+        self.path = path
+
+
 class MissingAPIKeyError(RuntimeError):
     def __init__(self, env_key: str, provider_name: str) -> None:
         super().__init__(

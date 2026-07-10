@@ -40,6 +40,7 @@ from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.discovered import DiscoveredConfigLayer
 from vibe.core.config.models import (
     THINKING_LEVELS,
+    ConfigFileError,
     ConnectorConfig,
     ExperimentsConfig,
     MCPHttp,
@@ -115,6 +116,7 @@ __all__ = [
     "ConfigChangeCallback",
     "ConfigChangeEvent",
     "ConfigDefinitionError",
+    "ConfigFileError",
     "ConfigFragment",
     "ConfigLayer",
     "ConfigLayerError",
