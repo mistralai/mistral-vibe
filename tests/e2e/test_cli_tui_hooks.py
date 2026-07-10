@@ -19,6 +19,8 @@ from tests.e2e.common import (
 )
 from tests.e2e.mock_server import StreamingMockServer
 
+pytestmark = pytest.mark.network
+
 
 def _enable_hooks(vibe_home: Path, invocation_path: Path) -> None:
     config_path = vibe_home / "config.toml"

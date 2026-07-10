@@ -39,6 +39,7 @@ from vibe.core.types import FunctionCall, ToolCall
 RESPONSE_TIMEOUT = 2.0
 MOCK_ENTRYPOINT_PATH = "tests/mock/mock_entrypoint.py"
 PLAYGROUND_DIR = TESTS_ROOT / "playground"
+pytestmark = pytest.mark.network
 
 
 def deep_merge(target: dict, source: dict) -> None:

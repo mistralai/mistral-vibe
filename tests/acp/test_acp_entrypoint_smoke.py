@@ -21,6 +21,8 @@ BROWSER_AUTH_DESCRIPTION = (
     "Sign into Mistral Vibe through your Mistral AI Studio account."
 )
 
+pytestmark = pytest.mark.network
+
 
 class _AcpSmokeClient(Client):
     def on_connect(self, conn: Any) -> None:

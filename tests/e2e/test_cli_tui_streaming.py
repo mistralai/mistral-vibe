@@ -14,6 +14,8 @@ from tests.e2e.common import (
 )
 from tests.e2e.mock_server import StreamingMockServer
 
+pytestmark = pytest.mark.network
+
 
 @pytest.mark.timeout(15)
 def test_spawn_cli_to_send_and_receive_message(

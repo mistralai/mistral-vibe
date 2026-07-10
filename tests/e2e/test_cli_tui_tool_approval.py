@@ -14,6 +14,8 @@ from tests.e2e.common import (
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
+pytestmark = pytest.mark.network
+
 PREDICTABLE_OUTPUT = "__E2E_BASH_OK__"
 TOOL_ARGUMENTS = f'{{"command":"printf \\"{PREDICTABLE_OUTPUT}\\\\n\\""}}'
 
