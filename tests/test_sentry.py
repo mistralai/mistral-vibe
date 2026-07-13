@@ -4,7 +4,7 @@ from typing import Any, cast
 
 from sentry_sdk.types import Event, Hint
 
-from vibe.core.sentry import _before_send
+from vibe.core.sentry import SentryTarget, _before_send
 
 
 def _send(event: dict[str, Any]) -> dict[str, Any]:
@@ -37,3 +37,8 @@ def test_before_send_scrubs_paths_across_event():
     result = _send(event)
     assert result["message"] == "boom at [Filtered]/x.py"
     assert result["exception"]["values"][0]["value"] == "failed in [Filtered]/x.py"
+
+
+def test_sentry_target_maps_to_distinct_project_server_names():
+    assert SentryTarget.CLI.server_name == "vibe-cli"
+    assert SentryTarget.ACP.server_name == "vibe-acp"

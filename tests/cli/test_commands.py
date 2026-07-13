@@ -69,18 +69,11 @@ class TestCommandRegistry:
         assert registry.get_command_name("/teleport") == "teleport"
         assert registry.has_command("teleport")
 
-    def test_teleport_command_registration_ignores_project_picker_flag(self) -> None:
-        registry = CommandRegistry(
-            vibe_code_enabled=True, experimental_vibe_code_project_picker_enabled=False
-        )
+    def test_teleport_command_registration_uses_latest_context(self) -> None:
+        registry = CommandRegistry(vibe_code_enabled=True)
         assert registry.get_command_name("/teleport") == "teleport"
 
-        registry.refresh(
-            CommandContext(
-                vibe_code_enabled=False,
-                experimental_vibe_code_project_picker_enabled=True,
-            )
-        )
+        registry.refresh(CommandContext(vibe_code_enabled=False))
         assert registry.get_command_name("/teleport") is None
 
     def test_teleport_help_text_uses_resolved_context(self) -> None:
@@ -91,18 +84,8 @@ class TestCommandRegistry:
         assert eligible_registry.get("teleport") is not None
         assert "/teleport" in eligible_registry.get_help_text()
 
-    def test_vibe_code_project_command_not_registered_without_picker_flag(self) -> None:
-        registry = CommandRegistry(
-            vibe_code_enabled=True, experimental_vibe_code_project_picker_enabled=False
-        )
-
-        assert registry.get_command_name("/remote-project") is None
-        assert registry.parse_command("/remote-project") is None
-
-    def test_vibe_code_project_command_registered_with_picker_flag(self) -> None:
-        registry = CommandRegistry(
-            vibe_code_enabled=True, experimental_vibe_code_project_picker_enabled=True
-        )
+    def test_vibe_code_project_command_registered_when_vibe_code_enabled(self) -> None:
+        registry = CommandRegistry(vibe_code_enabled=True)
 
         assert registry.get_command_name("/remote-project") == "remote-project"
         result = registry.parse_command("/remote-project")

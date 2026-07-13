@@ -10,7 +10,7 @@ from vibe.core.config import (
     RemoveOperationPatch,
     ReplaceOperationPatch,
 )
-from vibe.core.config.patch import ConfigPatch, PatchOp
+from vibe.core.config.patch import ConfigPatch, PatchOp, ensure_parent_paths
 
 
 @pytest.mark.parametrize(
@@ -205,6 +205,64 @@ def test_config_patch_describe_multiple_operations() -> None:
         "add '/tools/disabled_tools/-' = 'bash'",
         "remove '/tools/deprecated_setting'",
     ]
+
+
+def test_ensure_parent_paths_vivifies_missing_dicts() -> None:
+    data: dict[str, Any] = {}
+    ops = [AddOperationPatch(path="/tools/bash/allowlist", value=["ls"])]
+
+    result = ensure_parent_paths(data, ops)
+
+    assert data == {}
+    assert result == {"tools": {"bash": {}}}
+
+
+def test_ensure_parent_paths_leaves_existing_dicts() -> None:
+    data: dict[str, Any] = {"tools": {"bash": {"allowlist": ["ls"]}}}
+    ops = [AddOperationPatch(path="/tools/bash/allowlist", value=["cat"])]
+
+    result = ensure_parent_paths(data, ops)
+
+    assert result == {"tools": {"bash": {"allowlist": ["ls"]}}}
+
+
+def test_ensure_parent_paths_leaves_non_dict_parents() -> None:
+    data: dict[str, Any] = {"tools": "not-a-dict"}
+    ops = [AddOperationPatch(path="/tools/bash/allowlist", value=["ls"])]
+
+    result = ensure_parent_paths(data, ops)
+
+    assert result == {"tools": "not-a-dict"}
+
+
+def test_ensure_parent_paths_skips_array_index_tokens() -> None:
+    data: dict[str, Any] = {}
+    ops = [AddOperationPatch(path="/tools/0/name", value="bash")]
+
+    result = ensure_parent_paths(data, ops)
+
+    assert result == {"tools": {}}
+
+
+def test_ensure_parent_paths_skips_append_token() -> None:
+    data: dict[str, Any] = {}
+    ops = [AddOperationPatch(path="/tools/-/name", value="bash")]
+
+    result = ensure_parent_paths(data, ops)
+
+    assert result == {"tools": {}}
+
+
+def test_ensure_parent_paths_ignores_non_add_ops() -> None:
+    data: dict[str, Any] = {}
+    ops: list[PatchOp] = [
+        ReplaceOperationPatch(path="/tools/bash/allowlist", value=["ls"]),
+        RemoveOperationPatch(path="/tools/bash/allowlist"),
+    ]
+
+    result = ensure_parent_paths(data, ops)
+
+    assert result == {}
 
 
 def test_scenario_build_patch_incrementally() -> None:

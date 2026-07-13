@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import pytest
+from textual.app import App, ComposeResult
+from textual.containers import Container
 
+from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.core.tools.builtins.ask_user_question import (
     AskUserQuestionArgs,
     Choice,
@@ -123,6 +126,35 @@ class TestQuestionAppState:
         assert app._is_other_selected is False
         app.selected_option = 2  # Other option
         assert app._is_other_selected is True
+
+    def test_focusing_other_input_selects_other_option(self, single_question_args):
+        from textual import events
+        from textual.widgets import Input
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        app.other_input = Input()
+        app.selected_option = 0  # A regular option is selected
+
+        app.on_descendant_focus(events.DescendantFocus(app.other_input))
+
+        assert app.selected_option == app._other_option_idx
+        assert app._is_other_selected is True
+
+    def test_focusing_non_other_widget_leaves_selection(self, single_question_args):
+        from textual import events
+        from textual.widgets import Input
+
+        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+
+        app = QuestionApp(single_question_args)
+        app.other_input = Input()
+        app.selected_option = 1
+
+        app.on_descendant_focus(events.DescendantFocus(Input()))
+
+        assert app.selected_option == 1
 
     def test_is_submit_selected(self, multi_select_args):
         from vibe.cli.textual_ui.widgets.question_app import QuestionApp
@@ -524,68 +556,70 @@ class TestSingleSelectOtherBehavior:
         assert is_other is False
 
 
-class TestMultiSelectAutoSelect:
-    def test_typing_auto_selects_other(self, multi_select_args):
-        from unittest.mock import MagicMock
+class TestMultiSelectFreeChoice:
+    @pytest.mark.asyncio
+    async def test_enter_toggles_free_choice(self, multi_select_args):
+        app = _HostApp(multi_select_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+            other_idx = qapp._other_option_idx
 
-        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+            # Navigate with the keyboard so the free choice starts unselected.
+            await pilot.press("down", "down", "down")
+            assert qapp._is_other_selected
+            assert other_idx not in qapp.multi_selections.get(0, set())
 
-        app = QuestionApp(multi_select_args)
-        app.other_input = MagicMock()
-        app.other_input.value = "Custom text"
+            await pilot.press("enter")
+            assert other_idx in qapp.multi_selections[0]
 
-        # Initially no selections
-        assert app._other_option_idx not in app.multi_selections.get(0, set())
+            await pilot.press("enter")
+            assert other_idx not in qapp.multi_selections[0]
 
-        # Simulate input change
-        from textual.widgets import Input
+    @pytest.mark.asyncio
+    async def test_typing_selects_free_choice(self, multi_select_args):
+        app = _HostApp(multi_select_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+            other_idx = qapp._other_option_idx
 
-        app.on_input_changed(Input.Changed(app.other_input, "Custom text"))
+            # Navigate with the keyboard so the free choice starts unselected.
+            await pilot.press("down", "down", "down")
+            assert other_idx not in qapp.multi_selections.get(0, set())
 
-        # Other should now be selected
-        assert app._other_option_idx in app.multi_selections[0]
+            await pilot.press(*"x")
 
-    def test_clearing_auto_deselects_other(self, multi_select_args):
-        from unittest.mock import MagicMock
+            assert other_idx in qapp.multi_selections[0]
 
-        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
+    @pytest.mark.asyncio
+    async def test_typing_stores_text_and_keeps_selection(self, multi_select_args):
+        app = _HostApp(multi_select_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+            other_idx = qapp._other_option_idx
 
-        app = QuestionApp(multi_select_args)
-        app.other_input = MagicMock()
+            assert qapp.other_static is not None
+            await pilot.click(qapp.other_static)
+            await pilot.press(*"custom")
 
-        # Start with Other selected and text
-        app.multi_selections[0] = {app._other_option_idx}
-        app.other_input.value = ""  # Cleared
+            assert qapp.other_texts.get(0) == "custom"
+            assert other_idx in qapp.multi_selections[0]
 
-        # Simulate input change with empty value
-        from textual.widgets import Input
+    @pytest.mark.asyncio
+    async def test_clearing_free_choice_deselects_it(self, multi_select_args):
+        app = _HostApp(multi_select_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+            other_idx = qapp._other_option_idx
 
-        app.on_input_changed(Input.Changed(app.other_input, ""))
+            assert qapp.other_static is not None
+            await pilot.click(qapp.other_static)
+            await pilot.press(*"hi")
+            assert other_idx in qapp.multi_selections[0]
 
-        # Other should now be deselected
-        assert app._other_option_idx not in app.multi_selections[0]
+            await pilot.press("backspace", "backspace")
 
-    def test_auto_select_preserves_other_selections(self, multi_select_args):
-        from unittest.mock import MagicMock
-
-        from vibe.cli.textual_ui.widgets.question_app import QuestionApp
-
-        app = QuestionApp(multi_select_args)
-        app.other_input = MagicMock()
-        app.other_input.value = "Custom"
-
-        # Pre-select Auth and Logging
-        app.multi_selections[0] = {0, 2}
-
-        # Simulate typing
-        from textual.widgets import Input
-
-        app.on_input_changed(Input.Changed(app.other_input, "Custom"))
-
-        # All selections should be preserved plus Other
-        assert 0 in app.multi_selections[0]
-        assert 2 in app.multi_selections[0]
-        assert app._other_option_idx in app.multi_selections[0]
+            assert qapp.other_texts.get(0) == ""
+            assert other_idx not in qapp.multi_selections.get(0, set())
 
 
 class TestNumberKeyShortcuts:
@@ -819,3 +853,77 @@ class TestVimKeybindings:
         app.on_key(events.Key("j", "j"))
 
         assert app.selected_option == 1
+
+
+class _HostApp(App[None]):
+    CSS_PATH = "../../vibe/cli/textual_ui/app.tcss"
+
+    def __init__(self, args: AskUserQuestionArgs) -> None:
+        super().__init__()
+        self._args = args
+
+    def compose(self) -> ComposeResult:
+        with Container(id="bottom-app-container"):
+            yield QuestionApp(args=self._args)
+
+
+class TestQuestionAppClicks:
+    @pytest.mark.asyncio
+    async def test_clicking_option_selects_it(self, single_question_args):
+        app = _HostApp(single_question_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+            assert qapp.selected_option == 0
+
+            await pilot.click(qapp.option_widgets[1])
+
+            assert qapp.selected_option == 1
+
+    @pytest.mark.asyncio
+    async def test_clicking_other_row_selects_other(self, single_question_args):
+        app = _HostApp(single_question_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+            assert not qapp._is_other_selected
+
+            assert qapp.other_static is not None
+            await pilot.click(qapp.other_static)
+
+            assert qapp.selected_option == qapp._other_option_idx
+            assert qapp._is_other_selected
+
+    @pytest.mark.asyncio
+    async def test_clicking_submit_selects_submit(self, multi_select_args):
+        app = _HostApp(multi_select_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+            assert qapp.submit_widget is not None
+
+            await pilot.click(qapp.submit_widget)
+
+            assert qapp.selected_option == qapp._submit_option_idx
+
+    @pytest.mark.asyncio
+    async def test_clicking_option_toggles_in_multi_select(self, multi_select_args):
+        app = _HostApp(multi_select_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+
+            await pilot.click(qapp.option_widgets[1])
+            assert qapp.selected_option == 1
+            assert 1 in qapp.multi_selections[0]
+
+            await pilot.click(qapp.option_widgets[1])
+            assert 1 not in qapp.multi_selections[0]
+
+    @pytest.mark.asyncio
+    async def test_clicking_free_choice_selects_it(self, multi_select_args):
+        app = _HostApp(multi_select_args)
+        async with app.run_test() as pilot:
+            qapp = app.query_one(QuestionApp)
+
+            assert qapp.other_static is not None
+            await pilot.click(qapp.other_static)
+
+            assert qapp.selected_option == qapp._other_option_idx
+            assert qapp._other_option_idx in qapp.multi_selections[0]

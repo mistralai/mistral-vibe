@@ -28,6 +28,7 @@ from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.cache_store import FileSystemVibeCodeCacheStore
 from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.hooks.config import HookConfigResult, load_hooks_from_fs
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE, WORKTREES_DIR
@@ -224,6 +225,29 @@ def _resume_previous_session(
     )
 
 
+async def _resolve_programmatic_teleport_project(config: VibeConfig) -> str:
+    from vibe.core.teleport.git import GitRepository
+    from vibe.core.vibe_code_project import (
+        VibeCodeProjectApiError,
+        VibeCodeProjectPickerService,
+    )
+
+    api_key = config.vibe_code_api_key
+    if not api_key:
+        raise VibeCodeProjectApiError(f"{config.vibe_code_api_key_env_var} not set.")
+
+    async with GitRepository() as git:
+        git_info = await git.get_info()
+
+    resolver = VibeCodeProjectPickerService(
+        base_url=config.vibe_code_sessions_base_url,
+        api_key=api_key,
+        repo_root=git_info.repo_root or Path.cwd().resolve(),
+    )
+    resolution = await resolver.resolve_project_for_headless_teleport(git_info)
+    return resolution.project_id
+
+
 def _run_programmatic_mode(
     args: argparse.Namespace,
     config: VibeConfig,
@@ -244,6 +268,27 @@ def _run_programmatic_mode(
         sys.exit(1)
     output_format = OutputFormat(args.output if hasattr(args, "output") else "text")
 
+    teleport = args.teleport and config.vibe_code_enabled
+    teleport_project_id: str | None = None
+    if teleport:
+        from vibe.core.teleport.errors import ServiceTeleportError
+        from vibe.core.vibe_code_project import (
+            VibeCodeProjectApiError,
+            VibeCodeProjectResolverError,
+        )
+
+        try:
+            teleport_project_id = asyncio.run(
+                _resolve_programmatic_teleport_project(config)
+            )
+        except (
+            VibeCodeProjectApiError,
+            VibeCodeProjectResolverError,
+            ServiceTeleportError,
+        ) as e:
+            print(f"Teleport error: {e}", file=sys.stderr)
+            sys.exit(1)
+
     from vibe.core.programmatic import run_programmatic
 
     try:
@@ -256,7 +301,8 @@ def _run_programmatic_mode(
             output_format=output_format,
             previous_messages=loaded_session[0] if loaded_session else None,
             agent_name=initial_agent_name,
-            teleport=args.teleport and config.vibe_code_enabled,
+            teleport=teleport,
+            teleport_project_id=teleport_project_id,
             headless=True,
             hook_config_result=hook_config_result,
             terminal_emulator=detect_terminal(),
@@ -288,7 +334,7 @@ def _run_interactive_mode(
 
     try:
         agent_loop = AgentLoop(
-            config,
+            LegacyConfigOrchestrator(config),
             agent_name=initial_agent_name,
             enable_streaming=True,
             launch_context=_build_cli_launch_context(),

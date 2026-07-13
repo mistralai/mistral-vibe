@@ -7,6 +7,7 @@ from vibe.core.compaction.context import (
     extract_summary,
     parse_previous_user_messages,
     render_compaction_context,
+    render_teleport_summary_request,
 )
 from vibe.core.compaction.manager import (
     CompactionFailedError,
@@ -26,4 +27,5 @@ __all__ = [
     "extract_summary",
     "parse_previous_user_messages",
     "render_compaction_context",
+    "render_teleport_summary_request",
 ]

@@ -7,6 +7,7 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.agents import AgentManager
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
@@ -40,7 +41,7 @@ def _build_managers(config):
     return (
         ToolManager(lambda: config),
         SkillManager(lambda: config),
-        AgentManager(lambda: config),
+        AgentManager(LegacyConfigOrchestrator(config)),
     )
 
 

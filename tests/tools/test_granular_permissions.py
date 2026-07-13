@@ -5,6 +5,7 @@ import os
 import pytest
 
 from vibe.core.tools.base import BaseToolState, ToolPermission
+from vibe.core.tools.builtins import bash as bash_module
 from vibe.core.tools.builtins.bash import (
     Bash,
     BashArgs,
@@ -732,6 +733,26 @@ class TestCollectOutsideDirs:
         dirs = _collect_outside_dirs(["cp /tmp/a /var/b"])
         assert len(dirs) == 2
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "grep root /etc/passwd",
+            "less /etc/passwd",
+            "sha256sum /etc/passwd",
+            "od -c /etc/passwd",
+            "cut -d: -f1 /etc/passwd",
+            "find /etc -name x",
+        ],
+    )
+    def test_read_only_allowlisted_commands_collect_outside_paths(self, command):
+        # Read-only commands are auto-allowed, so their outside paths must still
+        # be collected — otherwise they read outside the workdir with no prompt.
+        assert len(_collect_outside_dirs([command])) >= 1
+
+    def test_read_only_command_in_workdir_not_collected(self):
+        (self.workdir / "local.txt").touch()
+        assert _collect_outside_dirs(["grep root ./local.txt"]) == set()
+
     def test_chmod_skips_plus_x_token(self):
         dirs = _collect_outside_dirs(["chmod +x /tmp/script.sh"])
         # +x should be skipped, only /tmp/script.sh should be considered
@@ -767,3 +788,53 @@ class TestCollectOutsideDirs:
         (self.workdir / "foo" / "bar").touch()
         dirs = _collect_outside_dirs(["cat foo/bar"])
         assert len(dirs) == 0
+
+    def test_forward_slash_absolute_path_detected(self):
+        """Git Bash forward-slash paths must be detected regardless of os.sep.
+
+        Detection keys on "/" (the POSIX-shell separator) rather than os.sep,
+        so /c/Users/... style paths are not silently skipped on Windows.
+        """
+        dirs = _collect_outside_dirs(["cat /c/Users/victim/secret.txt"])
+        assert len(dirs) >= 1
+
+    def test_posix_escaped_space_path_stays_single_token(self, monkeypatch):
+        monkeypatch.setattr(bash_module, "is_windows", lambda: False)
+        seen_paths: list[str] = []
+
+        def is_within_workdir(path: str) -> bool:
+            seen_paths.append(path)
+            return False
+
+        monkeypatch.setattr(bash_module, "is_path_within_workdir", is_within_workdir)
+
+        dirs = _collect_outside_dirs([r"cat /outside/foo\ bar"])
+
+        assert seen_paths == ["/outside/foo bar"]
+        assert len(dirs) == 1
+
+    def test_git_bash_drive_path_normalized_before_workdir_check(self, monkeypatch):
+        seen_paths: list[str] = []
+
+        def is_within_workdir(path: str) -> bool:
+            seen_paths.append(path)
+            return False
+
+        monkeypatch.setattr(bash_module, "is_windows", lambda: True)
+        monkeypatch.setattr(bash_module, "is_path_within_workdir", is_within_workdir)
+
+        dirs = _collect_outside_dirs(["cat /c/Users/victim/secret.txt"])
+
+        assert seen_paths == ["C:/Users/victim/secret.txt"]
+        assert len(dirs) == 1
+
+    @pytest.mark.parametrize(
+        "path", [r"C:\Users\victim\secret.txt", r"src\..\..\outside\file"]
+    )
+    def test_backslash_path_detected(self, path, monkeypatch):
+        # Backslash paths are a Windows concern; a POSIX shell would consume the
+        # backslashes as escapes, so detection only applies under is_windows().
+        monkeypatch.setattr(bash_module, "is_windows", lambda: True)
+        monkeypatch.setattr(bash_module, "is_path_within_workdir", lambda _: False)
+        dirs = _collect_outside_dirs([f"cat {path}"])
+        assert len(dirs) >= 1

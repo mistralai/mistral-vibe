@@ -38,10 +38,11 @@ class TestACPForkSession:
         assert response.session_id != source_session.id
         assert response.modes is not None
         assert response.modes.current_mode_id == BuiltinAgentName.PLAN
-        assert response.models is not None
+        model_config = next(
+            option for option in response.config_options or [] if option.id == "model"
+        )
         assert (
-            response.models.current_model_id
-            == source_session.agent_loop.config.active_model
+            model_config.current_value == source_session.agent_loop.config.active_model
         )
         assert response.config_options is not None
         assert len(response.config_options) == 3

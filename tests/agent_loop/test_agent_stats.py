@@ -277,7 +277,8 @@ class TestReloadPreservesStats:
         assert original_context_tokens > 0
         assert len(agent.messages) > 1
 
-        await agent.reload_with_initial_messages(base_config=config2)
+        agent._replace_base_config(config2)
+        await agent.reload_with_initial_messages()
 
         assert len(agent.messages) > 1
         assert agent.stats.context_tokens == original_context_tokens
@@ -297,7 +298,8 @@ class TestReloadPreservesStats:
         assert agent.stats.output_price_per_million == 2.0
 
         config_other = make_config(active_model="strawberry")
-        await agent.reload_with_initial_messages(base_config=config_other)
+        agent._replace_base_config(config_other)
+        await agent.reload_with_initial_messages()
 
         assert agent.stats.input_price_per_million == 2.5
         assert agent.stats.output_price_per_million == 10.0
@@ -321,7 +323,8 @@ class TestReloadPreservesStats:
         )
 
         config2 = make_config(active_model="strawberry")
-        await agent.reload_with_initial_messages(base_config=config2)
+        agent._replace_base_config(config2)
+        await agent.reload_with_initial_messages()
 
         async for _ in agent.act("Continue"):
             pass
@@ -367,7 +370,8 @@ class TestReloadPreservesMessages:
         old_user = agent.messages[1].content
 
         config2 = make_config(system_prompt_id="cli")
-        await agent.reload_with_initial_messages(base_config=config2)
+        agent._replace_base_config(config2)
+        await agent.reload_with_initial_messages()
 
         assert agent.messages[0].content != old_system
         assert agent.messages[1].content == old_user
@@ -409,7 +413,8 @@ class TestConcurrentReloads:
         config_last = make_config(system_prompt_id="cli")
 
         reference = build_test_agent_loop(config=config_first, backend=FakeBackend([]))
-        await reference.reload_with_initial_messages(base_config=config_last)
+        reference._replace_base_config(config_last)
+        await reference.reload_with_initial_messages()
         winning_system_prompt = reference.messages[0].content
 
         agent = build_test_agent_loop(
@@ -418,15 +423,17 @@ class TestConcurrentReloads:
         async for _ in agent.act("Hello"):
             pass
 
-        results = await asyncio.gather(
-            agent.reload_with_initial_messages(base_config=config_first),
-            agent.reload_with_initial_messages(base_config=config_last),
-            return_exceptions=True,
-        )
+        # Each reload sees a different config on the shared orchestrator; the
+        # generation guard ensures only the last one (reload2, config_last) commits.
+        agent._replace_base_config(config_first)
+        reload1 = agent.reload_with_initial_messages()
+        agent._replace_base_config(config_last)
+        reload2 = agent.reload_with_initial_messages()
+        results = await asyncio.gather(reload1, reload2, return_exceptions=True)
 
         assert results == [None, None]
         assert agent.messages[0].content == winning_system_prompt
-        assert agent._base_config.system_prompt_id == "cli"
+        assert agent.base_config.system_prompt_id == "cli"
 
 
 class TestCompactStatsHandling:
@@ -705,7 +712,8 @@ class TestStatsEdgeCases:
         cost_before = agent.stats.session_cost
 
         config2 = make_config(active_model="strawberry")
-        await agent.reload_with_initial_messages(base_config=config2)
+        agent._replace_base_config(config2)
+        await agent.reload_with_initial_messages()
 
         cost_after = agent.stats.session_cost
 
@@ -766,7 +774,7 @@ class TestStatsEdgeCases:
         original_config = make_config(active_model="devstral-latest")
         agent = build_test_agent_loop(config=original_config, backend=backend)
 
-        await agent.reload_with_initial_messages(base_config=None)
+        await agent.reload_with_initial_messages()
 
         assert agent.config.active_model == "devstral-latest"
 
@@ -777,6 +785,7 @@ class TestStatsEdgeCases:
         agent = build_test_agent_loop(config=original_config, backend=backend)
 
         new_config = make_config(active_model="devstral-small")
-        await agent.reload_with_initial_messages(base_config=new_config)
+        agent._replace_base_config(new_config)
+        await agent.reload_with_initial_messages()
 
         assert agent.config.active_model == "devstral-small"

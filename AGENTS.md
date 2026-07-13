@@ -36,7 +36,7 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 - Private modules are prefixed with `_` (e.g. `_settings.py`, `_config.py`).
 - Pydantic models live in `models.py`; configuration in `_settings.py` / `_config.py`.
 - Abstract interfaces use the `_port.py` suffix (hexagonal-style ports).
-- Tests mirror the source layout; test doubles in `tests/stubs/` are named `Fake*`.
+- Tests mirror the source layout: a test lives in the directory mirroring its source module's package. Tests for a `vibe/core` subpackage go under the matching `tests/core/<subpackage>/` (e.g. `vibe/core/utils/http.py` → `tests/core/utils/test_http_client.py`); tests for modules that sit directly in `vibe/core/` (e.g. `loop.py`, `types.py`) stay flat in `tests/core/`. No `__init__.py` is needed in test subdirectories — pytest runs in `--import-mode=importlib`. Test doubles in `tests/stubs/` are named `Fake*`.
 
 ## Python style
 
@@ -101,6 +101,16 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 
 - When a rule sets `color: $text-muted;`, pair it with a nested `&:ansi { text-style: dim; }` so the muted intent survives under ANSI themes.
 - Never use `ansi_*` colors (e.g. `ansi_red`, `ansi_bright_blue`). Use Textual theme variables like `$primary`, `$foreground`, `$surface`, `$error`, etc. — see https://textual.textualize.io/guide/design/. ANSI themes are derived from these variables automatically.
+
+## Cross-platform
+
+Vibe ships on Linux, macOS, and Windows, but **CI runs the test suite on Linux only**. The machine you develop on is not the machine that gates the PR — code and tests must pass on every platform, and must be *provably* correct on the platforms CI cannot exercise.
+
+- Never rely on host-specific behavior (shell, path separator, line ending, available binaries, `$SHELL`, case sensitivity). Assume the same code runs under `cmd.exe`, Git Bash, `zsh`, and `sh`.
+- Branch platform-specific logic behind the helpers in `vibe.core.utils.platform` (`is_windows()`, `resolve_windows_shell()`), not ad-hoc `sys.platform` checks. Keep POSIX-only assumptions (forward slashes, POSIX `shlex` escaping, `$SHELL`) out of shared paths and scope Windows-only handling to `is_windows()`.
+- Use `pathlib.Path` for path composition; never hardcode `/` or `\\`.
+- Test other-platform code paths **on Linux** by monkeypatching `sys.platform`, env vars, and probes like `shutil.which` — do not `@pytest.mark.skipif` them away. A Windows-only behavior with no Linux-runnable test is untested in CI.
+- When an assertion depends on the platform, force it explicitly (e.g. `monkeypatch.setattr(module, "is_windows", lambda: True)`) instead of letting the test pass only because of the host it happened to run on. A test that would flip its result on a different OS is a bug.
 
 ## Tests
 

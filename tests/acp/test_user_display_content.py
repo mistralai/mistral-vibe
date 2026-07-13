@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from acp.schema import TextContentBlock
+from acp.schema import TextContentBlock, UserMessageChunk
 from pydantic import ValidationError
 import pytest
 
@@ -67,6 +67,34 @@ def test_parse_rejects_invalid_metadata() -> None:
             "host": "mistral-vscode",
             "content": [],
         })
+
+
+@pytest.mark.asyncio
+async def test_prompt_streams_user_display_content_on_user_message_chunk(
+    acp_agent_loop: VibeAcpAgentLoop,
+) -> None:
+    session_response = await acp_agent_loop.new_session(
+        cwd=str(Path.cwd()), mcp_servers=[]
+    )
+    fake_client: FakeClient = acp_agent_loop.client  # type: ignore[assignment]
+    fake_client._session_updates.clear()
+    payload = _metadata_payload()
+
+    response = await acp_agent_loop.prompt(
+        prompt=[TextContentBlock(type="text", text="Look at app.ts")],
+        session_id=session_response.session_id,
+        **_metadata_kwargs(payload),
+    )
+
+    assert response.stop_reason == "end_turn"
+    user_updates = [
+        update
+        for update in fake_client._session_updates
+        if isinstance(update.update, UserMessageChunk)
+    ]
+
+    assert len(user_updates) == 1
+    assert user_updates[0].update.field_meta == {USER_DISPLAY_CONTENT_META_KEY: payload}
 
 
 @pytest.mark.asyncio

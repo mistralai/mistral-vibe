@@ -16,9 +16,11 @@ from vibe.core.logger import logger
 from vibe.core.paths import VIBE_HOME
 from vibe.core.prompts import MissingPromptFileError, UtilityPrompt, load_system_prompt
 from vibe.core.utils import (
+    WindowsShellKind,
     get_platform_display_name,
     is_dangerous_directory,
     is_windows,
+    resolve_windows_shell,
 )
 
 if TYPE_CHECKING:
@@ -150,24 +152,21 @@ class ProjectContextProvider:
         )
 
 
-def _get_default_shell() -> str:
-    """Get the default shell used by asyncio.create_subprocess_shell.
-
-    On Unix, uses $SHELL env var and default to sh.
-    On Windows, this is COMSPEC or cmd.exe.
-    """
-    if is_windows():
-        return os.environ.get("COMSPEC", "cmd.exe")
-    return os.environ.get("SHELL", "sh")
-
-
 def _get_os_system_prompt() -> str:
-    shell = _get_default_shell()
     platform_name = get_platform_display_name()
-    prompt = f"The operating system is {platform_name} with shell `{shell}`"
 
-    if is_windows():
-        prompt += "\n" + _get_windows_system_prompt()
+    if not is_windows():
+        shell = os.environ.get("SHELL", "sh")
+        return f"The operating system is {platform_name} with shell `{shell}`"
+
+    shell = resolve_windows_shell()
+    if shell.kind is WindowsShellKind.BASH and shell.executable is not None:
+        shell_display = f"bash ({shell.executable})"
+    else:
+        shell_display = shell.executable or "cmd.exe"
+
+    prompt = f"The operating system is {platform_name} with shell `{shell_display}`"
+    prompt += "\n" + _get_windows_system_prompt(shell.kind)
     return prompt
 
 
@@ -176,16 +175,39 @@ def _format_current_date() -> str:
     return f"{today.isoformat()} ({today.strftime('%A')})"
 
 
-def _get_windows_system_prompt() -> str:
+def _get_windows_bash_system_prompt() -> str:
     return (
         "### COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
-        "- DO NOT use Unix commands like `ls`, `grep`, `cat` - they won't work on Windows\n"
-        "- Use: `dir` (Windows) for directory listings\n"
-        "- Use: backslashes (\\\\) for paths\n"
-        "- Check command availability with: `where command` (Windows)\n"
+        "- Commands run through bash (Git Bash), so Unix commands like `ls`, "
+        "`grep`, `cat`, `find` work - this is NOT cmd.exe or PowerShell\n"
+        "- Discard output with `2>/dev/null` - NEVER `2>nul` or `2>$null`\n"
+        "- `&&` and `||` are valid for command chaining\n"
+        "- Prefer forward slashes in paths; bash resolves Windows drives as "
+        "`/c/Users/...`\n"
+        "- Check command availability with: `command -v <command>`\n"
+        "### ALWAYS verify commands work on the detected platform before suggesting them"
+    )
+
+
+def _get_windows_cmd_system_prompt() -> str:
+    return (
+        "### COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
+        "- The shell is cmd.exe, NOT bash or PowerShell\n"
+        "- DO NOT use Unix commands like `ls`, `grep`, `cat` - they won't work; "
+        "use `dir`, `findstr`, `type`\n"
+        "- Use backslashes (\\\\) for paths\n"
+        "- Discard output with `2>nul` - NEVER `2>/dev/null` or `2>$null`\n"
+        "- `&&` and `||` are valid for command chaining in cmd.exe\n"
+        "- Check command availability with: `where command`\n"
         "- Script shebang: Not applicable on Windows\n"
         "### ALWAYS verify commands work on the detected platform before suggesting them"
     )
+
+
+def _get_windows_system_prompt(shell_kind: WindowsShellKind) -> str:
+    if shell_kind is WindowsShellKind.BASH:
+        return _get_windows_bash_system_prompt()
+    return _get_windows_cmd_system_prompt()
 
 
 def _add_commit_signature() -> str:

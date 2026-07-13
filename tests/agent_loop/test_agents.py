@@ -21,6 +21,7 @@ from vibe.core.agents.models import (
     _deep_merge,
 )
 from vibe.core.config import VibeConfig
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.manager import ToolManager
@@ -377,7 +378,7 @@ class TestAgentProfileMigration:
         )
         config = build_test_vibe_config(agent_paths=[agents_dir])
 
-        manager = AgentManager(lambda: config, initial_agent="legacy")
+        manager = AgentManager(LegacyConfigOrchestrator(config), initial_agent="legacy")
 
         assert manager.active_profile.overrides == {
             "disabled_tools": ["exit_plan_mode"]
@@ -398,7 +399,7 @@ class TestAgentProfileMigration:
         )
         config = build_test_vibe_config()
 
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
 
         assert "default" in manager.available_agents
 
@@ -653,7 +654,7 @@ class TestPlanAgentToolRestriction:
 class TestAgentManagerFiltering:
     def test_enabled_agents_filters_to_only_enabled(self) -> None:
         config = build_test_vibe_config(enabled_agents=["default", "plan"])
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
 
         agents = manager.available_agents
         assert len(agents) < len(manager._discovered)
@@ -666,7 +667,7 @@ class TestAgentManagerFiltering:
         config = build_test_vibe_config(
             disabled_agents=["auto-approve", "accept-edits"]
         )
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
 
         agents = manager.available_agents
         assert len(agents) < len(manager._discovered)
@@ -680,7 +681,7 @@ class TestAgentManagerFiltering:
             enabled_agents=["default"],
             disabled_agents=["default"],  # Should be ignored
         )
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
 
         agents = manager.available_agents
         assert len(agents) == 1
@@ -688,7 +689,7 @@ class TestAgentManagerFiltering:
 
     def test_glob_pattern_matching(self) -> None:
         config = build_test_vibe_config(disabled_agents=["auto-*", "accept-*"])
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
 
         agents = manager.available_agents
         assert "default" in agents
@@ -698,7 +699,7 @@ class TestAgentManagerFiltering:
 
     def test_regex_pattern_matching(self) -> None:
         config = build_test_vibe_config(enabled_agents=["re:^(default|plan)$"])
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
 
         agents = manager.available_agents
         assert len(agents) == 2
@@ -707,7 +708,7 @@ class TestAgentManagerFiltering:
 
     def test_empty_enabled_agents_returns_all(self) -> None:
         config = build_test_vibe_config(enabled_agents=[])
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
 
         agents = manager.available_agents
         assert "default" in agents
@@ -717,21 +718,21 @@ class TestAgentManagerFiltering:
 
     def test_install_required_agents_hidden_by_default(self) -> None:
         config = build_test_vibe_config()
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
 
         agents = manager.available_agents
         assert "lean" not in agents
 
     def test_install_required_agents_visible_when_installed(self) -> None:
         config = build_test_vibe_config(installed_agents=["lean"])
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
 
         agents = manager.available_agents
         assert "lean" in agents
 
     def test_get_subagents_respects_filtering(self) -> None:
         config = build_test_vibe_config(disabled_agents=["explore"])
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
 
         subagents = manager.get_subagents()
         names = [a.name for a in subagents]

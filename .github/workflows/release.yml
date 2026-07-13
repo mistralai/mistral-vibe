@@ -34,7 +34,8 @@ jobs:
       - name: Inject Sentry DSN
         shell: bash
         env:
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          CLI_SENTRY_DSN: ${{ secrets.CLI_SENTRY_DSN }}
+          ACP_SENTRY_DSN: ${{ secrets.ACP_SENTRY_DSN }}
           REQUIRE_SENTRY_DSN: "true"
         run: bash ./scripts/ci/inject-sentry-dsn.sh
 

@@ -33,6 +33,7 @@ TRUSTED_FOLDERS_FILE = GlobalPath(lambda: VIBE_HOME.path / "trusted_folders.toml
 LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs")
 LOG_FILE = GlobalPath(lambda: VIBE_HOME.path / "logs" / "vibe.log")
 CACHE_FILE = GlobalPath(lambda: VIBE_HOME.path / "cache.toml")
+PROJECTS_FILE = GlobalPath(lambda: VIBE_HOME.path / "projects.toml")
 CONNECTOR_BOOTSTRAP_CACHE_FILE = GlobalPath(
     lambda: VIBE_HOME.path / "connector_bootstrap_cache.json"
 )

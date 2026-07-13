@@ -5,9 +5,10 @@ from unittest.mock import AsyncMock, patch
 
 from acp import NewSessionResponse
 import pytest
+import tomli_w
 
 from tests.acp.conftest import _create_acp_agent
-from tests.conftest import build_test_vibe_config
+from tests.conftest import build_test_vibe_config, get_base_config
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
@@ -49,7 +50,7 @@ def acp_agent_loop(backend) -> VibeAcpAgentLoop:
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._base_config = config
+            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()
@@ -93,17 +94,6 @@ class TestACPNewSession:
         )
 
         assert session_response.session_id == acp_session.agent_loop.session_id
-
-        assert session_response.models is not None
-        assert session_response.models.current_model_id is not None
-        assert session_response.models.available_models is not None
-        assert len(session_response.models.available_models) == 2
-
-        assert session_response.models.current_model_id == "devstral-latest"
-        assert session_response.models.available_models[0].model_id == "devstral-latest"
-        assert session_response.models.available_models[0].name == "devstral-latest"
-        assert session_response.models.available_models[1].model_id == "devstral-small"
-        assert session_response.models.available_models[1].name == "devstral-small"
 
         assert session_response.modes is not None
         assert session_response.modes.current_mode_id is not None
@@ -341,21 +331,41 @@ class TestACPNewSession:
             acp_agent_loop, session_response.session_id
         )
 
-    @pytest.mark.skip(reason="TODO: Fix this test")
     @pytest.mark.asyncio
-    async def test_new_session_preserves_model_after_set_model(
-        self, acp_agent_loop: VibeAcpAgentLoop
+    async def test_new_session_preserves_model_after_config_option_model(
+        self, backend, config_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        base_config = get_base_config()
+        base_config["models"].append({
+            "name": "mistral-vibe-cli-small",
+            "provider": "mistral",
+            "alias": "devstral-small",
+        })
+        (config_dir / "config.toml").write_text(
+            tomli_w.dumps(base_config), encoding="utf-8"
+        )
+
+        class PatchedAgentLoop(AgentLoop):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **{**kwargs, "backend": backend})
+
+        monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)
+        acp_agent_loop = _create_acp_agent()
+
         session_response = await acp_agent_loop.new_session(
             cwd=str(Path.cwd()), mcp_servers=[]
         )
         session_id = session_response.session_id
 
-        assert session_response.models is not None
-        assert session_response.models.current_model_id == "devstral-latest"
+        model_config = next(
+            option
+            for option in session_response.config_options or []
+            if option.id == "model"
+        )
+        assert model_config.current_value == "devstral-latest"
 
-        response = await acp_agent_loop.set_session_model(
-            session_id=session_id, model_id="devstral-small"
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value="devstral-small"
         )
         assert response is not None
 
@@ -363,8 +373,12 @@ class TestACPNewSession:
             cwd=str(Path.cwd()), mcp_servers=[]
         )
 
-        assert session_response.models is not None
-        assert session_response.models.current_model_id == "devstral-small"
+        model_config = next(
+            option
+            for option in session_response.config_options or []
+            if option.id == "model"
+        )
+        assert model_config.current_value == "devstral-small"
 
 
 @pytest.mark.asyncio
@@ -383,7 +397,7 @@ async def test_new_session_honors_default_agent(
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._base_config = config
+            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
     monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)

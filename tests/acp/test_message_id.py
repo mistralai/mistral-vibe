@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
 
-from acp.schema import AgentMessageChunk, TextContentBlock
+from acp.schema import AgentMessageChunk, TextContentBlock, UserMessageChunk
 import pytest
 
 from tests.acp.conftest import _create_acp_agent
@@ -45,39 +45,30 @@ def two_turn_acp_agent_loop() -> VibeAcpAgentLoop:
     return _create_acp_agent()
 
 
-class TestPromptResponseUserMessageId:
+class TestUserMessageChunkMessageId:
     @pytest.mark.asyncio
-    async def test_generates_user_message_id_when_client_provides_none(
+    async def test_generates_user_message_id(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         session_response = await acp_agent_loop.new_session(
             cwd=str(Path.cwd()), mcp_servers=[]
         )
 
-        response = await acp_agent_loop.prompt(
+        await acp_agent_loop.prompt(
             session_id=session_response.session_id,
             prompt=[TextContentBlock(type="text", text="hi")],
         )
 
-        assert response.user_message_id is not None
-        assert _is_uuid(response.user_message_id)
+        fake_client: FakeClient = acp_agent_loop.client  # type: ignore
+        user_chunks = [
+            u.update
+            for u in fake_client._session_updates
+            if isinstance(u.update, UserMessageChunk)
+        ]
 
-    @pytest.mark.asyncio
-    async def test_echoes_client_provided_message_id(
-        self, acp_agent_loop: VibeAcpAgentLoop
-    ) -> None:
-        session_response = await acp_agent_loop.new_session(
-            cwd=str(Path.cwd()), mcp_servers=[]
-        )
-        client_message_id = "550e8400-e29b-41d4-a716-446655440000"
-
-        response = await acp_agent_loop.prompt(
-            session_id=session_response.session_id,
-            prompt=[TextContentBlock(type="text", text="hi")],
-            message_id=client_message_id,
-        )
-
-        assert response.user_message_id == client_message_id
+        assert len(user_chunks) == 1
+        assert user_chunks[0].message_id is not None
+        assert _is_uuid(user_chunks[0].message_id)
 
     @pytest.mark.asyncio
     async def test_user_message_ids_are_unique_across_turns(
@@ -88,15 +79,24 @@ class TestPromptResponseUserMessageId:
         )
         session_id = session_response.session_id
 
-        response_1 = await acp_agent_loop.prompt(
+        fake_client: FakeClient = acp_agent_loop.client  # type: ignore
+
+        await acp_agent_loop.prompt(
             session_id=session_id, prompt=[TextContentBlock(type="text", text="hi")]
         )
-        response_2 = await acp_agent_loop.prompt(
+        await acp_agent_loop.prompt(
             session_id=session_id,
             prompt=[TextContentBlock(type="text", text="hi again")],
         )
 
-        assert response_1.user_message_id != response_2.user_message_id
+        user_chunks = [
+            u.update
+            for u in fake_client._session_updates
+            if isinstance(u.update, UserMessageChunk)
+        ]
+
+        assert len(user_chunks) == 2
+        assert user_chunks[0].message_id != user_chunks[1].message_id
 
 
 class TestAgentMessageChunkMessageId:

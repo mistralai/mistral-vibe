@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,16 +18,17 @@ from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
     from vibe.core.config import AnyVibeConfig
+    from vibe.core.config.orchestrator_port import ConfigOrchestratorPort
 
 
 class AgentManager:
     def __init__(
         self,
-        config_getter: Callable[[], AnyVibeConfig],
+        orchestrator: ConfigOrchestratorPort[AnyVibeConfig],
         initial_agent: str = BuiltinAgentName.DEFAULT,
         allow_subagent: bool = False,
     ) -> None:
-        self._config_getter = config_getter
+        self._orchestrator = orchestrator
         self._search_paths = self._compute_search_paths(self._config)
         self._migrate_agent_profiles()
         self._discovered: dict[str, AgentProfile] = self._discover_agents()
@@ -60,7 +60,7 @@ class AgentManager:
 
     @property
     def _config(self) -> AnyVibeConfig:
-        return self._config_getter()
+        return self._orchestrator.config
 
     @property
     def available_agents(self) -> dict[str, AgentProfile]:

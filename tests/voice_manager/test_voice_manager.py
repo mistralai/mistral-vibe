@@ -179,6 +179,47 @@ class TestStopRecording:
         assert manager.transcribe_state == TranscribeState.IDLE
 
     @pytest.mark.asyncio
+    async def test_stop_survives_task_cleared_during_drain(self) -> None:
+        import asyncio
+
+        class HangingTranscribeClient:
+            def __init__(self, provider=None, model=None) -> None:
+                pass
+
+            async def transcribe(self, audio_stream):
+                await asyncio.Event().wait()
+                return
+                yield
+
+            async def close(self) -> None:
+                pass
+
+        recorder = FakeAudioRecorder()
+        config = build_test_vibe_config(voice_mode_enabled=True)
+        manager = VoiceManager(
+            config_getter=lambda: config,
+            audio_recorder=recorder,
+            transcribe_client=HangingTranscribeClient(),
+        )
+        manager.start_recording()
+        task = manager._transcribe_task
+        assert task is not None
+
+        async def clear_task_during_drain() -> None:
+            await asyncio.sleep(0)
+            manager._transcribe_task = None
+
+        clearer = asyncio.create_task(clear_task_during_drain())
+        with patch(
+            "vibe.cli.voice_manager.voice_manager.TRANSCRIPTION_DRAIN_TIMEOUT", 0.01
+        ):
+            await manager.stop_recording()
+        await clearer
+        task.cancel()
+
+        assert manager.transcribe_state == TranscribeState.IDLE
+
+    @pytest.mark.asyncio
     async def test_stop_recovers_when_no_audio_was_sent(self) -> None:
         client = FakeTranscribeClient(
             events=[

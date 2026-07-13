@@ -8,6 +8,7 @@ from tests.conftest import build_test_vibe_config
 from tests.mock.utils import collect_result
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import BUILTIN_AGENTS, AgentType
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError, ToolPermission
 from vibe.core.tools.builtins.task import Task, TaskArgs, TaskResult, TaskToolConfig
@@ -35,7 +36,7 @@ class TestTaskToolValidation:
     @pytest.fixture
     def ctx(self) -> InvokeContext:
         config = build_test_vibe_config()
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
         return InvokeContext(
             tool_call_id="test-call-id",
             agent_manager=manager,
@@ -138,7 +139,7 @@ class TestTaskToolExecution:
     @pytest.fixture
     def ctx(self) -> InvokeContext:
         config = build_test_vibe_config()
-        manager = AgentManager(lambda: config)
+        manager = AgentManager(LegacyConfigOrchestrator(config))
         return InvokeContext(
             tool_call_id="test-call-id",
             agent_manager=manager,

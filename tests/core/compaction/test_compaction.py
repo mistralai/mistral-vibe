@@ -6,7 +6,9 @@ from vibe.core.compaction import (
     extract_summary,
     parse_previous_user_messages,
     render_compaction_context,
+    render_teleport_summary_request,
 )
+from vibe.core.teleport.types import TELEPORT_MESSAGE_CONTEXT_MAX_LENGTH
 from vibe.core.types import LLMMessage, Role
 
 _PREFIX = "Another language model started to solve this problem"
@@ -224,6 +226,20 @@ def test_compaction_context_preserves_summary_angle_brackets() -> None:
     context = render_compaction_context([_user("hello")], "summary with <code>")
 
     assert "summary with <code>" in context
+
+
+def test_teleport_summary_request_mentions_summary_limit() -> None:
+    request = render_teleport_summary_request(
+        "Summarize the session.",
+        "Continue in Vibe Code Web.",
+        max_summary_chars=TELEPORT_MESSAGE_CONTEXT_MAX_LENGTH,
+    )
+
+    assert "under 8,000 characters" in request
+    assert (
+        "<teleported_prompt>\nContinue in Vibe Code Web.\n</teleported_prompt>"
+        in request
+    )
 
 
 def test_budget_drops_oldest_first() -> None:

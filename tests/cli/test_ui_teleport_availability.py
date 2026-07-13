@@ -98,6 +98,7 @@ async def test_plan_resolution_updates_subscription_banner() -> None:
                 in str(app.query_one("#banner-user-plan", NoMarkupStatic).content)
             ),
         )
+        assert app.agent_loop.user_plan == "Pro"
 
 
 @pytest.mark.asyncio
@@ -124,10 +125,13 @@ async def test_teleport_command_without_history_sends_early_failure_telemetry(
             "event_name": "vibe.teleport_failed",
             "properties": {
                 **_expected_system_metadata(),
+                "user_plan": "Pro",
                 "stage": "no_history",
                 "error_class": "TeleportNoHistoryError",
                 "push_required": False,
                 "nb_session_messages": 0,
+                "context_summary": "skipped",
+                "context_summary_chars": None,
                 "session_id": app.agent_loop.session_id,
             },
         }
@@ -167,10 +171,13 @@ async def test_teleport_command_visible_but_errors_when_key_not_eligible(
             "event_name": "vibe.teleport_failed",
             "properties": {
                 **_expected_system_metadata(),
+                "user_plan": "Pro",
                 "stage": "ineligible",
                 "error_class": "TeleportIneligibleError",
                 "push_required": False,
                 "nb_session_messages": 0,
+                "context_summary": "skipped",
+                "context_summary_chars": None,
                 "session_id": app.agent_loop.session_id,
             },
         }
@@ -269,8 +276,7 @@ async def test_teleport_command_errors_after_switching_to_non_mistral_model(
         active_model="gpt",
     )
 
-    async def fake_reload_with_initial_messages(*, base_config) -> None:
-        app.agent_loop._base_config = base_config
+    async def fake_reload_with_initial_messages() -> None:
         app.agent_loop.agent_manager.invalidate_config()
 
     async with app.run_test() as pilot:

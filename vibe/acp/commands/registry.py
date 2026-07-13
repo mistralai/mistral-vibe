@@ -9,7 +9,6 @@ type OnCommandsChanged = Callable[[], Awaitable[None]]
 @dataclass(frozen=True)
 class AcpCommandContext:
     vibe_code_enabled: bool = False
-    experimental_vibe_code_project_picker_enabled: bool = False
 
 
 type CommandAvailability = Callable[[AcpCommandContext], bool]
@@ -31,18 +30,12 @@ class AcpCommandRegistry:
     """Registry of ACP commands. Notifies listeners when commands change."""
 
     vibe_code_enabled: bool = False
-    experimental_vibe_code_project_picker_enabled: bool = False
     _commands: dict[str, AcpCommand] = field(default_factory=dict)
     _on_changed: OnCommandsChanged | None = None
     _context: AcpCommandContext = field(init=False, default_factory=AcpCommandContext)
 
     def __post_init__(self) -> None:
-        self.refresh(
-            AcpCommandContext(
-                vibe_code_enabled=self.vibe_code_enabled,
-                experimental_vibe_code_project_picker_enabled=self.experimental_vibe_code_project_picker_enabled,
-            )
-        )
+        self.refresh(AcpCommandContext(vibe_code_enabled=self.vibe_code_enabled))
 
     def refresh(self, context: AcpCommandContext) -> None:
         self._context = context

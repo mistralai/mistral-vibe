@@ -21,8 +21,6 @@ CURRENT_REPO_URL = "https://github.com/mistralai/mistral-vibe.git"
 
 def _context() -> ProjectPickerContext:
     return ProjectPickerContext(
-        organization_id="org",
-        workspace_id="workspace",
         repo_root=Path("/repo/mistral-vibe"),
         repo_url=CURRENT_REPO_URL,
         repo_name="mistral-vibe",

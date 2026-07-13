@@ -40,7 +40,7 @@ def acp_agent_loop(backend) -> VibeAcpAgentLoop:
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._base_config = config
+            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
             try:
                 active_model = config.get_active_model()
@@ -54,9 +54,11 @@ def acp_agent_loop(backend) -> VibeAcpAgentLoop:
     return _create_acp_agent()
 
 
-class TestACPSetModel:
+class TestACPSetConfigOptionModelCompat:
     @pytest.mark.asyncio
-    async def test_set_model_success(self, acp_agent_loop: VibeAcpAgentLoop) -> None:
+    async def test_set_config_option_model_success(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
         session_response = await acp_agent_loop.new_session(
             cwd=str(Path.cwd()), mcp_servers=[]
         )
@@ -67,15 +69,15 @@ class TestACPSetModel:
         assert acp_session is not None
         assert acp_session.agent_loop.config.active_model == "devstral-latest"
 
-        response = await acp_agent_loop.set_session_model(
-            session_id=session_id, model_id="devstral-small"
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value="devstral-small"
         )
 
         assert response is not None
         assert acp_session.agent_loop.config.active_model == "devstral-small"
 
     @pytest.mark.asyncio
-    async def test_set_model_invalid_model_returns_none(
+    async def test_set_config_option_model_invalid_model_returns_none(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         session_response = await acp_agent_loop.new_session(
@@ -88,15 +90,15 @@ class TestACPSetModel:
         assert acp_session is not None
         initial_model = acp_session.agent_loop.config.active_model
 
-        response = await acp_agent_loop.set_session_model(
-            session_id=session_id, model_id="non-existent-model"
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value="non-existent-model"
         )
 
         assert response is None
         assert acp_session.agent_loop.config.active_model == initial_model
 
     @pytest.mark.asyncio
-    async def test_set_model_to_same_model(
+    async def test_set_config_option_model_to_same_model(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         session_response = await acp_agent_loop.new_session(
@@ -110,15 +112,15 @@ class TestACPSetModel:
         assert acp_session is not None
         assert acp_session.agent_loop.config.active_model == initial_model
 
-        response = await acp_agent_loop.set_session_model(
-            session_id=session_id, model_id=initial_model
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value=initial_model
         )
 
         assert response is not None
         assert acp_session.agent_loop.config.active_model == initial_model
 
     @pytest.mark.asyncio
-    async def test_set_model_saves_to_config(
+    async def test_set_config_option_model_saves_to_config(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         session_response = await acp_agent_loop.new_session(
@@ -127,15 +129,15 @@ class TestACPSetModel:
         session_id = session_response.session_id
 
         with patch("vibe.acp.acp_agent_loop.VibeConfig.save_updates") as mock_save:
-            response = await acp_agent_loop.set_session_model(
-                session_id=session_id, model_id="devstral-small"
+            response = await acp_agent_loop.set_config_option(
+                session_id=session_id, config_id="model", value="devstral-small"
             )
 
             assert response is not None
             mock_save.assert_called_once_with({"active_model": "devstral-small"})
 
     @pytest.mark.asyncio
-    async def test_set_model_does_not_save_on_invalid_model(
+    async def test_set_config_option_model_does_not_save_on_invalid_model(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         session_response = await acp_agent_loop.new_session(
@@ -144,15 +146,15 @@ class TestACPSetModel:
         session_id = session_response.session_id
 
         with patch("vibe.acp.acp_agent_loop.VibeConfig.save_updates") as mock_save:
-            response = await acp_agent_loop.set_session_model(
-                session_id=session_id, model_id="non-existent-model"
+            response = await acp_agent_loop.set_config_option(
+                session_id=session_id, config_id="model", value="non-existent-model"
             )
 
             assert response is None
             mock_save.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_set_model_with_empty_string(
+    async def test_set_config_option_model_with_empty_string(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         session_response = await acp_agent_loop.new_session(
@@ -166,15 +168,15 @@ class TestACPSetModel:
 
         initial_model = acp_session.agent_loop.config.active_model
 
-        response = await acp_agent_loop.set_session_model(
-            session_id=session_id, model_id=""
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value=""
         )
 
         assert response is None
         assert acp_session.agent_loop.config.active_model == initial_model
 
     @pytest.mark.asyncio
-    async def test_set_model_updates_active_model(
+    async def test_set_config_option_model_updates_active_model(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         session_response = await acp_agent_loop.new_session(
@@ -189,8 +191,8 @@ class TestACPSetModel:
             acp_session.agent_loop.config.get_active_model().alias == "devstral-latest"
         )
 
-        await acp_agent_loop.set_session_model(
-            session_id=session_id, model_id="devstral-small"
+        await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value="devstral-small"
         )
 
         assert (
@@ -198,7 +200,7 @@ class TestACPSetModel:
         )
 
     @pytest.mark.asyncio
-    async def test_set_model_calls_reload_with_initial_messages(
+    async def test_set_config_option_model_calls_reload_with_initial_messages(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         session_response = await acp_agent_loop.new_session(
@@ -210,21 +212,28 @@ class TestACPSetModel:
         )
         assert acp_session is not None
 
-        with patch.object(
-            acp_session.agent_loop, "reload_with_initial_messages"
-        ) as mock_reload:
-            response = await acp_agent_loop.set_session_model(
-                session_id=session_id, model_id="devstral-small"
+        orchestrator = acp_session.agent_loop.config_orchestrator
+        with (
+            patch.object(
+                orchestrator, "reload", wraps=orchestrator.reload
+            ) as mock_orch_reload,
+            patch.object(
+                acp_session.agent_loop, "reload_with_initial_messages"
+            ) as mock_reload,
+        ):
+            response = await acp_agent_loop.set_config_option(
+                session_id=session_id, config_id="model", value="devstral-small"
             )
 
             assert response is not None
-            mock_reload.assert_called_once()
-            call_args = mock_reload.call_args
-            assert call_args.kwargs["base_config"] is not None
-            assert call_args.kwargs["base_config"].active_model == "devstral-small"
+            mock_orch_reload.assert_awaited_once()
+            mock_reload.assert_awaited_once()
+            assert mock_reload.call_args.kwargs == {}
+            # reload() re-reads from disk, picking up the persisted model change
+            assert orchestrator.config.get_active_model().alias == "devstral-small"
 
     @pytest.mark.asyncio
-    async def test_set_model_preserves_conversation_history(
+    async def test_set_config_option_model_preserves_conversation_history(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         session_response = await acp_agent_loop.new_session(
@@ -244,8 +253,8 @@ class TestACPSetModel:
 
         assert len(acp_session.agent_loop.messages) == 3
 
-        response = await acp_agent_loop.set_session_model(
-            session_id=session_id, model_id="devstral-small"
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value="devstral-small"
         )
 
         assert response is not None
@@ -255,7 +264,7 @@ class TestACPSetModel:
         assert acp_session.agent_loop.messages[2].content == "Hi there!"
 
     @pytest.mark.asyncio
-    async def test_set_model_resets_stats_with_new_model_pricing(
+    async def test_set_config_option_model_resets_stats_with_new_model_pricing(
         self, acp_agent_loop: VibeAcpAgentLoop
     ) -> None:
         session_response = await acp_agent_loop.new_session(
@@ -282,8 +291,8 @@ class TestACPSetModel:
             == initial_output_price
         )
 
-        response = await acp_agent_loop.set_session_model(
-            session_id=session_id, model_id="devstral-small"
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value="devstral-small"
         )
 
         assert response is not None

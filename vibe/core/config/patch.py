@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+import copy
 from typing import Annotated, Any
 
 from jsonpointer import JsonPointer, JsonPointerException
@@ -97,3 +99,29 @@ class RemoveOperationPatch(_OperationPatch):
 
 
 type PatchOp = AddOperationPatch | ReplaceOperationPatch | RemoveOperationPatch
+
+
+def ensure_parent_paths(
+    data: dict[str, Any], operations: Sequence[PatchOp]
+) -> dict[str, Any]:
+    """Auto-vivify missing intermediate dicts for object-key ``add`` ops.
+
+    Returns a deep copy of *data* with intermediate dicts filled in so a leaf
+    like ``/tools/bash/allowlist`` can be set on a config with no ``[tools.bash]``
+    table. Array-index and ``-`` append tokens are skipped, and existing non-dict
+    parents are left untouched. The input is never mutated.
+    """
+    data = copy.deepcopy(data)
+    for op in operations:
+        if not isinstance(op, AddOperationPatch):
+            continue
+        current: Any = data
+        for token in JsonPointer(op.path).parts[:-1]:
+            if not isinstance(current, dict) or token == "-" or token.isdigit():
+                break
+            if token not in current:
+                current[token] = {}
+            elif not isinstance(current[token], dict):
+                break
+            current = current[token]
+    return data

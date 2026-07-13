@@ -10,7 +10,6 @@ from textual.containers import Container, Vertical
 from textual.message import Message
 from textual.widgets import Static
 
-from vibe.cli.commands import ALT_KEY
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
@@ -30,6 +29,9 @@ class RewindApp(VimNavigationMixin, Container):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("up", "move_up", "Up", show=False),
         Binding("down", "move_down", "Down", show=False),
+        Binding("left", "edit_prev", "Edit previous", show=False),
+        Binding("right", "edit_next", "Edit next", show=False),
+        Binding("q", "quit_rewind", "Quit", show=False),
         Binding("enter", "select", "Select", show=False),
         Binding("1", "select_1", "Option 1", show=False),
         Binding("2", "select_2", "Option 2", show=False),
@@ -40,6 +42,15 @@ class RewindApp(VimNavigationMixin, Container):
 
     class RewindWithoutRestore(Message):
         """User chose to edit the message without restoring files."""
+
+    class EditPrev(Message):
+        """User navigated to the previous editable message."""
+
+    class EditNext(Message):
+        """User navigated to the next editable message."""
+
+    class Quit(Message):
+        """User exited rewind mode."""
 
     def __init__(self, message_preview: str, *, has_file_changes: bool) -> None:
         super().__init__(id="rewind-app")
@@ -88,9 +99,9 @@ class RewindApp(VimNavigationMixin, Container):
             yield NoMarkupStatic("")
             yield NoMarkupStatic(
                 shortcut_hint(
-                    f"{shortcut(f'{ALT_KEY}+↑↓')} or {shortcut('Ctrl+P/N')} "
-                    f"browse messages  {shortcut('↑↓/jk')} pick option  "
-                    f"{shortcut('Enter')} confirm  {shortcut('Esc')} cancel"
+                    f"{shortcut('←/Esc')} previous  {shortcut('→')} next  "
+                    f"{shortcut('Shift+↑↓')} scroll  {shortcut('↑↓')} pick option  "
+                    f"{shortcut('Enter')} accept  {shortcut('q')} quit"
                 ),
                 classes="rewind-help",
             )
@@ -140,6 +151,15 @@ class RewindApp(VimNavigationMixin, Container):
         if self._option_count() >= 2:  # noqa: PLR2004
             self.selected_option = 1
             self._handle_selection(1)
+
+    def action_edit_prev(self) -> None:
+        self.post_message(self.EditPrev())
+
+    def action_edit_next(self) -> None:
+        self.post_message(self.EditNext())
+
+    def action_quit_rewind(self) -> None:
+        self.post_message(self.Quit())
 
     def _handle_selection(self, option: int) -> None:
         _, action = self._options[option]

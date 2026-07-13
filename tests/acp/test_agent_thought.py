@@ -44,7 +44,7 @@ def acp_agent_loop_with_reasoning(
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend_with_reasoning})
-            self._base_config = config
+            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()

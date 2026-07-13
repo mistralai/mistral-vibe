@@ -127,6 +127,7 @@ from vibe.core.config.harness_files import (
     init_harness_files_manager,
     reset_harness_files_manager,
 )
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 
 
 class Backend:
@@ -144,7 +145,7 @@ try:
         session_logging=SessionLoggingConfig(enabled=False),
     )
     loop = AgentLoop(
-        config=config,
+        config_orchestrator=LegacyConfigOrchestrator(config),
         backend=Backend(),
         defer_heavy_init=True,
         headless=True,

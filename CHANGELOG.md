@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.20.0] - 2026-07-13
+
+### Added
+
+- Warning when the Narrator is enabled without working audio output
+
+### Changed
+
+- Windows command prompt is now shell-aware
+- Hardened bash tool permissions and cross-platform shell handling
+- Rewind now triggers on a double `Esc` when the input is empty, with improved keybindings
+- Teleports now include summarized context
+- Renamed user plan labels (Teams → Team, Education → Student)
+- `ask_user_question` selection now works via mouse and supports free-text entry
+
+### Fixed
+
+- More robust SSE streaming in the generic backend
+- NoneType crash when stopping voice recording during a drain-timeout race
+- Windows ProactorEventLoop teardown tracebacks on `/exit`
+- MCP OAuth tokens are no longer dropped on transient refresh errors
+
+
 ## [2.19.1] - 2026-07-08
 
 ### Added

@@ -8,6 +8,9 @@ patchelf_version="${PATCHELF_VERSION:-0.18.0}"
 
 uv python install "${python_version}"
 
+# manylinux_2_28 is AlmaLinux-based; keep zip as an explicit build dependency.
+yum install -y zip
+
 arch="$(uname -m)"
 
 # Known-good SHA256 checksums for the pinned patchelf release, keyed by "<version>-<arch>".

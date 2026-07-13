@@ -19,7 +19,7 @@ import time
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from vibe.core.agent_loop_hooks import AgentLoopHooksMixin
 from vibe.core.agents.manager import AgentManager
@@ -29,13 +29,12 @@ from vibe.core.compaction import (
     CompactionFailedError as CompactionFailedError,
     CompactionManager,
 )
-from vibe.core.config import (
-    AnyVibeConfig,
-    ModelConfig,
-    ProviderConfig,
-    VibeConfig,
-    resolve_api_key,
+from vibe.core.compaction.context import (
+    extract_summary,
+    render_teleport_summary_request,
 )
+from vibe.core.config import AnyVibeConfig, ModelConfig, ProviderConfig, resolve_api_key
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.experiments import ExperimentManager
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.session import (
@@ -85,12 +84,19 @@ from vibe.core.telemetry.build_metadata import (
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import (
     LaunchContext,
+    ProjectPickerTelemetryPayload,
     TelemetryCallType,
     TelemetryRequestMetadata,
 )
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.telemetry import TeleportTelemetryTracker
-from vibe.core.teleport.types import TeleportCompleteEvent
+from vibe.core.teleport.types import (
+    TELEPORT_MESSAGE_CONTEXT_MAX_LENGTH,
+    TeleportCompleteEvent,
+    TeleportMessageContext,
+    TeleportMessageContextSource,
+    TeleportSummarizingContextEvent,
+)
 from vibe.core.tools.base import (
     BaseTool,
     CancellableToolResult,
@@ -193,6 +199,7 @@ def _load_teleport_service() -> type[TeleportService]:
 if TYPE_CHECKING:
     from opentelemetry import trace
 
+    from vibe.core.config.orchestrator_port import ConfigOrchestratorPort
     from vibe.core.teleport.teleport import TeleportService
     from vibe.core.teleport.types import TeleportPushResponseEvent, TeleportYieldEvent
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
@@ -336,7 +343,7 @@ def requires_init(fn: Callable[..., Any]) -> Callable[..., Any]:
 class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def __init__(  # noqa: PLR0913, PLR0915
         self,
-        config: AnyVibeConfig,
+        config_orchestrator: ConfigOrchestratorPort[AnyVibeConfig],
         *,
         agent_name: str = BuiltinAgentName.DEFAULT,
         message_observer: Callable[[LLMMessage], None] | None = None,
@@ -356,7 +363,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         cache_store: VibeCodeCacheStore | None = None,
         force_bypass_tool_permissions: bool = False,
     ) -> None:
-        self._base_config = config
+        self._config_orchestrator = config_orchestrator
+        config = config_orchestrator.config
         self._force_bypass_tool_permissions = force_bypass_tool_permissions
         self._apply_forced_bypass()
         self._headless = headless
@@ -386,7 +394,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             None if defer_heavy_init else self._create_connector_registry()
         )
         self.agent_manager = AgentManager(
-            lambda: self._base_config,
+            self._config_orchestrator,
             initial_agent=agent_name,
             allow_subagent=is_subagent,
         )
@@ -404,6 +412,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._max_tokens = max_tokens
         self._max_session_tokens = max_session_tokens
         self._plan_session = PlanSession()
+        self._user_plan: str | None = None
 
         self.format_handler = APIToolFormatHandler()
 
@@ -461,6 +470,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             parent_session_id_getter=lambda: self.parent_session_id,
             launch_context=self.launch_context,
             experiments_getter=lambda: self.experiment_manager.assignments(),
+            user_plan_getter=lambda: self.user_plan,
         )
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
         self._hook_config_result = hook_config_result
@@ -565,15 +575,16 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         return self.agent_manager.active_profile
 
     @property
+    def config_orchestrator(self) -> ConfigOrchestratorPort[AnyVibeConfig]:
+        return self._config_orchestrator
+
+    @property
     def base_config(self) -> AnyVibeConfig:
-        return self._base_config
+        return self._config_orchestrator.config
 
     @property
     def config(self) -> AnyVibeConfig:
         return self.agent_manager.config
-
-    def experimental_vibe_code_project_picker_enabled(self) -> bool:
-        return self._base_config.experimental_vibe_code_project_picker_enabled
 
     @property
     def bypass_tool_permissions(self) -> bool:
@@ -581,10 +592,16 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     def _apply_forced_bypass(self) -> None:
         if self._force_bypass_tool_permissions:
-            self._base_config.bypass_tool_permissions = True
+            self.base_config.bypass_tool_permissions = True
 
-    def refresh_config(self) -> None:
-        self._base_config = VibeConfig.load()
+    def _replace_base_config(self, config: AnyVibeConfig) -> None:
+        # Sync bridge: swap the config on the shared orchestrator in place so
+        # AgentManager sees it. PR5 construction sites always wrap a legacy
+        # config; PR6 replaces these writes with async orchestrator calls.
+        cast(LegacyConfigOrchestrator, self._config_orchestrator).replace_config(config)
+
+    async def refresh_config(self) -> None:
+        await self._config_orchestrator.reload()
         self._apply_forced_bypass()
         self.agent_manager.invalidate_config()
         if self.mcp_registry is not None:
@@ -604,17 +621,17 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def set_user_input_callback(self, callback: UserInputCallback) -> None:
         self.user_input_callback = callback
 
-    def set_tool_permission(
+    async def set_tool_permission(
         self, tool_name: str, permission: ToolPermission, save_permanently: bool = False
     ) -> None:
         if save_permanently:
-            VibeConfig.save_updates({
-                "tools": {tool_name: {"permission": permission.value}}
-            })
+            await self._config_orchestrator.set_field(
+                f"/tools/{tool_name}/permission", permission.value
+            )
 
         self._permission_store.set_tool_permission(tool_name, permission)
 
-    def approve_always(
+    async def approve_always(
         self,
         tool_name: str,
         required_permissions: list[RequiredPermission] | None,
@@ -635,9 +652,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     tool_name, [rp.session_pattern for rp in required_permissions]
                 )
             ):
-                VibeConfig.save_updates(allowlist_update)
+                # Extract the allowlist from the update dict
+                allowlist = allowlist_update["tools"][tool_name]["allowlist"]
+                await self._config_orchestrator.set_field(
+                    f"/tools/{tool_name}/allowlist", allowlist
+                )
         else:
-            self.set_tool_permission(
+            await self.set_tool_permission(
                 tool_name, ToolPermission.ALWAYS, save_permanently=save_permanently
             )
 
@@ -702,10 +723,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             await self.experiment_manager.aclose()
 
     def _create_connector_registry(self) -> ConnectorRegistry | None:
-        if not self._base_config.enable_connectors:
+        if not self.base_config.enable_connectors:
             return None
 
-        provider = self._base_config.get_mistral_provider()
+        provider = self.base_config.get_mistral_provider()
         if provider is None:
             return None
 
@@ -817,7 +838,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,
-            self._base_config,
+            self.base_config,
             self.tool_manager,
             self.agent_profile,
             allow_empty=allow_empty,
@@ -901,31 +922,55 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 session_logger=self.session_logger,
                 vibe_code_sessions_base_url=self.config.vibe_code_sessions_base_url,
                 vibe_code_api_key=self.config.vibe_code_api_key,
-                vibe_config=self._base_config,
+                vibe_config=self.base_config,
             )
         return self._teleport_service
 
     @requires_init
     async def teleport_to_vibe_code(
-        self, prompt: str | None
+        self,
+        prompt: str | None,
+        *,
+        project_id: str | None = None,
+        project_picker: ProjectPickerTelemetryPayload | None = None,
     ) -> AsyncGenerator[TeleportYieldEvent, TeleportPushResponseEvent | None]:
         nb_session_messages = max(len(self.messages) - 1, 0)
-        if prompt:
-            resolved_prompt = prompt
-        else:
-            last = self._last_user_message()
-            content = last.content if last else None
-            resolved_prompt = (
-                f"{content} (continue)" if isinstance(content, str) and content else ""
-            )
+        resolved_prompt = self._resolve_teleport_prompt(prompt)
         telemetry_tracker = TeleportTelemetryTracker(
             telemetry_client=self.telemetry_client,
             nb_session_messages=nb_session_messages,
             stage="no_history" if not resolved_prompt else "git_check",
+            project_picker=project_picker,
         )
         try:
+            teleport_message_context: TeleportMessageContext | None = None
+            if resolved_prompt and self._should_summarize_teleport_context(prompt):
+                summary_event = TeleportSummarizingContextEvent()
+                telemetry_tracker.record_event(summary_event)
+                yield summary_event
+                try:
+                    message_context = await self._summarize_teleport_context(
+                        prompt=prompt, resolved_prompt=resolved_prompt
+                    )
+                except ServiceTeleportError:
+                    telemetry_tracker.record_context_summary_failed()
+                    raise
+                except Exception as e:
+                    telemetry_tracker.record_context_summary_failed()
+                    raise ServiceTeleportError(
+                        "Failed to summarize context for teleport.",
+                        telemetry_details={"failure_kind": "context_summary_failed"},
+                    ) from e
+
+                teleport_message_context = self._build_teleport_message_context(
+                    message_context, telemetry_tracker
+                )
             async with self.teleport_service:
-                gen = self.teleport_service.execute(prompt=resolved_prompt)
+                gen = self.teleport_service.execute(
+                    prompt=resolved_prompt,
+                    project_id=project_id,
+                    message_context=teleport_message_context,
+                )
                 response: TeleportPushResponseEvent | None = None
                 while True:
                     try:
@@ -949,13 +994,99 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             telemetry_tracker.send_failure_if_needed()
             self._teleport_service = None
 
+    def _resolve_teleport_prompt(self, prompt: str | None) -> str:
+        if prompt:
+            return prompt
+
+        last = self._last_user_message()
+        content = last.content if last else None
+        return content if isinstance(content, str) and content else ""
+
+    def _build_teleport_message_context(
+        self, summary: str, telemetry_tracker: TeleportTelemetryTracker
+    ) -> TeleportMessageContext | None:
+        try:
+            message_context = TeleportMessageContext(
+                summary=summary, source=self._teleport_message_context_source()
+            )
+        except ValidationError:
+            telemetry_tracker.record_context_summary_failed()
+            return None
+
+        telemetry_tracker.record_context_summary_generated(summary)
+        return message_context
+
+    def _should_summarize_teleport_context(self, prompt: str | None) -> bool:
+        if not self.config.experimental_teleport_context_summary:
+            return False
+        return any(
+            self._is_teleport_context_message(message)
+            for message in self._teleport_context_messages(prompt)
+        )
+
+    @staticmethod
+    def _is_teleport_context_message(message: LLMMessage) -> bool:
+        if message.role == Role.system:
+            return False
+        return bool(
+            message.content
+            or message.reasoning_content
+            or message.tool_calls
+            or message.tool_call_id
+            or message.images
+        )
+
+    def _teleport_context_messages(self, prompt: str | None) -> list[LLMMessage]:
+        excluded = None if prompt else self._last_user_message()
+        return [message for message in self.messages if message is not excluded]
+
+    async def _summarize_teleport_context(
+        self, *, prompt: str | None, resolved_prompt: str
+    ) -> str:
+        source_messages = [
+            message.model_copy(deep=True)
+            for message in self._teleport_context_messages(prompt)
+        ]
+        summary_request = render_teleport_summary_request(
+            self.config.compaction_prompt,
+            resolved_prompt,
+            max_summary_chars=TELEPORT_MESSAGE_CONTEXT_MAX_LENGTH,
+        )
+        summary_messages = [
+            *source_messages,
+            LLMMessage(role=Role.user, content=summary_request),
+        ]
+        self.stats.steps += 1
+        summary_result = await self._complete(
+            model=self.config.get_compaction_model(),
+            messages=summary_messages,
+            tools=[],
+            tool_choice=None,
+            call_type="secondary_call",
+        )
+        raw_content = (summary_result.message.content or "").strip()
+        if summary_result.message.tool_calls or not raw_content:
+            raise ServiceTeleportError(
+                "Failed to summarize context for teleport.",
+                telemetry_details={"failure_kind": "context_summary_failed"},
+            )
+        return extract_summary(raw_content) or raw_content
+
+    def _teleport_message_context_source(self) -> TeleportMessageContextSource:
+        if self.launch_context is None:
+            return TeleportMessageContextSource()
+        return TeleportMessageContextSource(
+            entrypoint=self.launch_context.agent_entrypoint,
+            client_name=self.launch_context.client_name,
+        )
+
     def _last_user_message(self) -> LLMMessage | None:
+        return AgentLoop._last_user_message_from(self.messages)
+
+    @staticmethod
+    def _last_user_message_from(messages: Sequence[LLMMessage]) -> LLMMessage | None:
         return next(
-            (
-                m
-                for m in reversed(self.messages)
-                if m.role == Role.user and not m.injected
-            ),
+            (m for m in reversed(messages) if m.role == Role.user and not m.injected),
             None,
         )
 
@@ -1069,6 +1200,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             new_session_id=self.session_id,
         )
 
+    @property
+    def user_plan(self) -> str | None:
+        return self._user_plan
+
+    def set_user_plan(self, user_plan: str | None) -> None:
+        self._user_plan = user_plan
+
     def _should_self_heal(self) -> bool:
         # Recover from an overflow at most once per turn; strict mode surfaces it.
         return (
@@ -1094,6 +1232,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 else ("main_call" if self._is_user_prompt_call else "secondary_call")
             ),
             message_id=self._current_user_message_id,
+            user_plan=self.user_plan,
         )
 
     def _get_extra_headers(
@@ -2086,7 +2225,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     async def fork(self, message_id: str | None = None) -> AgentLoop:
         messages = self._messages_for_fork(message_id)
         forked = AgentLoop(
-            config=self.base_config.model_copy(deep=True),
+            # Temporary (PR5): deepcopy is safe for the legacy adapter (config only); PR6 must revisit for the real orchestrator (locks/subscriptions).
+            config_orchestrator=copy.deepcopy(self._config_orchestrator),
             agent_name=self.agent_profile.name,
             max_turns=self._max_turns,
             max_price=self._max_price,
@@ -2145,7 +2285,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,
-            self._base_config,
+            self.base_config,
             self.tool_manager,
             self.agent_profile,
         )
@@ -2229,7 +2369,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     @requires_init
     async def reload_with_initial_messages(
         self,
-        base_config: AnyVibeConfig | None = None,
         max_turns: int | None = None,
         max_price: float | None = None,
         reset_middleware: bool = True,
@@ -2241,7 +2380,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,
-            self._base_config,
+            self.base_config,
             self.tool_manager,
             self.agent_profile,
         )
@@ -2251,10 +2390,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             return
 
         # Cheap on-loop setup; warm the config cache so the worker thread only reads it.
-        if base_config is not None:
-            self._base_config = base_config
-            self._apply_forced_bypass()
-            self.agent_manager.invalidate_config()
+        # Callers mutate the orchestrator (reload / set_field) before reinit, so we just
+        # re-read base_config and re-invalidate.
+        self._apply_forced_bypass()
+        self.agent_manager.invalidate_config()
         if max_turns is not None:
             self._max_turns = max_turns
         if max_price is not None:

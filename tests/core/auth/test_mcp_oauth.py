@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import suppress
 import socket
+import time
 from types import TracebackType
 from unittest.mock import patch
 import urllib.parse
@@ -15,6 +16,7 @@ import keyring.backends.fail
 import keyring.errors
 from mcp.client.auth import OAuthFlowError
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from pydantic import AnyUrl
 import pytest
 import respx
 
@@ -24,10 +26,14 @@ from vibe.core.auth.mcp_oauth import (
     LoopbackCallbackHandler,
     MCPOAuthError,
     MCPOAuthHeadlessError,
+    MCPOAuthInvalidGrant,
     MCPOAuthLoginFailed,
     MCPOAuthPortInUse,
+    MCPOAuthTransientRefreshError,
+    RefreshAwareOAuthClientProvider,
     build_oauth_provider,
     perform_oauth_login,
+    unwrap_oauth_refresh_error,
 )
 from vibe.core.config import MCPOAuth, MCPStreamableHttp
 
@@ -426,6 +432,240 @@ class TestBuildOAuthProvider:
 
         with pytest.raises(TypeError, match="OAuth"):
             build_oauth_provider(srv, redirect_handler=on_url, callback_handler=cb)
+
+
+class TestRefreshAwareProvider:
+    def _provider(
+        self, memory_keyring: _MemoryKeyring
+    ) -> RefreshAwareOAuthClientProvider:
+        srv = _oauth_server(name="demo")
+
+        async def on_url(_url: str) -> None:
+            return None
+
+        async def cb() -> tuple[str, str | None]:
+            return "code", None
+
+        provider = build_oauth_provider(
+            srv, redirect_handler=on_url, callback_handler=cb
+        )
+        assert isinstance(provider, RefreshAwareOAuthClientProvider)
+        provider.context.current_tokens = OAuthToken(
+            access_token="ACCESS", token_type="Bearer", refresh_token="REFRESH"
+        )
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_invalid_grant_raises_and_clears_in_memory_tokens(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        provider = self._provider(memory_keyring)
+        response = httpx.Response(
+            400, json={"error": "invalid_grant", "error_description": "expired"}
+        )
+
+        with pytest.raises(MCPOAuthInvalidGrant):
+            await provider._handle_refresh_response(response)
+
+        assert provider.context.current_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_grant_on_unread_stream_response_still_clears_tokens(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        provider = self._provider(memory_keyring)
+        response = httpx.Response(
+            400, stream=httpx.ByteStream(b'{"error": "invalid_grant"}')
+        )
+
+        with pytest.raises(MCPOAuthInvalidGrant):
+            await provider._handle_refresh_response(response)
+
+        assert provider.context.current_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_server_error_is_transient_and_keeps_tokens(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        provider = self._provider(memory_keyring)
+        response = httpx.Response(503, text="upstream unavailable")
+
+        with pytest.raises(MCPOAuthTransientRefreshError):
+            await provider._handle_refresh_response(response)
+
+        assert provider.context.current_tokens is not None
+        assert provider.context.current_tokens.refresh_token == "REFRESH"
+
+    @pytest.mark.asyncio
+    async def test_non_invalid_grant_oauth_error_is_transient(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        provider = self._provider(memory_keyring)
+        response = httpx.Response(400, json={"error": "temporarily_unavailable"})
+
+        with pytest.raises(MCPOAuthTransientRefreshError):
+            await provider._handle_refresh_response(response)
+
+        assert provider.context.current_tokens is not None
+
+
+class TestRefreshAwareProviderThroughHttpxFlow:
+    """Drive the real httpx auth flow so the token-endpoint response reaches our
+    override unread, exactly as it does against a live server (e.g. Sentry).
+
+    A direct call to ``_handle_refresh_response`` cannot catch the unread-body
+    class of bug because httpx only reads the body *after* resuming the auth-flow
+    generator; these tests exercise that seam via ``httpx.AsyncClient``.
+    """
+
+    def _armed_provider(
+        self, memory_keyring: _MemoryKeyring
+    ) -> RefreshAwareOAuthClientProvider:
+        srv = _oauth_server(name="sentry", url="https://mcp.sentry.dev/mcp")
+
+        async def on_url(_url: str) -> None:
+            return None
+
+        async def cb() -> tuple[str, str | None]:
+            return "code", None
+
+        provider = build_oauth_provider(
+            srv, redirect_handler=on_url, callback_handler=cb
+        )
+        assert isinstance(provider, RefreshAwareOAuthClientProvider)
+        provider.context.client_info = OAuthClientInformationFull(
+            client_id="cid",
+            redirect_uris=[AnyUrl("http://localhost:47823/callback")],
+            token_endpoint_auth_method="none",
+        )
+        provider.context.current_tokens = OAuthToken(
+            access_token="EXPIRED", token_type="Bearer", refresh_token="REFRESH"
+        )
+        provider.context.token_expiry_time = time.time() - 60
+        provider._initialized = True
+        return provider
+
+    async def _drive_refresh(self, provider: RefreshAwareOAuthClientProvider) -> None:
+        async with httpx.AsyncClient() as client:
+            await client.get("https://mcp.sentry.dev/mcp", auth=provider)
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_live_invalid_grant_clears_tokens(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        respx.post("https://mcp.sentry.dev/token").mock(
+            return_value=httpx.Response(
+                400, json={"error": "invalid_grant", "error_description": "revoked"}
+            )
+        )
+        provider = self._armed_provider(memory_keyring)
+
+        with pytest.raises(MCPOAuthInvalidGrant):
+            await self._drive_refresh(provider)
+
+        assert provider.context.current_tokens is None
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_live_server_5xx_is_transient_and_keeps_tokens(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        respx.post("https://mcp.sentry.dev/token").mock(
+            return_value=httpx.Response(503, text="upstream unavailable")
+        )
+        provider = self._armed_provider(memory_keyring)
+
+        with pytest.raises(MCPOAuthTransientRefreshError):
+            await self._drive_refresh(provider)
+
+        assert provider.context.current_tokens is not None
+        assert provider.context.current_tokens.refresh_token == "REFRESH"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_live_malformed_body_is_transient_and_keeps_tokens(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        respx.post("https://mcp.sentry.dev/token").mock(
+            return_value=httpx.Response(400, text="<html>not json</html>")
+        )
+        provider = self._armed_provider(memory_keyring)
+
+        with pytest.raises(MCPOAuthTransientRefreshError):
+            await self._drive_refresh(provider)
+
+        assert provider.context.current_tokens is not None
+        assert provider.context.current_tokens.refresh_token == "REFRESH"
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_live_non_invalid_grant_oauth_error_is_transient(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        respx.post("https://mcp.sentry.dev/token").mock(
+            return_value=httpx.Response(400, json={"error": "temporarily_unavailable"})
+        )
+        provider = self._armed_provider(memory_keyring)
+
+        with pytest.raises(MCPOAuthTransientRefreshError):
+            await self._drive_refresh(provider)
+
+        assert provider.context.current_tokens is not None
+
+
+class TestUnwrapOAuthRefreshError:
+    def test_returns_bare_error(self) -> None:
+        err = MCPOAuthInvalidGrant(server_alias="linear", reason="invalid_grant")
+        assert unwrap_oauth_refresh_error(err) is err
+
+    def test_finds_error_inside_exception_group(self) -> None:
+        err = MCPOAuthTransientRefreshError(server_alias="linear", reason="HTTP 503")
+        group = ExceptionGroup("unhandled errors in a TaskGroup", [err])
+        assert unwrap_oauth_refresh_error(group) is err
+
+    def test_finds_error_inside_nested_group(self) -> None:
+        err = OAuthFlowError("needs interactive login")
+        nested = ExceptionGroup("inner", [err])
+        outer = ExceptionGroup("outer", [nested])
+        assert unwrap_oauth_refresh_error(outer) is err
+
+    def test_prefers_invalid_grant_over_transient(self) -> None:
+        invalid = MCPOAuthInvalidGrant(server_alias="linear", reason="invalid_grant")
+        transient = MCPOAuthTransientRefreshError(server_alias="linear", reason="503")
+        group = ExceptionGroup("g", [transient, invalid])
+        assert unwrap_oauth_refresh_error(group) is invalid
+
+    def test_returns_none_for_unrelated_error(self) -> None:
+        group = ExceptionGroup("g", [ValueError("boom")])
+        assert unwrap_oauth_refresh_error(group) is None
+
+    @pytest.mark.asyncio
+    async def test_streamable_http_stack_wraps_auth_flow_error(
+        self, memory_keyring: _MemoryKeyring
+    ) -> None:
+        from vibe.core.tools.mcp.tools import list_tools_http
+
+        raised = MCPOAuthInvalidGrant(server_alias="linear", reason="invalid_grant")
+
+        class _RaisingAuth(httpx.Auth):
+            requires_response_body = True
+
+            async def async_auth_flow(
+                self, request: httpx.Request
+            ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+                raise raised
+                yield request  # pragma: no cover
+
+        with pytest.raises(BaseException) as excinfo:
+            await list_tools_http(
+                "https://mcp.example.com/mcp",
+                auth=_RaisingAuth(),
+                startup_timeout_sec=5,
+            )
+
+        assert isinstance(excinfo.value, BaseExceptionGroup)
+        assert unwrap_oauth_refresh_error(excinfo.value) is raised
 
 
 class TestPerformOAuthLogin:

@@ -828,6 +828,13 @@ class TerminalSessionManager:
         returncode = session.process.poll()
         if returncode is None:
             return
+        # The process exited, but the reader thread may still be draining
+        # buffered PTY output. Let it own the "completed" transition (see
+        # _reader_loop's finally) so callers never observe a completed session
+        # with output still in flight.
+        reader = session.reader_thread
+        if reader is not None and reader.is_alive():
+            return
         session.status = "completed"
         session.exit_code = returncode
         session.updated_at = time.time()

@@ -6,7 +6,7 @@ from functools import lru_cache
 import os
 from pathlib import Path
 import shlex
-from typing import Literal, final
+from typing import final
 
 from pydantic import BaseModel, Field
 from tree_sitter import Language, Node, Parser
@@ -30,7 +30,12 @@ from vibe.core.tools.permissions import (
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import is_path_within_workdir
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
-from vibe.core.utils import is_windows, kill_async_subprocess
+from vibe.core.utils import (
+    WindowsShellKind,
+    is_windows,
+    kill_async_subprocess,
+    resolve_windows_shell,
+)
 from vibe.core.utils.io import decode_safe
 
 
@@ -78,6 +83,52 @@ def _get_shell_executable() -> str | None:
     return os.environ.get("SHELL")
 
 
+async def _spawn_command(command: str) -> asyncio.subprocess.Process:
+    """Spawn ``command`` in the shell the current platform actually uses.
+
+    On Windows we prefer a real bash (``bash -c``) when one is available so
+    Unix-style commands work; otherwise we spawn cmd.exe explicitly. On Unix we
+    use ``$SHELL``. This must stay in sync with the system prompt, which
+    describes the same resolved shell.
+    """
+    env = _get_base_env()
+
+    if is_windows():
+        shell = resolve_windows_shell()
+        if shell.kind is WindowsShellKind.BASH and shell.executable is not None:
+            return await asyncio.create_subprocess_exec(
+                shell.executable,
+                "-c",
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
+                env=env,
+            )
+        # Use the resolved cmd.exe path instead of COMSPEC so prompt syntax and
+        # execution cannot diverge when COMSPEC points at another shell.
+        return await asyncio.create_subprocess_exec(
+            shell.executable or "cmd.exe",
+            "/d",
+            "/c",
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+            env=env,
+        )
+
+    return await asyncio.create_subprocess_shell(
+        command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.DEVNULL,
+        env=env,
+        executable=_get_shell_executable(),
+        start_new_session=True,
+    )
+
+
 def _get_base_env() -> dict[str, str]:
     base_env = {**os.environ, "CI": "true", "NONINTERACTIVE": "1", "NO_TTY": "1"}
 
@@ -93,6 +144,12 @@ def _get_base_env() -> dict[str, str]:
         base_env["LC_ALL"] = "en_US.UTF-8"
 
     return base_env
+
+
+def _uses_posix_shell() -> bool:
+    if not is_windows():
+        return True
+    return resolve_windows_shell().kind is WindowsShellKind.BASH
 
 
 _READ_ONLY_COMMANDS_WINDOWS = ["dir", "findstr", "more", "type", "ver", "where"]
@@ -139,7 +196,9 @@ _READ_ONLY_COMMANDS_POSIX = [
 
 def default_read_only_commands() -> list[str]:
     return list(
-        _READ_ONLY_COMMANDS_WINDOWS if is_windows() else _READ_ONLY_COMMANDS_POSIX
+        _READ_ONLY_COMMANDS_POSIX
+        if _uses_posix_shell()
+        else _READ_ONLY_COMMANDS_WINDOWS
     )
 
 
@@ -151,58 +210,81 @@ def _get_default_allowlist() -> list[str]:
 def _get_default_denylist() -> list[str]:
     common = ["gdb", "pdb", "passwd"]
 
-    if is_windows():
+    if not _uses_posix_shell():
         return common + ["cmd /k", "powershell -NoExit", "pwsh -NoExit", "notepad"]
-    else:
-        return common + [
-            "nano",
-            "vim",
-            "vi",
-            "emacs",
-            "bash -i",
-            "sh -i",
-            "zsh -i",
-            "fish -i",
-            "dash -i",
-            "screen",
-            "tmux",
-        ]
+
+    return common + [
+        "nano",
+        "vim",
+        "vi",
+        "emacs",
+        "bash -i",
+        "sh -i",
+        "zsh -i",
+        "fish -i",
+        "dash -i",
+        "screen",
+        "tmux",
+    ]
 
 
 def _get_default_denylist_standalone() -> list[str]:
     common = ["python", "python3", "ipython"]
 
-    if is_windows():
+    if not _uses_posix_shell():
         return common + ["cmd", "powershell", "pwsh", "notepad"]
-    else:
-        return common + ["bash", "sh", "nohup", "vi", "vim", "emacs", "nano", "su"]
+
+    return common + ["bash", "sh", "nohup", "vi", "vim", "emacs", "nano", "su"]
 
 
-_PATH_COMMANDS = {
-    "cat",
-    "cd",
-    "chmod",
-    "chown",
-    "cp",
-    "head",
-    "ls",
-    "mkdir",
-    "mv",
-    "rm",
-    "stat",
-    "tail",
-    "touch",
-    "wc",
-}
+_MUTATING_PATH_COMMANDS = {"cd", "chmod", "chown", "cp", "mkdir", "mv", "rm", "touch"}
+
+# Every command whose path arguments must be checked against the workdir
+# boundary. This must stay a superset of the read-only allowlist: any command
+# that can be auto-allowed (see _is_unconditionally_allowed) has to have its
+# paths inspected first, otherwise `grep root /etc/passwd`, `od -c ~/.ssh/id_rsa`
+# and friends would read outside the workdir without ever requiring the
+# OUTSIDE_DIRECTORY permission.
+_PATH_COMMANDS = _MUTATING_PATH_COMMANDS | set(_READ_ONLY_COMMANDS_POSIX)
 
 _FIND_EXECUTION_PREDICATES = {"-exec", "-execdir", "-ok", "-okdir"}
+_MSYS_DRIVE_PATH_PREFIX_LEN = 2
 
 
 def _split_command_tokens(command: str) -> list[str]:
     try:
-        return shlex.split(command)
+        if not is_windows():
+            return shlex.split(command)
+        # On Windows, escape="" keeps backslashes literal so paths like
+        # C:\Users\... survive tokenization; POSIX shlex would otherwise consume
+        # them as escape characters. This must stay Windows-only: on POSIX the
+        # backslash is a real escape and dropping it would corrupt path tokens.
+        lexer = shlex.shlex(command, posix=True)
+        lexer.whitespace_split = True
+        lexer.escape = ""
+        return list(lexer)
     except ValueError:
         return command.split()
+
+
+def _normalize_bash_path_token(token: str) -> str:
+    if not is_windows():
+        return token
+    if not token.startswith("/"):
+        return token
+    if len(token) < _MSYS_DRIVE_PATH_PREFIX_LEN:
+        return token
+
+    drive = token[1]
+    if not drive.isascii() or not drive.isalpha():
+        return token
+    if len(token) > _MSYS_DRIVE_PATH_PREFIX_LEN and token[
+        _MSYS_DRIVE_PATH_PREFIX_LEN
+    ] not in {"/", "\\"}:
+        return token
+
+    suffix = token[_MSYS_DRIVE_PATH_PREFIX_LEN:].replace("\\", "/")
+    return f"{drive.upper()}:{suffix or '/'}"
 
 
 def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
@@ -214,6 +296,11 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
     working directory, adds the parent directory (or the path itself when it is
     a directory) to the result set — suitable for building an OUTSIDE_DIRECTORY
     RequiredPermission.
+
+    Only invoked under POSIX-shell semantics (see resolve_permission), where "/"
+    is a valid path separator — including Git Bash on Windows, whose paths can
+    look like /c/Users/... even though os.sep is "\\" there. Git Bash also
+    accepts backslash-separated Windows paths.
     """
     dirs: set[str] = set()
     for part in command_parts:
@@ -230,18 +317,20 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
                 continue
             # Only consider tokens that look like paths
             if not (
-                token.startswith(os.sep)
+                token.startswith("/")
                 or token.startswith("~")
                 or token.startswith(".")
-                or os.sep in token
+                or "/" in token
+                or "\\" in token
             ):
                 continue
-            if is_path_within_workdir(token):
+            path_token = _normalize_bash_path_token(token)
+            if is_path_within_workdir(path_token):
                 continue
-            if is_scratchpad_path(token):
+            if is_scratchpad_path(path_token):
                 continue
             # Resolve relative / home-relative paths, then collect parent dir
-            resolved = Path(token).expanduser()
+            resolved = Path(path_token).expanduser()
             if not resolved.is_absolute():
                 resolved = Path.cwd() / resolved
             resolved = resolved.resolve()
@@ -462,7 +551,7 @@ class Bash(
         return required
 
     def resolve_permission(self, args: BashArgs) -> PermissionContext | None:
-        if is_windows():
+        if not _uses_posix_shell():
             return None
 
         command_parts = _extract_commands(args.command)
@@ -521,20 +610,7 @@ class Bash(
 
         proc = None
         try:
-            # start_new_session is Unix-only, on Windows it's ignored
-            kwargs: dict[Literal["start_new_session"], bool] = (
-                {} if is_windows() else {"start_new_session": True}
-            )
-
-            proc = await asyncio.create_subprocess_shell(
-                args.command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.DEVNULL,
-                env=_get_base_env(),
-                executable=_get_shell_executable(),
-                **kwargs,
-            )
+            proc = await _spawn_command(args.command)
 
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(

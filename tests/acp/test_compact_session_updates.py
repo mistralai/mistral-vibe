@@ -13,6 +13,7 @@ from tests.stubs.fake_client import FakeClient
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.acp.exceptions import CompactionError
 from vibe.core.agent_loop import AgentLoop, CompactionFailedError
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.session.session_id import shorten_session_id
 from vibe.core.types import LLMMessage, Role
 
@@ -21,8 +22,10 @@ from vibe.core.types import LLMMessage, Role
 def acp_agent_loop(backend: FakeBackend) -> VibeAcpAgentLoop:
     class PatchedAgent(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
-            kwargs["config"] = build_test_vibe_config(
-                models=make_test_models(auto_compact_threshold=1)
+            kwargs["config_orchestrator"] = LegacyConfigOrchestrator(
+                build_test_vibe_config(
+                    models=make_test_models(auto_compact_threshold=1)
+                )
             )
             super().__init__(*args, **kwargs, backend=backend)
 

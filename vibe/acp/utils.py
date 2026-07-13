@@ -9,13 +9,11 @@ from acp.schema import (
     AgentThoughtChunk,
     ContentToolCallContent,
     Implementation,
-    ModelInfo,
     PermissionOption,
     PermissionOptionKind,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
     SessionMode,
-    SessionModelState,
     SessionModeState,
     TextContentBlock,
     ToolCallProgress,
@@ -162,24 +160,17 @@ def build_mode_state(
     return state, config
 
 
-def build_model_state(
+def build_model_config(
     models: list[ModelConfig], current_model_id: str
-) -> tuple[SessionModelState, SessionConfigOptionSelect]:
-    model_infos: list[ModelInfo] = []
-    config_options: list[SessionConfigSelectOption] = []
-
-    for model in models:
-        model_infos.append(ModelInfo(model_id=model.alias, name=model.alias))
-        config_options.append(
-            SessionConfigSelectOption(
-                value=model.alias, name=model.alias, description=model.name
-            )
+) -> SessionConfigOptionSelect:
+    config_options = [
+        SessionConfigSelectOption(
+            value=model.alias, name=model.alias, description=model.name
         )
+        for model in models
+    ]
 
-    state = SessionModelState(
-        current_model_id=current_model_id, available_models=model_infos
-    )
-    config_option = SessionConfigOptionSelect(
+    return SessionConfigOptionSelect(
         id="model",
         name="Model",
         current_value=current_model_id,
@@ -187,7 +178,6 @@ def build_model_state(
         type="select",
         options=config_options,
     )
-    return state, config_option
 
 
 def make_thinking_response(

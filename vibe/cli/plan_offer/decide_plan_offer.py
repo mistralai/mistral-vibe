@@ -25,6 +25,13 @@ class MistralCodePlanName(StrEnum):
     FREE = "F"
     ENTERPRISE = "E"
 
+    @classmethod
+    def from_string(cls, value: str) -> MistralCodePlanName | None:
+        try:
+            return cls(value.strip().upper())
+        except ValueError:
+            return None
+
 
 class ChatPlanName(StrEnum):
     FREE = "FREE"
@@ -32,11 +39,32 @@ class ChatPlanName(StrEnum):
     EDU = "EDU"
     TEAM = "TEAM"
 
+    @classmethod
+    def from_string(cls, value: str) -> ChatPlanName | None:
+        try:
+            return cls(value.strip().upper())
+        except ValueError:
+            return None
+
+
+_CHAT_PLAN_TO_USER_PLAN = {
+    ChatPlanName.FREE: "Free",
+    ChatPlanName.INDIVIDUAL: "Pro",
+    ChatPlanName.EDU: "Student",
+    ChatPlanName.TEAM: "Team",
+}
+
+_MISTRAL_CODE_PLAN_TO_USER_PLAN = {
+    MistralCodePlanName.FREE: "Free Codestral",
+    MistralCodePlanName.ENTERPRISE: "Code Enterprise",
+}
+
 
 class PlanInfo:
     plan_type: WhoAmIPlanType
     plan_name: str
     prompt_switching_to_pro_plan: bool
+    user_plan: str | None
 
     def __init__(
         self,
@@ -47,6 +75,7 @@ class PlanInfo:
         self.plan_type = plan_type
         self.plan_name = plan_name
         self.prompt_switching_to_pro_plan = prompt_switching_to_pro_plan
+        self.user_plan = user_plan_for(plan_type=plan_type, plan_name=plan_name)
 
     @classmethod
     def from_response(cls, response: WhoAmIResponse) -> PlanInfo:
@@ -89,6 +118,22 @@ class PlanInfo:
             self.plan_type == WhoAmIPlanType.MISTRAL_CODE
             and self.plan_name.upper() == MistralCodePlanName.ENTERPRISE
         )
+
+
+def user_plan_for(*, plan_type: WhoAmIPlanType, plan_name: str) -> str | None:
+    plan_name_upper = plan_name.upper()
+    if plan_type == WhoAmIPlanType.CHAT:
+        plan = ChatPlanName.from_string(plan_name_upper)
+        return None if plan is None else _CHAT_PLAN_TO_USER_PLAN[plan]
+    if plan_type == WhoAmIPlanType.API:
+        if "FREE" in plan_name_upper:
+            return "Free API"
+        if plan_name_upper:
+            return "PAYG API"
+    if plan_type == WhoAmIPlanType.MISTRAL_CODE:
+        plan = MistralCodePlanName.from_string(plan_name_upper)
+        return None if plan is None else _MISTRAL_CODE_PLAN_TO_USER_PLAN[plan]
+    return None
 
 
 async def decide_plan_offer(api_key: str | None, gateway: WhoAmIGateway) -> PlanInfo:

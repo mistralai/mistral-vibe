@@ -7,12 +7,20 @@ from vibe.core.vibe_code_project.client import (
 )
 from vibe.core.vibe_code_project.picker_service import (
     VIBE_CODE_PROJECT_PICKER_PAGE_LIMIT,
+    HeadlessProjectResolution,
+    HeadlessProjectResolutionSource,
+    TeleportProjectResolution,
     VibeCodeProjectCreateResult,
     VibeCodeProjectLoadMoreResult,
     VibeCodeProjectPageFetcher,
     VibeCodeProjectPickerInitialData,
     VibeCodeProjectPickerService,
     VibeCodeProjectPickerState,
+    VibeCodeProjectResolverError,
+)
+from vibe.core.vibe_code_project.project_store import (
+    REMOTE_PROJECT_KIND,
+    VibeProjectsStore,
 )
 from vibe.core.vibe_code_project.selection import (
     ProjectMatchKind,
@@ -26,13 +34,24 @@ from vibe.core.vibe_code_project.selection import (
     VibeCodeProject,
     VibeCodeProjectLink,
     build_project_picker_items,
+    is_project_linked_to_repo,
+    is_saved_project_stale_error,
     normalize_repo_url,
     repo_url_label,
     suggested_project_name,
 )
+from vibe.core.vibe_code_project.telemetry import (
+    build_headless_project_telemetry,
+    build_project_picker_telemetry,
+    build_project_resolution_failed_telemetry,
+    count_multi_repo_matches,
+)
 
 __all__ = [
+    "REMOTE_PROJECT_KIND",
     "VIBE_CODE_PROJECT_PICKER_PAGE_LIMIT",
+    "HeadlessProjectResolution",
+    "HeadlessProjectResolutionSource",
     "ProjectMatchKind",
     "ProjectPickerContext",
     "ProjectPickerCreateItem",
@@ -41,6 +60,7 @@ __all__ = [
     "ProjectPickerProjectItem",
     "ProjectPickerUnlinkItem",
     "ProjectRepository",
+    "TeleportProjectResolution",
     "VibeCodeProject",
     "VibeCodeProjectApiError",
     "VibeCodeProjectClient",
@@ -52,7 +72,15 @@ __all__ = [
     "VibeCodeProjectPickerInitialData",
     "VibeCodeProjectPickerService",
     "VibeCodeProjectPickerState",
+    "VibeCodeProjectResolverError",
+    "VibeProjectsStore",
+    "build_headless_project_telemetry",
     "build_project_picker_items",
+    "build_project_picker_telemetry",
+    "build_project_resolution_failed_telemetry",
+    "count_multi_repo_matches",
+    "is_project_linked_to_repo",
+    "is_saved_project_stale_error",
     "normalize_repo_url",
     "repo_url_label",
     "suggested_project_name",

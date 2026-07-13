@@ -31,6 +31,11 @@ class LegacyConfigOrchestrator:
     def config(self) -> AnyVibeConfig:
         return self._config
 
+    def replace_config(self, config: AnyVibeConfig) -> None:
+        # Sync in-place swap of the held config. Bridges AgentLoop's sync
+        # refresh/reload paths until PR6 routes them through async reload/set_field.
+        self._config = config
+
     async def set_field(
         self,
         path: str,

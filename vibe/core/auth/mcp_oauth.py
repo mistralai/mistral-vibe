@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 import errno
-from typing import Final
+from typing import Final, cast
 import urllib.parse
 
 import anyio.to_thread
+import httpx
 import keyring
 import keyring.backends.fail
 import keyring.errors
@@ -32,6 +33,8 @@ _CLIENT_NAME: Final = "Mistral Vibe"
 _LOGIN_TIMEOUT_SECONDS: Final = 300.0
 _MIN_REQUEST_LINE_PARTS: Final = 2
 _HEADER_TERMINATORS: Final = frozenset({b"\r\n", b"\n", b""})
+# OAuth 2.0 token-endpoint error signalling a permanently dead refresh token.
+_OAUTH_INVALID_GRANT: Final = "invalid_grant"
 
 
 class MCPOAuthError(Exception):
@@ -77,6 +80,20 @@ class MCPOAuthInvalidGrant(MCPOAuthError):
         return (
             f"OAuth refresh failed for MCP server {self.server_alias!r}: {self.reason}. "
             f"Run `/mcp login {self.server_alias}` to re-authenticate."
+        )
+
+
+class MCPOAuthTransientRefreshError(MCPOAuthError):
+    def __init__(self, *, server_alias: str, reason: str) -> None:
+        self.server_alias = server_alias
+        self.reason = reason
+        super().__init__(self._fmt())
+
+    def _fmt(self) -> str:
+        return (
+            f"OAuth token refresh for MCP server {self.server_alias!r} hit a "
+            f"transient error ({self.reason}); keeping stored credentials and will "
+            "retry."
         )
 
 
@@ -397,6 +414,85 @@ class _suppress_close_errors:
         )
 
 
+async def _classify_refresh_error(response: httpx.Response) -> tuple[str, bool]:
+    """Return a reason and whether the refresh failed permanently (invalid_grant)."""
+    try:
+        # body arrives unread in the httpx auth flow
+        await response.aread()
+        payload = response.json()
+    except (ValueError, httpx.HTTPError):
+        return f"HTTP {response.status_code}", False
+    if not isinstance(payload, dict):
+        return f"HTTP {response.status_code}", False
+    error = payload.get("error")
+    description = payload.get("error_description") or ""
+    reason = ": ".join(part for part in (error, description) if part) or (
+        f"HTTP {response.status_code}"
+    )
+    return reason, error == _OAUTH_INVALID_GRANT
+
+
+def _first_of_type[E: BaseException](exc: BaseException, target: type[E]) -> E | None:
+    if isinstance(exc, target):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for sub in exc.exceptions:
+            if (found := _first_of_type(sub, target)) is not None:
+                return found
+    return None
+
+
+def unwrap_oauth_refresh_error(
+    exc: BaseException,
+) -> MCPOAuthInvalidGrant | MCPOAuthTransientRefreshError | OAuthFlowError | None:
+    """Find a known OAuth error inside a possibly-grouped exception (streamable_http wraps auth-flow errors in an ExceptionGroup)."""
+    if (invalid_grant := _first_of_type(exc, MCPOAuthInvalidGrant)) is not None:
+        return invalid_grant
+    if (transient := _first_of_type(exc, MCPOAuthTransientRefreshError)) is not None:
+        return transient
+    return _first_of_type(exc, OAuthFlowError)
+
+
+class RefreshAwareOAuthClientProvider(OAuthClientProvider):
+    """Like ``OAuthClientProvider`` but only clears tokens on a genuine ``invalid_grant``."""
+
+    def __init__(
+        self,
+        server_url: str,
+        client_metadata: OAuthClientMetadata,
+        storage: TokenStorage,
+        *,
+        server_alias: str,
+        redirect_handler: Callable[[str], Awaitable[None]] | None = None,
+        callback_handler: Callable[[], Awaitable[tuple[str, str | None]]] | None = None,
+        client_metadata_url: str | None = None,
+    ) -> None:
+        super().__init__(
+            server_url=server_url,
+            client_metadata=client_metadata,
+            storage=storage,
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
+            client_metadata_url=client_metadata_url,
+        )
+        self._server_alias = server_alias
+
+    async def _handle_refresh_response(self, response: httpx.Response) -> bool:
+        if response.status_code == httpx.codes.OK:
+            return await super()._handle_refresh_response(response)
+        reason, is_invalid_grant = await _classify_refresh_error(response)
+        if is_invalid_grant:
+            self.context.clear_tokens()
+            # storage is always KeyringTokenStorage (see build_oauth_provider)
+            storage = cast(KeyringTokenStorage, self.context.storage)
+            await storage.delete_tokens()
+            await storage.delete_client_info()
+            raise MCPOAuthInvalidGrant(server_alias=self._server_alias, reason=reason)
+        raise MCPOAuthTransientRefreshError(
+            server_alias=self._server_alias, reason=reason
+        )
+
+
 def build_oauth_provider(
     server: MCPHttp | MCPStreamableHttp,
     *,
@@ -433,12 +529,13 @@ def build_oauth_provider(
             token_endpoint_auth_method="none",
             client_name=_CLIENT_NAME,
         )
-    return OAuthClientProvider(
+    return RefreshAwareOAuthClientProvider(
         server_url=server.url,
         client_metadata=metadata,
         storage=KeyringTokenStorage(
             alias=server.name, fallback_client_info=fallback_client_info
         ),
+        server_alias=server.name,
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
         client_metadata_url=client_metadata_url,
@@ -465,4 +562,13 @@ async def perform_oauth_login(
             await client.get(server.url)
     except (OAuthTokenError, OAuthFlowError) as exc:
         raise MCPOAuthLoginFailed(server_alias=server.name, reason=str(exc)) from exc
+    except MCPOAuthInvalidGrant:
+        async with VibeAsyncHTTPClient(
+            auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
+        ) as client:
+            await client.get(server.url)
+    except MCPOAuthTransientRefreshError as exc:
+        raise MCPOAuthLoginFailed(
+            server_alias=server.name, reason=f"Transient error: {exc.reason}"
+        ) from exc
     await Fingerprint.compute(server).save(server.name)

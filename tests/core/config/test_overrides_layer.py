@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.config.patch import AddOperationPatch, ConfigPatch
+from vibe.core.config.types import ConflictStrategy
 
 
 @pytest.mark.asyncio
@@ -65,6 +67,26 @@ async def test_output_isolated_from_internal_data() -> None:
     result.model_extra["key"] = "mutated"
     result2 = await layer.load(force=True)
     assert result2.model_extra == {"key": "value"}
+
+
+@pytest.mark.asyncio
+async def test_apply_persists_to_in_memory_data() -> None:
+    layer = OverridesLayer(data={"active_model": "custom"})
+    await layer.load()
+    old_fp = layer.fingerprint
+    patch = ConfigPatch(
+        AddOperationPatch(path="/tools/bash/allowlist", value=["ls"]),
+        fingerprint=old_fp or "",
+    )
+
+    await layer.apply(patch, on_conflict=ConflictStrategy.CANCEL)
+
+    assert layer.fingerprint != old_fp
+    result = await layer.load(force=True)
+    assert result.model_extra == {
+        "active_model": "custom",
+        "tools": {"bash": {"allowlist": ["ls"]}},
+    }
 
 
 @pytest.mark.asyncio

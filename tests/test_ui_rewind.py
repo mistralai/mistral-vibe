@@ -26,15 +26,19 @@ async def _send_messages(pilot, messages: list[str]) -> None:
         await pilot.pause(0.4)
 
 
+async def _enter_rewind(pilot) -> None:
+    await pilot.press("escape", "escape")
+    await pilot.app.workers.wait_for_complete()
+    await pilot.pause(0.1)
+
+
 @pytest.mark.asyncio
-async def test_rewind_mode_activates_on_alt_up() -> None:
+async def test_rewind_mode_activates_on_double_escape() -> None:
     app = _make_app()
     async with app.run_test() as pilot:
         await _send_messages(pilot, ["hello", "world"])
 
-        await pilot.press("alt+up")
-        await pilot.app.workers.wait_for_complete()
-        await pilot.pause(0.1)
+        await _enter_rewind(pilot)
 
         assert app._rewind_mode is True
         assert app._current_bottom_app == BottomApp.Rewind
@@ -46,9 +50,7 @@ async def test_rewind_highlights_last_user_message() -> None:
     async with app.run_test() as pilot:
         await _send_messages(pilot, ["hello", "world"])
 
-        await pilot.press("alt+up")
-        await pilot.app.workers.wait_for_complete()
-        await pilot.pause(0.1)
+        await _enter_rewind(pilot)
 
         assert app._rewind_highlighted_widget is not None
         assert app._rewind_highlighted_widget.get_content() == "world"
@@ -60,10 +62,8 @@ async def test_rewind_navigates_to_previous_message() -> None:
     async with app.run_test() as pilot:
         await _send_messages(pilot, ["hello", "world"])
 
-        await pilot.press("alt+up")
-        await pilot.app.workers.wait_for_complete()
-        await pilot.pause(0.1)
-        await pilot.press("alt+up")
+        await _enter_rewind(pilot)
+        await pilot.press("left")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 
@@ -77,14 +77,12 @@ async def test_rewind_navigates_down() -> None:
     async with app.run_test() as pilot:
         await _send_messages(pilot, ["hello", "world"])
 
-        # Go up twice, then down once
-        await pilot.press("alt+up")
+        # Go up once, then back down
+        await _enter_rewind(pilot)
+        await pilot.press("left")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
-        await pilot.press("alt+up")
-        await pilot.app.workers.wait_for_complete()
-        await pilot.pause(0.1)
-        await pilot.press("alt+down")
+        await pilot.press("right")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 
@@ -93,16 +91,31 @@ async def test_rewind_navigates_down() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rewind_escape_exits_mode() -> None:
+async def test_rewind_escape_navigates_to_previous() -> None:
     app = _make_app()
     async with app.run_test() as pilot:
         await _send_messages(pilot, ["hello", "world"])
 
-        await pilot.press("alt+up")
+        await _enter_rewind(pilot)
+
+        await pilot.press("escape")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 
-        await pilot.press("escape")
+        assert app._rewind_mode is True
+        assert app._rewind_highlighted_widget is not None
+        assert app._rewind_highlighted_widget.get_content() == "hello"
+
+
+@pytest.mark.asyncio
+async def test_rewind_q_exits_mode() -> None:
+    app = _make_app()
+    async with app.run_test() as pilot:
+        await _send_messages(pilot, ["hello", "world"])
+
+        await _enter_rewind(pilot)
+
+        await pilot.press("q")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 
@@ -112,30 +125,21 @@ async def test_rewind_escape_exits_mode() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rewind_ctrl_p_n_alternate_bindings() -> None:
+async def test_rewind_arrow_keys_navigate_messages() -> None:
     app = _make_app()
     async with app.run_test() as pilot:
         await _send_messages(pilot, ["hello", "world"])
 
-        # ctrl+p should enter rewind mode
-        await pilot.press("ctrl+p")
-        await pilot.app.workers.wait_for_complete()
-        await pilot.pause(0.1)
+        await _enter_rewind(pilot)
 
-        assert app._rewind_mode is True
-        assert app._rewind_highlighted_widget is not None
-        assert app._rewind_highlighted_widget.get_content() == "world"
-
-        # ctrl+p again goes to previous
-        await pilot.press("ctrl+p")
+        await pilot.press("left")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 
         assert app._rewind_highlighted_widget is not None
         assert app._rewind_highlighted_widget.get_content() == "hello"
 
-        # ctrl+n goes back
-        await pilot.press("ctrl+n")
+        await pilot.press("right")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 
@@ -149,9 +153,7 @@ async def test_rewind_confirm_edits_message_and_prefills_input() -> None:
     async with app.run_test() as pilot:
         await _send_messages(pilot, ["hello", "world"])
 
-        await pilot.press("alt+up")
-        await pilot.app.workers.wait_for_complete()
-        await pilot.pause(0.1)
+        await _enter_rewind(pilot)
 
         # Confirm with enter (selects "Edit message from here")
         await pilot.press("enter")
@@ -173,10 +175,8 @@ async def test_rewind_removes_messages_after_selected() -> None:
         await _send_messages(pilot, ["first", "second", "third"])
 
         # Navigate to "second"
-        await pilot.press("alt+up")
-        await pilot.app.workers.wait_for_complete()
-        await pilot.pause(0.1)
-        await pilot.press("alt+up")
+        await _enter_rewind(pilot)
+        await pilot.press("left")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 
@@ -210,16 +210,14 @@ async def test_rewind_skips_command_messages() -> None:
 
         await _send_messages(pilot, ["world"])
 
-        # First alt+up should land on "world", not the command message
-        await pilot.press("alt+up")
-        await pilot.app.workers.wait_for_complete()
-        await pilot.pause(0.1)
+        # Entering rewind should land on "world", not the command message
+        await _enter_rewind(pilot)
 
         assert app._rewind_highlighted_widget is not None
         assert app._rewind_highlighted_widget.get_content() == "world"
 
-        # Second alt+up should land on "hello", skipping the command message
-        await pilot.press("alt+up")
+        # Going previous should land on "hello", skipping the command message
+        await pilot.press("left")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 
@@ -234,9 +232,7 @@ async def test_rewind_edits_uncommitted_user_message() -> None:
         await app._mount_and_scroll(UserMessage("first", message_index=1))
         await pilot.pause(0.1)
 
-        await pilot.press("alt+up")
-        await pilot.app.workers.wait_for_complete()
-        await pilot.pause(0.1)
+        await _enter_rewind(pilot)
         await pilot.press("enter")
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
@@ -254,7 +250,7 @@ async def test_rewind_does_not_activate_while_agent_running() -> None:
 
         app._agent_running = True
 
-        await pilot.press("alt+up")
+        app._start_rewind_mode()
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 
@@ -284,9 +280,7 @@ async def test_rewind_option_selection_with_number_keys() -> None:
     async with app.run_test() as pilot:
         await _send_messages(pilot, ["hello"])
 
-        await pilot.press("alt+up")
-        await pilot.app.workers.wait_for_complete()
-        await pilot.pause(0.1)
+        await _enter_rewind(pilot)
 
         # Press "1" to select first option directly
         await pilot.press("1")

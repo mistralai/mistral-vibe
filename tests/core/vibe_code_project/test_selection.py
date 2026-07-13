@@ -23,8 +23,6 @@ CURRENT_REPO_URL = "https://github.com/mistralai/mistral-vibe.git"
 
 def _context(saved_link: VibeCodeProjectLink | None = None) -> ProjectPickerContext:
     return ProjectPickerContext(
-        organization_id="org",
-        workspace_id="workspace",
         repo_root=Path("/repo/mistral-vibe"),
         repo_url=CURRENT_REPO_URL,
         repo_name="mistral-vibe",
@@ -34,8 +32,6 @@ def _context(saved_link: VibeCodeProjectLink | None = None) -> ProjectPickerCont
 
 def _link(project_id: str, repo_url: str = CURRENT_REPO_URL) -> VibeCodeProjectLink:
     return VibeCodeProjectLink(
-        organization_id="org",
-        workspace_id="workspace",
         repo_root=Path("/repo/mistral-vibe"),
         repo_url=repo_url,
         project_id=project_id,

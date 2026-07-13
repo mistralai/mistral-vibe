@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import AgentType, BuiltinAgentName
 from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -123,7 +124,7 @@ class Task(
         )
         base_config = VibeConfig.load(session_logging=session_logging)
         subagent_loop = AgentLoop(
-            config=base_config,
+            config_orchestrator=LegacyConfigOrchestrator(base_config),
             agent_name=args.agent,
             launch_context=ctx.launch_context,
             is_subagent=True,

@@ -8,7 +8,8 @@ from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp, VibeConfig
 from vibe.core.tools.mcp import AuthStatus
 
 
-def test_refresh_config_reconciles_mcp_registry_status(
+@pytest.mark.asyncio
+async def test_refresh_config_reconciles_mcp_registry_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kept = MCPHttp(name="kept", transport="http", url="http://kept:1")
@@ -21,12 +22,13 @@ def test_refresh_config_reconciles_mcp_registry_status(
     refreshed_config = build_test_vibe_config(mcp_servers=[kept])
 
     monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
-    agent_loop.refresh_config()
+    await agent_loop.refresh_config()
 
     assert registry.status() == {"kept": AuthStatus.STATIC}
 
 
-def test_refresh_config_preserves_forced_bypass_tool_permissions(
+@pytest.mark.asyncio
+async def test_refresh_config_preserves_forced_bypass_tool_permissions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A session-level forced bypass (e.g. CLI --yolo) must survive a config
@@ -39,12 +41,13 @@ def test_refresh_config_preserves_forced_bypass_tool_permissions(
 
     refreshed_config = build_test_vibe_config(bypass_tool_permissions=False)
     monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
-    agent_loop.refresh_config()
+    await agent_loop.refresh_config()
 
     assert agent_loop.bypass_tool_permissions is True
 
 
-def test_refresh_config_drops_disk_bypass_when_not_forced(
+@pytest.mark.asyncio
+async def test_refresh_config_drops_disk_bypass_when_not_forced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Without a forced override, a disk-originated bypass value follows the
@@ -56,12 +59,13 @@ def test_refresh_config_drops_disk_bypass_when_not_forced(
 
     refreshed_config = build_test_vibe_config(bypass_tool_permissions=False)
     monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
-    agent_loop.refresh_config()
+    await agent_loop.refresh_config()
 
     assert agent_loop.bypass_tool_permissions is False
 
 
-def test_refresh_config_does_not_mark_undiscovered_oauth_server_ok(
+@pytest.mark.asyncio
+async def test_refresh_config_does_not_mark_undiscovered_oauth_server_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     oauth = MCPStreamableHttp(
@@ -77,6 +81,6 @@ def test_refresh_config_does_not_mark_undiscovered_oauth_server_ok(
     refreshed_config = build_test_vibe_config(mcp_servers=[oauth])
 
     monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
-    agent_loop.refresh_config()
+    await agent_loop.refresh_config()
 
     assert registry.status() == {"linear": AuthStatus.NEEDS_AUTH}

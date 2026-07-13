@@ -74,12 +74,13 @@ class TestPermissionStore:
 
 
 class TestAgentLoopSharesStore:
-    def test_subagent_inherits_parent_session_rules(self):
+    @pytest.mark.asyncio
+    async def test_subagent_inherits_parent_session_rules(self):
         store = PermissionStore()
         parent = build_test_agent_loop(permission_store=store)
         subagent = build_test_agent_loop(permission_store=store)
 
-        parent.approve_always(
+        await parent.approve_always(
             "bash",
             [
                 RequiredPermission(
@@ -99,12 +100,13 @@ class TestAgentLoopSharesStore:
         )
         assert subagent._permission_store.covers("bash", rp)
 
-    def test_subagent_inherits_parent_tool_permission(self):
+    @pytest.mark.asyncio
+    async def test_subagent_inherits_parent_tool_permission(self):
         store = PermissionStore()
         parent = build_test_agent_loop(permission_store=store)
         subagent = build_test_agent_loop(permission_store=store)
 
-        parent.approve_always("bash", None)
+        await parent.approve_always("bash", None)
 
         assert (
             subagent._permission_store.get_tool_permission("bash")
@@ -115,7 +117,7 @@ class TestAgentLoopSharesStore:
     async def test_subagent_applies_parent_tool_permission_before_resolution(self):
         store = PermissionStore()
         parent = build_test_agent_loop(permission_store=store)
-        parent.approve_always("bash", None)
+        await parent.approve_always("bash", None)
         approval_requested = False
 
         async def approval_callback(

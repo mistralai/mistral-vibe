@@ -15,7 +15,9 @@ import pytest
 from vibe.core.auth.mcp_oauth import (
     Fingerprint,
     KeyringTokenStorage,
+    MCPOAuthInvalidGrant,
     MCPOAuthLoginFailed,
+    MCPOAuthTransientRefreshError,
 )
 from vibe.core.config import MCPOAuth, MCPStreamableHttp
 from vibe.core.tools.base import BaseToolConfig, InvokeContext, ToolError
@@ -68,6 +70,12 @@ def _oauth_server(
         url=url,
         auth=MCPOAuth(type="oauth", scopes=scopes if scopes is not None else ["read"]),
     )
+
+
+def _grouped(exc: Exception) -> ExceptionGroup:
+    # streamable_http_client surfaces auth-flow errors wrapped in a task-group
+    # ExceptionGroup, never bare. Tests must reproduce that shape.
+    return ExceptionGroup("unhandled errors in a TaskGroup", [exc])
 
 
 async def _save_valid_oauth_state(srv: MCPStreamableHttp) -> None:
@@ -236,6 +244,56 @@ class TestMCPRegistryOAuthDiscovery:
         assert registry.count_loaded([srv]) == 0
 
     @pytest.mark.asyncio
+    async def test_invalid_grant_during_discovery_deletes_tokens(
+        self, memory_keyring: MemoryKeyring
+    ) -> None:
+        srv = _oauth_server()
+        await _save_valid_oauth_state(srv)
+        storage = KeyringTokenStorage(alias="linear")
+        registry = MCPRegistry()
+
+        with patch(
+            "vibe.core.tools.mcp.registry.list_tools_http",
+            new=AsyncMock(
+                side_effect=_grouped(
+                    MCPOAuthInvalidGrant(server_alias="linear", reason="invalid_grant")
+                )
+            ),
+        ):
+            tools = await registry.get_tools_async([srv])
+
+        assert tools == {}
+        assert registry.needs_auth == {"linear"}
+        assert await storage.get_tokens() is None
+
+    @pytest.mark.asyncio
+    async def test_transient_refresh_during_discovery_keeps_tokens(
+        self, memory_keyring: MemoryKeyring
+    ) -> None:
+        srv = _oauth_server()
+        await _save_valid_oauth_state(srv)
+        storage = KeyringTokenStorage(alias="linear")
+        registry = MCPRegistry()
+
+        with patch(
+            "vibe.core.tools.mcp.registry.list_tools_http",
+            new=AsyncMock(
+                side_effect=_grouped(
+                    MCPOAuthTransientRefreshError(
+                        server_alias="linear", reason="HTTP 503"
+                    )
+                )
+            ),
+        ):
+            tools = await registry.get_tools_async([srv])
+
+        assert tools == {}
+        assert registry.needs_auth == {"linear"}
+        tokens = await storage.get_tokens()
+        assert tokens is not None
+        assert tokens.refresh_token == "REFRESH"
+
+    @pytest.mark.asyncio
     async def test_logout_deletes_tokens_client_info_and_fingerprint(
         self, memory_keyring: MemoryKeyring
     ) -> None:
@@ -266,7 +324,7 @@ class TestMCPRegistryOAuthDiscovery:
 
 class TestMCPHttpOAuthProxy:
     @pytest.mark.asyncio
-    async def test_oauth_flow_error_marks_auth_failure_with_stop_turn_message(
+    async def test_invalid_grant_marks_auth_failure_with_stop_turn_message(
         self,
     ) -> None:
         callback = AsyncMock()
@@ -282,13 +340,71 @@ class TestMCPHttpOAuthProxy:
 
         with patch(
             "vibe.core.tools.mcp.tools.call_tool_http",
-            new=AsyncMock(side_effect=OAuthFlowError("invalid_grant")),
+            new=AsyncMock(
+                side_effect=_grouped(
+                    MCPOAuthInvalidGrant(server_alias="linear", reason="invalid_grant")
+                )
+            ),
         ):
             with pytest.raises(ToolError, match="lost authentication"):
                 async for _ in tool.run(_OpenArgs(), InvokeContext(tool_call_id="tc")):
                     pass
 
         callback.assert_awaited_once_with("linear")
+
+    @pytest.mark.asyncio
+    async def test_transient_refresh_error_keeps_credentials(self) -> None:
+        callback = AsyncMock()
+        tool_cls = create_mcp_http_proxy_tool_class(
+            url="https://mcp.example.com/mcp",
+            remote=RemoteTool(name="search"),
+            alias="linear",
+            oauth_runtime=MCPHttpOAuthRuntime(
+                lock=asyncio.Lock(), failure_callback=callback
+            ),
+        )
+        tool = tool_cls.from_config(lambda: BaseToolConfig())
+
+        with patch(
+            "vibe.core.tools.mcp.tools.call_tool_http",
+            new=AsyncMock(
+                side_effect=_grouped(
+                    MCPOAuthTransientRefreshError(
+                        server_alias="linear", reason="HTTP 503"
+                    )
+                )
+            ),
+        ):
+            with pytest.raises(ToolError, match="transient token refresh"):
+                async for _ in tool.run(_OpenArgs(), InvokeContext(tool_call_id="tc")):
+                    pass
+
+        callback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_oauth_flow_error_does_not_delete_credentials(self) -> None:
+        callback = AsyncMock()
+        tool_cls = create_mcp_http_proxy_tool_class(
+            url="https://mcp.example.com/mcp",
+            remote=RemoteTool(name="search"),
+            alias="linear",
+            oauth_runtime=MCPHttpOAuthRuntime(
+                lock=asyncio.Lock(), failure_callback=callback
+            ),
+        )
+        tool = tool_cls.from_config(lambda: BaseToolConfig())
+
+        with patch(
+            "vibe.core.tools.mcp.tools.call_tool_http",
+            new=AsyncMock(
+                side_effect=_grouped(OAuthFlowError("needs interactive login"))
+            ),
+        ):
+            with pytest.raises(ToolError, match="needs re-authentication"):
+                async for _ in tool.run(_OpenArgs(), InvokeContext(tool_call_id="tc")):
+                    pass
+
+        callback.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_oauth_lock_serializes_concurrent_calls(self) -> None:

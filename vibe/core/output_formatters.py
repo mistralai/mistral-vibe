@@ -11,6 +11,7 @@ from vibe.core.teleport.types import (
     TeleportPushingEvent,
     TeleportPushRequiredEvent,
     TeleportStartingWorkflowEvent,
+    TeleportSummarizingContextEvent,
 )
 from vibe.core.types import AssistantEvent, BaseEvent, LLMMessage, OutputFormat
 
@@ -50,6 +51,8 @@ class TextOutputFormatter(OutputFormatter):
         match event:
             case AssistantEvent():
                 self._final_response = event.content
+            case TeleportSummarizingContextEvent():
+                self._print("Summarizing context...")
             case TeleportCheckingGitEvent():
                 self._print("Preparing workspace...")
             case TeleportPushRequiredEvent(unpushed_count=count):

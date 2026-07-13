@@ -9,7 +9,7 @@ from jsonpatch import JsonPatchException, apply_patch
 from jsonpointer import JsonPointerException
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from vibe.core.config.patch import ConfigPatch
+from vibe.core.config.patch import ConfigPatch, ensure_parent_paths
 from vibe.core.config.types import (
     ConcurrencyConflictError,
     ConflictStrategy,
@@ -314,7 +314,10 @@ class ConfigLayer[S: BaseModel](ABC):
                 raise ValueError(f"Unsupported conflict strategy: {on_conflict!r}")
 
         try:
-            new_data = apply_patch(state.data.model_dump(), patch.to_json_patch())
+            new_data = apply_patch(
+                ensure_parent_paths(state.data.model_dump(), patch.operations),
+                patch.to_json_patch(),
+            )
             validated_new_data = self.validate_output(new_data)
         except (JsonPatchException, JsonPointerException, ValidationError) as e:
             raise ConfigPatchApplicationError(self.name) from e

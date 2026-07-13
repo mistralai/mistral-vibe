@@ -632,7 +632,11 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 - `/resume` (or `/continue`) - Browse and resume past sessions for the current
   folder. The picker header shows the folder being listed. Press `d` twice to
   delete a saved session; the active session cannot be deleted here.
-- `/rewind` - Rewind to a previous message
+- `/rewind` - Rewind to a previous message. Also triggered by pressing `Esc`
+  twice on an empty input; if the input has content, the first double-`Esc`
+  clears it instead. In the rewind panel: `↑/↓` pick option, `Shift+↑/↓`
+  scroll, `←`/`Esc` edit previous message, `→` edit next message, `Enter`
+  accept, `q` quit.
 - `/loop <interval> <prompt>` - Schedule a recurring prompt (e.g. `/loop 30s ping`).
   Intervals: `Ns/Nm/Nh/Nd`, minimum 30s, max 50 loops/session.
   - `/loop` (or `/loop list` / `/loop ls`) - List current scheduled loops.

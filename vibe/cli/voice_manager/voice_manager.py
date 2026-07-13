@@ -116,14 +116,13 @@ class VoiceManager:
         recording = self._audio_recorder.stop(wait_for_queue_drained=should_flush_queue)
         self._tracking.set_recording_duration(recording.duration)
 
-        if self._transcribe_task is not None:
+        task = self._transcribe_task
+        if task is not None:
             try:
-                await wait_for(
-                    self._transcribe_task, timeout=TRANSCRIPTION_DRAIN_TIMEOUT
-                )
+                await wait_for(task, timeout=TRANSCRIPTION_DRAIN_TIMEOUT)
             except TimeoutError:
                 logger.warning("Transcription task timed out, cancelling")
-                self._transcribe_task.cancel()
+                task.cancel()
                 self._on_audio_transcription_error("Transcription timed out")
             except CancelledError:
                 pass

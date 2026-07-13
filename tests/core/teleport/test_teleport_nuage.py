@@ -21,6 +21,7 @@ from vibe.core.utils.http import VibeAsyncHTTPClient
 
 def _request() -> NuageRequest:
     return NuageRequest(
+        project_id="project-id",
         idempotency_key="idem-1",
         message=NuageMessage(parts=[NuageTextPart(text="continue from here")]),
         context=NuageContext(
@@ -58,7 +59,7 @@ async def test_start_posts_nuage_request() -> None:
     assert seen_request.headers["authorization"] == "Bearer api-key"
     assert seen_request.headers["content-type"] == "application/json"
     assert json.loads(seen_request.content) == {
-        "project_name": "Vibe CLI",
+        "projectId": "project-id",
         "source": "vibe_code_cli",
         "idempotencyKey": "idem-1",
         "message": {
@@ -97,6 +98,7 @@ async def test_start_omits_empty_branch() -> None:
         )
 
     request = NuageRequest(
+        project_id="project-id",
         idempotency_key="idem-1",
         message=NuageMessage(parts=[NuageTextPart(text="prompt")]),
         context=NuageContext(
@@ -108,7 +110,7 @@ async def test_start_omits_empty_branch() -> None:
         await nuage.start(request)
 
     assert seen_body == {
-        "project_name": "Vibe CLI",
+        "projectId": "project-id",
         "source": "vibe_code_cli",
         "idempotencyKey": "idem-1",
         "message": {"role": "user", "parts": [{"type": "text", "text": "prompt"}]},
@@ -135,6 +137,7 @@ async def test_start_serializes_commit_sha_and_diff() -> None:
         )
 
     request = NuageRequest(
+        project_id="project-id",
         idempotency_key="idem-1",
         message=NuageMessage(parts=[NuageTextPart(text="prompt")]),
         context=NuageContext(

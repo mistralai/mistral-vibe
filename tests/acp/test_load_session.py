@@ -48,7 +48,7 @@ def acp_agent_with_session_config(
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._base_config = config
+            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
     monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)
@@ -85,7 +85,7 @@ async def test_load_session_honors_default_agent(
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._base_config = config
+            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
     monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)
@@ -128,14 +128,15 @@ class TestLoadSession:
         )
 
         assert response is not None
-        assert response.models is not None
-        assert len(response.models.available_models) == 2
-
-        assert response.models.current_model_id == "devstral-latest"
-        assert response.models.available_models[0].model_id == "devstral-latest"
-        assert response.models.available_models[0].name == "devstral-latest"
-        assert response.models.available_models[1].model_id == "devstral-small"
-        assert response.models.available_models[1].name == "devstral-small"
+        model_config = next(
+            option for option in response.config_options or [] if option.id == "model"
+        )
+        assert model_config.current_value == "devstral-latest"
+        assert len(model_config.options) == 2
+        assert model_config.options[0].value == "devstral-latest"
+        assert model_config.options[0].name == "devstral-latest"
+        assert model_config.options[1].value == "devstral-small"
+        assert model_config.options[1].name == "devstral-small"
 
         assert response.modes is not None
         assert response.modes.current_mode_id == BuiltinAgentName.DEFAULT

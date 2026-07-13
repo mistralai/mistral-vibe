@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import types
 
@@ -137,7 +138,7 @@ class VibeCodeProjectClient:
             )
 
         try:
-            return _ProjectListResponse.model_validate(response.json()).to_domain()
+            return await asyncio.to_thread(_parse_project_list_response, response)
         except ValidationError as e:
             raise VibeCodeProjectApiError(
                 "Vibe Code Web projects response was invalid."
@@ -173,7 +174,7 @@ class VibeCodeProjectClient:
             )
 
         try:
-            return _ProjectResponse.model_validate(response.json()).to_domain()
+            return await asyncio.to_thread(_parse_project_response, response)
         except ValidationError as e:
             raise VibeCodeProjectApiError(
                 "Vibe Code Web project creation response was invalid."
@@ -182,3 +183,11 @@ class VibeCodeProjectClient:
             raise VibeCodeProjectApiError(
                 "Vibe Code Web project creation response was not valid JSON."
             ) from e
+
+
+def _parse_project_list_response(response: httpx.Response) -> VibeCodeProjectPage:
+    return _ProjectListResponse.model_validate(response.json()).to_domain()
+
+
+def _parse_project_response(response: httpx.Response) -> VibeCodeProject:
+    return _ProjectResponse.model_validate(response.json()).to_domain()

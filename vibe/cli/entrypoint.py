@@ -283,6 +283,12 @@ def _cleanup_worktree_on_exit(worktree: PreparedWorktree) -> None:
 
 
 def main() -> None:
+    from vibe.core.utils.windows_asyncio import (
+        silence_proactor_transport_teardown_warnings,
+    )
+
+    silence_proactor_transport_teardown_warnings()
+
     args = parse_arguments()
     worktree_session: PreparedWorktree | None = None
 

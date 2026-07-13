@@ -28,6 +28,20 @@ DTYPE = "int16"
 DEFAULT_SAMPLE_WIDTH = 2  # 16-bit = 2 bytes
 
 
+def check_audio_available() -> str | None:
+    """Return an error string if sounddevice/PortAudio is unavailable, else None."""
+    if sd is None:
+        return (
+            "sounddevice is not installed or PortAudio is missing "
+            "(install the 'sounddevice' package and the PortAudio system library)"
+        )
+    try:
+        sd.query_devices(kind="output")
+    except Exception as exc:
+        return f"No audio output device available: {exc}"
+    return None
+
+
 class AudioPlayer:
     """Plays audio through the default output device using sounddevice."""
 

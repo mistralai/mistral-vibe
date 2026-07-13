@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import aclosing
+from pathlib import Path
 from typing import Literal, cast
 from uuid import uuid4
 
@@ -19,6 +20,11 @@ from acp.schema import (
 
 from vibe.acp.session import AcpSessionLoop
 from vibe.core.agent_loop import TeleportError
+from vibe.core.telemetry.types import (
+    ProjectPickerTelemetryPayload,
+    TeleportFailureStage,
+)
+from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.telemetry import send_teleport_early_failure_telemetry
 from vibe.core.teleport.types import (
     TeleportCheckingGitEvent,
@@ -27,14 +33,23 @@ from vibe.core.teleport.types import (
     TeleportPushRequiredEvent,
     TeleportPushResponseEvent,
     TeleportStartingWorkflowEvent,
+    TeleportSummarizingContextEvent,
 )
 from vibe.core.types import Role
+from vibe.core.vibe_code_project import (
+    VibeCodeProjectApiError,
+    VibeCodeProjectPickerService,
+    VibeCodeProjectResolverError,
+    build_headless_project_telemetry,
+    build_project_resolution_failed_telemetry,
+)
 
 TELEPORT_PUSH_OPTION_ID = "teleport_push_and_continue"
 TELEPORT_CANCEL_OPTION_ID = "teleport_cancel"
 TELEPORT_FIELD_META_KEY = "teleport"
 type TeleportAcpStatus = Literal[
     "starting",
+    "summarizing_context",
     "preparing_workspace",
     "push_required",
     "syncing_remote",
@@ -117,9 +132,7 @@ async def _teleport_command_reply(
             field_meta=field_meta,
         ),
     )
-    return PromptResponse(
-        stop_reason="end_turn", user_message_id=message_id, field_meta=field_meta
-    )
+    return PromptResponse(stop_reason="end_turn", field_meta=field_meta)
 
 
 async def _request_teleport_push_approval(
@@ -179,6 +192,48 @@ async def _request_teleport_push_approval(
     outcome = cast(AllowedOutcome, response.outcome)
     return TeleportPushResponseEvent(
         approved=outcome.option_id == TELEPORT_PUSH_OPTION_ID
+    )
+
+
+async def _resolve_acp_teleport_project(
+    session: AcpSessionLoop,
+) -> tuple[str | None, ProjectPickerTelemetryPayload | None]:
+    from vibe.core.teleport.git import GitRepository
+
+    config = session.agent_loop.config
+    api_key = config.vibe_code_api_key
+    if not api_key:
+        raise VibeCodeProjectApiError(f"{config.vibe_code_api_key_env_var} not set.")
+
+    async with GitRepository() as git:
+        git_info = await git.get_info()
+
+    resolver = VibeCodeProjectPickerService(
+        base_url=config.vibe_code_sessions_base_url,
+        api_key=api_key,
+        repo_root=git_info.repo_root or Path.cwd().resolve(),
+    )
+    resolution = await resolver.resolve_project_for_headless_teleport(git_info)
+    return resolution.project_id, build_headless_project_telemetry(resolution)
+
+
+def _teleport_failure_stage_for_project_resolution(
+    error: Exception,
+) -> TeleportFailureStage:
+    if isinstance(error, VibeCodeProjectApiError):
+        return "workflow_start"
+    return "git_check"
+
+
+def _send_project_resolution_failed_telemetry(
+    session: AcpSessionLoop, error: Exception
+) -> None:
+    session.agent_loop.telemetry_client.send_teleport_failed(
+        stage=_teleport_failure_stage_for_project_resolution(error),
+        error_class=type(error).__name__,
+        push_required=False,
+        nb_session_messages=len(session.agent_loop.messages[1:]),
+        project_picker=build_project_resolution_failed_telemetry(),
     )
 
 
@@ -260,8 +315,14 @@ async def handle_teleport_command(
     )
 
     final_url: str | None = None
+    project_picker: ProjectPickerTelemetryPayload | None = None
     try:
-        async with aclosing(session.agent_loop.teleport_to_vibe_code(None)) as events:
+        project_id, project_picker = await _resolve_acp_teleport_project(session)
+        async with aclosing(
+            session.agent_loop.teleport_to_vibe_code(
+                None, project_id=project_id, project_picker=project_picker
+            )
+        ) as events:
             response: TeleportPushResponseEvent | None = None
             while True:
                 try:
@@ -271,6 +332,16 @@ async def handle_teleport_command(
                 response = None
 
                 match event:
+                    case TeleportSummarizingContextEvent():
+                        await client.session_update(
+                            session_id=session.id,
+                            update=_teleport_progress_update(
+                                tool_call_id,
+                                title="Summarizing context...",
+                                text="Summarizing context...",
+                                teleport_status="summarizing_context",
+                            ),
+                        )
                     case TeleportCheckingGitEvent():
                         await client.session_update(
                             session_id=session.id,
@@ -325,7 +396,14 @@ async def handle_teleport_command(
                                 teleport_status="completed",
                             ),
                         )
-    except TeleportError as e:
+    except (
+        ServiceTeleportError,
+        TeleportError,
+        VibeCodeProjectApiError,
+        VibeCodeProjectResolverError,
+    ) as e:
+        if not isinstance(e, TeleportError):
+            _send_project_resolution_failed_telemetry(session, e)
         await client.session_update(
             session_id=session.id,
             update=_teleport_progress_update(
@@ -338,13 +416,10 @@ async def handle_teleport_command(
             ),
         )
         return PromptResponse(
-            stop_reason="end_turn",
-            user_message_id=message_id,
-            field_meta=_teleport_field_meta("failed"),
+            stop_reason="end_turn", field_meta=_teleport_field_meta("failed")
         )
 
     return PromptResponse(
         stop_reason="end_turn",
-        user_message_id=message_id,
         field_meta=_teleport_field_meta("completed", url=final_url),
     )

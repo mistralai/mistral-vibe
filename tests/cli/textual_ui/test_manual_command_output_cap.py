@@ -116,13 +116,22 @@ async def test_large_bang_command_output_is_capped_in_history() -> None:
         chat_input.value = cmd
         await pilot.press("enter")
 
+        injected = None
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
-            if next(iter(app.query(BashOutputMessage)), None):
+            injected = next(
+                (
+                    message
+                    for message in reversed(app.agent_loop.messages)
+                    if message.role == Role.user and message.injected
+                ),
+                None,
+            )
+            if injected is not None and next(iter(app.query(BashOutputMessage)), None):
                 break
             await pilot.pause(0.05)
 
-        injected = app.agent_loop.messages[-1]
+        assert injected is not None
         assert injected.role == Role.user
         assert injected.injected is True
         assert injected.content is not None

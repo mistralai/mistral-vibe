@@ -272,14 +272,11 @@ class VibeConfigSchema(ConfigSchema):
     vibe_code_api_key_env_var: Annotated[str, WithReplaceMerge()] = (
         DEFAULT_MISTRAL_API_ENV_KEY
     )
-    vibe_code_project_name: Annotated[str | None, WithReplaceMerge()] = None
-    experimental_vibe_code_project_picker_enabled: Annotated[
-        bool, WithReplaceMerge()
-    ] = False
     enable_otel: Annotated[bool, WithReplaceMerge()] = False
     otel_endpoint: Annotated[str, WithReplaceMerge()] = ""
     console_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_CONSOLE_BASE_URL
     enable_experimental_hooks: Annotated[bool, WithReplaceMerge()] = False
+    experimental_teleport_context_summary: Annotated[bool, WithReplaceMerge()] = False
     experimental_bash_tool: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
         description=(

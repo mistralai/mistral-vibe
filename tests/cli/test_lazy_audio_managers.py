@@ -153,7 +153,8 @@ def test_lazy_narrator_manager_sync_materializes_after_enable() -> None:
     assert narrator.synced is False
 
 
-def test_tui_config_refresh_syncs_lazy_narrator(
+@pytest.mark.asyncio
+async def test_tui_config_refresh_syncs_lazy_narrator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     initial_config = build_test_vibe_config(narrator_enabled=False)
@@ -165,7 +166,7 @@ def test_tui_config_refresh_syncs_lazy_narrator(
     app = build_test_vibe_app(agent_loop=agent_loop, narrator_manager=narrator_manager)
     monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
 
-    app._refresh_config_from_disk()
+    await app._refresh_config_from_disk()
 
     factory.assert_called_once()
     assert narrator.synced is False

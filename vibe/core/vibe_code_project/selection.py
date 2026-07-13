@@ -10,6 +10,16 @@ from urllib.parse import urlparse
 _SSH_REPO_URL_RE = re.compile(r"^(?:ssh://)?git@(?P<host>[^/:]+)[:/](?P<path>.+)$")
 
 
+def is_saved_project_stale_error(message: str) -> bool:
+    normalized = message.casefold()
+    return (
+        "project not found" in normalized
+        or ("status 404" in normalized and "project" in normalized)
+        or ("status 403" in normalized and "project" in normalized)
+        or ("forbidden" in normalized and "project" in normalized)
+    )
+
+
 class ProjectMatchKind(StrEnum):
     CURRENT_LINK = auto()
     EXACT_REPO = auto()
@@ -32,8 +42,6 @@ class VibeCodeProject:
 
 @dataclass(frozen=True)
 class VibeCodeProjectLink:
-    organization_id: str
-    workspace_id: str
     repo_root: Path
     repo_url: str
     project_id: str
@@ -42,8 +50,6 @@ class VibeCodeProjectLink:
 
 @dataclass(frozen=True)
 class ProjectPickerContext:
-    organization_id: str
-    workspace_id: str
     repo_root: Path
     repo_url: str
     repo_name: str

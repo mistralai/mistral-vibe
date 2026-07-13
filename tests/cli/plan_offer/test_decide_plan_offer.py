@@ -15,6 +15,7 @@ from vibe.cli.plan_offer.decide_plan_offer import (
     plan_offer_cta,
     plan_title,
     resolve_api_key_for_plan,
+    user_plan_for,
 )
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIResponse
 from vibe.core.config import ProviderConfig
@@ -398,6 +399,26 @@ def test_teleport_eligibility_depends_on_chat_plan_and_current_key(
     ],
 )
 def test_plan_title_uses_current_plan_labels(
-    payload: PlanInfo, expected_title: str
+    payload: PlanInfo, expected_title: str | None
 ) -> None:
     assert plan_title(payload) == expected_title
+
+
+@pytest.mark.parametrize(
+    ("plan_type", "plan_name", "expected_user_plan"),
+    [
+        (WhoAmIPlanType.CHAT, "FREE", "Free"),
+        (WhoAmIPlanType.CHAT, "INDIVIDUAL", "Pro"),
+        (WhoAmIPlanType.CHAT, "EDU", "Student"),
+        (WhoAmIPlanType.CHAT, "TEAM", "Team"),
+        (WhoAmIPlanType.API, "FREE", "Free API"),
+        (WhoAmIPlanType.API, "PAY_AS_YOU_GO", "PAYG API"),
+        (WhoAmIPlanType.MISTRAL_CODE, "F", "Free Codestral"),
+        (WhoAmIPlanType.MISTRAL_CODE, "E", "Code Enterprise"),
+        (WhoAmIPlanType.UNKNOWN, "", None),
+    ],
+)
+def test_user_plan_for_maps_whoami_plan(
+    plan_type: WhoAmIPlanType, plan_name: str, expected_user_plan: str | None
+) -> None:
+    assert user_plan_for(plan_type=plan_type, plan_name=plan_name) == expected_user_plan

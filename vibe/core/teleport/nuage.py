@@ -9,9 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.telemetry.types import TeleportFailureDetails
 from vibe.core.teleport.errors import ServiceTeleportError
+from vibe.core.teleport.types import TeleportMessageContext
 from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
-DEFAULT_NUAGE_PROJECT_NAME = "Vibe CLI"
 _AMBIGUOUS_CREATE_STATUS_CODES = frozenset({504})
 _AMBIGUOUS_REQUEST_ERRORS: tuple[type[httpx.RequestError], ...] = (
     httpx.TimeoutException,
@@ -58,14 +58,15 @@ class NuageContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     repositories: list[NuageRepository]
+    message_context: TeleportMessageContext | None = Field(
+        default=None, serialization_alias="messageContext"
+    )
 
 
 class NuageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    project_name: str = Field(
-        default=DEFAULT_NUAGE_PROJECT_NAME, serialization_alias="project_name"
-    )
+    project_id: str = Field(serialization_alias="projectId")
     source: str = "vibe_code_cli"
     idempotency_key: str = Field(serialization_alias="idempotencyKey")
     message: NuageMessage
@@ -142,14 +143,13 @@ class NuageClient:
 
     async def start(self, request: NuageRequest) -> NuageResponse:
         response: httpx.Response | None = None
+        request_content = await asyncio.to_thread(_request_json_content, request)
         for attempt in range(self._max_start_attempts):
             try:
                 response = await self._http_client.post(
                     f"{self._base_url}/api/v1/code/sessions",
                     headers=self._headers(),
-                    json=request.model_dump(
-                        mode="json", by_alias=True, exclude_none=True
-                    ),
+                    content=request_content,
                 )
             except _AMBIGUOUS_REQUEST_ERRORS as e:
                 if attempt < self._max_start_attempts - 1:
@@ -210,3 +210,7 @@ class NuageClient:
             "Check Vibe Code Web before trying again.",
             telemetry_details=details,
         )
+
+
+def _request_json_content(request: NuageRequest) -> bytes:
+    return request.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")

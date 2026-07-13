@@ -4,7 +4,12 @@ import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
-from acp.schema import AgentMessageChunk, AvailableCommandsUpdate, TextContentBlock
+from acp.schema import (
+    AgentMessageChunk,
+    AvailableCommandsUpdate,
+    TextContentBlock,
+    UserMessageChunk,
+)
 import pytest
 
 from tests.acp.conftest import _create_acp_agent
@@ -21,7 +26,7 @@ def acp_agent_loop(backend) -> VibeAcpAgentLoop:
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._base_config = config
+            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()
@@ -191,7 +196,7 @@ class TestProxySetupCommand:
 
 class TestProxySetupMessageId:
     @pytest.mark.asyncio
-    async def test_proxy_setup_response_has_user_message_id(
+    async def test_proxy_setup_user_message_chunk_has_message_id(
         self,
         acp_agent_loop: VibeAcpAgentLoop,
         tmp_path: Path,
@@ -210,41 +215,16 @@ class TestProxySetupMessageId:
             cwd=str(Path.cwd()), mcp_servers=[]
         )
 
-        response = await acp_agent_loop.prompt(
+        await acp_agent_loop.prompt(
             prompt=[TextContentBlock(type="text", text="/proxy-setup")],
             session_id=session_response.session_id,
         )
 
-        assert response.user_message_id is not None
+        updates = _get_fake_client(acp_agent_loop)._session_updates
+        user_updates = [u for u in updates if isinstance(u.update, UserMessageChunk)]
 
-    @pytest.mark.asyncio
-    async def test_proxy_setup_echoes_client_message_id(
-        self,
-        acp_agent_loop: VibeAcpAgentLoop,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        env_file = tmp_path / ".env"
-
-        class FakeGlobalEnvFile:
-            path = env_file
-
-        monkeypatch.setattr(
-            "vibe.core.proxy_setup.GLOBAL_ENV_FILE", FakeGlobalEnvFile()
-        )
-
-        session_response = await acp_agent_loop.new_session(
-            cwd=str(Path.cwd()), mcp_servers=[]
-        )
-        client_message_id = "550e8400-e29b-41d4-a716-446655440000"
-
-        response = await acp_agent_loop.prompt(
-            prompt=[TextContentBlock(type="text", text="/proxy-setup")],
-            session_id=session_response.session_id,
-            message_id=client_message_id,
-        )
-
-        assert response.user_message_id == client_message_id
+        assert len(user_updates) == 1
+        assert user_updates[0].update.message_id is not None
 
     @pytest.mark.asyncio
     async def test_proxy_setup_agent_message_has_message_id(
@@ -423,9 +403,11 @@ class TestDataRetentionCommand:
         )
 
         assert response.stop_reason == "end_turn"
-        assert response.user_message_id is not None
 
         updates = _get_fake_client(acp_agent_loop)._session_updates
+        user_updates = [u for u in updates if isinstance(u.update, UserMessageChunk)]
+        assert len(user_updates) == 1
+        assert user_updates[0].update.message_id is not None
         message_updates = [
             u for u in updates if isinstance(u.update, AgentMessageChunk)
         ]

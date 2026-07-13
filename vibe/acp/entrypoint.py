@@ -16,6 +16,7 @@ from vibe.core.config.harness_files import (
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.telemetry.build_metadata import build_launch_context
+from vibe.core.utils.windows_asyncio import silence_proactor_transport_teardown_warnings
 
 # Configure line buffering for subprocess communication
 sys.stdout.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
@@ -76,11 +77,14 @@ def handle_debug_mode() -> None:
 
 
 def main() -> None:
+    silence_proactor_transport_teardown_warnings()
+
     handle_debug_mode()
     init_harness_files_manager("user", "project")
 
     from vibe.acp.acp_agent_loop import run_acp_server
     from vibe.core.config import VibeConfig, load_dotenv_values
+    from vibe.core.sentry import SentryTarget, init_sentry
     from vibe.core.tracing import setup_tracing
     from vibe.setup.onboarding import run_onboarding
 
@@ -101,9 +105,28 @@ def main() -> None:
 
     try:
         config = VibeConfig.load()
-        setup_tracing(config)
     except Exception:
-        pass  # tracing disabled
+        config = None
+
+    if config is not None:
+        try:
+            setup_tracing(config)
+        except Exception:
+            pass  # tracing disabled
+        try:
+            init_sentry(
+                config,
+                headless=True,
+                launch_context=build_launch_context(
+                    agent_entrypoint="acp",
+                    agent_version=__version__,
+                    client_name="vibe_acp",
+                    client_version=__version__,
+                ),
+                target=SentryTarget.ACP,
+            )
+        except Exception:
+            pass  # error reporting disabled
 
     run_acp_server(environ_before_dotenv_load=environ_before_dotenv_load)
 

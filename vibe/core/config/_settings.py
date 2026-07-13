@@ -279,10 +279,6 @@ class VibeConfig(BaseSettings):
     vibe_code_api_key_env_var: str = Field(
         default=DEFAULT_MISTRAL_API_ENV_KEY, exclude=True
     )
-    vibe_code_project_name: str | None = Field(default=None, exclude=True)
-    experimental_vibe_code_project_picker_enabled: bool = Field(
-        default=False, exclude=True
-    )
 
     # TODO(otel): remove exclude=True once the feature is publicly available
     enable_otel: bool = Field(default=False, exclude=True)
@@ -292,6 +288,10 @@ class VibeConfig(BaseSettings):
     vibe_base_url: str = Field(default=DEFAULT_VIBE_BASE_URL, exclude=True)
 
     enable_experimental_hooks: bool = Field(default=False, exclude=True)
+    experimental_teleport_context_summary: bool = Field(
+        default=False,
+        description="Experimental: summarize the current session context when teleporting to Vibe Code.",
+    )
     experimental_bash_tool: bool = Field(
         default=False,
         description=(
@@ -727,7 +727,7 @@ class VibeConfig(BaseSettings):
         """
         model = self.get_active_model()
 
-        current_config = TomlFileSettingsSource(type(self)).toml_data
+        current_config = self.get_persisted_config()
         models = current_config.get("models", [])
         for entry in models:
             if entry.get("alias", entry.get("name")) == model.alias:
@@ -777,7 +777,7 @@ class VibeConfig(BaseSettings):
     def save_updates(cls, updates: dict[str, Any]) -> None:
         if not get_harness_files_manager().persist_allowed:
             return
-        current_config = TomlFileSettingsSource(cls).toml_data
+        current_config = cls.get_persisted_config()
         merged_config = deep_update(current_config, updates)
         cls.dump_config(merged_config)
 

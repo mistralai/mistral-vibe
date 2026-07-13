@@ -9,8 +9,10 @@ from vibe.core.auth.mcp_oauth import (
     MCPOAuthInvalidGrant,
     MCPOAuthLoginFailed,
     MCPOAuthPortInUse,
+    MCPOAuthTransientRefreshError,
     build_oauth_provider,
     perform_oauth_login,
+    unwrap_oauth_refresh_error,
 )
 
 __all__ = [
@@ -22,6 +24,8 @@ __all__ = [
     "MCPOAuthInvalidGrant",
     "MCPOAuthLoginFailed",
     "MCPOAuthPortInUse",
+    "MCPOAuthTransientRefreshError",
     "build_oauth_provider",
     "perform_oauth_login",
+    "unwrap_oauth_refresh_error",
 ]

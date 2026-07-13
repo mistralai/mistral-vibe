@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Iterable
-from typing import cast
+from typing import Any, cast
 
 from tests.mock.utils import mock_llm_chunk
 from vibe.core.types import LLMChunk, LLMMessage, Role
@@ -36,6 +36,8 @@ class FakeBackend:
         self._requests_extra_headers: list[dict[str, str] | None] = []
         self._requests_metadata: list[dict[str, str] | None] = []
         self._requests_max_tokens: list[int | None] = []
+        self._requests_tools: list[Any] = []
+        self._requests_tool_choices: list[Any] = []
         self._exception_to_raise = exception_to_raise
 
         self._streams: list[list[LLMChunk]]
@@ -72,6 +74,14 @@ class FakeBackend:
     def requests_max_tokens(self) -> list[int | None]:
         return self._requests_max_tokens
 
+    @property
+    def requests_tools(self) -> list[Any]:
+        return self._requests_tools
+
+    @property
+    def requests_tool_choices(self) -> list[Any]:
+        return self._requests_tool_choices
+
     async def __aenter__(self):
         return self
 
@@ -97,6 +107,8 @@ class FakeBackend:
         self._requests_extra_headers.append(extra_headers)
         self._requests_metadata.append(metadata)
         self._requests_max_tokens.append(max_tokens)
+        self._requests_tools.append(tools)
+        self._requests_tool_choices.append(tool_choice)
 
         if self._streams:
             stream = self._streams.pop(0)
@@ -126,6 +138,8 @@ class FakeBackend:
         self._requests_extra_headers.append(extra_headers)
         self._requests_metadata.append(metadata)
         self._requests_max_tokens.append(max_tokens)
+        self._requests_tools.append(tools)
+        self._requests_tool_choices.append(tool_choice)
 
         if self._streams:
             stream = list(self._streams.pop(0))

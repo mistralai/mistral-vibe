@@ -12,7 +12,12 @@ from pydantic import ValidationError
 from vibe.core.config.builder import ConfigBuilder
 from vibe.core.config.event_bus import EventBus
 from vibe.core.config.layer import ConfigLayer, LayerNotLoadedError, RawConfig
-from vibe.core.config.patch import AddOperationPatch, ConfigPatch, PatchOp
+from vibe.core.config.patch import (
+    AddOperationPatch,
+    ConfigPatch,
+    PatchOp,
+    ensure_parent_paths,
+)
 from vibe.core.config.schema import ConfigSchema
 from vibe.core.config.types import ConfigChangeCallback, ConflictStrategy
 
@@ -112,7 +117,7 @@ class ConfigOrchestrator[S: ConfigSchema]:
         try:
             self.config.model_validate(
                 apply_patch(
-                    self._config.model_dump(),
+                    ensure_parent_paths(self._config.model_dump(), operations),
                     patch=[operation.to_json_patch() for operation in operations],
                     in_place=False,
                 )

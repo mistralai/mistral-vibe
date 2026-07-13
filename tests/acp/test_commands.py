@@ -28,6 +28,7 @@ from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.acp.teleport import TELEPORT_PUSH_OPTION_ID
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.config import SessionLoggingConfig
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.teleport import TeleportService
 from vibe.core.teleport.types import (
@@ -39,6 +40,7 @@ from vibe.core.teleport.types import (
     TeleportStartingWorkflowEvent,
 )
 from vibe.core.types import LLMMessage, Role
+from vibe.core.vibe_code_project import VibeCodeProjectResolverError
 
 
 def _get_client(agent: VibeAcpAgentLoop) -> FakeClient:
@@ -110,8 +112,11 @@ def _make_patched_agent_loop(
 
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
-            if config_updates and "config" in kwargs and kwargs["config"] is not None:
-                kwargs["config"] = kwargs["config"].model_copy(update=config_updates)
+            orchestrator = kwargs.get("config_orchestrator")
+            if config_updates and orchestrator is not None:
+                kwargs["config_orchestrator"] = LegacyConfigOrchestrator(
+                    orchestrator.config.model_copy(update=config_updates)
+                )
             super().__init__(*args, **{**kwargs, "backend": backend})
 
     return PatchedAgentLoop
@@ -310,13 +315,15 @@ class TestHandleTeleport:
 
     @pytest.mark.asyncio
     async def test_teleport_sends_tool_updates_and_structured_url(
-        self, acp_agent_loop: VibeAcpAgentLoop
+        self, acp_agent_loop: VibeAcpAgentLoop, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         class FakeTeleportService:
             prompts: list[str]
+            project_ids: list[str | None]
 
             def __init__(self) -> None:
                 self.prompts = []
+                self.project_ids = []
 
             async def __aenter__(self) -> FakeTeleportService:
                 return self
@@ -324,8 +331,11 @@ class TestHandleTeleport:
             async def __aexit__(self, *_args: object) -> None:
                 return None
 
-            async def execute(self, prompt: str) -> AsyncGenerator[object, object]:
+            async def execute(
+                self, prompt: str, *, project_id: str | None = None, **_kwargs: object
+            ) -> AsyncGenerator[object, object]:
                 self.prompts.append(prompt)
+                self.project_ids.append(project_id)
                 yield TeleportCheckingGitEvent()
                 yield TeleportStartingWorkflowEvent()
                 yield TeleportCompleteEvent(url="https://chat.example.com/code/1/2")
@@ -334,6 +344,10 @@ class TestHandleTeleport:
         session = acp_agent_loop.sessions[session_id]
         session.agent_loop.messages.append(
             LLMMessage(role=Role.user, content="continue this task")
+        )
+        monkeypatch.setattr(
+            "vibe.acp.teleport._resolve_acp_teleport_project",
+            AsyncMock(return_value=(None, None)),
         )
         service = FakeTeleportService()
         _set_teleport_service(session.agent_loop, service)
@@ -348,7 +362,8 @@ class TestHandleTeleport:
                 "url": "https://chat.example.com/code/1/2",
             },
         }
-        assert service.prompts == ["continue this task (continue)"]
+        assert service.prompts == ["continue this task"]
+        assert service.project_ids == [None]
         assert _get_message_texts(acp_agent_loop) == []
 
         tool_updates = _get_tool_updates(acp_agent_loop)
@@ -370,8 +385,112 @@ class TestHandleTeleport:
         ]
 
     @pytest.mark.asyncio
+    async def test_teleport_uses_headless_resolved_project_id(
+        self,
+        acp_agent_loop: VibeAcpAgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+        telemetry_events: list[dict],
+    ) -> None:
+        class FakeTeleportService:
+            def __init__(self) -> None:
+                self.project_ids: list[str | None] = []
+
+            async def __aenter__(self) -> FakeTeleportService:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def execute(
+                self, prompt: str, *, project_id: str | None = None, **_kwargs: object
+            ) -> AsyncGenerator[object, object]:
+                self.project_ids.append(project_id)
+                yield TeleportCompleteEvent(url="https://chat.example.com/code/1/2")
+
+        async def resolve_project(_session: object) -> tuple[str, dict[str, object]]:
+            return "project-id", {
+                "project_picker_shown": False,
+                "project_selection_source": "saved_link",
+                "project_candidate_count_loaded": 0,
+                "project_multi_repo_match_count": 0,
+                "saved_project_link_cleared": False,
+                "project_repo_remote_changed": False,
+            }
+
+        monkeypatch.setattr(
+            "vibe.acp.teleport._resolve_acp_teleport_project", resolve_project
+        )
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        session = acp_agent_loop.sessions[session_id]
+        session.agent_loop.messages.append(
+            LLMMessage(role=Role.user, content="ship it")
+        )
+        service = FakeTeleportService()
+        _set_teleport_service(session.agent_loop, service)
+
+        response = await _prompt(acp_agent_loop, session_id, "/teleport")
+
+        assert response.field_meta == {
+            "tool_name": "teleport",
+            "teleport": {
+                "status": "completed",
+                "url": "https://chat.example.com/code/1/2",
+            },
+        }
+        assert service.project_ids == ["project-id"]
+        assert telemetry_events[-1]["event_name"] == "vibe.teleport_completed"
+        assert {
+            "project_picker_shown": False,
+            "project_selection_source": "saved_link",
+            "project_candidate_count_loaded": 0,
+            "project_multi_repo_match_count": 0,
+            "saved_project_link_cleared": False,
+            "project_repo_remote_changed": False,
+        }.items() <= telemetry_events[-1]["properties"].items()
+
+    @pytest.mark.asyncio
+    async def test_teleport_marks_tool_failed_when_project_resolution_fails(
+        self,
+        acp_agent_loop: VibeAcpAgentLoop,
+        monkeypatch: pytest.MonkeyPatch,
+        telemetry_events: list[dict],
+    ) -> None:
+        async def fail_project_resolution(_session: object) -> tuple[None, None]:
+            raise VibeCodeProjectResolverError("Multiple projects match.")
+
+        monkeypatch.setattr(
+            "vibe.acp.teleport._resolve_acp_teleport_project", fail_project_resolution
+        )
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        session = acp_agent_loop.sessions[session_id]
+        session.agent_loop.messages.append(
+            LLMMessage(role=Role.user, content="ship it")
+        )
+
+        response = await _prompt(acp_agent_loop, session_id, "/teleport")
+
+        assert response.field_meta == {
+            "tool_name": "teleport",
+            "teleport": {"status": "failed"},
+        }
+        failed = _get_tool_updates(acp_agent_loop)[-1]
+        assert failed.status == "failed"
+        assert failed.raw_output == "Multiple projects match."
+        assert telemetry_events[-1]["event_name"] == "vibe.teleport_failed"
+        assert {
+            "stage": "git_check",
+            "error_class": "VibeCodeProjectResolverError",
+            "project_picker_shown": False,
+            "project_selection_source": "cancelled",
+            "project_candidate_count_loaded": 0,
+            "project_multi_repo_match_count": 0,
+            "saved_project_link_cleared": False,
+            "project_repo_remote_changed": False,
+        }.items() <= telemetry_events[-1]["properties"].items()
+
+    @pytest.mark.asyncio
     async def test_teleport_push_required_requests_permission(
-        self, acp_agent_loop: VibeAcpAgentLoop
+        self, acp_agent_loop: VibeAcpAgentLoop, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         class FakeTeleportService:
             response: TeleportPushResponseEvent | None
@@ -385,7 +504,10 @@ class TestHandleTeleport:
             async def __aexit__(self, *_args: object) -> None:
                 return None
 
-            async def execute(self, prompt: str) -> AsyncGenerator[object, object]:
+            async def execute(
+                self, prompt: str, *, project_id: str | None = None, **_kwargs: object
+            ) -> AsyncGenerator[object, object]:
+                assert project_id is None
                 yield TeleportCheckingGitEvent()
                 response = yield TeleportPushRequiredEvent(
                     unpushed_count=2, branch_not_pushed=False
@@ -398,6 +520,10 @@ class TestHandleTeleport:
         session = acp_agent_loop.sessions[session_id]
         session.agent_loop.messages.append(
             LLMMessage(role=Role.user, content="ship it")
+        )
+        monkeypatch.setattr(
+            "vibe.acp.teleport._resolve_acp_teleport_project",
+            AsyncMock(return_value=(None, None)),
         )
         service = FakeTeleportService()
         _set_teleport_service(session.agent_loop, service)
@@ -465,7 +591,7 @@ class TestHandleTeleport:
 
     @pytest.mark.asyncio
     async def test_teleport_push_denied_marks_tool_call_failed(
-        self, acp_agent_loop: VibeAcpAgentLoop
+        self, acp_agent_loop: VibeAcpAgentLoop, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         class FakeTeleportService:
             async def __aenter__(self) -> FakeTeleportService:
@@ -474,7 +600,10 @@ class TestHandleTeleport:
             async def __aexit__(self, *_args: object) -> None:
                 return None
 
-            async def execute(self, prompt: str) -> AsyncGenerator[object, object]:
+            async def execute(
+                self, prompt: str, *, project_id: str | None = None, **_kwargs: object
+            ) -> AsyncGenerator[object, object]:
+                assert project_id is None
                 response = yield TeleportPushRequiredEvent()
                 if (
                     not isinstance(response, TeleportPushResponseEvent)
@@ -488,6 +617,10 @@ class TestHandleTeleport:
         session = acp_agent_loop.sessions[session_id]
         session.agent_loop.messages.append(
             LLMMessage(role=Role.user, content="ship it")
+        )
+        monkeypatch.setattr(
+            "vibe.acp.teleport._resolve_acp_teleport_project",
+            AsyncMock(return_value=(None, None)),
         )
         _set_teleport_service(session.agent_loop, FakeTeleportService())
 

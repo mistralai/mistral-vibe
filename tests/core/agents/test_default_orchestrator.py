@@ -185,7 +185,7 @@ async def test_agent_profile_layer_overrides_runtime_overrides() -> None:
 async def test_agent_manager_switch_profile_updates_agent_profile_layer() -> None:
     orchestrator = await build_default_orchestrator()
 
-    manager = AgentManager(lambda: orchestrator.config)
+    manager = AgentManager(orchestrator)
 
     await _switch_profile_with_agent_layer(manager, orchestrator, BuiltinAgentName.PLAN)
 
@@ -201,7 +201,7 @@ async def test_agent_manager_switch_profile_updates_agent_profile_layer() -> Non
 @pytest.mark.asyncio
 async def test_agent_manager_switch_profile_replaces_agent_profile_layer() -> None:
     orchestrator = await build_default_orchestrator()
-    manager = AgentManager(lambda: orchestrator.config)
+    manager = AgentManager(orchestrator)
 
     await _switch_profile_with_agent_layer(manager, orchestrator, BuiltinAgentName.PLAN)
 
@@ -246,7 +246,7 @@ async def test_agent_manager_switch_writes_discovered_agent_profile_layer(
         f'agent_paths = ["{agents_dir.as_posix()}"]\n', encoding="utf-8"
     )
     orchestrator = await build_default_orchestrator()
-    manager = AgentManager(lambda: orchestrator.config)
+    manager = AgentManager(orchestrator)
 
     await _switch_profile_with_agent_layer(manager, orchestrator, "scout")
 

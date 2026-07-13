@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated, Any
 
-from jsonpointer import JsonPointerException
+from jsonpatch import JsonPatchException
 from pydantic import BaseModel, Field, ValidationError
 import pytest
 
@@ -18,7 +18,12 @@ from vibe.core.config.layer import (
 from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.discovered import DiscoveredConfigLayer
-from vibe.core.config.patch import AddOperationPatch, ConfigPatch, ReplaceOperationPatch
+from vibe.core.config.patch import (
+    AddOperationPatch,
+    ConfigPatch,
+    RemoveOperationPatch,
+    ReplaceOperationPatch,
+)
 from vibe.core.config.schema import ConfigSchema, WithConcatMerge, WithReplaceMerge
 from vibe.core.config.types import (
     ConcurrencyConflictError,
@@ -586,13 +591,13 @@ async def test_apply_operation_failure_wrapped() -> None:
     ) as exc_info:
         await layer.apply(
             ConfigPatch(
-                AddOperationPatch(path="/tools/enabled_tools/-", value="read"),
+                RemoveOperationPatch(path="/tools/enabled_tools"),
                 fingerprint=fingerprint,
             )
         )
 
     assert exc_info.value.layer_name == "stub"
-    assert isinstance(exc_info.value.__cause__, JsonPointerException)
+    assert isinstance(exc_info.value.__cause__, JsonPatchException)
     assert "enabled_tools" in str(exc_info.value.__cause__)
     assert layer.fingerprint == fingerprint
     assert (await layer.load()).model_dump() == original_data
@@ -611,7 +616,7 @@ async def test_apply_operation_failure_after_successful_operation_is_atomic() ->
         await layer.apply(
             ConfigPatch(
                 ReplaceOperationPatch(path="/active_model", value="new"),
-                AddOperationPatch(path="/tools/enabled_tools/-", value="read"),
+                RemoveOperationPatch(path="/tools/enabled_tools"),
                 fingerprint=fingerprint,
             )
         )

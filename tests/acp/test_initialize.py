@@ -84,46 +84,10 @@ class TestACPInitialize:
         assert auth_method.description == BROWSER_AUTH_DESCRIPTION
 
     @pytest.mark.asyncio
-    async def test_load_config_uses_client_info_title_for_vibe_code_project_name(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        config = build_test_vibe_config()
-        monkeypatch.setattr(
-            "vibe.acp.acp_agent_loop.VibeConfig.load", lambda *args, **kwargs: config
-        )
-        acp_agent_loop = build_acp_agent_loop()
-
-        await acp_agent_loop.initialize(
-            protocol_version=PROTOCOL_VERSION,
-            client_info=Implementation(name="zed", title="Zed", version="0.999.0"),
-        )
-
-        assert acp_agent_loop._load_config().vibe_code_project_name == "Zed"
-
-    @pytest.mark.asyncio
-    async def test_load_config_preserves_explicit_vibe_code_project_name(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        config = build_test_vibe_config(vibe_code_project_name="Configured Project")
-        monkeypatch.setattr(
-            "vibe.acp.acp_agent_loop.VibeConfig.load", lambda *args, **kwargs: config
-        )
-        acp_agent_loop = build_acp_agent_loop()
-
-        await acp_agent_loop.initialize(
-            protocol_version=PROTOCOL_VERSION,
-            client_info=Implementation(name="zed", title="Zed", version="0.999.0"),
-        )
-
-        assert (
-            acp_agent_loop._load_config().vibe_code_project_name == "Configured Project"
-        )
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "reload_method_name", ["_reload_config", "_reload_session_config"]
     )
-    async def test_reload_config_uses_client_info_title_for_vibe_code_project_name(
+    async def test_reload_config_preserves_reloaded_config_without_project_name_mutation(
         self, monkeypatch: pytest.MonkeyPatch, reload_method_name: str
     ) -> None:
         config = build_test_vibe_config()
@@ -131,8 +95,10 @@ class TestACPInitialize:
             "vibe.acp.acp_agent_loop.VibeConfig.load", lambda *args, **kwargs: config
         )
         acp_agent_loop = build_acp_agent_loop()
+        mock_config_orchestrator = SimpleNamespace(reload=AsyncMock(), config=config)
         agent_loop = SimpleNamespace(
             config=SimpleNamespace(tool_paths=[]),
+            config_orchestrator=mock_config_orchestrator,
             reload_with_initial_messages=AsyncMock(),
         )
         session = cast(Any, SimpleNamespace(agent_loop=agent_loop))
@@ -143,11 +109,9 @@ class TestACPInitialize:
         )
         await getattr(acp_agent_loop, reload_method_name)(session)
 
+        mock_config_orchestrator.reload.assert_awaited_once()
         agent_loop.reload_with_initial_messages.assert_awaited_once()
-        reloaded_config = agent_loop.reload_with_initial_messages.await_args.kwargs[
-            "base_config"
-        ]
-        assert reloaded_config.vibe_code_project_name == "Zed"
+        assert agent_loop.reload_with_initial_messages.await_args.kwargs == {}
 
     @pytest.mark.asyncio
     async def test_initialize_with_terminal_auth(

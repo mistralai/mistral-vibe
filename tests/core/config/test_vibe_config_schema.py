@@ -40,7 +40,6 @@ disabled_tools = ["bash"]
 default_agent = "plan"
 enabled_skills = ["search"]
 enable_otel = true
-experimental_vibe_code_project_picker_enabled = true
 
 [[models]]
 alias = "codestral"
@@ -70,7 +69,6 @@ provider = "mistral"
     assert config.default_agent == "plan"
     assert "search" in config.enabled_skills
     assert config.enable_otel is True
-    assert config.experimental_vibe_code_project_picker_enabled is True
 
 
 def test_duplicate_model_alias_raises() -> None:

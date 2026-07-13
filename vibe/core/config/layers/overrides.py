@@ -29,7 +29,7 @@ class OverridesLayer(ConfigLayer[RawConfig]):
         fingerprint = create_dict_fingerprint(data)
         return LayerConfigSnapshot(data=data, fingerprint=fingerprint)
 
-    async def _save_to_store(self, _next_config: RawConfig) -> str:
-        raise NotImplementedError(
-            "OverridesLayer patch persistence is not implemented yet"
-        )
+    async def _save_to_store(self, next_config: RawConfig) -> str:
+        data = copy.deepcopy(next_config.model_dump())
+        self._data = data
+        return create_dict_fingerprint(data)

@@ -87,7 +87,7 @@ def mock_sessions() -> Iterator[respx.MockRouter]:
 async def _drain(
     agent: AgentLoop, prompt: str | None, *, approve: bool | None = None
 ) -> list[object]:
-    gen = agent.teleport_to_vibe_code(prompt)
+    gen = agent.teleport_to_vibe_code(prompt, project_id="project-id")
     events: list[object] = []
     response: TeleportPushResponseEvent | None = None
     while True:
@@ -130,6 +130,7 @@ async def test_teleport_sends_repo_metadata_and_diff(
     await _drain(build_e2e_agent_loop(), "ship it")
 
     payload = mock_sessions.calls.last.request.read().decode()
+    assert '"projectId":"project-id"' in payload
     assert "https://github.com/owner/repo.git" in payload
     assert "work" in payload
     assert commit in payload

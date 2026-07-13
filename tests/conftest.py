@@ -37,10 +37,12 @@ from vibe.core.config.harness_files import (
     init_harness_files_manager,
     reset_harness_files_manager,
 )
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.llm.types import BackendLike
 from vibe.core.utils import keyring as keyring_utils
 from vibe.core.utils.concurrency import run_sync
+from vibe.core.utils.platform import resolve_windows_shell
 
 
 class _EmptyKeyring(KeyringBackend):
@@ -56,6 +58,13 @@ class _EmptyKeyring(KeyringBackend):
 
     def delete_password(self, service: str, username: str) -> None:
         raise keyring.errors.PasswordDeleteError()
+
+
+@pytest.fixture(autouse=True)
+def _reset_windows_shell_cache() -> None:
+    # resolve_windows_shell is cached for the process; tests vary sys.platform,
+    # env, and shutil.which between cases, so clear it before each test.
+    resolve_windows_shell.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -404,7 +413,7 @@ def build_test_agent_loop(
     resolved_config = config or build_test_vibe_config()
 
     return AgentLoop(
-        config=resolved_config,
+        config_orchestrator=LegacyConfigOrchestrator(resolved_config),
         agent_name=agent_name,
         backend=backend or FakeBackend(),
         enable_streaming=enable_streaming,

@@ -35,7 +35,7 @@ def _make_acp_agent(backend: FakeBackend) -> VibeAcpAgentLoop:
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._base_config = config
+            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()
@@ -232,7 +232,7 @@ class TestLoadSessionUsageUpdate:
         class PatchedAgentLoop(AgentLoop):
             def __init__(self, *args, **kwargs) -> None:
                 super().__init__(*args, **{**kwargs, "backend": backend})
-                self._base_config = config
+                self._replace_base_config(config)
                 self.agent_manager.invalidate_config()
 
         patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()

@@ -82,7 +82,8 @@ jobs:
       - name: Inject Sentry DSN
         shell: bash
         env:
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          CLI_SENTRY_DSN: ${{ secrets.CLI_SENTRY_DSN }}
+          ACP_SENTRY_DSN: ${{ secrets.ACP_SENTRY_DSN }}
           REQUIRE_SENTRY_DSN: ${{ github.event_name == 'release' && 'true' || 'false' }}
         run: bash ./scripts/ci/inject-sentry-dsn.sh
 
@@ -100,17 +101,21 @@ jobs:
         shell: bash
         run: echo "version=$(uv version | cut -d' ' -f2)" >> $GITHUB_OUTPUT
 
-      - name: Upload ACP binary as artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}
-          path: dist/vibe-acp-dir/
+      - name: Package PyInstaller artifacts
+        shell: bash
+        run: bash ./scripts/ci/package-pyinstaller-artifacts.sh ${{ matrix.os }} ${{ matrix.arch }} ${{ steps.get_version.outputs.version }} vibe-acp vibe
 
-      - name: Upload CLI binary as artifact
+      - name: Upload ACP release asset
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: vibe-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}
-          path: dist/vibe-dir/
+          path: dist/release-assets/vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.zip
+          archive: false
+
+      - name: Upload CLI release asset
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: dist/release-assets/vibe-${{ matrix.os }}-${{ matrix.arch }}-${{ steps.get_version.outputs.version }}.zip
+          archive: false
 
   nix-build:
     needs: configure
@@ -163,24 +168,53 @@ jobs:
 
       - name: Set up Python (container)
         if: ${{ matrix.container }}
-        run: yum install -y python3.11 python3.11-pip
+        run: yum install -y python3.11 python3.11-pip unzip
 
       - name: Install smoke test deps
-        run: ${{ matrix.container && 'python3.11' || 'python' }} -m pip install agent-client-protocol==0.10.1
+        run: ${{ matrix.container && 'python3.11' || 'python' }} -m pip install agent-client-protocol==0.11.0
 
       - name: Download ACP artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-*
+          pattern: vibe-acp-${{ matrix.os }}-${{ matrix.arch }}-*.zip
           merge-multiple: true
-          path: dist/vibe-acp-dir
+          skip-decompress: true
+          path: artifacts/vibe-acp
 
       - name: Download CLI artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: vibe-${{ matrix.os }}-${{ matrix.arch }}-*
+          pattern: vibe-${{ matrix.os }}-${{ matrix.arch }}-*.zip
           merge-multiple: true
-          path: dist/vibe-dir
+          skip-decompress: true
+          path: artifacts/vibe
+
+      - name: Extract release assets
+        shell: bash
+        run: |
+          shopt -s nullglob
+          mkdir -p dist/vibe-acp-dir dist/vibe-dir
+
+          extract_asset() {
+            local artifact_dir="$1"
+            local output_dir="$2"
+            local zips=("$artifact_dir"/*.zip)
+
+            if [ "${#zips[@]}" -ne 1 ]; then
+              echo "Expected one zip in $artifact_dir, found ${#zips[@]}" >&2
+              exit 1
+            fi
+
+            if [ "${{ matrix.os }}" = "windows" ]; then
+              powershell -NoProfile -Command "Expand-Archive -Path '${zips[0]}' -DestinationPath '$output_dir' -Force"
+              return
+            fi
+
+            unzip -oq "${zips[0]}" -d "$output_dir"
+          }
+
+          extract_asset artifacts/vibe-acp dist/vibe-acp-dir
+          extract_asset artifacts/vibe dist/vibe-dir
 
       - name: Run ACP smoke tests
         run: ${{ matrix.container && 'python3.11' || 'python' }} tests/acp/smoke_binary.py dist/vibe-acp-dir
@@ -201,21 +235,15 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          skip-decompress: true
           path: artifacts
 
-      - name: Zip artifacts
+      - name: Collect release assets
+        shell: bash
         run: |
           mkdir release-assets
-          for dir in artifacts/*; do
-            name=$(basename "$dir")
-            if [ -f "$dir/vibe-acp" ] || [ -f "$dir/vibe-acp.exe" ]; then
-              chmod -f +x "$dir/vibe-acp" 2>/dev/null || true
-              (cd "$dir" && zip -r "../../release-assets/${name}.zip" .)
-            elif [ -f "$dir/vibe" ] || [ -f "$dir/vibe.exe" ]; then
-              chmod -f +x "$dir/vibe" 2>/dev/null || true
-              (cd "$dir" && zip -r "../../release-assets/${name}.zip" .)
-            fi
-          done
+          find artifacts -name '*.zip' -exec cp {} release-assets/ \;
+          test "$(find release-assets -name '*.zip' | wc -l)" -gt 0
 
       - name: Attach binaries to release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1

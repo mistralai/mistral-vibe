@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Generator
 import importlib
 import json
 import os
 from pathlib import Path
 import sys
+import threading
+from types import ModuleType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,24 +16,44 @@ import httpx
 import pytest
 import zstandard
 
-from tests.conftest import build_test_vibe_config
 from tests.constants import TELEPORT_COMPLETE_URL, TELEPORT_SESSIONS_PATH
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
 )
 from vibe.core.teleport.git import GitRepoInfo
-from vibe.core.teleport.nuage import DEFAULT_NUAGE_PROJECT_NAME
 from vibe.core.teleport.teleport import TeleportService
 from vibe.core.teleport.types import (
     TeleportCheckingGitEvent,
     TeleportCompleteEvent,
+    TeleportMessageContext,
+    TeleportMessageContextSource,
     TeleportPushingEvent,
     TeleportPushRequiredEvent,
     TeleportPushResponseEvent,
     TeleportStartingWorkflowEvent,
 )
 from vibe.core.utils.http import VibeAsyncHTTPClient
+from vibe.core.vibe_code_project import VibeProjectsStore
+
+
+@pytest.fixture(autouse=True)
+def _restore_reimported_agent_loop_modules() -> Generator[None]:
+    module_prefixes = ("vibe.core.agent_loop", "git", "vibe.core.teleport")
+    originals: dict[str, ModuleType] = {
+        name: module
+        for name, module in sys.modules.items()
+        if any(name.startswith(prefix) for prefix in module_prefixes)
+    }
+    yield
+    for name in [
+        name
+        for name in sys.modules
+        if any(name.startswith(prefix) for prefix in module_prefixes)
+    ]:
+        if name not in originals:
+            del sys.modules[name]
+    sys.modules.update(originals)
 
 
 def _reimport_agent_loop() -> Any:
@@ -66,6 +89,16 @@ def _mock_handler() -> Any:
         )
 
     return handler
+
+
+class TrackingProjectsStore(VibeProjectsStore):
+    def __init__(self, path: Path | str | None = None) -> None:
+        super().__init__(path)
+        self.delete_remote_project_threads: list[int] = []
+
+    def delete_remote_project(self, *, repo_root: Path) -> None:
+        self.delete_remote_project_threads.append(threading.get_ident())
+        super().delete_remote_project(repo_root=repo_root)
 
 
 class TestTeleportServiceCompressDiff:
@@ -162,16 +195,12 @@ class TestTeleportServiceIsSupported:
 
 
 class TestTeleportServiceExecute:
-    def test_build_nuage_request_uses_configured_project_name(
-        self, tmp_path: Path
-    ) -> None:
-        service = _make_service(
-            tmp_path,
-            vibe_config=build_test_vibe_config(vibe_code_project_name="  Zed  "),
-        )
+    def test_build_nuage_request_uses_project_id(self, tmp_path: Path) -> None:
+        service = _make_service(tmp_path)
 
         request = service._build_nuage_request(
             prompt="test prompt",
+            project_id="project-id",
             git_info=GitRepoInfo(
                 remote_name="origin",
                 remote_url="https://github.com/owner/repo",
@@ -183,29 +212,13 @@ class TestTeleportServiceExecute:
             ),
         )
 
-        assert request.project_name == "Zed"
-
-    def test_build_nuage_request_uses_default_project_name_for_blank_config(
-        self, tmp_path: Path
-    ) -> None:
-        service = _make_service(
-            tmp_path, vibe_config=build_test_vibe_config(vibe_code_project_name="  ")
+        assert request.project_id == "project-id"
+        assert (
+            request.model_dump(mode="json", by_alias=True, exclude_none=True)[
+                "projectId"
+            ]
+            == "project-id"
         )
-
-        request = service._build_nuage_request(
-            prompt="test prompt",
-            git_info=GitRepoInfo(
-                remote_name="origin",
-                remote_url="https://github.com/owner/repo",
-                owner="owner",
-                repo="repo",
-                branch="main",
-                commit="abc123",
-                diff="",
-            ),
-        )
-
-        assert request.project_name == DEFAULT_NUAGE_PROJECT_NAME
 
     @pytest.mark.asyncio
     async def test_execute_happy_path(self, tmp_path: Path) -> None:
@@ -250,7 +263,19 @@ class TestTeleportServiceExecute:
             service._git.is_commit_pushed = AsyncMock(return_value=True)
             service._git.is_branch_pushed = AsyncMock(return_value=True)
 
-            events = [event async for event in service.execute("test prompt")]
+            events = [
+                event
+                async for event in service.execute(
+                    "test prompt",
+                    project_id="project-id",
+                    message_context=TeleportMessageContext(
+                        summary="Prior teleport context",
+                        source=TeleportMessageContextSource(
+                            entrypoint="acp", client_name="mistral-vibe-vscode"
+                        ),
+                    ),
+                )
+            ]
 
         assert isinstance(events[0], TeleportCheckingGitEvent)
         assert isinstance(events[1], TeleportStartingWorkflowEvent)
@@ -258,7 +283,7 @@ class TestTeleportServiceExecute:
         assert events[2].url == TELEPORT_COMPLETE_URL
         assert seen_url == f"https://chat.example.com{TELEPORT_SESSIONS_PATH}"
         assert seen_body is not None
-        assert seen_body["project_name"] == DEFAULT_NUAGE_PROJECT_NAME
+        assert seen_body["projectId"] == "project-id"
         assert seen_body["message"] == {
             "role": "user",
             "parts": [{"type": "text", "text": "test prompt"}],
@@ -272,6 +297,14 @@ class TestTeleportServiceExecute:
         assert repos[0]["diff"]["encoding"] == "base64"
         assert repos[0]["diff"]["compression"] == "zstd"
         assert len(repos[0]["diff"]["content"]) > 0
+        assert seen_body["context"]["messageContext"] == {
+            "summary": "Prior teleport context",
+            "source": {
+                "type": "teleport",
+                "entrypoint": "acp",
+                "clientName": "mistral-vibe-vscode",
+            },
+        }
         assert "idempotencyKey" in seen_body
         service._git.fetch.assert_awaited_once_with("upstream")
         service._git.is_commit_pushed.assert_awaited_once_with(
@@ -298,7 +331,7 @@ class TestTeleportServiceExecute:
         )
 
         with pytest.raises(ServiceTeleportError, match="checked-out branch"):
-            async for _ in service.execute("test prompt"):
+            async for _ in service.execute("test prompt", project_id="project-id"):
                 pass
 
         service._git.fetch.assert_not_awaited()
@@ -309,6 +342,17 @@ class TestTeleportServiceExecute:
         with pytest.raises(ServiceTeleportError, match="non-empty prompt"):
             async for _ in service.execute(""):
                 pass
+
+    @pytest.mark.asyncio
+    async def test_execute_requires_project_id(self, tmp_path: Path) -> None:
+        service = _make_service(tmp_path)
+        service._git.get_info = AsyncMock()
+
+        with pytest.raises(ServiceTeleportError, match="project id"):
+            async for _ in service.execute("test prompt"):
+                pass
+
+        service._git.get_info.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_push_confirmation_approved(self, tmp_path: Path) -> None:
@@ -333,7 +377,7 @@ class TestTeleportServiceExecute:
             service._git.get_unpushed_commit_count = AsyncMock(return_value=2)
             service._git.push_current_branch = AsyncMock(return_value=True)
 
-            gen = service.execute("test prompt")
+            gen = service.execute("test prompt", project_id="project-id")
             assert isinstance(await gen.asend(None), TeleportCheckingGitEvent)
             push_event = await gen.asend(None)
             assert isinstance(push_event, TeleportPushRequiredEvent)
@@ -369,12 +413,54 @@ class TestTeleportServiceExecute:
         service._git.is_branch_pushed = AsyncMock(return_value=True)
         service._git.get_unpushed_commit_count = AsyncMock(return_value=1)
 
-        gen = service.execute("test prompt")
+        gen = service.execute("test prompt", project_id="project-id")
         await gen.asend(None)
         await gen.asend(None)
 
         with pytest.raises(ServiceTeleportError, match="Teleport cancelled"):
             await gen.asend(TeleportPushResponseEvent(approved=False))
+
+    @pytest.mark.asyncio
+    async def test_execute_clears_stale_project_link_off_event_loop(
+        self, tmp_path: Path
+    ) -> None:
+        event_loop_thread = threading.get_ident()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, text="project not found")
+
+        project_store = TrackingProjectsStore(tmp_path / "projects.toml")
+        async with VibeAsyncHTTPClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            service = _make_service(
+                tmp_path, client=client, project_store=project_store
+            )
+            service._git.fetch = AsyncMock()
+            service._git.get_info = AsyncMock(
+                return_value=GitRepoInfo(
+                    remote_name="origin",
+                    remote_url="https://github.com/owner/repo",
+                    owner="owner",
+                    repo="repo",
+                    branch="main",
+                    commit="abc123",
+                    diff="",
+                    repo_root=tmp_path,
+                )
+            )
+            service._git.is_commit_pushed = AsyncMock(return_value=True)
+            service._git.is_branch_pushed = AsyncMock(return_value=True)
+
+            with pytest.raises(ServiceTeleportError, match="project not found"):
+                async for _ in service.execute("test prompt", project_id="project-id"):
+                    pass
+
+        assert project_store.delete_remote_project_threads
+        assert all(
+            thread_id != event_loop_thread
+            for thread_id in project_store.delete_remote_project_threads
+        )
 
 
 class TestTeleportServiceContextManager:
