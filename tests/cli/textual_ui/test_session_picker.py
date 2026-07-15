@@ -195,6 +195,7 @@ class TestSessionPickerSessionRemoval:
         assert_delete_state(picker, kind="confirmation", option_id="session-a")
         assert option_list.replaced_prompts[-1].option_id == "session-a"
         prompt = option_list.replaced_prompts[-1].prompt
+        assert isinstance(prompt, Content)
         assert "Press d again to delete" in prompt.plain
         assert any(span.style == SHORTCUT_STYLE for span in prompt.spans)
         assert posted_messages == []

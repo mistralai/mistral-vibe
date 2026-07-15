@@ -217,7 +217,7 @@ class SessionPickerApp(Container):
             self._restore_option_text(session)
 
     def _show_delete_state(
-        self, session: ResumeSessionInfo, kind: _DeleteStateKind, prompt: Text
+        self, session: ResumeSessionInfo, kind: _DeleteStateKind, prompt: Text | Content
     ) -> None:
         self._clear_delete_state()
         self._delete_state = _DeleteState(kind=kind, option_id=session.option_id)
