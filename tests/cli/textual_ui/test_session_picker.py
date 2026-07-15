@@ -5,6 +5,7 @@ from typing import cast
 
 import pytest
 from rich.text import Text
+from textual.content import Content
 from textual.widgets import OptionList
 
 from vibe.cli.textual_ui.shortcut_hints import SHORTCUT_STYLE
@@ -197,6 +198,21 @@ class TestSessionPickerSessionRemoval:
         assert "Press d again to delete" in prompt.plain
         assert any(span.style == SHORTCUT_STYLE for span in prompt.spans)
         assert posted_messages == []
+
+    def test_delete_confirmation_prompt_renders_in_option_list(
+        self,
+        sample_sessions: list[ResumeSessionInfo],
+        sample_latest_messages: dict[str, str],
+    ) -> None:
+        picker = SessionPickerApp(
+            sessions=sample_sessions, latest_messages=sample_latest_messages
+        )
+        prompt = picker._delete_confirmation_option_text(sample_sessions[0])
+        assert isinstance(prompt, Content)
+
+        option_list = OptionList()
+        option_list.add_option(prompt)
+        option_list._update_lines()
 
     def test_second_delete_request_posts_delete_message(
         self,
