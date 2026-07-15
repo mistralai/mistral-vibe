@@ -6,7 +6,13 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.tools.base import BaseTool
-from vibe.core.types import AvailableTool, LLMMessage, Role, StrToolChoice
+from vibe.core.types import (
+    AvailableTool,
+    ImageAttachment,
+    LLMMessage,
+    Role,
+    StrToolChoice,
+)
 
 if TYPE_CHECKING:
     from vibe.core.tools.manager import ToolManager
@@ -152,13 +158,17 @@ class APIToolFormatHandler:
         return ResolvedMessage(tool_calls=resolved_calls, failed_calls=failed_calls)
 
     def create_tool_response_message(
-        self, tool_call: ResolvedToolCall, result_text: str
+        self,
+        tool_call: ResolvedToolCall,
+        result_text: str,
+        images: list[ImageAttachment] | None = None,
     ) -> LLMMessage:
         return LLMMessage(
             role=Role.tool,
             tool_call_id=tool_call.call_id,
             name=tool_call.tool_name,
             content=result_text,
+            images=images,
         )
 
     def create_failed_tool_response_message(

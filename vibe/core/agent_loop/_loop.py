@@ -1800,6 +1800,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if extra:
             text += "\n\n" + extra
 
+        images = tool_instance.get_result_images(result_model)
+
         result_cancelled = (
             isinstance(result_model, CancellableToolResult) and result_model.cancelled
         )
@@ -1821,6 +1823,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             tool_output=result_dict,
             duration_ms=duration * 1000.0,
             initial_text=text,
+            tool_images=images,
         ):
             yield ev
         self.stats.tool_calls_succeeded += 1
@@ -1905,10 +1908,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         decision: ToolDecision | None = None,
         result: dict[str, Any] | None = None,
         span: trace.Span | None = None,
+        images: list[ImageAttachment] | None = None,
     ) -> None:
         self.messages.append(
             LLMMessage.model_validate(
-                self.format_handler.create_tool_response_message(tool_call, text)
+                self.format_handler.create_tool_response_message(
+                    tool_call, text, images=images
+                )
             )
         )
 

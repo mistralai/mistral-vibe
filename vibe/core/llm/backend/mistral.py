@@ -113,6 +113,22 @@ class MistralMapper:
                     ],
                 )
             case Role.tool:
+                if msg.images:
+                    tool_parts: list[ContentChunk] = [
+                        TextChunk(type="text", text=msg.content or "")
+                    ]
+                    tool_parts.extend(
+                        ImageURLChunk(
+                            type="image_url", image_url=ImageURL(url=_to_data_uri(att))
+                        )
+                        for att in msg.images
+                    )
+                    return ToolMessage(
+                        role="tool",
+                        content=tool_parts,
+                        tool_call_id=msg.tool_call_id,
+                        name=msg.name,
+                    )
                 return ToolMessage(
                     role="tool",
                     content=msg.content,

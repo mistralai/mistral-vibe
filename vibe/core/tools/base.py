@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.logger import logger
 from vibe.core.rewind.manager import FileSnapshot
-from vibe.core.types import ToolStreamEvent
+from vibe.core.types import ImageAttachment, ToolStreamEvent
 from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
@@ -414,6 +414,16 @@ class BaseTool[
             logger.warning("Failed to read file for tool snapshot: %s", file_path)
             content = None
         return FileSnapshot(path=str(file_path), content=content)
+
+    def get_result_images(self, result: ToolResult) -> list[ImageAttachment] | None:
+        """Optional images derived from a tool result for the LLM to see.
+
+        Override in subclasses to produce ``ImageAttachment`` instances that
+        will be attached to the tool-response ``LLMMessage`` so the vision
+        model can "see" the images on the next turn.  The default returns
+        ``None`` (no images).
+        """
+        return None
 
     def get_result_extra(self, result: ToolResult) -> str | None:
         """Optional extra context appended to the result text sent to the LLM.

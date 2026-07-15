@@ -34,6 +34,16 @@ def _user_message(image: ImageAttachment) -> LLMMessage:
     return LLMMessage(role=Role.user, content="describe this", images=[image])
 
 
+def _tool_message(image: ImageAttachment) -> LLMMessage:
+    return LLMMessage(
+        role=Role.tool,
+        content="read_image result",
+        images=[image],
+        tool_call_id="call-abc",
+        name="read_image",
+    )
+
+
 class _FakeProvider:
     name = "mistral"
     reasoning_field_name = "reasoning_content"
@@ -72,6 +82,22 @@ def test_mistral_mapper_emits_image_url_chunk(
     assert dumped["role"] == "user"
     parts = dumped["content"]
     assert parts[0] == {"type": "text", "text": "describe this"}
+    assert parts[1]["type"] == "image_url"
+    assert parts[1]["image_url"]["url"] == EXPECTED_DATA_URI
+
+
+def test_mistral_mapper_emits_image_url_chunk_for_tool_role(
+    image_attachment: ImageAttachment,
+) -> None:
+    mapper = MistralMapper()
+    prepared = mapper.prepare_message(_tool_message(image_attachment))
+
+    dumped = prepared.model_dump()
+    assert dumped["role"] == "tool"
+    assert dumped["tool_call_id"] == "call-abc"
+    assert dumped["name"] == "read_image"
+    parts = dumped["content"]
+    assert parts[0] == {"type": "text", "text": "read_image result"}
     assert parts[1]["type"] == "image_url"
     assert parts[1]["image_url"]["url"] == EXPECTED_DATA_URI
 
@@ -146,3 +172,16 @@ def test_text_only_user_message_keeps_string_content() -> None:
     text_block = anthropic_payload["messages"][0]["content"][0]
     assert text_block["type"] == "text"
     assert text_block["text"] == "hi"
+
+
+def test_text_only_tool_message_keeps_string_content() -> None:
+    text_msg = LLMMessage(
+        role=Role.tool, content="tool result", tool_call_id="call-1", name="some_tool"
+    )
+
+    mistral_prepared = MistralMapper().prepare_message(text_msg)
+    dumped = mistral_prepared.model_dump()
+    assert dumped["role"] == "tool"
+    assert dumped["content"] == "tool result"
+    assert dumped["tool_call_id"] == "call-1"
+    assert dumped["name"] == "some_tool"

@@ -43,7 +43,7 @@ from vibe.core.hooks.models import (
 )
 from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.logger import logger
-from vibe.core.types import ToolResultEvent
+from vibe.core.types import ImageAttachment, ToolResultEvent
 from vibe.core.utils import (
     CANCELLATION_TAG,
     TOOL_ERROR_TAG,
@@ -92,6 +92,7 @@ class AgentLoopHooksMixin:
         decision: ToolDecision | None = None,
         result: dict[str, Any] | None = None,
         span: trace.Span | None = None,
+        images: list[ImageAttachment] | None = None,
     ) -> None: ...
 
     def _serialize_tool_input(self, tool_call: ResolvedToolCall) -> dict[str, Any]:
@@ -190,7 +191,10 @@ class AgentLoopHooksMixin:
                 events.append(ev)
         return final_text, events
 
-    async def _run_after_tool_and_finalize(
+    # Disabling PLR0913 too many arguments.
+    # All parameters are required independently downstream — grouping them
+    # into a bag object wouldn't reduce the count, just rename it.
+    async def _run_after_tool_and_finalize(  # noqa: PLR0913
         self,
         tool_call: ResolvedToolCall,
         *,
@@ -203,6 +207,7 @@ class AgentLoopHooksMixin:
         tool_error: str | None = None,
         duration_ms: float = 0.0,
         initial_text: str = "",
+        tool_images: list[ImageAttachment] | None = None,
     ) -> AsyncGenerator[HookEvent]:
         """Run after-tool hooks, apply text replacements, and record the response.
 
@@ -226,7 +231,13 @@ class AgentLoopHooksMixin:
             else:
                 yield ev
         self._handle_tool_response(
-            tool_call, final_text, response_status, decision, tool_output, span=span
+            tool_call,
+            final_text,
+            response_status,
+            decision,
+            tool_output,
+            span=span,
+            images=tool_images,
         )
 
     # ------------------------------------------------------------------
