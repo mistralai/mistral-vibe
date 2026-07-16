@@ -5,7 +5,7 @@ import pytest
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp, VibeConfig
-from vibe.core.tools.mcp import AuthStatus
+from vibe.core.tools.mcp import AuthStatus, MCPRegistry
 
 
 @pytest.mark.asyncio
@@ -84,3 +84,36 @@ async def test_refresh_config_does_not_mark_undiscovered_oauth_server_ok(
     await agent_loop.refresh_config()
 
     assert registry.status() == {"linear": AuthStatus.NEEDS_AUTH}
+
+
+@pytest.mark.asyncio
+async def test_refresh_config_creates_mcp_registry_for_first_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression test: a session that starts with zero MCP servers never
+    # gets an `mcp_registry` (it's only created lazily when servers exist).
+    # `/mcp add`ing the first server must make refresh_config() create the
+    # registry, otherwise the immediate `/mcp login` that follows fails with
+    # "No MCP servers configured." even though the server was just persisted.
+    agent_loop = build_test_agent_loop(
+        config=build_test_vibe_config(mcp_servers=[]),
+        mcp_registry=None,
+        defer_heavy_init=True,
+    )
+    assert agent_loop.mcp_registry is None
+
+    added = MCPStreamableHttp(
+        name="qlik-presales-iberia",
+        transport="streamable-http",
+        url="https://presales-iberia.eu.qlikcloud.com/api/ai/mcp",
+        auth=MCPOAuth(type="oauth", scopes=["user_default", "mcp:execute"]),
+    )
+    refreshed_config = build_test_vibe_config(mcp_servers=[added])
+    monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
+
+    await agent_loop.refresh_config()
+
+    assert isinstance(agent_loop.mcp_registry, MCPRegistry)
+    assert agent_loop.mcp_registry.status() == {
+        "qlik-presales-iberia": AuthStatus.NEEDS_AUTH
+    }

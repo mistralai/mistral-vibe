@@ -604,6 +604,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self._config_orchestrator.reload()
         self._apply_forced_bypass()
         self.agent_manager.invalidate_config()
+        self._ensure_remote_registries()
         if self.mcp_registry is not None:
             self.mcp_registry.sync_active_servers(self.config.mcp_servers)
 
