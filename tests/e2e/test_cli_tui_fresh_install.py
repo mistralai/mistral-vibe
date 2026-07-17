@@ -62,6 +62,7 @@ def _install_fresh_wheel(tmp_path: Path, wheel_path: Path) -> Path:
     return _venv_executable(venv_path, "vibe")
 
 
+@pytest.mark.network
 @pytest.mark.timeout(90)
 def test_fresh_wheel_install_can_spawn_cli_and_complete_happy_path(
     streaming_mock_server: StreamingMockServer,

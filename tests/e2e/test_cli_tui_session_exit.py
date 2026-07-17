@@ -23,6 +23,8 @@ from tests.e2e.common import (
 from tests.e2e.mock_server import StreamingMockServer
 from vibe.core.utils.io import read_safe
 
+pytestmark = pytest.mark.network
+
 
 def _usage_by_run_factory(
     request_index: int, _payload: object

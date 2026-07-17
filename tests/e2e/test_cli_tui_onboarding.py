@@ -7,6 +7,8 @@ import pytest
 
 from tests.e2e.common import SpawnedVibeProcessFixture, ansi_tolerant_pattern
 
+pytestmark = pytest.mark.network
+
 
 @pytest.mark.timeout(15)
 def test_spawn_cli_shows_onboarding_when_api_key_missing(

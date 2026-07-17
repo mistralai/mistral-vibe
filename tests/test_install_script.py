@@ -7,6 +7,8 @@ import stat
 import subprocess
 from textwrap import dedent
 
+import pytest
+
 INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "install.sh"
 
 
@@ -146,6 +148,7 @@ def _run_install_script(
     )
 
 
+@pytest.mark.network
 def test_install_reports_missing_path_for_uv_tool_bin(tmp_path: Path) -> None:
     home = tmp_path / "home"
     fake_bin = tmp_path / "fake-bin"

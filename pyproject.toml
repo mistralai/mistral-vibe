@@ -258,6 +258,9 @@ ignore_decorators = ["@*"]
 [tool.pytest.ini_options]
 addopts = "-vvvv -q -n auto --durations=10 --import-mode=importlib --maxschedchunk=1"
 timeout = 10
+markers = [
+    "network: tests that require network-capable execution environment",
+]
 filterwarnings = [
     # (e2e) streaming mock server is started in a thread; and the cli is spawn in a fork
     "ignore:This process \\(pid=.*\\) is multi-threaded, use of forkpty\\(\\) may lead to deadlocks in the child\\.:DeprecationWarning",
