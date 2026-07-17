@@ -303,7 +303,7 @@ class TestConnectorProxyToolRun:
         return cast(MCPTool, tool_cls.from_config(lambda: BaseToolConfig()))
 
     @pytest.mark.asyncio
-    async def test_run_calls_mcp_proxy(self) -> None:
+    async def test_run_calls_connector_tool(self) -> None:
         cls = self._make_tool_class()
         tool = self._make_tool(cls)
         expected = MCPToolResult(
@@ -311,17 +311,19 @@ class TestConnectorProxyToolRun:
         )
 
         with patch(
-            "vibe.core.tools.connectors.connector_registry.call_tool_http",
+            "vibe.core.tools.connectors.connector_registry.call_connector_tool",
             new_callable=AsyncMock,
             return_value=expected,
         ) as mock_call:
             results = [r async for r in tool.invoke(query="hello")]
 
         mock_call.assert_awaited_once()
-        call_args = mock_call.call_args
-        assert "/v1/connectors-gateway/conn-123/mcp" in call_args.args[0]
-        assert call_args.args[1] == "search"
-        assert call_args.kwargs["headers"]["Authorization"] == "Bearer test-key"
+        call_kwargs = mock_call.call_args.kwargs
+        assert call_kwargs["base_url"] == "https://custom.api.example.com"
+        assert call_kwargs["api_key"] == "test-key"
+        assert call_kwargs["connector_id"] == "conn-123"
+        assert call_kwargs["tool_name"] == "search"
+        assert call_kwargs["arguments"] == {"query": "hello"}
 
         assert len(results) == 1
         assert results[0] == expected
@@ -344,14 +346,13 @@ class TestConnectorProxyToolRun:
         expected = MCPToolResult(ok=True, server="s", tool="ping", text="pong")
 
         with patch(
-            "vibe.core.tools.connectors.connector_registry.call_tool_http",
+            "vibe.core.tools.connectors.connector_registry.call_connector_tool",
             new_callable=AsyncMock,
             return_value=expected,
         ) as mock_call:
             [_ async for _ in tool.invoke()]
 
-        url = mock_call.call_args.args[0]
-        assert url.startswith("https://api.mistral.ai/")
+        assert mock_call.call_args.kwargs["base_url"] == "https://api.mistral.ai"
 
     @pytest.mark.asyncio
     async def test_run_surfaces_timeout_error(self) -> None:
@@ -360,7 +361,7 @@ class TestConnectorProxyToolRun:
 
         with (
             patch(
-                "vibe.core.tools.connectors.connector_registry.call_tool_http",
+                "vibe.core.tools.connectors.connector_registry.call_connector_tool",
                 new_callable=AsyncMock,
                 side_effect=httpx.ReadTimeout("timed out"),
             ),
@@ -375,13 +376,37 @@ class TestConnectorProxyToolRun:
 
         with (
             patch(
-                "vibe.core.tools.connectors.connector_registry.call_tool_http",
+                "vibe.core.tools.connectors.connector_registry.call_connector_tool",
                 new_callable=AsyncMock,
                 side_effect=httpx.ConnectError("refused"),
             ),
             pytest.raises(ToolError, match="network"),
         ):
             [_ async for _ in tool.invoke(query="hello")]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_run_hits_public_connector_tool_call_endpoint(self) -> None:
+        """Regression test: must call the public /tools/{name}/call endpoint,
+        not the internal /v1/connectors-gateway/{id}/mcp path (which 502s).
+        """
+        cls = self._make_tool_class()
+        tool = self._make_tool(cls)
+        route = respx.post(
+            "https://custom.api.example.com/v1/connectors/conn-123/tools/search/call"
+        ).mock(
+            return_value=httpx.Response(
+                200, json={"content": [{"type": "text", "text": "result text"}]}
+            )
+        )
+
+        results = [r async for r in tool.invoke(query="hello")]
+
+        assert route.called
+        assert len(results) == 1
+        result = results[0]
+        assert isinstance(result, MCPToolResult)
+        assert result.text == "result text"
 
 
 # ---------------------------------------------------------------------------

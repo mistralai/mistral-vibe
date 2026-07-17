@@ -34,16 +34,41 @@ _BOOTSTRAP_TIMEOUT = 30.0
 _BOOTSTRAP_CACHE_TTL_SECONDS = 10 * 60
 
 
-async def call_tool_http(
-    url: str,
+def _parse_connector_tool_result(server: str, tool: str, result: Any) -> MCPToolResult:
+    parts = [
+        block.text
+        for block in result.content
+        if getattr(block, "type", None) == "text"
+        and isinstance(getattr(block, "text", None), str)
+    ]
+    text = "\n".join(parts) if parts else None
+    return MCPToolResult(server=server, tool=tool, text=text, structured=None)
+
+
+async def call_connector_tool(
+    *,
+    base_url: str,
+    api_key: str,
+    connector_id: str,
     tool_name: str,
     arguments: dict[str, Any],
-    *,
-    headers: dict[str, str] | None = None,
 ) -> MCPToolResult:
-    from vibe.core.tools.mcp.tools import call_tool_http as call_mcp_tool_http
+    from mistralai.client import Mistral
 
-    return await call_mcp_tool_http(url, tool_name, arguments, headers=headers)
+    http_client = VibeAsyncHTTPClient(verify=build_ssl_context())
+    try:
+        sdk_client = Mistral(
+            api_key=api_key, server_url=base_url, async_client=http_client
+        )
+        async with sdk_client as client:
+            result = await client.beta.connectors.call_tool_async(
+                connector_id_or_name=connector_id,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+        return _parse_connector_tool_result(connector_id, tool_name, result)
+    finally:
+        await http_client.aclose()
 
 
 class ConnectorAuthAction(StrEnum):
@@ -200,6 +225,11 @@ def _format_http_status_error(
                 f"Connector {connector_ref} not found (HTTP 404). "
                 "It may have been deleted or is not accessible."
             )
+        case 502 | 503 | 504:
+            detail = (
+                f"Connector {connector_ref} gateway is temporarily unavailable "
+                f"(HTTP {status}). Try again in a moment."
+            )
         case _:
             detail = f"Connector {connector_ref} request failed (HTTP {status})."
 
@@ -284,12 +314,14 @@ def create_connector_proxy_tool_class(
         async def run(
             self, args: _OpenArgs, ctx: InvokeContext | None = None
         ) -> AsyncGenerator[ToolStreamEvent | MCPToolResult, None]:
-            url = f"{self._base_url}/v1/connectors-gateway/{self._connector_id}/mcp"
-            headers = {"Authorization": f"Bearer {self._api_key}"}
             payload = args.model_dump(exclude_none=True)
             try:
-                yield await call_tool_http(
-                    url, self._remote_name, payload, headers=headers
+                yield await call_connector_tool(
+                    base_url=self._base_url,
+                    api_key=self._api_key,
+                    connector_id=self._connector_id,
+                    tool_name=self._remote_name,
+                    arguments=payload,
                 )
             except Exception as exc:
                 msg = _connector_error_message(
