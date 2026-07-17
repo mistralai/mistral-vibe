@@ -257,7 +257,7 @@ def test_copy_to_clipboard_stops_after_verified_copy() -> None:
 
 
 def test_copy_to_clipboard_tries_all_when_verify_fails() -> None:
-    """Tries all strategies when _read_clipboard never confirms."""
+    """Tries all strategies when _read_clipboard never confirms, then raises."""
     mock_first = MagicMock()
     mock_second = MagicMock()
 
@@ -265,7 +265,8 @@ def test_copy_to_clipboard_tries_all_when_verify_fails() -> None:
         patch("vibe.cli.clipboard._COPY_METHODS", [mock_first, mock_second]),
         patch("vibe.cli.clipboard._read_clipboard", return_value=None),
     ):
-        _copy_to_clipboard("hello")
+        with pytest.raises(RuntimeError, match="Clipboard copy succeeded but verification failed"):
+            _copy_to_clipboard("hello")
 
     mock_first.assert_called_once_with("hello")
     mock_second.assert_called_once_with("hello")
