@@ -226,6 +226,53 @@ def _disk_lines(state: FileState) -> list[str]:
     return (state.data or b"").decode("utf-8").splitlines()
 
 
+def test_edit_decomposition_is_memoized_across_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each edit's hunk decomposition is computed at most once and reused across
+    the many fresh ``History`` instances a review session spins up (every
+    ``view``/``content``/``decide`` builds a new one over the same immutable log).
+
+    This guards a *performance* regression, not a wrong answer: caching the
+    decomposition per-History instead of per-edit re-runs ``SequenceMatcher`` on
+    every edit for every read, an O(reads x edits) blowup that timed CI out. A
+    call-count assertion pins the invariant deterministically, without depending
+    on wall-clock (the flaky pytest-timeout it replaces).
+    """
+    from vibe.core.checkpoints._events import _Edit
+    import vibe.core.checkpoints.history as history_mod
+    from vibe.core.checkpoints.models import OpaqueChange, Region
+
+    calls = 0
+    real = history_mod._compute_changes
+
+    def counting(edit: _Edit) -> list[tuple[int, Region | OpaqueChange]]:
+        nonlocal calls
+        calls += 1
+        return real(edit)
+
+    monkeypatch.setattr(history_mod, "_compute_changes", counting)
+
+    chain: Chain = [
+        (1, st("a\n"), st("a\nb\n")),
+        (2, st("a\nb\n"), st("a\nB\nc\n")),
+    ]
+    cur = st("a\nB\nc\n")
+    cp = build(chain)
+
+    # Warm the memo, then hammer the read model over the same log.
+    cp.view({P: cur}).regions(P)
+    warmed = calls
+    for _ in range(50):
+        cp.view({P: cur}).content(P)
+        cp.view({P: cur}).regions(P)
+        cp.view({P: cur}).accepted_baseline(P)
+    assert calls == warmed, (
+        f"decomposition recomputed on reads: {calls - warmed} extra calls "
+        "(cache is per-History, not per-edit)"
+    )
+
+
 def test_manual_edits_during_review_stay_projectable() -> None:
     """A review session that interleaves decisions (persisted, like the manager's
     decide-then-write flow) with genuine manual disk edits.

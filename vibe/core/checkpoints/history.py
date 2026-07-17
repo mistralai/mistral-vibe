@@ -192,21 +192,23 @@ class History:
     hands one out through ``view(current)``.
     """
 
-    __slots__ = ("_changes_cache", "_edits_cache", "_effective_cache", "_events")
+    __slots__ = ("_edits_cache", "_effective_cache", "_events")
 
     def __init__(self, events: list[_Event]) -> None:
         # Copy so the memo caches can assume a frozen event list, even if the
         # caller keeps mutating the list it was handed (the Checkpointer does).
         self._events = list(events)
         self._edits_cache: dict[str, list[_Edit]] = {}
-        self._changes_cache: dict[int, list[tuple[int, Region | OpaqueChange]]] = {}
         self._effective_cache: dict[str, dict[RegionId, Decision]] = {}
 
     def _changes_of(self, edit: _Edit) -> list[tuple[int, Region | OpaqueChange]]:
-        cached = self._changes_cache.get(edit.seq)
+        # Cache on the edit itself, not this History instance: the Checkpointer
+        # builds a fresh History per read over the same immutable edits, so an
+        # instance-scoped cache would recompute every edit's diff on every call.
+        cached = edit._changes
         if cached is None:
             cached = _compute_changes(edit)
-            self._changes_cache[edit.seq] = cached
+            edit._changes = cached
         return cached
 
     def has_edits(self, path: str) -> bool:

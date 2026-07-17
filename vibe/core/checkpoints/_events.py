@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from vibe.core.checkpoints.models import FileState, Owner, RegionId
+from vibe.core.checkpoints.models import (
+    FileState,
+    OpaqueChange,
+    Owner,
+    Region,
+    RegionId,
+)
 
 
 @dataclass(slots=True)
@@ -28,6 +34,15 @@ class _Edit:
     before: FileState
     after: FileState
     deps: dict[int, tuple[RegionId, ...]]
+    # Memoized hunk decomposition (line regions, or one opaque whole-file unit),
+    # filled lazily by ``History._changes_of``. An edit's ``before``/``after`` are
+    # fixed at construction, so this is a pure function of the edit and is shared
+    # across every History built over the same log — a fresh History per read
+    # would otherwise recompute every edit's SequenceMatcher diff. Excluded from
+    # equality/repr: it is a derived cache, not identity.
+    _changes: list[tuple[int, Region | OpaqueChange]] | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
 @dataclass(slots=True)
