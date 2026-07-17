@@ -178,11 +178,9 @@ from vibe.core.autocompletion.path_prompt import (
     build_path_prompt_payload,
     build_title_segments,
 )
-from vibe.core.autocompletion.path_prompt_adapter import (
-    extract_image_resources,
-    render_path_prompt_from_payload,
-)
-from vibe.core.config import DEFAULT_THEME, AnyVibeConfig, ModelConfig, VibeConfig
+from vibe.core.autocompletion.path_prompt_adapter import extract_image_resources
+from vibe.core.config import DEFAULT_THEME, AnyVibeConfig, ModelConfig
+from vibe.core.config.patch import escape_json_pointer_token
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.hooks.models import HookStartEvent
 from vibe.core.log_reader import LogReader
@@ -628,9 +626,6 @@ class VibeApp(App):  # noqa: PLR0904
             maybe_show_feedback_bar=self._maybe_show_feedback_bar,
             send_skill_telemetry=self._send_skill_telemetry,
             send_at_mention_telemetry=self._send_at_mention_telemetry,
-            render_payload=lambda payload: asyncio.to_thread(
-                render_path_prompt_from_payload, payload, skip_images=True
-            ),
         )
 
     def _active_model_or_none(self) -> ModelConfig | None:
@@ -653,7 +648,7 @@ class VibeApp(App):  # noqa: PLR0904
         await self.agent_loop.inject_user_context(
             content,
             as_message=True,
-            inject_invoked_skill=True,
+            inject_implicit=True,
             images=images,
             client_message_id=client_message_id,
             on_event=self._handle_injected_context_event,
@@ -879,6 +874,13 @@ class VibeApp(App):  # noqa: PLR0904
                 await self._ensure_loading_widget("Initializing", show_hint=False)
                 init_widget = self._loading_widget
             await self.agent_loop.wait_until_ready()
+            for srv_name, err in self.agent_loop.tool_manager.pop_mcp_errors().items():
+                self.notify(
+                    f"MCP server '{srv_name}' failed to connect: {err}",
+                    severity="warning",
+                    markup=False,
+                    timeout=10,
+                )
             await self._show_mcp_auth_required_notice()
         except Exception as e:
             await self._mount_and_scroll(
@@ -1125,6 +1127,11 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         self._feedback_bar.handle_feedback_key(message.rating)
 
+    def on_chat_text_area_snooze_key_pressed(
+        self, message: ChatTextArea.SnoozeKeyPressed
+    ) -> None:
+        self._feedback_bar.handle_snooze_key()
+
     def on_chat_text_area_non_feedback_key_pressed(
         self, message: ChatTextArea.NonFeedbackKeyPressed
     ) -> None:
@@ -1136,6 +1143,12 @@ class VibeApp(App):  # noqa: PLR0904
         self.agent_loop.telemetry_client.send_user_rating_feedback(
             rating=message.rating, model=self.config.active_model
         )
+        self._feedback_bar_manager.record_feedback_given(self.agent_loop)
+
+    def on_feedback_bar_snooze_key_pressed(
+        self, message: FeedbackBar.SnoozeKeyPressed
+    ) -> None:
+        self._feedback_bar_manager.record_feedback_snoozed(self.agent_loop)
 
     async def _remove_loading_widget(self) -> None:
         if self._loading_widget and self._loading_widget.parent:
@@ -1236,13 +1249,17 @@ class VibeApp(App):  # noqa: PLR0904
     async def _paste_clipboard_image_command(self, **_kwargs: Any) -> None:
         await handle_clipboard_image_paste(self, notify_when_empty=True)
 
+    async def _persist_config_changes(self, changes: dict[str, str | bool]) -> None:
+        for key, value in changes.items():
+            await self.agent_loop.config_orchestrator.set_field(f"/{key}", value)
+
     async def on_config_app_open_model_picker(
         self, _message: ConfigApp.OpenModelPicker
     ) -> None:
         config_app = self.query_one(ConfigApp)
         changes = config_app._convert_changes_for_save()
         if changes:
-            VibeConfig.save_updates(changes)
+            await self._persist_config_changes(changes)
             await self._reload_config()
         await self._switch_to_input_app()
         await self._switch_to_model_picker_app()
@@ -1253,7 +1270,7 @@ class VibeApp(App):  # noqa: PLR0904
         config_app = self.query_one(ConfigApp)
         changes = config_app._convert_changes_for_save()
         if changes:
-            VibeConfig.save_updates(changes)
+            await self._persist_config_changes(changes)
             await self._reload_config()
         await self._switch_to_input_app()
         await self._switch_to_thinking_picker_app()
@@ -1287,7 +1304,7 @@ class VibeApp(App):  # noqa: PLR0904
         self, changes: dict[str, str | bool]
     ) -> None:
         if changes:
-            VibeConfig.save_updates(changes)
+            await self._persist_config_changes(changes)
             await self._reload_config()
         else:
             await self._mount_and_scroll(
@@ -1307,7 +1324,10 @@ class VibeApp(App):  # noqa: PLR0904
             current = self._voice_manager.is_enabled
             desired = changes["voice_mode_enabled"]
             if current != desired:
-                self._voice_manager.toggle_voice_mode()
+                result = self._voice_manager.toggle_voice_mode()
+                await self.agent_loop.config_orchestrator.set_field(
+                    "/voice_mode_enabled", result.enabled
+                )
                 self.agent_loop.telemetry_client.send_telemetry_event(
                     "vibe.voice_mode_toggled", {"enabled": desired}
                 )
@@ -1327,7 +1347,7 @@ class VibeApp(App):  # noqa: PLR0904
             k: v for k, v in changes.items() if k != "voice_mode_enabled"
         }
         if non_voice_changes:
-            VibeConfig.save_updates(non_voice_changes)
+            await self._persist_config_changes(non_voice_changes)
             await self._refresh_config_from_disk()
             if non_voice_changes.get("narrator_enabled") is True:
                 from vibe.core.audio_player.audio_player import check_audio_available
@@ -1344,7 +1364,9 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_model_picker_app_model_selected(
         self, message: ModelPickerApp.ModelSelected
     ) -> None:
-        VibeConfig.save_updates({"active_model": message.alias})
+        await self.agent_loop.config_orchestrator.set_field(
+            "/active_model", message.alias
+        )
         await self._reload_config()
         await self._switch_to_input_app()
 
@@ -1593,7 +1615,11 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_thinking_picker_app_thinking_selected(
         self, message: ThinkingPickerApp.ThinkingSelected
     ) -> None:
-        VibeConfig.save_updates(self.config.build_thinking_update(message.level))
+        active_model = self.config.get_active_model()
+        await self.agent_loop.config_orchestrator.set_field(
+            f"/models/{escape_json_pointer_token(active_model.alias)}/thinking",
+            message.level,
+        )
         await self._reload_config()
         await self._switch_to_input_app()
 
@@ -1612,8 +1638,9 @@ class VibeApp(App):  # noqa: PLR0904
         self, message: ThemePickerApp.ThemeSelected
     ) -> None:
         self._apply_theme(message.theme)
-        self.config.theme = message.theme
-        VibeConfig.save_updates({"theme": message.theme})
+        await self.agent_loop.config_orchestrator.set_field("/theme", message.theme)
+        await self.agent_loop.config_orchestrator.reload()
+        self.agent_loop.agent_manager.invalidate_config()
         await self._restyle_diff_widgets()
         await self._switch_to_input_app()
 
@@ -2237,9 +2264,6 @@ class VibeApp(App):  # noqa: PLR0904
             images = await self._resolve_turn_images(prompt_payload, prebuilt_images)
             if images is None:
                 return
-            rendered_prompt = await asyncio.to_thread(
-                render_path_prompt_from_payload, prompt_payload, skip_images=True
-            )
             auto_title: str | None = None
             if self.agent_loop.session_logger.needs_initial_auto_title():
                 title_segments = await asyncio.to_thread(
@@ -2247,10 +2271,10 @@ class VibeApp(App):  # noqa: PLR0904
                 )
                 auto_title = format_session_title(title_segments) or None
             self._narrator_manager.cancel()
-            self._narrator_manager.on_turn_start(rendered_prompt)
+            self._narrator_manager.on_turn_start(prompt)
             async with aclosing(
                 self.agent_loop.act(
-                    rendered_prompt,
+                    prompt,
                     client_message_id=message_id,
                     auto_title=auto_title,
                     images=images or None,
@@ -3223,7 +3247,9 @@ class VibeApp(App):  # noqa: PLR0904
                 UserCommandMessage("Lean agent is already installed.")
             )
             return
-        VibeConfig.save_updates({"installed_agents": sorted([*current, "lean"])})
+        await self.agent_loop.config_orchestrator.set_field(
+            "/installed_agents", sorted([*current, "lean"])
+        )
         await self._reload_config()
 
     async def _uninstall_lean(self, **kwargs: Any) -> None:
@@ -3233,9 +3259,9 @@ class VibeApp(App):  # noqa: PLR0904
                 UserCommandMessage("Lean agent is not installed.")
             )
             return
-        VibeConfig.save_updates({
-            "installed_agents": [a for a in current if a != "lean"]
-        })
+        await self.agent_loop.config_orchestrator.set_field(
+            "/installed_agents", [a for a in current if a != "lean"]
+        )
         await self._reload_config()
 
     async def _reset_message_widgets(self) -> None:
@@ -3490,7 +3516,7 @@ class VibeApp(App):  # noqa: PLR0904
         if self._current_bottom_app == BottomApp.ModelPicker:
             return
 
-        model_aliases = [m.alias for m in self.config.models]
+        model_aliases = list(self.config.models)
         current_model = str(self.config.active_model)
         await self._switch_from_input(
             ModelPickerApp(model_aliases=model_aliases, current_model=current_model)

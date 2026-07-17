@@ -161,6 +161,16 @@ OptionList, OptionList:focus {
     }
 }
 
+#completion-popup.completion-no-description .completion-command {
+    max-width: 100%;
+    width: 1fr;
+    margin-right: 0;
+}
+
+#completion-popup.completion-no-description .completion-description {
+    display: none;
+}
+
 #completion-popup _CompletionRow.completion-selected .completion-command {
     text-style: bold reverse;
 }
@@ -1164,11 +1174,6 @@ StatusMessage {
 .approval-option {
     height: auto;
     color: $foreground;
-    margin-bottom: 1;
-
-    &:last-of-type {
-        margin-bottom: 0;
-    }
 }
 
 .approval-cursor-selected {
@@ -1195,6 +1200,7 @@ StatusMessage {
 
 .approval-help {
     height: auto;
+    margin-top: 1;
     color: $text-muted;
 
     &:ansi {
@@ -1878,7 +1884,7 @@ FeedbackBar {
     width: 100%;
 }
 
-.hook-before-tool {
+.hook-pre-tool {
     margin-top: 1;
 }
 

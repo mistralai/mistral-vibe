@@ -49,7 +49,9 @@ class WorktreeCleanupState:
             reasons.append("untracked files")
         if self.new_commit_count:
             noun = "commit" if self.new_commit_count == 1 else "commits"
-            reasons.append(f"{self.new_commit_count} new {noun}")
+            reasons.append(
+                f"{self.new_commit_count} {noun} added to the branch during this session"
+            )
         return tuple(reasons)
 
 

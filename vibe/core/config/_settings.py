@@ -34,20 +34,22 @@ from vibe.core.config._defaults import (
 from vibe.core.config._migration import migrate_config
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.models import (
-    THINKING_LEVELS as THINKING_LEVELS,
     ConnectorConfig,
     ExperimentsConfig,
     MCPServer,
     MissingAPIKeyError,
     ModelConfig,
+    OtelRedactionMode,
     ProjectContextConfig,
     ProviderConfig,
     SessionLoggingConfig,
-    ThinkingLevel,
     TranscribeModelConfig,
     TranscribeProviderConfig,
     TTSModelConfig,
     TTSProviderConfig,
+    normalize_model_configs,
+    normalize_model_configs_with_defaults,
+    serialize_model_configs,
 )
 from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE
@@ -229,7 +231,18 @@ DEFAULT_TTS_MODELS = [DEFAULT_ACTIVE_TTS_MODEL_CONFIG]
 
 
 def get_persisted_config() -> dict[str, Any]:
-    return TomlFileSettingsSource(VibeConfig).toml_data
+    file = get_harness_files_manager().config_file
+    if file is None:
+        return {}
+    try:
+        with file.open("rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return {}
+    except tomllib.TOMLDecodeError as e:
+        raise RuntimeError(f"Invalid TOML in {file}: {e}") from e
+    except OSError as e:
+        raise RuntimeError(f"Cannot read {file}: {e}") from e
 
 
 def resolve_theme_name(value: Any) -> str:
@@ -283,11 +296,13 @@ class VibeConfig(BaseSettings):
     # TODO(otel): remove exclude=True once the feature is publicly available
     enable_otel: bool = Field(default=False, exclude=True)
     otel_endpoint: str = Field(default="", exclude=True)
+    otel_redaction: OtelRedactionMode = Field(
+        default=OtelRedactionMode.DEFAULT, exclude=True
+    )
 
     console_base_url: str = Field(default=DEFAULT_CONSOLE_BASE_URL, exclude=True)
     vibe_base_url: str = Field(default=DEFAULT_VIBE_BASE_URL, exclude=True)
 
-    enable_experimental_hooks: bool = Field(default=False, exclude=True)
     experimental_teleport_context_summary: bool = Field(
         default=False,
         description="Experimental: summarize the current session context when teleporting to Vibe Code.",
@@ -305,7 +320,9 @@ class VibeConfig(BaseSettings):
     providers: list[ProviderConfig] = Field(
         default_factory=lambda: list(DEFAULT_PROVIDERS)
     )
-    models: list[ModelConfig] = Field(default_factory=lambda: list(DEFAULT_MODELS))
+    models: dict[str, ModelConfig] = Field(
+        default_factory=lambda: normalize_model_configs(DEFAULT_MODELS)
+    )
     compaction_model: ModelConfig | None = None
 
     transcribe_providers: list[TranscribeProviderConfig] = Field(
@@ -465,9 +482,8 @@ class VibeConfig(BaseSettings):
         )
 
     def get_active_model(self) -> ModelConfig:
-        for model in self.models:
-            if model.alias == self.active_model:
-                return model
+        if model := self.models.get(self.active_model):
+            return model
         raise ValueError(
             f"Active model '{self.active_model}' not found in configuration."
         )
@@ -565,16 +581,16 @@ class VibeConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _apply_global_auto_compact_threshold(self) -> VibeConfig:
-        self.models = [
-            (
+        self.models = {
+            alias: (
                 model
                 if "auto_compact_threshold" in model.model_fields_set
                 else model.model_copy(
                     update={"auto_compact_threshold": self.auto_compact_threshold}
                 )
             )
-            for model in self.models
-        ]
+            for alias, model in self.models.items()
+        }
         return self
 
     @model_validator(mode="after")
@@ -586,14 +602,12 @@ class VibeConfig(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _validate_model_uniqueness(self) -> VibeConfig:
-        seen_aliases: set[str] = set()
-        for model in self.models:
-            if model.alias in seen_aliases:
+    def _validate_model_keys_match_aliases(self) -> VibeConfig:
+        for alias, model in self.models.items():
+            if model.alias != alias:
                 raise ValueError(
-                    f"Duplicate model alias found: '{model.alias}'. Aliases must be unique."
+                    f"Model key '{alias}' does not match model alias '{model.alias}'."
                 )
-            seen_aliases.add(model.alias)
         return self
 
     @model_validator(mode="after")
@@ -631,10 +645,9 @@ class VibeConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _apply_active_model_fallback(self) -> VibeConfig:
-        aliases = {model.alias for model in self.models}
-        if self.active_model not in aliases:
+        if self.active_model not in self.models:
             unknown = self.active_model
-            fallback = self.models[0].alias
+            fallback = next(iter(self.models))
             logger.warning(
                 "Active model '%s' is not in your configured models; defaulting to '%s'.",
                 unknown,
@@ -688,6 +701,14 @@ class VibeConfig(BaseSettings):
             return []
         return [Path(p).expanduser().resolve() for p in v]
 
+    @field_validator("models", mode="before")
+    @classmethod
+    def _normalize_models(cls, v: Any) -> Any:
+        """Bridge sparse default-model overrides until DefaultConfigLayer owns them."""
+        # TODO(config-orchestrator): remove this after all config loads go through
+        # DefaultConfigLayer, which can provide required model fields itself.
+        return normalize_model_configs_with_defaults(v, DEFAULT_MODELS)
+
     @field_validator("skill_paths", mode="before")
     @classmethod
     def _expand_skill_paths(cls, v: Any) -> list[Path]:
@@ -720,34 +741,6 @@ class VibeConfig(BaseSettings):
         _ = self.compaction_prompt
         return self
 
-    def build_thinking_update(self, level: ThinkingLevel) -> dict[str, Any]:
-        """Compute the persist payload that sets the active model's thinking level.
-
-        Callers apply the returned payload (e.g. via ``save_updates``) and reload.
-        """
-        model = self.get_active_model()
-
-        current_config = self.get_persisted_config()
-        models = current_config.get("models", [])
-        for entry in models:
-            if entry.get("alias", entry.get("name")) == model.alias:
-                entry["thinking"] = level
-                break
-        else:
-            # Model comes from defaults; materialize the identities so we
-            # don't lose the other models.
-            models = [
-                {
-                    "name": m.name,
-                    "provider": m.provider,
-                    "alias": m.alias,
-                    "thinking": level if m.alias == model.alias else m.thinking,
-                    **({"supports_images": True} if m.supports_images else {}),
-                }
-                for m in self.models
-            ]
-        return {"models": models}
-
     def build_tool_allowlist_update(
         self, tool_name: str, patterns: list[str]
     ) -> dict[str, Any] | None:
@@ -778,6 +771,12 @@ class VibeConfig(BaseSettings):
         if not get_harness_files_manager().persist_allowed:
             return
         current_config = cls.get_persisted_config()
+        if isinstance(updates.get("models"), dict):
+            # Convert persisted [[models]] into the internal map before deep updates.
+            current_config = dict(current_config)
+            current_config["models"] = normalize_model_configs(
+                current_config.get("models", [])
+            )
         merged_config = deep_update(current_config, updates)
         cls.dump_config(merged_config)
 
@@ -793,6 +792,8 @@ class VibeConfig(BaseSettings):
             toml_document = {}
         else:
             toml_document = _remove_none_values(jsonable)
+        if isinstance(toml_document.get("models"), dict):
+            toml_document["models"] = serialize_model_configs(toml_document["models"])
         cls.model_validate(toml_document)
         with target.open("wb") as f:
             tomli_w.dump(toml_document, f)
@@ -827,6 +828,9 @@ class VibeConfig(BaseSettings):
     def create_default(cls) -> dict[str, Any]:
         config = cls.model_construct()
         config_dict = config.model_dump(mode="json")
+        if isinstance(config_dict.get("models"), dict):
+            # Entry points dump this dict directly, so keep the persisted shape here.
+            config_dict["models"] = serialize_model_configs(config_dict["models"])
 
         from vibe.core.tools.manager import ToolManager
 

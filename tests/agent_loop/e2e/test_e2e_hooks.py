@@ -31,12 +31,12 @@ def _emit_cmd(payload: dict[str, Any]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_before_tool_hook_denies_tool_and_skips_execution(
+async def test_pre_tool_hook_denies_tool_and_skips_execution(
     mistral_api: MistralAPI,
 ) -> None:
     deny_hook = HookConfig(
         name="deny",
-        type=HookType.BEFORE_TOOL,
+        type=HookType.PRE_TOOL,
         command=_emit_cmd({"decision": "deny", "reason": "blocked by policy"}),
         match="todo",
     )
@@ -56,7 +56,7 @@ async def test_before_tool_hook_denies_tool_and_skips_execution(
 
 
 @pytest.mark.asyncio
-async def test_before_tool_hook_rewrites_tool_input_seen_by_model(
+async def test_pre_tool_hook_rewrites_tool_input_seen_by_model(
     mistral_api: MistralAPI,
 ) -> None:
     rewritten = {
@@ -65,7 +65,7 @@ async def test_before_tool_hook_rewrites_tool_input_seen_by_model(
     }
     rewrite_hook = HookConfig(
         name="rewrite",
-        type=HookType.BEFORE_TOOL,
+        type=HookType.PRE_TOOL,
         command=_emit_cmd({"hook_specific_output": {"tool_input": rewritten}}),
         match="todo",
     )
@@ -83,12 +83,12 @@ async def test_before_tool_hook_rewrites_tool_input_seen_by_model(
 
 
 @pytest.mark.asyncio
-async def test_before_tool_rewrite_failing_validation_is_denied(
+async def test_pre_tool_rewrite_failing_validation_is_denied(
     mistral_api: MistralAPI,
 ) -> None:
     bad_rewrite_hook = HookConfig(
         name="bad-rewrite",
-        type=HookType.BEFORE_TOOL,
+        type=HookType.PRE_TOOL,
         command=_emit_cmd({"hook_specific_output": {"tool_input": {"todos": "x"}}}),
         match="todo",
     )
@@ -108,12 +108,12 @@ async def test_before_tool_rewrite_failing_validation_is_denied(
 
 
 @pytest.mark.asyncio
-async def test_after_tool_hook_replaces_tool_output_seen_by_model(
+async def test_post_tool_hook_replaces_tool_output_seen_by_model(
     mistral_api: MistralAPI,
 ) -> None:
     replace_output_hook = HookConfig(
         name="replace",
-        type=HookType.AFTER_TOOL,
+        type=HookType.POST_TOOL,
         command=_emit_cmd({"decision": "deny", "reason": "REPLACED OUTPUT"}),
         match="todo",
     )
@@ -131,7 +131,7 @@ async def test_after_tool_hook_replaces_tool_output_seen_by_model(
 
 
 @pytest.mark.asyncio
-async def test_post_agent_turn_hook_injects_retry_user_message(
+async def test_post_agent_hook_injects_retry_user_message(
     mistral_api: MistralAPI,
 ) -> None:
     # A post-agent-turn hook that denies forever would loop, so this script
@@ -146,7 +146,7 @@ async def test_post_agent_turn_hook_injects_retry_user_message(
     """)
     retry_hook = HookConfig(
         name="retry",
-        type=HookType.POST_AGENT_TURN,
+        type=HookType.POST_AGENT,
         command=f"{sys.executable} -c {shlex.quote(deny_once)}",
     )
     mistral_api.reply(

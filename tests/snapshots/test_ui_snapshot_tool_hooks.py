@@ -67,7 +67,7 @@ class ToolHooksApp(App):
             return
         call_id = "call_1"
 
-        # before_tool hooks
+        # pre_tool hooks
         await self._handler.handle_event(
             ToolCallEvent(
                 tool_call_id=call_id,
@@ -78,7 +78,7 @@ class ToolHooksApp(App):
         )
         await self._handler.handle_event(
             HookRunStartEvent(
-                scope=HookType.BEFORE_TOOL, tool_name="stub_tool", tool_call_id=call_id
+                scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id=call_id
             )
         )
         await self._handler.handle_event(HookStartEvent(hook_name="guard-bash"))
@@ -87,12 +87,12 @@ class ToolHooksApp(App):
                 hook_name="guard-bash",
                 status=HookMessageSeverity.OK,
                 content="Command allowed",
-                scope=HookType.BEFORE_TOOL,
+                scope=HookType.PRE_TOOL,
                 tool_call_id=call_id,
             )
         )
         await self._handler.handle_event(
-            HookRunEndEvent(scope=HookType.BEFORE_TOOL, tool_call_id=call_id)
+            HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id=call_id)
         )
 
         # tool result
@@ -105,10 +105,10 @@ class ToolHooksApp(App):
             )
         )
 
-        # after_tool hooks
+        # post_tool hooks
         await self._handler.handle_event(
             HookRunStartEvent(
-                scope=HookType.AFTER_TOOL, tool_name="stub_tool", tool_call_id=call_id
+                scope=HookType.POST_TOOL, tool_name="stub_tool", tool_call_id=call_id
             )
         )
         await self._handler.handle_event(HookStartEvent(hook_name="redact-secrets"))
@@ -117,12 +117,12 @@ class ToolHooksApp(App):
                 hook_name="redact-secrets",
                 status=HookMessageSeverity.WARNING,
                 content="Replaced tool result (42 chars)",
-                scope=HookType.AFTER_TOOL,
+                scope=HookType.POST_TOOL,
                 tool_call_id=call_id,
             )
         )
         await self._handler.handle_event(
-            HookRunEndEvent(scope=HookType.AFTER_TOOL, tool_call_id=call_id)
+            HookRunEndEvent(scope=HookType.POST_TOOL, tool_call_id=call_id)
         )
 
 

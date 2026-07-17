@@ -64,21 +64,23 @@ provider = "mistral"
     assert config.api_timeout == 300.0
     assert config.api_retry_max_elapsed_time == 120.0
     assert config.active_model == "codestral"
-    assert config.models[0].alias == "codestral"
+    assert config.models["codestral"].alias == "codestral"
     assert "bash" in config.disabled_tools
     assert config.default_agent == "plan"
     assert "search" in config.enabled_skills
     assert config.enable_otel is True
 
 
-def test_duplicate_model_alias_raises() -> None:
-    with pytest.raises(ValueError, match="Duplicate alias"):
-        VibeConfigSchema(
-            models=[
-                ModelConfig(name="model-a", provider="mistral", alias="same"),
-                ModelConfig(name="model-b", provider="mistral", alias="same"),
-            ]
-        )
+def test_duplicate_model_alias_last_wins() -> None:
+    config = VibeConfigSchema.model_validate({
+        "models": [
+            ModelConfig(name="model-a", provider="mistral", alias="same"),
+            ModelConfig(name="model-b", provider="mistral", alias="same"),
+        ]
+    })
+
+    assert list(config.models) == ["same"]
+    assert config.models["same"].name == "model-b"
 
 
 def test_unknown_active_model_falls_back_to_first(
@@ -87,8 +89,9 @@ def test_unknown_active_model_falls_back_to_first(
     with caplog.at_level("WARNING"):
         config = VibeConfigSchema(active_model="does-not-exist")
 
-    assert config.active_model == config.models[0].alias
-    assert config.get_active_model().alias == config.models[0].alias
+    fallback = next(iter(config.models))
+    assert config.active_model == fallback
+    assert config.get_active_model().alias == fallback
     assert (
         "Active model 'does-not-exist' is not in your configured models" in caplog.text
     )
@@ -100,14 +103,17 @@ def test_known_active_model_is_not_overridden(caplog: pytest.LogCaptureFixture) 
         ModelConfig(name="model-b", provider="mistral", alias="b"),
     ]
     with caplog.at_level("WARNING"):
-        config = VibeConfigSchema(active_model="b", models=models)
+        config = VibeConfigSchema.model_validate({
+            "active_model": "b",
+            "models": models,
+        })
     assert config.active_model == "b"
     assert "is not in your configured models" not in caplog.text
 
 
 def test_no_models_raises() -> None:
     with pytest.raises(ValueError, match="No models are configured"):
-        VibeConfigSchema(models=[])
+        VibeConfigSchema.model_validate({"models": []})
 
 
 def test_compaction_model_provider_must_match_active() -> None:

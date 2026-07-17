@@ -24,7 +24,9 @@ from pydantic import BaseModel, ValidationError
 from vibe.core.agent_loop_hooks import AgentLoopHooksMixin
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
+from vibe.core.autocompletion.path_prompt import build_path_prompt_payload
 from vibe.core.cache_store import InMemoryVibeCodeCacheStore, VibeCodeCacheStore
+from vibe.core.checkpoints import Checkpointer, CheckpointRecorder, FileStore
 from vibe.core.compaction import (
     CompactionFailedError as CompactionFailedError,
     CompactionManager,
@@ -70,6 +72,7 @@ from vibe.core.middleware import (
     make_plan_agent_reminder,
 )
 from vibe.core.plan_session import PlanSession
+from vibe.core.review import ReviewManager
 from vibe.core.rewind import RewindManager
 from vibe.core.scratchpad import init_scratchpad
 from vibe.core.session.session_id import extract_suffix, generate_session_id
@@ -105,13 +108,14 @@ from vibe.core.tools.base import (
     ToolPermission,
     ToolPermissionError,
 )
+from vibe.core.tools.builtins.read_file import ReadFileArgs
 from vibe.core.tools.builtins.skill import (
     Skill as SkillTool,
     SkillArgs,
     select_skill_result,
     skill_content_marker,
 )
-from vibe.core.tools.manager import ToolManager
+from vibe.core.tools.manager import NoSuchToolError, ToolManager
 from vibe.core.tools.permissions import (
     ApprovedRule,
     PermissionContext,
@@ -481,10 +485,18 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             hook_config_result.issues if hook_config_result else []
         )
         self.hooks_count = len(hook_config_result.hooks) if hook_config_result else 0
+        checkpointer = Checkpointer()
+        file_store = FileStore()
+        self.checkpoint_recorder = CheckpointRecorder(
+            checkpointer, self.messages, file_store
+        )
+        self.review_manager = ReviewManager(checkpointer, file_store)
         self.rewind_manager = RewindManager(
+            checkpointer,
             messages=self.messages,
             save_messages=self._save_messages,
             reset_session=self._reset_session,
+            files=file_store,
         )
         self.compaction_manager = CompactionManager(
             messages=self.messages,
@@ -850,7 +862,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         content: str,
         *,
         as_message: bool = False,
-        inject_invoked_skill: bool = False,
+        inject_implicit: bool = False,
         images: list[ImageAttachment] | None = None,
         client_message_id: str | None = None,
         on_event: Callable[[BaseEvent], Awaitable[None]] | None = None,
@@ -864,8 +876,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     images=images or None,
                 )
             )
-            if inject_invoked_skill:
+            if inject_implicit:
                 async for event in self._inject_invoked_skill(content):
+                    if on_event is not None:
+                        await on_event(event)
+                async for event in self._inject_mentioned_files(content):
                     if on_event is not None:
                         await on_event(event)
         else:
@@ -898,16 +913,22 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if images and active_model is not None and not active_model.supports_images:
             raise ImagesNotSupportedError(active_model.alias)
         self._clean_message_history()
-        self.rewind_manager.create_checkpoint()
-        async with agent_span(model=model_name, session_id=self.session_id):
-            async for event in self._conversation_loop(
-                msg,
-                client_message_id=client_message_id,
-                auto_title=auto_title,
-                images=images,
-                user_display_content=user_display_content,
-            ):
-                yield event
+        try:
+            self.checkpoint_recorder.create_checkpoint()
+            async with agent_span(model=model_name, session_id=self.session_id):
+                async for event in self._conversation_loop(
+                    msg,
+                    client_message_id=client_message_id,
+                    auto_title=auto_title,
+                    images=images,
+                    user_display_content=user_display_content,
+                ):
+                    yield event
+        finally:
+            # Seal the turn's post-edit boundary so per-turn review can attribute
+            # later edits correctly, even if the turn opens then fails, or is
+            # cancelled mid-flight.
+            self.checkpoint_recorder.seal_turn()
 
     @property
     def teleport_service(self) -> TeleportService:
@@ -1272,6 +1293,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         async for event in self._inject_invoked_skill(user_msg):
             yield event
 
+        async for event in self._inject_mentioned_files(user_msg):
+            yield event
+
         if auto_title is not None and self.session_logger.set_initial_auto_title(
             auto_title
         ):
@@ -1333,7 +1357,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 self.stats.steps += 1
                 first_llm_turn = False
                 # Per-turn save so the on-disk log stays fresh; after the
-                # inner loop so before_tool rewrites land in the snapshot.
+                # inner loop so pre_tool rewrites land in the snapshot.
                 await self._save_messages()
                 self._is_user_prompt_call = False
 
@@ -1424,6 +1448,54 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             result=result,
             tool_call_id=call_id,
         )
+
+    async def _inject_mentioned_files(
+        self, user_msg: str
+    ) -> AsyncGenerator[BaseEvent, None]:
+        payload = build_path_prompt_payload(user_msg)
+        file_resources = [r for r in payload.resources if r.kind == "file"]
+        if not file_resources:
+            return
+        try:
+            tool_instance = self.tool_manager.get("read_file")
+        except NoSuchToolError:
+            return
+        tool_class = type(tool_instance)
+
+        for resource in file_resources:
+            file_path = str(resource.path)
+            call_id = str(uuid4())
+            self.messages.append(
+                LLMMessage(
+                    role=Role.assistant,
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id=call_id,
+                            index=0,
+                            function=FunctionCall(
+                                name="read_file",
+                                arguments=json.dumps({"file_path": file_path}),
+                            ),
+                        )
+                    ],
+                )
+            )
+            tool_call = ResolvedToolCall(
+                tool_name="read_file",
+                tool_class=tool_class,
+                validated_args=ReadFileArgs(file_path=file_path),
+                call_id=call_id,
+            )
+            yield ToolCallEvent(
+                tool_call_id=call_id,
+                tool_call_index=0,
+                tool_name="read_file",
+                tool_class=tool_class,
+                args=ReadFileArgs(file_path=file_path),
+            )
+            async for event in self._process_one_tool_call(tool_call):
+                yield event
 
     def _handle_plan_review_ended(self) -> None:
         if not self._plan_session.has_content_changed():
@@ -1669,7 +1741,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             self._handle_tool_response(tool_call, error_msg, "failure", span=span)
             return
 
-        events, resolution = await self._run_before_tool_pipeline(
+        events, resolution = await self._run_pre_tool_pipeline(
             tool_call, tool_input, span=span
         )
         for ev in events:
@@ -1734,7 +1806,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 error=error_msg,
                 tool_call_id=tool_call.call_id,
             )
-            async for ev in self._run_after_tool_and_finalize(
+            async for ev in self._run_post_tool_and_finalize(
                 tool_call,
                 tool_input=tool_input,
                 tool_status="failure",
@@ -1757,9 +1829,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
         self.stats.tool_calls_agreed += 1
 
-        snapshot = tool_instance.get_file_snapshot(tool_call.validated_args)
+        snapshot = await asyncio.to_thread(
+            tool_instance.get_file_snapshot, tool_call.validated_args
+        )
         if snapshot is not None:
-            self.rewind_manager.add_snapshot(snapshot)
+            self.checkpoint_recorder.add_snapshot(snapshot)
 
         start_time = time.perf_counter()
         result_model = None
@@ -1811,7 +1885,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             duration=duration,
             tool_call_id=tool_call.call_id,
         )
-        async for ev in self._run_after_tool_and_finalize(
+        async for ev in self._run_post_tool_and_finalize(
             tool_call,
             tool_input=tool_input,
             tool_status="cancelled" if result_cancelled else "success",

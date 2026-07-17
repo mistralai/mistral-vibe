@@ -18,7 +18,6 @@ from vibe.core.audio_recorder.audio_recorder_port import (
     AudioBackendUnavailableError,
     NoAudioInputDeviceError,
 )
-from vibe.core.config import VibeConfig
 from vibe.core.transcribe.transcribe_client_port import (
     TranscribeDone,
     TranscribeError,
@@ -290,21 +289,18 @@ class TestCancelRecording:
 
 
 class TestToggleVoiceMode:
-    @patch.object(VibeConfig, "save_updates")
-    def test_toggle_enables(self, _mock_save) -> None:
+    def test_toggle_enables(self) -> None:
         manager, _, _ = _make_manager(voice_mode_enabled=False)
         result = manager.toggle_voice_mode()
         assert result == VoiceToggleResult(enabled=True)
 
-    @patch.object(VibeConfig, "save_updates")
-    def test_toggle_disables(self, _mock_save) -> None:
+    def test_toggle_disables(self) -> None:
         manager, _, _ = _make_manager(voice_mode_enabled=True)
         result = manager.toggle_voice_mode()
         assert result == VoiceToggleResult(enabled=False)
 
     @pytest.mark.asyncio
-    @patch.object(VibeConfig, "save_updates")
-    async def test_toggle_disable_cancels_active_recording(self, _mock_save) -> None:
+    async def test_toggle_disable_cancels_active_recording(self) -> None:
         manager, _, _ = _make_manager(voice_mode_enabled=True)
         manager.start_recording()
         manager.toggle_voice_mode()
@@ -320,8 +316,7 @@ class TestListeners:
         manager.start_recording()
         assert listener.state_changes == [TranscribeState.RECORDING]
 
-    @patch.object(VibeConfig, "save_updates")
-    def test_listener_notified_on_voice_mode_change(self, _mock_save) -> None:
+    def test_listener_notified_on_voice_mode_change(self) -> None:
         manager, _, _ = _make_manager(voice_mode_enabled=False)
         listener = StateListener()
         manager.add_listener(listener)

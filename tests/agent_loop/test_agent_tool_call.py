@@ -499,7 +499,7 @@ def _install_recording_hooks(agent_loop: AgentLoop) -> _RecordingHooksManager:
 
 
 @pytest.mark.asyncio
-async def test_after_tool_does_not_fire_when_cancel_lands_before_tool_execution() -> (
+async def test_post_tool_does_not_fire_when_cancel_lands_before_tool_execution() -> (
     None
 ):
     async def approval_callback(
@@ -529,12 +529,12 @@ async def test_after_tool_does_not_fire_when_cancel_lands_before_tool_execution(
     assert tool_result is not None
     assert tool_result.cancelled is True
 
-    assert "before_tool" in recorder.invoked
-    assert "after_tool" not in recorder.invoked
+    assert "pre_tool" in recorder.invoked
+    assert "post_tool" not in recorder.invoked
 
 
 @pytest.mark.asyncio
-async def test_after_tool_does_not_fire_when_user_denies_at_approval_prompt() -> None:
+async def test_post_tool_does_not_fire_when_user_denies_at_approval_prompt() -> None:
     async def approval_callback(
         _tool_name: str, _args: BaseModel, _tool_call_id: str, _rp: list | None = None
     ) -> tuple[ApprovalResponse, str | None]:
@@ -563,12 +563,12 @@ async def test_after_tool_does_not_fire_when_user_denies_at_approval_prompt() ->
     assert tool_result.skipped is True
     assert tool_result.skip_reason == "do not run this please"
 
-    assert "before_tool" in recorder.invoked
-    assert "after_tool" not in recorder.invoked
+    assert "pre_tool" in recorder.invoked
+    assert "post_tool" not in recorder.invoked
 
 
 @pytest.mark.asyncio
-async def test_after_tool_does_not_fire_when_permission_is_never() -> None:
+async def test_post_tool_does_not_fire_when_permission_is_never() -> None:
     agent_loop = make_agent_loop(
         auto_approve=False,
         todo_permission=ToolPermission.NEVER,
@@ -590,12 +590,12 @@ async def test_after_tool_does_not_fire_when_permission_is_never() -> None:
     assert tool_result is not None
     assert tool_result.skipped is True
 
-    assert "before_tool" in recorder.invoked
-    assert "after_tool" not in recorder.invoked
+    assert "pre_tool" in recorder.invoked
+    assert "post_tool" not in recorder.invoked
 
 
 @pytest.mark.asyncio
-async def test_after_tool_fires_when_cancel_lands_during_tool_execution() -> None:
+async def test_post_tool_fires_when_cancel_lands_during_tool_execution() -> None:
     tool_call = ToolCall(
         id="call_cancel_mid",
         index=0,
@@ -620,7 +620,7 @@ async def test_after_tool_fires_when_cancel_lands_during_tool_execution() -> Non
     async for _ev in agent_loop.act("Execute tool"):
         pass
 
-    assert "after_tool" in recorder.invoked
+    assert "post_tool" in recorder.invoked
 
 
 @pytest.mark.asyncio

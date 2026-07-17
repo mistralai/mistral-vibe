@@ -17,6 +17,7 @@ from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.paths import dedup_paths
+from vibe.core.utils import configure_ssl_context
 
 
 async def build_default_orchestrator(
@@ -56,6 +57,9 @@ async def build_default_orchestrator(
         schema=VibeConfigSchema,
         layers=layers,
         default_layer_resolver=default_layer_resolver,
+    )
+    configure_ssl_context(
+        enable_system_trust_store=orchestrator.config.enable_system_trust_store
     )
     migrate_agent_profile_files(_agent_profile_search_paths(orchestrator.config))
     return orchestrator

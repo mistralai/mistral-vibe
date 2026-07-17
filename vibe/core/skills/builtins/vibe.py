@@ -27,7 +27,7 @@ agents, prompts, logs, and session data live here.
 ```
 ~/.vibe/
   config.toml          # Main configuration file (TOML format)
-  hooks.toml           # User-level hook definitions (experimental)
+  hooks.toml           # User-level hook definitions
   .env                 # API keys and credentials (dotenv format)
   vibehistory          # Command history
   trusted_folders.toml # Trust database for project folders
@@ -382,11 +382,11 @@ Le Chat web deployment, where the Vibe API key is managed:
 vibe_base_url = "https://chat.mistral.ai"
 ```
 
-### Hooks (Experimental)
+### Hooks
 
-Hooks let users run shell commands automatically at lifecycle events.
-**Experimental**, enabled with `enable_experimental_hooks = true` in
-`config.toml` or `VIBE_ENABLE_EXPERIMENTAL_HOOKS=true`.
+Hooks let users run shell commands automatically at lifecycle events. They
+are always available — no flag is required; dropping a `hooks.toml` in place
+is enough.
 
 #### Config and hook types
 
@@ -404,14 +404,14 @@ fields) surface in the TUI as warnings and the offending hook is skipped.
 ```toml
 [[hooks]]
 name = "lint"                       # Required: unique within the file.
-type = "post_agent_turn"            # Required: post_agent_turn | before_tool | after_tool.
+type = "post_agent"                 # Required: post_agent | pre_tool | post_tool.
 command = "eslint --quiet ."        # Required: shell command run in cwd.
 timeout = 60.0                      # Default: 60s for all hooks.
 description = "Run ESLint"          # Optional.
 
 [[hooks]]
 name = "deny-rm-rf"
-type = "before_tool"
+type = "pre_tool"
 match = "bash"                      # Tool-name matcher (tool hooks only, default "*").
 strict = true                       # Tool hooks only: escalate any failure to deny/clear.
 command = "uv run python /path/to/guard-bash"
@@ -419,14 +419,14 @@ command = "uv run python /path/to/guard-bash"
 
 | Type | When it runs |
 |---|---|
-| `post_agent_turn` | Once per turn, after the agent finishes responding (no pending tool calls). |
-| `before_tool` | Per tool call, before the user permission prompt. |
-| `after_tool` | Per tool call, **iff the tool body actually ran**. `tool_status` is `success`, `failure`, or `cancelled`. Does not fire when the tool never executed (`before_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started). |
+| `post_agent` | Once per turn, after the agent finishes responding (no pending tool calls). |
+| `pre_tool` | Per tool call, before the user permission prompt. |
+| `post_tool` | Per tool call, **iff the tool body actually ran**. `tool_status` is `success`, `failure`, or `cancelled`. Does not fire when the tool never executed (`pre_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started). |
 
 **Matcher syntax** (same as `enabled_tools`): fnmatch glob by default
 (`"bash"`, `"read_*"`, case-insensitive), or a regex full-match when the
 pattern starts with `re:` (`"re:(read_file|grep)"`). `match` is forbidden on
-`post_agent_turn`.
+`post_agent`.
 
 **Tool name conventions** for matchers:
 - Built-in tools use their bare name (`bash`, `read_file`, …); see the Tools
@@ -446,18 +446,18 @@ Every hook is spawned in `cwd` and receives a JSON object on **stdin**
 discriminated by `hook_event_name`:
 
 ```json
-// post_agent_turn
-{"hook_event_name": "post_agent_turn", "session_id": "...",
+// post_agent
+{"hook_event_name": "post_agent", "session_id": "...",
  "parent_session_id": null, "transcript_path": "...", "cwd": "..."}
 
-// before_tool
-{"hook_event_name": "before_tool", "session_id": "...", "parent_session_id": null,
+// pre_tool
+{"hook_event_name": "pre_tool", "session_id": "...", "parent_session_id": null,
  "transcript_path": "...", "cwd": "...",
  "tool_name": "bash", "tool_call_id": "call_42",
  "tool_input": {"command": "ls"}}
 
-// after_tool
-{"hook_event_name": "after_tool", "session_id": "...", "parent_session_id": null,
+// post_tool
+{"hook_event_name": "post_tool", "session_id": "...", "parent_session_id": null,
  "transcript_path": "...", "cwd": "...",
  "tool_name": "bash", "tool_call_id": "call_42",
  "tool_input": {"command": "ls"},
@@ -489,8 +489,8 @@ Structured-response schema:
   "reason": "string",                     // required when decision == "deny"
   "system_message": "string",             // optional UI note
   "hook_specific_output": {
-    "tool_input": { ... },                // before_tool only
-    "additional_context": "string"        // after_tool only
+    "tool_input": { ... },                // pre_tool only
+    "additional_context": "string"        // post_tool only
   }
 }
 ```
@@ -499,7 +499,7 @@ Unknown fields are tolerated at every level. Fields that aren't meaningful
 for the current hook type are silently ignored.
 
 **Don't self-name in `system_message` or `reason`** — the UI prefixes
-hook-end-event content with `[hook-name]` automatically, and `before_tool`
+hook-end-event content with `[hook-name]` automatically, and `pre_tool`
 denials are wrapped as ``Tool 'X' was denied by hook 'Y': {reason}`` before
 the LLM sees them. A hook that writes ``"reason": "guard: refused..."``
 will produce ``hook 'guard': guard: refused...`` downstream.
@@ -508,18 +508,18 @@ will produce ``hook 'guard': guard: refused...`` downstream.
 
 | Hook | Effect of `decision: "deny"` |
 |---|---|
-| `before_tool` | Deny the tool call; `reason` is the tool error returned to the LLM. First deny short-circuits the remaining `before_tool` hooks for this call. |
-| `after_tool` | Replace `tool_output_text` with `reason`. Pipeline continues; subsequent hooks see the replacement. |
-| `post_agent_turn` | Inject `reason` as a retry user message. Capped at 3 retries per hook per user turn. |
+| `pre_tool` | Deny the tool call; `reason` is the tool error returned to the LLM. First deny short-circuits the remaining `pre_tool` hooks for this call. |
+| `post_tool` | Replace `tool_output_text` with `reason`. Pipeline continues; subsequent hooks see the replacement. |
+| `post_agent` | Inject `reason` as a retry user message. Capped at 3 retries per hook per user turn. |
 
 Event-specific payloads:
 
-- `hook_specific_output.tool_input` (`before_tool`): full replacement of the
+- `hook_specific_output.tool_input` (`pre_tool`): full replacement of the
   model's arguments. Vibe re-validates against the tool's schema **after each
   rewriting hook** — the first invalid rewrite aborts the chain and
   synthesizes a denial attributing the failure to that hook. Rewrites
   compose: hook N receives `tool_input` as rewritten by hooks 1..N-1.
-- `hook_specific_output.additional_context` (`after_tool`): text appended
+- `hook_specific_output.additional_context` (`post_tool`): text appended
   (with `\n`) to the current `tool_output_text`. Composes with a same-hook
   `decision: "deny"`: deny replaces first, then `additional_context` is
   appended to the replacement.
@@ -530,10 +530,10 @@ non-conforming stdout) emits a UI warning and lets the gated action proceed
 
 | Hook | Strict failure escalates to |
 |---|---|
-| `before_tool` | Deny the tool call with the failure reason. |
-| `after_tool` | Clear `tool_output_text` (replace with empty). |
+| `pre_tool` | Deny the tool call with the failure reason. |
+| `post_tool` | Clear `tool_output_text` (replace with empty). |
 
-`strict` is forbidden on `post_agent_turn`.
+`strict` is forbidden on `post_agent`.
 
 #### Execution semantics
 
@@ -542,7 +542,7 @@ non-conforming stdout) emits a UI warning and lets the gated action proceed
 - Tool calls within a single LLM turn run **concurrently**; each call's hook
   chain runs serially but the chains run in parallel across calls. Hooks
   that touch shared state (filesystem, env) must coordinate themselves.
-- `before_tool` rewrites take effect everywhere downstream: the user
+- `pre_tool` rewrites take effect everywhere downstream: the user
   permission prompt sees the rewritten arguments, the tool runs with them,
   and the assistant message is patched so subsequent LLM turns reflect what
   actually ran.
@@ -657,12 +657,17 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 ## File Mentions (`@`)
 
 Type `@` in the chat input to autocomplete files and folders from the
-project tree. Pressing Tab/Enter inserts the chosen path. Behavior
-depends on the file kind:
+project tree. Pressing Tab/Enter inserts the chosen path. Your message text
+is sent as-is (the `@path` stays in the prompt); behavior then depends on
+the mention kind:
 
-- **Text files** are read at submit and their contents are inlined into the
-  prompt text (up to ~256KB).
-- **Folders** are inserted as a resource link header (name + uri).
+- **Text files** trigger a synthetic `read_file` tool call injected right
+  after your message, so the file content arrives as a fresh tool result
+  every turn (no caching/dedup). The same limits as the `read_file` tool
+  apply (~2000 lines / 50 KB per call; larger files are truncated or
+  reported as an error result). Re-mentioning a file always re-reads it.
+- **Folders** are not read automatically — the path stays in your message
+  text and the agent can `read_file`/`grep` it on demand.
 - **Image files** (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) become image
   attachments — sent alongside the prompt as native multimodal content for
   vision-capable models.

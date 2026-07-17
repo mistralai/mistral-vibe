@@ -14,7 +14,7 @@ from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_tool import FakeTool, FakeToolArgs
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.config import SessionLoggingConfig
 from vibe.core.hooks._handler import HookOutputError, _parse_structured_response
 from vibe.core.hooks.config import (
     HookConfigResult,
@@ -24,7 +24,6 @@ from vibe.core.hooks.config import (
 from vibe.core.hooks.executor import HookExecutor
 from vibe.core.hooks.manager import HooksManager
 from vibe.core.hooks.models import (
-    AfterToolInvocation,
     HookConfig,
     HookEndEvent,
     HookEvent,
@@ -39,7 +38,8 @@ from vibe.core.hooks.models import (
     HookToolInputRewrite,
     HookType,
     HookUserMessage,
-    PostAgentTurnInvocation,
+    PostAgentInvocation,
+    PostToolInvocation,
     build_invocation,
 )
 from vibe.core.types import AssistantEvent, FunctionCall, ToolCall, ToolResultEvent
@@ -68,12 +68,12 @@ def _run(
     )
 
 
-async def _drain_after_tool_chain(
+async def _drain_post_tool_chain(
     handler: HooksManager, ctx: HookSessionContext, **kwargs: object
 ) -> tuple[str, list[_AnyHookYield]]:
     final_text = str(kwargs.get("initial_text", ""))
     events: list[_AnyHookYield] = []
-    async for ev in _run(handler, HookType.AFTER_TOOL, ctx, **kwargs):
+    async for ev in _run(handler, HookType.POST_TOOL, ctx, **kwargs):
         if isinstance(ev, HookTextReplacement):
             final_text = ev.text
         else:
@@ -82,8 +82,8 @@ async def _drain_after_tool_chain(
 
 
 @pytest.fixture
-def sample_invocation() -> PostAgentTurnInvocation:
-    return PostAgentTurnInvocation(
+def sample_invocation() -> PostAgentInvocation:
+    return PostAgentInvocation(
         session_id="test-session", transcript_path="", cwd=str(Path.cwd())
     )
 
@@ -93,16 +93,6 @@ def ctx() -> HookSessionContext:
     return HookSessionContext(
         session_id="sess", transcript_path="", cwd=str(Path.cwd())
     )
-
-
-@pytest.fixture
-def config_hooks_disabled() -> VibeConfig:
-    return VibeConfig(enable_experimental_hooks=False)
-
-
-@pytest.fixture
-def config_hooks_enabled() -> VibeConfig:
-    return VibeConfig(enable_experimental_hooks=True)
 
 
 def _write_hooks_toml(path: Path, hooks: list[dict]) -> None:
@@ -115,7 +105,7 @@ def _make_hook(
     name: str = "test-hook",
     command: str = "echo ok",
     timeout: float = 60.0,
-    type: HookType = HookType.POST_AGENT_TURN,
+    type: HookType = HookType.POST_AGENT,
     match: str | None = None,
 ) -> HookConfig:
     return HookConfig(
@@ -158,115 +148,75 @@ def _deny_cmd(reason: str = "") -> str:
 
 
 class TestConfigLoading:
-    def test_load_from_global_file(
-        self, config_dir: Path, config_hooks_enabled: VibeConfig
-    ) -> None:
+    def test_load_from_global_file(self, config_dir: Path) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",
-            [
-                {
-                    "name": "lint",
-                    "type": HookType.POST_AGENT_TURN,
-                    "command": "echo lint",
-                }
-            ],
+            [{"name": "lint", "type": HookType.POST_AGENT, "command": "echo lint"}],
         )
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert len(result.hooks) == 1
         assert result.hooks[0].name == "lint"
         assert result.issues == []
 
     def test_load_from_both_global_and_project(
-        self,
-        config_dir: Path,
-        tmp_working_directory: Path,
-        config_hooks_enabled: VibeConfig,
+        self, config_dir: Path, tmp_working_directory: Path
     ) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",
-            [
-                {
-                    "name": "global-hook",
-                    "type": "post_agent_turn",
-                    "command": "echo global",
-                }
-            ],
+            [{"name": "global-hook", "type": "post_agent", "command": "echo global"}],
         )
         project_vibe = tmp_working_directory / ".vibe"
         _write_hooks_toml(
             project_vibe / "hooks.toml",
-            [
-                {
-                    "name": "project-hook",
-                    "type": "post_agent_turn",
-                    "command": "echo project",
-                }
-            ],
+            [{"name": "project-hook", "type": "post_agent", "command": "echo project"}],
         )
         from vibe.core.trusted_folders import trusted_folders_manager
 
         trusted_folders_manager.add_trusted(tmp_working_directory)
 
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert len(result.hooks) == 2
         names = [h.name for h in result.hooks]
         # Project hooks are loaded first.
         assert names == ["project-hook", "global-hook"]
 
     def test_project_file_skipped_when_untrusted(
-        self, tmp_working_directory: Path, config_hooks_enabled: VibeConfig
+        self, tmp_working_directory: Path
     ) -> None:
         project_vibe = tmp_working_directory / ".vibe"
         _write_hooks_toml(
             project_vibe / "hooks.toml",
-            [
-                {
-                    "name": "sneaky-hook",
-                    "type": "post_agent_turn",
-                    "command": "echo sneaky",
-                }
-            ],
+            [{"name": "sneaky-hook", "type": "post_agent", "command": "echo sneaky"}],
         )
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert not any(h.name == "sneaky-hook" for h in result.hooks)
 
     def test_duplicate_hook_name_project_wins(
-        self,
-        config_dir: Path,
-        tmp_working_directory: Path,
-        config_hooks_enabled: VibeConfig,
+        self, config_dir: Path, tmp_working_directory: Path
     ) -> None:
         # Project file loads first; the user-global duplicate is flagged.
         _write_hooks_toml(
             config_dir / "hooks.toml",
-            [{"name": "dup-hook", "type": "post_agent_turn", "command": "echo global"}],
+            [{"name": "dup-hook", "type": "post_agent", "command": "echo global"}],
         )
         project_vibe = tmp_working_directory / ".vibe"
         _write_hooks_toml(
             project_vibe / "hooks.toml",
-            [
-                {
-                    "name": "dup-hook",
-                    "type": "post_agent_turn",
-                    "command": "echo project",
-                }
-            ],
+            [{"name": "dup-hook", "type": "post_agent", "command": "echo project"}],
         )
         from vibe.core.trusted_folders import trusted_folders_manager
 
         trusted_folders_manager.add_trusted(tmp_working_directory)
 
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert len(result.hooks) == 1
         assert result.hooks[0].command == "echo project"
         assert any("Duplicate" in i.message for i in result.issues)
 
-    def test_toml_parse_error_reported(
-        self, config_dir: Path, config_hooks_enabled: VibeConfig
-    ) -> None:
+    def test_toml_parse_error_reported(self, config_dir: Path) -> None:
         hooks_file = config_dir / "hooks.toml"
         hooks_file.write_text("this is not valid toml [[[", encoding="utf-8")
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert result.hooks == []
         assert len(result.issues) == 1
         assert (
@@ -274,126 +224,96 @@ class TestConfigLoading:
             or "Failed" in result.issues[0].message
         )
 
-    def test_validation_error_reported(
-        self, config_dir: Path, config_hooks_enabled: VibeConfig
-    ) -> None:
+    def test_validation_error_reported(self, config_dir: Path) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",
             [{"name": "bad", "type": "InvalidType", "command": "echo"}],
         )
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert result.hooks == []
         assert len(result.issues) == 1
 
-    def test_missing_command_reported(
-        self, config_dir: Path, config_hooks_enabled: VibeConfig
-    ) -> None:
+    def test_missing_command_reported(self, config_dir: Path) -> None:
         _write_hooks_toml(
-            config_dir / "hooks.toml", [{"name": "no-cmd", "type": "post_agent_turn"}]
+            config_dir / "hooks.toml", [{"name": "no-cmd", "type": "post_agent"}]
         )
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert result.hooks == []
         assert len(result.issues) == 1
 
-    def test_empty_command_reported(
-        self, config_dir: Path, config_hooks_enabled: VibeConfig
-    ) -> None:
+    def test_empty_command_reported(self, config_dir: Path) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",
-            [{"name": "empty-cmd", "type": "post_agent_turn", "command": "   "}],
+            [{"name": "empty-cmd", "type": "post_agent", "command": "   "}],
         )
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert result.hooks == []
         assert len(result.issues) == 1
 
-    def test_default_timeout_is_uniform(
-        self, config_dir: Path, config_hooks_enabled: VibeConfig
-    ) -> None:
+    def test_default_timeout_is_uniform(self, config_dir: Path) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",
             [
-                {"name": "p", "type": "post_agent_turn", "command": "echo ok"},
-                {"name": "b", "type": "before_tool", "command": "echo ok"},
-                {"name": "a", "type": "after_tool", "command": "echo ok"},
+                {"name": "p", "type": "post_agent", "command": "echo ok"},
+                {"name": "b", "type": "pre_tool", "command": "echo ok"},
+                {"name": "a", "type": "post_tool", "command": "echo ok"},
             ],
         )
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert all(h.timeout == 60.0 for h in result.hooks)
 
-    def test_explicit_timeout_overrides_default(
-        self, config_dir: Path, config_hooks_enabled: VibeConfig
-    ) -> None:
+    def test_explicit_timeout_overrides_default(self, config_dir: Path) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",
-            [
-                {
-                    "name": "b",
-                    "type": "before_tool",
-                    "command": "echo ok",
-                    "timeout": 12.5,
-                }
-            ],
+            [{"name": "b", "type": "pre_tool", "command": "echo ok", "timeout": 12.5}],
         )
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert result.hooks[0].timeout == 12.5
 
-    def test_match_field_on_tool_hooks(
-        self, config_dir: Path, config_hooks_enabled: VibeConfig
-    ) -> None:
+    def test_match_field_on_tool_hooks(self, config_dir: Path) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",
             [
                 {
                     "name": "b",
-                    "type": "before_tool",
+                    "type": "pre_tool",
                     "command": "echo ok",
                     "match": "bash",
                 },
                 {
                     "name": "a",
-                    "type": "after_tool",
+                    "type": "post_tool",
                     "command": "echo ok",
                     "match": "re:read_.*",
                 },
             ],
         )
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert result.hooks[0].match == "bash"
         assert result.hooks[1].match == "re:read_.*"
 
-    def test_match_field_rejected_on_post_agent_turn(
-        self, config_dir: Path, config_hooks_enabled: VibeConfig
-    ) -> None:
+    def test_match_field_rejected_on_post_agent(self, config_dir: Path) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",
             [
                 {
                     "name": "h",
-                    "type": "post_agent_turn",
+                    "type": "post_agent",
                     "command": "echo ok",
                     "match": "bash",
                 }
             ],
         )
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert result.hooks == []
         assert any("match" in i.message for i in result.issues)
 
-    def test_empty_match_rejected(
-        self, config_dir: Path, config_hooks_enabled: VibeConfig
-    ) -> None:
+    def test_empty_match_rejected(self, config_dir: Path) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",
-            [
-                {
-                    "name": "h",
-                    "type": "before_tool",
-                    "command": "echo ok",
-                    "match": "   ",
-                }
-            ],
+            [{"name": "h", "type": "pre_tool", "command": "echo ok", "match": "   "}],
         )
-        result = load_hooks_from_fs(config_hooks_enabled)
+        result = load_hooks_from_fs()
         assert result.hooks == []
 
     def test_nonexistent_file_returns_empty(self, tmp_path: Path) -> None:
@@ -401,29 +321,10 @@ class TestConfigLoading:
         assert result.hooks == []
         assert result.issues == []
 
-    def test_hooks_disabled_returns_empty(
-        self, config_dir: Path, config_hooks_disabled: VibeConfig
-    ) -> None:
-        _write_hooks_toml(
-            config_dir / "hooks.toml",
-            [
-                {
-                    "name": "lint",
-                    "type": HookType.POST_AGENT_TURN,
-                    "command": "echo lint",
-                }
-            ],
-        )
-        result = load_hooks_from_fs(config_hooks_disabled)
-        assert result.hooks == []
-        assert result.issues == []
-
 
 class TestHookExecutor:
     @pytest.mark.asyncio
-    async def test_exit_0_success(
-        self, sample_invocation: PostAgentTurnInvocation
-    ) -> None:
+    async def test_exit_0_success(self, sample_invocation: PostAgentInvocation) -> None:
         hook = _make_hook(command="echo success")
         result = await HookExecutor().run(hook, sample_invocation)
         assert result.exit_code == 0
@@ -432,7 +333,7 @@ class TestHookExecutor:
 
     @pytest.mark.asyncio
     async def test_nonzero_exit_passes_through(
-        self, sample_invocation: PostAgentTurnInvocation
+        self, sample_invocation: PostAgentInvocation
     ) -> None:
         # The executor is a thin wrapper around the subprocess — it does not
         # interpret exit codes itself. Any non-zero value is forwarded so the
@@ -443,7 +344,7 @@ class TestHookExecutor:
         assert "oops" in result.stdout
 
     @pytest.mark.asyncio
-    async def test_timeout(self, sample_invocation: PostAgentTurnInvocation) -> None:
+    async def test_timeout(self, sample_invocation: PostAgentInvocation) -> None:
         hook = _make_hook(command="sleep 60", timeout=0.5)
         result = await HookExecutor().run(hook, sample_invocation)
         assert result.timed_out
@@ -451,7 +352,7 @@ class TestHookExecutor:
 
     @pytest.mark.asyncio
     async def test_timeout_after_stdio_closed(
-        self, sample_invocation: PostAgentTurnInvocation
+        self, sample_invocation: PostAgentInvocation
     ) -> None:
         # A hook that closes stdout/stderr but keeps running must still be
         # killed by the timeout. Before the fix, process.wait() had no
@@ -470,7 +371,7 @@ class TestHookExecutor:
 
     @pytest.mark.asyncio
     async def test_stderr_captured_separately(
-        self, sample_invocation: PostAgentTurnInvocation
+        self, sample_invocation: PostAgentInvocation
     ) -> None:
         hook = _make_hook(command="echo out; echo err >&2")
         result = await HookExecutor().run(hook, sample_invocation)
@@ -480,7 +381,7 @@ class TestHookExecutor:
 
     @pytest.mark.asyncio
     async def test_stdin_json_received(
-        self, sample_invocation: PostAgentTurnInvocation
+        self, sample_invocation: PostAgentInvocation
     ) -> None:
         hook = _make_hook(
             command=f"{sys.executable} -c \"import sys,json; d=json.load(sys.stdin); print(d['session_id'])\""
@@ -492,8 +393,8 @@ class TestHookExecutor:
     @pytest.mark.asyncio
     async def test_large_stdin_when_child_closes_pipe_does_not_crash(self) -> None:
         command = f"{sys.executable} -c \"import sys; sys.stdin.close(); print('ok')\""
-        hook = _make_hook(command=command, type=HookType.AFTER_TOOL)
-        invocation = AfterToolInvocation(
+        hook = _make_hook(command=command, type=HookType.POST_TOOL)
+        invocation = PostToolInvocation(
             session_id="test-session",
             transcript_path="",
             cwd=str(Path.cwd()),
@@ -513,9 +414,7 @@ class TestHookExecutor:
 
     @pytest.mark.asyncio
     async def test_spawn_failure_message_goes_to_stderr(
-        self,
-        sample_invocation: PostAgentTurnInvocation,
-        monkeypatch: pytest.MonkeyPatch,
+        self, sample_invocation: PostAgentInvocation, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def _raise(*_args: Any, **_kwargs: Any) -> Any:
             raise OSError("nope")
@@ -528,12 +427,12 @@ class TestHookExecutor:
         assert "nope" in result.stderr
 
 
-class TestPostAgentTurnHook:
+class TestPostAgentHook:
     @pytest.mark.asyncio
     async def test_exit_0_emits_start_and_end(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([_make_hook(command="echo ok")])
         events: list[_AnyHookYield] = []
-        async for ev in _run(handler, HookType.POST_AGENT_TURN, ctx):
+        async for ev in _run(handler, HookType.POST_AGENT, ctx):
             events.append(ev)
 
         event_types = [type(e).__name__ for e in events]
@@ -549,7 +448,7 @@ class TestPostAgentTurnHook:
     ) -> None:
         handler = HooksManager([_make_hook(command=_deny_cmd("fix it"))])
         events: list[_AnyHookYield] = []
-        async for ev in _run(handler, HookType.POST_AGENT_TURN, ctx):
+        async for ev in _run(handler, HookType.POST_AGENT, ctx):
             events.append(ev)
 
         retry_msgs = [e for e in events if isinstance(e, HookUserMessage)]
@@ -570,7 +469,7 @@ class TestPostAgentTurnHook:
         # message — the hook explicitly asked for a retry with no guidance.
         handler = HooksManager([_make_hook(command=_deny_cmd())])
         events: list[_AnyHookYield] = []
-        async for ev in _run(handler, HookType.POST_AGENT_TURN, ctx):
+        async for ev in _run(handler, HookType.POST_AGENT, ctx):
             events.append(ev)
 
         retry_msgs = [e for e in events if isinstance(e, HookUserMessage)]
@@ -582,10 +481,10 @@ class TestPostAgentTurnHook:
         handler = HooksManager([_make_hook(command=_deny_cmd("retry"))])
 
         for _ in range(3):
-            events = [ev async for ev in _run(handler, HookType.POST_AGENT_TURN, ctx)]
+            events = [ev async for ev in _run(handler, HookType.POST_AGENT, ctx)]
             assert any(isinstance(e, HookUserMessage) for e in events)
 
-        events = [ev async for ev in _run(handler, HookType.POST_AGENT_TURN, ctx)]
+        events = [ev async for ev in _run(handler, HookType.POST_AGENT, ctx)]
         assert not any(isinstance(e, HookUserMessage) for e in events)
         error_events = [
             e
@@ -606,7 +505,7 @@ class TestPostAgentTurnHook:
         handler = HooksManager([
             _make_hook(command="echo stdout-msg; echo stderr-msg >&2; exit 1")
         ])
-        events = [ev async for ev in _run(handler, HookType.POST_AGENT_TURN, ctx)]
+        events = [ev async for ev in _run(handler, HookType.POST_AGENT, ctx)]
 
         warnings = [
             e
@@ -620,7 +519,7 @@ class TestPostAgentTurnHook:
     async def test_warning_falls_back_to_stdout(self, ctx: HookSessionContext) -> None:
         # When stderr is empty, stdout is still used as a fallback.
         handler = HooksManager([_make_hook(command="echo only-stdout; exit 1")])
-        events = [ev async for ev in _run(handler, HookType.POST_AGENT_TURN, ctx)]
+        events = [ev async for ev in _run(handler, HookType.POST_AGENT, ctx)]
 
         warnings = [
             e
@@ -633,7 +532,7 @@ class TestPostAgentTurnHook:
     @pytest.mark.asyncio
     async def test_timeout_emits_warning(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([_make_hook(command="sleep 60", timeout=0.5)])
-        events = [ev async for ev in _run(handler, HookType.POST_AGENT_TURN, ctx)]
+        events = [ev async for ev in _run(handler, HookType.POST_AGENT, ctx)]
 
         warnings = [
             e
@@ -644,7 +543,7 @@ class TestPostAgentTurnHook:
         assert warnings[0].content and "Timed out" in warnings[0].content
 
 
-class TestBeforeToolHook:
+class TestPreToolHook:
     @pytest.mark.asyncio
     async def test_no_hooks_no_events(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([])
@@ -652,7 +551,7 @@ class TestBeforeToolHook:
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -665,14 +564,14 @@ class TestBeforeToolHook:
     async def test_matcher_filters_non_matching(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
             _make_tool_hook(
-                "guard", _deny_cmd("nope"), type=HookType.BEFORE_TOOL, match="bash"
+                "guard", _deny_cmd("nope"), type=HookType.PRE_TOOL, match="bash"
             )
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="read_file",
                 tool_call_id="tc1",
@@ -685,13 +584,13 @@ class TestBeforeToolHook:
     @pytest.mark.asyncio
     async def test_exit_0_allows_tool(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
-            _make_tool_hook("audit", "echo ok", type=HookType.BEFORE_TOOL)
+            _make_tool_hook("audit", "echo ok", type=HookType.PRE_TOOL)
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -705,13 +604,13 @@ class TestBeforeToolHook:
     @pytest.mark.asyncio
     async def test_decision_deny_with_reason(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
-            _make_tool_hook("guard", _deny_cmd("no rm -rf"), type=HookType.BEFORE_TOOL)
+            _make_tool_hook("guard", _deny_cmd("no rm -rf"), type=HookType.PRE_TOOL)
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -726,13 +625,13 @@ class TestBeforeToolHook:
     @pytest.mark.asyncio
     async def test_decision_deny_with_no_reason(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
-            _make_tool_hook("guard", _deny_cmd(), type=HookType.BEFORE_TOOL)
+            _make_tool_hook("guard", _deny_cmd(), type=HookType.PRE_TOOL)
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -747,18 +646,16 @@ class TestBeforeToolHook:
     async def test_first_deny_wins(self, ctx: HookSessionContext) -> None:
         # Two hooks both match; the first denies, the second must not run.
         handler = HooksManager([
+            _make_tool_hook("first", _deny_cmd("first deny"), type=HookType.PRE_TOOL),
             _make_tool_hook(
-                "first", _deny_cmd("first deny"), type=HookType.BEFORE_TOOL
-            ),
-            _make_tool_hook(
-                "second", _deny_cmd("second should not run"), type=HookType.BEFORE_TOOL
+                "second", _deny_cmd("second should not run"), type=HookType.PRE_TOOL
             ),
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -775,14 +672,14 @@ class TestBeforeToolHook:
     async def test_spawn_failure_is_fail_open(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
             _make_tool_hook(
-                "broken", "/nonexistent/hook/binary", type=HookType.BEFORE_TOOL
+                "broken", "/nonexistent/hook/binary", type=HookType.PRE_TOOL
             )
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -801,14 +698,14 @@ class TestBeforeToolHook:
     @pytest.mark.asyncio
     async def test_strict_failure_denies(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
-            _make_tool_hook("guard", "exit 1", type=HookType.BEFORE_TOOL, strict=True),
-            _make_tool_hook("second", "echo ok", type=HookType.BEFORE_TOOL),
+            _make_tool_hook("guard", "exit 1", type=HookType.PRE_TOOL, strict=True),
+            _make_tool_hook("second", "echo ok", type=HookType.PRE_TOOL),
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -832,14 +729,14 @@ class TestBeforeToolHook:
     async def test_strict_timeout_denies(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
             _make_tool_hook(
-                "slow", "sleep 10", type=HookType.BEFORE_TOOL, timeout=0.1, strict=True
+                "slow", "sleep 10", type=HookType.PRE_TOOL, timeout=0.1, strict=True
             )
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -851,11 +748,11 @@ class TestBeforeToolHook:
         assert denials[0].hook_name == "slow"
 
 
-class TestAfterToolHook:
+class TestPostToolHook:
     @pytest.mark.asyncio
     async def test_no_hooks_returns_initial_text(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([])
-        final_text, events = await _drain_after_tool_chain(
+        final_text, events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -873,9 +770,9 @@ class TestAfterToolHook:
     @pytest.mark.asyncio
     async def test_exit_0_passthrough(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
-            _make_tool_hook("audit", "echo ok", type=HookType.AFTER_TOOL)
+            _make_tool_hook("audit", "echo ok", type=HookType.POST_TOOL)
         ])
-        final_text, events = await _drain_after_tool_chain(
+        final_text, events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -893,9 +790,9 @@ class TestAfterToolHook:
     @pytest.mark.asyncio
     async def test_decision_deny_replaces_text(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
-            _make_tool_hook("redact", _deny_cmd("REDACTED"), type=HookType.AFTER_TOOL)
+            _make_tool_hook("redact", _deny_cmd("REDACTED"), type=HookType.POST_TOOL)
         ])
-        final_text, _events = await _drain_after_tool_chain(
+        final_text, _events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -914,9 +811,9 @@ class TestAfterToolHook:
         self, ctx: HookSessionContext
     ) -> None:
         handler = HooksManager([
-            _make_tool_hook("silence", _deny_cmd(), type=HookType.AFTER_TOOL)
+            _make_tool_hook("silence", _deny_cmd(), type=HookType.POST_TOOL)
         ])
-        final_text, _events = await _drain_after_tool_chain(
+        final_text, _events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -938,9 +835,9 @@ class TestAfterToolHook:
         # to the current tool_output_text.
         payload = {"hook_specific_output": {"additional_context": "[redacted 1 key]"}}
         handler = HooksManager([
-            _make_tool_hook("audit", _emit_cmd(payload), type=HookType.AFTER_TOOL)
+            _make_tool_hook("audit", _emit_cmd(payload), type=HookType.POST_TOOL)
         ])
-        final_text, _events = await _drain_after_tool_chain(
+        final_text, _events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -966,9 +863,9 @@ class TestAfterToolHook:
             "hook_specific_output": {"additional_context": "(2 secrets stripped)"},
         }
         handler = HooksManager([
-            _make_tool_hook("redact", _emit_cmd(payload), type=HookType.AFTER_TOOL)
+            _make_tool_hook("redact", _emit_cmd(payload), type=HookType.POST_TOOL)
         ])
-        final_text, _events = await _drain_after_tool_chain(
+        final_text, _events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -998,10 +895,10 @@ class TestAfterToolHook:
             '"'
         )
         handler = HooksManager([
-            _make_tool_hook("first", _deny_cmd("piped"), type=HookType.AFTER_TOOL),
-            _make_tool_hook("second", upper_script, type=HookType.AFTER_TOOL),
+            _make_tool_hook("first", _deny_cmd("piped"), type=HookType.POST_TOOL),
+            _make_tool_hook("second", upper_script, type=HookType.POST_TOOL),
         ])
-        final_text, _events = await _drain_after_tool_chain(
+        final_text, _events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -1021,10 +918,10 @@ class TestAfterToolHook:
     ) -> None:
         handler = HooksManager([
             _make_tool_hook(
-                "rescue", _deny_cmd("synthetic recovery"), type=HookType.AFTER_TOOL
+                "rescue", _deny_cmd("synthetic recovery"), type=HookType.POST_TOOL
             )
         ])
-        final_text, _events = await _drain_after_tool_chain(
+        final_text, _events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -1048,7 +945,7 @@ class TestAfterToolHook:
             f'{sys.executable} -c "'
             "import sys,json; "
             "d=json.load(sys.stdin); "
-            "assert d['hook_event_name'] == 'after_tool'; "
+            "assert d['hook_event_name'] == 'post_tool'; "
             "assert d['tool_status'] == 'success'; "
             "assert d['tool_output'] == {'r': 1}; "
             "assert d['tool_name'] == 'bash'; "
@@ -1059,9 +956,9 @@ class TestAfterToolHook:
             '"'
         )
         handler = HooksManager([
-            _make_tool_hook("inspect", script, type=HookType.AFTER_TOOL)
+            _make_tool_hook("inspect", script, type=HookType.POST_TOOL)
         ])
-        final_text, _events = await _drain_after_tool_chain(
+        final_text, _events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -1078,10 +975,10 @@ class TestAfterToolHook:
     @pytest.mark.asyncio
     async def test_strict_failure_empties_text(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
-            _make_tool_hook("guard", "exit 1", type=HookType.AFTER_TOOL, strict=True),
-            _make_tool_hook("second", _deny_cmd("replaced"), type=HookType.AFTER_TOOL),
+            _make_tool_hook("guard", "exit 1", type=HookType.POST_TOOL, strict=True),
+            _make_tool_hook("second", _deny_cmd("replaced"), type=HookType.POST_TOOL),
         ])
-        final_text, events = await _drain_after_tool_chain(
+        final_text, events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -1108,10 +1005,10 @@ class TestAfterToolHook:
     async def test_strict_timeout_empties_text(self, ctx: HookSessionContext) -> None:
         handler = HooksManager([
             _make_tool_hook(
-                "slow", "sleep 10", type=HookType.AFTER_TOOL, timeout=0.1, strict=True
+                "slow", "sleep 10", type=HookType.POST_TOOL, timeout=0.1, strict=True
             )
         ])
-        final_text, _events = await _drain_after_tool_chain(
+        final_text, _events = await _drain_post_tool_chain(
             handler,
             ctx,
             tool_name="bash",
@@ -1127,24 +1024,21 @@ class TestAfterToolHook:
 
 
 class TestStrictValidation:
-    def test_strict_forbidden_on_post_agent_turn(self) -> None:
+    def test_strict_forbidden_on_post_agent(self) -> None:
         with pytest.raises(ValueError, match="strict is only valid for tool hooks"):
             HookConfig(
-                name="bad",
-                type=HookType.POST_AGENT_TURN,
-                command="echo ok",
-                strict=True,
+                name="bad", type=HookType.POST_AGENT, command="echo ok", strict=True
             )
 
-    def test_strict_allowed_on_before_tool(self) -> None:
+    def test_strict_allowed_on_pre_tool(self) -> None:
         hook = HookConfig(
-            name="guard", type=HookType.BEFORE_TOOL, command="echo ok", strict=True
+            name="guard", type=HookType.PRE_TOOL, command="echo ok", strict=True
         )
         assert hook.strict is True
 
-    def test_strict_allowed_on_after_tool(self) -> None:
+    def test_strict_allowed_on_post_tool(self) -> None:
         hook = HookConfig(
-            name="redact", type=HookType.AFTER_TOOL, command="echo ok", strict=True
+            name="redact", type=HookType.POST_TOOL, command="echo ok", strict=True
         )
         assert hook.strict is True
 
@@ -1235,7 +1129,7 @@ class TestStructuredResponseParsing:
         assert m.hook_specific_output.tool_input is None
 
 
-class TestBeforeToolRewrite:
+class TestPreToolRewrite:
     @pytest.mark.asyncio
     async def test_single_hook_rewrites_tool_input(
         self, ctx: HookSessionContext
@@ -1248,13 +1142,13 @@ class TestBeforeToolRewrite:
             '"'
         )
         handler = HooksManager([
-            _make_tool_hook("rewriter", script, type=HookType.BEFORE_TOOL, match="bash")
+            _make_tool_hook("rewriter", script, type=HookType.PRE_TOOL, match="bash")
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -1294,14 +1188,14 @@ class TestBeforeToolRewrite:
             '"'
         )
         handler = HooksManager([
-            _make_tool_hook("first", first, type=HookType.BEFORE_TOOL),
-            _make_tool_hook("second", second, type=HookType.BEFORE_TOOL),
+            _make_tool_hook("first", first, type=HookType.PRE_TOOL),
+            _make_tool_hook("second", second, type=HookType.PRE_TOOL),
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -1334,15 +1228,15 @@ class TestBeforeToolRewrite:
             )
 
         handler = HooksManager([
-            _make_tool_hook("a", script("a"), type=HookType.BEFORE_TOOL),
-            _make_tool_hook("b", script("b"), type=HookType.BEFORE_TOOL),
-            _make_tool_hook("c", script("c"), type=HookType.BEFORE_TOOL),
+            _make_tool_hook("a", script("a"), type=HookType.PRE_TOOL),
+            _make_tool_hook("b", script("b"), type=HookType.PRE_TOOL),
+            _make_tool_hook("c", script("c"), type=HookType.PRE_TOOL),
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -1364,13 +1258,13 @@ class TestBeforeToolRewrite:
             '"'
         )
         handler = HooksManager([
-            _make_tool_hook("audit", script, type=HookType.BEFORE_TOOL)
+            _make_tool_hook("audit", script, type=HookType.PRE_TOOL)
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -1392,14 +1286,14 @@ class TestBeforeToolRewrite:
         # — surfaced as a UI warning, no denial, no rewrite.
         handler = HooksManager([
             _make_tool_hook(
-                "chatty", "echo 'just some debug output'", type=HookType.BEFORE_TOOL
+                "chatty", "echo 'just some debug output'", type=HookType.PRE_TOOL
             )
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -1422,21 +1316,18 @@ class TestBeforeToolRewrite:
     ) -> None:
         # With strict=true the "bad stdout" path is escalated through
         # HookHandler.on_strict_failure — exactly like a non-zero exit
-        # would be. For before_tool that means denying the call with the
+        # would be. For pre_tool that means denying the call with the
         # parse error as the reason.
         handler = HooksManager([
             _make_tool_hook(
-                "guard",
-                "echo 'not actually json'",
-                type=HookType.BEFORE_TOOL,
-                strict=True,
+                "guard", "echo 'not actually json'", type=HookType.PRE_TOOL, strict=True
             )
         ])
         events = [
             ev
             async for ev in _run(
                 handler,
-                HookType.BEFORE_TOOL,
+                HookType.PRE_TOOL,
                 ctx,
                 tool_name="bash",
                 tool_call_id="tc1",
@@ -1450,7 +1341,7 @@ class TestBeforeToolRewrite:
 
 class TestAgentLoopIntegration:
     @pytest.mark.asyncio
-    async def test_post_agent_turn_hook_runs_after_turn(self) -> None:
+    async def test_post_agent_hook_runs_after_turn(self) -> None:
         backend = FakeBackend(mock_llm_chunk(content="Hello!"))
         hooks = [_make_hook(name="post-lint", command="echo ok")]
         agent_loop = build_test_agent_loop(
@@ -1463,7 +1354,7 @@ class TestAgentLoopIntegration:
         assert "HookEndEvent" in event_types
 
     @pytest.mark.asyncio
-    async def test_post_agent_turn_hook_retry_reinjects_message(self) -> None:
+    async def test_post_agent_hook_retry_reinjects_message(self) -> None:
         backend = FakeBackend([
             [mock_llm_chunk(content="first response")],
             [mock_llm_chunk(content="second response")],
@@ -1509,14 +1400,14 @@ class TestAgentLoopIntegration:
         assert hook_events == []
 
     @pytest.mark.asyncio
-    async def test_before_tool_deny_prevents_invocation(self) -> None:
+    async def test_pre_tool_deny_prevents_invocation(self) -> None:
         tool_call = _stub_tool_call("call_block")
         config = build_test_vibe_config(enabled_tools=["stub_tool"])
         hooks = [
             _make_tool_hook(
                 "deny-stub",
                 _deny_cmd("denied by policy"),
-                type=HookType.BEFORE_TOOL,
+                type=HookType.PRE_TOOL,
                 match="stub_tool",
             )
         ]
@@ -1542,12 +1433,12 @@ class TestAgentLoopIntegration:
         assert agent_loop.stats.tool_calls_rejected == 0
 
     @pytest.mark.asyncio
-    async def test_before_tool_deny_payload_appears_in_messages(self) -> None:
+    async def test_pre_tool_deny_payload_appears_in_messages(self) -> None:
         tool_call = _stub_tool_call("call_msg")
         config = build_test_vibe_config(enabled_tools=["stub_tool"])
         hooks = [
             _make_tool_hook(
-                "deny", _deny_cmd("forbidden"), type=HookType.BEFORE_TOOL, match="*"
+                "deny", _deny_cmd("forbidden"), type=HookType.PRE_TOOL, match="*"
             )
         ]
         backend = FakeBackend([
@@ -1569,14 +1460,14 @@ class TestAgentLoopIntegration:
         assert any("forbidden" in (m.content or "") for m in tool_msgs)
 
     @pytest.mark.asyncio
-    async def test_after_tool_replaces_llm_text_not_event(self) -> None:
+    async def test_post_tool_replaces_llm_text_not_event(self) -> None:
         tool_call = _stub_tool_call("call_after")
         config = build_test_vibe_config(enabled_tools=["stub_tool"])
         hooks = [
             _make_tool_hook(
                 "rewrite",
                 _deny_cmd("REWRITTEN"),
-                type=HookType.AFTER_TOOL,
+                type=HookType.POST_TOOL,
                 match="stub_tool",
             )
         ]
@@ -1606,14 +1497,14 @@ class TestAgentLoopIntegration:
         assert any((m.content or "").strip() == "REWRITTEN" for m in tool_msgs)
 
     @pytest.mark.asyncio
-    async def test_after_tool_matcher_skips_non_matching(self) -> None:
+    async def test_post_tool_matcher_skips_non_matching(self) -> None:
         tool_call = _stub_tool_call("call_nope")
         config = build_test_vibe_config(enabled_tools=["stub_tool"])
         hooks = [
             _make_tool_hook(
                 "wrong-match",
                 _deny_cmd("should not run"),
-                type=HookType.AFTER_TOOL,
+                type=HookType.POST_TOOL,
                 match="bash",
             )
         ]
@@ -1638,7 +1529,7 @@ class TestAgentLoopIntegration:
         assert not any("should not run" in (m.content or "") for m in tool_msgs)
 
     @pytest.mark.asyncio
-    async def test_before_tool_rewrite_applies_to_tool_invocation(self) -> None:
+    async def test_pre_tool_rewrite_applies_to_tool_invocation(self) -> None:
         # The hook rewrites tool_input so the tool runs with text="rewritten".
         # The result message echoes that value (FakeTool returns it as
         # `message`), proving the rewrite reached the tool.
@@ -1653,7 +1544,7 @@ class TestAgentLoopIntegration:
         )
         hooks = [
             _make_tool_hook(
-                "rewriter", script, type=HookType.BEFORE_TOOL, match="stub_tool"
+                "rewriter", script, type=HookType.PRE_TOOL, match="stub_tool"
             )
         ]
         backend = FakeBackend([
@@ -1688,7 +1579,7 @@ class TestAgentLoopIntegration:
         assert '"text": "rewritten"' in tc_args
 
     @pytest.mark.asyncio
-    async def test_before_tool_rewrite_is_persisted_to_messages_jsonl(self) -> None:
+    async def test_pre_tool_rewrite_is_persisted_to_messages_jsonl(self) -> None:
         # The in-memory patch (covered above) is necessary but not
         # sufficient: the on-disk ``messages.jsonl`` must also reflect the
         # rewritten args, otherwise a resumed session would replay the
@@ -1707,7 +1598,7 @@ class TestAgentLoopIntegration:
         )
         hooks = [
             _make_tool_hook(
-                "rewriter", script, type=HookType.BEFORE_TOOL, match="stub_tool"
+                "rewriter", script, type=HookType.PRE_TOOL, match="stub_tool"
             )
         ]
         backend = FakeBackend([
@@ -1743,7 +1634,7 @@ class TestAgentLoopIntegration:
         )
 
     @pytest.mark.asyncio
-    async def test_before_tool_rewrite_validation_failure_denies(self) -> None:
+    async def test_pre_tool_rewrite_validation_failure_denies(self) -> None:
         # The hook returns a tool_input with a wrong type for `text` (int
         # instead of str). Re-validation should fail and the rewrite is
         # converted to a denial that the LLM sees as a tool error.
@@ -1760,7 +1651,7 @@ class TestAgentLoopIntegration:
         )
         hooks = [
             _make_tool_hook(
-                "bad-rewriter", script, type=HookType.BEFORE_TOOL, match="stub_tool"
+                "bad-rewriter", script, type=HookType.PRE_TOOL, match="stub_tool"
             )
         ]
         backend = FakeBackend([
@@ -1813,10 +1704,10 @@ class TestAgentLoopIntegration:
         )
         hooks = [
             _make_tool_hook(
-                "broken", bad_script, type=HookType.BEFORE_TOOL, match="stub_tool"
+                "broken", bad_script, type=HookType.PRE_TOOL, match="stub_tool"
             ),
             _make_tool_hook(
-                "would-fix", good_script, type=HookType.BEFORE_TOOL, match="stub_tool"
+                "would-fix", good_script, type=HookType.PRE_TOOL, match="stub_tool"
             ),
         ]
         backend = FakeBackend([
@@ -1875,7 +1766,7 @@ class TestAgentLoopIntegration:
 class TestHookOutputCap:
     @pytest.mark.asyncio
     async def test_stdout_capped_at_limit(
-        self, sample_invocation: PostAgentTurnInvocation
+        self, sample_invocation: PostAgentInvocation
     ) -> None:
         from vibe.core.hooks.executor import _MAX_OUTPUT_BYTES
 
@@ -1892,7 +1783,7 @@ class TestHookOutputCap:
 
     @pytest.mark.asyncio
     async def test_stderr_capped_at_limit(
-        self, sample_invocation: PostAgentTurnInvocation
+        self, sample_invocation: PostAgentInvocation
     ) -> None:
         from vibe.core.hooks.executor import _MAX_OUTPUT_BYTES
 

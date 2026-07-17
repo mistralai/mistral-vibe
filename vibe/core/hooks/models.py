@@ -18,9 +18,9 @@ class HookMessageSeverity(StrEnum):
 
 
 class HookType(StrEnum):
-    POST_AGENT_TURN = auto()
-    BEFORE_TOOL = auto()
-    AFTER_TOOL = auto()
+    POST_AGENT = auto()
+    PRE_TOOL = auto()
+    POST_TOOL = auto()
 
 
 ToolStatus = Literal["success", "failure", "cancelled"]
@@ -57,13 +57,13 @@ class HookConfig(BaseModel):
 
     @model_validator(mode="after")
     def _apply_defaults_and_constraints(self) -> Self:
-        if self.match is not None and self.type == HookType.POST_AGENT_TURN:
+        if self.match is not None and self.type == HookType.POST_AGENT:
             raise ValueError(
-                "match is only valid for tool hooks (before_tool / after_tool)"
+                "match is only valid for tool hooks (pre_tool / post_tool)"
             )
-        if self.strict and self.type == HookType.POST_AGENT_TURN:
+        if self.strict and self.type == HookType.POST_AGENT:
             raise ValueError(
-                "strict is only valid for tool hooks (before_tool / after_tool)"
+                "strict is only valid for tool hooks (pre_tool / post_tool)"
             )
         if self.timeout is None:
             self.timeout = _DEFAULT_HOOK_TIMEOUT
@@ -92,19 +92,19 @@ class HookSessionContext(BaseModel):
     parent_session_id: str | None = None
 
 
-class PostAgentTurnInvocation(HookSessionContext):
-    hook_event_name: Literal[HookType.POST_AGENT_TURN] = HookType.POST_AGENT_TURN
+class PostAgentInvocation(HookSessionContext):
+    hook_event_name: Literal[HookType.POST_AGENT] = HookType.POST_AGENT
 
 
-class BeforeToolInvocation(HookSessionContext):
-    hook_event_name: Literal[HookType.BEFORE_TOOL] = HookType.BEFORE_TOOL
+class PreToolInvocation(HookSessionContext):
+    hook_event_name: Literal[HookType.PRE_TOOL] = HookType.PRE_TOOL
     tool_name: str
     tool_call_id: str
     tool_input: dict[str, Any]
 
 
-class AfterToolInvocation(HookSessionContext):
-    hook_event_name: Literal[HookType.AFTER_TOOL] = HookType.AFTER_TOOL
+class PostToolInvocation(HookSessionContext):
+    hook_event_name: Literal[HookType.POST_TOOL] = HookType.POST_TOOL
     tool_name: str
     tool_call_id: str
     tool_input: dict[str, Any]
@@ -115,7 +115,7 @@ class AfterToolInvocation(HookSessionContext):
     duration_ms: float
 
 
-HookInvocation = PostAgentTurnInvocation | BeforeToolInvocation | AfterToolInvocation
+HookInvocation = PostAgentInvocation | PreToolInvocation | PostToolInvocation
 
 
 def build_invocation(
@@ -134,26 +134,26 @@ def build_invocation(
     """Build the right HookInvocation subclass for *hook_type*."""
     base = ctx.model_dump()
     match hook_type:
-        case HookType.POST_AGENT_TURN:
-            return PostAgentTurnInvocation(**base)
-        case HookType.BEFORE_TOOL:
+        case HookType.POST_AGENT:
+            return PostAgentInvocation(**base)
+        case HookType.PRE_TOOL:
             if tool_name is None or tool_call_id is None:
                 raise ValueError(
-                    "tool_name and tool_call_id are required for before_tool hooks"
+                    "tool_name and tool_call_id are required for pre_tool hooks"
                 )
-            return BeforeToolInvocation(
+            return PreToolInvocation(
                 **base,
                 tool_name=tool_name,
                 tool_call_id=tool_call_id,
                 tool_input=tool_input or {},
             )
-        case HookType.AFTER_TOOL:
+        case HookType.POST_TOOL:
             if tool_name is None or tool_call_id is None or tool_status is None:
                 raise ValueError(
                     "tool_name, tool_call_id, and tool_status are required"
-                    " for after_tool hooks"
+                    " for post_tool hooks"
                 )
-            return AfterToolInvocation(
+            return PostToolInvocation(
                 **base,
                 tool_name=tool_name,
                 tool_call_id=tool_call_id,
@@ -182,9 +182,9 @@ class HookExecutionResult(BaseModel):
 class HookSpecificOutput(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    # before_tool only.
+    # pre_tool only.
     tool_input: dict[str, Any] | None = None
-    # after_tool only.
+    # post_tool only.
     additional_context: str | None = None
 
 
@@ -206,7 +206,7 @@ class HookStructuredResponse(BaseModel):
 
 
 class HookUserMessage(BaseModel):
-    """post_agent_turn deny: ``content`` is injected as a retry user
+    """post_agent deny: ``content`` is injected as a retry user
     message.
     """
 
@@ -214,7 +214,7 @@ class HookUserMessage(BaseModel):
 
 
 class HookToolDenial(BaseModel):
-    """before_tool deny: ``content`` becomes the tool error returned to
+    """pre_tool deny: ``content`` becomes the tool error returned to
     the LLM.
     """
 
@@ -223,7 +223,7 @@ class HookToolDenial(BaseModel):
 
 
 class HookToolInputRewrite(BaseModel):
-    """before_tool: one per rewriting hook in the chain. The agent loop
+    """pre_tool: one per rewriting hook in the chain. The agent loop
     validates each as it arrives — the first invalid rewrite aborts the
     chain and synthesizes a denial.
     """
@@ -233,7 +233,7 @@ class HookToolInputRewrite(BaseModel):
 
 
 class HookTextReplacement(BaseModel):
-    """after_tool: ``text`` is the cumulative LLM-bound output after the
+    """post_tool: ``text`` is the cumulative LLM-bound output after the
     handler applied its replacement or append.
     """
 
@@ -248,13 +248,13 @@ class HookEvent(BaseEvent):
 
 
 class HookRunStartEvent(HookEvent):
-    scope: HookType = HookType.POST_AGENT_TURN
+    scope: HookType = HookType.POST_AGENT
     tool_name: str | None = None
     tool_call_id: str | None = None
 
 
 class HookRunEndEvent(HookEvent):
-    scope: HookType = HookType.POST_AGENT_TURN
+    scope: HookType = HookType.POST_AGENT
     tool_call_id: str | None = None
 
 
@@ -262,7 +262,7 @@ class HookRunEndEvent(HookEvent):
 # chains interleave on the wire.
 class HookStartEvent(HookEvent):
     hook_name: str
-    scope: HookType = HookType.POST_AGENT_TURN
+    scope: HookType = HookType.POST_AGENT
     tool_call_id: str | None = None
 
 
@@ -270,5 +270,5 @@ class HookEndEvent(HookEvent):
     hook_name: str
     status: HookMessageSeverity
     content: str | None = None
-    scope: HookType = HookType.POST_AGENT_TURN
+    scope: HookType = HookType.POST_AGENT
     tool_call_id: str | None = None

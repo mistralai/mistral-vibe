@@ -287,7 +287,7 @@ async def test_teleport_command_errors_after_switching_to_non_mistral_model(
 
         with (
             patch(
-                "vibe.cli.textual_ui.app.VibeConfig.load",
+                "vibe.core.config.orchestrator_legacy.VibeConfig.load",
                 return_value=non_mistral_config,
             ),
             patch.object(

@@ -16,7 +16,7 @@ from vibe.core.audio_recorder.audio_recorder_port import (
     NoAudioInputDeviceError,
     RecordingMode,
 )
-from vibe.core.config import AnyVibeConfig, VibeConfig
+from vibe.core.config import AnyVibeConfig
 from vibe.core.logger import logger
 from vibe.core.transcribe.transcribe_client_port import (
     TranscribeDone,
@@ -70,8 +70,6 @@ class VoiceManager:
         new_state = not self.is_enabled
         if not new_state:
             self.cancel_recording()
-
-        VibeConfig.save_updates({"voice_mode_enabled": new_state})
 
         for listener in self._listeners:
             try:

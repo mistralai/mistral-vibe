@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from jsonpointer import JsonPointer
@@ -7,6 +8,7 @@ from jsonpointer import JsonPointer
 from vibe.core.config._settings import VibeConfig
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.config.models import merge_model_payloads, normalize_model_configs
 from vibe.core.logger import logger
 
 if TYPE_CHECKING:
@@ -47,7 +49,10 @@ class LegacyConfigOrchestrator:
         if target_layer == OverridesLayer.NAME:
             _set_pointer_in_place(self._config, path, value)
             return []
-        VibeConfig.save_updates(_pointer_to_nested_update(path, value))
+        updates = _pointer_to_nested_update(path, value)
+        VibeConfig.save_updates(
+            _with_current_models_when_missing(self._config, updates)
+        )
         return []
 
     async def reload(self) -> None:
@@ -79,6 +84,52 @@ def _pointer_to_nested_update(path: str, value: Any) -> dict[str, Any]:
     for part in reversed(JsonPointer(path).parts):
         nested = {part: nested}
     return nested
+
+
+def _with_current_models_when_missing(
+    config: AnyVibeConfig, updates: dict[str, Any]
+) -> dict[str, Any]:
+    """Materialize current models when a patch targets models absent from TOML."""
+    models_update = updates.get("models")
+    if not isinstance(models_update, dict):
+        return updates
+
+    persisted = normalize_model_configs(VibeConfig.get_persisted_config().get("models"))
+    persisted_aliases = set(persisted) if isinstance(persisted, dict) else set()
+    if all(alias in persisted_aliases for alias in models_update):
+        return updates
+
+    current_models = _current_model_payloads(config)
+    if not current_models:
+        return updates
+
+    return {**updates, "models": merge_model_payloads(current_models, models_update)}
+
+
+def _current_model_payloads(config: AnyVibeConfig) -> dict[str, Any]:
+    """Return lightweight persistable payloads for every loaded model."""
+    payloads: dict[str, Any] = {}
+    for alias, model in config.models.items():
+        if not isinstance(alias, str):
+            continue
+        if hasattr(model, "model_dump"):
+            payloads[alias] = _model_identity_payload(model)
+        elif isinstance(model, Mapping):
+            payloads[alias] = dict(model)
+    return payloads
+
+
+def _model_identity_payload(model: Any) -> dict[str, Any]:
+    """Keep only model identity fields needed to persist default-model patches."""
+    payload = {
+        "name": model.name,
+        "provider": model.provider,
+        "alias": model.alias,
+        "thinking": model.thinking,
+    }
+    if model.supports_images:
+        payload["supports_images"] = True
+    return payload
 
 
 def _set_pointer_in_place(root: Any, path: str, value: Any) -> None:

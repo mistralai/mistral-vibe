@@ -3,7 +3,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol
 
-from vibe.core.feedback import record_feedback_asked, should_show_feedback
+from vibe.core.feedback import (
+    record_feedback_asked,
+    record_feedback_given,
+    record_feedback_snoozed,
+    should_show_feedback,
+)
 from vibe.core.types import Role
 
 if TYPE_CHECKING:
@@ -57,3 +62,9 @@ class FeedbackBarManager:
 
     def record_feedback_asked(self, agent_loop: _FeedbackSource) -> None:
         record_feedback_asked(agent_loop.cache_store)
+
+    def record_feedback_given(self, agent_loop: _FeedbackSource) -> None:
+        record_feedback_given(agent_loop.cache_store)
+
+    def record_feedback_snoozed(self, agent_loop: _FeedbackSource) -> None:
+        record_feedback_snoozed(agent_loop.cache_store)

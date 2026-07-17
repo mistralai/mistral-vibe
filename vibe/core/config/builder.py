@@ -3,8 +3,12 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Callable
+import copy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
+
+from pydantic import BeforeValidator
+from pydantic.fields import FieldInfo
 
 from vibe.core.config.layer import (
     ConfigLayer,
@@ -38,6 +42,12 @@ class ConfigBuilder[S: ConfigSchema]:
     @property
     def layers(self) -> list[ConfigLayer[RawConfig]]:
         return self._layers
+
+    def copy(self) -> ConfigBuilder[S]:
+        """Return a new builder for the same schema with deep-copied layers."""
+        new_builder = ConfigBuilder(self._schema)
+        new_builder.add_layers([copy.deepcopy(layer) for layer in self._layers])
+        return new_builder
 
     async def build(self, force_load: bool = False) -> S:
         """Merge all layers and return a validated schema.
@@ -93,6 +103,9 @@ class ConfigBuilder[S: ConfigSchema]:
                         if fragment_meta is None:
                             continue
 
+                        fragment_value = self._apply_model_before_validators(
+                            fragment_key, fragment_field, fragment_value
+                        )
                         accumulated[key][fragment_key] = (
                             fragment_meta.merge_strategy.apply(
                                 accumulated[key].get(fragment_key),
@@ -106,11 +119,24 @@ class ConfigBuilder[S: ConfigSchema]:
                 if meta is None:
                     continue
 
+                value = self._apply_model_before_validators(key, field_info, value)
                 accumulated[key] = meta.merge_strategy.apply(
                     accumulated.get(key), value, key_fn=self._make_key_fn(meta)
                 )
 
         return accumulated, origins
+
+    def _apply_model_before_validators(
+        self, field_name: str, field_info: FieldInfo, value: Any
+    ) -> Any:
+        if field_name != "models":
+            return value
+
+        for item in field_info.metadata:
+            if isinstance(item, BeforeValidator):
+                func = cast(Callable[[Any], Any], item.func)
+                value = func(value)
+        return value
 
     def _make_key_fn(
         self, merge_field_meta: MergeFieldMetadata

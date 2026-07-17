@@ -35,6 +35,10 @@ _WORD = re.compile(r"\w+")
 _DOUBLE_CLICK = 2
 _TRIPLE_CLICK = 3
 
+FEEDBACK_RATING_KEYS: dict[str, str] = {"1": "good", "2": "fine", "3": "bad"}
+FEEDBACK_SNOOZE_KEY = "0"
+FEEDBACK_SNOOZE_LABEL = "snooze"
+
 
 class ChatTextArea(TextArea):
     ALLOW_SELECT: ClassVar[bool] = False
@@ -280,6 +284,9 @@ class ChatTextArea(TextArea):
             self.rating = rating
             super().__init__()
 
+    class SnoozeKeyPressed(Message):
+        pass
+
     class NonFeedbackKeyPressed(Message):
         pass
 
@@ -323,10 +330,15 @@ class ChatTextArea(TextArea):
         self._mark_cursor_moved_if_needed()
 
         if self.feedback_active:
-            if event.character in {"1", "2", "3"}:
+            if event.character in FEEDBACK_RATING_KEYS:
                 event.prevent_default()
                 event.stop()
                 self.post_message(self.FeedbackKeyPressed(int(event.character)))
+                return
+            if event.character == FEEDBACK_SNOOZE_KEY:
+                event.prevent_default()
+                event.stop()
+                self.post_message(self.SnoozeKeyPressed())
                 return
             if event.character is not None:
                 self.post_message(self.NonFeedbackKeyPressed())

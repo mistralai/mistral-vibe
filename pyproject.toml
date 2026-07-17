@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "2.20.0"
+version = "2.21.0"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -41,7 +41,7 @@ dependencies = [
     "cryptography==48.0.1",
     "eval-type-backport==0.3.1",
     "gitdb==4.0.12",
-    "gitpython==3.1.50",
+    "gitpython==3.1.51",
     "giturlparse==0.15.0",
     "google-auth==2.49.2",
     "googleapis-common-protos==1.74.0",
@@ -141,19 +141,20 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 include = ["vibe/"]
 
-
 [project.scripts]
 vibe = "vibe.cli.entrypoint:main"
 vibe-acp = "vibe.acp.entrypoint:main"
 
-
 [tool.uv]
 exclude-newer = "2 days"
 index-strategy = "first-index"
-
 package = true
 required-version = ">=0.8.0"
 
+[[tool.uv.index]]
+default = true
+name = "pypi"
+url = "https://pypi.org/simple"
 
 [dependency-groups]
 dev = [

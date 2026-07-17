@@ -658,25 +658,20 @@ startup_timeout_sec = 15
 tool_timeout_sec = 120
 ```
 
-### Hooks (Experimental)
+### Hooks
 
-Hooks wire arbitrary shell commands into Vibe's lifecycle to gate, audit, or rewrite agent behavior. **Experimental**, gated behind:
-
-```toml
-# config.toml
-enable_experimental_hooks = true   # or env VIBE_ENABLE_EXPERIMENTAL_HOOKS=true
-```
+Hooks wire arbitrary shell commands into Vibe's lifecycle to gate, audit, or rewrite agent behavior. No flag is required — declaring a hook is enough.
 
 Declared in `<project>/.vibe/hooks.toml` (project, loaded first; trusted only) and `~/.vibe/hooks.toml` (user-global, loaded second; duplicates by `name` lose to the project entry):
 
 ```toml
 [[hooks]]
 name = "deny-rm-rf"
-type = "before_tool"
+type = "pre_tool"
 match = "bash"                       # tool-name matcher (fnmatch glob + `re:` regex escape, case-insensitive)
 command = "uv run python /path/to/guard-bash"
 timeout = 60.0                       # seconds; default 60 for all hooks
-strict = false                       # tool hooks only: turn failures into denials (before) / text-clears (after)
+strict = false                       # tool hooks only: turn failures into denials (pre) / text-clears (post)
 description = "Reject dangerous shell commands."
 ```
 
@@ -699,7 +694,7 @@ Every hook signals back via its **exit code** and **stdout**. The contract on st
 
 Unknown JSON fields are tolerated at every level (forward-compatible). Fields that aren't meaningful for the current hook type are silently ignored.
 
-#### `post_agent_turn`
+#### `post_agent`
 
 Fires after every assistant turn that ends without pending tool calls.
 
@@ -708,9 +703,9 @@ Fires after every assistant turn that ends without pending tool calls.
   - `decision: "deny"` + `reason` — `reason` is injected as a new user message asking for a retry. Capped at **3 retries per hook per user turn**; further denies become terminal warnings.
   - `system_message` — UI-only.
 
-#### `before_tool`
+#### `pre_tool`
 
-Fires per tool call, **before** the user permission prompt. First deny short-circuits remaining `before_tool` hooks for that call.
+Fires per tool call, **before** the user permission prompt. First deny short-circuits remaining `pre_tool` hooks for that call.
 
 - **Receives** (in addition to the session context): `tool_name`, `tool_call_id`, `tool_input` (the model's raw arguments).
 - **Can return**:
@@ -718,9 +713,9 @@ Fires per tool call, **before** the user permission prompt. First deny short-cir
   - `hook_specific_output.tool_input` (object) — **full replacement** of the model's arguments. Re-validated against the tool's schema (validation failure → synthesized denial). Rewrites compose left-to-right across hooks. The rewritten arguments are also what the permission prompt displays, what the tool runs with, and what subsequent LLM turns see on the assistant message.
   - `system_message` — UI-only.
 
-#### `after_tool`
+#### `post_tool`
 
-Fires per tool call **if and only if the tool body actually ran**. `tool_status` is `success`, `failure`, or `cancelled` (cancellation during the tool body — cancellation is shielded so audit hooks still run). Does not fire when the tool never executed: `before_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started.
+Fires per tool call **if and only if the tool body actually ran**. `tool_status` is `success`, `failure`, or `cancelled` (cancellation during the tool body — cancellation is shielded so audit hooks still run). Does not fire when the tool never executed: `pre_tool` denial, user denial at the approval prompt, permission `NEVER`, or cancellation before the body started.
 
 - **Receives** (in addition to the session context): `tool_name`, `tool_call_id`, `tool_input` (post-rewrite), `tool_status`, `tool_output` (structured result dict; null on failure), `tool_output_text` (the running text the LLM will see, mutable by prior hooks), `tool_error`, `duration_ms`.
 - **Can return**:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import tomllib
 
 import pexpect
 import pytest
@@ -20,12 +19,7 @@ from tests.e2e.common import (
 from tests.e2e.mock_server import StreamingMockServer
 
 
-def _enable_hooks(vibe_home: Path, invocation_path: Path) -> None:
-    config_path = vibe_home / "config.toml"
-    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    config["enable_experimental_hooks"] = True
-    config_path.write_bytes(tomli_w.dumps(config).encode())
-
+def _setup_recording_hook(vibe_home: Path, invocation_path: Path) -> None:
     script = vibe_home / "_record_hook.py"
     script.write_text(
         "import json, sys\n"
@@ -40,7 +34,7 @@ def _enable_hooks(vibe_home: Path, invocation_path: Path) -> None:
                 "hooks": [
                     {
                         "name": "record-invocation",
-                        "type": "post_agent_turn",
+                        "type": "post_agent",
                         "command": f"uv run python {script}",
                     }
                 ]
@@ -58,7 +52,7 @@ def test_spawn_cli_runs_configured_hook_after_turn(
 ) -> None:
     vibe_home = Path(os.environ["VIBE_HOME"])
     invocation_path = vibe_home / "hook-invocation.json"
-    _enable_hooks(vibe_home, invocation_path)
+    _setup_recording_hook(vibe_home, invocation_path)
 
     with spawned_vibe_process(e2e_workdir) as (child, captured):
         wait_for_main_screen(child, timeout=15)
@@ -82,10 +76,10 @@ def test_spawn_cli_runs_configured_hook_after_turn(
 
     assert len(streaming_mock_server.requests) == 1
     invocation = json.loads(invocation_path.read_text(encoding="utf-8"))
-    assert invocation["hook_event_name"] == "post_agent_turn"
+    assert invocation["hook_event_name"] == "post_agent"
     assert isinstance(invocation["cwd"], str) and invocation["cwd"]
     assert isinstance(invocation["session_id"], str) and invocation["session_id"]
     # New in the discriminated-union payload: top-level sessions have no
     # parent. Tool hook invocations in this test never fire (no tool calls
-    # in the mock response), so we only assert the post_agent_turn shape.
+    # in the mock response), so we only assert the post_agent shape.
     assert invocation.get("parent_session_id") is None

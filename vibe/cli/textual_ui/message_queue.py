@@ -133,7 +133,6 @@ class QueuePorts:
     maybe_show_feedback_bar: Callable[[], None]
     send_skill_telemetry: Callable[[str | None], None]
     send_at_mention_telemetry: Callable[[PathPromptPayload, str], None]
-    render_payload: Callable[[PathPromptPayload], Awaitable[str]]
 
 
 @dataclass(slots=True)
@@ -392,12 +391,8 @@ class QueueController:
     async def _inject_head_item(self, item: QueuedItem, widget: UserMessage) -> None:
         widget.message_index = self._ports.next_message_index()
         message_id = str(uuid4()) if item.payload is not None else None
-        if item.payload is not None:
-            rendered = await self._ports.render_payload(item.payload)
-        else:
-            rendered = item.content
         await self._ports.inject_queued_prompt(
-            rendered, images=item.images, client_message_id=message_id
+            item.content, images=item.images, client_message_id=message_id
         )
         self._ports.send_skill_telemetry(item.skill_name)
         if item.payload is not None and message_id is not None:

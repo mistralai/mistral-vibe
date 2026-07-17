@@ -33,7 +33,6 @@ from vibe.core.config._settings import (
     DEFAULT_TTS_MODELS,
     DEFAULT_TTS_PROVIDERS,
     _strip_bash_pattern_wildcard,
-    get_persisted_config,
     resolve_api_key,
     resolve_theme_name,
 )
@@ -43,14 +42,16 @@ from vibe.core.config.models import (
     MCPServer,
     MissingAPIKeyError,
     ModelConfig,
+    OtelRedactionMode,
     ProjectContextConfig,
     ProviderConfig,
     SessionLoggingConfig,
-    ThinkingLevel,
     TranscribeModelConfig,
     TranscribeProviderConfig,
     TTSModelConfig,
     TTSProviderConfig,
+    normalize_model_configs,
+    normalize_model_configs_with_defaults,
 )
 from vibe.core.config.schema import (
     ConfigSchema,
@@ -102,6 +103,13 @@ def _normalize_tool_configs(v: Any) -> dict[str, dict[str, Any]]:
     return {name: cfg if isinstance(cfg, dict) else {} for name, cfg in v.items()}
 
 
+def _normalize_models(v: Any) -> Any:
+    """Bridge sparse default-model overrides until DefaultConfigLayer owns them."""
+    # TODO(config-orchestrator): remove this after all config loads go through
+    # DefaultConfigLayer, which can provide required model fields itself.
+    return normalize_model_configs_with_defaults(v, DEFAULT_MODELS)
+
+
 class VibeConfigSchema(ConfigSchema):
     _validation_warnings: list[str] = PrivateAttr(default_factory=list)
 
@@ -115,11 +123,12 @@ class VibeConfigSchema(ConfigSchema):
         Field(default_factory=lambda: list(DEFAULT_PROVIDERS))
     )
     models: Annotated[
-        list[ModelConfig],
-        WithUnionMerge(merge_key="alias"),
+        dict[str, ModelConfig],
+        # Keyed by alias internally so per-model patches can deep-merge.
+        WithDeepMerge(),
+        BeforeValidator(_normalize_models),
         AfterValidator(_non_empty),
-        AfterValidator(_unique_by("alias")),
-    ] = Field(default_factory=lambda: list(DEFAULT_MODELS))
+    ] = Field(default_factory=lambda: normalize_model_configs(DEFAULT_MODELS))
     compaction_model: Annotated[ModelConfig | None, WithReplaceMerge()] = None
     auto_compact_threshold: Annotated[int, WithReplaceMerge()] = (
         DEFAULT_AUTO_COMPACT_THRESHOLD
@@ -274,8 +283,10 @@ class VibeConfigSchema(ConfigSchema):
     )
     enable_otel: Annotated[bool, WithReplaceMerge()] = False
     otel_endpoint: Annotated[str, WithReplaceMerge()] = ""
+    otel_redaction: Annotated[OtelRedactionMode, WithReplaceMerge()] = (
+        OtelRedactionMode.DEFAULT
+    )
     console_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_CONSOLE_BASE_URL
-    enable_experimental_hooks: Annotated[bool, WithReplaceMerge()] = False
     experimental_teleport_context_summary: Annotated[bool, WithReplaceMerge()] = False
     experimental_bash_tool: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
@@ -338,9 +349,7 @@ class VibeConfigSchema(ConfigSchema):
     )
 
     def get_active_model(self) -> ModelConfig:
-        if model := next(
-            (m for m in self.models if m.alias == self.active_model), None
-        ):
+        if model := self.models.get(self.active_model):
             return model
         raise ValueError(
             f"Active model '{self.active_model}' not found in configuration."
@@ -428,32 +437,6 @@ class VibeConfigSchema(ConfigSchema):
             f"TTS provider '{model.provider}' for TTS model '{model.name}' not found in configuration."
         )
 
-    def build_thinking_update(self, level: ThinkingLevel) -> dict[str, Any]:
-        """Compute the persist payload that sets the active model's thinking level.
-
-        The schema is immutable and does not persist; callers apply the returned
-        payload (e.g. via ``save_updates``) and reload the config.
-        """
-        model = self.get_active_model()
-        current_config = get_persisted_config()
-        models = current_config.get("models", [])
-        for entry in models:
-            if entry.get("alias", entry.get("name")) == model.alias:
-                entry["thinking"] = level
-                break
-        else:
-            models = [
-                {
-                    "name": m.name,
-                    "provider": m.provider,
-                    "alias": m.alias,
-                    "thinking": level if m.alias == model.alias else m.thinking,
-                    **({"supports_images": True} if m.supports_images else {}),
-                }
-                for m in self.models
-            ]
-        return {"models": models}
-
     def build_tool_allowlist_update(
         self, tool_name: str, patterns: list[str]
     ) -> dict[str, Any] | None:
@@ -489,23 +472,24 @@ class VibeConfigSchema(ConfigSchema):
 
     @model_validator(mode="after")
     def _apply_global_auto_compact_threshold(self) -> VibeConfigSchema:
-        models = [
-            model
-            if "auto_compact_threshold" in model.model_fields_set
-            else model.model_copy(
-                update={"auto_compact_threshold": self.auto_compact_threshold}
+        models = {
+            alias: (
+                model
+                if "auto_compact_threshold" in model.model_fields_set
+                else model.model_copy(
+                    update={"auto_compact_threshold": self.auto_compact_threshold}
+                )
             )
-            for model in self.models
-        ]
+            for alias, model in self.models.items()
+        }
         object.__setattr__(self, "models", models)
         return self
 
     @model_validator(mode="after")
     def _apply_active_model_fallback(self) -> VibeConfigSchema:
-        aliases = {model.alias for model in self.models}
-        if self.active_model not in aliases:
+        if self.active_model not in self.models:
             unknown = self.active_model
-            fallback = self.models[0].alias
+            fallback = next(iter(self.models))
             logger.warning(
                 "Active model '%s' is not in your configured models; defaulting to '%s'.",
                 unknown,

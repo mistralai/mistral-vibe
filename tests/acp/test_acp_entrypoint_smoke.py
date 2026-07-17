@@ -198,6 +198,12 @@ async def test_vibe_acp_initialize_and_new_session(vibe_home_dir: Path) -> None:
         assert initialize_response.agent_info.name == "@mistralai/mistral-vibe"
         assert initialize_response.agent_info.title == "Mistral Vibe"
 
+        config_schema = await asyncio.wait_for(
+            conn.ext_method("config/schema", {}), timeout=10
+        )
+        assert config_schema["version"] == initialize_response.agent_info.version
+        assert config_schema["schema"]["title"] == "VibeConfigSchema"
+
         session = await asyncio.wait_for(
             conn.new_session(cwd=str(Path.cwd()), mcp_servers=[]), timeout=10
         )

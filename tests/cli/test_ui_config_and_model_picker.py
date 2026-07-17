@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -9,13 +9,7 @@ from vibe.cli.textual_ui.app import BottomApp
 from vibe.cli.textual_ui.widgets.config_app import ConfigApp
 from vibe.cli.textual_ui.widgets.model_picker import ModelPickerApp
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
-from vibe.core.config._settings import THINKING_LEVELS, ModelConfig, VibeConfig
-
-
-def _persisted_thinking(save_updates: MagicMock, alias: str) -> str:
-    payload = save_updates.call_args.args[0]
-    entry = next(m for m in payload["models"] if m.get("alias", m.get("name")) == alias)
-    return entry["thinking"]
+from vibe.core.config import THINKING_LEVELS, ModelConfig
 
 
 def _make_config_with_models():
@@ -94,13 +88,14 @@ async def test_config_escape_saves_changes() -> None:
         await pilot.press("enter")
         await pilot.pause(0.1)
 
-        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates") as mock_save:
+        orchestrator = app.agent_loop.config_orchestrator
+        with patch.object(
+            orchestrator, "set_field", new=AsyncMock(return_value=[])
+        ) as mock_set_field:
             await pilot.press("escape")
             await pilot.pause(0.2)
 
-            mock_save.assert_called_once()
-            changes = mock_save.call_args[0][0]
-            assert changes["autocopy_to_clipboard"] is True
+            mock_set_field.assert_awaited_once_with("/autocopy_to_clipboard", True)
 
 
 # --- /model command ---
@@ -154,11 +149,14 @@ async def test_model_picker_escape_does_not_save() -> None:
         await app._show_model()
         await pilot.pause(0.2)
 
-        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates") as mock_save:
+        orchestrator = app.agent_loop.config_orchestrator
+        with patch.object(
+            orchestrator, "set_field", new=AsyncMock(return_value=[])
+        ) as mock_set_field:
             await pilot.press("escape")
             await pilot.pause(0.2)
 
-            mock_save.assert_not_called()
+            mock_set_field.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -171,11 +169,14 @@ async def test_model_picker_select_model() -> None:
 
         # Navigate down to "beta" and select
         await pilot.press("down")
-        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates") as mock_save:
+        orchestrator = app.agent_loop.config_orchestrator
+        with patch.object(
+            orchestrator, "set_field", new=AsyncMock(return_value=[])
+        ) as mock_set_field:
             await pilot.press("enter")
             await pilot.pause(0.2)
 
-            mock_save.assert_called_once_with({"active_model": "beta"})
+            mock_set_field.assert_awaited_once_with("/active_model", "beta")
 
         assert app._current_bottom_app == BottomApp.Input
         assert len(app.query(ModelPickerApp)) == 0
@@ -190,11 +191,14 @@ async def test_model_picker_select_current_model() -> None:
         await app._show_model()
         await pilot.pause(0.2)
 
-        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates") as mock_save:
+        orchestrator = app.agent_loop.config_orchestrator
+        with patch.object(
+            orchestrator, "set_field", new=AsyncMock(return_value=[])
+        ) as mock_set_field:
             await pilot.press("enter")
             await pilot.pause(0.2)
 
-            mock_save.assert_called_once_with({"active_model": "alpha"})
+            mock_set_field.assert_awaited_once_with("/active_model", "alpha")
 
         assert app._current_bottom_app == BottomApp.Input
 
@@ -257,11 +261,14 @@ async def test_config_to_model_picker_select_returns_to_input() -> None:
 
         # Select second model
         await pilot.press("down")
-        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates") as mock_save:
+        orchestrator = app.agent_loop.config_orchestrator
+        with patch.object(
+            orchestrator, "set_field", new=AsyncMock(return_value=[])
+        ) as mock_set_field:
             await pilot.press("enter")
             await pilot.pause(0.2)
 
-            mock_save.assert_called_once_with({"active_model": "beta"})
+            mock_set_field.assert_awaited_once_with("/active_model", "beta")
 
         assert app._current_bottom_app == BottomApp.Input
 
@@ -286,13 +293,14 @@ async def test_config_pending_changes_saved_before_model_picker() -> None:
         # Go back up to model row and open model picker
         await pilot.press("up")
         await pilot.press("up")
-        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates") as mock_save:
+        orchestrator = app.agent_loop.config_orchestrator
+        with patch.object(
+            orchestrator, "set_field", new=AsyncMock(return_value=[])
+        ) as mock_set_field:
             await pilot.press("enter")
             await pilot.pause(0.3)
 
-            mock_save.assert_called_once()
-            changes = mock_save.call_args[0][0]
-            assert changes["autocopy_to_clipboard"] is True
+            mock_set_field.assert_awaited_once_with("/autocopy_to_clipboard", True)
 
 
 # --- /thinking command ---
@@ -348,16 +356,17 @@ async def test_thinking_picker_select_level() -> None:
 
         # Navigate down to "low" (second item) and select
         await pilot.press("down")
+        set_field = AsyncMock(return_value=[])
         with (
             patch.object(app, "_reload_config", new=AsyncMock()),
-            patch.object(VibeConfig, "save_updates") as save_updates,
+            patch.object(app.agent_loop.config_orchestrator, "set_field", set_field),
         ):
             await pilot.press("enter")
             await pilot.pause(0.2)
 
         assert app._current_bottom_app == BottomApp.Input
         assert len(app.query(ThinkingPickerApp)) == 0
-        assert _persisted_thinking(save_updates, "alpha") == "low"
+        set_field.assert_awaited_once_with("/models/alpha/thinking", "low")
 
 
 @pytest.mark.asyncio
@@ -372,14 +381,15 @@ async def test_thinking_picker_select_high() -> None:
         await pilot.press("down")
         await pilot.press("down")
         await pilot.press("down")
+        set_field = AsyncMock(return_value=[])
         with (
             patch.object(app, "_reload_config", new=AsyncMock()),
-            patch.object(VibeConfig, "save_updates") as save_updates,
+            patch.object(app.agent_loop.config_orchestrator, "set_field", set_field),
         ):
             await pilot.press("enter")
             await pilot.pause(0.2)
 
-        assert _persisted_thinking(save_updates, "alpha") == "high"
+        set_field.assert_awaited_once_with("/models/alpha/thinking", "high")
 
 
 # --- config -> thinking picker flow ---
@@ -441,12 +451,13 @@ async def test_config_to_thinking_picker_select_returns_to_input() -> None:
         # Select "medium" (3rd item = 2 downs from "off")
         await pilot.press("down")
         await pilot.press("down")
+        set_field = AsyncMock(return_value=[])
         with (
             patch.object(app, "_reload_config", new=AsyncMock()),
-            patch.object(VibeConfig, "save_updates") as save_updates,
+            patch.object(app.agent_loop.config_orchestrator, "set_field", set_field),
         ):
             await pilot.press("enter")
             await pilot.pause(0.2)
 
         assert app._current_bottom_app == BottomApp.Input
-        assert _persisted_thinking(save_updates, "alpha") == "medium"
+        set_field.assert_awaited_once_with("/models/alpha/thinking", "medium")

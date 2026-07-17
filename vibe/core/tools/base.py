@@ -23,8 +23,8 @@ from typing import (
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from vibe.core.checkpoints import FileSnapshot, FileState
 from vibe.core.logger import logger
-from vibe.core.rewind.manager import FileSnapshot
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils.io import read_safe
 
@@ -413,7 +413,7 @@ class BaseTool[
         except Exception:
             logger.warning("Failed to read file for tool snapshot: %s", file_path)
             content = None
-        return FileSnapshot(path=str(file_path), content=content)
+        return FileSnapshot(path=str(file_path), state=FileState(content))
 
     def get_result_extra(self, result: ToolResult) -> str | None:
         """Optional extra context appended to the result text sent to the LLM.

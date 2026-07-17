@@ -15,6 +15,7 @@ from vibe.core.config._settings import (
     DEFAULT_VIBE_BASE_URL,
 )
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config.models import normalize_model_configs
 from vibe.core.logger import logger
 
 _ONBOARDING_LIST_ADAPTER = TypeAdapter(list[Any])
@@ -72,11 +73,21 @@ def _load_onboarding_toml_payload() -> dict[str, Any]:
     except OSError as err:
         raise RuntimeError(f"Cannot read {config_file}: {err}") from err
 
-    return {
+    payload = {
         field_name: toml_data[field_name]
         for field_name in _ONBOARDING_FIELDS
         if field_name in toml_data
     }
+    if "models" in payload:
+        payload["models"] = _normalize_onboarding_model_payloads(payload["models"])
+    return payload
+
+
+def _normalize_onboarding_model_payloads(value: Any) -> Any:
+    normalized = normalize_model_configs(value)
+    if isinstance(normalized, dict):
+        return list(normalized.values())
+    return normalized
 
 
 def _load_onboarding_env_payload_for_fields(

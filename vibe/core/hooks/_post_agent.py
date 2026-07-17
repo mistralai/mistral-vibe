@@ -20,7 +20,7 @@ from vibe.core.hooks.models import (
 logger = logging.getLogger(__name__)
 
 
-class PostAgentTurnHandler(HookHandler):
+class PostAgentHandler(HookHandler):
     """Deny → inject ``reason`` as a retry user message, capped at
     :data:`_MAX_RETRIES` per hook per user turn.
     """

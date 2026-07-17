@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import tomli_w
 
-from tests.conftest import ConfigBuilder, ConfigLoader, build_test_vibe_config
+from tests.conftest import ConfigBuilder, ConfigLoader, build_test_vibe_config, run_sync
 from vibe.core.config import ConnectorConfig, ModelConfig, ProviderConfig, VibeConfig
 from vibe.core.config._migration import BASH_READ_ONLY_MIGRATION
 from vibe.core.config._settings import (
@@ -23,6 +23,7 @@ from vibe.core.config.harness_files import (
     init_harness_files_manager,
     reset_harness_files_manager,
 )
+from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.paths import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import Backend
@@ -269,7 +270,7 @@ class TestSystemTrustStoreConfig:
             build_ssl_context.cache_clear()
 
 
-class TestSetThinking:
+class TestModelThinkingFieldUpdate:
     def test_persists_thinking_to_toml(
         self, config_dir: Path, load_config: ConfigLoader
     ) -> None:
@@ -284,7 +285,9 @@ class TestSetThinking:
             tomli_w.dump(data, f)
 
         cfg = load_config()
-        VibeConfig.save_updates(cfg.build_thinking_update("high"))
+        run_sync(
+            LegacyConfigOrchestrator(cfg).set_field("/models/my-model/thinking", "high")
+        )
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
@@ -306,7 +309,9 @@ class TestSetThinking:
             tomli_w.dump(data, f)
 
         cfg = load_config()
-        VibeConfig.save_updates(cfg.build_thinking_update("max"))
+        run_sync(
+            LegacyConfigOrchestrator(cfg).set_field("/models/model-b/thinking", "max")
+        )
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
@@ -314,6 +319,33 @@ class TestSetThinking:
         model_b = next(m for m in result["models"] if m["alias"] == "model-b")
         assert model_a.get("thinking") is None
         assert model_b["thinking"] == "max"
+
+    def test_persists_thinking_from_model_mapping_as_legacy_list(
+        self, config_dir: Path, load_config: ConfigLoader
+    ) -> None:
+        config_file = config_dir / "config.toml"
+        data = {
+            "active_model": "my-model",
+            "models": {"my-model": {"name": "my-model", "provider": "mistral"}},
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        cfg = load_config()
+        run_sync(
+            LegacyConfigOrchestrator(cfg).set_field("/models/my-model/thinking", "high")
+        )
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"] == [
+            {
+                "name": "my-model",
+                "provider": "mistral",
+                "alias": "my-model",
+                "thinking": "high",
+            }
+        ]
 
     def test_preserves_supports_images_when_materializing_defaults(
         self, config_dir: Path, load_config: ConfigLoader
@@ -324,7 +356,11 @@ class TestSetThinking:
             tomli_w.dump(data, f)
 
         cfg = load_config()
-        VibeConfig.save_updates(cfg.build_thinking_update("low"))
+        run_sync(
+            LegacyConfigOrchestrator(cfg).set_field(
+                "/models/mistral-medium-3.5/thinking", "low"
+            )
+        )
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
@@ -341,6 +377,96 @@ class TestSetThinking:
             m for m in result["models"] if m["alias"] != "mistral-medium-3.5"
         )
         assert "supports_images" not in other_entry
+
+
+class TestModelConfigShapeCompatibility:
+    def test_create_default_uses_legacy_model_list_shape(self) -> None:
+        default_config = VibeConfig.create_default()
+
+        models = default_config["models"]
+        assert isinstance(models, list)
+        assert models
+        assert all(isinstance(model, dict) for model in models)
+        assert all({"alias", "name", "provider"} <= model.keys() for model in models)
+
+    def test_load_accepts_model_mapping(self, config_dir: Path) -> None:
+        config_file = config_dir / "config.toml"
+        with config_file.open("wb") as file:
+            tomli_w.dump(
+                {
+                    "active_model": "custom",
+                    "providers": [
+                        {
+                            "name": "custom-provider",
+                            "api_base": "https://custom.example/v1",
+                            "api_key_env_var": "",
+                        }
+                    ],
+                    "models": {
+                        "custom": {
+                            "name": "custom-model",
+                            "provider": "custom-provider",
+                        }
+                    },
+                },
+                file,
+            )
+
+        cfg = VibeConfig.load()
+
+        assert cfg.get_active_model().alias == "custom"
+        assert cfg.get_active_model().name == "custom-model"
+
+    def test_dump_config_writes_model_mapping_as_legacy_list(
+        self, config_dir: Path
+    ) -> None:
+        config_file = config_dir / "config.toml"
+
+        VibeConfig.dump_config({
+            "active_model": "custom",
+            "providers": [
+                {
+                    "name": "custom-provider",
+                    "api_base": "https://custom.example/v1",
+                    "api_key_env_var": "",
+                }
+            ],
+            "models": {
+                "custom": {"name": "custom-model", "provider": "custom-provider"}
+            },
+        })
+
+        with config_file.open("rb") as file:
+            persisted = tomllib.load(file)
+        assert persisted["models"] == [
+            {"name": "custom-model", "provider": "custom-provider", "alias": "custom"}
+        ]
+
+    def test_existing_migrations_canonicalize_model_mapping_shape(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        data = {
+            "applied_migrations": [BASH_READ_ONLY_MIGRATION],
+            "models": {
+                "custom": {"name": "custom-model", "provider": "custom-provider"}
+            },
+            "tools": {"bash": {"allowlist": ["echo"]}},
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+        VibeConfig._migrate()
+
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        assert result["models"] == [
+            {"name": "custom-model", "provider": "custom-provider", "alias": "custom"}
+        ]
+        assert result["tools"]["bash"]["allowlist"] == ["echo", "find"]
 
 
 class TestMigrateLeavesFindInBashAllowlist:
@@ -1077,6 +1203,34 @@ class TestOnboardingContextResolution:
         assert context.provider.api_key_env_var == "ENV_API_KEY"
         assert context.vibe_base_url == "https://env-vibe.example.com"
 
+    def test_load_accepts_toml_model_mapping(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        config_file = tmp_path / "config.toml"
+        with config_file.open("wb") as file:
+            tomli_w.dump(
+                {
+                    "active_model": "custom-model",
+                    "providers": [_custom_provider_payload()],
+                    "models": {
+                        "custom-model": {
+                            "name": "custom-model",
+                            "provider": "custom-provider",
+                        }
+                    },
+                },
+                file,
+            )
+
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+
+        context = OnboardingContext.load()
+
+        assert context.provider.name == "custom-provider"
+        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
+
     def test_load_prefers_explicit_overrides_over_toml_and_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1389,8 +1543,9 @@ class TestActiveModelValidation:
         with caplog.at_level("WARNING"):
             cfg = build_config(active_model="does-not-exist")
 
-        assert cfg.active_model == cfg.models[0].alias
-        assert cfg.get_active_model().alias == cfg.models[0].alias
+        fallback = next(iter(cfg.models))
+        assert cfg.active_model == fallback
+        assert cfg.get_active_model().alias == fallback
         assert (
             "Active model 'does-not-exist' is not in your configured models"
             in caplog.text
@@ -1413,13 +1568,14 @@ class TestActiveModelValidation:
         with pytest.raises(ValueError, match="No models are configured"):
             build_config(models=[])
 
-    def test_duplicate_model_alias_raises(self, build_config: ConfigBuilder) -> None:
+    def test_duplicate_model_alias_last_wins(self, build_config: ConfigBuilder) -> None:
         models = [
             ModelConfig(name="model-a", provider="mistral", alias="same"),
             ModelConfig(name="model-b", provider="mistral", alias="same"),
         ]
-        with pytest.raises(ValueError, match="Duplicate .*alias"):
-            build_config(models=models)
+        cfg = build_config(models=models)
+        assert list(cfg.models) == ["same"]
+        assert cfg.models["same"].name == "model-b"
 
 
 class TestGetMistralProvider:

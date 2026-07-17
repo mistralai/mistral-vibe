@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC
+from functools import lru_cache
 import logging
 import os
 from pathlib import Path
@@ -91,6 +92,7 @@ from vibe.acp.exceptions import (
     UnauthenticatedError,
 )
 from vibe.acp.image_blocks import extract_image_attachments
+from vibe.acp.models import ConfigSchemaResponse
 from vibe.acp.session import AcpSessionLoop
 from vibe.acp.teleport import handle_teleport_command
 from vibe.acp.title import acp_blocks_to_title_segments
@@ -131,7 +133,6 @@ from vibe.core.agent_loop import (
 )
 from vibe.core.agents.models import CHAT as CHAT_AGENT
 from vibe.core.auth import MCPOAuthError
-from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
 from vibe.core.cache_store import FileSystemVibeCodeCacheStore
 from vibe.core.config import (
     AnyVibeConfig,
@@ -139,9 +140,11 @@ from vibe.core.config import (
     ProviderConfig,
     SessionLoggingConfig,
     VibeConfig,
+    VibeConfigSchema,
     load_dotenv_values,
 )
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.config.patch import escape_json_pointer_token
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.feedback import record_feedback_asked, should_show_feedback
 from vibe.core.hooks.config import load_hooks_from_fs
@@ -220,6 +223,7 @@ from vibe.setup.auth.api_key_persistence import (
 from vibe.setup.onboarding.context import OnboardingContext
 
 logger = logging.getLogger("vibe")
+
 
 NON_INTERACTIVE_DISABLED_TOOLS = ["ask_user_question", "exit_plan_mode"]
 INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS = 0.1
@@ -355,6 +359,11 @@ def _auth_status_response_from_auth_state(auth_state: AuthState) -> AuthStatusRe
         authState=auth_state.kind,
         signOutAvailable=auth_state.sign_out_available,
     )
+
+
+@lru_cache(maxsize=1)
+def _get_vibe_config_json_schema() -> dict[str, Any]:
+    return VibeConfigSchema.model_json_schema(mode="serialization", by_alias=True)
 
 
 def _dispatch_at_mention_inserted(
@@ -764,9 +773,29 @@ class VibeAcpAgentLoop(AcpAgent):
         """
         try:
             await session.agent_loop.wait_until_ready()
+            await self._notify_mcp_discovery_failures(session)
             await self._notify_mcp_auth_required(session)
         except Exception:
             pass
+
+    async def _notify_mcp_discovery_failures(self, session: AcpSessionLoop) -> None:
+        """Surface MCP servers that failed to connect during discovery."""
+        errors = session.agent_loop.tool_manager.pop_mcp_errors()
+        if not errors:
+            return
+        lines = [
+            "The following MCP servers failed to connect:",
+            "",
+            *(f"- {name}: {err}" for name, err in sorted(errors.items())),
+        ]
+        await self.client.session_update(
+            session_id=session.id,
+            update=AgentMessageChunk(
+                session_update="agent_message_chunk",
+                content=TextContentBlock(type="text", text="\n".join(lines)),
+                message_id=str(uuid4()),
+            ),
+        )
 
     async def _notify_mcp_auth_required(self, session: AcpSessionLoop) -> None:
         """Show a notice if any enabled MCP servers require OAuth authentication."""
@@ -951,7 +980,7 @@ class VibeAcpAgentLoop(AcpAgent):
         os.chdir(cwd)
 
         config = self._load_config()
-        hook_config_result = load_hooks_from_fs(config)
+        hook_config_result = load_hooks_from_fs()
 
         try:
             agent_loop = self._create_agent_loop(
@@ -1238,7 +1267,7 @@ class VibeAcpAgentLoop(AcpAgent):
         os.chdir(cwd)
 
         config = self._load_config()
-        hook_config_result = load_hooks_from_fs(config)
+        hook_config_result = load_hooks_from_fs()
 
         session_dir = SessionLoader.find_session_by_id(
             session_id, config.session_logging
@@ -1304,7 +1333,7 @@ class VibeAcpAgentLoop(AcpAgent):
             await command_registry.notify_changed()
 
     async def _apply_model_change(self, session: AcpSessionLoop, model_id: str) -> bool:
-        model_aliases = [model.alias for model in session.agent_loop.config.models]
+        model_aliases = list(session.agent_loop.config.models)
         if model_id not in model_aliases:
             return False
 
@@ -1315,7 +1344,10 @@ class VibeAcpAgentLoop(AcpAgent):
     async def _apply_thinking_change(
         self, session: AcpSessionLoop, level: ThinkingLevel
     ) -> bool:
-        VibeConfig.save_updates(session.agent_loop.config.build_thinking_update(level))
+        active_model = session.agent_loop.config.get_active_model()
+        await session.agent_loop.config_orchestrator.set_field(
+            f"/models/{escape_json_pointer_token(active_model.alias)}/thinking", level
+        )
         await self._reload_config(session)
         return True
 
@@ -1664,11 +1696,9 @@ class VibeAcpAgentLoop(AcpAgent):
         user_display_content: UserDisplayContentMetadata | None = None,
         images: list[ImageAttachment] | None = None,
     ) -> AsyncGenerator[SessionUpdate | UsageUpdate]:
-        rendered_prompt = render_path_prompt(prompt, base_dir=Path.cwd())
-
         async with aclosing(
             session.agent_loop.act(
-                rendered_prompt,
+                prompt,
                 client_message_id=client_message_id,
                 auto_title=auto_title,
                 user_display_content=user_display_content,
@@ -2080,8 +2110,15 @@ class VibeAcpAgentLoop(AcpAgent):
 
         return {}
 
+    def _handle_config_schema(self) -> dict[str, Any]:
+        return ConfigSchemaResponse(
+            version=__version__, schema=_get_vibe_config_json_schema()
+        ).model_dump(mode="json", by_alias=True)
+
     @override
     async def ext_method(self, method: str, params: dict) -> dict:
+        if method == "config/schema":
+            return self._handle_config_schema()
         if method == "auth/status":
             return self._handle_auth_status()
         if method == "auth/signOut":

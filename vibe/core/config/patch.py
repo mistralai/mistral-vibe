@@ -101,6 +101,11 @@ class RemoveOperationPatch(_OperationPatch):
 type PatchOp = AddOperationPatch | ReplaceOperationPatch | RemoveOperationPatch
 
 
+def escape_json_pointer_token(value: str) -> str:
+    """Escape one JSON Pointer path segment for use inside a pointer string."""
+    return value.replace("~", "~0").replace("/", "~1")
+
+
 def ensure_parent_paths(
     data: dict[str, Any], operations: Sequence[PatchOp]
 ) -> dict[str, Any]:

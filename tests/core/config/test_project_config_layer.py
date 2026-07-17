@@ -35,6 +35,34 @@ async def test_reads_toml_when_trusted(tmp_working_directory: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_duplicate_model_aliases_dedup_last_wins(
+    tmp_working_directory: Path,
+) -> None:
+    trusted_folders_manager.add_trusted(tmp_working_directory)
+    config_path = tmp_working_directory / ".vibe" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "[[models]]\n"
+        'name = "devstral-small-latest"\n'
+        'provider = "mistral"\n'
+        'alias = "devstral-small"\n'
+        "\n"
+        "[[models]]\n"
+        'name = "devstral-small-next"\n'
+        'provider = "mistral"\n'
+        'alias = "devstral-small"\n'
+    )
+
+    layer = ProjectConfigLayer(path=tmp_working_directory)
+    data = await layer.load()
+
+    assert data.model_extra is not None
+    models = data.model_extra["models"]
+    assert list(models) == ["devstral-small"]
+    assert models["devstral-small"]["name"] == "devstral-small-next"
+
+
+@pytest.mark.asyncio
 async def test_untrusted_raises(tmp_working_directory: Path) -> None:
     trusted_folders_manager.add_untrusted(tmp_working_directory)
     config_path = tmp_working_directory / ".vibe" / "config.toml"

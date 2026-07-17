@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from pydantic import Field, ValidationError
+from pydantic import BeforeValidator, Field, ValidationError
 import pytest
 
 from vibe.core.config.builder import ConfigBuilder
 from vibe.core.config.layer import ConfigLayer, RawConfig
+from vibe.core.config.models import normalize_model_configs
 from vibe.core.config.schema import (
     ConfigFragment,
     ConfigSchema,
@@ -194,6 +195,53 @@ async def test_deep_merge_preserves_nested_tool_fields_across_layers() -> None:
         "bash": {"permission": "ask", "allowlist": ["git diff"]},
         "read_file": {"permission": "always"},
     }
+
+
+@pytest.mark.asyncio
+async def test_models_before_validator_runs_before_merge() -> None:
+    class ModelMergeSchema(ConfigSchema):
+        models: Annotated[
+            dict[str, dict[str, Any]],
+            WithDeepMerge(),
+            BeforeValidator(normalize_model_configs),
+        ] = Field(default_factory=dict)
+
+    builder = ConfigBuilder(ModelMergeSchema)
+    builder.add_layer(
+        FakeLayer(
+            name="base",
+            data={"models": [{"alias": "m1", "name": "model-1", "provider": "p1"}]},
+        )
+    )
+    builder.add_layer(
+        FakeLayer(name="override", data={"models": {"m1": {"thinking": "high"}}})
+    )
+
+    config = await builder.build()
+
+    assert config.models == {
+        "m1": {"alias": "m1", "name": "model-1", "provider": "p1", "thinking": "high"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_model_before_validators_do_not_run_before_merge() -> None:
+    calls: list[Any] = []
+
+    def record(value: Any) -> Any:
+        calls.append(value)
+        return value
+
+    class BeforeValidatorSchema(ConfigSchema):
+        name: Annotated[str, WithReplaceMerge(), BeforeValidator(record)] = "default"
+
+    builder = ConfigBuilder(BeforeValidatorSchema)
+    builder.add_layer(FakeLayer(name="layer", data={"name": "custom"}))
+
+    config = await builder.build()
+
+    assert config.name == "custom"
+    assert calls == ["custom"]
 
 
 # --- CONFLICT ---

@@ -66,7 +66,7 @@ class EventHandler:
         self.current_streaming_message: AssistantMessage | None = None
         self.current_streaming_reasoning: ReasoningMessage | None = None
         self.plan_file_message: PlanFileMessage | None = None
-        # Keyed by "agent_turn", "before_tool:{call_id}", "after_tool:{call_id}"
+        # Keyed by "agent_turn", "pre_tool:{call_id}", "post_tool:{call_id}"
         self._hook_containers: dict[str, HookRunContainer] = {}
         # Per-tool-call anchor for correct widget ordering during concurrent calls.
         self._tool_call_anchors: dict[str, Widget] = {}
@@ -98,7 +98,7 @@ class EventHandler:
                             severity=event.status,
                         )
                         await container.add_message(widget)
-                        if event.scope == HookType.BEFORE_TOOL and event.tool_call_id:
+                        if event.scope == HookType.PRE_TOOL and event.tool_call_id:
                             tool_call = self.tool_calls.get(event.tool_call_id)
                             if tool_call is not None:
                                 tool_call.add_class("no-gap")
@@ -107,7 +107,7 @@ class EventHandler:
 
     @staticmethod
     def _hook_container_key(scope: HookType, tool_call_id: str | None) -> str:
-        if scope == HookType.POST_AGENT_TURN:
+        if scope == HookType.POST_AGENT:
             return "agent_turn"
         return f"{scope.value}:{tool_call_id or ''}"
 
@@ -116,14 +116,14 @@ class EventHandler:
         key = self._hook_container_key(event.scope, event.tool_call_id)
         self._hook_containers[key] = container
 
-        if event.scope == HookType.BEFORE_TOOL:
-            container.add_class("hook-before-tool")
+        if event.scope == HookType.PRE_TOOL:
+            container.add_class("hook-pre-tool")
 
         anchor = self._tool_call_anchors.get(event.tool_call_id or "")
-        if event.scope == HookType.BEFORE_TOOL and anchor is not None:
+        if event.scope == HookType.PRE_TOOL and anchor is not None:
             # Mount *above* the tool call widget so it reads as a precondition.
             await self.mount_callback(container, before=anchor)
-        elif event.scope == HookType.AFTER_TOOL and anchor is not None:
+        elif event.scope == HookType.POST_TOOL and anchor is not None:
             await self.mount_callback(container, after=anchor)
         else:
             await self.mount_callback(container)
@@ -134,10 +134,10 @@ class EventHandler:
         if container is None:
             return
         if container.display:
-            # BEFORE_TOOL containers mount *above* the call widget, so they
+            # PRE_TOOL containers mount *above* the call widget, so they
             # must not become the anchor — the result still needs to land
             # after the call widget, not after the hook container.
-            if event.scope != HookType.BEFORE_TOOL and event.tool_call_id:
+            if event.scope != HookType.PRE_TOOL and event.tool_call_id:
                 self._tool_call_anchors[event.tool_call_id] = container
         else:
             await container.remove()

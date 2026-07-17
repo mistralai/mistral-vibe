@@ -13,7 +13,7 @@ from textual.widgets.option_list import Option
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config._settings import ThinkingLevel
+from vibe.core.config.models import ThinkingLevel
 
 
 def _build_option_text(level: str, is_current: bool) -> Text:

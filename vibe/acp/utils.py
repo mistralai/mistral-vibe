@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -24,7 +25,7 @@ from acp.schema import (
 from vibe.acp.tools.session_update import resolve_kind, tool_call_session_update
 from vibe.acp.user_display_content import USER_DISPLAY_CONTENT_META_KEY
 from vibe.core.agents.models import AgentProfile, AgentType
-from vibe.core.config._settings import THINKING_LEVELS, ThinkingLevel
+from vibe.core.config.models import THINKING_LEVELS, ThinkingLevel
 from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.proxy_setup import SUPPORTED_PROXY_VARS, get_current_proxy_settings
 from vibe.core.tools.permissions import RequiredPermission
@@ -161,13 +162,14 @@ def build_mode_state(
 
 
 def build_model_config(
-    models: list[ModelConfig], current_model_id: str
+    models: Mapping[str, ModelConfig] | list[ModelConfig], current_model_id: str
 ) -> SessionConfigOptionSelect:
+    model_values = models.values() if isinstance(models, Mapping) else models
     config_options = [
         SessionConfigSelectOption(
             value=model.alias, name=model.alias, description=model.name
         )
-        for model in models
+        for model in model_values
     ]
 
     return SessionConfigOptionSelect(

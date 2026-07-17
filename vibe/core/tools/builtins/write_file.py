@@ -7,7 +7,7 @@ from typing import final
 import anyio
 from pydantic import BaseModel, Field
 
-from vibe.core.rewind.manager import FileSnapshot
+from vibe.core.checkpoints import FileSnapshot
 from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.base import (
     BaseTool,

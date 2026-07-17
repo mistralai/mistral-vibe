@@ -332,3 +332,53 @@ class TestRewindIntegration:
         loaded, _ = SessionLoader.load_session(session_dir)
         user_contents = [m.content for m in loaded if m.role == Role.user]
         assert user_contents == ["message A-bis"]
+
+    async def test_rewind_restores_multiple_files_across_turns(
+        self, tmp_working_directory: Path
+    ) -> None:
+        """Turn 1 creates file A, turn 2 creates file B, turn 3 edits A.
+        Rewinding to turn 2 undoes turns 2 and 3: A returns to its turn-1
+        version and B (created in turn 2) is removed.
+        """
+        file_a = tmp_working_directory / "a.txt"
+        file_b = tmp_working_directory / "b.txt"
+
+        backend = FakeBackend([
+            [
+                mock_llm_chunk(
+                    content="A.", tool_calls=[_write_file_tool_call(str(file_a), "a1")]
+                )
+            ],
+            [mock_llm_chunk(content="ok")],
+            [
+                mock_llm_chunk(
+                    content="B.", tool_calls=[_write_file_tool_call(str(file_b), "b1")]
+                )
+            ],
+            [mock_llm_chunk(content="ok")],
+            [
+                mock_llm_chunk(
+                    content="A2.",
+                    tool_calls=[
+                        _edit_tool_call(str(file_a), "a1", "a2", call_id="call_3")
+                    ],
+                )
+            ],
+            [mock_llm_chunk(content="ok")],
+        ])
+        agent_loop = _make_agent_loop(backend)
+
+        await _act_and_collect(agent_loop, "turn1")
+        await _act_and_collect(agent_loop, "turn2")
+        await _act_and_collect(agent_loop, "turn3")
+        assert file_a.read_text() == "a2"
+        assert file_b.read_text() == "b1"
+
+        rm = agent_loop.rewind_manager
+        rewindable = rm.get_rewindable_messages()
+        assert len(rewindable) == 3
+
+        await rm.rewind_to_message(rewindable[1][0], restore_files=True)
+
+        assert file_a.read_text() == "a1"
+        assert not file_b.exists()

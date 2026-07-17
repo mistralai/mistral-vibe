@@ -139,7 +139,7 @@ async def test_inject_user_context_emits_skill_events_via_callback(
         events.append(event)
 
     await agent_loop.inject_user_context(
-        "/test-skill", as_message=True, inject_invoked_skill=True, on_event=capture
+        "/test-skill", as_message=True, inject_implicit=True, on_event=capture
     )
 
     assert [type(e) for e in events] == [ToolCallEvent, ToolResultEvent]
@@ -165,7 +165,7 @@ async def test_inject_user_context_injects_skill_and_forwards_events(
     await agent_loop.inject_user_context(
         "/test-skill",
         as_message=True,
-        inject_invoked_skill=True,
+        inject_implicit=True,
         on_event=lambda e: _record(events, e),
     )
 

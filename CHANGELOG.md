@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.21.0] - 2026-07-17
+
+### Added
+
+- Registry skills content store and manifest for skill discovery
+- Config schema exposed through ACP
+- Checkpointer engine state model, owner union, and pending hunks
+
+### Changed
+
+- **[Breaking — hooks]** Hooks graduated from experimental; `hooks.toml` is now stable. Every hook `type` is renamed: `post_agent_turn` → `post_agent`, `before_tool` → `pre_tool`, `after_tool` → `post_tool` (the `hook_event_name` payload field is renamed to match). Update existing `hooks.toml` files accordingly.
+- `@file` mentions now inject as `read_file` tool calls
+- Telemetry routed through client-side redaction
+- Models field migration from list to dict
+- VibeConfig cutover prep with persisted-config read and orchestrator SSL parity
+- Reduced feedback survey frequency for users who already responded
+
+### Fixed
+
+- Duplicate model aliases deduplicated instead of failing config load
+- UTF-8 BOM stripped in `decode_safe`
+- UTF-8 BOM stripped from `SKILL.md` before parsing frontmatter
+- MCP server connection errors now surface in the TUI
+- MCP discovery failures now surface in ACP sessions
+- stdin content no longer discarded when `/dev/tty` is unavailable
+- GitPython import deferred off the ACP startup path
+- `@file` mention suggestions stretched to full width
+- Blank line removed between approval options
+- Connector tool permission content scrolls instead of cropping
+- ConfigOrchestrator gained an explicit `copy()` for forking
+
+### Removed
+
+- `set_thinking` removed from the CLI
+- `enable_experimental_hooks` config flag (and `VIBE_ENABLE_EXPERIMENTAL_HOOKS` env var); hooks now load unconditionally when declared
+
+
 ## [2.20.0] - 2026-07-13
 
 ### Added

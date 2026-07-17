@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -51,11 +51,14 @@ async def test_theme_picker_escape_restores_original_theme() -> None:
         await pilot.press("down")
         await pilot.pause(0.2)
 
-        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates") as mock_save:
+        orchestrator = app.agent_loop.config_orchestrator
+        with patch.object(
+            orchestrator, "set_field", new=AsyncMock(return_value=[])
+        ) as mock_set_field:
             await pilot.press("escape")
             await pilot.pause(0.2)
 
-            mock_save.assert_not_called()
+            mock_set_field.assert_not_awaited()
 
         assert app._current_bottom_app == BottomApp.Input
         assert len(app.query(ThemePickerApp)) == 0
@@ -81,11 +84,14 @@ async def test_theme_picker_select_persists_and_applies() -> None:
 
         await pilot.press("down")
 
-        with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates") as mock_save:
+        orchestrator = app.agent_loop.config_orchestrator
+        with patch.object(
+            orchestrator, "set_field", new=AsyncMock(wraps=orchestrator.set_field)
+        ) as mock_set_field:
             await pilot.press("enter")
             await pilot.pause(0.2)
 
-            mock_save.assert_called_once_with({"theme": target})
+            mock_set_field.assert_awaited_once_with("/theme", target)
 
         assert app._current_bottom_app == BottomApp.Input
         assert len(app.query(ThemePickerApp)) == 0

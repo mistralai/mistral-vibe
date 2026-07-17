@@ -72,19 +72,14 @@ class ToolApprovalWidget[TArgs: BaseModel](Vertical):
         self.add_class("tool-approval-widget")
 
     def compose(self) -> ComposeResult:
-        MAX_MSG_SIZE = 150
         model_cls = type(self.args)
         field_names = model_cls.model_fields or self.args.model_extra or {}
         for field_name in field_names:
             value = getattr(self.args, field_name, None)
             if value is None or value in ("", []):
                 continue
-            value_str = str(value)
-            if len(value_str) > MAX_MSG_SIZE:
-                hidden = len(value_str) - MAX_MSG_SIZE
-                value_str = value_str[:MAX_MSG_SIZE] + f"… ({hidden} more characters)"
             yield NoMarkupStatic(
-                f"{field_name}: {value_str}", classes="approval-description"
+                f"{field_name}: {value}", classes="approval-description"
             )
 
 

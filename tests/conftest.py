@@ -338,8 +338,11 @@ def _prepare_test_config_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     kwargs["enable_update_checks"] = (
         False if enable_update_checks is None else enable_update_checks
     )
-    if kwargs.get("models"):
-        kwargs.setdefault("active_model", kwargs["models"][0].alias)
+    if models := kwargs.get("models"):
+        if isinstance(models, dict):
+            kwargs.setdefault("active_model", next(iter(models)))
+        else:
+            kwargs.setdefault("active_model", models[0].alias)
     # Connectors trigger a real HTTP discovery on agent construction; off by
     # default so tests don't pay for it. Connector tests pass enable_connectors=True.
     kwargs.setdefault("enable_connectors", False)

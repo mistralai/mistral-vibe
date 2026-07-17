@@ -7,7 +7,7 @@ import pytest
 
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import build_default_orchestrator
+from vibe.core.config import VibeConfig, build_default_orchestrator
 from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.discovered import DiscoveredConfigLayer
 from vibe.core.config.patch import AddOperationPatch
@@ -99,12 +99,116 @@ alias = "custom"
     orchestrator = await build_default_orchestrator()
 
     assert orchestrator.config.active_model == "custom"
-    assert {model.alias for model in orchestrator.config.models} >= {
+    assert set(orchestrator.config.models) >= {
         "custom",
         "mistral-medium-3.5",
         "devstral-small",
         "local",
     }
+
+
+@pytest.mark.asyncio
+async def test_build_default_orchestrator_accepts_model_mapping(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+    config_path.write_text(
+        """\
+active_model = "custom"
+
+[[providers]]
+name = "custom-provider"
+api_base = "https://custom.example/v1"
+api_key_env_var = ""
+
+[models.custom]
+name = "custom-model"
+provider = "custom-provider"
+""",
+        encoding="utf-8",
+    )
+
+    orchestrator = await build_default_orchestrator()
+
+    assert orchestrator.config.active_model == "custom"
+    assert orchestrator.config.get_active_model().name == "custom-model"
+
+
+@pytest.mark.asyncio
+async def test_config_orchestrator_writes_model_mapping_as_legacy_list(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+
+    orchestrator = await build_default_orchestrator()
+    result = await orchestrator.set_field(
+        "/models",
+        {"custom": {"name": "custom-model", "provider": "mistral"}},
+        reason="internal model mapping update",
+    )
+
+    assert result == []
+    with config_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["models"] == [
+        {"name": "custom-model", "provider": "mistral", "alias": "custom"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_config_orchestrator_deep_merges_model_mapping_updates(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+    config_path.write_text(
+        """\
+active_model = "custom"
+
+[[models]]
+name = "custom-model"
+provider = "mistral"
+alias = "custom"
+temperature = 0.2
+""",
+        encoding="utf-8",
+    )
+
+    orchestrator = await build_default_orchestrator()
+    result = await orchestrator.set_field("/models/custom/thinking", "high")
+
+    assert result == []
+    assert orchestrator.config.models["custom"].thinking == "high"
+    with config_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted["models"] == [
+        {
+            "name": "custom-model",
+            "provider": "mistral",
+            "alias": "custom",
+            "temperature": 0.2,
+            "thinking": "high",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_config_orchestrator_can_patch_default_model_thinking(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+
+    orchestrator = await build_default_orchestrator()
+    result = await orchestrator.set_field("/models/mistral-medium-3.5/thinking", "off")
+
+    assert result == []
+    assert orchestrator.config.models["mistral-medium-3.5"].thinking == "off"
+    with config_path.open("rb") as file:
+        persisted = tomllib.load(file)
+    entry = next(
+        model for model in persisted["models"] if model["alias"] == "mistral-medium-3.5"
+    )
+    assert entry == {"alias": "mistral-medium-3.5", "thinking": "off"}
+    assert VibeConfig.load().models["mistral-medium-3.5"].thinking == "off"
 
 
 @pytest.mark.asyncio

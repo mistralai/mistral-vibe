@@ -10,7 +10,12 @@ from vibe.core.config import (
     RemoveOperationPatch,
     ReplaceOperationPatch,
 )
-from vibe.core.config.patch import ConfigPatch, PatchOp, ensure_parent_paths
+from vibe.core.config.patch import (
+    ConfigPatch,
+    PatchOp,
+    ensure_parent_paths,
+    escape_json_pointer_token,
+)
 
 
 @pytest.mark.parametrize(
@@ -75,6 +80,10 @@ def test_json_patch_operations_accept_slash_prefixed_paths() -> None:
     op = ReplaceOperationPatch(path="/", value={"active_model": "devstral-small"})
 
     assert op.path == "/"
+
+
+def test_escape_json_pointer_token_escapes_special_path_characters() -> None:
+    assert escape_json_pointer_token("model/with~chars") == "model~1with~0chars"
 
 
 def test_config_patch_stores_operations_and_metadata() -> None:

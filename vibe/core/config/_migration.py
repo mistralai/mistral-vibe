@@ -108,7 +108,16 @@ def _migrate_bash_read_only(data: dict[str, Any]) -> bool:
 def _migrate_model_renames(data: dict[str, Any]) -> bool:
     """Rename devstral-2 to mistral-medium-3.5 and update its config."""
     changed = False
-    for model in data.get("models", []):
+    models = data.get("models", [])
+    model_entries: Iterable[dict[str, Any]]
+    if isinstance(models, dict):
+        model_entries = [model for model in models.values() if isinstance(model, dict)]
+    elif isinstance(models, list):
+        model_entries = [model for model in models if isinstance(model, dict)]
+    else:
+        model_entries = []
+
+    for model in model_entries:
         if (
             model.get("name") == "mistral-vibe-cli-latest"
             and model.get("alias") == "devstral-2"
@@ -119,6 +128,11 @@ def _migrate_model_renames(data: dict[str, Any]) -> bool:
             model["output_price"] = 7.5
             model["thinking"] = "high"
             changed = True
+
+            if isinstance(models, dict):
+                _rekey_model_entry(
+                    models, old_alias="devstral-2", new_alias="mistral-medium-3.5"
+                )
 
         if (
             model.get("name") == "mistral-vibe-cli-latest"
@@ -133,6 +147,14 @@ def _migrate_model_renames(data: dict[str, Any]) -> bool:
         changed = True
 
     return changed
+
+
+def _rekey_model_entry(
+    models: dict[str, Any], *, old_alias: str, new_alias: str
+) -> None:
+    if old_alias not in models or old_alias == new_alias:
+        return
+    models[new_alias] = models.pop(old_alias)
 
 
 def _migrate_renamed_tools(data: dict[str, Any]) -> bool:

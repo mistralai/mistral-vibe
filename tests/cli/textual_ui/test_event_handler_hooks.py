@@ -110,10 +110,10 @@ def _tool_result_event(call_id: str) -> ToolResultEvent:
 
 
 @pytest.mark.asyncio
-async def test_before_tool_container_scoped_to_tool_call_id(
+async def test_pre_tool_container_scoped_to_tool_call_id(
     hook_container_factory: list[FakeHookRunContainer],
 ) -> None:
-    """Two concurrent tool calls each get their own before_tool container."""
+    """Two concurrent tool calls each get their own pre_tool container."""
     mount_callback = AsyncMock()
     handler = EventHandler(
         mount_callback=mount_callback, get_tools_collapsed=lambda: False
@@ -123,40 +123,40 @@ async def test_before_tool_container_scoped_to_tool_call_id(
     await handler.handle_event(_tool_call_event("call_A"))
     await handler.handle_event(_tool_call_event("call_B"))
 
-    # before_tool starts for both, interleaved
+    # pre_tool starts for both, interleaved
     await handler.handle_event(
         HookRunStartEvent(
-            scope=HookType.BEFORE_TOOL, tool_name="stub_tool", tool_call_id="call_A"
+            scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_A"
         )
     )
     await handler.handle_event(
         HookRunStartEvent(
-            scope=HookType.BEFORE_TOOL, tool_name="stub_tool", tool_call_id="call_B"
+            scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_B"
         )
     )
 
     # Two distinct containers were created.
     assert len(hook_container_factory) == 2
-    assert "before_tool:call_A" in handler._hook_containers
-    assert "before_tool:call_B" in handler._hook_containers
+    assert "pre_tool:call_A" in handler._hook_containers
+    assert "pre_tool:call_B" in handler._hook_containers
     assert (
-        handler._hook_containers["before_tool:call_A"]
-        is not handler._hook_containers["before_tool:call_B"]
+        handler._hook_containers["pre_tool:call_A"]
+        is not handler._hook_containers["pre_tool:call_B"]
     )
 
     # End them — both are empty, both should be removed.
     await handler.handle_event(
-        HookRunEndEvent(scope=HookType.BEFORE_TOOL, tool_call_id="call_A")
+        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_A")
     )
     await handler.handle_event(
-        HookRunEndEvent(scope=HookType.BEFORE_TOOL, tool_call_id="call_B")
+        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_B")
     )
-    assert "before_tool:call_A" not in handler._hook_containers
-    assert "before_tool:call_B" not in handler._hook_containers
+    assert "pre_tool:call_A" not in handler._hook_containers
+    assert "pre_tool:call_B" not in handler._hook_containers
 
 
 @pytest.mark.asyncio
-async def test_after_tool_container_anchors_after_tool_result(
+async def test_post_tool_container_anchors_after_tool_result(
     hook_container_factory: list[FakeHookRunContainer],
 ) -> None:
     mount_callback = AsyncMock()
@@ -170,19 +170,19 @@ async def test_after_tool_container_anchors_after_tool_result(
     # anchor for this tool_call_id.
     await handler.handle_event(
         HookRunStartEvent(
-            scope=HookType.AFTER_TOOL, tool_name="stub_tool", tool_call_id="call_X"
+            scope=HookType.POST_TOOL, tool_name="stub_tool", tool_call_id="call_X"
         )
     )
-    assert "after_tool:call_X" in handler._hook_containers
+    assert "post_tool:call_X" in handler._hook_containers
 
-    # mount_callback was called with after=<tool_result_widget> for the after_tool
+    # mount_callback was called with after=<tool_result_widget> for the post_tool
     # container. Inspect the last call's kwargs.
     last_call = mount_callback.call_args_list[-1]
     assert last_call.kwargs.get("after") is not None
 
 
 @pytest.mark.asyncio
-async def test_before_tool_container_for_unknown_tool_call_id(
+async def test_pre_tool_container_for_unknown_tool_call_id(
     hook_container_factory: list[FakeHookRunContainer],
 ) -> None:
     mount_callback = AsyncMock()
@@ -192,7 +192,7 @@ async def test_before_tool_container_for_unknown_tool_call_id(
 
     await handler.handle_event(
         HookRunStartEvent(
-            scope=HookType.BEFORE_TOOL, tool_name="bash", tool_call_id="unknown"
+            scope=HookType.PRE_TOOL, tool_name="bash", tool_call_id="unknown"
         )
     )
     last_call = mount_callback.call_args_list[-1]
@@ -201,7 +201,7 @@ async def test_before_tool_container_for_unknown_tool_call_id(
 
 
 @pytest.mark.asyncio
-async def test_before_tool_container_mounts_before_tool_call_widget(
+async def test_pre_tool_container_mounts_before_tool_call_widget(
     hook_container_factory: list[FakeHookRunContainer],
 ) -> None:
     mount_callback = AsyncMock()
@@ -214,7 +214,7 @@ async def test_before_tool_container_mounts_before_tool_call_widget(
 
     await handler.handle_event(
         HookRunStartEvent(
-            scope=HookType.BEFORE_TOOL, tool_name="stub_tool", tool_call_id="call_Y"
+            scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_Y"
         )
     )
 
@@ -224,7 +224,7 @@ async def test_before_tool_container_mounts_before_tool_call_widget(
 
 
 @pytest.mark.asyncio
-async def test_before_tool_run_end_keeps_tool_call_widget_as_anchor(
+async def test_pre_tool_run_end_keeps_tool_call_widget_as_anchor(
     hook_container_factory: list[FakeHookRunContainer],
 ) -> None:
     mount_callback = AsyncMock()
@@ -237,7 +237,7 @@ async def test_before_tool_run_end_keeps_tool_call_widget_as_anchor(
 
     await handler.handle_event(
         HookRunStartEvent(
-            scope=HookType.BEFORE_TOOL, tool_name="stub_tool", tool_call_id="call_Z"
+            scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_Z"
         )
     )
     await handler.handle_event(HookStartEvent(hook_name="before"))
@@ -245,10 +245,10 @@ async def test_before_tool_run_end_keeps_tool_call_widget_as_anchor(
         HookEndEvent(hook_name="before", status=HookMessageSeverity.OK, content="ok")
     )
     await handler.handle_event(
-        HookRunEndEvent(scope=HookType.BEFORE_TOOL, tool_call_id="call_Z")
+        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_Z")
     )
 
-    # Even though the before_tool container has content and stays in the DOM,
+    # Even though the pre_tool container has content and stays in the DOM,
     # the anchor for the next widget (the tool result) must remain the call
     # widget — the container lives *above* the call, not below it.
     assert handler._tool_call_anchors["call_Z"] is tool_call_widget
@@ -268,7 +268,7 @@ async def test_hook_end_routes_to_matching_container_when_chains_interleave(
 
     await handler.handle_event(
         HookRunStartEvent(
-            scope=HookType.BEFORE_TOOL, tool_name="stub_tool", tool_call_id="call_A"
+            scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_A"
         )
     )
     assert len(hook_container_factory) == 1
@@ -277,7 +277,7 @@ async def test_hook_end_routes_to_matching_container_when_chains_interleave(
     await handler.handle_event(HookStartEvent(hook_name="hook_a"))
     await handler.handle_event(
         HookRunStartEvent(
-            scope=HookType.BEFORE_TOOL, tool_name="stub_tool", tool_call_id="call_B"
+            scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_B"
         )
     )
     assert len(hook_container_factory) == 2
@@ -289,7 +289,7 @@ async def test_hook_end_routes_to_matching_container_when_chains_interleave(
             hook_name="hook_a",
             status=HookMessageSeverity.OK,
             content="from A",
-            scope=HookType.BEFORE_TOOL,
+            scope=HookType.PRE_TOOL,
             tool_call_id="call_A",
         )
     )
@@ -299,7 +299,7 @@ async def test_hook_end_routes_to_matching_container_when_chains_interleave(
             hook_name="hook_b",
             status=HookMessageSeverity.OK,
             content="from B",
-            scope=HookType.BEFORE_TOOL,
+            scope=HookType.PRE_TOOL,
             tool_call_id="call_B",
         )
     )
@@ -323,7 +323,7 @@ async def test_hook_end_after_other_chain_ended_still_routes_correctly(
     await handler.handle_event(_tool_call_event("call_B"))
     await handler.handle_event(
         HookRunStartEvent(
-            scope=HookType.BEFORE_TOOL, tool_name="stub_tool", tool_call_id="call_A"
+            scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_A"
         )
     )
     container_a = hook_container_factory[-1]
@@ -331,7 +331,7 @@ async def test_hook_end_after_other_chain_ended_still_routes_correctly(
 
     await handler.handle_event(
         HookRunStartEvent(
-            scope=HookType.BEFORE_TOOL, tool_name="stub_tool", tool_call_id="call_B"
+            scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id="call_B"
         )
     )
     await handler.handle_event(HookStartEvent(hook_name="hook_b"))
@@ -340,12 +340,12 @@ async def test_hook_end_after_other_chain_ended_still_routes_correctly(
             hook_name="hook_b",
             status=HookMessageSeverity.OK,
             content="from B",
-            scope=HookType.BEFORE_TOOL,
+            scope=HookType.PRE_TOOL,
             tool_call_id="call_B",
         )
     )
     await handler.handle_event(
-        HookRunEndEvent(scope=HookType.BEFORE_TOOL, tool_call_id="call_B")
+        HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id="call_B")
     )
 
     await handler.handle_event(
@@ -353,7 +353,7 @@ async def test_hook_end_after_other_chain_ended_still_routes_correctly(
             hook_name="hook_a",
             status=HookMessageSeverity.OK,
             content="from A",
-            scope=HookType.BEFORE_TOOL,
+            scope=HookType.PRE_TOOL,
             tool_call_id="call_A",
         )
     )

@@ -3,8 +3,7 @@ from __future__ import annotations
 from unittest.mock import Mock
 
 from vibe.cli.textual_ui.widgets.banner.banner import Banner, BannerState, _pluralize
-from vibe.core.config import VibeConfig
-from vibe.core.config._settings import ModelConfig, ThinkingLevel
+from vibe.core.config import ModelConfig, ThinkingLevel, VibeConfig
 from vibe.core.skills.manager import SkillManager
 
 

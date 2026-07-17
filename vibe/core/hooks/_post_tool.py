@@ -6,43 +6,43 @@ from vibe.core.hooks._handler import (
     HookExternalAttrs,
     HookHandler,
     HookRetryState,
+    _append_text,
     _HookAction,
 )
 from vibe.core.hooks.config import HookConfig
 from vibe.core.hooks.models import (
-    BeforeToolInvocation,
     HookEndEvent,
     HookInvocation,
     HookMessageSeverity,
     HookStructuredResponse,
-    HookToolDenial,
-    HookToolInputRewrite,
+    HookTextReplacement,
+    PostToolInvocation,
 )
 from vibe.core.utils.matching import name_matches
 
 logger = logging.getLogger(__name__)
 
 
-def _as_before(invocation: HookInvocation) -> BeforeToolInvocation:
-    if not isinstance(invocation, BeforeToolInvocation):
+def _as_post_tool(invocation: HookInvocation) -> PostToolInvocation:
+    if not isinstance(invocation, PostToolInvocation):
         raise TypeError(
-            f"BeforeToolHandler expected BeforeToolInvocation, got"
+            f"PostToolHandler expected PostToolInvocation, got"
             f" {type(invocation).__name__}"
         )
     return invocation
 
 
-class BeforeToolHandler(HookHandler):
-    """Deny → ``HookToolDenial``; ``tool_input`` rewrite → one
-    ``HookToolInputRewrite`` per rewriting hook (validated by the agent
-    loop, first invalid rewrite aborts the chain).
+class PostToolHandler(HookHandler):
+    """Deny → replace ``tool_output_text`` with ``reason`` (then append
+    ``additional_context`` if present). Plain ``additional_context`` →
+    append to ``tool_output_text``.
     """
 
     def matches(self, hook: HookConfig, invocation: HookInvocation) -> bool:
-        return name_matches(_as_before(invocation).tool_name, [hook.match or "*"])
+        return name_matches(_as_post_tool(invocation).tool_name, [hook.match or "*"])
 
     def external_attributes(self, invocation: HookInvocation) -> HookExternalAttrs:
-        inv = _as_before(invocation)
+        inv = _as_post_tool(invocation)
         return {"tool_name": inv.tool_name, "tool_call_id": inv.tool_call_id}
 
     def _on_deny(
@@ -52,18 +52,24 @@ class BeforeToolHandler(HookHandler):
         response: HookStructuredResponse,
         retry_state: HookRetryState,
     ) -> _HookAction:
-        inv = _as_before(invocation)
+        inv = _as_post_tool(invocation)
+        reason = response.reason or ""
+        additional = response.hook_specific_output.additional_context
+        final_text = (
+            _append_text(reason, additional) if additional is not None else reason
+        )
         return _HookAction(
             events=[
                 HookEndEvent(
                     hook_name=hook.name,
-                    status=HookMessageSeverity.ERROR,
-                    content=f"Denied tool '{inv.tool_name}'",
+                    status=HookMessageSeverity.WARNING,
+                    content=response.system_message
+                    or f"Replaced tool result ({len(final_text)} chars)",
                 ),
-                HookToolDenial(hook_name=hook.name, content=response.reason or ""),
+                HookTextReplacement(text=final_text),
             ],
-            next_invocation=None,
-            should_break=True,
+            next_invocation=inv.model_copy(update={"tool_output_text": final_text}),
+            should_break=False,
         )
 
     def _on_allow(
@@ -73,14 +79,14 @@ class BeforeToolHandler(HookHandler):
         response: HookStructuredResponse,
         retry_state: HookRetryState,
     ) -> _HookAction:
-        if response.hook_specific_output.additional_context is not None:
+        if response.hook_specific_output.tool_input is not None:
             logger.warning(
-                "Hook %s: 'hook_specific_output.additional_context' is only"
-                " meaningful for after_tool; ignoring",
+                "Hook %s: 'hook_specific_output.tool_input' is only"
+                " meaningful for pre_tool; ignoring",
                 hook.name,
             )
-        rewrite = response.hook_specific_output.tool_input
-        if rewrite is None:
+        additional = response.hook_specific_output.additional_context
+        if additional is None:
             return _HookAction(
                 events=[
                     HookEndEvent(
@@ -92,18 +98,19 @@ class BeforeToolHandler(HookHandler):
                 next_invocation=None,
                 should_break=False,
             )
-        inv = _as_before(invocation)
+        inv = _as_post_tool(invocation)
+        new_text = _append_text(inv.tool_output_text, additional)
         return _HookAction(
             events=[
                 HookEndEvent(
                     hook_name=hook.name,
                     status=HookMessageSeverity.WARNING,
                     content=response.system_message
-                    or f"Rewrote tool_input for '{inv.tool_name}'",
+                    or f"Appended {len(additional)} chars to tool result",
                 ),
-                HookToolInputRewrite(hook_name=hook.name, tool_input=rewrite),
+                HookTextReplacement(text=new_text),
             ],
-            next_invocation=inv.model_copy(update={"tool_input": rewrite}),
+            next_invocation=inv.model_copy(update={"tool_output_text": new_text}),
             should_break=False,
         )
 
@@ -113,16 +120,16 @@ class BeforeToolHandler(HookHandler):
     def on_strict_failure(
         self, hook: HookConfig, invocation: HookInvocation, reason: str
     ) -> _HookAction | None:
-        inv = _as_before(invocation)
+        inv = _as_post_tool(invocation)
         return _HookAction(
             events=[
                 HookEndEvent(
                     hook_name=hook.name,
                     status=HookMessageSeverity.ERROR,
-                    content=f"Denied tool '{inv.tool_name}' (strict)",
+                    content="Cleared tool result (strict)",
                 ),
-                HookToolDenial(hook_name=hook.name, content=reason),
+                HookTextReplacement(text=""),
             ],
-            next_invocation=None,
+            next_invocation=inv.model_copy(update={"tool_output_text": ""}),
             should_break=True,
         )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Callable
+import copy
 from typing import Any
 
 from jsonpatch import JsonPatchException, apply_patch
@@ -53,6 +54,24 @@ class ConfigOrchestrator[S: ConfigSchema]:
         self._config = config
         self._default_layer_resolver = default_layer_resolver
         self._bus = bus if bus is not None else EventBus()
+
+    def copy(self) -> ConfigOrchestrator[S]:
+        """Return an independent in-memory copy of this orchestrator.
+
+        The builder and its layers are deep-copied so writes on the copy never
+        touch the original. The default-layer resolver is rebound to the copied
+        layers, and the copy starts with a fresh event bus so it does not
+        inherit the original's subscribers.
+        """
+        builder = self._builder.copy()
+        default_layer_name = self._default_layer_resolver().name
+        layers_by_name = {layer.name: layer for layer in builder.layers}
+        return type(self)(
+            builder,
+            copy.deepcopy(self._config),
+            lambda: layers_by_name[default_layer_name],
+            bus=None,
+        )
 
     @classmethod
     async def create(

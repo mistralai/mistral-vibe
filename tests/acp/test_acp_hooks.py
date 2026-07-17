@@ -25,9 +25,8 @@ def backend() -> FakeBackend:
     )
 
 
-def _write_config(config_dir: Path, *, enable_hooks: bool) -> None:
+def _write_config(config_dir: Path) -> None:
     config = get_base_config()
-    config["enable_experimental_hooks"] = enable_hooks
     with (config_dir / "config.toml").open("wb") as f:
         tomli_w.dump(config, f)
 
@@ -111,12 +110,12 @@ async def _load_session(
 
 @pytest.mark.asyncio
 class TestAcpHooksLoading:
-    async def test_new_session_hooks_enabled_loads_valid_hook(
+    async def test_new_session_loads_valid_hook(
         self, backend: FakeBackend, config_dir: Path
     ) -> None:
-        _write_config(config_dir, enable_hooks=True)
+        _write_config(config_dir)
         (config_dir / "hooks.toml").write_text(
-            '[[hooks]]\nname = "lint"\ntype = "post_agent_turn"\ncommand = "eslint ."\n'
+            '[[hooks]]\nname = "lint"\ntype = "post_agent"\ncommand = "eslint ."\n'
         )
 
         spy = await _new_session(backend)
@@ -125,15 +124,15 @@ class TestAcpHooksLoading:
         assert result is not None
         assert len(result.hooks) == 1
         assert result.hooks[0].name == "lint"
-        assert result.hooks[0].type == HookType.POST_AGENT_TURN
+        assert result.hooks[0].type == HookType.POST_AGENT
         assert result.hooks[0].command == "eslint ."
         assert result.hooks[0].timeout == 60.0
         assert result.issues == []
 
-    async def test_new_session_hooks_enabled_invalid_toml(
+    async def test_new_session_invalid_toml(
         self, backend: FakeBackend, config_dir: Path
     ) -> None:
-        _write_config(config_dir, enable_hooks=True)
+        _write_config(config_dir)
         (config_dir / "hooks.toml").write_text("{{broken toml")
 
         spy = await _new_session(backend)
@@ -144,12 +143,12 @@ class TestAcpHooksLoading:
         assert len(result.issues) == 1
         assert "Failed to parse" in result.issues[0].message
 
-    async def test_load_session_hooks_enabled_loads_valid_hook(
+    async def test_load_session_loads_valid_hook(
         self, backend: FakeBackend, config_dir: Path, tmp_path: Path
     ) -> None:
-        _write_config(config_dir, enable_hooks=True)
+        _write_config(config_dir)
         (config_dir / "hooks.toml").write_text(
-            '[[hooks]]\nname = "lint"\ntype = "post_agent_turn"\ncommand = "eslint ."\n'
+            '[[hooks]]\nname = "lint"\ntype = "post_agent"\ncommand = "eslint ."\n'
         )
 
         spy = await _load_session(
@@ -165,7 +164,7 @@ class TestAcpHooksLoading:
         assert result is not None
         assert len(result.hooks) == 1
         assert result.hooks[0].name == "lint"
-        assert result.hooks[0].type == HookType.POST_AGENT_TURN
+        assert result.hooks[0].type == HookType.POST_AGENT
         assert result.hooks[0].command == "eslint ."
         assert result.hooks[0].timeout == 60.0
         assert result.issues == []

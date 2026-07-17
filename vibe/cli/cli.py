@@ -68,14 +68,15 @@ def get_prompt_from_stdin() -> str | None:
     if sys.stdin.isatty():
         return None
     try:
-        if content := sys.stdin.read().strip():
-            sys.stdin = sys.__stdin__ = open("/dev/tty")
-            return content
+        content = sys.stdin.read().strip()
     except KeyboardInterrupt:
-        pass
-    except OSError:
         return None
-
+    if content:
+        try:
+            sys.stdin = sys.__stdin__ = open("/dev/tty")
+        except OSError:
+            pass
+        return content
     return None
 
 
@@ -513,7 +514,7 @@ def run_cli(
         initial_agent_name = get_initial_agent_name(args, config)
         if args.auto_approve:
             config.bypass_tool_permissions = True
-        hook_config_result = load_hooks_from_fs(config)
+        hook_config_result = load_hooks_from_fs()
         setup_tracing(config)
 
         if args.enabled_tools:

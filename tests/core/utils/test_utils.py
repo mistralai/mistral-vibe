@@ -10,6 +10,7 @@ import vibe.core.utils.io as io_utils
 from vibe.core.utils.io import (
     _FILE_WRITE_LOCKS,
     decode_safe,
+    encode_safe,
     file_write_lock,
     read_lines_safe,
     read_lines_safe_async,
@@ -128,6 +129,36 @@ class TestReadSafe:
         assert from_subprocess.encoding == "cp850"
         assert from_subprocess.text == "café\n"
 
+    def test_utf8_bom_is_stripped_and_reported_as_sig(self) -> None:
+        got = decode_safe("café\n".encode("utf-8-sig"))
+        assert got.text == "café\n"
+        assert got.encoding == "utf-8-sig"
+
+    def test_utf8_without_bom_reported_as_plain_utf8(self) -> None:
+        got = decode_safe("café\n".encode())
+        assert got.text == "café\n"
+        assert got.encoding == "utf-8"
+
+    def test_utf16_le_bom_is_stripped(self) -> None:
+        got = decode_safe(b"\xff\xfe" + "été\n".encode("utf-16-le"))
+        assert got.text == "été\n"
+        assert got.encoding == "utf-16"
+
+    def test_utf16_be_bom_is_stripped(self) -> None:
+        got = decode_safe(b"\xfe\xff" + "été\n".encode("utf-16-be"))
+        assert got.text == "été\n"
+        assert got.encoding == "utf-16"
+
+    def test_utf32_le_bom_is_stripped(self) -> None:
+        got = decode_safe(b"\xff\xfe\x00\x00" + "été\n".encode("utf-32-le"))
+        assert got.text == "été\n"
+        assert got.encoding == "utf-32"
+
+    def test_utf32_be_bom_is_stripped(self) -> None:
+        got = decode_safe(b"\x00\x00\xfe\xff" + "été\n".encode("utf-32-be"))
+        assert got.text == "été\n"
+        assert got.encoding == "utf-32"
+
 
 class TestReadSafeNewlines:
     def test_lf(self, tmp_path: Path) -> None:
@@ -202,6 +233,29 @@ class TestReadSafeNewlines:
         assert got.newline == "\r\n"
 
 
+class TestEncodeSafe:
+    def test_defaults_to_utf8_lf(self) -> None:
+        assert encode_safe("a\nb\n") == b"a\nb\n"
+
+    @pytest.mark.parametrize(
+        "raw", [b"a\r\nb\r\nc\r\n", b"a\nb\nc\n", b"solo", b"x\ry\r"]
+    )
+    def test_round_trips_decode_safe(self, raw: bytes) -> None:
+        decoded = decode_safe(raw)
+        assert (
+            encode_safe(
+                decoded.text, encoding=decoded.encoding, newline=decoded.newline
+            )
+            == raw
+        )
+
+    def test_encodes_with_given_encoding(self) -> None:
+        assert encode_safe("café\n", encoding="cp1252") == "café\n".encode("cp1252")
+
+    def test_falls_back_to_utf8_for_unknown_encoding(self) -> None:
+        assert encode_safe("hi\n", encoding="not-a-codec") == b"hi\n"
+
+
 class TestReadSafeResultEncoding:
     def test_reports_utf8_for_plain_utf8_file(self, tmp_path: Path) -> None:
         f = tmp_path / "x.txt"
@@ -215,9 +269,8 @@ class TestReadSafeResultEncoding:
         f = tmp_path / "u16.txt"
         f.write_bytes("a\n".encode("utf-16"))
         got = await read_safe_async(f)
-        assert got.encoding == "utf-16-le"
-        # utf-16-le leaves the BOM as U+FEFF in the string (unlike utf-8-sig).
-        assert got.text == "\ufeffa\n"
+        assert got.encoding == "utf-16"
+        assert got.text == "a\n"
 
 
 class TestReadSafeAsync:

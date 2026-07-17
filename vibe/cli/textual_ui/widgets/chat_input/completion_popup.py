@@ -9,6 +9,7 @@ from textual.widgets import Static
 COMPLETION_POPUP_MAX_HEIGHT = 12
 COMPLETION_POPUP_PADDING_X = 1
 SELECTED_CLASS = "completion-selected"
+NO_DESCRIPTION_CLASS = "completion-no-description"
 
 
 class _CompletionItem(Static):
@@ -45,6 +46,8 @@ class CompletionPopup(VerticalScroll):
     def _rebuild(self, suggestions: list[tuple[str, str]]) -> list[_CompletionRow]:
         self.remove_children()
         self._suggestions = suggestions
+        has_descriptions = any(description for _, description in suggestions)
+        self.set_class(not has_descriptions, NO_DESCRIPTION_CLASS)
         command_width = max(
             cell_len(self._display_label(label)) for label, _ in suggestions
         )
@@ -53,7 +56,8 @@ class CompletionPopup(VerticalScroll):
             command = _CompletionItem(
                 self._display_label(label), classes="completion-command"
             )
-            command.styles.width = command_width
+            if has_descriptions:
+                command.styles.width = command_width
             description_cell = _CompletionItem(
                 description, classes="completion-description"
             )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum, auto
 import os
 from pathlib import Path
@@ -347,6 +348,132 @@ class ModelConfig(BaseModel):
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
 
 
+def normalize_model_configs(value: Any) -> Any:
+    """Read [[models]] lists or alias maps into the deep-mergeable internal map."""
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        for alias, payload in value.items():
+            normalized[alias] = _model_payload_with_alias(alias, payload)
+        return normalized
+
+    if isinstance(value, list):
+        normalized: dict[str, Any] = {}
+        for payload in value:
+            alias = _model_alias_from_payload(payload)
+            normalized[alias] = _model_payload_with_alias(alias, payload)
+        return normalized
+
+    return value
+
+
+def serialize_model_configs(value: Any) -> Any:
+    """Write the internal model map back as legacy [[models]] TOML entries."""
+    normalized = normalize_model_configs(value)
+    if not isinstance(normalized, Mapping):
+        return normalized
+    return [
+        model.model_dump() if isinstance(model, ModelConfig) else model
+        for model in normalized.values()
+    ]
+
+
+def normalize_model_configs_with_defaults(value: Any, defaults: Any) -> Any:
+    """Normalize models and fill sparse default-model overrides when required."""
+    normalized = normalize_model_configs(value)
+    if not isinstance(normalized, Mapping):
+        return normalized
+
+    default_models = normalize_model_configs(defaults)
+    if not isinstance(default_models, Mapping):
+        return normalized
+
+    if not _needs_default_model_payloads(normalized, default_models):
+        return normalized
+
+    return merge_model_payloads(
+        {
+            alias: _model_payload_for_merge(model)
+            for alias, model in default_models.items()
+        },
+        normalized,
+    )
+
+
+def _model_alias_from_payload(payload: Any) -> str:
+    if isinstance(payload, ModelConfig):
+        return payload.alias
+
+    if not isinstance(payload, Mapping):
+        raise ValueError("Model entries must be tables with an alias or name.")
+
+    alias = payload.get("alias", payload.get("name"))
+    if not isinstance(alias, str) or not alias:
+        raise ValueError("Model entries must define a non-empty alias or name.")
+    return alias
+
+
+def _model_payload_with_alias(alias: Any, payload: Any) -> Any:
+    if not isinstance(alias, str) or not alias:
+        raise ValueError("Model aliases must be non-empty strings.")
+
+    if isinstance(payload, ModelConfig):
+        if payload.alias != alias:
+            raise ValueError(
+                f"Model key '{alias}' does not match model alias '{payload.alias}'."
+            )
+        return payload
+
+    if not isinstance(payload, Mapping):
+        return payload
+
+    model_payload = dict(payload)
+    existing_alias = model_payload.get("alias")
+    if existing_alias is None:
+        model_payload["alias"] = alias
+        return model_payload
+
+    if existing_alias != alias:
+        raise ValueError(
+            f"Model key '{alias}' does not match model alias '{existing_alias}'."
+        )
+    return model_payload
+
+
+def _needs_default_model_payloads(
+    models: Mapping[str, Any], defaults: Mapping[str, Any]
+) -> bool:
+    """Return whether a known default model is missing required identity fields."""
+    for alias, payload in models.items():
+        if alias not in defaults or not isinstance(payload, Mapping):
+            continue
+        if "name" not in payload or "provider" not in payload:
+            return True
+    return False
+
+
+def _model_payload_for_merge(model: Any) -> dict[str, Any]:
+    """Convert a default model entry into a plain mapping for deep merge."""
+    if isinstance(model, ModelConfig):
+        return model.model_dump(mode="json")
+    if isinstance(model, Mapping):
+        return dict(model)
+    return {}
+
+
+def merge_model_payloads(
+    mapping: Mapping[str, Any], updating_mapping: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Recursively merge model payload mappings without mutating either input."""
+    merged = dict(mapping)
+    for key, value in updating_mapping.items():
+        existing = merged.get(key)
+        if isinstance(value, Mapping) and isinstance(existing, Mapping):
+            merged[key] = merge_model_payloads(existing, value)
+            continue
+        merged[key] = value
+    return merged
+
+
 class TranscribeModelConfig(BaseModel):
     name: str
     provider: str
@@ -384,6 +511,12 @@ class TTSModelConfig(BaseModel):
     response_format: SpeechOutputFormat = "wav"
 
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
+
+
+class OtelRedactionMode(StrEnum):
+    DEFAULT = auto()
+    NONE = auto()
+    STRICT = auto()
 
 
 class OtelSpanExporterConfig(BaseModel):

@@ -314,6 +314,21 @@ async def test_set_field_uses_default_layer_resolver() -> None:
 
 
 @pytest.mark.asyncio
+async def test_copy_preserves_default_layer_resolution() -> None:
+    layer = RawWritableLayer(name="user-toml", data={})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+
+    forked = orch.copy()
+    result = await forked.set_field("/value", "forked", reason="set field")
+
+    assert result == []
+    assert forked.config.value == "forked"
+    assert orch.config.value == "default"
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_returns_layer_save_error_after_other_layer_commits() -> None:
     first_layer = FieldWritableLayer(
         name="first-layer", field_name="first", data={"first": "one"}

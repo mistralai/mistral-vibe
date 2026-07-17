@@ -42,16 +42,16 @@ def _detect_newline(text: str) -> str:
 
 
 def _encodings_from_bom(raw: bytes) -> str | None:
+    # Endianless codecs (utf-16/utf-32) auto-detect byte order from the BOM and
+    # strip it, symmetric with utf-8-sig; the explicit -le/-be variants leave a
+    # stray U+FEFF in the decoded text. Check the 32-bit BOMs first: the
+    # utf-32-le BOM has the utf-16-le BOM as a prefix.
     if raw.startswith(b"\xef\xbb\xbf"):
         return "utf-8-sig"
-    if raw.startswith(b"\xff\xfe\x00\x00"):
-        return "utf-32-le"
-    if raw.startswith(b"\x00\x00\xfe\xff"):
-        return "utf-32-be"
-    if raw.startswith(b"\xff\xfe"):
-        return "utf-16-le"
-    if raw.startswith(b"\xfe\xff"):
-        return "utf-16-be"
+    if raw.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return "utf-32"
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
     return None
 
 
@@ -84,8 +84,8 @@ def _get_candidate_encodings(
             seen.add(key)
             yield encoding
 
-    yield from _emit("utf-8")
     yield from _emit(_encodings_from_bom(raw))
+    yield from _emit("utf-8")
     yield from _emit(preferred_encoding)
     yield from _emit(locale.getpreferredencoding(False))
     yield from _emit(_encoding_from_best_match(raw))
@@ -105,7 +105,7 @@ def decode_safe(
 ) -> ReadSafeResult:
     """Decode ``raw`` like :func:`read_safe` after ``read_bytes``.
 
-    Tries UTF-8, BOM, locale, charset-normalizer, then UTF-8 (strict or
+    Tries BOM, UTF-8, locale, charset-normalizer, then UTF-8 (strict or
     replace). ``UnicodeDecodeError`` can only occur in that last step when
     ``raise_on_error`` is true. Set ``from_subprocess`` when decoding console
     output so the Windows OEM code page is preferred over the ANSI locale.
@@ -123,6 +123,19 @@ def decode_safe(
         text = raw.decode(encoding, errors=errors)
     text, newline = normalize_newlines(text)
     return ReadSafeResult(text, encoding, newline)
+
+
+def encode_safe(text: str, *, encoding: str = "utf-8", newline: str = "\n") -> bytes:
+    r"""Inverse of :func:`decode_safe`: translate ``\n`` line endings to
+    ``newline`` and encode with ``encoding``, falling back to UTF-8 when the codec
+    cannot represent the text. The in-memory sibling of ``atomic_replace``'s
+    ``open(..., newline=...)`` write.
+    """
+    body = text if newline == "\n" else text.replace("\n", newline)
+    try:
+        return body.encode(encoding)
+    except (LookupError, UnicodeError):
+        return body.encode("utf-8")
 
 
 def read_safe(path: Path, *, raise_on_error: bool = False) -> ReadSafeResult:

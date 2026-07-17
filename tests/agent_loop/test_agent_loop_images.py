@@ -89,7 +89,7 @@ async def test_act_raises_when_model_lacks_vision(
     assert backend.requests_extra_headers == []  # no LLM call was made
     # Capability check runs *before* checkpoint creation and history mutation,
     # so a rejected turn leaves no trace in either.
-    assert agent.rewind_manager.checkpoints == []
+    assert agent.rewind_manager._checkpointer.view().turns == []
     assert len(agent.messages) == initial_message_count
 
 

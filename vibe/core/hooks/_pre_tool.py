@@ -6,43 +6,43 @@ from vibe.core.hooks._handler import (
     HookExternalAttrs,
     HookHandler,
     HookRetryState,
-    _append_text,
     _HookAction,
 )
 from vibe.core.hooks.config import HookConfig
 from vibe.core.hooks.models import (
-    AfterToolInvocation,
     HookEndEvent,
     HookInvocation,
     HookMessageSeverity,
     HookStructuredResponse,
-    HookTextReplacement,
+    HookToolDenial,
+    HookToolInputRewrite,
+    PreToolInvocation,
 )
 from vibe.core.utils.matching import name_matches
 
 logger = logging.getLogger(__name__)
 
 
-def _as_after(invocation: HookInvocation) -> AfterToolInvocation:
-    if not isinstance(invocation, AfterToolInvocation):
+def _as_pre_tool(invocation: HookInvocation) -> PreToolInvocation:
+    if not isinstance(invocation, PreToolInvocation):
         raise TypeError(
-            f"AfterToolHandler expected AfterToolInvocation, got"
+            f"PreToolHandler expected PreToolInvocation, got"
             f" {type(invocation).__name__}"
         )
     return invocation
 
 
-class AfterToolHandler(HookHandler):
-    """Deny → replace ``tool_output_text`` with ``reason`` (then append
-    ``additional_context`` if present). Plain ``additional_context`` →
-    append to ``tool_output_text``.
+class PreToolHandler(HookHandler):
+    """Deny → ``HookToolDenial``; ``tool_input`` rewrite → one
+    ``HookToolInputRewrite`` per rewriting hook (validated by the agent
+    loop, first invalid rewrite aborts the chain).
     """
 
     def matches(self, hook: HookConfig, invocation: HookInvocation) -> bool:
-        return name_matches(_as_after(invocation).tool_name, [hook.match or "*"])
+        return name_matches(_as_pre_tool(invocation).tool_name, [hook.match or "*"])
 
     def external_attributes(self, invocation: HookInvocation) -> HookExternalAttrs:
-        inv = _as_after(invocation)
+        inv = _as_pre_tool(invocation)
         return {"tool_name": inv.tool_name, "tool_call_id": inv.tool_call_id}
 
     def _on_deny(
@@ -52,24 +52,18 @@ class AfterToolHandler(HookHandler):
         response: HookStructuredResponse,
         retry_state: HookRetryState,
     ) -> _HookAction:
-        inv = _as_after(invocation)
-        reason = response.reason or ""
-        additional = response.hook_specific_output.additional_context
-        final_text = (
-            _append_text(reason, additional) if additional is not None else reason
-        )
+        inv = _as_pre_tool(invocation)
         return _HookAction(
             events=[
                 HookEndEvent(
                     hook_name=hook.name,
-                    status=HookMessageSeverity.WARNING,
-                    content=response.system_message
-                    or f"Replaced tool result ({len(final_text)} chars)",
+                    status=HookMessageSeverity.ERROR,
+                    content=f"Denied tool '{inv.tool_name}'",
                 ),
-                HookTextReplacement(text=final_text),
+                HookToolDenial(hook_name=hook.name, content=response.reason or ""),
             ],
-            next_invocation=inv.model_copy(update={"tool_output_text": final_text}),
-            should_break=False,
+            next_invocation=None,
+            should_break=True,
         )
 
     def _on_allow(
@@ -79,14 +73,14 @@ class AfterToolHandler(HookHandler):
         response: HookStructuredResponse,
         retry_state: HookRetryState,
     ) -> _HookAction:
-        if response.hook_specific_output.tool_input is not None:
+        if response.hook_specific_output.additional_context is not None:
             logger.warning(
-                "Hook %s: 'hook_specific_output.tool_input' is only"
-                " meaningful for before_tool; ignoring",
+                "Hook %s: 'hook_specific_output.additional_context' is only"
+                " meaningful for post_tool; ignoring",
                 hook.name,
             )
-        additional = response.hook_specific_output.additional_context
-        if additional is None:
+        rewrite = response.hook_specific_output.tool_input
+        if rewrite is None:
             return _HookAction(
                 events=[
                     HookEndEvent(
@@ -98,19 +92,18 @@ class AfterToolHandler(HookHandler):
                 next_invocation=None,
                 should_break=False,
             )
-        inv = _as_after(invocation)
-        new_text = _append_text(inv.tool_output_text, additional)
+        inv = _as_pre_tool(invocation)
         return _HookAction(
             events=[
                 HookEndEvent(
                     hook_name=hook.name,
                     status=HookMessageSeverity.WARNING,
                     content=response.system_message
-                    or f"Appended {len(additional)} chars to tool result",
+                    or f"Rewrote tool_input for '{inv.tool_name}'",
                 ),
-                HookTextReplacement(text=new_text),
+                HookToolInputRewrite(hook_name=hook.name, tool_input=rewrite),
             ],
-            next_invocation=inv.model_copy(update={"tool_output_text": new_text}),
+            next_invocation=inv.model_copy(update={"tool_input": rewrite}),
             should_break=False,
         )
 
@@ -120,16 +113,16 @@ class AfterToolHandler(HookHandler):
     def on_strict_failure(
         self, hook: HookConfig, invocation: HookInvocation, reason: str
     ) -> _HookAction | None:
-        inv = _as_after(invocation)
+        inv = _as_pre_tool(invocation)
         return _HookAction(
             events=[
                 HookEndEvent(
                     hook_name=hook.name,
                     status=HookMessageSeverity.ERROR,
-                    content="Cleared tool result (strict)",
+                    content=f"Denied tool '{inv.tool_name}' (strict)",
                 ),
-                HookTextReplacement(text=""),
+                HookToolDenial(hook_name=hook.name, content=reason),
             ],
-            next_invocation=inv.model_copy(update={"tool_output_text": ""}),
+            next_invocation=None,
             should_break=True,
         )

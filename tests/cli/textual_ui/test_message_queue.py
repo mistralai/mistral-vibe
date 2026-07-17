@@ -160,7 +160,7 @@ def test_item_kinds_round_trip(kind: QueuedItemKind, content: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_inject_head_item_awaits_async_payload_renderer() -> None:
+async def test_inject_head_item_injects_raw_content() -> None:
     payload = PathPromptPayload(
         display_text="display", prompt_text="prompt", resources=[], all_resources=[]
     )
@@ -172,11 +172,6 @@ async def test_inject_head_item_awaits_async_payload_renderer() -> None:
 
     def noop_task(*args, **kwargs) -> asyncio.Task[None]:
         return asyncio.create_task(noop_async())
-
-    async def render_payload(received: PathPromptPayload) -> str:
-        await asyncio.sleep(0)
-        assert received is payload
-        return "rendered prompt"
 
     async def inject_queued_prompt(content: str, **kwargs) -> None:
         injected["content"] = content
@@ -206,7 +201,6 @@ async def test_inject_head_item_awaits_async_payload_renderer() -> None:
             maybe_show_feedback_bar=lambda: None,
             send_skill_telemetry=send_skill_telemetry,
             send_at_mention_telemetry=send_at_mention_telemetry,
-            render_payload=render_payload,
         )
     )
     item = QueuedItem(
@@ -217,7 +211,7 @@ async def test_inject_head_item_awaits_async_payload_renderer() -> None:
     await controller._inject_head_item(item, widget)
 
     assert widget.message_index == 42
-    assert injected["content"] == "rendered prompt"
+    assert injected["content"] == "raw prompt"
     assert isinstance(injected["client_message_id"], str)
     assert telemetry == {
         "skill_name": "skill",

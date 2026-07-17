@@ -74,7 +74,7 @@ def test_snapshot_model_picker_select_different_model(
         await pilot.press("enter")
         await pilot.pause(0.2)
 
-    with patch("vibe.cli.textual_ui.app.VibeConfig.save_updates"):
+    with patch("vibe.core.config.orchestrator_legacy.VibeConfig.save_updates"):
         assert snap_compare(
             "test_ui_snapshot_model_picker.py:ModelPickerTestApp",
             terminal_size=(100, 36),

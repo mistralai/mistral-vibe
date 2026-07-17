@@ -13,6 +13,7 @@ from vibe import __version__
 from vibe.core.config import (
     DEFAULT_MISTRAL_API_ENV_KEY,
     DEFAULT_MISTRAL_SERVER_URL,
+    OtelRedactionMode,
     OtelSpanExporterConfig,
     resolve_api_key,
 )
@@ -81,13 +82,26 @@ def setup_tracing(config: AnyVibeConfig) -> None:
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 
     resource = Resource.create({
         "service.name": VIBE_AGENT_NAME,
         "service.version": __version__,
     })
-    exporter = OTLPSpanExporter(**exporter_cfg.model_dump())
+    exporter: SpanExporter = OTLPSpanExporter(**exporter_cfg.model_dump())
+    if config.otel_redaction is not OtelRedactionMode.NONE:
+        from mistralai.extra.observability import (
+            AttributeRedactionPolicy,
+            RedactingSpanExporter,
+            default_redaction_policy,
+        )
+
+        policy = (
+            AttributeRedactionPolicy()
+            if config.otel_redaction is OtelRedactionMode.STRICT
+            else default_redaction_policy()
+        )
+        exporter = RedactingSpanExporter(exporter, policy)
     provider = TracerProvider(resource=resource)
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)

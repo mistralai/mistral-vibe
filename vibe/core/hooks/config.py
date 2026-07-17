@@ -6,7 +6,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from vibe.core.config import AnyVibeConfig
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.hooks.models import HookConfig, HookConfigIssue, HookConfigResult
 from vibe.core.utils.io import read_safe
@@ -74,10 +73,7 @@ def _load_hooks_file(path: Path) -> HookConfigResult:
     return HookConfigResult(hooks=hooks, issues=issues)
 
 
-def load_hooks_from_fs(config: AnyVibeConfig) -> HookConfigResult:
-    if not config.enable_experimental_hooks:
-        return HookConfigResult(hooks=[], issues=[])
-
+def load_hooks_from_fs() -> HookConfigResult:
     all_hooks: list[HookConfig] = []
     all_issues: list[HookConfigIssue] = []
     seen_names: set[str] = set()
