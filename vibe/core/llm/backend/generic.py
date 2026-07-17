@@ -67,6 +67,22 @@ class OpenAIAdapter(APIAdapter):
             headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
+    @staticmethod
+    def apply_openrouter_reasoning(
+        payload: dict[str, Any], thinking: str
+    ) -> dict[str, Any]:
+        if "reasoning" in payload:
+            return payload
+
+        if thinking == "off":
+            payload["reasoning"] = {"enabled": False}
+        elif thinking == "max":
+            payload["reasoning"] = {"effort": "high"}
+        elif thinking in {"low", "medium", "high"}:
+            payload["reasoning"] = {"effort": thinking}
+
+        return payload
+
     def _reasoning_to_api(
         self, msg_dict: dict[str, Any], field_name: str
     ) -> dict[str, Any]:
@@ -136,6 +152,9 @@ class OpenAIAdapter(APIAdapter):
         payload = self.build_payload(
             model_name, converted_messages, temperature, tools, max_tokens, tool_choice
         )
+
+        if provider.name == "openrouter":
+            payload = self.apply_openrouter_reasoning(payload, thinking)
 
         if enable_streaming:
             payload["stream"] = True
