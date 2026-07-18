@@ -29,6 +29,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 class AgentSafety(StrEnum):
     SAFE = auto()
     NEUTRAL = auto()
+    GUARDED = auto()
     DESTRUCTIVE = auto()
     YOLO = auto()
 
@@ -136,7 +137,7 @@ AUTO = AgentProfile(
     BuiltinAgentName.AUTO,
     "Smart Auto",
     "Runs without prompts; a classifier blocks risky actions",
-    AgentSafety.DESTRUCTIVE,
+    AgentSafety.GUARDED,
     overrides={"disabled_tools": ["exit_plan_mode"], "auto_mode": {"enabled": True}},
 )
 AUTO_APPROVE = AgentProfile(

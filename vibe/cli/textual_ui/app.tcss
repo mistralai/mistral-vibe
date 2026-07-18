@@ -1,4 +1,5 @@
 $mistral_orange: #FF8205;
+$smart_auto: #7B5CFF;
 
 * {
     scrollbar-size: 1 1;
@@ -194,6 +195,12 @@ OptionList, OptionList:focus {
         border-top: solid $warning;
         border-bottom: solid $warning;
         border-title-color: $warning;
+    }
+
+    &.border-guarded {
+        border-top: solid $smart_auto;
+        border-bottom: solid $smart_auto;
+        border-title-color: $smart_auto;
     }
 
     &.border-safe {

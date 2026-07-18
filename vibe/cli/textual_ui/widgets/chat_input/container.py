@@ -7,6 +7,7 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
+from textual.timer import Timer
 
 from vibe.cli.autocompletion.path_completion import PathCompletionController
 from vibe.cli.autocompletion.slash_command import SlashCommandController
@@ -16,6 +17,10 @@ from vibe.cli.textual_ui.widgets.chat_input.completion_manager import (
     MultiCompletionManager,
 )
 from vibe.cli.textual_ui.widgets.chat_input.completion_popup import CompletionPopup
+from vibe.cli.textual_ui.widgets.chat_input.glow import (
+    GLOW_INTERVAL_SECONDS,
+    glow_color,
+)
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.voice_manager.voice_manager_port import VoiceManagerPort
 from vibe.core.agents import AgentSafety
@@ -23,9 +28,12 @@ from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
 
 SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
     AgentSafety.SAFE: "border-safe",
+    AgentSafety.GUARDED: "border-guarded",
     AgentSafety.DESTRUCTIVE: "border-warning",
     AgentSafety.YOLO: "border-error",
 }
+
+GLOWING_SAFETIES = frozenset({AgentSafety.GUARDED})
 
 
 class ChatInputContainer(Vertical):
@@ -58,6 +66,8 @@ class ChatInputContainer(Vertical):
         )
         self._voice_manager = voice_manager
         self._custom_border_label: str | None = None
+        self._glow_timer: Timer | None = None
+        self._glow_step = 0
 
         self._completion_manager = MultiCompletionManager([
             SlashCommandController(CommandCompleter(self._get_slash_entries), self),
@@ -103,6 +113,9 @@ class ChatInputContainer(Vertical):
         if self._body.input_widget:
             self._body.input_widget.set_completion_manager(self._completion_manager)
             self._body.focus_input()
+        # compose() runs before the app is reachable, so a session that starts in a
+        # glowing mode needs the timer picked up here.
+        self._sync_glow_timer()
 
     @property
     def input_widget(self) -> ChatTextArea | None:
@@ -232,6 +245,45 @@ class ChatInputContainer(Vertical):
         label = self._custom_border_label or self._agent_name
         return f" {label} " if label else ""
 
+    def _is_glowing(self) -> bool:
+        if self._custom_border_label is not None:
+            return False
+        return self._safety in GLOWING_SAFETIES
+
+    def _sync_glow_timer(self) -> None:
+        # Honour reduced motion: a frozen first frame keeps the colour without the
+        # pulse, and keeps snapshot tests deterministic.
+        try:
+            animated = self.app.animation_level != "none"
+        except Exception:
+            return
+        wanted = self._is_glowing() and animated
+        if wanted and self._glow_timer is None:
+            self._glow_timer = self.set_interval(
+                GLOW_INTERVAL_SECONDS, self._advance_glow
+            )
+        elif not wanted and self._glow_timer is not None:
+            self._glow_timer.stop()
+            self._glow_timer = None
+            self._glow_step = 0
+            try:
+                self.get_widget_by_id(
+                    self.ID_INPUT_BOX
+                ).styles.border_title_color = None
+            except Exception:
+                return
+
+    def _advance_glow(self) -> None:
+        self._glow_step += 1
+        self._apply_glow_color(glow_color(self._glow_step))
+
+    def _apply_glow_color(self, color: str) -> None:
+        try:
+            input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
+        except Exception:
+            return
+        input_box.styles.border_title_color = color
+
     def _apply_input_box_chrome(self) -> None:
         try:
             input_box = self.get_widget_by_id(self.ID_INPUT_BOX)
@@ -245,4 +297,5 @@ class ChatInputContainer(Vertical):
         if border_class:
             input_box.add_class(border_class)
 
+        self._sync_glow_timer()
         input_box.border_title = self._get_border_title()
