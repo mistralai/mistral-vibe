@@ -116,6 +116,43 @@ class ApprovalSpy:
         return len(self.calls)
 
 
+class ThresholdTrippingClassifier(FakeClassifier):
+    def __init__(self, decision: ClassifierDecision) -> None:
+        super().__init__([decision])
+        self.agent_loop: AgentLoop | None = None
+
+    async def classify(
+        self,
+        *,
+        auto_mode: AutoModeConfig,
+        tool_name: str,
+        args: BaseModel,
+        required_permissions: Sequence[RequiredPermission],
+        transcript: Sequence[LLMMessage],
+        metadata: dict[str, str] | None = None,
+    ) -> ClassifierDecision | None:
+        # Simulates auto mode going away (concurrent block streak, mode toggled
+        # off) while this very classification is in flight.
+        if self.agent_loop is not None:
+            self.agent_loop.stats.classifier_blocks_total = AUTO_MODE_MAX_TOTAL_BLOCKS
+        return await super().classify(
+            auto_mode=auto_mode,
+            tool_name=tool_name,
+            args=args,
+            required_permissions=required_permissions,
+            transcript=transcript,
+            metadata=metadata,
+        )
+
+
+class ClosableClassifier:
+    def __init__(self) -> None:
+        self.close_count = 0
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+
+
 def allow(reason: str = "harmless") -> ClassifierDecision:
     return ClassifierDecision(verdict=ClassifierVerdict.ALLOW, reason=reason)
 
@@ -797,3 +834,94 @@ def test_default_builtin_agent_profile_leaves_auto_mode_off() -> None:
 
     assert agent_loop.config.auto_mode.enabled is False
     assert agent_loop._auto_mode_active() is False
+
+
+# --- verdicts that land after auto mode went away --------------------------
+
+
+@pytest.mark.asyncio
+async def test_allow_arriving_after_auto_mode_paused_is_not_auto_executed() -> None:
+    classifier = ThresholdTrippingClassifier(allow())
+    approval = ApprovalSpy(response=ApprovalResponse.YES)
+    agent_loop = make_agent_loop(
+        auto_mode_enabled=True,
+        backend=FakeBackend(turns_calling_todo(1)),
+        approval_callback=approval,
+    )
+    install_classifier(agent_loop, classifier)
+    classifier.agent_loop = agent_loop
+
+    events = await act_and_collect_events(agent_loop, "read my todos")
+
+    assert classifier.call_count == 1
+    assert agent_loop._auto_mode_active() is False
+    assert approval.call_count == 1, (
+        "a stale ALLOW must not bypass the human once auto mode has gone away"
+    )
+    assert tool_results(events)[0].skipped is False
+
+
+@pytest.mark.asyncio
+async def test_block_arriving_after_auto_mode_paused_falls_through_to_approval() -> (
+    None
+):
+    classifier = ThresholdTrippingClassifier(block())
+    approval = ApprovalSpy(response=ApprovalResponse.NO)
+    agent_loop = make_agent_loop(
+        auto_mode_enabled=True,
+        backend=FakeBackend(turns_calling_todo(1)),
+        approval_callback=approval,
+    )
+    install_classifier(agent_loop, classifier)
+    classifier.agent_loop = agent_loop
+
+    events = await act_and_collect_events(agent_loop, "read my todos")
+
+    assert classifier.call_count == 1
+    assert approval.call_count == 1
+    results = tool_results(events)
+    assert results[0].skipped is True
+    assert results[0].skip_reason != BLOCK_REASON, (
+        "a stale BLOCK must not be applied; the human decides instead"
+    )
+    # The stale verdict must not move the counters either.
+    assert agent_loop.stats.classifier_blocks_consecutive == 0
+    assert agent_loop.stats.classifier_blocks_total == AUTO_MODE_MAX_TOTAL_BLOCKS
+
+
+# --- classifier lifecycle --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refresh_config_discards_and_closes_the_cached_classifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    classifier = ClosableClassifier()
+    agent_loop = make_agent_loop(auto_mode_enabled=True, backend=FakeBackend())
+    agent_loop._permission_classifier = cast(PermissionClassifier, classifier)
+    agent_loop._permission_classifier_resolved = True
+
+    monkeypatch.setattr(
+        VibeConfig, "load", staticmethod(lambda: make_config(auto_mode_enabled=True))
+    )
+    await agent_loop.refresh_config()
+
+    # The classifier captures its model and provider at build time, so a config
+    # change has to drop it for the next call to rebuild.
+    assert agent_loop._permission_classifier is None
+    assert agent_loop._permission_classifier_resolved is False
+    assert classifier.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_the_cached_classifier() -> None:
+    classifier = ClosableClassifier()
+    agent_loop = make_agent_loop(auto_mode_enabled=True, backend=FakeBackend())
+    agent_loop._permission_classifier = cast(PermissionClassifier, classifier)
+    agent_loop._permission_classifier_resolved = True
+
+    await agent_loop.aclose()
+
+    assert agent_loop._permission_classifier is None
+    assert agent_loop._permission_classifier_resolved is False
+    assert classifier.close_count == 1

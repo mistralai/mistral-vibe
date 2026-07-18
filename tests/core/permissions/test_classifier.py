@@ -17,7 +17,7 @@ from vibe.core.permissions.classifier import (
     create_permission_classifier,
 )
 from vibe.core.tools.permissions import PermissionScope, RequiredPermission
-from vibe.core.types import LLMMessage, Role
+from vibe.core.types import FunctionCall, LLMMessage, Role, ToolCall
 
 
 class _Args(BaseModel):
@@ -205,7 +205,7 @@ async def test_classify_sends_system_prompt_first_and_pending_call_last():
 
 
 @pytest.mark.asyncio
-async def test_classify_faithfully_passes_through_transcript_unmodified():
+async def test_classify_faithfully_passes_through_clean_transcript_unmodified():
     backend = FakeBackend(
         chunks=mock_llm_chunk(content='{"verdict": "allow", "reason": "ok"}')
     )
@@ -213,10 +213,10 @@ async def test_classify_faithfully_passes_through_transcript_unmodified():
     transcript = [
         LLMMessage(role=Role.user, content="do the thing"),
         LLMMessage(role=Role.assistant, content="doing it", tool_calls=None),
-        LLMMessage(role=Role.tool, content="tool output here", name="shell"),
+        LLMMessage(role=Role.user, content="and then this"),
     ]
 
-    await classifier.classify(
+    decision = await classifier.classify(
         auto_mode=AutoModeConfig(),
         tool_name="shell",
         args=_Args(),
@@ -224,10 +224,62 @@ async def test_classify_faithfully_passes_through_transcript_unmodified():
         transcript=transcript,
     )
 
+    assert decision is not None
     sent = backend.requests_messages[0]
-    # Exactly the given transcript, verbatim, in the same order — the caller is
-    # responsible for filtering; the classifier must not silently drop or alter it.
+    # Exactly the given transcript, verbatim, in the same order — a clean
+    # transcript must not be silently dropped or altered on its way to the model.
     assert sent[1 : 1 + len(transcript)] == transcript
+
+
+@pytest.mark.asyncio
+async def test_classify_rejects_transcript_carrying_a_tool_role_message():
+    backend = FakeBackend(
+        chunks=mock_llm_chunk(content='{"verdict": "allow", "reason": "ok"}')
+    )
+    classifier = build_classifier(backend)
+
+    decision = await classifier.classify(
+        auto_mode=AutoModeConfig(),
+        tool_name="shell",
+        args=_Args(),
+        required_permissions=REQUIRED_PERMISSIONS,
+        transcript=[
+            LLMMessage(role=Role.user, content="do the thing"),
+            LLMMessage(role=Role.tool, content="attacker controlled", name="shell"),
+        ],
+    )
+
+    # ADR-0009: tool output must never reach the classifier, so the boundary
+    # fails closed rather than trusting the caller to have filtered.
+    assert decision is None
+    assert backend.requests_messages == []
+
+
+@pytest.mark.asyncio
+async def test_classify_rejects_transcript_with_unresolved_assistant_tool_calls():
+    backend = FakeBackend(
+        chunks=mock_llm_chunk(content='{"verdict": "allow", "reason": "ok"}')
+    )
+    classifier = build_classifier(backend)
+    tool_call = ToolCall(
+        id="call_1",
+        index=0,
+        function=FunctionCall(name="shell", arguments='{"command": "ls"}'),
+    )
+
+    decision = await classifier.classify(
+        auto_mode=AutoModeConfig(),
+        tool_name="shell",
+        args=_Args(),
+        required_permissions=REQUIRED_PERMISSIONS,
+        transcript=[
+            LLMMessage(role=Role.user, content="do the thing"),
+            LLMMessage(role=Role.assistant, content="doing it", tool_calls=[tool_call]),
+        ],
+    )
+
+    assert decision is None
+    assert backend.requests_messages == []
 
 
 @pytest.mark.asyncio
@@ -270,16 +322,18 @@ async def test_classify_renders_configured_rules_into_system_prompt():
 
 
 @pytest.mark.asyncio
-async def test_classify_truncates_oversized_serialized_args():
+async def test_classify_returns_none_for_oversized_serialized_args():
     class _HugeArgs(BaseModel):
         payload: str = "HEAD_MARKER" + ("x" * 5000) + "TAIL_MARKER"
+
+    assert len(_HugeArgs().model_dump_json()) > MAX_SERIALIZED_ARGS_CHARS
 
     backend = FakeBackend(
         chunks=mock_llm_chunk(content='{"verdict": "allow", "reason": "ok"}')
     )
     classifier = build_classifier(backend)
 
-    await classifier.classify(
+    decision = await classifier.classify(
         auto_mode=AutoModeConfig(),
         tool_name="shell",
         args=_HugeArgs(),
@@ -287,15 +341,38 @@ async def test_classify_truncates_oversized_serialized_args():
         transcript=[],
     )
 
+    # Truncating would hand the classifier a harmless prefix while a dangerous
+    # suffix goes unseen, so oversized arguments get no verdict at all.
+    assert decision is None
+    assert backend.requests_messages == []
+
+
+@pytest.mark.asyncio
+async def test_classify_still_classifies_args_just_under_the_size_limit():
+    class _SnugArgs(BaseModel):
+        payload: str = "y" * (MAX_SERIALIZED_ARGS_CHARS - 100)
+
+    assert len(_SnugArgs().model_dump_json()) <= MAX_SERIALIZED_ARGS_CHARS
+
+    backend = FakeBackend(
+        chunks=mock_llm_chunk(content='{"verdict": "allow", "reason": "ok"}')
+    )
+    classifier = build_classifier(backend)
+
+    decision = await classifier.classify(
+        auto_mode=AutoModeConfig(),
+        tool_name="shell",
+        args=_SnugArgs(),
+        required_permissions=REQUIRED_PERMISSIONS,
+        transcript=[],
+    )
+
+    assert decision is not None
+    assert decision.verdict is ClassifierVerdict.ALLOW
+    assert len(backend.requests_messages) == 1
     pending_content = backend.requests_messages[0][-1].content
     assert isinstance(pending_content, str)
-
-    serialized_len = len(_HugeArgs().model_dump_json())
-    assert serialized_len > MAX_SERIALIZED_ARGS_CHARS
-
-    assert "[truncated]" in pending_content
-    assert "HEAD_MARKER" in pending_content
-    assert "TAIL_MARKER" not in pending_content
+    assert _SnugArgs().payload in pending_content
 
 
 # --- create_permission_classifier ------------------------------------------

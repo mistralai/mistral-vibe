@@ -626,6 +626,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     async def refresh_config(self) -> None:
         await self._config_orchestrator.reload()
         self._apply_forced_bypass()
+        await self._discard_permission_classifier()
         self.agent_manager.invalidate_config()
         if self.mcp_registry is not None:
             self.mcp_registry.sync_active_servers(self.config.mcp_servers)
@@ -742,6 +743,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 await self._mcp_pool.aclose()
         with contextlib.suppress(Exception):
             await self.backend.__aexit__(None, None, None)
+        await self._discard_permission_classifier()
         with contextlib.suppress(Exception):
             await self.experiment_manager.aclose()
 
@@ -1988,6 +1990,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             and self.stats.classifier_blocks_total < AUTO_MODE_MAX_TOTAL_BLOCKS
         )
 
+    async def _discard_permission_classifier(self) -> None:
+        # The classifier captures its model and provider when it is built, so a
+        # config or profile change has to drop it for the next call to rebuild.
+        classifier, self._permission_classifier = self._permission_classifier, None
+        self._permission_classifier_resolved = False
+        if classifier is not None:
+            with contextlib.suppress(Exception):
+                await classifier.aclose()
+
     def _get_permission_classifier(self) -> PermissionClassifier | None:
         if self._permission_classifier_resolved:
             return self._permission_classifier
@@ -2044,7 +2055,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 call_type="secondary_call"
             ).model_dump(exclude_none=True),
         )
-        if decision is None:
+        # Auto mode may have been switched off, or a concurrent call may have hit a
+        # pause threshold, while this classification was in flight.
+        if decision is None or not self._auto_mode_active():
             return None
 
         if decision.verdict is ClassifierVerdict.ALLOW:
@@ -2615,6 +2628,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         # Synchronous swap: no await, so an in-flight turn can't observe a partial
         # update. Keep it that way -- don't make it async or move it off-thread.
         self._commit_reload(prepared, reset_middleware, switch_to_agent)
+
+        # Dropped after the swap so the next classification picks up the new config.
+        await self._discard_permission_classifier()
 
     def _prepare_reload(self, target_config: AnyVibeConfig) -> _PreparedReload:
         config_source = _SwappableConfigSource(lambda: target_config)

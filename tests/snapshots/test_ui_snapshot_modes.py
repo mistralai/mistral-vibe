@@ -52,8 +52,6 @@ def test_snapshot_cycle_to_accept_edits_mode(snap_compare: SnapCompare) -> None:
 
 
 def test_snapshot_cycle_to_auto_mode(snap_compare: SnapCompare) -> None:
-    """Test that shift+tab cycles to auto mode."""
-
     async def run_before(pilot: Pilot) -> None:
         await pilot.pause(0.1)
         await pilot.press("shift+tab")  # default -> plan

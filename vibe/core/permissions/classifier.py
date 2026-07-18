@@ -54,11 +54,21 @@ def _render_rules(rules: Sequence[str]) -> str:
     return "\n".join(f"- {rule}" for rule in rules)
 
 
-def _serialize_args(args: BaseModel) -> str:
+def _serialize_args(args: BaseModel) -> str | None:
+    # Truncating would hand the classifier a harmless prefix while a dangerous
+    # suffix goes unseen, so oversized arguments get no verdict at all.
     serialized = args.model_dump_json()
-    if len(serialized) <= MAX_SERIALIZED_ARGS_CHARS:
-        return serialized
-    return f"{serialized[:MAX_SERIALIZED_ARGS_CHARS]}… [truncated]"
+    if len(serialized) > MAX_SERIALIZED_ARGS_CHARS:
+        return None
+    return serialized
+
+
+def _transcript_is_clean(transcript: Sequence[LLMMessage]) -> bool:
+    # ADR-0009: tool output must never reach the classifier. Callers filter, but
+    # the boundary enforces it too so a future caller cannot quietly regress it.
+    # Unresolved tool_calls are rejected as well: the API refuses a request whose
+    # calls and responses do not pair up.
+    return not any(m.role == Role.tool or m.tool_calls for m in transcript)
 
 
 def _describe_permissions(required: Sequence[RequiredPermission]) -> str:
@@ -93,6 +103,9 @@ class PermissionClassifier:
         self._backend = backend
         self._model = model
 
+    async def aclose(self) -> None:
+        await self._backend.__aexit__(None, None, None)
+
     def _system_prompt(self, auto_mode: AutoModeConfig) -> str:
         # Config appends to the built-in defaults; it cannot remove one.
         return Template(UtilityPrompt.PERMISSION_CLASSIFIER.read()).safe_substitute(
@@ -112,10 +125,24 @@ class PermissionClassifier:
         transcript: Sequence[LLMMessage],
         metadata: dict[str, str] | None = None,
     ) -> ClassifierDecision | None:
+        if (serialized_args := _serialize_args(args)) is None:
+            logger.warning(
+                "Permission classifier skipped: arguments too large for tool=%s",
+                tool_name,
+            )
+            return None
+        if not _transcript_is_clean(transcript):
+            logger.error(
+                "Permission classifier refused a transcript carrying tool output"
+                " for tool=%s",
+                tool_name,
+            )
+            return None
+
         pending = (
             "# Pending tool call\n\n"
             f"Tool: {tool_name}\n"
-            f"Arguments: {_serialize_args(args)}\n\n"
+            f"Arguments: {serialized_args}\n\n"
             "Requires approval because:\n"
             f"{_describe_permissions(required_permissions)}\n\n"
             "Respond with the single-line JSON verdict."
