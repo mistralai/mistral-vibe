@@ -624,6 +624,7 @@ guarantee, and unavailable or malformed classifier responses prompt normally.
 
 - `/help` - Show help message
 - `/config` - Edit config settings
+- `/auto` - Configure suggested and custom Smart Auto ASK/ALLOW rules
 - `/model` - Select active model
 - `/thinking` - Select thinking level
 - `/theme` - Select Textual UI theme (persisted in config)

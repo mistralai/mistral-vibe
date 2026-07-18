@@ -1247,6 +1247,55 @@ StatusMessage {
     margin: 0;
 }
 
+#smartautorules-app {
+    width: 100%;
+    height: auto;
+    max-height: 70vh;
+    background: transparent;
+    border: solid $foreground-muted;
+    padding: 0 1;
+    margin: 0;
+}
+
+#smartautorules-content,
+#smartautorules-editor {
+    width: 100%;
+    height: auto;
+}
+
+.smartautorules-title,
+#smartautorules-editor-title {
+    height: auto;
+    color: $smart_auto;
+    text-style: bold;
+}
+
+.smartautorules-description {
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#smartautorules-options {
+    width: 100%;
+    height: auto;
+    max-height: 45vh;
+    border: none;
+}
+
+#smartautorules-input {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid $smart_auto;
+    margin: 1 0;
+}
+
+.smartautorules-help {
+    height: auto;
+    color: $text-muted;
+}
+
 #question-content {
     width: 100%;
     height: auto;

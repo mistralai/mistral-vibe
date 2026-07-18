@@ -20,6 +20,7 @@ The gap between `accept-edits` (prompts on every shell command) and `auto-approv
 - The classifier is created lazily. A session that never enters `auto` mode must never construct a classifier backend (0001 startup budget).
 - A blocked action must enter the normal human approval flow. The classifier decides what can run automatically; it never replaces the human's final authority. Headless mode continues to fail closed when no approval callback exists.
 - Interactive clients should surface each model verdict and its reason before continuing: `ALLOW` when the tool will run automatically, and `ASK` when the model routes it to human approval. This visibility is diagnostic; clients must not reinterpret or replace the classifier's judgment.
+- The `/auto` picker edits additional ASK (`soft_deny`) and ALLOW rules as natural-language guidance. Curated choices are ordinary prose rules, custom rules use the same path, and ASK rules keep precedence over ALLOW rules inside the model prompt; the picker must not introduce command-pattern matching.
 - `auto` mode pauses after repeated blocks and falls back to normal prompting, so a mis-tuned rule set degrades into prompts rather than an infinite denial loop.
 
 ## Flag To User When
