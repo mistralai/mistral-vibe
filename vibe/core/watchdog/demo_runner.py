@@ -652,8 +652,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--delay",
         type=float,
-        default=0,
-        help="Seconds between trace rows (default: 0).",
+        default=0.02,
+        help="Seconds between trace rows (default: 0.02; use 0 for instant).",
     )
     parser.add_argument(
         "--artifacts",

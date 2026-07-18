@@ -3145,7 +3145,9 @@ class VibeApp(App):  # noqa: PLR0904
                         )
                     await update(progress)
 
-                execution = await run_demo(selection, progress=matrix_update)
+                execution = await run_demo(
+                    selection, delay=0.02, progress=matrix_update
+                )
                 report = execution.report
                 if integration_report is not None:
                     report = report.model_copy(

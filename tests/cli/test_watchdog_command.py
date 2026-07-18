@@ -194,11 +194,16 @@ async def test_watchcat_report_displays_latest_demo_dashboard(
 
         report_app = app.query_one(WatchcatReportApp)
         tabs = report_app.query_one(TabbedContent)
-        assert tabs.tab_count == 5
+        assert tabs.tab_count == 6
         assert tabs.active == "watchcat-summary"
+        assert len(report_app.query(".watchcat-metric")) == 5
+        assert report_app.query(".watchcat-pipeline-visual")
 
         await pilot.press("right")
-        assert tabs.active == "watchcat-protected"
+        assert tabs.active == "watchcat-details"
+        await pilot.press("right", "right")
+        assert tabs.active == "watchcat-mitigated"
+        assert report_app.query(".watchcat-run-card")
         await pilot.press("escape")
         await pilot.pause()
         assert not app.query(WatchcatReportApp)

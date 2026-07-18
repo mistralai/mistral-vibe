@@ -50,6 +50,12 @@ fixture API -> vibe -p ... --watchcat --auto-approve
 uv run python scripts/watchcat_live_demo.py
 ```
 
+Default pacing: `0.3s` per model fixture response. Instant mode:
+
+```bash
+uv run python scripts/watchcat_live_demo.py --delay 0
+```
+
 In Vibe: `/watchcat demo headless`.
 
 ## Exhaustive matrix + live canary
@@ -72,6 +78,9 @@ Run one scenario with a paced trace:
 ```bash
 uv run python scripts/watchcat_demo.py --scenario recovery --delay 0.05
 ```
+
+The direct matrix defaults to `0.02s` between trace rows. Use `--delay 0` for
+fast automated coverage.
 
 | Scenario | Demonstrates |
 | --- | --- |

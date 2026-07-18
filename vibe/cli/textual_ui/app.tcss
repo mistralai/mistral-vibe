@@ -1878,8 +1878,8 @@ FeedbackBar {
 
 #watchcatreport-app {
     width: 100%;
-    height: 65vh;
-    min-height: 18;
+    height: 72vh;
+    min-height: 22;
     background: transparent;
     border: solid $foreground-muted;
     padding: 0 1;
@@ -1940,6 +1940,186 @@ FeedbackBar {
     width: 100%;
     height: 1fr;
     padding: 0 1;
+}
+
+.watchcat-kpi-row {
+    width: 100%;
+    height: 5;
+    margin: 1 0;
+}
+
+.watchcat-metric {
+    width: 1fr;
+    height: 5;
+    margin-right: 1;
+    padding: 0 1;
+    border: tall $foreground-muted;
+    background: $surface;
+    content-align: center middle;
+}
+
+.watchcat-metric:last-child {
+    margin-right: 0;
+}
+
+.watchcat-metric-value {
+    height: 2;
+    text-align: center;
+    text-style: bold;
+    color: $foreground;
+}
+
+.watchcat-metric-label {
+    height: 1;
+    text-align: center;
+    color: $text-muted;
+}
+
+.watchcat-metric-total {
+    border: tall $primary;
+}
+
+.watchcat-metric-protected {
+    border: tall $accent;
+}
+
+.watchcat-metric-mitigated {
+    border: tall $success;
+}
+
+.watchcat-metric-blocked {
+    border: tall $warning;
+}
+
+.watchcat-metric-degraded {
+    border: tall $error;
+}
+
+.watchcat-dashboard-row {
+    width: 100%;
+    height: 9;
+    margin-bottom: 1;
+}
+
+.watchcat-panel {
+    border: round $foreground-muted;
+    background: $surface;
+    padding: 0 1;
+}
+
+.watchcat-distribution-panel {
+    width: 2fr;
+    height: 9;
+    margin-right: 1;
+}
+
+.watchcat-pipeline-panel {
+    width: 3fr;
+    height: 9;
+}
+
+.watchcat-panel-title {
+    height: 1;
+    text-style: bold;
+    color: $primary;
+}
+
+.watchcat-bar-row {
+    height: 1;
+}
+
+.watchcat-pipeline-visual {
+    height: 3;
+    content-align: center middle;
+    text-align: center;
+}
+
+.watchcat-panel-caption {
+    height: 1;
+    text-align: center;
+    color: $text-muted;
+}
+
+.watchcat-run-map {
+    width: 100%;
+    height: auto;
+    padding-bottom: 1;
+}
+
+.watchcat-run-map-row {
+    height: 1;
+}
+
+.watchcat-run-card {
+    width: 100%;
+    height: auto;
+    min-height: 12;
+    margin: 1 0;
+    padding: 0 1 1 1;
+    border: round $foreground-muted;
+    background: $surface;
+}
+
+.watchcat-card-protected {
+    border: round $accent;
+}
+
+.watchcat-card-mitigated {
+    border: round $success;
+}
+
+.watchcat-card-blocked {
+    border: round $warning;
+}
+
+.watchcat-card-degraded {
+    border: round $error;
+}
+
+.watchcat-run-card-title {
+    height: 1;
+}
+
+.watchcat-run-trigger {
+    height: auto;
+    max-height: 2;
+    color: $text-muted;
+}
+
+.watchcat-run-flow {
+    height: 3;
+    content-align: center middle;
+    text-align: center;
+}
+
+.watchcat-run-stats {
+    width: 100%;
+    height: 4;
+}
+
+.watchcat-run-stat {
+    width: 1fr;
+    height: 4;
+    margin-right: 1;
+    border: tall $foreground-muted;
+    content-align: center middle;
+    text-align: center;
+}
+
+.watchcat-trace-visual {
+    height: auto;
+    min-height: 2;
+    margin-top: 1;
+}
+
+.watchcat-details-header {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.watchcat-empty-state {
+    height: auto;
+    color: $text-muted;
 }
 
 .watchcat-report-help {

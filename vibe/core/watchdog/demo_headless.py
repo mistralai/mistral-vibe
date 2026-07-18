@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from types import TracebackType
 from typing import Any, cast
 
@@ -28,11 +29,17 @@ HEADLESS_DEMO_PROMPT = (
 )
 REPEATED_READ_COUNT = 4
 RECOVERY_RESPONSE_INDEX = REPEATED_READ_COUNT + 1
+TOTAL_MODEL_RESPONSES = RECOVERY_RESPONSE_INDEX + 1
+DEFAULT_RESPONSE_DELAY = 0.3
 
 
 class _FixtureServer:
-    def __init__(self) -> None:
+    def __init__(
+        self, *, response_delay: float, progress: Callable[[int, int, str], None] | None
+    ) -> None:
         self.requests: list[dict[str, Any]] = []
+        self._response_delay = response_delay
+        self._progress = progress
         self._lock = threading.Lock()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -75,6 +82,11 @@ class _FixtureServer:
                 with fixture._lock:
                     fixture.requests.append(payload)
                     index = len(fixture.requests)
+                if fixture._progress is not None:
+                    fixture._progress(
+                        index, TOTAL_MODEL_RESPONSES, _response_label(index)
+                    )
+                time.sleep(fixture._response_delay)
                 response = _completion(index)
                 body = json.dumps(response).encode("utf-8")
                 self.send_response(200)
@@ -117,6 +129,14 @@ def _completion(index: int) -> dict[str, Any]:
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1},
     }
+
+
+def _response_label(index: int) -> str:
+    if index <= REPEATED_READ_COUNT:
+        return f"controlled repeated read {index}/{REPEATED_READ_COUNT}"
+    if index == RECOVERY_RESPONSE_INDEX:
+        return "recovery received; changing read -> write"
+    return "verification complete; closing run"
 
 
 def _tool_message(call_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -165,12 +185,22 @@ def _write_config(vibe_home: Path, api_base: str) -> None:
     )
 
 
-def run_headless_demo(workdir: Path | None = None) -> DemoRunReport:
+def run_headless_demo(
+    workdir: Path | None = None,
+    *,
+    response_delay: float = DEFAULT_RESPONSE_DELAY,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> DemoRunReport:
+    if response_delay < 0:
+        raise ValueError("response_delay must be non-negative")
     executable = shutil.which("vibe")
     if executable is None:
         raise RuntimeError("`vibe` executable not found on PATH")
     launch_cwd = (workdir or Path.cwd()).resolve()
-    with _FixtureServer() as fixture, _temporary_demo_dir() as temporary:
+    with (
+        _FixtureServer(response_delay=response_delay, progress=progress) as fixture,
+        _temporary_demo_dir() as temporary,
+    ):
         temporary_home = temporary / "home"
         demo_workdir = temporary / "workdir"
         demo_workdir.mkdir()
