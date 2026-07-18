@@ -112,7 +112,7 @@ class CommandRegistry:
                 description=(
                     "Monitor agent health, inspect incidents, and control recovery. "
                     "Subcommands: status, on, off, pause, resume, snapshot, "
-                    "recover, replay"
+                    "recover"
                 ),
                 handler="_watchdog_command",
             ),

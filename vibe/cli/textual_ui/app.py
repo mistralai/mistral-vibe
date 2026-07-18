@@ -70,7 +70,11 @@ from vibe.cli.textual_ui.notifications import (
 from vibe.cli.textual_ui.quit_manager import QuitManager
 from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopRunner
 from vibe.cli.textual_ui.session_exit import print_session_resume_message
-from vibe.cli.textual_ui.watchdog_command import WATCHDOG_USAGE, format_watchdog_status
+from vibe.cli.textual_ui.watchdog_command import (
+    WATCHDOG_USAGE,
+    format_snapshot_list,
+    format_watchdog_status,
+)
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
@@ -142,6 +146,10 @@ from vibe.cli.textual_ui.widgets.vibe_code_project import (
     suggested_default_branch,
 )
 from vibe.cli.textual_ui.widgets.voice_app import VoiceApp
+from vibe.cli.textual_ui.widgets.watchdog_snapshot import (
+    WatchdogSnapshotDropApp,
+    WatchdogSnapshotPickerApp,
+)
 from vibe.cli.textual_ui.windowing import (
     HISTORY_RESUME_TAIL_MESSAGES,
     LOAD_MORE_BATCH_SIZE,
@@ -283,6 +291,7 @@ if TYPE_CHECKING:
     from vibe.cli.textual_ui.widgets.mcp_oauth_app import MCPOAuthApp
     from vibe.core.agent_loop import AgentLoop
     from vibe.core.watchdog.runtime import WatchdogRuntime
+    from vibe.core.watchdog.snapshots import ConversationSnapshotStore
 
 
 def _get_connector_auth_app_class() -> type[ConnectorAuthApp]:
@@ -337,6 +346,8 @@ class BottomApp(StrEnum):
     VibeCodeProjectCreate = auto()
     SessionPicker = auto()
     Voice = auto()
+    WatchdogSnapshotDrop = auto()
+    WatchdogSnapshotPicker = auto()
 
 
 class ChatScroll(VerticalScroll):
@@ -599,6 +610,13 @@ class VibeApp(App):  # noqa: PLR0904
         self._is_resuming_session = opts.is_resuming_session
         self._watchdog_runtime = opts.watchdog_runtime
         self._last_watchdog_runtime = opts.watchdog_runtime
+        self._watchdog_snapshot_store: ConversationSnapshotStore | None = None
+        if opts.watchdog_runtime is not None:
+            from vibe.core.watchdog.snapshots import ConversationSnapshotStore
+
+            self._watchdog_snapshot_store = ConversationSnapshotStore(
+                opts.watchdog_runtime.paths.snapshots / "conversations"
+            )
         self._startup_prompt_processed = False
         self._startup_command_availability_ready = asyncio.Event()
 
@@ -2975,7 +2993,9 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _watchdog_command(self, *, cmd_args: str = "", **kwargs: Any) -> None:
         del kwargs
-        command = cmd_args.strip().lower() or "status"
+        raw_command = cmd_args.strip()
+        command, _, arguments = raw_command.partition(" ")
+        command = command.lower() or "status"
         match command:
             case "status":
                 message = format_watchdog_status(self._watchdog_runtime)
@@ -2996,11 +3016,8 @@ class VibeApp(App):  # noqa: PLR0904
                 runtime.supervisor.resume()
                 message = format_watchdog_status(runtime)
             case "snapshot":
-                runtime = await self._require_watchdog_runtime()
-                if runtime is None:
-                    return
-                path = await runtime.supervisor.store.snapshot(runtime.supervisor.state)
-                message = f"Watchdog snapshot: `{path}`"
+                await self._watchdog_snapshot_command(arguments)
+                return
             case "recover":
                 runtime = await self._require_watchdog_runtime()
                 if runtime is None:
@@ -3011,20 +3028,188 @@ class VibeApp(App):  # noqa: PLR0904
                     if recovered
                     else "No confirmed recoverable Watchdog incident."
                 )
-            case "replay":
-                runtime = self._watchdog_runtime or self._last_watchdog_runtime
-                if runtime is None:
-                    await self._mount_and_scroll(
-                        ErrorMessage("No Watchdog run is available to replay.")
-                    )
-                    return
-                from vibe.core.watchdog.replay import render_replay
-
-                message = await asyncio.to_thread(render_replay, runtime.paths)
             case _:
                 await self._mount_and_scroll(ErrorMessage(WATCHDOG_USAGE))
                 return
         await self._mount_and_scroll(UserCommandMessage(message))
+
+    async def _watchdog_snapshot_command(self, arguments: str) -> None:
+        runtime = await self._require_watchdog_runtime()
+        if runtime is None:
+            return
+        store = self._snapshot_store(runtime)
+        raw = arguments.strip()
+        action, _, reference = raw.partition(" ")
+        match action.lower():
+            case "list":
+                await self._list_watchdog_snapshots(store)
+            case "apply":
+                await self._select_or_apply_watchdog_snapshot(store, reference)
+            case "drop":
+                await self._drop_watchdog_snapshot(store, reference)
+            case _:
+                snapshot = await store.create(
+                    label=raw or None,
+                    session_id=self.agent_loop.session_id,
+                    messages=list(self.agent_loop.messages),
+                    watchdog_state=runtime.supervisor.state,
+                )
+                label = f" — {snapshot.label}" if snapshot.label is not None else ""
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        f"Created Watchdog snapshot `{snapshot.snapshot_id}`{label}."
+                    )
+                )
+
+    def _snapshot_store(self, runtime: WatchdogRuntime) -> ConversationSnapshotStore:
+        if self._watchdog_snapshot_store is None:
+            from vibe.core.watchdog.snapshots import ConversationSnapshotStore
+
+            self._watchdog_snapshot_store = ConversationSnapshotStore(
+                runtime.paths.snapshots / "conversations"
+            )
+        return self._watchdog_snapshot_store
+
+    async def _list_watchdog_snapshots(self, store: ConversationSnapshotStore) -> None:
+        snapshots = await store.list()
+        message = (
+            format_snapshot_list(snapshots)
+            if snapshots
+            else "No Watchdog snapshots for this session."
+        )
+        await self._mount_and_scroll(UserCommandMessage(message))
+
+    async def _select_or_apply_watchdog_snapshot(
+        self, store: ConversationSnapshotStore, reference: str
+    ) -> None:
+        if reference.strip():
+            await self._apply_watchdog_snapshot(store, reference.strip())
+            return
+        snapshots = await store.list()
+        if not snapshots:
+            await self._mount_and_scroll(
+                UserCommandMessage("No Watchdog snapshots for this session.")
+            )
+            return
+        await self._switch_from_input(WatchdogSnapshotPickerApp(snapshots))
+
+    async def _apply_watchdog_snapshot(
+        self, store: ConversationSnapshotStore, reference: str
+    ) -> None:
+        from vibe.core.watchdog.runtime import attach_watchdog
+        from vibe.core.watchdog.snapshots import SnapshotError
+
+        try:
+            snapshot = await store.resolve(reference)
+        except SnapshotError as error:
+            await self._mount_and_scroll(ErrorMessage(str(error)))
+            return
+
+        runtime = self._watchdog_runtime
+        if runtime is None:
+            await self._mount_and_scroll(
+                ErrorMessage("Watchdog is disabled. Run `/watchdog on`.")
+            )
+            return
+        await store.create(
+            label=f"before apply {snapshot.snapshot_id}",
+            session_id=self.agent_loop.session_id,
+            messages=list(self.agent_loop.messages),
+            watchdog_state=runtime.supervisor.state,
+        )
+        self.agent_loop.set_event_observer(None)
+        try:
+            await self.agent_loop.restore_conversation_snapshot(snapshot.messages)
+        except Exception as error:
+            replacement = attach_watchdog(
+                self.agent_loop, objective="Continue the current user task"
+            )
+            self._watchdog_runtime = replacement
+            self._last_watchdog_runtime = replacement
+            await self._switch_to_input_app()
+            await self._mount_and_scroll(
+                ErrorMessage(f"Failed to apply Watchdog snapshot: {error}")
+            )
+            return
+
+        replacement = attach_watchdog(
+            self.agent_loop, objective="Continue the restored conversation"
+        )
+        self._watchdog_runtime = replacement
+        self._last_watchdog_runtime = replacement
+        await self._refresh_snapshot_conversation()
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                f"Applied Watchdog snapshot `{snapshot.snapshot_id}`. "
+                "Conversation restored; files unchanged."
+            )
+        )
+
+    async def _refresh_snapshot_conversation(self) -> None:
+        await self._switch_to_input_app()
+        self._reset_ui_state()
+        await self._load_more.hide()
+        await self._messages_area.remove_children()
+        await self._resume_history_from_messages()
+
+    async def _drop_watchdog_snapshot(
+        self, store: ConversationSnapshotStore, reference: str
+    ) -> None:
+        from vibe.core.watchdog.snapshots import SnapshotError
+
+        if reference.strip():
+            try:
+                dropped = await store.drop(reference.strip())
+            except SnapshotError as error:
+                await self._mount_and_scroll(ErrorMessage(str(error)))
+                return
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    f"Dropped Watchdog snapshot `{dropped.snapshot_id}`."
+                )
+            )
+            return
+        snapshots = await store.list()
+        if not snapshots:
+            await self._mount_and_scroll(
+                UserCommandMessage("No Watchdog snapshots to drop.")
+            )
+            return
+        await self._switch_from_input(WatchdogSnapshotDropApp(len(snapshots)))
+
+    async def on_watchdog_snapshot_picker_app_snapshot_selected(
+        self, message: WatchdogSnapshotPickerApp.SnapshotSelected
+    ) -> None:
+        store = self._watchdog_snapshot_store
+        if store is None:
+            await self._switch_to_input_app()
+            return
+        await self._apply_watchdog_snapshot(store, message.snapshot_id)
+
+    async def on_watchdog_snapshot_picker_app_cancelled(
+        self, message: WatchdogSnapshotPickerApp.Cancelled
+    ) -> None:
+        del message
+        await self._switch_to_input_app()
+
+    async def on_watchdog_snapshot_drop_app_confirmed(
+        self, message: WatchdogSnapshotDropApp.Confirmed
+    ) -> None:
+        del message
+        store = self._watchdog_snapshot_store
+        await self._switch_to_input_app()
+        if store is None:
+            return
+        count = await store.clear()
+        await self._mount_and_scroll(
+            UserCommandMessage(f"Dropped {count} Watchdog snapshots.")
+        )
+
+    async def on_watchdog_snapshot_drop_app_cancelled(
+        self, message: WatchdogSnapshotDropApp.Cancelled
+    ) -> None:
+        del message
+        await self._switch_to_input_app()
 
     def _watchdog_on(self) -> str:
         if self._watchdog_runtime is not None:
@@ -3037,6 +3222,7 @@ class VibeApp(App):  # noqa: PLR0904
         )
         self._watchdog_runtime = runtime
         self._last_watchdog_runtime = runtime
+        self._snapshot_store(runtime)
         return format_watchdog_status(runtime)
 
     def _watchdog_off(self) -> str:

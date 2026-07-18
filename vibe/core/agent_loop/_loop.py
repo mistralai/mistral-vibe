@@ -913,6 +913,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             )
         await self._save_messages()
 
+    async def restore_conversation_snapshot(
+        self, messages: Sequence[LLMMessage]
+    ) -> None:
+        restored = [message.model_copy(deep=True) for message in messages]
+        await self._save_messages(allow_empty=True)
+        await self._reset_session()
+        self.messages.reset(restored)
+        await self._save_messages(allow_empty=True)
+
     def set_event_observer(self, observer: WatchdogObserverPort | None) -> None:
         self._event_observer = observer
 

@@ -187,7 +187,6 @@ class TestCommandRegistry:
             "resume",
             "snapshot",
             "recover",
-            "replay",
         ):
             assert control in command.description
 

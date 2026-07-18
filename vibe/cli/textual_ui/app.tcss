@@ -1866,6 +1866,38 @@ FeedbackBar {
     }
 }
 
+#watchdogsnapshotpicker-app,
+#watchdogsnapshotdrop-app {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid $foreground-muted;
+    padding: 0 1;
+    margin: 0;
+}
+
+#watchdog-snapshot-picker-content,
+#watchdog-snapshot-drop-content {
+    width: 100%;
+    height: auto;
+}
+
+.watchdog-snapshot-title {
+    height: auto;
+    text-style: bold;
+    color: $primary;
+}
+
+.watchdog-snapshot-warning,
+.watchdog-snapshot-help {
+    height: auto;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
 #feedback-text {
     width: auto;
     height: auto;

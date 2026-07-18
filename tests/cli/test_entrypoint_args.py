@@ -31,7 +31,13 @@ def test_enabled_and_disabled_tools_are_independent(
 def test_watchdog_flags_parse_without_mutating_other_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    args = _parse(monkeypatch, ["--watchdog", "--watchdog-replay", "run-1"])
+    args = _parse(monkeypatch, ["--watchdog"])
 
     assert args.watchdog is True
-    assert args.watchdog_replay == "run-1"
+
+
+def test_removed_watchdog_replay_flag_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(SystemExit):
+        _parse(monkeypatch, ["--watchdog-replay", "run-1"])

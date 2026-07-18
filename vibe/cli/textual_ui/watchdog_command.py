@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from vibe.core.watchdog.runtime import WatchdogRuntime
+from vibe.core.watchdog.snapshots import ConversationSnapshot
 
-WATCHDOG_USAGE = "Usage: /watchdog [status|on|off|pause|resume|snapshot|recover|replay]"
+WATCHDOG_USAGE = "Usage: /watchdog [status|on|off|pause|resume|snapshot|recover]"
 
 
 def format_watchdog_status(runtime: WatchdogRuntime | None) -> str:
@@ -47,5 +48,17 @@ Run: `{runtime.run_id}`
 
 Artifacts: `{runtime.paths.run_dir}`
 
-Controls: `/watchdog pause|resume|snapshot|recover|replay|off`
+Controls: `/watchdog pause|resume|snapshot|recover|off`
 """
+
+
+def format_snapshot_list(snapshots: list[ConversationSnapshot]) -> str:
+    lines = ["```text", "SNAPSHOTS", "|"]
+    for index, snapshot in enumerate(snapshots):
+        branch = "`--" if index == len(snapshots) - 1 else "+--"
+        lines.append(
+            f"{branch} {index}  {snapshot.display_name[:40]}  "
+            f"msg:{len(snapshot.messages)}"
+        )
+    lines.extend(["```", "", "Apply by index or hash: `/watchdog snapshot apply 0`"])
+    return "\n".join(lines)

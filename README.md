@@ -227,31 +227,42 @@ Most modern terminals should work, but older or minimal terminal emulators may h
 
 ### Watchdog
 
-Enable incident detection, context-injection recovery, and replay artifacts:
+Enable incident detection and context-injection recovery:
 
 ```bash
 vibe --watchdog
 vibe --watchdog --prompt "Fix the parser tests"
 ```
 
-Vibe prints the Watchdog run ID and artifact directory at startup. Replay a run:
-
-```bash
-vibe --watchdog-replay RUN_ID
-```
+Vibe prints the Watchdog run ID and artifact directory at startup. Persisted
+incident artifacts are secret-redacted by default.
 
 Interactive controls:
 
 ```text
 /watchdog           status
 /watchdog on        enable a new run
-/watchdog off       disable; keep the last replay available
+/watchdog off       disable monitoring
 /watchdog pause     observe only; close active incident
 /watchdog resume    enable intervention with a fresh detector baseline
-/watchdog snapshot  persist the current state snapshot
+/watchdog snapshot [label]       save conversation + Watchdog state
+/watchdog snapshot list          list snapshots; newest is index 0
+/watchdog snapshot apply [ref]   restore by index/hash, or open picker
+/watchdog snapshot drop [ref]    delete one, or confirm deletion of all
 /watchdog recover   request the next authorized recovery
-/watchdog replay    show the current or last run replay
 ```
+
+Snapshot parameters and behavior:
+
+| Command | Parameter | Result |
+| --- | --- | --- |
+| `/watchdog snapshot [label]` | Optional free-text label | Saves the current conversation and Watchdog state. Without a label, the generated 7-character hash is the name. |
+| `/watchdog snapshot list` | None | Lists snapshots newest-first. Each row shows its index, label/hash, and message count. |
+| `/watchdog snapshot apply [ref]` | Optional list index or 7-character hash | With a reference, restores immediately. Without one, opens the arrow-key picker. Creates a safety snapshot first. |
+| `/watchdog snapshot drop [ref]` | Optional list index or 7-character hash | With a reference, deletes one snapshot. Without one, asks for confirmation before deleting all snapshots. |
+
+Picker controls: `↑`/`↓` navigate, `Enter` selects, `Esc` closes. Applying a
+snapshot restores conversation state only; working-tree files are unchanged.
 
 Watchdog state is stored under `$VIBE_HOME/watchdog/runs/RUN_ID/`. Recovery can
 inject bounded context; it never automatically restores the main checkout.
@@ -263,7 +274,7 @@ uv run pytest -q tests/e2e/watchdog/test_repeated_call_recovery.py
 ```
 
 ```text
-repeat failure ×2 → confirm → inject once → changed action → close → replay
+repeat failure ×2 → confirm → inject once → changed action → close
 ```
 
 ### Interactive Mode

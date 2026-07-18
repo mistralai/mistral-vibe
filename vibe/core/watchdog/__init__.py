@@ -58,6 +58,12 @@ from vibe.core.watchdog.sentinel import (
     SentinelAction,
     SentinelPolicy,
 )
+from vibe.core.watchdog.snapshots import (
+    ConversationSnapshot,
+    ConversationSnapshotStore,
+    SnapshotError,
+    SnapshotNotFoundError,
+)
 from vibe.core.watchdog.store import (
     WatchdogSchemaVersionError,
     WatchdogStorageError,
@@ -81,6 +87,8 @@ __all__ = [
     "CheckpointRestorePolicy",
     "ContextInjectionVerifier",
     "ContinuationCoordinator",
+    "ConversationSnapshot",
+    "ConversationSnapshotStore",
     "DeadlineStatus",
     "EventIdentityError",
     "EventKind",
@@ -111,6 +119,8 @@ __all__ = [
     "RunState",
     "SentinelAction",
     "SentinelPolicy",
+    "SnapshotError",
+    "SnapshotNotFoundError",
     "TestImprovementVerifier",
     "TiltTracker",
     "VerificationInput",

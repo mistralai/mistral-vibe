@@ -150,12 +150,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--watchdog",
         action="store_true",
-        help="Enable Watchdog incident detection, recovery, and replay artifacts.",
-    )
-    parser.add_argument(
-        "--watchdog-replay",
-        metavar="RUN_ID",
-        help="Print a redacted Watchdog event replay and exit.",
+        help="Enable Watchdog incident detection and recovery.",
     )
 
     # Feature flag for teleport, not exposed to the user yet

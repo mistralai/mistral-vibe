@@ -496,13 +496,6 @@ def run_cli(
     load_dotenv_values()
     bootstrap_config_files()
 
-    if run_id := getattr(args, "watchdog_replay", None):
-        from vibe.core.watchdog.paths import WatchdogPaths
-        from vibe.core.watchdog.replay import render_replay
-
-        print(render_replay(WatchdogPaths.for_run(run_id)))
-        return
-
     if args.setup:
         from vibe.setup.onboarding import run_onboarding
 
