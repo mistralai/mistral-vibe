@@ -134,7 +134,7 @@ ACCEPT_EDITS = AgentProfile(
 )
 AUTO = AgentProfile(
     BuiltinAgentName.AUTO,
-    "Auto",
+    "Smart Auto",
     "Runs without prompts; a classifier blocks risky actions",
     AgentSafety.DESTRUCTIVE,
     overrides={"disabled_tools": ["exit_plan_mode"], "auto_mode": {"enabled": True}},
