@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from vibe.core.watchdog._port import WatchdogObserverPort
+from vibe.core.watchdog.checkpoint_policy import (
+    CheckpointRestorePolicy,
+    RestoreLocation,
+    RestoreVerdict,
+)
 from vibe.core.watchdog.continuation import ContinuationCoordinator
 from vibe.core.watchdog.deadlines import (
     DeadlineStatus,
@@ -18,6 +23,7 @@ from vibe.core.watchdog.fingerprint import (
     fingerprint_result,
     sanitize_artifact,
 )
+from vibe.core.watchdog.handoff import RecoveryHandoff
 from vibe.core.watchdog.heartbeat import Heartbeat, HeartbeatWriter
 from vibe.core.watchdog.incident import IncidentEngine, IncidentTransition
 from vibe.core.watchdog.models import (
@@ -57,9 +63,21 @@ from vibe.core.watchdog.store import (
 )
 from vibe.core.watchdog.supervisor import ObserveOnlySupervisor, observe_stream
 from vibe.core.watchdog.tilt import TiltTracker
+from vibe.core.watchdog.verification import (
+    CancellationVerifier,
+    ContextInjectionVerifier,
+    TestImprovementVerifier,
+    VerificationInput,
+    VerificationResult,
+    VerificationStatus,
+    VerifierRegistry,
+)
 
 __all__ = [
     "CancelResult",
+    "CancellationVerifier",
+    "CheckpointRestorePolicy",
+    "ContextInjectionVerifier",
     "ContinuationCoordinator",
     "DeadlineStatus",
     "EventIdentityError",
@@ -82,13 +100,21 @@ __all__ = [
     "QuiesceResult",
     "RecoveryCoordinator",
     "RecoveryDecision",
+    "RecoveryHandoff",
     "RecoveryPort",
     "RecoveryStrategy",
+    "RestoreLocation",
+    "RestoreVerdict",
     "RunPhase",
     "RunState",
     "SentinelAction",
     "SentinelPolicy",
+    "TestImprovementVerifier",
     "TiltTracker",
+    "VerificationInput",
+    "VerificationResult",
+    "VerificationStatus",
+    "VerifierRegistry",
     "WatchdogEvent",
     "WatchdogEventQueue",
     "WatchdogObserverPort",

@@ -7,6 +7,7 @@ from vibe.core.watchdog.authorization import (
     RecoveryAuthorizationPolicy,
 )
 from vibe.core.watchdog.events import EventKind, WatchdogEvent
+from vibe.core.watchdog.handoff import RecoveryHandoff
 from vibe.core.watchdog.models import (
     Incident,
     IncidentState,
@@ -27,10 +28,12 @@ class RecoveryCoordinator:
         store: WatchdogStore,
         port: RecoveryPort,
         authorization: RecoveryAuthorizationPolicy | None = None,
+        objective: str = "Continue the current user task safely",
     ) -> None:
         self._store = store
         self._port = port
         self._authorization = authorization or RecoveryAuthorizationPolicy()
+        self._objective = objective
         self._lock = asyncio.Lock()
         self._claimed: set[tuple[str, int]] = set()
 
@@ -65,7 +68,9 @@ class RecoveryCoordinator:
                 decision=decision,
             )
             try:
-                await self._port.inject_context(_recovery_context(recovering))
+                await self._port.inject_context(
+                    _recovery_context(state, recovering, self._objective)
+                )
             except Exception:
                 failed = recovering.model_copy(update={"state": IncidentState.DEGRADED})
                 await self._persist_transition(
@@ -107,14 +112,19 @@ class RecoveryCoordinator:
         return updated
 
 
-def _recovery_context(incident: Incident) -> str:
+def _recovery_context(state: RunState, incident: Incident, objective: str) -> str:
     evidence = incident.evidence[-1]
-    return "\n".join((
-        "[WATCHDOG RECOVERY]",
-        f"incident={incident.incident_id}",
-        f"epoch={incident.epoch}",
-        f"detector={evidence.detector}",
-        f"evidence={evidence.fingerprint}",
-        "Do not repeat the same tool call with unchanged inputs and repository.",
-        "Choose a materially different next action and verify its result.",
-    ))
+    repository = evidence.facts.get("repository")
+    return RecoveryHandoff(
+        objective=objective,
+        incident_id=incident.incident_id,
+        epoch=incident.epoch,
+        detector=evidence.detector,
+        evidence_fingerprint=evidence.fingerprint,
+        phase=state.phase,
+        repository_fingerprint=repository if isinstance(repository, str) else None,
+        prohibited_action="repeat the same tool call with unchanged inputs",
+        required_next_step="choose a materially different action and verify it",
+        attempted_strategies=(RecoveryStrategy.INJECT_CONTEXT.value,),
+        remaining_attempts=1,
+    ).render()
