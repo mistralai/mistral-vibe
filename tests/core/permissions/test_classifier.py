@@ -429,6 +429,38 @@ async def test_classify_renders_configured_rules_into_system_prompt():
 
 
 @pytest.mark.asyncio
+async def test_classifier_policy_defaults_to_allow_without_concrete_danger():
+    backend = FakeBackend(
+        chunks=mock_llm_chunk(content=decision_json(ClassifierVerdict.ALLOW, "ok"))
+    )
+    classifier = build_classifier(backend)
+    outside_permission = RequiredPermission(
+        scope=PermissionScope.OUTSIDE_DIRECTORY,
+        invocation_pattern="/external/*",
+        session_pattern="/external/*",
+        label="access files outside the working directory",
+    )
+
+    await classifier.classify(
+        auto_mode=AutoModeConfig(),
+        tool_name="shell",
+        args=_Args(command="inspect an external directory"),
+        required_permissions=[outside_permission],
+        transcript=[LLMMessage(role=Role.user, content="inspect that directory")],
+    )
+
+    system_content = backend.requests_messages[0][0].content
+    assert isinstance(system_content, str)
+    assert "Bias strongly toward ALLOW" in system_content
+    assert "outside the working directory" in system_content
+    assert "Merely reading or inspecting an external path is not dangerous" in (
+        system_content
+    )
+    assert "Never invent a deny rule" in system_content
+    assert "illustrative common cases, not an exhaustive allowlist" in system_content
+
+
+@pytest.mark.asyncio
 async def test_classify_returns_none_for_oversized_serialized_args():
     class _HugeArgs(BaseModel):
         payload: str = "HEAD_MARKER" + ("x" * 5000) + "TAIL_MARKER"
