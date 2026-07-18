@@ -417,7 +417,8 @@ class VibeConfig(BaseSettings):
         default=BuiltinAgentName.DEFAULT,
         description=(
             "Agent profile to use when no --agent flag is passed. "
-            "Builtin: default, plan, accept-edits, auto-approve. "
+            "Builtin: default, plan, accept-edits, careful-yolo, auto-approve. "
+            "The legacy auto name selects careful-yolo. "
             "Applies in both interactive and programmatic (-p/--prompt) mode."
         ),
     )

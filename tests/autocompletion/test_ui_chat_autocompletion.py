@@ -75,7 +75,7 @@ async def test_arrow_navigation_updates_selected_suggestion(vibe_app: VibeApp) -
 
         ensure_selected_command(popup, "/config")
         await pilot.press("down")
-        ensure_selected_command(popup, "/clear")
+        ensure_selected_command(popup, "/careful-yolo")
         await pilot.press("up")
         ensure_selected_command(popup, "/config")
 

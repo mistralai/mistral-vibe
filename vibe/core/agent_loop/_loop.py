@@ -232,6 +232,7 @@ class ToolDecision(BaseModel):
     verdict: ToolExecutionResponse
     approval_type: ToolPermission
     feedback: str | None = None
+    classifier_verdict: Literal["allow", "ask"] | None = None
 
 
 @dataclass(frozen=True)
@@ -1740,9 +1741,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     await monitor
 
     async def _execute_tool_to_queue(
-        self,
-        tc: ResolvedToolCall,
-        queue: asyncio.Queue[ToolQueueItem],
+        self, tc: ResolvedToolCall, queue: asyncio.Queue[ToolQueueItem]
     ) -> None:
         """Run a single tool call, sending events to the queue."""
         async for event in self._process_one_tool_call(tc):
@@ -1764,7 +1763,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             async for event in self._execute_tool_call(span, tool_call):
                 yield event
 
-    async def _execute_tool_call(
+    async def _execute_tool_call(  # noqa: PLR0912, PLR0915
         self, span: trace.Span, tool_call: ResolvedToolCall
     ) -> AsyncGenerator[ToolPipelineEvent]:
         try:
@@ -1830,6 +1829,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     tool_call.call_id,
                     permission_review.approval_context,
                 )
+                if permission_review.classifier_decision is not None:
+                    decision = decision.model_copy(update={"classifier_verdict": "ask"})
 
             if decision.verdict == ToolExecutionResponse.SKIP:
                 async for ev in self._handle_tool_skip(tool_call, decision, span=span):
@@ -1971,7 +1972,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             yield ev
         self.stats.tool_calls_succeeded += 1
 
-    async def _should_execute_tool(
+    async def _should_execute_tool(  # noqa: PLR0911
         self, tool: BaseTool, args: BaseModel
     ) -> ToolPermissionReview:
         if self.bypass_tool_permissions:
@@ -2023,6 +2024,60 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         classifier_decision = await self._run_classifier_gate(
             tool_name, args, uncovered
         )
+
+        # Re-resolve the complete permission contract after the classifier's
+        # network await. A profile switch, tool override, or new session rule may
+        # have changed both the permission level and the required scopes.
+        async with self._permission_store.lock:
+            if self.bypass_tool_permissions:
+                return ToolPermissionReview(
+                    decision=ToolDecision(
+                        verdict=ToolExecutionResponse.EXECUTE,
+                        approval_type=ToolPermission.ALWAYS,
+                    )
+                )
+
+            refreshed_ctx = tool.resolve_permission(args)
+            if refreshed_ctx is None:
+                refreshed_permission = self.tool_manager.get_tool_config(
+                    tool_name
+                ).permission
+                refreshed_ctx = PermissionContext(permission=refreshed_permission)
+
+            match refreshed_ctx.permission:
+                case ToolPermission.ALWAYS:
+                    return ToolPermissionReview(
+                        decision=ToolDecision(
+                            verdict=ToolExecutionResponse.EXECUTE,
+                            approval_type=ToolPermission.ALWAYS,
+                        )
+                    )
+                case ToolPermission.NEVER:
+                    return ToolPermissionReview(
+                        decision=ToolDecision(
+                            verdict=ToolExecutionResponse.SKIP,
+                            approval_type=ToolPermission.NEVER,
+                            feedback=refreshed_ctx.reason
+                            or f"Tool '{tool_name}' is permanently disabled",
+                        )
+                    )
+
+            refreshed_uncovered = self._uncovered_permissions(tool_name, refreshed_ctx)
+            if refreshed_ctx.required_permissions and not refreshed_uncovered:
+                return ToolPermissionReview(
+                    decision=ToolDecision(
+                        verdict=ToolExecutionResponse.EXECUTE,
+                        approval_type=ToolPermission.ALWAYS,
+                    )
+                )
+
+            contract_unchanged = (
+                refreshed_ctx == ctx and refreshed_uncovered == uncovered
+            )
+
+        if not contract_unchanged:
+            return ToolPermissionReview(decision=None, approval_context=refreshed_ctx)
+
         if (
             classifier_decision is not None
             and classifier_decision.verdict is ClassifierVerdict.ALLOW
@@ -2031,13 +2086,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 decision=ToolDecision(
                     verdict=ToolExecutionResponse.EXECUTE,
                     approval_type=ToolPermission.ALWAYS,
+                    classifier_verdict="allow",
                 ),
                 classifier_decision=classifier_decision,
             )
 
         return ToolPermissionReview(
             decision=None,
-            approval_context=ctx,
+            approval_context=refreshed_ctx,
             classifier_decision=classifier_decision,
         )
 

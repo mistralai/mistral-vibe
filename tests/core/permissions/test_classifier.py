@@ -45,14 +45,16 @@ def decision_json(
     reason: str,
     *,
     effect: str = "runs a routine command",
-    soft_deny_rule: str | None = None,
+    deny_rule: str | None = None,
+    deny_tier: str | None = None,
     user_authorized: bool = False,
     scope_ok: bool = True,
 ) -> str:
     return json.dumps(
         {
             "effect": effect,
-            "soft_deny_rule": soft_deny_rule,
+            "deny_rule": deny_rule,
+            "deny_tier": deny_tier,
             "user_authorized": user_authorized,
             "scope_ok": scope_ok,
             "verdict": verdict,
@@ -69,7 +71,8 @@ def test_parse_decision_allow():
     decision = _parse_decision(decision_json(ClassifierVerdict.ALLOW, "fine"))
     assert decision == ClassifierDecision(
         effect="runs a routine command",
-        soft_deny_rule=None,
+        deny_rule=None,
+        deny_tier=None,
         user_authorized=False,
         scope_ok=True,
         verdict=ClassifierVerdict.ALLOW,
@@ -83,12 +86,14 @@ def test_parse_decision_block():
             ClassifierVerdict.BLOCK,
             "nope",
             effect="force-pushes a branch",
-            soft_deny_rule="Force-pushing a branch.",
+            deny_rule="Force-pushing a branch.",
+            deny_tier="soft_deny",
         )
     )
     assert decision == ClassifierDecision(
         effect="force-pushes a branch",
-        soft_deny_rule="Force-pushing a branch.",
+        deny_rule="Force-pushing a branch.",
+        deny_tier="soft_deny",
         user_authorized=False,
         scope_ok=True,
         verdict=ClassifierVerdict.BLOCK,
@@ -152,7 +157,8 @@ async def test_classify_allow_verdict_from_backend():
 
     assert decision == ClassifierDecision(
         effect="runs a routine command",
-        soft_deny_rule=None,
+        deny_rule=None,
+        deny_tier=None,
         user_authorized=False,
         scope_ok=True,
         verdict=ClassifierVerdict.ALLOW,
@@ -168,7 +174,8 @@ async def test_classify_block_verdict_from_backend():
                 ClassifierVerdict.BLOCK,
                 "unsafe",
                 effect="force-pushes a branch",
-                soft_deny_rule="Force-pushing a branch.",
+                deny_rule="Force-pushing a branch.",
+                deny_tier="soft_deny",
             )
         )
     )
@@ -184,7 +191,8 @@ async def test_classify_block_verdict_from_backend():
 
     assert decision == ClassifierDecision(
         effect="force-pushes a branch",
-        soft_deny_rule="Force-pushing a branch.",
+        deny_rule="Force-pushing a branch.",
+        deny_tier="soft_deny",
         user_authorized=False,
         scope_ok=True,
         verdict=ClassifierVerdict.BLOCK,
@@ -201,7 +209,8 @@ async def test_classify_cannot_auto_allow_a_matched_dangerous_action():
                 ClassifierVerdict.ALLOW,
                 "The user confirmed the deletion.",
                 effect="permanently deletes user files",
-                soft_deny_rule=rule,
+                deny_rule=rule,
+                deny_tier="soft_deny",
                 user_authorized=True,
             )
         )
@@ -218,7 +227,7 @@ async def test_classify_cannot_auto_allow_a_matched_dangerous_action():
 
     assert decision is not None
     assert decision.verdict is ClassifierVerdict.BLOCK
-    assert decision.soft_deny_rule == rule
+    assert decision.deny_rule == rule
     assert "requires explicit tool approval" in decision.reason
 
 
@@ -233,6 +242,13 @@ async def test_classify_security_test_weakening_block_verdict():
                 ClassifierVerdict.BLOCK,
                 "Weakening an authentication test is always blocked.",
                 effect="makes the authentication test pass unconditionally",
+                deny_rule=(
+                    "Weakening a check that guards security: disabling, skipping, "
+                    "force-passing, deleting, or narrowing the scope of a test, "
+                    "scanner, or lint rule that verifies auth, access control, "
+                    "input validation, secrets handling, or sandboxing."
+                ),
+                deny_tier="hard_deny",
             )
         )
     )
@@ -251,6 +267,37 @@ async def test_classify_security_test_weakening_block_verdict():
     sent = backend.requests_messages[0]
     assert "Weakening a check that guards security" in str(sent[0].content)
     assert command in str(sent[-1].content)
+
+
+@pytest.mark.asyncio
+async def test_classify_cannot_auto_allow_a_matched_hard_deny_rule():
+    rule = "Weakening the agent's own oversight."
+    backend = FakeBackend(
+        chunks=mock_llm_chunk(
+            content=decision_json(
+                ClassifierVerdict.ALLOW,
+                "The user requested fewer prompts.",
+                effect="disables permission checks",
+                deny_rule=rule,
+                deny_tier="hard_deny",
+                user_authorized=True,
+            )
+        )
+    )
+    classifier = build_classifier(backend)
+
+    decision = await classifier.classify(
+        auto_mode=AutoModeConfig(),
+        tool_name="shell",
+        args=_Args(command="disable permission checks"),
+        required_permissions=REQUIRED_PERMISSIONS,
+        transcript=[LLMMessage(role=Role.user, content="disable permission checks")],
+    )
+
+    assert decision is not None
+    assert decision.verdict is ClassifierVerdict.BLOCK
+    assert decision.deny_rule == rule
+    assert decision.deny_tier == "hard_deny"
 
 
 @pytest.mark.asyncio

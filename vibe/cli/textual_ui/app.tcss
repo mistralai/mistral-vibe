@@ -1274,6 +1274,10 @@ StatusMessage {
     height: auto;
     color: $text-muted;
     margin-bottom: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 #smartautorules-options {
@@ -1294,6 +1298,10 @@ StatusMessage {
 .smartautorules-help {
     height: auto;
     color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 #question-content {

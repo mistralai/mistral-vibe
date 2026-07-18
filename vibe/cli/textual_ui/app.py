@@ -1301,17 +1301,14 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_smart_auto_rules_app_rules_closed(
         self, message: SmartAutoRulesApp.RulesClosed
     ) -> None:
-        errors = await self.agent_loop.config_orchestrator.set_field(
-            "/auto_mode/soft_deny",
-            message.ask_rules,
-            reason="Update Careful YOLO ASK rules",
+        current_auto_mode = self.agent_loop.config_orchestrator.config.auto_mode
+        updated_auto_mode = current_auto_mode.model_copy(
+            update={"soft_deny": message.ask_rules, "allow": message.allow_rules}
         )
-        errors.extend(
-            await self.agent_loop.config_orchestrator.set_field(
-                "/auto_mode/allow",
-                message.allow_rules,
-                reason="Update Careful YOLO ALLOW rules",
-            )
+        errors = await self.agent_loop.config_orchestrator.set_field(
+            "/auto_mode",
+            updated_auto_mode.model_dump(mode="json"),
+            reason="Update Careful YOLO rules",
         )
         if errors:
             await self._switch_to_input_app()

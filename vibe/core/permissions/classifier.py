@@ -5,9 +5,16 @@ from collections.abc import Sequence
 from enum import StrEnum
 import json
 from string import Template
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    StrictBool,
+    StrictStr,
+    ValidationError,
+    model_validator,
+)
 
 from vibe.core.config import AnyVibeConfig, ModelConfig, resolve_api_key
 from vibe.core.llm.backend.factory import create_backend
@@ -45,11 +52,18 @@ class ClassifierDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     effect: StrictStr
-    soft_deny_rule: StrictStr | None
+    deny_rule: StrictStr | None
+    deny_tier: Literal["hard_deny", "soft_deny"] | None
     user_authorized: StrictBool
     scope_ok: StrictBool
     verdict: ClassifierVerdict
     reason: StrictStr
+
+    @model_validator(mode="after")
+    def validate_deny_evidence(self) -> ClassifierDecision:
+        if (self.deny_rule is None) != (self.deny_tier is None):
+            raise ValueError("deny_rule and deny_tier must either both be set or null")
+        return self
 
 
 def _render_rules(rules: Sequence[str]) -> str:
@@ -99,14 +113,14 @@ def _parse_decision(raw: str) -> ClassifierDecision | None:
 def _enforce_dangerous_action_approval(
     decision: ClassifierDecision,
 ) -> ClassifierDecision:
-    if decision.soft_deny_rule is None or decision.verdict is ClassifierVerdict.BLOCK:
+    if decision.deny_rule is None or decision.verdict is ClassifierVerdict.BLOCK:
         return decision
     return decision.model_copy(
         update={
             "verdict": ClassifierVerdict.BLOCK,
             "reason": (
                 "A matched dangerous-action rule requires explicit tool approval: "
-                f"{decision.soft_deny_rule}"
+                f"{decision.deny_rule}"
             ),
         }
     )

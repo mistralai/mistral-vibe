@@ -194,6 +194,7 @@ from vibe.core.types import (
     ResponseTooLongError as CoreResponseTooLongError,
     Role,
     SessionTitleUpdatedEvent,
+    SmartAutoDecisionEvent,
     ToolCallEvent,
     ToolResultEvent,
     ToolStreamEvent,
@@ -1686,7 +1687,7 @@ class VibeAcpAgentLoop(AcpAgent):
             USER_DISPLAY_CONTENT_META_KEY: user_display_content.model_dump(mode="json")
         }
 
-    async def _run_agent_loop(
+    async def _run_agent_loop(  # noqa: PLR0912
         self,
         session: AcpSessionLoop,
         prompt: str,
@@ -1753,6 +1754,30 @@ class VibeAcpAgentLoop(AcpAgent):
                     if session_update:
                         yield session_update
                     self._send_usage_update(session)
+
+                elif isinstance(event, SmartAutoDecisionEvent):
+                    yield ToolCallProgress(
+                        session_update="tool_call_update",
+                        tool_call_id=event.tool_call_id,
+                        status="in_progress",
+                        kind=resolve_kind(event.tool_name),
+                        content=[
+                            ContentToolCallContent(
+                                type="content",
+                                content=TextContentBlock(
+                                    type="text",
+                                    text=(
+                                        f"Careful YOLO: {event.verdict} — "
+                                        f"{event.reason}"
+                                    ),
+                                ),
+                            )
+                        ],
+                        field_meta={
+                            "tool_name": event.tool_name,
+                            "careful_yolo_verdict": event.verdict,
+                        },
+                    )
 
                 elif isinstance(event, ToolTerminalOpenedEvent):
                     # bash yielded the terminal id; surface it as an

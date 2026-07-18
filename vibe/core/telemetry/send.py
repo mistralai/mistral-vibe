@@ -258,6 +258,7 @@ class TelemetryClient:
             "nb_files_modified": nb_files_modified,
             "file_extension": file_extension,
             "message_id": message_id,
+            "careful_yolo_verdict": (decision.classifier_verdict if decision else None),
         }
         self.send_telemetry_event("vibe.tool_call_finished", payload)
 

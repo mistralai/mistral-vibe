@@ -2,7 +2,7 @@
 
 ## Decision
 
-Vibe gains the **Careful YOLO** permission mode (`careful-yolo`; legacy alias: `auto`). Tool calls that would otherwise prompt the user are first routed to a separate, cheap classifier model (`PermissionClassifier`) that returns allow/block against four tiers of prose rules — `hard_deny`, `soft_deny`, `allow`, and `environment` — configured through `AutoModeConfig`. Allow verdicts execute automatically; block verdicts return to the normal human approval flow. In headless sessions, blocks are denied because no human approval callback exists.
+Vibe gains the **Careful YOLO** permission mode (`careful-yolo`; legacy alias: `auto`). Tool calls that would otherwise prompt the user are first routed to a separate, cheap classifier model (`PermissionClassifier`) that returns allow/block against four tiers of prose rules — `hard_deny`, `soft_deny`, `allow`, and `environment` — configured through `AutoModeConfig`. Both deny tiers mean “ask the user”; neither is a permanent refusal. Allow verdicts execute automatically; block verdicts return to the normal human approval flow. In headless sessions, blocks are denied because no human approval callback exists.
 
 This is a second gate layered on top of the `PermissionContext` contract from 0004 Typed Permissioned Tools. It does not replace or fork tool permission semantics: explicit ALWAYS/NEVER permissions and session-approved rules still resolve before the classifier is ever consulted.
 
@@ -19,9 +19,10 @@ The gap between `accept-edits` (prompts on every shell command) and `auto-approv
 - Rule lists in `AutoModeConfig` are additive over the built-in defaults in `permission_classifier.md`; config cannot delete a default rule.
 - The classifier is created lazily. A session that never enters Careful YOLO must never construct a classifier backend (0001 startup budget).
 - A blocked action must enter the normal human approval flow. The classifier decides what can run automatically; it never replaces the human's final authority. Headless mode continues to fail closed when no approval callback exists.
-- Interactive clients should surface each model verdict and its reason before continuing: `ALLOW` when the tool will run automatically, and `ASK` when the model routes it to human approval. This visibility is diagnostic; clients must not reinterpret or replace the classifier's judgment.
+- Interactive clients should surface each validated classifier verdict and its reason before continuing: `ALLOW` when the tool will run automatically, and `ASK` when the model routes it to human approval. Schema enforcement may turn an internally inconsistent model response into `ASK`; clients must not reinterpret the validated result.
 - The `/careful-yolo` picker (`/auto` remains an alias) edits additional ASK (`soft_deny`) and ALLOW rules as natural-language guidance. Curated choices are ordinary prose rules, custom rules use the same path, and ASK rules keep precedence over ALLOW rules inside the model prompt; the picker must not introduce command-pattern matching.
 - Careful YOLO pauses after repeated blocks and falls back to normal prompting, so a mis-tuned rule set degrades into prompts rather than an infinite denial loop.
+- Instrumentation extends the existing `vibe.tool_call_finished` event with `careful_yolo_verdict` (`allow`, `ask`, or null). The existing `vibe.slash_command_used` event records entry into the rule picker, avoiding a parallel event for the same interaction.
 
 ## Flag To User When
 

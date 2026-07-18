@@ -68,10 +68,10 @@ async def test_custom_ask_and_allow_rules_can_be_added() -> None:
         option_list = app.query_one(OptionList)
         option_list.highlighted = len(CURATED_ASK_RULES)
         await pilot.press("enter")
-        await pilot.press(*"external government production system")
+        await pilot.press(*"changing production access controls")
         await pilot.press("enter")
 
-        assert "external government production system" in app.rules.ask_rules
+        assert "changing production access controls" in app.rules.ask_rules
 
         option_list.highlighted = option_list.option_count - 2
         await pilot.press("enter")
@@ -84,7 +84,7 @@ async def test_custom_ask_and_allow_rules_can_be_added() -> None:
 
 
 async def test_x_removes_only_custom_rules() -> None:
-    custom_rule = "changing a protected public service"
+    custom_rule = "rotating production credentials"
     app = SmartAutoRulesHarness(
         ask_rules=[CURATED_ASK_RULES[0], custom_rule],
         allow_rules=["running local unit tests"],
@@ -146,14 +146,16 @@ async def test_slash_command_panel_opens_and_persists_both_rule_lists() -> None:
         assert app._current_bottom_app == BottomApp.Input
         assert set_field.await_args_list == [
             call(
-                "/auto_mode/soft_deny",
-                ["ask before touching production"],
-                reason="Update Careful YOLO ASK rules",
-            ),
-            call(
-                "/auto_mode/allow",
-                ["allow local tests"],
-                reason="Update Careful YOLO ALLOW rules",
-            ),
+                "/auto_mode",
+                {
+                    "enabled": True,
+                    "hard_deny": [],
+                    "soft_deny": ["ask before touching production"],
+                    "allow": ["allow local tests"],
+                    "environment": [],
+                    "classifier_model": None,
+                },
+                reason="Update Careful YOLO rules",
+            )
         ]
         reload_config.assert_awaited_once()

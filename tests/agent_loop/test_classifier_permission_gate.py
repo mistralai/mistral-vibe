@@ -146,6 +146,35 @@ class ThresholdTrippingClassifier(FakeClassifier):
         )
 
 
+class PermissionChangingClassifier(FakeClassifier):
+    def __init__(self, decision: ClassifierDecision) -> None:
+        super().__init__([decision])
+        self.agent_loop: AgentLoop | None = None
+
+    async def classify(
+        self,
+        *,
+        auto_mode: AutoModeConfig,
+        tool_name: str,
+        args: BaseModel,
+        required_permissions: Sequence[RequiredPermission],
+        transcript: Sequence[LLMMessage],
+        metadata: dict[str, str] | None = None,
+    ) -> ClassifierDecision | None:
+        if self.agent_loop is not None:
+            self.agent_loop._permission_store.set_tool_permission(
+                tool_name, ToolPermission.NEVER
+            )
+        return await super().classify(
+            auto_mode=auto_mode,
+            tool_name=tool_name,
+            args=args,
+            required_permissions=required_permissions,
+            transcript=transcript,
+            metadata=metadata,
+        )
+
+
 class ClosableClassifier:
     def __init__(self) -> None:
         self.close_count = 0
@@ -157,7 +186,8 @@ class ClosableClassifier:
 def allow(reason: str = "harmless") -> ClassifierDecision:
     return ClassifierDecision(
         effect="performs a routine operation",
-        soft_deny_rule=None,
+        deny_rule=None,
+        deny_tier=None,
         user_authorized=False,
         scope_ok=True,
         verdict=ClassifierVerdict.ALLOW,
@@ -168,7 +198,8 @@ def allow(reason: str = "harmless") -> ClassifierDecision:
 def block(reason: str = BLOCK_REASON) -> ClassifierDecision:
     return ClassifierDecision(
         effect="deletes the production database",
-        soft_deny_rule="Deploying to production or running a database migration.",
+        deny_rule="Deploying to production or running a database migration.",
+        deny_tier="soft_deny",
         user_authorized=False,
         scope_ok=True,
         verdict=ClassifierVerdict.BLOCK,
@@ -234,9 +265,7 @@ def tool_results(events: Sequence[BaseEvent]) -> list[ToolResultEvent]:
     return [e for e in events if isinstance(e, ToolResultEvent)]
 
 
-def smart_auto_decisions(
-    events: Sequence[BaseEvent],
-) -> list[SmartAutoDecisionEvent]:
+def smart_auto_decisions(events: Sequence[BaseEvent]) -> list[SmartAutoDecisionEvent]:
     return [e for e in events if isinstance(e, SmartAutoDecisionEvent)]
 
 
@@ -412,6 +441,7 @@ async def test_allow_verdict_records_always_approval_type_in_telemetry(
     ]
     assert len(finished) == 1
     assert finished[0]["properties"]["approval_type"] == ToolPermission.ALWAYS.value
+    assert finished[0]["properties"]["careful_yolo_verdict"] == "allow"
 
 
 @pytest.mark.asyncio
@@ -480,6 +510,29 @@ async def test_block_verdict_lets_the_human_approve() -> None:
     assert approval.call_count == 1
     assert tool_results(events)[0].skipped is False
     assert agent_loop.stats.tool_calls_succeeded == 1
+
+
+@pytest.mark.asyncio
+async def test_block_verdict_records_ask_in_telemetry(
+    telemetry_events: list[dict],
+) -> None:
+    classifier = FakeClassifier([block()])
+    agent_loop = make_agent_loop(
+        auto_mode_enabled=True,
+        backend=FakeBackend(turns_calling_todo(1)),
+        approval_callback=ApprovalSpy(response=ApprovalResponse.YES),
+    )
+    install_classifier(agent_loop, classifier)
+
+    await act_and_collect_events(agent_loop, "read my todos")
+
+    finished = [
+        event
+        for event in telemetry_events
+        if event.get("event_name") == "vibe.tool_call_finished"
+    ]
+    assert len(finished) == 1
+    assert finished[0]["properties"]["careful_yolo_verdict"] == "ask"
 
 
 @pytest.mark.asyncio
@@ -950,6 +1003,28 @@ async def test_block_arriving_after_auto_mode_paused_falls_through_to_approval()
     # The stale verdict must not move the counters either.
     assert agent_loop.stats.classifier_blocks_consecutive == 0
     assert agent_loop.stats.classifier_blocks_total == AUTO_MODE_MAX_TOTAL_BLOCKS
+
+
+@pytest.mark.asyncio
+async def test_permission_becoming_never_during_classification_skips_tool() -> None:
+    classifier = PermissionChangingClassifier(allow())
+    approval = ApprovalSpy(response=ApprovalResponse.YES)
+    agent_loop = make_agent_loop(
+        auto_mode_enabled=True,
+        backend=FakeBackend(turns_calling_todo(1)),
+        approval_callback=approval,
+    )
+    install_classifier(agent_loop, classifier)
+    classifier.agent_loop = agent_loop
+
+    events = await act_and_collect_events(agent_loop, "read my todos")
+
+    assert classifier.call_count == 1
+    assert approval.call_count == 0
+    assert smart_auto_decisions(events) == []
+    result = tool_results(events)[0]
+    assert result.skipped is True
+    assert result.skip_reason == "Tool 'todo' is permanently disabled"
 
 
 # --- classifier lifecycle --------------------------------------------------

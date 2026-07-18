@@ -153,6 +153,10 @@ allow = ["Allow the repository's signed release script."]
 environment = ["The staging API is inside the trust boundary."]
 ```
 
+Both deny lists route the action to the normal approval prompt; they never
+permanently refuse it. `hard_deny` is for rules that should take precedence
+over conflicting guidance, while `soft_deny` is for ordinary ASK preferences.
+
 Careful YOLO is a mitigation, not a safety guarantee. Classifier failures,
 unparseable responses, and repeated blocks fall back to normal approval.
 

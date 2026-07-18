@@ -18,16 +18,12 @@ if TYPE_CHECKING:
 
 
 CURATED_ASK_RULES: tuple[str, ...] = (
-    "Changing a citizen-facing production service or government system.",
-    "Sending government, personal, or protected data outside approved systems.",
     "Changing credentials, roles, permissions, or access-control policies.",
     "Publishing a release, package, or artifact for external users.",
 )
 
 
 class SmartAutoRulesApp(Container):
-    """Interactive editor for model-classified Careful YOLO prose rules."""
-
     can_focus_children = True
 
     BINDINGS: ClassVar[list[BindingType]] = [

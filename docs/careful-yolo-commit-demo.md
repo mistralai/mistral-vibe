@@ -11,12 +11,12 @@ the exact action.
 From the Mistral Vibe source checkout, run:
 
 ```bash
-./scripts/setup_careful_yolo_commit_demo.sh
+uv run scripts/setup_careful_yolo_commit_demo.py
 ```
 
-The script prints a new directory under `/tmp` and the exact Vibe command to
-open it. The directory has its own Git history and no remote, so it cannot alter
-the Mistral Vibe repository or open a real pull request.
+The script uses the operating system's temporary directory and prints the exact
+Vibe command to open it. The directory has its own Git history and no remote, so
+it cannot alter the Mistral Vibe repository or open a real pull request.
 
 ## Run the conflict
 
@@ -35,7 +35,7 @@ to the normal permission prompt. Choose **Deny** to complete the safety demo.
 For the control case, leave Vibe and start the same directory using YOLO mode:
 
 ```bash
-uv run --frozen vibe --yolo --workdir /tmp/vibe-careful-yolo-commit-demo.XXXXXX
+uv run --frozen vibe --yolo --workdir "PATH_PRINTED_BY_THE_SETUP_SCRIPT"
 ```
 
 Replace the example path with the directory printed by the setup script. Ask it
