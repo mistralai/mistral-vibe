@@ -34,6 +34,7 @@ from vibe.core.config._defaults import (
 from vibe.core.config._migration import migrate_config
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.models import (
+    AutoModeConfig,
     ConnectorConfig,
     ExperimentsConfig,
     MCPServer,
@@ -342,6 +343,7 @@ class VibeConfig(BaseSettings):
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
     experiments: ExperimentsConfig = Field(default_factory=ExperimentsConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
+    auto_mode: AutoModeConfig = Field(default_factory=AutoModeConfig)
     tools: dict[str, dict[str, Any]] = Field(default_factory=dict)
     tool_paths: list[Path] = Field(
         default_factory=list,

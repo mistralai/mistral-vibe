@@ -37,6 +37,7 @@ from vibe.core.config._settings import (
     resolve_theme_name,
 )
 from vibe.core.config.models import (
+    AutoModeConfig,
     ConnectorConfig,
     ExperimentsConfig,
     MCPServer,
@@ -346,6 +347,9 @@ class VibeConfigSchema(ConfigSchema):
     )
     experiments: Annotated[ExperimentsConfig, WithReplaceMerge()] = Field(
         default_factory=ExperimentsConfig
+    )
+    auto_mode: Annotated[AutoModeConfig, WithReplaceMerge()] = Field(
+        default_factory=AutoModeConfig
     )
 
     def get_active_model(self) -> ModelConfig:

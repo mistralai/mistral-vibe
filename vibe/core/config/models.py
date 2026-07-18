@@ -348,6 +348,17 @@ class ModelConfig(BaseModel):
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
 
 
+class AutoModeConfig(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
+
+    enabled: bool = False
+    hard_deny: list[str] = Field(default_factory=list)
+    soft_deny: list[str] = Field(default_factory=list)
+    allow: list[str] = Field(default_factory=list)
+    environment: list[str] = Field(default_factory=list)
+    classifier_model: ModelConfig | None = None
+
+
 def normalize_model_configs(value: Any) -> Any:
     """Read [[models]] lists or alias maps into the deep-mergeable internal map."""
     if isinstance(value, Mapping):
