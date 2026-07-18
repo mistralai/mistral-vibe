@@ -96,6 +96,22 @@ def _parse_decision(raw: str) -> ClassifierDecision | None:
         return None
 
 
+def _enforce_dangerous_action_approval(
+    decision: ClassifierDecision,
+) -> ClassifierDecision:
+    if decision.soft_deny_rule is None or decision.verdict is ClassifierVerdict.BLOCK:
+        return decision
+    return decision.model_copy(
+        update={
+            "verdict": ClassifierVerdict.BLOCK,
+            "reason": (
+                "A matched dangerous-action rule requires explicit tool approval: "
+                f"{decision.soft_deny_rule}"
+            ),
+        }
+    )
+
+
 class PermissionClassifier:
     def __init__(self, backend: BackendLike, model: ModelConfig) -> None:
         self._backend = backend
@@ -178,7 +194,8 @@ class PermissionClassifier:
                 "Permission classifier returned an unparseable verdict for tool=%s",
                 tool_name,
             )
-        return decision
+            return None
+        return _enforce_dangerous_action_approval(decision)
 
 
 def create_permission_classifier(config: AnyVibeConfig) -> PermissionClassifier | None:

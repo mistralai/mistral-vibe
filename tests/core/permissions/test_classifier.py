@@ -193,6 +193,36 @@ async def test_classify_block_verdict_from_backend():
 
 
 @pytest.mark.asyncio
+async def test_classify_cannot_auto_allow_a_matched_dangerous_action():
+    rule = "Deleting user files outside the working directory."
+    backend = FakeBackend(
+        chunks=mock_llm_chunk(
+            content=decision_json(
+                ClassifierVerdict.ALLOW,
+                "The user confirmed the deletion.",
+                effect="permanently deletes user files",
+                soft_deny_rule=rule,
+                user_authorized=True,
+            )
+        )
+    )
+    classifier = build_classifier(backend)
+
+    decision = await classifier.classify(
+        auto_mode=AutoModeConfig(),
+        tool_name="shell",
+        args=_Args(command="delete confirmed files"),
+        required_permissions=REQUIRED_PERMISSIONS,
+        transcript=[LLMMessage(role=Role.user, content="yes")],
+    )
+
+    assert decision is not None
+    assert decision.verdict is ClassifierVerdict.BLOCK
+    assert decision.soft_deny_rule == rule
+    assert "requires explicit tool approval" in decision.reason
+
+
+@pytest.mark.asyncio
 async def test_classify_security_test_weakening_block_verdict():
     command = (
         "sed -i 's/assert response.status_code == 403/assert True/' tests/test_auth.py"
