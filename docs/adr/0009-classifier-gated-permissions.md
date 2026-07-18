@@ -12,7 +12,7 @@ The gap between `accept-edits` (prompts on every shell command) and `auto-approv
 
 ## Agent Guidance
 
-- The classifier must never see tool results. It receives only system, user, and assistant messages. Tool output is attacker-controlled (file contents, command stdout, fetched pages); letting it reach the classifier would let a hostile file argue its own way past the gate. Any change that widens the classifier's input is a security regression.
+- The classifier must never see system context, injected user messages, or tool results. It receives only genuine human messages and assistant messages. Repository instructions, tool output, command stdout, fetched pages, and injected context may be attacker-controlled; letting them reach the classifier would let hostile content argue its own way past the gate or impersonate user authorization. Any change that widens the classifier's input is a security regression.
 - A malformed, timed-out, or unavailable classifier response is never an allow — it falls through to a human prompt.
 - The classifier is a mitigation, not a guarantee. Do not describe `auto` mode as safe, and do not extend it to replace review on sensitive operations.
 - Rule lists in `AutoModeConfig` are additive over the built-in defaults in `permission_classifier.md`; config cannot delete a default rule.

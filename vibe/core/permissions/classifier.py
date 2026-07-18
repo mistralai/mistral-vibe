@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from enum import StrEnum, auto
+from enum import StrEnum
 import json
 from string import Template
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, ValidationError
 
 from vibe.core.config import AnyVibeConfig, ModelConfig, resolve_api_key
 from vibe.core.llm.backend.factory import create_backend
@@ -37,17 +37,19 @@ MAX_SERIALIZED_ARGS_CHARS = 4000
 
 
 class ClassifierVerdict(StrEnum):
-    ALLOW = auto()
-    BLOCK = auto()
+    ALLOW = "ALLOW"
+    BLOCK = "BLOCK"
 
 
 class ClassifierDecision(BaseModel):
-    # The prompt asks for extra fields (effect, soft_deny_rule, user_authorized) to
-    # steer the model's reasoning. Only the verdict is used.
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
+    effect: StrictStr
+    soft_deny_rule: StrictStr | None
+    user_authorized: StrictBool
+    scope_ok: StrictBool
     verdict: ClassifierVerdict
-    reason: str
+    reason: StrictStr
 
 
 def _render_rules(rules: Sequence[str]) -> str:
@@ -64,11 +66,12 @@ def _serialize_args(args: BaseModel) -> str | None:
 
 
 def _transcript_is_clean(transcript: Sequence[LLMMessage]) -> bool:
-    # ADR-0009: tool output must never reach the classifier. Callers filter, but
-    # the boundary enforces it too so a future caller cannot quietly regress it.
-    # Unresolved tool_calls are rejected as well: the API refuses a request whose
-    # calls and responses do not pair up.
-    return not any(m.role == Role.tool or m.tool_calls for m in transcript)
+    # Only genuine human messages may establish intent. Callers filter system,
+    # injected, and tool content, but the service boundary enforces provenance too.
+    return not any(
+        m.role not in {Role.user, Role.assistant} or m.injected or m.tool_calls
+        for m in transcript
+    )
 
 
 def _describe_permissions(required: Sequence[RequiredPermission]) -> str:
@@ -79,19 +82,14 @@ def _describe_permissions(required: Sequence[RequiredPermission]) -> str:
 
 def _parse_decision(raw: str) -> ClassifierDecision | None:
     text = raw.strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
+    if not text or "\n" in text or "\r" in text:
         return None
     try:
-        payload: Any = json.loads(text[start : end + 1])
+        payload: Any = json.loads(text)
     except json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):
         return None
-    verdict = payload.get("verdict")
-    if isinstance(verdict, str):
-        payload["verdict"] = verdict.strip().lower()
     try:
         return ClassifierDecision.model_validate(payload)
     except ValidationError:
@@ -102,13 +100,14 @@ class PermissionClassifier:
     def __init__(self, backend: BackendLike, model: ModelConfig) -> None:
         self._backend = backend
         self._model = model
+        self._prompt_template = UtilityPrompt.PERMISSION_CLASSIFIER.read()
 
     async def aclose(self) -> None:
         await self._backend.__aexit__(None, None, None)
 
     def _system_prompt(self, auto_mode: AutoModeConfig) -> str:
         # Config appends to the built-in defaults; it cannot remove one.
-        return Template(UtilityPrompt.PERMISSION_CLASSIFIER.read()).safe_substitute(
+        return Template(self._prompt_template).safe_substitute(
             hard_deny=_render_rules(auto_mode.hard_deny),
             soft_deny=_render_rules(auto_mode.soft_deny),
             allow=_render_rules(auto_mode.allow),
@@ -133,8 +132,7 @@ class PermissionClassifier:
             return None
         if not _transcript_is_clean(transcript):
             logger.error(
-                "Permission classifier refused a transcript carrying tool output"
-                " for tool=%s",
+                "Permission classifier refused an untrusted transcript for tool=%s",
                 tool_name,
             )
             return None

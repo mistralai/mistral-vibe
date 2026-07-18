@@ -116,6 +116,7 @@ Vibe comes with several built-in agent profiles, each designed for different use
 - **`default`**: Standard agent that requires approval for tool executions. Best for general use.
 - **`plan`**: Read-only agent for exploration and planning. Auto-approves safe tools like `grep` and `read`.
 - **`accept-edits`**: Auto-approves file edits only (`write_file`, `edit`). Useful for code refactoring.
+- **`auto` (Smart Auto)**: Auto-runs routine actions while a separate classifier reviews permissioned actions, blocking some risky ones or falling back to normal approval when uncertain.
 - **`auto-approve`**: Auto-approves all tool executions. Use with caution.
 
 Use the `--agent` flag to select a different agent:
@@ -131,7 +132,7 @@ To change the default agent used when `--agent` is not passed, set
 default_agent = "plan"
 ```
 
-Valid values are `default`, `plan`, `accept-edits`, `auto-approve`,
+Valid values are `default`, `plan`, `accept-edits`, `auto`, `auto-approve`,
 `lean` (only when listed in `installed_agents`), or the name of any
 custom agent file in `~/.vibe/agents/` or the project's `.vibe/agents/`
 directory. Subagents such as `explore` are not accepted.
@@ -139,6 +140,20 @@ directory. Subagents such as `explore` are not accepted.
 > Note: `default_agent` applies in both interactive and programmatic
 > (`-p` / `--prompt`) sessions. Pass `--auto-approve` or `--yolo` with any
 > agent when a run should approve all tool calls without prompting.
+
+Smart Auto uses `mistral-medium-latest` by default. Its built-in deny and allow
+rules can be extended—but not removed—in `config.toml`:
+
+```toml
+[auto_mode]
+hard_deny = ["Never upload unreleased product plans."]
+soft_deny = ["Ask before publishing a package."]
+allow = ["Allow the repository's signed release script."]
+environment = ["The staging API is inside the trust boundary."]
+```
+
+Smart Auto is a mitigation, not a safety guarantee. Classifier failures,
+unparseable responses, and repeated blocks fall back to normal approval.
 
 ### Subagents and Task Delegation
 

@@ -396,6 +396,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._permission_store = permission_store or PermissionStore()
         self._permission_classifier: PermissionClassifier | None = None
         self._permission_classifier_resolved = False
+        self._permission_classifier_lock = asyncio.Lock()
 
         self.mcp_registry: MCPRegistry | None = (
             mcp_registry
@@ -1993,27 +1994,36 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     async def _discard_permission_classifier(self) -> None:
         # The classifier captures its model and provider when it is built, so a
         # config or profile change has to drop it for the next call to rebuild.
-        classifier, self._permission_classifier = self._permission_classifier, None
-        self._permission_classifier_resolved = False
+        async with self._permission_classifier_lock:
+            classifier, self._permission_classifier = (
+                self._permission_classifier,
+                None,
+            )
+            self._permission_classifier_resolved = False
         if classifier is not None:
             with contextlib.suppress(Exception):
                 await classifier.aclose()
 
-    def _get_permission_classifier(self) -> PermissionClassifier | None:
+    async def _get_permission_classifier(self) -> PermissionClassifier | None:
         if self._permission_classifier_resolved:
             return self._permission_classifier
-        self._permission_classifier = create_permission_classifier(self.config)
-        self._permission_classifier_resolved = True
-        return self._permission_classifier
+        async with self._permission_classifier_lock:
+            if self._permission_classifier_resolved:
+                return self._permission_classifier
+            self._permission_classifier = await asyncio.to_thread(
+                create_permission_classifier, self.config
+            )
+            self._permission_classifier_resolved = True
+            return self._permission_classifier
 
     def _classifier_transcript(self) -> list[LLMMessage]:
-        # Tool results are attacker-controlled (file contents, command output,
-        # fetched pages) and must never reach the classifier. Dropping them would
-        # orphan the assistant tool_calls they answered, which the API rejects, so
-        # those are flattened into text instead.
+        # Only genuine human messages may establish explicit authorization.
+        # System context, injected user messages, and tool results can all contain
+        # repository-controlled text, so none may reach the classifier. Assistant
+        # tool calls are flattened because unresolved calls are rejected by the API.
         transcript: list[LLMMessage] = []
         for message in self.messages:
-            if message.role == Role.tool:
+            if message.role in {Role.system, Role.tool} or message.injected:
                 continue
             if not message.tool_calls:
                 transcript.append(message)
@@ -2041,7 +2051,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if not self._auto_mode_active():
             return None
 
-        classifier = self._get_permission_classifier()
+        classifier = await self._get_permission_classifier()
         if classifier is None:
             return None
 
