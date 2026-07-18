@@ -75,6 +75,7 @@ class ConfigApp(Container):
                 "Autocomplete watcher (may delay first autocompletion)",
             ),
             ("ask_confirmation_on_exit", "Confirm quit on Ctrl+D"),
+            ("watchdog_enabled", "Always start Watchdog (next launch)"),
         ]
 
     def _get_current_model(self) -> str:

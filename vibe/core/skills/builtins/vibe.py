@@ -135,6 +135,7 @@ enable_telemetry = true
 enable_update_checks = true       # Daily PyPI check; prompts on next launch when a newer release exists
 enable_notifications = true
 enable_system_trust_store = false  # Use OS trust store for outbound HTTPS
+watchdog_enabled = false          # Start Watchdog automatically on every launch
 api_timeout = 720.0               # API request timeout in seconds
 api_retry_max_elapsed_time = 300.0  # Retry budget for retryable API failures in seconds
 auto_compact_threshold = 200000   # Token count before auto-compaction

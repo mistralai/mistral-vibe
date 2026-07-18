@@ -261,6 +261,7 @@ class VibeConfig(BaseSettings):
     autocopy_to_clipboard: bool = True
     file_watcher_for_autocomplete: bool = False
     ask_confirmation_on_exit: bool = True
+    watchdog_enabled: bool = False
     displayed_workdir: str = ""
     context_warnings: bool = False
     voice_mode_enabled: bool = False

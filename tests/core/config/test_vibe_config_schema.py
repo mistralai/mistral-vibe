@@ -27,6 +27,11 @@ def test_vibe_config_schema_covers_all_vibe_config_fields() -> None:
     )
 
 
+def test_watchdog_is_disabled_by_default_in_both_config_models() -> None:
+    assert VibeConfig.model_fields["watchdog_enabled"].default is False
+    assert VibeConfigSchema.model_fields["watchdog_enabled"].default is False
+
+
 @pytest.mark.asyncio
 async def test_full_toml_to_vibe_config_schema(tmp_path: Path) -> None:
     toml_path = tmp_path / "config.toml"

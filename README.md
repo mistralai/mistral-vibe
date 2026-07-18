@@ -234,6 +234,15 @@ vibe --watchdog
 vibe --watchdog --prompt "Fix the parser tests"
 ```
 
+To enable Watchdog on every launch, open `/config` and toggle
+`Always start Watchdog`, or set:
+
+```toml
+watchdog_enabled = true
+```
+
+Default: `false`. The CLI flag still enables Watchdog for a single launch.
+
 Vibe prints the Watchdog run ID and artifact directory at startup. Persisted
 incident artifacts are secret-redacted by default.
 

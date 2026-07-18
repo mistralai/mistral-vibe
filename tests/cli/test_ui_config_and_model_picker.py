@@ -98,6 +98,33 @@ async def test_config_escape_saves_changes() -> None:
             mock_set_field.assert_awaited_once_with("/autocopy_to_clipboard", True)
 
 
+@pytest.mark.asyncio
+async def test_config_toggles_and_persists_always_start_watchdog() -> None:
+    config = _make_config_with_models()
+    config.watchdog_enabled = False
+    app = build_test_vibe_app(config=config)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.1)
+        await app._show_config()
+        await pilot.pause(0.2)
+
+        for _ in range(5):
+            await pilot.press("down")
+        await pilot.press("enter")
+
+        config_app = app.query_one(ConfigApp)
+        assert config_app.changes.get("watchdog_enabled") == "On"
+
+        orchestrator = app.agent_loop.config_orchestrator
+        with patch.object(
+            orchestrator, "set_field", new=AsyncMock(return_value=[])
+        ) as mock_set_field:
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+
+            mock_set_field.assert_awaited_once_with("/watchdog_enabled", True)
+
+
 # --- /model command ---
 
 
