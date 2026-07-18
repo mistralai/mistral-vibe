@@ -68,7 +68,7 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
 
         runtime = attach_watchdog(agent_loop, objective=prompt)
         print(
-            f"WATCHDOG run={runtime.run_id} artifacts={runtime.paths.run_dir}",
+            f"WATCHCAT run={runtime.run_id} artifacts={runtime.paths.run_dir}",
             file=sys.stderr,
         )
     logger.info("USER: %s", prompt)

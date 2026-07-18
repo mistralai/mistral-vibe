@@ -36,22 +36,26 @@ The pinned `[dependency-groups].build` is what `uv sync --no-dev --group build` 
 
 `main` keeps `>=` ranges, so day-to-day upgrades on `main` (`uv lock --upgrade-package …`, Renovate PRs, etc.) are unaffected. Each new release re-snapshots `uv.lock` — there is no hand-maintained pin list.
 
-# Watchdog demo
+# Watchcat demo
 
 Run every deterministic scenario with a paced ASCII trace:
 
 ```bash
-uv run python scripts/watchdog_demo.py
+uv run python scripts/watchcat_demo.py
 ```
+
+Then open Vibe and run `/watchcat report` for the persisted ASCII dashboard.
 
 Run one scenario instantly:
 
 ```bash
-uv run python scripts/watchdog_demo.py --scenario recovery --delay 0
+uv run python scripts/watchcat_demo.py --scenario recovery --delay 0
 ```
 
 | Scenario | Demonstrates |
 | --- | --- |
+| `guarded` | Three exact failures → threshold protection → no incident |
 | `recovery` | Four exact failures → one context injection → changed action → closed incident |
 | `signal` | Signal quality degraded → score `92` → deterministic context injection → closed incident |
+| `signal-blocked` | Signal quality degraded → score `40` → intervention blocked |
 | `degraded` | Recovery delivery failure → persisted degraded incident |

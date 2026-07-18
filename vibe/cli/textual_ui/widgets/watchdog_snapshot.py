@@ -51,7 +51,7 @@ class WatchdogSnapshotPickerApp(Container):
         options.append(Option("Close picker", id="close"))
         with Vertical(id="watchdog-snapshot-picker-content"):
             yield NoMarkupStatic(
-                "Apply Watchdog Snapshot", classes="watchdog-snapshot-title"
+                "Apply Watchcat Snapshot", classes="watchdog-snapshot-title"
             )
             yield NavigableOptionList(*options, id="watchdog-snapshot-options")
             yield NoMarkupStatic(
@@ -98,7 +98,7 @@ class WatchdogSnapshotDropApp(Container):
     def compose(self) -> ComposeResult:
         with Vertical(id="watchdog-snapshot-drop-content"):
             yield NoMarkupStatic(
-                f"Drop all {self._count} Watchdog snapshots?",
+                f"Drop all {self._count} Watchcat snapshots?",
                 classes="watchdog-snapshot-title",
             )
             yield NoMarkupStatic(

@@ -17,7 +17,7 @@ class WatchdogPaths:
     def for_run(cls, run_id: str, *, root: Path | None = None) -> WatchdogPaths:
         if not _SAFE_RUN_ID.fullmatch(run_id):
             raise ValueError("run_id must be safe for use as a directory name")
-        base = root or VIBE_HOME.path / "watchdog" / "runs"
+        base = root or VIBE_HOME.path / "watchcat" / "runs"
         return cls(run_dir=base / run_id)
 
     @property

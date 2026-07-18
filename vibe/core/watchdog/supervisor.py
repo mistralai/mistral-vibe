@@ -97,11 +97,11 @@ class ObserveOnlySupervisor:
 
     def _require_idle_control(self) -> None:
         if self._worker is not None and not self._worker.done():
-            raise RuntimeError("Watchdog controls require an idle agent turn")
+            raise RuntimeError("Watchcat controls require an idle agent turn")
 
     async def start(self) -> None:
         if self._worker is not None and not self._worker.done():
-            raise RuntimeError("Watchdog supervisor already started")
+            raise RuntimeError("Watchcat supervisor already started")
         self._queue = WatchdogEventQueue(capacity=self._queue_capacity)
         self._worker = asyncio.create_task(self._run())
         self._enqueue_boundary(EventKind.RUN_STARTED)

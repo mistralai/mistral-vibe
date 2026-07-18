@@ -135,7 +135,7 @@ enable_telemetry = true
 enable_update_checks = true       # Daily PyPI check; prompts on next launch when a newer release exists
 enable_notifications = true
 enable_system_trust_store = false  # Use OS trust store for outbound HTTPS
-watchdog_enabled = false          # Start Watchdog automatically on every launch
+watchcat_enabled = false          # Start Watchcat automatically on every launch
 api_timeout = 720.0               # API request timeout in seconds
 api_retry_max_elapsed_time = 300.0  # Retry budget for retryable API failures in seconds
 auto_compact_threshold = 200000   # Token count before auto-compaction
@@ -566,15 +566,15 @@ vibe --agent NAME                   # Select agent profile (falls back to `defau
 vibe --auto-approve / --yolo         # Approve all tool calls for the selected agent
 vibe --workdir DIR                  # Change working directory
 vibe --worktree NAME                # Create/reuse a git worktree under $VIBE_HOME/worktrees on branch NAME and run inside it. Auto-cleanup only for worktrees Vibe created this run and only after a session started; reused worktrees and attached (pre-existing) branches are kept unless confirmed. -p sessions keep worktrees. Ignored with --setup/--check-upgrade.
-vibe --watchdog                     # Enable incident detection and context-injection recovery
-/watchdog                           # Show live Watchdog status
-/watchdog on|off                    # Enable or disable Watchdog for the interactive session
-/watchdog pause|resume              # Toggle intervention; resume starts a fresh detector baseline
-/watchdog snapshot [label]          # Save conversation + Watchdog state
-/watchdog snapshot list             # List snapshots, newest first
-/watchdog snapshot apply [index|hash] # Restore directly or open picker
-/watchdog snapshot drop [index|hash]  # Delete one or confirm deletion of all
-/watchdog recover                   # Request the next authorized recovery
+vibe --watchcat                     # Enable incident detection and context-injection recovery
+/watchcat                           # Show live Watchcat status
+/watchcat on|off                    # Enable or disable Watchcat for the interactive session
+/watchcat pause|resume              # Toggle intervention; resume starts a fresh detector baseline
+/watchcat snapshot [label]          # Save conversation + Watchcat state
+/watchcat snapshot list             # List snapshots, newest first
+/watchcat snapshot apply [index|hash] # Restore directly or open picker
+/watchcat snapshot drop [index|hash]  # Delete one or confirm deletion of all
+/watchcat recover                   # Request the next authorized recovery
 vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
 vibe --trust                        # Trust cwd for this invocation only (not persisted)
 vibe -c / --continue                # Continue most recent session in this terminal (TTY-scoped, falls back to latest in cwd)

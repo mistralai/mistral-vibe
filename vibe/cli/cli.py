@@ -64,8 +64,8 @@ def get_initial_agent_name(args: argparse.Namespace, config: VibeConfig) -> str:
     return args.agent or config.default_agent
 
 
-def is_watchdog_enabled(args: argparse.Namespace, config: VibeConfig) -> bool:
-    return bool(getattr(args, "watchdog", False) or config.watchdog_enabled)
+def is_watchcat_enabled(args: argparse.Namespace, config: VibeConfig) -> bool:
+    return bool(getattr(args, "watchcat", False) or config.watchcat_enabled)
 
 
 def get_prompt_from_stdin() -> str | None:
@@ -311,7 +311,7 @@ def _run_programmatic_mode(
             headless=True,
             hook_config_result=hook_config_result,
             terminal_emulator=detect_terminal(),
-            watchdog=is_watchdog_enabled(args, config),
+            watchdog=is_watchcat_enabled(args, config),
         )
         if final_response:
             print(final_response)
@@ -357,7 +357,7 @@ def _run_interactive_mode(
         _resume_previous_session(agent_loop, *loaded_session)
 
     watchdog_runtime = None
-    if is_watchdog_enabled(args, config):
+    if is_watchcat_enabled(args, config):
         from vibe.core.watchdog.runtime import attach_watchdog
 
         watchdog_runtime = attach_watchdog(
@@ -365,7 +365,7 @@ def _run_interactive_mode(
             objective=args.initial_prompt or stdin_prompt or "Continue the user task",
         )
         rprint(
-            f"[cyan]Watchdog enabled[/] run={watchdog_runtime.run_id} "
+            f"[cyan]Watchcat enabled[/] run={watchdog_runtime.run_id} "
             f"artifacts={watchdog_runtime.paths.run_dir}"
         )
 

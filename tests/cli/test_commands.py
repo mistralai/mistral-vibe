@@ -13,7 +13,8 @@ class TestCommandRegistry:
         assert registry.get_command_name("/clear") == "clear"
         assert registry.get_command_name("/exit") == "exit"
         assert registry.get_command_name("/data-retention") == "data-retention"
-        assert registry.get_command_name("/watchdog") == "watchdog"
+        assert registry.get_command_name("/watchcat") == "watchcat"
+        assert registry.get_command_name("/watchdog") is None
 
     def test_get_command_name_normalizes_input(self) -> None:
         registry = CommandRegistry()
@@ -168,13 +169,13 @@ class TestCommandRegistry:
         assert cmd.handler == "_loop_command"
         assert cmd_args == "30s ping"
 
-    def test_watchdog_command_registration_lists_all_controls(self) -> None:
+    def test_watchcat_command_registration_lists_all_controls(self) -> None:
         registry = CommandRegistry()
-        result = registry.parse_command("/watchdog snapshot")
+        result = registry.parse_command("/watchcat snapshot")
 
         assert result is not None
         cmd_name, command, cmd_args = result
-        assert cmd_name == "watchdog"
+        assert cmd_name == "watchcat"
         assert command.handler == "_watchdog_command"
         assert cmd_args == "snapshot"
         assert "Monitor agent health" in command.description

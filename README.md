@@ -225,66 +225,71 @@ Most modern terminals should work, but older or minimal terminal emulators may h
 
 ## Usage
 
-### Watchdog
+### Watchcat
 
 Enable incident detection and context-injection recovery:
 
 ```bash
-vibe --watchdog
-vibe --watchdog --prompt "Fix the parser tests"
+vibe --watchcat
+vibe --watchcat --prompt "Fix the parser tests"
 ```
 
-To enable Watchdog on every launch, open `/config` and toggle
-`Always start Watchdog`, or set:
+To enable Watchcat on every launch, open `/config` and toggle
+`Always start Watchcat`, or set:
 
 ```toml
-watchdog_enabled = true
+watchcat_enabled = true
 ```
 
-Default: `false`. The CLI flag still enables Watchdog for a single launch.
+Default: `false`. The CLI flag still enables Watchcat for a single launch.
 
-Vibe prints the Watchdog run ID and artifact directory at startup. Persisted
+Vibe prints the Watchcat run ID and artifact directory at startup. Persisted
 incident artifacts are secret-redacted by default.
 
 Interactive controls:
 
 ```text
-/watchdog           status
-/watchdog on        enable a new run
-/watchdog off       disable monitoring
-/watchdog pause     observe only; close active incident
-/watchdog resume    enable intervention with a fresh detector baseline
-/watchdog snapshot [label]       save conversation + Watchdog state
-/watchdog snapshot list          list snapshots; newest is index 0
-/watchdog snapshot apply [ref]   restore by index/hash, or open picker
-/watchdog snapshot drop [ref]    delete one, or confirm deletion of all
-/watchdog recover   request the next authorized recovery
+/watchcat           status
+/watchcat report    show the latest demo dashboard
+/watchcat on        enable a new run
+/watchcat off       disable monitoring
+/watchcat pause     observe only; close active incident
+/watchcat resume    enable intervention with a fresh detector baseline
+/watchcat snapshot [label]       save conversation + Watchcat state
+/watchcat snapshot list          list snapshots; newest is index 0
+/watchcat snapshot apply [ref]   restore by index/hash, or open picker
+/watchcat snapshot drop [ref]    delete one, or confirm deletion of all
+/watchcat recover   request the next authorized recovery
 ```
 
 Snapshot parameters and behavior:
 
 | Command | Parameter | Result |
 | --- | --- | --- |
-| `/watchdog snapshot [label]` | Optional free-text label | Saves the current conversation and Watchdog state. Without a label, the generated 7-character hash is the name. |
-| `/watchdog snapshot list` | None | Lists snapshots newest-first. Each row shows its index, label/hash, and message count. |
-| `/watchdog snapshot apply [ref]` | Optional list index or 7-character hash | With a reference, restores immediately. Without one, opens the arrow-key picker. Creates a safety snapshot first. |
-| `/watchdog snapshot drop [ref]` | Optional list index or 7-character hash | With a reference, deletes one snapshot. Without one, asks for confirmation before deleting all snapshots. |
+| `/watchcat snapshot [label]` | Optional free-text label | Saves the current conversation and Watchcat state. Without a label, the generated 7-character hash is the name. |
+| `/watchcat snapshot list` | None | Lists snapshots newest-first. Each row shows its index, label/hash, and message count. |
+| `/watchcat snapshot apply [ref]` | Optional list index or 7-character hash | With a reference, restores immediately. Without one, opens the arrow-key picker. Creates a safety snapshot first. |
+| `/watchcat snapshot drop [ref]` | Optional list index or 7-character hash | With a reference, deletes one snapshot. Without one, asks for confirmation before deleting all snapshots. |
 
 Picker controls: `↑`/`↓` navigate, `Enter` selects, `Esc` closes. Applying a
 snapshot restores conversation state only; working-tree files are unchanged.
 
-Watchdog state is stored under `$VIBE_HOME/watchdog/runs/RUN_ID/`. Recovery can
+Watchcat state is stored under `$VIBE_HOME/watchcat/runs/RUN_ID/`. Recovery can
 inject bounded context; it never automatically restores the main checkout.
 
-Deterministic local demo (runs three Watchdog scenarios):
+Deterministic local demo (runs five Watchcat scenarios):
 
 ```bash
-uv run python scripts/watchdog_demo.py
+uv run python scripts/watchcat_demo.py
 ```
 
+Then run `/watchcat report` inside Vibe to view the persisted ASCII dashboard.
+
 ```text
+guarded  : repeat failure ×3 → no incident
 recovery : repeat failure ×4 → confirm → inject once → changed action → close
 signal   : signal quality degraded → LLM score → deterministic recovery policy
+blocked  : degraded signal → low LLM score → intervention blocked
 degraded : delivery failure → degraded incident recorded
 ```
 

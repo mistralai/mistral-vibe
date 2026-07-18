@@ -148,9 +148,9 @@ def parse_arguments() -> argparse.Namespace:
         "Use this for non-interactive automation.",
     )
     parser.add_argument(
-        "--watchdog",
+        "--watchcat",
         action="store_true",
-        help="Enable Watchdog incident detection and recovery.",
+        help="Enable Watchcat incident detection and recovery.",
     )
 
     # Feature flag for teleport, not exposed to the user yet

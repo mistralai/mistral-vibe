@@ -120,7 +120,7 @@ class ConversationSnapshotStore:
                     )
                 )
         except (OSError, UnicodeError, ValueError) as error:
-            raise SnapshotError("Failed to read Watchdog snapshots.") from error
+            raise SnapshotError("Failed to read Watchcat snapshots.") from error
         return sorted(snapshots, key=lambda item: item.created_at, reverse=True)
 
     def _clear_sync(self) -> int:
@@ -131,7 +131,7 @@ class ConversationSnapshotStore:
             for path in paths:
                 path.unlink()
         except OSError as error:
-            raise SnapshotError("Failed to clear Watchdog snapshots.") from error
+            raise SnapshotError("Failed to clear Watchcat snapshots.") from error
         return len(paths)
 
     @staticmethod
@@ -175,7 +175,7 @@ class ConversationSnapshotStore:
                 os.fsync(temp.fileno())
             os.replace(temp_path, target)
         except OSError as error:
-            raise SnapshotError("Failed to persist Watchdog snapshot.") from error
+            raise SnapshotError("Failed to persist Watchcat snapshot.") from error
         finally:
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from vibe.cli.cli import get_initial_agent_name, is_watchdog_enabled
+from vibe.cli.cli import get_initial_agent_name, is_watchcat_enabled
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import VibeConfig
 
@@ -69,16 +69,16 @@ def test_auto_approve_flag_keeps_explicit_agent_arg() -> None:
     assert get_initial_agent_name(args, config) == BuiltinAgentName.LEAN
 
 
-def test_watchdog_starts_from_flag_or_persisted_config() -> None:
-    flag_args = argparse.Namespace(watchdog=True)
-    plain_args = argparse.Namespace(watchdog=False)
+def test_watchcat_starts_from_flag_or_persisted_config() -> None:
+    flag_args = argparse.Namespace(watchcat=True)
+    plain_args = argparse.Namespace(watchcat=False)
 
-    assert is_watchdog_enabled(
-        flag_args, VibeConfig.model_construct(watchdog_enabled=False)
+    assert is_watchcat_enabled(
+        flag_args, VibeConfig.model_construct(watchcat_enabled=False)
     )
-    assert is_watchdog_enabled(
-        plain_args, VibeConfig.model_construct(watchdog_enabled=True)
+    assert is_watchcat_enabled(
+        plain_args, VibeConfig.model_construct(watchcat_enabled=True)
     )
-    assert not is_watchdog_enabled(
-        plain_args, VibeConfig.model_construct(watchdog_enabled=False)
+    assert not is_watchcat_enabled(
+        plain_args, VibeConfig.model_construct(watchcat_enabled=False)
     )

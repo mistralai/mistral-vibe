@@ -106,7 +106,7 @@ class WatchdogStore:
         ).encode()
         if len(encoded) > self._max_record_bytes:
             raise WatchdogStorageError(
-                f"Watchdog audit record exceeds {self._max_record_bytes} bytes"
+                f"Watchcat audit record exceeds {self._max_record_bytes} bytes"
             )
         try:
             with path.open("ab") as audit:
@@ -163,13 +163,13 @@ class WatchdogStore:
         try:
             raw = json.loads(read_safe(self.paths.state, raise_on_error=True).text)
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            raise WatchdogStorageError("failed to read Watchdog state") from error
+            raise WatchdogStorageError("failed to read Watchcat state") from error
         if not isinstance(raw, dict) or raw.get("schema_version") != 1:
-            raise WatchdogSchemaVersionError("unsupported Watchdog state schema")
+            raise WatchdogSchemaVersionError("unsupported Watchcat state schema")
         try:
             return RunState.model_validate(raw)
         except ValidationError as error:
-            raise WatchdogStorageError("invalid Watchdog state") from error
+            raise WatchdogStorageError("invalid Watchcat state") from error
 
     def _load_events_sync(self) -> list[WatchdogEvent]:
         if not self.paths.events.exists():
@@ -181,5 +181,5 @@ class WatchdogStore:
                 if line:
                     events.append(WatchdogEvent.model_validate_json(line))
         except (OSError, UnicodeError, ValidationError) as error:
-            raise WatchdogStorageError("failed to read Watchdog events") from error
+            raise WatchdogStorageError("failed to read Watchcat events") from error
         return events

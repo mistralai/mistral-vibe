@@ -71,8 +71,9 @@ from vibe.cli.textual_ui.quit_manager import QuitManager
 from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopRunner
 from vibe.cli.textual_ui.session_exit import print_session_resume_message
 from vibe.cli.textual_ui.watchdog_command import (
-    WATCHDOG_USAGE,
+    WATCHCAT_USAGE,
     format_snapshot_list,
+    format_watchcat_demo_report,
     format_watchdog_status,
 )
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
@@ -2999,6 +3000,16 @@ class VibeApp(App):  # noqa: PLR0904
         match command:
             case "status":
                 message = format_watchdog_status(self._watchdog_runtime)
+            case "report":
+                from vibe.core.watchdog.demo_report import load_latest_demo_report
+
+                report = load_latest_demo_report()
+                message = (
+                    format_watchcat_demo_report(report)
+                    if report is not None
+                    else "No Watchcat demo report found. Run "
+                    "`uv run python scripts/watchcat_demo.py` first."
+                )
             case "on":
                 message = self._watchdog_on()
             case "off":
@@ -3026,10 +3037,10 @@ class VibeApp(App):  # noqa: PLR0904
                 message = (
                     format_watchdog_status(runtime)
                     if recovered
-                    else "No confirmed recoverable Watchdog incident."
+                    else "No confirmed recoverable Watchcat incident."
                 )
             case _:
-                await self._mount_and_scroll(ErrorMessage(WATCHDOG_USAGE))
+                await self._mount_and_scroll(ErrorMessage(WATCHCAT_USAGE))
                 return
         await self._mount_and_scroll(UserCommandMessage(message))
 
@@ -3057,7 +3068,7 @@ class VibeApp(App):  # noqa: PLR0904
                 label = f" — {snapshot.label}" if snapshot.label is not None else ""
                 await self._mount_and_scroll(
                     UserCommandMessage(
-                        f"Created Watchdog snapshot `{snapshot.snapshot_id}`{label}."
+                        f"Created Watchcat snapshot `{snapshot.snapshot_id}`{label}."
                     )
                 )
 
@@ -3075,7 +3086,7 @@ class VibeApp(App):  # noqa: PLR0904
         message = (
             format_snapshot_list(snapshots)
             if snapshots
-            else "No Watchdog snapshots for this session."
+            else "No Watchcat snapshots for this session."
         )
         await self._mount_and_scroll(UserCommandMessage(message))
 
@@ -3088,7 +3099,7 @@ class VibeApp(App):  # noqa: PLR0904
         snapshots = await store.list()
         if not snapshots:
             await self._mount_and_scroll(
-                UserCommandMessage("No Watchdog snapshots for this session.")
+                UserCommandMessage("No Watchcat snapshots for this session.")
             )
             return
         await self._switch_from_input(WatchdogSnapshotPickerApp(snapshots))
@@ -3108,7 +3119,7 @@ class VibeApp(App):  # noqa: PLR0904
         runtime = self._watchdog_runtime
         if runtime is None:
             await self._mount_and_scroll(
-                ErrorMessage("Watchdog is disabled. Run `/watchdog on`.")
+                ErrorMessage("Watchcat is disabled. Run `/watchcat on`.")
             )
             return
         await store.create(
@@ -3128,7 +3139,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._last_watchdog_runtime = replacement
             await self._switch_to_input_app()
             await self._mount_and_scroll(
-                ErrorMessage(f"Failed to apply Watchdog snapshot: {error}")
+                ErrorMessage(f"Failed to apply Watchcat snapshot: {error}")
             )
             return
 
@@ -3140,7 +3151,7 @@ class VibeApp(App):  # noqa: PLR0904
         await self._refresh_snapshot_conversation()
         await self._mount_and_scroll(
             UserCommandMessage(
-                f"Applied Watchdog snapshot `{snapshot.snapshot_id}`. "
+                f"Applied Watchcat snapshot `{snapshot.snapshot_id}`. "
                 "Conversation restored; files unchanged."
             )
         )
@@ -3165,14 +3176,14 @@ class VibeApp(App):  # noqa: PLR0904
                 return
             await self._mount_and_scroll(
                 UserCommandMessage(
-                    f"Dropped Watchdog snapshot `{dropped.snapshot_id}`."
+                    f"Dropped Watchcat snapshot `{dropped.snapshot_id}`."
                 )
             )
             return
         snapshots = await store.list()
         if not snapshots:
             await self._mount_and_scroll(
-                UserCommandMessage("No Watchdog snapshots to drop.")
+                UserCommandMessage("No Watchcat snapshots to drop.")
             )
             return
         await self._switch_from_input(WatchdogSnapshotDropApp(len(snapshots)))
@@ -3202,7 +3213,7 @@ class VibeApp(App):  # noqa: PLR0904
             return
         count = await store.clear()
         await self._mount_and_scroll(
-            UserCommandMessage(f"Dropped {count} Watchdog snapshots.")
+            UserCommandMessage(f"Dropped {count} Watchcat snapshots.")
         )
 
     async def on_watchdog_snapshot_drop_app_cancelled(
@@ -3236,7 +3247,7 @@ class VibeApp(App):  # noqa: PLR0904
     async def _require_watchdog_runtime(self) -> WatchdogRuntime | None:
         if self._watchdog_runtime is None:
             await self._mount_and_scroll(
-                ErrorMessage("Watchdog is disabled. Run `/watchdog on`.")
+                ErrorMessage("Watchcat is disabled. Run `/watchcat on`.")
             )
         return self._watchdog_runtime
 

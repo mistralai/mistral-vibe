@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from vibe.core.watchdog import (
     WatchdogRuntime,
     WatchdogStore,
 )
+from vibe.core.watchdog.demo_report import DemoReport, DemoRunReport, save_demo_report
 
 
 def _runtime(tmp_path: Path):
@@ -38,34 +40,34 @@ async def test_watchdog_command_controls_full_runtime_lifecycle(tmp_path: Path) 
 
     async with app.run_test() as pilot:
         for command in (
-            "/watchdog",
-            "/watchdog pause",
-            "/watchdog resume",
-            "/watchdog snapshot",
-            "/watchdog snapshot list",
-            "/watchdog recover",
-            "/watchdog off",
-            "/watchdog on",
-            "/watchdog status",
+            "/watchcat",
+            "/watchcat pause",
+            "/watchcat resume",
+            "/watchcat snapshot",
+            "/watchcat snapshot list",
+            "/watchcat recover",
+            "/watchcat off",
+            "/watchcat on",
+            "/watchcat status",
         ):
             assert await app._handle_command(command)
         await pilot.pause()
 
         messages = [message._content for message in app.query(UserCommandMessage)]
-        assert any("WATCHDOG [PAUSED]" in message for message in messages)
+        assert any("WATCHCAT [PAUSED]" in message for message in messages)
         assert any(
             "observe --> detect --> recover --> verify" in message
             for message in messages
         )
-        assert any("Created Watchdog snapshot" in message for message in messages)
+        assert any("Created Watchcat snapshot" in message for message in messages)
         assert any("SNAPSHOTS" in message for message in messages)
         assert any(
-            message == "No confirmed recoverable Watchdog incident."
+            message == "No confirmed recoverable Watchcat incident."
             for message in messages
         )
-        assert any("WATCHDOG [OFF]" in message for message in messages)
-        assert messages[-1].startswith("## Watchdog")
-        assert "WATCHDOG [ENABLED]" in messages[-1]
+        assert any("WATCHCAT [OFF]" in message for message in messages)
+        assert messages[-1].startswith("## Watchcat")
+        assert "WATCHCAT [ENABLED]" in messages[-1]
         assert "signal quality : healthy" in messages[-1]
 
     snapshots = runtime.paths.snapshots / "conversations"
@@ -81,18 +83,18 @@ async def test_watchdog_snapshot_picker_applies_and_close_option_cancels(
     app = build_test_vibe_app(agent_loop=agent_loop, watchdog_runtime=runtime)
 
     async with app.run_test() as pilot:
-        assert await app._handle_command("/watchdog snapshot parser checkpoint")
+        assert await app._handle_command("/watchcat snapshot parser checkpoint")
         agent_loop.messages.append(
             LLMMessage(role=Role.assistant, content="later work")
         )
 
-        assert await app._handle_command("/watchdog snapshot apply")
+        assert await app._handle_command("/watchcat snapshot apply")
         assert app.query_one(WatchdogSnapshotPickerApp)
         await pilot.press("down", "enter")
         await pilot.pause()
         assert list(agent_loop.messages)[-1].content == "later work"
 
-        assert await app._handle_command("/watchdog snapshot apply")
+        assert await app._handle_command("/watchcat snapshot apply")
         await pilot.press("enter")
         await pilot.pause()
 
@@ -116,24 +118,63 @@ async def test_watchdog_snapshot_drop_all_defaults_to_cancel_then_confirms(
     app = build_test_vibe_app(agent_loop=agent_loop, watchdog_runtime=runtime)
 
     async with app.run_test() as pilot:
-        assert await app._handle_command("/watchdog snapshot first")
-        assert await app._handle_command("/watchdog snapshot second")
+        assert await app._handle_command("/watchcat snapshot first")
+        assert await app._handle_command("/watchcat snapshot second")
         store = app._watchdog_snapshot_store
         assert store is not None
 
-        assert await app._handle_command("/watchdog snapshot drop")
+        assert await app._handle_command("/watchcat snapshot drop")
         assert app.query_one(WatchdogSnapshotDropApp)
         await pilot.press("enter")
         await pilot.pause()
         assert len(await store.list()) == 2
 
-        assert await app._handle_command("/watchdog snapshot drop")
+        assert await app._handle_command("/watchcat snapshot drop")
         await pilot.press("down", "enter")
         await pilot.pause()
         assert await store.list() == []
         assert any(
-            message._content == "Dropped 2 Watchdog snapshots."
+            message._content == "Dropped 2 Watchcat snapshots."
             for message in app.query(UserCommandMessage)
+        )
+
+
+@pytest.mark.asyncio
+async def test_watchcat_report_displays_latest_demo_dashboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    save_demo_report(
+        DemoReport(
+            report_id="demo-report",
+            created_at=datetime.now(UTC),
+            runs=[
+                DemoRunReport(
+                    name="recovery",
+                    title="Repeated failure recovery",
+                    trigger="4 exact repeated calls",
+                    flow=["observe x4", "confirm", "recover", "verify", "close"],
+                    outcome="recovered",
+                    signal_quality="healthy",
+                    incident_state="closed",
+                    llm_scores=[],
+                    injection_attempts=1,
+                    context_injections=1,
+                    artifacts="/tmp/demo-recovery",
+                )
+            ],
+        )
+    )
+    app = build_test_vibe_app()
+
+    async with app.run_test() as pilot:
+        assert await app._handle_command("/watchcat report")
+        await pilot.pause()
+
+        messages = [message._content for message in app.query(UserCommandMessage)]
+        assert any("WATCHCAT DEMO  demo-report" in message for message in messages)
+        assert any(
+            "observe x4 -> confirm -> recover" in message for message in messages
         )
 
 
@@ -142,12 +183,12 @@ async def test_watchdog_command_rejects_unknown_control() -> None:
     app = build_test_vibe_app()
 
     async with app.run_test() as pilot:
-        assert await app._handle_command("/watchdog explode")
+        assert await app._handle_command("/watchcat explode")
         await pilot.pause()
 
         errors = app.query(ErrorMessage)
         assert any(
             error._error
-            == "Usage: /watchdog [status|on|off|pause|resume|snapshot|recover]"
+            == "Usage: /watchcat [status|report|on|off|pause|resume|snapshot|recover]"
             for error in errors
         )

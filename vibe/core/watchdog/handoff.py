@@ -25,7 +25,7 @@ class RecoveryHandoff(BaseModel):
 
     def render(self, *, max_chars: int = 4_000) -> str:
         structured = [
-            "[WATCHDOG RECOVERY HANDOFF]",
+            "[WATCHCAT RECOVERY HANDOFF]",
             f"objective={self.objective}",
             f"incident={self.incident_id}",
             f"epoch={self.epoch}",

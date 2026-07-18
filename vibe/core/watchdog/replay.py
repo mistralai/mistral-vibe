@@ -8,7 +8,7 @@ from vibe.core.watchdog.paths import WatchdogPaths
 
 def render_replay(paths: WatchdogPaths) -> str:
     if not paths.events.exists():
-        return f"No Watchdog events found for {paths.run_dir.name}."
+        return f"No Watchcat events found for {paths.run_dir.name}."
     lines: list[str] = []
     for raw_line in read_safe(paths.events).text.splitlines():
         if not raw_line:

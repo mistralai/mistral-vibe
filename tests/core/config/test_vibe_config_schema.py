@@ -27,9 +27,9 @@ def test_vibe_config_schema_covers_all_vibe_config_fields() -> None:
     )
 
 
-def test_watchdog_is_disabled_by_default_in_both_config_models() -> None:
-    assert VibeConfig.model_fields["watchdog_enabled"].default is False
-    assert VibeConfigSchema.model_fields["watchdog_enabled"].default is False
+def test_watchcat_is_disabled_by_default_in_both_config_models() -> None:
+    assert VibeConfig.model_fields["watchcat_enabled"].default is False
+    assert VibeConfigSchema.model_fields["watchcat_enabled"].default is False
 
 
 @pytest.mark.asyncio

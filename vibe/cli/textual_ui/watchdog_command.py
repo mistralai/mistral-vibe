@@ -1,23 +1,24 @@
 from __future__ import annotations
 
+from vibe.core.watchdog.demo_report import DemoReport, render_demo_report
 from vibe.core.watchdog.models import ObserverState
 from vibe.core.watchdog.runtime import WatchdogRuntime
 from vibe.core.watchdog.snapshots import ConversationSnapshot
 
-WATCHDOG_USAGE = "Usage: /watchdog [status|on|off|pause|resume|snapshot|recover]"
+WATCHCAT_USAGE = "Usage: /watchcat [status|report|on|off|pause|resume|snapshot|recover]"
 
 
 def format_watchdog_status(runtime: WatchdogRuntime | None) -> str:
     if runtime is None:
-        return """## Watchdog
+        return """## Watchcat
 
 ```text
-WATCHDOG [OFF]
+WATCHCAT [OFF]
 |
 `-- monitoring disabled
 ```
 
-Run `/watchdog on` to start monitoring and recovery.
+Run `/watchcat on` to start monitoring and recovery.
 """
 
     state = runtime.supervisor.state
@@ -33,10 +34,10 @@ Run `/watchdog on` to start monitoring and recovery.
     signal_quality = (
         "healthy" if state.observer_state == ObserverState.TRUSTED else "degraded"
     )
-    return f"""## Watchdog
+    return f"""## Watchcat
 
 ```text
-WATCHDOG [{status.upper()}]
+WATCHCAT [{status.upper()}]
 |
 +-- signal quality : {signal_quality}
 +-- phase          : {state.phase.value}
@@ -52,7 +53,7 @@ Run: `{runtime.run_id}`
 
 Artifacts: `{runtime.paths.run_dir}`
 
-Controls: `/watchdog pause|resume|snapshot|recover|off`
+Controls: `/watchcat pause|resume|snapshot|recover|off`
 """
 
 
@@ -64,5 +65,9 @@ def format_snapshot_list(snapshots: list[ConversationSnapshot]) -> str:
             f"{branch} {index}  {snapshot.display_name[:40]}  "
             f"msg:{len(snapshot.messages)}"
         )
-    lines.extend(["```", "", "Apply by index or hash: `/watchdog snapshot apply 0`"])
+    lines.extend(["```", "", "Apply by index or hash: `/watchcat snapshot apply 0`"])
     return "\n".join(lines)
+
+
+def format_watchcat_demo_report(report: DemoReport) -> str:
+    return render_demo_report(report)

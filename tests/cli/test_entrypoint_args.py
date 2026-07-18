@@ -28,16 +28,14 @@ def test_enabled_and_disabled_tools_are_independent(
     assert args.disabled_tools == ["bash"]
 
 
-def test_watchdog_flags_parse_without_mutating_other_options(
+def test_watchcat_flag_parses_without_mutating_other_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    args = _parse(monkeypatch, ["--watchdog"])
+    args = _parse(monkeypatch, ["--watchcat"])
 
-    assert args.watchdog is True
+    assert args.watchcat is True
 
 
-def test_removed_watchdog_replay_flag_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_old_watchdog_flag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit):
-        _parse(monkeypatch, ["--watchdog-replay", "run-1"])
+        _parse(monkeypatch, ["--watchdog"])

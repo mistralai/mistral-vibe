@@ -47,7 +47,7 @@ _EPOCH_FENCED_EVENTS = {
 
 def apply_event(state: RunState, event: WatchdogEvent) -> RunState:
     if event.run_id != state.run_id or event.session_id != state.session_id:
-        raise EventIdentityError("event does not belong to this Watchdog run")
+        raise EventIdentityError("event does not belong to this Watchcat run")
     if event.sequence <= state.last_applied_sequence:
         raise EventOrderError(
             f"event sequence {event.sequence} is not after "
