@@ -7,6 +7,7 @@ import time
 from vibe.core.types import BaseEvent
 from vibe.core.watchdog.event_adapter import PendingWatchdogEvent, normalize_event
 from vibe.core.watchdog.events import EventKind, WatchdogEvent
+from vibe.core.watchdog.incident import IncidentEngine
 from vibe.core.watchdog.models import RunState
 from vibe.core.watchdog.queue import WatchdogEventQueue
 from vibe.core.watchdog.reducer import apply_event
@@ -21,11 +22,13 @@ class ObserveOnlySupervisor:
         session_id: str,
         store: WatchdogStore,
         queue_capacity: int = 256,
+        incident_engine: IncidentEngine | None = None,
     ) -> None:
         self.run_id = run_id
         self.session_id = session_id
         self.store = store
         self.state = RunState.new(run_id=run_id, session_id=session_id)
+        self._incident_engine = incident_engine
         self._queue = WatchdogEventQueue(capacity=queue_capacity)
         self._worker: asyncio.Task[None] | None = None
         self._integrity_lost = False
@@ -83,6 +86,19 @@ class ObserveOnlySupervisor:
         )
         self.state = apply_event(self.state, event)
         await self.store.persist(event, self.state)
+        if self._incident_engine is None:
+            return
+        for transition in self._incident_engine.observe(event, self.state):
+            transition_event = WatchdogEvent(
+                run_id=self.run_id,
+                session_id=self.session_id,
+                sequence=self.state.last_applied_sequence + 1,
+                observed_at_monotonic=pending.observed_at_monotonic,
+                kind=transition.kind,
+                payload={"incident": transition.incident.model_dump(mode="json")},
+            )
+            self.state = apply_event(self.state, transition_event)
+            await self.store.persist(transition_event, self.state)
 
 
 async def observe_stream(

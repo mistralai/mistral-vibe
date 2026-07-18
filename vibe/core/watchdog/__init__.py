@@ -12,6 +12,7 @@ from vibe.core.watchdog.fingerprint import (
     fingerprint_result,
     sanitize_artifact,
 )
+from vibe.core.watchdog.incident import IncidentEngine, IncidentTransition
 from vibe.core.watchdog.models import (
     Evidence,
     Incident,
@@ -43,7 +44,9 @@ __all__ = [
     "EventOrderError",
     "Evidence",
     "Incident",
+    "IncidentEngine",
     "IncidentState",
+    "IncidentTransition",
     "ObserveOnlySupervisor",
     "ObserverState",
     "QueuePutResult",

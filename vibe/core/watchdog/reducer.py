@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from vibe.core.watchdog.events import EventKind, WatchdogEvent
-from vibe.core.watchdog.models import ObserverState, RunPhase, RunState
+from vibe.core.watchdog.models import Incident, ObserverState, RunPhase, RunState
 
 
 class WatchdogReducerError(Exception):
@@ -56,6 +56,15 @@ def apply_event(state: RunState, event: WatchdogEvent) -> RunState:
     next_state = state.model_copy(update={"last_applied_sequence": event.sequence})
     if event.kind == EventKind.OBSERVER_ANOMALY:
         return next_state.model_copy(update={"observer_state": ObserverState.TILT})
+    if event.kind in {
+        EventKind.INCIDENT_SUSPECTED,
+        EventKind.INCIDENT_CONFIRMED,
+        EventKind.INCIDENT_CLOSED,
+    }:
+        incident = Incident.model_validate(event.payload["incident"])
+        return next_state.model_copy(
+            update={"incident": incident, "epoch": incident.epoch}
+        )
     if event.sequence != state.last_applied_sequence + 1:
         return next_state.model_copy(update={"observer_state": ObserverState.TILT})
 

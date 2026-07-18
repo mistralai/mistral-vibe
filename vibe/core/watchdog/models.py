@@ -64,7 +64,7 @@ class RecoveryDecision(_FrozenModel):
 
 class Incident(_FrozenModel):
     incident_id: str = Field(min_length=1)
-    epoch: int = Field(ge=1)
+    epoch: int = Field(ge=0)
     state: IncidentState
     owner: str | None = None
     evidence: tuple[Evidence, ...] = ()

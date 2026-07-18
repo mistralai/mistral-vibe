@@ -26,6 +26,9 @@ class EventKind(StrEnum):
     VERIFICATION_STARTED = auto()
     VERIFICATION_FINISHED = auto()
     OBSERVER_ANOMALY = auto()
+    INCIDENT_SUSPECTED = auto()
+    INCIDENT_CONFIRMED = auto()
+    INCIDENT_CLOSED = auto()
 
 
 class WatchdogEvent(BaseModel):
