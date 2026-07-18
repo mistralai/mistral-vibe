@@ -53,5 +53,5 @@ uv run python scripts/watchdog_demo.py --scenario recovery --delay 0
 | Scenario | Demonstrates |
 | --- | --- |
 | `recovery` | Four exact failures → one context injection → changed action → closed incident |
-| `tilt` | Observer anomaly → score `92` → deterministic context injection → closed incident |
+| `signal` | Signal quality degraded → score `92` → deterministic context injection → closed incident |
 | `degraded` | Recovery delivery failure → persisted degraded incident |

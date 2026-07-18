@@ -46,10 +46,10 @@ SCENARIOS = {
         title="Repeated failure -> recovery -> verified progress",
         intent="Show one bounded context injection followed by a changed action.",
     ),
-    "tilt": Scenario(
-        name="tilt",
+    "signal": Scenario(
+        name="signal",
         title="Observer anomaly -> LLM score -> deterministic recovery",
-        intent="Show the harness evaluator scoring evidence without selecting an action.",
+        intent="Show degraded signal quality using a score without selecting an action.",
     ),
     "degraded": Scenario(
         name="degraded",
@@ -148,6 +148,10 @@ def _enqueue_changed_action(supervisor: ObserveOnlySupervisor) -> None:
     )
 
 
+def _signal_quality(state: RunState) -> str:
+    return "healthy" if state.observer_state == ObserverState.TRUSTED else "degraded"
+
+
 async def _run_scenario(
     scenario: Scenario, root: Path
 ) -> tuple[WatchdogPaths, DemoRecoveryPort, DemoTiltEvaluator, RunState]:
@@ -166,10 +170,10 @@ async def _run_scenario(
             port=port,
             objective="Fix the parser without repeating the failed command",
         ),
-        tilt_evaluator=evaluator if scenario.name == "tilt" else None,
+        tilt_evaluator=evaluator if scenario.name == "signal" else None,
     )
     await supervisor.start()
-    if scenario.name == "tilt":
+    if scenario.name == "signal":
         supervisor._queue.put_nowait(
             PendingWatchdogEvent(
                 kind=EventKind.OBSERVER_ANOMALY,
@@ -180,7 +184,7 @@ async def _run_scenario(
         )
     for attempt in range(1, 5):
         _enqueue_failed_call(supervisor, f"repeat-{attempt}")
-    if scenario.name in {"recovery", "tilt"}:
+    if scenario.name in {"recovery", "signal"}:
         _enqueue_changed_action(supervisor)
     try:
         await supervisor.finish()
@@ -205,13 +209,13 @@ def _assert_outcome(
         raise RuntimeError(f"{scenario.name}: no incident detected")
     expected = {
         "recovery": (IncidentState.CLOSED, ObserverState.TRUSTED, 1),
-        "tilt": (IncidentState.CLOSED, ObserverState.TILT, 1),
+        "signal": (IncidentState.CLOSED, ObserverState.TILT, 1),
         "degraded": (IncidentState.DEGRADED, ObserverState.TRUSTED, 1),
     }[scenario.name]
     actual = (incident.state, state.observer_state, len(port.injections))
     if actual != expected:
         raise RuntimeError(f"{scenario.name}: expected {expected}, got {actual}")
-    expected_evaluations = 1 if scenario.name == "tilt" else 0
+    expected_evaluations = 1 if scenario.name == "signal" else 0
     if len(evaluator.requests) != expected_evaluations:
         raise RuntimeError(
             f"{scenario.name}: expected {expected_evaluations} evaluations, "
@@ -232,14 +236,15 @@ async def _print_trace(
     print(f"\nWATCHDOG DEMO :: {scenario.name.upper()}")
     print(f"+- {scenario.title}")
     print(f"`- {scenario.intent}\n")
-    print("SEQ  EVENT                    PHASE          OBSERVER  INCIDENT")
+    print("SEQ  EVENT                    PHASE          SIGNAL    INCIDENT")
     print("---  -----------------------  -------------  --------  ----------")
     for event in events:
         state = apply_event(state, event)
         incident = state.incident.state.value if state.incident else "-"
+        signal_quality = _signal_quality(state)
         print(
             f"{event.sequence:>3}  {event.kind.value:<23}  "
-            f"{state.phase.value:<13}  {state.observer_state.value:<8}  {incident}"
+            f"{state.phase.value:<13}  {signal_quality:<8}  {incident}"
         )
         if delay:
             await asyncio.sleep(delay)
@@ -247,7 +252,7 @@ async def _print_trace(
     scores = str([evaluator.score]) if evaluator.requests else "[]"
     print(f"+- LLM eval scores    : {scores}")
     print(f"+- context injections : {len(port.injections)}")
-    print(f"+- observer state     : {state.observer_state.value}")
+    print(f"+- signal quality     : {_signal_quality(state)}")
     print(
         f"+- incident state     : {state.incident.state.value if state.incident else '-'}"
     )

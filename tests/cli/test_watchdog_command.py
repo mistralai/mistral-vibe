@@ -66,6 +66,7 @@ async def test_watchdog_command_controls_full_runtime_lifecycle(tmp_path: Path) 
         assert any("WATCHDOG [OFF]" in message for message in messages)
         assert messages[-1].startswith("## Watchdog")
         assert "WATCHDOG [ENABLED]" in messages[-1]
+        assert "signal quality : healthy" in messages[-1]
 
     snapshots = runtime.paths.snapshots / "conversations"
     assert len(list(snapshots.glob("*.json"))) == 1

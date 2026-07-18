@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from vibe.core.watchdog.models import ObserverState
 from vibe.core.watchdog.runtime import WatchdogRuntime
 from vibe.core.watchdog.snapshots import ConversationSnapshot
 
@@ -29,17 +30,20 @@ Run `/watchdog on` to start monitoring and recovery.
         if incident is not None and incident.decision is not None
         else "none"
     )
+    signal_quality = (
+        "healthy" if state.observer_state == ObserverState.TRUSTED else "degraded"
+    )
     return f"""## Watchdog
 
 ```text
 WATCHDOG [{status.upper()}]
 |
-+-- observer : {state.observer_state.value}
-+-- phase    : {state.phase.value}
-+-- incident : {incident_state}
-+-- detector : {detector}
-+-- epoch    : {state.epoch}
-`-- recovery : {recovery}
++-- signal quality : {signal_quality}
++-- phase          : {state.phase.value}
++-- incident       : {incident_state}
++-- detector       : {detector}
++-- epoch          : {state.epoch}
+`-- recovery       : {recovery}
 
 observe --> detect --> recover --> verify
 ```
