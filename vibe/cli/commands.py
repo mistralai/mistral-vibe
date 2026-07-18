@@ -110,8 +110,9 @@ class CommandRegistry:
             "watchdog": Command(
                 aliases=frozenset(["/watchdog"]),
                 description=(
-                    "Control Watchdog: status, on, off, pause, resume, "
-                    "snapshot, recover, replay"
+                    "Monitor agent health, inspect incidents, and control recovery. "
+                    "Subcommands: status, on, off, pause, resume, snapshot, "
+                    "recover, replay"
                 ),
                 handler="_watchdog_command",
             ),

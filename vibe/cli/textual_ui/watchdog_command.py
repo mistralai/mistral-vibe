@@ -7,7 +7,16 @@ WATCHDOG_USAGE = "Usage: /watchdog [status|on|off|pause|resume|snapshot|recover|
 
 def format_watchdog_status(runtime: WatchdogRuntime | None) -> str:
     if runtime is None:
-        return "## Watchdog\n\n- **Status**: disabled\n\n`/watchdog on` to enable."
+        return """## Watchdog
+
+```text
+WATCHDOG [OFF]
+|
+`-- monitoring disabled
+```
+
+Run `/watchdog on` to start monitoring and recovery.
+"""
 
     state = runtime.supervisor.state
     incident = state.incident
@@ -21,13 +30,22 @@ def format_watchdog_status(runtime: WatchdogRuntime | None) -> str:
     )
     return f"""## Watchdog
 
-- **Status**: {status}
-- **Run**: `{runtime.run_id}`
-- **Phase**: {state.phase.value}
-- **Observer**: {state.observer_state.value}
-- **Incident**: {incident_state}
-- **Detector**: {detector}
-- **Epoch**: {state.epoch}
-- **Last recovery**: {recovery}
-- **Artifacts**: `{runtime.paths.run_dir}`
+```text
+WATCHDOG [{status.upper()}]
+|
++-- observer : {state.observer_state.value}
++-- phase    : {state.phase.value}
++-- incident : {incident_state}
++-- detector : {detector}
++-- epoch    : {state.epoch}
+`-- recovery : {recovery}
+
+observe --> detect --> recover --> verify
+```
+
+Run: `{runtime.run_id}`
+
+Artifacts: `{runtime.paths.run_dir}`
+
+Controls: `/watchdog pause|resume|snapshot|recover|replay|off`
 """

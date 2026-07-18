@@ -177,6 +177,8 @@ class TestCommandRegistry:
         assert cmd_name == "watchdog"
         assert command.handler == "_watchdog_command"
         assert cmd_args == "snapshot"
+        assert "Monitor agent health" in command.description
+        assert "inspect incidents" in command.description
         for control in (
             "status",
             "on",

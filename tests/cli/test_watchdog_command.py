@@ -48,16 +48,20 @@ async def test_watchdog_command_controls_full_runtime_lifecycle(tmp_path: Path) 
         await pilot.pause()
 
         messages = [message._content for message in app.query(UserCommandMessage)]
-        assert any("**Status**: paused" in message for message in messages)
+        assert any("WATCHDOG [PAUSED]" in message for message in messages)
+        assert any(
+            "observe --> detect --> recover --> verify" in message
+            for message in messages
+        )
         assert any("Watchdog snapshot:" in message for message in messages)
         assert any(
             message == "No confirmed recoverable Watchdog incident."
             for message in messages
         )
         assert any("No Watchdog events found" in message for message in messages)
-        assert any("**Status**: disabled" in message for message in messages)
+        assert any("WATCHDOG [OFF]" in message for message in messages)
         assert messages[-1].startswith("## Watchdog")
-        assert "**Status**: enabled" in messages[-1]
+        assert "WATCHDOG [ENABLED]" in messages[-1]
 
     assert (runtime.paths.snapshots / "state-000000.json").exists()
 
