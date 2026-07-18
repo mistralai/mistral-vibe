@@ -26,7 +26,7 @@ _MIN_REPEAT_THRESHOLD = 2
 class RepeatedCallDetector:
     detector_id = "repeated_call"
 
-    def __init__(self, *, threshold: int = 2, evidence_window: int = 20) -> None:
+    def __init__(self, *, threshold: int = 4, evidence_window: int = 20) -> None:
         if threshold < _MIN_REPEAT_THRESHOLD:
             raise ValueError("repeated-call threshold must be at least 2")
         self._threshold = threshold

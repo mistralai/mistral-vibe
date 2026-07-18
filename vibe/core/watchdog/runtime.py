@@ -67,10 +67,7 @@ def attach_watchdog(
         run_id=resolved_run_id,
         session_id=agent_loop.session_id,
         store=store,
-        incident_engine=IncidentEngine((
-            RepeatedCallDetector(threshold=2),
-            TerminalDetector(),
-        )),
+        incident_engine=IncidentEngine((RepeatedCallDetector(), TerminalDetector())),
         recovery=recovery,
         repository_probe=lambda: repository_fingerprint(root),
     )

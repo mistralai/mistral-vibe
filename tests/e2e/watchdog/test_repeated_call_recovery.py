@@ -41,7 +41,7 @@ def _tool_event(
 
 
 @pytest.mark.asyncio
-async def test_demo_detects_recovers_continues_and_replays_three_times(
+async def test_demo_detects_recovers_continues_and_persists_trace_three_times(
     tmp_path: Path,
 ) -> None:
     for attempt in range(3):
@@ -53,13 +53,13 @@ async def test_demo_detects_recovers_continues_and_replays_three_times(
             run_id=run_id,
             session_id="demo-session",
             store=store,
-            incident_engine=IncidentEngine((RepeatedCallDetector(threshold=2),)),
+            incident_engine=IncidentEngine((RepeatedCallDetector(),)),
             recovery=RecoveryCoordinator(
                 store=store, port=cast(RecoveryPort, port), objective="fix parser"
             ),
         )
         await supervisor.start()
-        for call_id in ("repeat-1", "repeat-2"):
+        for call_id in ("repeat-1", "repeat-2", "repeat-3", "repeat-4"):
             supervisor._queue.put_nowait(
                 _tool_event(
                     EventKind.TOOL_STARTED,

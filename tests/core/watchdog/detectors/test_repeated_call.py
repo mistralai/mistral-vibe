@@ -71,6 +71,49 @@ def test_same_call_result_and_repository_confirms() -> None:
     assert confirmed[0].verdict == DetectorVerdict.CONFIRMED
 
 
+def test_default_threshold_requires_four_exact_calls() -> None:
+    detector = RepeatedCallDetector()
+    state = RunState.new(run_id="run-1", session_id="session-1")
+    observations = []
+
+    for attempt in range(1, 5):
+        observations.extend(
+            detector.observe(
+                event(
+                    attempt * 2 - 1,
+                    EventKind.TOOL_STARTED,
+                    {
+                        "tool_call_id": str(attempt),
+                        "tool_name": "bash",
+                        "arguments": {"cmd": "x"},
+                    },
+                ),
+                state,
+            )
+        )
+        observations.extend(
+            detector.observe(
+                event(
+                    attempt * 2,
+                    EventKind.TOOL_FINISHED,
+                    {
+                        "tool_call_id": str(attempt),
+                        "result": "failed",
+                        "repository_fingerprint": "repo-1",
+                    },
+                ),
+                state,
+            )
+        )
+        if attempt < 4:
+            assert observations == []
+
+    assert [item.verdict for item in observations] == [
+        DetectorVerdict.SUSPECTED,
+        DetectorVerdict.CONFIRMED,
+    ]
+
+
 def test_repository_change_resets_suspicion() -> None:
     detector = RepeatedCallDetector(threshold=2)
     state = RunState.new(run_id="run-1", session_id="session-1")

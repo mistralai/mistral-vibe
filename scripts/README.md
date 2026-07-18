@@ -35,3 +35,23 @@ The pinned `[project].dependencies` is what `uv build` reads in `.github/workflo
 The pinned `[dependency-groups].build` is what `uv sync --no-dev --group build` reads in `.github/workflows/build-and-upload.yml`, so the PyInstaller binaries on each release tag are built against the exact same PyInstaller / truststore versions every time.
 
 `main` keeps `>=` ranges, so day-to-day upgrades on `main` (`uv lock --upgrade-package …`, Renovate PRs, etc.) are unaffected. Each new release re-snapshots `uv.lock` — there is no hand-maintained pin list.
+
+# Watchdog demo
+
+Run every deterministic scenario with a paced ASCII trace:
+
+```bash
+uv run python scripts/watchdog_demo.py
+```
+
+Run one scenario instantly:
+
+```bash
+uv run python scripts/watchdog_demo.py --scenario recovery --delay 0
+```
+
+| Scenario | Demonstrates |
+| --- | --- |
+| `recovery` | Four exact failures → one context injection → changed action → closed incident |
+| `tilt` | Observer anomaly → TILT → confirmed incident with intervention blocked |
+| `degraded` | Recovery delivery failure → persisted degraded incident |

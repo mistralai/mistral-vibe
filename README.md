@@ -267,14 +267,16 @@ snapshot restores conversation state only; working-tree files are unchanged.
 Watchdog state is stored under `$VIBE_HOME/watchdog/runs/RUN_ID/`. Recovery can
 inject bounded context; it never automatically restores the main checkout.
 
-Deterministic local demo (runs the full recovery path three times):
+Deterministic local demo (runs three Watchdog scenarios):
 
 ```bash
-uv run pytest -q tests/e2e/watchdog/test_repeated_call_recovery.py
+uv run python scripts/watchdog_demo.py
 ```
 
 ```text
-repeat failure ×2 → confirm → inject once → changed action → close
+recovery : repeat failure ×4 → confirm → inject once → changed action → close
+tilt     : observer anomaly → intervention blocked
+degraded : delivery failure → degraded incident recorded
 ```
 
 ### Interactive Mode
