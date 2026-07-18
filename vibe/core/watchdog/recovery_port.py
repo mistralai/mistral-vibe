@@ -26,6 +26,10 @@ class IdleResult(_Result):
     pass
 
 
+class RestoreResult(_Result):
+    pass
+
+
 class RecoveryPort(Protocol):
     async def quiesce(self, incident: Incident) -> QuiesceResult: ...
 
@@ -34,6 +38,10 @@ class RecoveryPort(Protocol):
     async def wait_until_idle(self, incident: Incident) -> IdleResult: ...
 
     async def inject_context(self, content: str) -> None: ...
+
+    async def restore_latest_snapshot(self, incident: Incident) -> RestoreResult: ...
+
+    async def request_user_input(self, content: str, incident: Incident) -> None: ...
 
     async def continue_once(self, prompt: str, incident: Incident) -> None: ...
 

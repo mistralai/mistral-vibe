@@ -21,8 +21,12 @@ from vibe.core.watchdog import (
     ObserveOnlySupervisor,
     ObserverState,
     QuiesceResult,
+    RecoveryAdvice,
+    RecoveryAdviceRequest,
     RecoveryCoordinator,
     RecoveryDecision,
+    RecoveryStrategy,
+    RestoreResult,
     RunState,
     TiltEvaluation,
     TiltEvaluationRequest,
@@ -35,6 +39,7 @@ from vibe.core.watchdog.demo_report import (
     DemoReport,
     DemoRunReport,
     DemoTraceEntry,
+    display_demo_event,
     save_demo_report,
 )
 from vibe.core.watchdog.detectors import RepeatedCallDetector
@@ -63,6 +68,10 @@ class Scenario:
     expected_attempts: int
     expected_injections: int
     mitigation: tuple[str, ...]
+    escalation_failures: int = 0
+    expected_advice_requests: int = 0
+    expected_restore_attempts: int = 0
+    expected_user_handoffs: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +187,125 @@ SCENARIOS = {
             "close",
         ),
     ),
+    "rewrite-command": Scenario(
+        name="rewrite-command",
+        title="Context recovery fails -> LLM rewrites command -> verified progress",
+        intent="Escalate once and execute a validated command rewrite.",
+        classification="mitigated",
+        issue="repeated_command_requires_rewrite",
+        trigger="confirmed repeat + unchanged action after context injection",
+        repeats=4,
+        last_result="1 failed",
+        last_repository="unchanged",
+        observer_anomaly=False,
+        evaluator_score=None,
+        evaluator_failure=False,
+        fail_injection=False,
+        next_action="changed",
+        expected_incident=IncidentState.CLOSED,
+        expected_observer=ObserverState.TRUSTED,
+        expected_attempts=2,
+        expected_injections=2,
+        mitigation=("inject context", "LLM rewrite command", "validate", "verify"),
+        escalation_failures=1,
+        expected_advice_requests=1,
+    ),
+    "alternate-tool": Scenario(
+        name="alternate-tool",
+        title="Command rewrite fails -> LLM selects alternate tool -> progress",
+        intent="Escalate from command rewrite to a validated alternate tool.",
+        classification="mitigated",
+        issue="command_rewrite_failed",
+        trigger="two failed mitigation actions",
+        repeats=4,
+        last_result="1 failed",
+        last_repository="unchanged",
+        observer_anomaly=False,
+        evaluator_score=None,
+        evaluator_failure=False,
+        fail_injection=False,
+        next_action="changed",
+        expected_incident=IncidentState.CLOSED,
+        expected_observer=ObserverState.TRUSTED,
+        expected_attempts=3,
+        expected_injections=3,
+        mitigation=("rewrite command", "LLM alternate tool", "validate", "verify"),
+        escalation_failures=2,
+        expected_advice_requests=2,
+    ),
+    "snapshot-restore": Scenario(
+        name="snapshot-restore",
+        title="Tool alternatives fail -> restore pre-incident snapshot -> progress",
+        intent="Restore the latest valid pre-incident snapshot before continuing.",
+        classification="mitigated",
+        issue="alternate_tool_failed",
+        trigger="three failed mitigation actions",
+        repeats=4,
+        last_result="1 failed",
+        last_repository="unchanged",
+        observer_anomaly=False,
+        evaluator_score=None,
+        evaluator_failure=False,
+        fail_injection=False,
+        next_action="changed",
+        expected_incident=IncidentState.CLOSED,
+        expected_observer=ObserverState.TRUSTED,
+        expected_attempts=4,
+        expected_injections=4,
+        mitigation=("alternate tool", "restore snapshot", "change action", "verify"),
+        escalation_failures=3,
+        expected_advice_requests=2,
+        expected_restore_attempts=1,
+    ),
+    "llm-recovery": Scenario(
+        name="llm-recovery",
+        title="Snapshot path fails -> final LLM recovery plan -> progress",
+        intent="Use one final validated LLM recommendation after deterministic options.",
+        classification="mitigated",
+        issue="snapshot_recovery_failed",
+        trigger="four failed mitigation actions",
+        repeats=4,
+        last_result="1 failed",
+        last_repository="unchanged",
+        observer_anomaly=False,
+        evaluator_score=None,
+        evaluator_failure=False,
+        fail_injection=False,
+        next_action="changed",
+        expected_incident=IncidentState.CLOSED,
+        expected_observer=ObserverState.TRUSTED,
+        expected_attempts=5,
+        expected_injections=5,
+        mitigation=("restore snapshot", "final LLM plan", "validate", "verify"),
+        escalation_failures=4,
+        expected_advice_requests=3,
+        expected_restore_attempts=1,
+    ),
+    "user-handoff": Scenario(
+        name="user-handoff",
+        title="Failure after final LLM plan -> automation paused -> user handoff",
+        intent="Stop automatic recovery after every bounded strategy has failed.",
+        classification="blocked",
+        issue="automatic_mitigation_exhausted",
+        trigger="another failure after final LLM-assisted mitigation",
+        repeats=4,
+        last_result="1 failed",
+        last_repository="unchanged",
+        observer_anomaly=False,
+        evaluator_score=None,
+        evaluator_failure=False,
+        fail_injection=False,
+        next_action=None,
+        expected_incident=IncidentState.NEEDS_USER,
+        expected_observer=ObserverState.TRUSTED,
+        expected_attempts=5,
+        expected_injections=5,
+        mitigation=("exhaust bounded ladder", "pause automation", "ask user"),
+        escalation_failures=5,
+        expected_advice_requests=3,
+        expected_restore_attempts=1,
+        expected_user_handoffs=1,
+    ),
     "signal": Scenario(
         name="signal",
         title="Observer anomaly -> LLM score -> deterministic recovery",
@@ -267,9 +395,10 @@ SCENARIOS = {
         mitigation=(
             "inject bounded context",
             "observe unchanged action",
-            "retry bounded recovery",
+            "LLM command rewrite",
             "keep verifying",
         ),
+        expected_advice_requests=1,
     ),
     "degraded": Scenario(
         name="degraded",
@@ -304,6 +433,8 @@ class DemoRecoveryPort:
         self.fail_injection = fail_injection
         self.injection_attempts = 0
         self.injections: list[str] = []
+        self.restore_attempts = 0
+        self.user_handoffs: list[str] = []
 
     async def quiesce(self, incident: Incident) -> QuiesceResult:
         del incident
@@ -323,12 +454,51 @@ class DemoRecoveryPort:
             raise RuntimeError("simulated delivery failure")
         self.injections.append(content)
 
+    async def restore_latest_snapshot(self, incident: Incident) -> RestoreResult:
+        del incident
+        self.restore_attempts += 1
+        return RestoreResult(succeeded=True, detail="demo-pre-incident")
+
+    async def request_user_input(self, content: str, incident: Incident) -> None:
+        del incident
+        self.user_handoffs.append(content)
+
     async def continue_once(self, prompt: str, incident: Incident) -> None:
         del prompt, incident
 
     async def request_approval(self, decision: RecoveryDecision) -> bool:
         del decision
         return False
+
+
+class DemoRecoveryAdvisor:
+    def __init__(self) -> None:
+        self.requests: list[RecoveryAdviceRequest] = []
+
+    async def advise(self, request: RecoveryAdviceRequest) -> RecoveryAdvice:
+        self.requests.append(request)
+        match request.strategy:
+            case RecoveryStrategy.REWRITE_COMMAND:
+                return RecoveryAdvice(
+                    strategy=request.strategy,
+                    reason="Use a narrower test target and disable stale cache state.",
+                    command="pytest -q test_parser.py --cache-clear",
+                )
+            case RecoveryStrategy.ALTERNATE_TOOL:
+                return RecoveryAdvice(
+                    strategy=request.strategy,
+                    reason="Edit the parser guard instead of repeating the failing test.",
+                    tool="edit",
+                )
+            case RecoveryStrategy.LLM_RECOVERY:
+                return RecoveryAdvice(
+                    strategy=request.strategy,
+                    reason="Inspect the failing boundary before applying one bounded edit.",
+                    tool="grep",
+                    command="locate parser boundary check, then patch once",
+                )
+            case _:
+                raise ValueError(f"unsupported demo strategy: {request.strategy}")
 
 
 class DemoTiltEvaluator:
@@ -409,11 +579,14 @@ def _signal_quality(state: RunState) -> str:
 
 async def _run_scenario(
     scenario: Scenario, root: Path
-) -> tuple[WatchdogPaths, DemoRecoveryPort, DemoTiltEvaluator, RunState]:
+) -> tuple[
+    WatchdogPaths, DemoRecoveryPort, DemoRecoveryAdvisor, DemoTiltEvaluator, RunState
+]:
     run_id = f"demo-{scenario.name}"
     paths = WatchdogPaths.for_run(run_id, root=root)
     store = WatchdogStore(paths)
     port = DemoRecoveryPort(fail_injection=scenario.fail_injection)
+    advisor = DemoRecoveryAdvisor()
     evaluator = DemoTiltEvaluator(
         score=scenario.evaluator_score or 0, fail=scenario.evaluator_failure
     )
@@ -425,7 +598,9 @@ async def _run_scenario(
         recovery=RecoveryCoordinator(
             store=store,
             port=port,
+            advisor=advisor,
             objective="Fix the parser without repeating the failed command",
+            available_tools=("bash", "edit", "grep"),
         ),
         tilt_evaluator=(
             evaluator
@@ -451,6 +626,8 @@ async def _run_scenario(
             result=scenario.last_result if is_last else "1 failed",
             repository=scenario.last_repository if is_last else "unchanged",
         )
+    for escalation in range(scenario.escalation_failures):
+        _enqueue_failed_call(supervisor, f"escalation-{escalation + 1}")
     if scenario.next_action == "changed":
         _enqueue_changed_action(supervisor)
     elif scenario.next_action == "same":
@@ -463,14 +640,15 @@ async def _run_scenario(
     state = await store.load_state()
     if state is None:
         raise RuntimeError("demo produced no Watchcat state")
-    _assert_outcome(scenario, state, port, evaluator)
-    return paths, port, evaluator, state
+    _assert_outcome(scenario, state, port, advisor, evaluator)
+    return paths, port, advisor, evaluator, state
 
 
 def _assert_outcome(
     scenario: Scenario,
     state: RunState,
     port: DemoRecoveryPort,
+    advisor: DemoRecoveryAdvisor,
     evaluator: DemoTiltEvaluator,
 ) -> None:
     incident = state.incident
@@ -491,6 +669,21 @@ def _assert_outcome(
             f"{scenario.name}: expected {scenario.expected_attempts} injection attempts, "
             f"got {port.injection_attempts}"
         )
+    if len(advisor.requests) != scenario.expected_advice_requests:
+        raise RuntimeError(
+            f"{scenario.name}: expected {scenario.expected_advice_requests} advice "
+            f"requests, got {len(advisor.requests)}"
+        )
+    if port.restore_attempts != scenario.expected_restore_attempts:
+        raise RuntimeError(
+            f"{scenario.name}: expected {scenario.expected_restore_attempts} restores, "
+            f"got {port.restore_attempts}"
+        )
+    if len(port.user_handoffs) != scenario.expected_user_handoffs:
+        raise RuntimeError(
+            f"{scenario.name}: expected {scenario.expected_user_handoffs} user "
+            f"handoffs, got {len(port.user_handoffs)}"
+        )
     expected_evaluations = (
         1 if scenario.evaluator_score is not None or scenario.evaluator_failure else 0
     )
@@ -505,6 +698,7 @@ async def _print_trace(
     scenario: Scenario,
     paths: WatchdogPaths,
     port: DemoRecoveryPort,
+    advisor: DemoRecoveryAdvisor,
     evaluator: DemoTiltEvaluator,
     *,
     delay: float,
@@ -516,14 +710,36 @@ async def _print_trace(
     output(f"\nWATCHCAT DEMO :: {scenario.name.upper()}")
     output(f"+- {scenario.title}")
     output(f"`- {scenario.intent}\n")
-    output("SEQ  EVENT                    PHASE          SIGNAL    INCIDENT")
-    output("---  -----------------------  -------------  --------  ----------")
+    output("SEQ  EVENT                        PHASE          SIGNAL    INCIDENT")
+    output("---  ---------------------------  -------------  --------  ----------")
     for event in events:
         state = apply_event(state, event)
         incident = state.incident.state.value if state.incident else "-"
         signal_quality = _signal_quality(state)
+        strategy = (
+            state.incident.decision.strategy.value
+            if event.kind
+            in {
+                EventKind.RECOVERY_STARTED,
+                EventKind.RECOVERY_FINISHED,
+                EventKind.RECOVERY_FAILED,
+            }
+            and state.incident is not None
+            and state.incident.decision is not None
+            else None
+        )
+        label = display_demo_event(
+            DemoTraceEntry(
+                sequence=event.sequence,
+                event=event.kind.value,
+                phase=state.phase.value,
+                signal_quality=signal_quality,
+                incident_state=incident,
+                strategy=strategy,
+            )
+        )
         output(
-            f"{event.sequence:>3}  {event.kind.value:<23}  "
+            f"{event.sequence:>3}  {label:<27}  "
             f"{state.phase.value:<13}  {signal_quality:<8}  {incident}"
         )
         if verbose and delay:
@@ -535,6 +751,9 @@ async def _print_trace(
         else "[]"
     )
     output(f"+- LLM eval scores    : {scores}")
+    output(f"+- recovery LLM calls : {len(advisor.requests)}")
+    output(f"+- snapshot restores  : {port.restore_attempts}")
+    output(f"+- user handoffs      : {len(port.user_handoffs)}")
     output(
         f"+- context injections : {len(port.injections)}/{port.injection_attempts} "
         "successful"
@@ -544,7 +763,7 @@ async def _print_trace(
         f"+- incident state     : {state.incident.state.value if state.incident else '-'}"
     )
     output(f"`- artifacts          : {paths.run_dir}")
-    return _build_run_report(scenario, events, state, port, evaluator, paths)
+    return _build_run_report(scenario, events, state, port, advisor, evaluator, paths)
 
 
 def _build_run_report(
@@ -552,6 +771,7 @@ def _build_run_report(
     events: list[WatchdogEvent],
     state: RunState,
     port: DemoRecoveryPort,
+    advisor: DemoRecoveryAdvisor,
     evaluator: DemoTiltEvaluator,
     paths: WatchdogPaths,
 ) -> DemoRunReport:
@@ -585,6 +805,11 @@ def _build_run_report(
         outcome = "recovered"
     elif scenario.classification == "degraded":
         outcome = "failure recorded"
+    elif (
+        state.incident is not None and state.incident.state == IncidentState.NEEDS_USER
+    ):
+        flow.append("user handoff")
+        outcome = "awaiting user input"
     elif state.incident is not None and state.incident.state == IncidentState.VERIFYING:
         flow.append("verification open")
         outcome = "verification open"
@@ -600,9 +825,16 @@ def _build_run_report(
                     if rendered not in evidence:
                         evidence.append(rendered)
     trace: list[DemoTraceEntry] = []
+    mitigation_attempts: list[str] = []
     trace_state = RunState.new(run_id=events[0].run_id, session_id=events[0].session_id)
     for event in events:
         trace_state = apply_event(trace_state, event)
+        if (
+            event.kind == EventKind.RECOVERY_STARTED
+            and trace_state.incident is not None
+            and trace_state.incident.decision is not None
+        ):
+            mitigation_attempts.append(trace_state.incident.decision.strategy.value)
         trace.append(
             DemoTraceEntry(
                 sequence=event.sequence,
@@ -611,6 +843,18 @@ def _build_run_report(
                 signal_quality=_signal_quality(trace_state),
                 incident_state=(
                     trace_state.incident.state.value if trace_state.incident else "-"
+                ),
+                strategy=(
+                    trace_state.incident.decision.strategy.value
+                    if event.kind
+                    in {
+                        EventKind.RECOVERY_STARTED,
+                        EventKind.RECOVERY_FINISHED,
+                        EventKind.RECOVERY_FAILED,
+                    }
+                    and trace_state.incident is not None
+                    and trace_state.incident.decision is not None
+                    else None
                 ),
             )
         )
@@ -634,6 +878,10 @@ def _build_run_report(
         ),
         injection_attempts=port.injection_attempts,
         context_injections=len(port.injections),
+        mitigation_attempts=mitigation_attempts,
+        recovery_llm_calls=len(advisor.requests),
+        snapshot_restores=port.restore_attempts,
+        user_handoffs=len(port.user_handoffs),
         artifacts=str(paths.run_dir),
         trace=trace,
     )
@@ -684,9 +932,17 @@ async def run_demo(
             await progress(
                 DemoProgress(index, len(selected), selected_scenario.name, "running")
             )
-        paths, port, evaluator, _state = await _run_scenario(selected_scenario, root)
+        paths, port, advisor, evaluator, _state = await _run_scenario(
+            selected_scenario, root
+        )
         run_report = await _print_trace(
-            selected_scenario, paths, port, evaluator, delay=delay, verbose=verbose
+            selected_scenario,
+            paths,
+            port,
+            advisor,
+            evaluator,
+            delay=delay,
+            verbose=verbose,
         )
         reports.append(run_report)
         if progress is not None:

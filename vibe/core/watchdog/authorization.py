@@ -14,11 +14,15 @@ class AuthorizationVerdict(StrEnum):
 class RecoveryAuthorizationPolicy:
     def authorize(self, strategy: RecoveryStrategy) -> AuthorizationVerdict:
         match strategy:
-            case RecoveryStrategy.INJECT_CONTEXT:
+            case (
+                RecoveryStrategy.INJECT_CONTEXT
+                | RecoveryStrategy.REWRITE_COMMAND
+                | RecoveryStrategy.ALTERNATE_TOOL
+                | RecoveryStrategy.RESTORE_CHECKPOINT
+                | RecoveryStrategy.LLM_RECOVERY
+            ):
                 return AuthorizationVerdict.ALLOW
             case RecoveryStrategy.CANCEL_AND_CONTINUE:
-                return AuthorizationVerdict.ASK
-            case RecoveryStrategy.RESTORE_CHECKPOINT:
                 return AuthorizationVerdict.ASK
             case RecoveryStrategy.RESTART_PROCESS:
                 return AuthorizationVerdict.ASK

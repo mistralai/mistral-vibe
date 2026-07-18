@@ -13,8 +13,13 @@ from vibe.core.watchdog import (
     Incident,
     IncidentState,
     QuiesceResult,
+    RecoveryAdvice,
+    RecoveryAdviceRequest,
     RecoveryCoordinator,
     RecoveryDecision,
+    RecoveryStrategy,
+    RestoreResult,
+    RunPhase,
     RunState,
     WatchdogPaths,
     WatchdogStore,
@@ -26,6 +31,8 @@ class FakeRecoveryPort:
         self.injected: list[str] = []
         self.continuations: list[str] = []
         self.idle = idle
+        self.restores = 0
+        self.user_handoffs = 0
 
     async def quiesce(self, incident: Incident) -> QuiesceResult:
         return QuiesceResult(succeeded=True)
@@ -39,11 +46,44 @@ class FakeRecoveryPort:
     async def inject_context(self, content: str) -> None:
         self.injected.append(content)
 
+    async def restore_latest_snapshot(self, incident: Incident) -> RestoreResult:
+        del incident
+        self.restores += 1
+        return RestoreResult(succeeded=True, detail="snapshot-1")
+
+    async def request_user_input(self, content: str, incident: Incident) -> None:
+        del content, incident
+        self.user_handoffs += 1
+
     async def continue_once(self, prompt: str, incident: Incident) -> None:
         self.continuations.append(prompt)
 
     async def request_approval(self, decision: RecoveryDecision) -> bool:
         return False
+
+
+class FakeRecoveryAdvisor:
+    def __init__(self) -> None:
+        self.requests: list[RecoveryAdviceRequest] = []
+
+    async def advise(self, request: RecoveryAdviceRequest) -> RecoveryAdvice:
+        self.requests.append(request)
+        if request.strategy == RecoveryStrategy.REWRITE_COMMAND:
+            return RecoveryAdvice(
+                strategy=request.strategy,
+                reason="rewrite",
+                command="pytest -q --cache-clear",
+            )
+        if request.strategy == RecoveryStrategy.ALTERNATE_TOOL:
+            return RecoveryAdvice(
+                strategy=request.strategy, reason="alternate", tool="edit"
+            )
+        return RecoveryAdvice(
+            strategy=request.strategy,
+            reason="final plan",
+            tool="grep",
+            command="inspect then patch once",
+        )
 
 
 def confirmed_state() -> RunState:
@@ -115,6 +155,51 @@ async def test_concurrent_recovery_triggers_inject_exactly_once(tmp_path: Path) 
     )
 
     assert len(port.injected) == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_escalates_once_per_strategy_then_hands_off(
+    tmp_path: Path,
+) -> None:
+    store = WatchdogStore(WatchdogPaths.for_run("run-1", root=tmp_path))
+    port = FakeRecoveryPort()
+    advisor = FakeRecoveryAdvisor()
+    coordinator = RecoveryCoordinator(store=store, port=port, advisor=advisor)
+    state = confirmed_state()
+
+    observed_strategies: list[RecoveryStrategy] = []
+    for sequence in range(1, 7):
+        state = await coordinator.recover(state, observed_at=float(sequence))
+        incident = state.incident
+        assert incident is not None
+        assert incident.decision is not None
+        observed_strategies.append(incident.decision.strategy)
+        if incident.state == IncidentState.NEEDS_USER:
+            break
+        state = state.model_copy(
+            update={
+                "incident": incident.model_copy(
+                    update={"state": IncidentState.CONFIRMED}
+                )
+            }
+        )
+
+    assert observed_strategies == [
+        RecoveryStrategy.INJECT_CONTEXT,
+        RecoveryStrategy.REWRITE_COMMAND,
+        RecoveryStrategy.ALTERNATE_TOOL,
+        RecoveryStrategy.RESTORE_CHECKPOINT,
+        RecoveryStrategy.LLM_RECOVERY,
+        RecoveryStrategy.ASK_USER,
+    ]
+    assert [request.strategy for request in advisor.requests] == [
+        RecoveryStrategy.REWRITE_COMMAND,
+        RecoveryStrategy.ALTERNATE_TOOL,
+        RecoveryStrategy.LLM_RECOVERY,
+    ]
+    assert port.restores == 1
+    assert port.user_handoffs == 1
+    assert state.phase == RunPhase.WAITING_FOR_USER
 
 
 @pytest.mark.asyncio

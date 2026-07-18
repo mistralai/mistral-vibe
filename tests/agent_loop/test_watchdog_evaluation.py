@@ -6,8 +6,8 @@ from tests.conftest import build_test_agent_loop
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.types import LLMMessage, Role
-from vibe.core.watchdog import TiltEvaluationRequest
-from vibe.core.watchdog.models import RunPhase
+from vibe.core.watchdog import RecoveryAdviceRequest, TiltEvaluationRequest
+from vibe.core.watchdog.models import RecoveryStrategy, RunPhase
 
 
 @pytest.mark.asyncio
@@ -38,3 +38,33 @@ async def test_agent_loop_runs_tool_free_accounted_tilt_evaluation() -> None:
     assert request_content is not None
     assert "Return exactly one JSON object" in system_content
     assert "exact_repeat_count" in request_content
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_runs_validated_tool_free_recovery_advice() -> None:
+    backend = FakeBackend(
+        mock_llm_chunk(
+            content=(
+                '{"strategy":"rewrite_command","reason":"clear stale cache",'
+                '"tool":null,"command":"pytest -q --cache-clear"}'
+            )
+        )
+    )
+    agent_loop = build_test_agent_loop(backend=backend)
+
+    result = await agent_loop.advise_watchdog_recovery(
+        RecoveryAdviceRequest(
+            strategy=RecoveryStrategy.REWRITE_COMMAND,
+            objective="Fix parser tests",
+            detector="repeated_call",
+            evidence=("same-command",),
+            attempted_strategies=(RecoveryStrategy.INJECT_CONTEXT,),
+        )
+    )
+
+    assert result.strategy == RecoveryStrategy.REWRITE_COMMAND
+    assert result.command == "pytest -q --cache-clear"
+    assert backend.requests_tools == [None]
+    metadata = backend.requests_metadata[0]
+    assert metadata is not None
+    assert metadata["call_type"] == "secondary_call"

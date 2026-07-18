@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from vibe.core.watchdog.events import EventKind, WatchdogEvent
-from vibe.core.watchdog.models import Incident, ObserverState, RunPhase, RunState
+from vibe.core.watchdog.models import (
+    Incident,
+    IncidentState,
+    ObserverState,
+    RunPhase,
+    RunState,
+)
 
 
 class WatchdogReducerError(Exception):
@@ -101,6 +107,11 @@ def _event_updates(state: RunState, event: WatchdogEvent) -> dict[str, object]:
 
     if phase := _PHASE_BY_EVENT.get(event.kind):
         updates["phase"] = phase
+    if (
+        isinstance((incident := updates.get("incident")), Incident)
+        and incident.state == IncidentState.NEEDS_USER
+    ):
+        updates["phase"] = RunPhase.WAITING_FOR_USER
     if event.kind == EventKind.RECOVERY_STARTED and event.epoch is not None:
         updates["epoch"] = event.epoch
     return updates

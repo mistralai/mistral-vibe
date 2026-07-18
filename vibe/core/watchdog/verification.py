@@ -76,6 +76,10 @@ class VerifierRegistry:
     def __init__(self) -> None:
         self._verifiers: dict[RecoveryStrategy, StrategyVerifier] = {
             RecoveryStrategy.INJECT_CONTEXT: ContextInjectionVerifier(),
+            RecoveryStrategy.REWRITE_COMMAND: ContextInjectionVerifier(),
+            RecoveryStrategy.ALTERNATE_TOOL: ContextInjectionVerifier(),
+            RecoveryStrategy.RESTORE_CHECKPOINT: ContextInjectionVerifier(),
+            RecoveryStrategy.LLM_RECOVERY: ContextInjectionVerifier(),
             RecoveryStrategy.CANCEL_AND_CONTINUE: CancellationVerifier(),
         }
 

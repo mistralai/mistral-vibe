@@ -188,6 +188,7 @@ class ObserveOnlySupervisor:
                     self.state = await self._recovery.recover(
                         self.state, observed_at=pending.observed_at_monotonic
                     )
+                    self._pause_if_user_needed()
 
     async def _evaluate_tilt(self, observed_at: float) -> None:
         incident = self.state.incident
@@ -234,6 +235,14 @@ class ObserveOnlySupervisor:
             self.state = await self._recovery.recover(
                 self.state, observed_at=observed_at, tilt_score_authorized=True
             )
+            self._pause_if_user_needed()
+
+    def _pause_if_user_needed(self) -> None:
+        if (
+            self.state.incident is not None
+            and self.state.incident.state == IncidentState.NEEDS_USER
+        ):
+            self._interventions_enabled = False
 
     async def _persist_tilt_score(
         self, kind: EventKind, observed_at: float, *, payload: dict[str, JsonValue]

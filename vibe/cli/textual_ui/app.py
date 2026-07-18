@@ -3100,7 +3100,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         from vibe.core.watchdog.demo_headless import run_headless_demo
         from vibe.core.watchdog.demo_report import DemoReport, save_demo_report
-        from vibe.core.watchdog.demo_runner import DemoProgress, run_demo
+        from vibe.core.watchdog.demo_runner import SCENARIOS, DemoProgress, run_demo
 
         async def update(progress: DemoProgress) -> None:
             if progress_app.parent is not None:
@@ -3109,7 +3109,7 @@ class VibeApp(App):  # noqa: PLR0904
         try:
             integration_report = None
             if selection in {"all", "headless"}:
-                integration_total = 12 if selection == "all" else 1
+                integration_total = len(SCENARIOS) + 1 if selection == "all" else 1
                 await update(
                     DemoProgress(1, integration_total, "headless-cli", "running")
                 )

@@ -2092,6 +2092,13 @@ FeedbackBar {
     text-align: center;
 }
 
+.watchcat-mitigation-ladder {
+    height: auto;
+    min-height: 2;
+    content-align: center middle;
+    text-align: center;
+}
+
 .watchcat-run-stats {
     width: 100%;
     height: 4;

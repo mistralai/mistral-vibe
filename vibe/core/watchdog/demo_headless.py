@@ -18,6 +18,7 @@ from typing import Any, cast
 
 from vibe.core.paths._vibe_home import VIBE_HOME
 from vibe.core.watchdog.demo_report import DemoRunReport, DemoTraceEntry
+from vibe.core.watchdog.events import EventKind
 from vibe.core.watchdog.models import IncidentState, ObserverState, RunState
 from vibe.core.watchdog.paths import WatchdogPaths
 from vibe.core.watchdog.reducer import apply_event
@@ -270,6 +271,18 @@ def _build_report(
                     else "degraded"
                 ),
                 incident_state=state.incident.state.value if state.incident else "-",
+                strategy=(
+                    state.incident.decision.strategy.value
+                    if event.kind
+                    in {
+                        EventKind.RECOVERY_STARTED,
+                        EventKind.RECOVERY_FINISHED,
+                        EventKind.RECOVERY_FAILED,
+                    }
+                    and state.incident is not None
+                    and state.incident.decision is not None
+                    else None
+                ),
             )
         )
     if state.incident is None or state.incident.state != IncidentState.CLOSED:
@@ -312,6 +325,7 @@ def _build_report(
         llm_scores=[],
         injection_attempts=1,
         context_injections=1,
+        mitigation_attempts=["inject_context"],
         artifacts=str(run_dir),
         trace=trace,
     )

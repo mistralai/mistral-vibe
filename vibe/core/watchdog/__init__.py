@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from vibe.core.watchdog._port import WatchdogObserverPort
+from vibe.core.watchdog.advice import (
+    RecoveryAdvice,
+    RecoveryAdviceRequest,
+    RecoveryAdvisor,
+    parse_recovery_advice,
+    validate_recovery_advice,
+)
 from vibe.core.watchdog.checkpoint_policy import (
     CheckpointRestorePolicy,
     RestoreLocation,
@@ -51,6 +58,7 @@ from vibe.core.watchdog.recovery_port import (
     IdleResult,
     QuiesceResult,
     RecoveryPort,
+    RestoreResult,
 )
 from vibe.core.watchdog.reducer import (
     EventIdentityError,
@@ -129,12 +137,16 @@ __all__ = [
     "PhaseDeadlineTracker",
     "QueuePutResult",
     "QuiesceResult",
+    "RecoveryAdvice",
+    "RecoveryAdviceRequest",
+    "RecoveryAdvisor",
     "RecoveryCoordinator",
     "RecoveryDecision",
     "RecoveryHandoff",
     "RecoveryPort",
     "RecoveryStrategy",
     "RestoreLocation",
+    "RestoreResult",
     "RestoreVerdict",
     "RunPhase",
     "RunState",
@@ -176,7 +188,9 @@ __all__ = [
     "fingerprint_result",
     "metric_from_event",
     "observe_stream",
+    "parse_recovery_advice",
     "parse_tilt_evaluation",
     "render_replay",
     "sanitize_artifact",
+    "validate_recovery_advice",
 ]

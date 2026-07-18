@@ -143,6 +143,9 @@ class WatchcatReportApp(Container):
             yield NoMarkupStatic(header, classes="watchcat-run-card-title")
             yield NoMarkupStatic(run.trigger, classes="watchcat-run-trigger")
             yield NoMarkupStatic(self._flow_visual(run), classes="watchcat-run-flow")
+            yield NoMarkupStatic(
+                self._mitigation_ladder(run), classes="watchcat-mitigation-ladder"
+            )
             with Horizontal(classes="watchcat-run-stats"):
                 yield NoMarkupStatic(
                     f"SIGNAL\n{run.signal_quality.upper()}", classes="watchcat-run-stat"
@@ -153,6 +156,11 @@ class WatchcatReportApp(Container):
                 )
                 yield NoMarkupStatic(
                     f"INJECTION\n{run.context_injections}/{run.injection_attempts}",
+                    classes="watchcat-run-stat",
+                )
+                yield NoMarkupStatic(
+                    f"LLM / RESTORE / USER\n{run.recovery_llm_calls} / "
+                    f"{run.snapshot_restores} / {run.user_handoffs}",
                     classes="watchcat-run-stat",
                 )
             yield NoMarkupStatic(
@@ -245,23 +253,33 @@ class WatchcatReportApp(Container):
         return text
 
     @staticmethod
+    def _mitigation_ladder(run: DemoRunReport) -> Text:
+        text = Text("MITIGATION  ", style="bold dim")
+        if not run.mitigation_attempts:
+            text.append("none", style="dim")
+            return text
+        for index, strategy in enumerate(run.mitigation_attempts):
+            if index:
+                text.append("  ━▶  ", style="dim")
+            text.append(strategy.replace("_", " ").upper(), style="bold magenta")
+        return text
+
+    @staticmethod
     def _trace_visual(run: DemoRunReport) -> Text:
         text = Text("TRACE  ", style="bold dim")
-        important = {
+        fixed = {
             "incident_suspected": ("?", "yellow"),
             "incident_confirmed": ("!", "yellow"),
-            "context_injection_started": ("→", "magenta"),
-            "context_injection_succeeded": ("+", "magenta"),
             "verification_passed": ("✓", "green"),
             "verification_failed": ("×", "red"),
-            "context_injection_failed": ("×", "red"),
             "signal_evaluated": ("S", "cyan"),
             "signal_evaluation_failed": ("×", "red"),
         }
         entries = [
             (entry, display_demo_event(entry))
             for entry in run.trace
-            if display_demo_event(entry) in important
+            if display_demo_event(entry) in fixed
+            or display_demo_event(entry).endswith(("_started", "_succeeded", "_failed"))
         ]
         if not entries:
             text.append("● no incident", style="cyan")
@@ -269,7 +287,7 @@ class WatchcatReportApp(Container):
         for index, (_entry, label) in enumerate(entries):
             if index:
                 text.append(" ─ ", style="dim")
-            symbol, style = important[label]
+            symbol, style = fixed.get(label, _mitigation_status_style(label))
             text.append(f"{symbol} {label.replace('_', ' ')}", style=style)
         return text
 
@@ -278,3 +296,11 @@ class WatchcatReportApp(Container):
 
     def action_close(self) -> None:
         self.post_message(self.Closed())
+
+
+def _mitigation_status_style(label: str) -> tuple[str, str]:
+    if label.endswith("_failed"):
+        return "×", "red"
+    if label.endswith("_succeeded"):
+        return "+", "magenta"
+    return "→", "magenta"

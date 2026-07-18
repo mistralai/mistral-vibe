@@ -37,8 +37,11 @@ class IncidentState(StrEnum):
 
 class RecoveryStrategy(StrEnum):
     INJECT_CONTEXT = auto()
+    REWRITE_COMMAND = auto()
+    ALTERNATE_TOOL = auto()
     CANCEL_AND_CONTINUE = auto()
     RESTORE_CHECKPOINT = auto()
+    LLM_RECOVERY = auto()
     RESTART_PROCESS = auto()
     ASK_USER = auto()
     STOP = auto()

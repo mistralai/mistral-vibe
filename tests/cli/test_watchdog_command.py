@@ -248,8 +248,9 @@ async def test_watchcat_demo_all_runs_every_scenario_and_opens_report(
         assert await app._handle_command("/watchcat demo all")
         for _ in range(80):
             await pilot.pause(0.1)
-            if load_latest_demo_report() is not None:
+            if load_latest_demo_report() is not None and app.query(WatchcatReportApp):
                 break
+        await pilot.pause()
 
         report = load_latest_demo_report()
         errors = [error._error for error in app.query(ErrorMessage)]
@@ -259,6 +260,16 @@ async def test_watchcat_demo_all_runs_every_scenario_and_opens_report(
         assert report.runs[0].incident_state == "closed"
         assert report.runs[0].recovery_prompt is not None
         assert "WATCHCAT RECOVERY HANDOFF" in report.runs[0].recovery_prompt
+        by_name = {run.name: run for run in report.runs}
+        assert by_name["rewrite-command"].mitigation_attempts == [
+            "inject_context",
+            "rewrite_command",
+        ]
+        assert by_name["alternate-tool"].mitigation_attempts[-1] == "alternate_tool"
+        assert by_name["snapshot-restore"].snapshot_restores == 1
+        assert by_name["llm-recovery"].recovery_llm_calls == 3
+        assert by_name["user-handoff"].incident_state == "needs_user"
+        assert by_name["user-handoff"].user_handoffs == 1
         assert app.query_one(WatchcatReportApp)
 
 

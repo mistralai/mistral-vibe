@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.paths._vibe_home import VIBE_HOME
 
@@ -16,6 +16,7 @@ class DemoTraceEntry(BaseModel):
     phase: str
     signal_quality: str
     incident_state: str
+    strategy: str | None = None
 
 
 class DemoRunReport(BaseModel):
@@ -38,6 +39,10 @@ class DemoRunReport(BaseModel):
     llm_scores: list[int]
     injection_attempts: int
     context_injections: int
+    mitigation_attempts: list[str] = Field(default_factory=list)
+    recovery_llm_calls: int = 0
+    snapshot_restores: int = 0
+    user_handoffs: int = 0
     artifacts: str
     trace: list[DemoTraceEntry]
 
@@ -58,10 +63,22 @@ def display_demo_event(entry: DemoTraceEntry) -> str:
             if entry.incident_state == "closed"
             else "verification_failed"
         )
+    if entry.event in {"recovery_started", "recovery_finished", "recovery_failed"}:
+        action = {
+            "inject_context": "context_injection",
+            "rewrite_command": "command_rewrite",
+            "alternate_tool": "alternate_tool",
+            "restore_checkpoint": "snapshot_restore",
+            "llm_recovery": "llm_recovery",
+            "ask_user": "user_handoff",
+        }.get(entry.strategy or "inject_context", "mitigation")
+        status = {
+            "recovery_started": "started",
+            "recovery_finished": "succeeded",
+            "recovery_failed": "failed",
+        }[entry.event]
+        return f"{action}_{status}"
     return {
-        "recovery_started": "context_injection_started",
-        "recovery_finished": "context_injection_succeeded",
-        "recovery_failed": "context_injection_failed",
         "tilt_evaluated": "signal_evaluated",
         "tilt_evaluation_failed": "signal_evaluation_failed",
         "run_finished": "run_completed",
@@ -120,6 +137,10 @@ def render_demo_report(report: DemoReport) -> str:
             f"+- signal  : {run.signal_quality}",
             f"+- LLM     : {scores}",
             f"+- inject  : {run.context_injections}/{run.injection_attempts} successful",
+            f"+- ladder  : {' -> '.join(run.mitigation_attempts) or 'none'}",
+            f"+- advisor : {run.recovery_llm_calls} LLM calls",
+            f"+- restore : {run.snapshot_restores}",
+            f"+- handoff : {run.user_handoffs}",
             f"+- incident: {run.incident_state}",
             f"`- artifact: {run.artifacts}",
         ])
@@ -167,6 +188,10 @@ def render_demo_runs(runs: list[DemoRunReport]) -> str:
             f"+- mitigation : {mitigation}",
             f"+- signal/LLM : {run.signal_quality} / {scores}",
             f"+- injection  : {run.context_injections}/{run.injection_attempts} successful",
+            f"+- ladder     : {' -> '.join(run.mitigation_attempts) or 'none'}",
+            f"+- advisor    : {run.recovery_llm_calls} LLM calls",
+            f"+- restores   : {run.snapshot_restores}",
+            f"+- handoffs   : {run.user_handoffs}",
             f"`- artifact   : {run.artifacts}",
             "",
             "SEQ  EVENT                        PHASE          SIGNAL    INCIDENT",

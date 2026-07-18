@@ -175,6 +175,12 @@ from vibe.core.utils import (
     get_user_cancellation_message,
     is_user_cancellation_event,
 )
+from vibe.core.watchdog.advice import (
+    RecoveryAdvice,
+    RecoveryAdviceRequest,
+    parse_recovery_advice,
+    validate_recovery_advice,
+)
 from vibe.core.watchdog.evaluation import (
     TiltEvaluation,
     TiltEvaluationRequest,
@@ -484,6 +490,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._is_user_prompt_call: bool = False
         self._reactive_recovery_used: bool = False
         self._pending_injected_messages: list[LLMMessage] = []
+        self._pending_conversation_restore: list[LLMMessage] | None = None
         self._pending_clear_context: bool = False
 
         self.experiment_manager = ExperimentManager(
@@ -650,6 +657,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         for injected in self._pending_injected_messages:
             self.messages.append(injected)
         self._pending_injected_messages.clear()
+        return True
+
+    def _drain_pending_conversation_restore(self) -> bool:
+        if self._pending_conversation_restore is None:
+            return False
+        self.messages.reset(self._pending_conversation_restore)
+        self._pending_conversation_restore = None
         return True
 
     def set_approval_callback(self, callback: ApprovalCallback) -> None:
@@ -924,6 +938,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             LLMMessage(role=Role.user, content=content, injected=True)
         )
 
+    async def queue_conversation_restore(self, messages: Sequence[LLMMessage]) -> None:
+        self._pending_conversation_restore = [
+            message.model_copy(deep=True) for message in messages
+        ]
+
     async def restore_conversation_snapshot(
         self, messages: Sequence[LLMMessage]
     ) -> None:
@@ -964,6 +983,42 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             call_type="secondary_call",
         )
         return parse_tilt_evaluation(result.message.content or "")
+
+    async def advise_watchdog_recovery(
+        self, request: RecoveryAdviceRequest
+    ) -> RecoveryAdvice:
+        transcript_lines: list[str] = []
+        for message in list(self.messages)[-8:]:
+            if not message.content or message.role == Role.system:
+                continue
+            transcript_lines.append(f"{message.role.value}: {message.content[:1_000]}")
+        transcript = "\n".join(transcript_lines)[-8_000:] or "(no recent messages)"
+        enriched = request.model_copy(
+            update={"available_tools": tuple(sorted(self.tool_manager.available_tools))}
+        )
+        messages = [
+            LLMMessage(
+                role=Role.system, content=UtilityPrompt.WATCHDOG_RECOVERY_ADVICE.read()
+            ),
+            LLMMessage(
+                role=Role.user,
+                content=(
+                    f"Recovery request:\n{enriched.model_dump_json()}\n\n"
+                    f"Recent conversation:\n{transcript}"
+                ),
+            ),
+        ]
+        model = self.config.get_active_model().model_copy(update={"temperature": 0.0})
+        result = await self._complete(
+            model=model,
+            messages=messages,
+            tools=None,
+            tool_choice=None,
+            call_type="secondary_call",
+        )
+        advice = parse_recovery_advice(result.message.content or "")
+        validate_recovery_advice(advice, enriched)
+        return advice
 
     def set_event_observer(self, observer: WatchdogObserverPort | None) -> None:
         self._event_observer = observer
@@ -1458,6 +1513,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     should_break_loop = False
                     continue
 
+                self._drain_pending_conversation_restore()
                 last_message = self.messages[-1]
                 drained = self._drain_pending_injections()
                 should_break_loop = last_message.role != Role.tool and not drained
