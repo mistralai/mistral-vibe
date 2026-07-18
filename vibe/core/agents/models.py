@@ -43,6 +43,7 @@ class BuiltinAgentName(StrEnum):
     CHAT = "chat"
     PLAN = "plan"
     ACCEPT_EDITS = "accept-edits"
+    AUTO = "auto"
     AUTO_APPROVE = "auto-approve"
     EXPLORE = "explore"
     LEAN = "lean"
@@ -131,6 +132,13 @@ ACCEPT_EDITS = AgentProfile(
         },
     },
 )
+AUTO = AgentProfile(
+    BuiltinAgentName.AUTO,
+    "Auto",
+    "Runs without prompts; a classifier blocks risky actions",
+    AgentSafety.DESTRUCTIVE,
+    overrides={"disabled_tools": ["exit_plan_mode"], "auto_mode": {"enabled": True}},
+)
 AUTO_APPROVE = AgentProfile(
     BuiltinAgentName.AUTO_APPROVE,
     "Auto Approve",
@@ -192,6 +200,7 @@ BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.DEFAULT: DEFAULT,
     BuiltinAgentName.PLAN: PLAN,
     BuiltinAgentName.ACCEPT_EDITS: ACCEPT_EDITS,
+    BuiltinAgentName.AUTO: AUTO,
     BuiltinAgentName.AUTO_APPROVE: AUTO_APPROVE,
     BuiltinAgentName.EXPLORE: EXPLORE,
     BuiltinAgentName.LEAN: LEAN,

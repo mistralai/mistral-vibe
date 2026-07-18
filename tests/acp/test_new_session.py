@@ -98,7 +98,7 @@ class TestACPNewSession:
         assert session_response.modes is not None
         assert session_response.modes.current_mode_id is not None
         assert session_response.modes.available_modes is not None
-        assert len(session_response.modes.available_modes) == 5
+        assert len(session_response.modes.available_modes) == 6
 
         assert session_response.modes.current_mode_id == BuiltinAgentName.DEFAULT
         # Check that all primary agents are available (order may vary)
@@ -106,6 +106,7 @@ class TestACPNewSession:
         assert mode_ids == {
             BuiltinAgentName.DEFAULT,
             BuiltinAgentName.CHAT,
+            BuiltinAgentName.AUTO,
             BuiltinAgentName.AUTO_APPROVE,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
@@ -120,11 +121,12 @@ class TestACPNewSession:
         assert mode_config.id == "mode"
         assert mode_config.category == "mode"
         assert mode_config.current_value == BuiltinAgentName.DEFAULT
-        assert len(mode_config.options) == 5
+        assert len(mode_config.options) == 6
         mode_option_values = {opt.value for opt in mode_config.options}
         assert mode_option_values == {
             BuiltinAgentName.DEFAULT,
             BuiltinAgentName.CHAT,
+            BuiltinAgentName.AUTO,
             BuiltinAgentName.AUTO_APPROVE,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,

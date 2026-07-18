@@ -101,7 +101,7 @@ def parse_arguments() -> argparse.Namespace:
         "--agent",
         metavar="NAME",
         default=None,
-        help="Agent to use (builtin: default, plan, accept-edits, auto-approve, "
+        help="Agent to use (builtin: default, plan, accept-edits, auto, auto-approve, "
         "or custom from ~/.vibe/agents/NAME.toml). Defaults to the "
         "'default_agent' config setting in both interactive and programmatic "
         "(-p/--prompt) mode.",
