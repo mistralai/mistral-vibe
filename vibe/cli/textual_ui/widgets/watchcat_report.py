@@ -11,7 +11,12 @@ from textual.widgets import TabbedContent, TabPane, Tabs
 
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.watchdog.demo_report import DemoReport, DemoRunReport, render_demo_runs
+from vibe.core.watchdog.demo_report import (
+    DemoReport,
+    DemoRunReport,
+    display_demo_event,
+    render_demo_runs,
+)
 
 CLASSIFICATIONS = ("protected", "mitigated", "blocked", "degraded")
 CLASS_STYLES = {
@@ -211,7 +216,14 @@ class WatchcatReportApp(Container):
             ("O", "tool_started" in events),
             ("D", "incident_confirmed" in events),
             ("R", "recovery_finished" in events),
-            ("V", "verification_finished" in events),
+            (
+                "V",
+                any(
+                    entry.event == "verification_finished"
+                    and entry.incident_state == "closed"
+                    for entry in run.trace
+                ),
+            ),
         )
         text = Text(f"{run.name[:20]:<20} ")
         for index, (label, active) in enumerate(stages):
@@ -238,22 +250,27 @@ class WatchcatReportApp(Container):
         important = {
             "incident_suspected": ("?", "yellow"),
             "incident_confirmed": ("!", "yellow"),
-            "recovery_started": ("R", "magenta"),
-            "recovery_finished": ("↻", "magenta"),
-            "verification_finished": ("✓", "green"),
-            "recovery_failed": ("×", "red"),
-            "tilt_evaluated": ("S", "cyan"),
-            "tilt_evaluation_failed": ("×", "red"),
+            "context_injection_started": ("→", "magenta"),
+            "context_injection_succeeded": ("+", "magenta"),
+            "verification_passed": ("✓", "green"),
+            "verification_failed": ("×", "red"),
+            "context_injection_failed": ("×", "red"),
+            "signal_evaluated": ("S", "cyan"),
+            "signal_evaluation_failed": ("×", "red"),
         }
-        entries = [entry for entry in run.trace if entry.event in important]
+        entries = [
+            (entry, display_demo_event(entry))
+            for entry in run.trace
+            if display_demo_event(entry) in important
+        ]
         if not entries:
             text.append("● no incident", style="cyan")
             return text
-        for index, entry in enumerate(entries):
+        for index, (_entry, label) in enumerate(entries):
             if index:
                 text.append(" ─ ", style="dim")
-            symbol, style = important[entry.event]
-            text.append(f"{symbol} {entry.event.replace('_', ' ')}", style=style)
+            symbol, style = important[label]
+            text.append(f"{symbol} {label.replace('_', ' ')}", style=style)
         return text
 
     def on_mount(self) -> None:

@@ -51,6 +51,23 @@ class DemoReport(BaseModel):
     runs: list[DemoRunReport]
 
 
+def display_demo_event(entry: DemoTraceEntry) -> str:
+    if entry.event == "verification_finished":
+        return (
+            "verification_passed"
+            if entry.incident_state == "closed"
+            else "verification_failed"
+        )
+    return {
+        "recovery_started": "context_injection_started",
+        "recovery_finished": "context_injection_succeeded",
+        "recovery_failed": "context_injection_failed",
+        "tilt_evaluated": "signal_evaluated",
+        "tilt_evaluation_failed": "signal_evaluation_failed",
+        "run_finished": "run_completed",
+    }.get(entry.event, entry.event)
+
+
 def demo_report_dir() -> Path:
     return VIBE_HOME.path / "watchcat" / "demo-reports"
 
@@ -152,12 +169,13 @@ def render_demo_runs(runs: list[DemoRunReport]) -> str:
             f"+- injection  : {run.context_injections}/{run.injection_attempts} successful",
             f"`- artifact   : {run.artifacts}",
             "",
-            "SEQ  EVENT                    PHASE          SIGNAL    INCIDENT",
-            "---  -----------------------  -------------  --------  ----------",
+            "SEQ  EVENT                        PHASE          SIGNAL    INCIDENT",
+            "---  ---------------------------  -------------  --------  ----------",
         ])
         for entry in run.trace:
+            event = display_demo_event(entry)
             sections.append(
-                f"{entry.sequence:>3}  {entry.event:<23}  {entry.phase:<13}  "
+                f"{entry.sequence:>3}  {event:<27}  {entry.phase:<13}  "
                 f"{entry.signal_quality:<8}  {entry.incident_state}"
             )
         sections.extend(["", "=" * 72, ""])

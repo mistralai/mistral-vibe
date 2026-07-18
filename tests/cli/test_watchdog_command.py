@@ -24,6 +24,7 @@ from vibe.core.watchdog.demo_report import (
     DemoReport,
     DemoRunReport,
     DemoTraceEntry,
+    display_demo_event,
     save_demo_report,
 )
 
@@ -38,6 +39,27 @@ def _runtime(tmp_path: Path):
     )
     runtime = WatchdogRuntime(run_id="command-run", paths=paths, supervisor=supervisor)
     return agent_loop, runtime
+
+
+def test_watchcat_demo_status_labels_are_unambiguous() -> None:
+    def entry(event: str, incident_state: str) -> DemoTraceEntry:
+        return DemoTraceEntry(
+            sequence=1,
+            event=event,
+            phase="verification",
+            signal_quality="healthy",
+            incident_state=incident_state,
+        )
+
+    assert display_demo_event(entry("verification_finished", "closed")) == (
+        "verification_passed"
+    )
+    assert display_demo_event(entry("verification_finished", "verifying")) == (
+        "verification_failed"
+    )
+    assert display_demo_event(entry("recovery_finished", "verifying")) == (
+        "context_injection_succeeded"
+    )
 
 
 @pytest.mark.asyncio
