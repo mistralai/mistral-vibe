@@ -70,6 +70,14 @@ from vibe.core.watchdog.store import (
     WatchdogStore,
 )
 from vibe.core.watchdog.supervisor import ObserveOnlySupervisor, observe_stream
+from vibe.core.watchdog.telemetry import (
+    NullWatchdogTelemetry,
+    WatchdogDetectorKind,
+    WatchdogMetricKind,
+    WatchdogTelemetryEvent,
+    WatchdogTelemetryPort,
+    metric_from_event,
+)
 from vibe.core.watchdog.tilt import TiltTracker
 from vibe.core.watchdog.verification import (
     CancellationVerifier,
@@ -103,6 +111,7 @@ __all__ = [
     "IncidentState",
     "IncidentTransition",
     "LivenessProbe",
+    "NullWatchdogTelemetry",
     "ObserveOnlySupervisor",
     "ObserverState",
     "PhaseDeadlineTracker",
@@ -127,8 +136,10 @@ __all__ = [
     "VerificationResult",
     "VerificationStatus",
     "VerifierRegistry",
+    "WatchdogDetectorKind",
     "WatchdogEvent",
     "WatchdogEventQueue",
+    "WatchdogMetricKind",
     "WatchdogObserverPort",
     "WatchdogPaths",
     "WatchdogReducerError",
@@ -136,6 +147,8 @@ __all__ = [
     "WatchdogSchemaVersionError",
     "WatchdogStorageError",
     "WatchdogStore",
+    "WatchdogTelemetryEvent",
+    "WatchdogTelemetryPort",
     "apply_event",
     "attach_watchdog",
     "canonical_json",
@@ -145,6 +158,7 @@ __all__ = [
     "fingerprint_evidence",
     "fingerprint_repository",
     "fingerprint_result",
+    "metric_from_event",
     "observe_stream",
     "render_replay",
     "sanitize_artifact",

@@ -15,6 +15,11 @@ from vibe.core.watchdog.fingerprint import sanitize_artifact
 from vibe.core.watchdog.models import RecoveryDecision, RunState
 from vibe.core.watchdog.paths import WatchdogPaths
 from vibe.core.watchdog.reducer import apply_event
+from vibe.core.watchdog.telemetry import (
+    NullWatchdogTelemetry,
+    WatchdogTelemetryPort,
+    metric_from_event,
+)
 
 
 class WatchdogStorageError(Exception):
@@ -27,10 +32,15 @@ class WatchdogSchemaVersionError(WatchdogStorageError):
 
 class WatchdogStore:
     def __init__(
-        self, paths: WatchdogPaths, *, max_record_bytes: int = 256 * 1024
+        self,
+        paths: WatchdogPaths,
+        *,
+        max_record_bytes: int = 256 * 1024,
+        telemetry: WatchdogTelemetryPort | None = None,
     ) -> None:
         self.paths = paths
         self._max_record_bytes = max_record_bytes
+        self._telemetry = telemetry or NullWatchdogTelemetry()
         self._write_lock = asyncio.Lock()
 
     async def persist(
@@ -46,6 +56,8 @@ class WatchdogStore:
             raise WatchdogStorageError("event and state identities do not match")
         async with self._write_lock:
             await asyncio.to_thread(self._persist_sync, event, state, decision)
+        if metric := metric_from_event(event, state):
+            self._telemetry.record(metric)
 
     async def load_state(self) -> RunState | None:
         return await asyncio.to_thread(self._load_state_sync)

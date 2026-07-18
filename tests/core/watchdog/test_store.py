@@ -12,6 +12,7 @@ from vibe.core.watchdog import (
     WatchdogPaths,
     WatchdogStorageError,
     WatchdogStore,
+    WatchdogTelemetryEvent,
     apply_event,
 )
 from vibe.core.watchdog.replay import render_replay
@@ -80,6 +81,36 @@ async def test_audit_artifact_redacts_secret_payload(tmp_path: Path) -> None:
     replay = render_replay(paths)
     assert "private-value" not in replay
     assert "run_started" in replay
+
+
+@pytest.mark.asyncio
+async def test_store_emits_secret_safe_telemetry_metric(tmp_path: Path) -> None:
+    recorded: list[WatchdogTelemetryEvent] = []
+
+    class Recorder:
+        def record(self, event: WatchdogTelemetryEvent) -> None:
+            recorded.append(event)
+
+    paths = WatchdogPaths.for_run("run-1", root=tmp_path)
+    store = WatchdogStore(paths, telemetry=Recorder())
+    item = event(1, payload={"api_key": "private-value", "command": "pwd"})
+    state = apply_event(RunState.new(run_id="run-1", session_id="session-1"), item)
+
+    await store.persist(item, state)
+
+    assert len(recorded) == 1
+    assert recorded[0].kind.value == "run_started"
+    assert set(recorded[0].model_dump()) == {
+        "schema_version",
+        "kind",
+        "sequence",
+        "epoch",
+        "phase",
+        "observer_state",
+        "incident_state",
+        "detector",
+        "recovery_strategy",
+    }
 
 
 @pytest.mark.asyncio
