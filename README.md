@@ -225,6 +225,24 @@ Most modern terminals should work, but older or minimal terminal emulators may h
 
 ## Usage
 
+### Watchdog
+
+Enable incident detection, context-injection recovery, and replay artifacts:
+
+```bash
+vibe --watchdog
+vibe --watchdog --prompt "Fix the parser tests"
+```
+
+Vibe prints the Watchdog run ID and artifact directory at startup. Replay a run:
+
+```bash
+vibe --watchdog-replay RUN_ID
+```
+
+Watchdog state is stored under `$VIBE_HOME/watchdog/runs/RUN_ID/`. Recovery can
+inject bounded context; it never automatically restores the main checkout.
+
 ### Interactive Mode
 
 Simply run `vibe` to enter the interactive chat loop.

@@ -14,6 +14,7 @@ from vibe.core.watchdog import (
     WatchdogStore,
     apply_event,
 )
+from vibe.core.watchdog.replay import render_replay
 
 
 def event(sequence: int, *, payload: dict | None = None) -> WatchdogEvent:
@@ -76,3 +77,6 @@ async def test_audit_artifact_redacts_secret_payload(tmp_path: Path) -> None:
     audit = paths.events.read_text()
     assert "private-value" not in audit
     assert "[REDACTED]" in audit
+    replay = render_replay(paths)
+    assert "private-value" not in replay
+    assert "run_started" in replay

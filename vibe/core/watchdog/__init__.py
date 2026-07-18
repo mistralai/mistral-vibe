@@ -51,6 +51,8 @@ from vibe.core.watchdog.reducer import (
     WatchdogReducerError,
     apply_event,
 )
+from vibe.core.watchdog.replay import render_replay
+from vibe.core.watchdog.runtime import WatchdogRuntime, attach_watchdog
 from vibe.core.watchdog.sentinel import (
     ExitClassification,
     SentinelAction,
@@ -120,10 +122,12 @@ __all__ = [
     "WatchdogObserverPort",
     "WatchdogPaths",
     "WatchdogReducerError",
+    "WatchdogRuntime",
     "WatchdogSchemaVersionError",
     "WatchdogStorageError",
     "WatchdogStore",
     "apply_event",
+    "attach_watchdog",
     "canonical_json",
     "fingerprint",
     "fingerprint_call",
@@ -132,5 +136,6 @@ __all__ = [
     "fingerprint_repository",
     "fingerprint_result",
     "observe_stream",
+    "render_replay",
     "sanitize_artifact",
 ]

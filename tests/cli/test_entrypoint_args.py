@@ -26,3 +26,12 @@ def test_enabled_and_disabled_tools_are_independent(
     args = _parse(monkeypatch, ["--enabled-tools", "read", "--disabled-tools", "bash"])
     assert args.enabled_tools == ["read"]
     assert args.disabled_tools == ["bash"]
+
+
+def test_watchdog_flags_parse_without_mutating_other_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _parse(monkeypatch, ["--watchdog", "--watchdog-replay", "run-1"])
+
+    assert args.watchdog is True
+    assert args.watchdog_replay == "run-1"

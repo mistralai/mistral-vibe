@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing
+import sys
 
 from vibe import __version__
 from vibe.core.agent_loop import AgentLoop, TeleportError
@@ -40,6 +41,7 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
     headless: bool = False,
     hook_config_result: HookConfigResult | None = None,
     terminal_emulator: TerminalEmulator | None = None,
+    watchdog: bool = False,
 ) -> str | None:
     formatter = create_formatter(output_format)
 
@@ -61,6 +63,14 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
         ),
         hook_config_result=hook_config_result,
     )
+    if watchdog:
+        from vibe.core.watchdog.runtime import attach_watchdog
+
+        runtime = attach_watchdog(agent_loop, objective=prompt)
+        print(
+            f"WATCHDOG run={runtime.run_id} artifacts={runtime.paths.run_dir}",
+            file=sys.stderr,
+        )
     logger.info("USER: %s", prompt)
 
     async def _async_run() -> str | None:

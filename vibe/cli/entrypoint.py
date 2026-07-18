@@ -147,6 +147,16 @@ def parse_arguments() -> argparse.Namespace:
         "persisted to trusted_folders.toml). Skips the trust prompt. "
         "Use this for non-interactive automation.",
     )
+    parser.add_argument(
+        "--watchdog",
+        action="store_true",
+        help="Enable Watchdog incident detection, recovery, and replay artifacts.",
+    )
+    parser.add_argument(
+        "--watchdog-replay",
+        metavar="RUN_ID",
+        help="Print a redacted Watchdog event replay and exit.",
+    )
 
     # Feature flag for teleport, not exposed to the user yet
     parser.add_argument("--teleport", action="store_true", help=argparse.SUPPRESS)

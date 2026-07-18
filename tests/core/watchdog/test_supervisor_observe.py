@@ -20,6 +20,7 @@ from vibe.core.watchdog.event_adapter import PendingWatchdogEvent
 from vibe.core.watchdog.incident import IncidentEngine
 from vibe.core.watchdog.models import IncidentState
 from vibe.core.watchdog.recovery_port import RecoveryPort
+from vibe.core.watchdog.runtime import attach_watchdog
 
 
 class InjectionPort:
@@ -133,3 +134,21 @@ async def test_supervisor_detects_recovers_and_replays_incident(tmp_path: Path) 
     assert state.incident.epoch == 1
     assert len(port.injected) == 1
     assert await store.replay() == state
+
+
+@pytest.mark.asyncio
+async def test_attached_runtime_survives_multiple_agent_turns(
+    tmp_path: Path, agent_loop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    runtime = attach_watchdog(
+        agent_loop, objective="finish task", cwd=tmp_path, run_id="run-live"
+    )
+
+    for prompt in ("first", "second"):
+        assert [event async for event in agent_loop.act(prompt)]
+
+    persisted = await WatchdogStore(runtime.paths).load_events()
+
+    assert [event.kind for event in persisted].count(EventKind.RUN_STARTED) == 2
+    assert [event.kind for event in persisted].count(EventKind.RUN_FINISHED) == 2

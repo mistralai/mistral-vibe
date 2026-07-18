@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterable
+from collections.abc import AsyncGenerator, AsyncIterable, Awaitable, Callable
+from dataclasses import replace
 import time
 
 from vibe.core.types import BaseEvent
@@ -25,6 +26,7 @@ class ObserveOnlySupervisor:
         queue_capacity: int = 256,
         incident_engine: IncidentEngine | None = None,
         recovery: RecoveryCoordinator | None = None,
+        repository_probe: Callable[[], Awaitable[str | None]] | None = None,
     ) -> None:
         self.run_id = run_id
         self.session_id = session_id
@@ -32,13 +34,16 @@ class ObserveOnlySupervisor:
         self.state = RunState.new(run_id=run_id, session_id=session_id)
         self._incident_engine = incident_engine
         self._recovery = recovery
+        self._repository_probe = repository_probe
+        self._queue_capacity = queue_capacity
         self._queue = WatchdogEventQueue(capacity=queue_capacity)
         self._worker: asyncio.Task[None] | None = None
         self._integrity_lost = False
 
     async def start(self) -> None:
-        if self._worker is not None:
+        if self._worker is not None and not self._worker.done():
             raise RuntimeError("Watchdog supervisor already started")
+        self._queue = WatchdogEventQueue(capacity=self._queue_capacity)
         self._worker = asyncio.create_task(self._run())
         self._enqueue_boundary(EventKind.RUN_STARTED)
 
@@ -52,6 +57,7 @@ class ObserveOnlySupervisor:
         self._queue.close()
         if self._worker is not None:
             await asyncio.wait_for(self._worker, timeout=2)
+            self._worker = None
 
     def _enqueue_boundary(self, kind: EventKind) -> None:
         result = self._queue.put_nowait(
@@ -79,6 +85,13 @@ class ObserveOnlySupervisor:
             await self._apply_pending(pending)
 
     async def _apply_pending(self, pending: PendingWatchdogEvent) -> None:
+        if pending.kind == EventKind.TOOL_FINISHED and self._repository_probe:
+            repository = await self._repository_probe()
+            if repository is not None:
+                pending = replace(
+                    pending,
+                    payload={**pending.payload, "repository_fingerprint": repository},
+                )
         event = WatchdogEvent(
             run_id=self.run_id,
             session_id=self.session_id,

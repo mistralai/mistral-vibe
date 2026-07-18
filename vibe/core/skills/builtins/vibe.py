@@ -565,6 +565,8 @@ vibe --agent NAME                   # Select agent profile (falls back to `defau
 vibe --auto-approve / --yolo         # Approve all tool calls for the selected agent
 vibe --workdir DIR                  # Change working directory
 vibe --worktree NAME                # Create/reuse a git worktree under $VIBE_HOME/worktrees on branch NAME and run inside it. Auto-cleanup only for worktrees Vibe created this run and only after a session started; reused worktrees and attached (pre-existing) branches are kept unless confirmed. -p sessions keep worktrees. Ignored with --setup/--check-upgrade.
+vibe --watchdog                     # Enable incident detection, context-injection recovery, and replay artifacts
+vibe --watchdog-replay RUN_ID       # Print the redacted event replay and final Watchdog state
 vibe --add-dir DIR                  # Extra working dir loaded for context (repeatable). Implicitly trusted.
 vibe --trust                        # Trust cwd for this invocation only (not persisted)
 vibe -c / --continue                # Continue most recent session in this terminal (TTY-scoped, falls back to latest in cwd)

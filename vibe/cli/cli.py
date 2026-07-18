@@ -307,6 +307,7 @@ def _run_programmatic_mode(
             headless=True,
             hook_config_result=hook_config_result,
             terminal_emulator=detect_terminal(),
+            watchdog=getattr(args, "watchdog", False),
         )
         if final_response:
             print(final_response)
@@ -350,6 +351,18 @@ def _run_interactive_mode(
 
     if loaded_session:
         _resume_previous_session(agent_loop, *loaded_session)
+
+    if getattr(args, "watchdog", False):
+        from vibe.core.watchdog.runtime import attach_watchdog
+
+        runtime = attach_watchdog(
+            agent_loop,
+            objective=args.initial_prompt or stdin_prompt or "Continue the user task",
+        )
+        rprint(
+            f"[cyan]Watchdog enabled[/] run={runtime.run_id} "
+            f"artifacts={runtime.paths.run_dir}"
+        )
 
     run_textual_ui(
         agent_loop=agent_loop,
@@ -480,6 +493,13 @@ def run_cli(
 
     load_dotenv_values()
     bootstrap_config_files()
+
+    if run_id := getattr(args, "watchdog_replay", None):
+        from vibe.core.watchdog.paths import WatchdogPaths
+        from vibe.core.watchdog.replay import render_replay
+
+        print(render_replay(WatchdogPaths.for_run(run_id)))
+        return
 
     if args.setup:
         from vibe.setup.onboarding import run_onboarding
