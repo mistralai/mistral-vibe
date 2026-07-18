@@ -23,12 +23,15 @@ class EventKind(StrEnum):
     WAIT_ENDED = auto()
     RECOVERY_STARTED = auto()
     RECOVERY_FINISHED = auto()
+    RECOVERY_FAILED = auto()
     VERIFICATION_STARTED = auto()
     VERIFICATION_FINISHED = auto()
     OBSERVER_ANOMALY = auto()
     INCIDENT_SUSPECTED = auto()
     INCIDENT_CONFIRMED = auto()
     INCIDENT_CLOSED = auto()
+    CONTINUATION_PENDING = auto()
+    CONTINUATION_STARTED = auto()
 
 
 class WatchdogEvent(BaseModel):

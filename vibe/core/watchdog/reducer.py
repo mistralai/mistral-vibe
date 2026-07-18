@@ -33,6 +33,7 @@ _PHASE_BY_EVENT = {
     EventKind.WAIT_ENDED: RunPhase.IDLE,
     EventKind.RECOVERY_STARTED: RunPhase.RECOVERY,
     EventKind.RECOVERY_FINISHED: RunPhase.VERIFICATION,
+    EventKind.RECOVERY_FAILED: RunPhase.IDLE,
     EventKind.VERIFICATION_STARTED: RunPhase.VERIFICATION,
     EventKind.VERIFICATION_FINISHED: RunPhase.IDLE,
 }
@@ -54,17 +55,6 @@ def apply_event(state: RunState, event: WatchdogEvent) -> RunState:
         )
 
     next_state = state.model_copy(update={"last_applied_sequence": event.sequence})
-    if event.kind == EventKind.OBSERVER_ANOMALY:
-        return next_state.model_copy(update={"observer_state": ObserverState.TILT})
-    if event.kind in {
-        EventKind.INCIDENT_SUSPECTED,
-        EventKind.INCIDENT_CONFIRMED,
-        EventKind.INCIDENT_CLOSED,
-    }:
-        incident = Incident.model_validate(event.payload["incident"])
-        return next_state.model_copy(
-            update={"incident": incident, "epoch": incident.epoch}
-        )
     if event.sequence != state.last_applied_sequence + 1:
         return next_state.model_copy(update={"observer_state": ObserverState.TILT})
 
@@ -75,11 +65,38 @@ def apply_event(state: RunState, event: WatchdogEvent) -> RunState:
     ):
         return next_state
 
+    updates = _event_updates(next_state, event)
+    if not updates:
+        return next_state
+    return next_state.model_copy(update=updates)
+
+
+def _event_updates(state: RunState, event: WatchdogEvent) -> dict[str, object]:
     updates: dict[str, object] = {}
+    if event.kind == EventKind.CONTINUATION_PENDING:
+        updates["pending_continuation"] = True
+    elif event.kind == EventKind.CONTINUATION_STARTED:
+        updates["pending_continuation"] = False
+    elif event.kind == EventKind.OBSERVER_ANOMALY:
+        updates["observer_state"] = ObserverState.TILT
+
+    incident_kinds = {
+        EventKind.INCIDENT_SUSPECTED,
+        EventKind.INCIDENT_CONFIRMED,
+        EventKind.INCIDENT_CLOSED,
+        EventKind.RECOVERY_STARTED,
+        EventKind.RECOVERY_FINISHED,
+        EventKind.RECOVERY_FAILED,
+    }
+    if event.kind in incident_kinds and (
+        incident_payload := event.payload.get("incident")
+    ):
+        incident = Incident.model_validate(incident_payload)
+        updates["incident"] = incident
+        updates["epoch"] = incident.epoch
+
     if phase := _PHASE_BY_EVENT.get(event.kind):
         updates["phase"] = phase
     if event.kind == EventKind.RECOVERY_STARTED and event.epoch is not None:
         updates["epoch"] = event.epoch
-    if not updates:
-        return next_state
-    return next_state.model_copy(update=updates)
+    return updates
