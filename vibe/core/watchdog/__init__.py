@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from vibe.core.watchdog._port import WatchdogObserverPort
 from vibe.core.watchdog.continuation import ContinuationCoordinator
+from vibe.core.watchdog.deadlines import (
+    DeadlineStatus,
+    LivenessProbe,
+    PhaseDeadlineTracker,
+)
 from vibe.core.watchdog.events import EventKind, WatchdogEvent
 from vibe.core.watchdog.fingerprint import (
     canonical_json,
@@ -13,6 +18,7 @@ from vibe.core.watchdog.fingerprint import (
     fingerprint_result,
     sanitize_artifact,
 )
+from vibe.core.watchdog.heartbeat import Heartbeat, HeartbeatWriter
 from vibe.core.watchdog.incident import IncidentEngine, IncidentTransition
 from vibe.core.watchdog.models import (
     Evidence,
@@ -39,27 +45,39 @@ from vibe.core.watchdog.reducer import (
     WatchdogReducerError,
     apply_event,
 )
+from vibe.core.watchdog.sentinel import (
+    ExitClassification,
+    SentinelAction,
+    SentinelPolicy,
+)
 from vibe.core.watchdog.store import (
     WatchdogSchemaVersionError,
     WatchdogStorageError,
     WatchdogStore,
 )
 from vibe.core.watchdog.supervisor import ObserveOnlySupervisor, observe_stream
+from vibe.core.watchdog.tilt import TiltTracker
 
 __all__ = [
     "CancelResult",
     "ContinuationCoordinator",
+    "DeadlineStatus",
     "EventIdentityError",
     "EventKind",
     "EventOrderError",
     "Evidence",
+    "ExitClassification",
+    "Heartbeat",
+    "HeartbeatWriter",
     "IdleResult",
     "Incident",
     "IncidentEngine",
     "IncidentState",
     "IncidentTransition",
+    "LivenessProbe",
     "ObserveOnlySupervisor",
     "ObserverState",
+    "PhaseDeadlineTracker",
     "QueuePutResult",
     "QuiesceResult",
     "RecoveryCoordinator",
@@ -68,6 +86,9 @@ __all__ = [
     "RecoveryStrategy",
     "RunPhase",
     "RunState",
+    "SentinelAction",
+    "SentinelPolicy",
+    "TiltTracker",
     "WatchdogEvent",
     "WatchdogEventQueue",
     "WatchdogObserverPort",

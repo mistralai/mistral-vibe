@@ -77,8 +77,10 @@ def _event_updates(state: RunState, event: WatchdogEvent) -> dict[str, object]:
         updates["pending_continuation"] = True
     elif event.kind == EventKind.CONTINUATION_STARTED:
         updates["pending_continuation"] = False
-    elif event.kind == EventKind.OBSERVER_ANOMALY:
+    elif event.kind in {EventKind.OBSERVER_ANOMALY, EventKind.TILT_ENTERED}:
         updates["observer_state"] = ObserverState.TILT
+    elif event.kind == EventKind.TILT_CLEARED:
+        updates["observer_state"] = ObserverState.TRUSTED
 
     incident_kinds = {
         EventKind.INCIDENT_SUSPECTED,
