@@ -403,9 +403,9 @@ async def test_allow_verdict_records_always_approval_type_in_telemetry(
 
 
 @pytest.mark.asyncio
-async def test_block_verdict_skips_tool_and_surfaces_the_classifier_reason() -> None:
+async def test_block_verdict_asks_the_human_and_honors_denial() -> None:
     classifier = FakeClassifier([block()])
-    approval = ApprovalSpy()
+    approval = ApprovalSpy(response=ApprovalResponse.NO)
     agent_loop = make_agent_loop(
         auto_mode_enabled=True,
         backend=FakeBackend(turns_calling_todo(1)),
@@ -418,28 +418,28 @@ async def test_block_verdict_skips_tool_and_surfaces_the_classifier_reason() -> 
     results = tool_results(events)
     assert len(results) == 1
     assert results[0].skipped is True
-    assert results[0].skip_reason == BLOCK_REASON
-    assert results[0].cancelled is False
-    assert approval.call_count == 0
+    assert results[0].cancelled is True
+    assert approval.call_count == 1
     assert agent_loop.stats.tool_calls_rejected == 1
     assert agent_loop.stats.tool_calls_succeeded == 0
 
 
 @pytest.mark.asyncio
-async def test_block_reason_is_fed_back_to_the_model_as_the_tool_response() -> None:
+async def test_block_verdict_lets_the_human_approve() -> None:
     classifier = FakeClassifier([block()])
+    approval = ApprovalSpy(response=ApprovalResponse.YES)
     agent_loop = make_agent_loop(
         auto_mode_enabled=True,
         backend=FakeBackend(turns_calling_todo(1)),
-        approval_callback=ApprovalSpy(),
+        approval_callback=approval,
     )
     install_classifier(agent_loop, classifier)
 
-    await act_and_collect_events(agent_loop, "read my todos")
+    events = await act_and_collect_events(agent_loop, "read my todos")
 
-    tool_messages = [m for m in agent_loop.messages if m.role == Role.tool]
-    assert len(tool_messages) == 1
-    assert BLOCK_REASON in str(tool_messages[0].content or "")
+    assert approval.call_count == 1
+    assert tool_results(events)[0].skipped is False
+    assert agent_loop.stats.tool_calls_succeeded == 1
 
 
 @pytest.mark.asyncio
@@ -512,7 +512,7 @@ async def test_consecutive_block_limit_pauses_auto_mode_and_hands_over_to_human(
 ):
     assert AUTO_MODE_MAX_CONSECUTIVE_BLOCKS == 3
     classifier = FakeClassifier([block()])
-    approval = ApprovalSpy(response=ApprovalResponse.NO)
+    approval = ApprovalSpy(response=ApprovalResponse.YES)
     agent_loop = make_agent_loop(
         auto_mode_enabled=True,
         backend=FakeBackend(turns_calling_todo(AUTO_MODE_MAX_CONSECUTIVE_BLOCKS + 1)),
@@ -525,7 +525,7 @@ async def test_consecutive_block_limit_pauses_auto_mode_and_hands_over_to_human(
     assert classifier.call_count == AUTO_MODE_MAX_CONSECUTIVE_BLOCKS, (
         "classifier must not be consulted once auto mode has paused"
     )
-    assert approval.call_count == 1
+    assert approval.call_count == AUTO_MODE_MAX_CONSECUTIVE_BLOCKS + 1
     assert agent_loop.stats.classifier_blocks_consecutive == (
         AUTO_MODE_MAX_CONSECUTIVE_BLOCKS
     )
@@ -547,9 +547,7 @@ async def test_allow_resets_the_consecutive_block_counter() -> None:
     await act_and_collect_events(agent_loop, "mixed bag")
 
     assert classifier.call_count == 5
-    assert approval.call_count == 0, (
-        "an ALLOW between blocks must reset the streak so the limit never trips"
-    )
+    assert approval.call_count == 4
     assert agent_loop.stats.classifier_blocks_consecutive == 2
     assert agent_loop.stats.classifier_blocks_total == 4
     assert agent_loop._auto_mode_active() is True
@@ -590,7 +588,7 @@ async def test_total_block_limit_is_not_tripped_one_block_early() -> None:
     await act_and_collect_events(agent_loop, "one more risky thing")
 
     assert classifier.call_count == 1
-    assert approval.call_count == 0
+    assert approval.call_count == 1
     assert agent_loop.stats.classifier_blocks_total == AUTO_MODE_MAX_TOTAL_BLOCKS
 
 
@@ -693,9 +691,7 @@ async def test_paused_auto_mode_does_not_construct_a_classifier_either() -> None
 
 
 @pytest.mark.asyncio
-async def test_headless_block_returns_the_classifier_reason_not_the_generic_denial() -> (
-    None
-):
+async def test_headless_block_falls_back_to_generic_denial() -> None:
     classifier = FakeClassifier([block()])
     agent_loop = make_agent_loop(
         auto_mode_enabled=True, backend=FakeBackend(turns_calling_todo(1))
@@ -708,8 +704,7 @@ async def test_headless_block_returns_the_classifier_reason_not_the_generic_deni
     results = tool_results(events)
     assert len(results) == 1
     assert results[0].skipped is True
-    assert results[0].skip_reason == BLOCK_REASON
-    assert results[0].skip_reason != "Tool execution not permitted."
+    assert results[0].skip_reason == "Tool execution not permitted."
 
 
 @pytest.mark.asyncio

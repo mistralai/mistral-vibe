@@ -136,7 +136,7 @@ ACCEPT_EDITS = AgentProfile(
 AUTO = AgentProfile(
     BuiltinAgentName.AUTO,
     "Smart Auto",
-    "Auto-runs routine actions; uncertain or risky actions require review",
+    "Auto-runs routine actions; asks approval for uncertain or risky actions",
     AgentSafety.GUARDED,
     overrides={"disabled_tools": ["exit_plan_mode"], "auto_mode": {"enabled": True}},
 )

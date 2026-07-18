@@ -2079,11 +2079,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         self.stats.classifier_blocks_consecutive += 1
         self.stats.classifier_blocks_total += 1
-        return ToolDecision(
-            verdict=ToolExecutionResponse.SKIP,
-            approval_type=ToolPermission.ASK,
-            feedback=decision.reason,
-        )
+        # BLOCK means the classifier is not confident enough to auto-execute.
+        # The normal approval path remains the authority in interactive sessions;
+        # headless sessions fail closed because they have no approval callback.
+        return None
 
     async def _ask_approval(
         self,

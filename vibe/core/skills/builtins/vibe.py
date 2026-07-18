@@ -602,8 +602,7 @@ There are two kinds of agents:
 - **plan**: Planning-focused agent
 - **accept-edits**: Auto-approves file edits but asks for other tools
 - **auto (Smart Auto)**: Auto-runs routine actions while a separate classifier
-  reviews permissioned actions, blocking some risky ones or falling back to normal
-  approval when uncertain
+  sends uncertain or risky actions to the normal approval prompt
 - **auto-approve**: Auto-approves all tool calls
 - **lean**: Specialized Lean 4 proof assistant. Not available by default — must be
   installed with `/leanstall` (removed with `/unleanstall`). Use `--agent lean

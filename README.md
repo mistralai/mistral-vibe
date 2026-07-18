@@ -116,7 +116,7 @@ Vibe comes with several built-in agent profiles, each designed for different use
 - **`default`**: Standard agent that requires approval for tool executions. Best for general use.
 - **`plan`**: Read-only agent for exploration and planning. Auto-approves safe tools like `grep` and `read`.
 - **`accept-edits`**: Auto-approves file edits only (`write_file`, `edit`). Useful for code refactoring.
-- **`auto` (Smart Auto)**: Auto-runs routine actions while a separate classifier reviews permissioned actions, blocking some risky ones or falling back to normal approval when uncertain.
+- **`auto` (Smart Auto)**: Auto-runs routine actions while a separate classifier sends uncertain or risky actions to the normal approval prompt.
 - **`auto-approve`**: Auto-approves all tool executions. Use with caution.
 
 Use the `--agent` flag to select a different agent:
