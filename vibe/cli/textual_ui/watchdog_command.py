@@ -5,7 +5,9 @@ from vibe.core.watchdog.models import ObserverState
 from vibe.core.watchdog.runtime import WatchdogRuntime
 from vibe.core.watchdog.snapshots import ConversationSnapshot
 
-WATCHCAT_USAGE = "Usage: /watchcat [status|report|on|off|pause|resume|snapshot|recover]"
+WATCHCAT_USAGE = (
+    "Usage: /watchcat [status|demo|report|on|off|pause|resume|snapshot|recover]"
+)
 
 
 def format_watchdog_status(runtime: WatchdogRuntime | None) -> str:

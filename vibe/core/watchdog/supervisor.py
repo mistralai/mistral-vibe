@@ -58,6 +58,8 @@ class ObserveOnlySupervisor:
         self._queue_capacity = queue_capacity
         self._queue = WatchdogEventQueue(capacity=queue_capacity)
         self._worker: asyncio.Task[None] | None = None
+        self._idle = asyncio.Event()
+        self._idle.set()
         self._integrity_lost = False
         self._interventions_enabled = True
 
@@ -103,13 +105,19 @@ class ObserveOnlySupervisor:
         if self._worker is not None and not self._worker.done():
             raise RuntimeError("Watchcat supervisor already started")
         self._queue = WatchdogEventQueue(capacity=self._queue_capacity)
+        self._idle.set()
         self._worker = asyncio.create_task(self._run())
         self._enqueue_boundary(EventKind.RUN_STARTED)
 
     def observe(self, event: BaseEvent) -> None:
         if pending := normalize_event(event):
             result = self._queue.put_nowait(pending)
+            if result.accepted:
+                self._idle.clear()
             self._integrity_lost |= result.integrity_lost
+
+    async def synchronize(self) -> None:
+        await self._idle.wait()
 
     async def finish(self, outcome: EventKind = EventKind.RUN_FINISHED) -> None:
         self._enqueue_boundary(outcome)
@@ -127,6 +135,8 @@ class ObserveOnlySupervisor:
                 critical=True,
             )
         )
+        if result.accepted:
+            self._idle.clear()
         self._integrity_lost |= result.integrity_lost
 
     async def _run(self) -> None:
@@ -142,6 +152,8 @@ class ObserveOnlySupervisor:
                     )
                 )
             await self._apply_pending(pending)
+            if self._queue.empty:
+                self._idle.set()
 
     async def _apply_pending(self, pending: PendingWatchdogEvent) -> None:
         if pending.kind == EventKind.TOOL_FINISHED and self._repository_probe:
@@ -331,6 +343,7 @@ async def observe_stream(
     try:
         async for event in events:
             supervisor.observe(event)
+            await supervisor.synchronize()
             yield event
     except asyncio.CancelledError:
         outcome = EventKind.RUN_CANCELLED

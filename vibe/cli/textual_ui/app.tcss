@@ -1886,6 +1886,44 @@ FeedbackBar {
     margin: 0;
 }
 
+#watchcatdemopicker-app,
+#watchcatdemoprogress-app {
+    width: 100%;
+    height: auto;
+    max-height: 65vh;
+    background: transparent;
+    border: solid $foreground-muted;
+    padding: 0 1;
+    margin: 0;
+}
+
+#watchcat-demo-picker-content,
+#watchcat-demo-progress-content {
+    width: 100%;
+    height: auto;
+}
+
+#watchcat-demo-options {
+    width: 100%;
+    max-height: 52vh;
+    border: none;
+}
+
+.watchcat-demo-title {
+    height: 1;
+    text-style: bold;
+    color: $primary;
+}
+
+.watchcat-demo-help {
+    height: 1;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
 #watchcat-report-content,
 #watchcat-report-tabs {
     width: 100%;

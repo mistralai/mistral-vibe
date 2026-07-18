@@ -111,7 +111,7 @@ class CommandRegistry:
                 aliases=frozenset(["/watchcat"]),
                 description=(
                     "Monitor agent health, inspect incidents, and control recovery. "
-                    "Subcommands: status, report, on, off, pause, resume, snapshot, "
+                    "Subcommands: status, demo, report, on, off, pause, resume, snapshot, "
                     "recover"
                 ),
                 handler="_watchdog_command",

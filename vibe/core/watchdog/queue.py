@@ -57,6 +57,10 @@ class WatchdogEventQueue:
         self._closed = True
         self._available.set()
 
+    @property
+    def empty(self) -> bool:
+        return not self._items
+
     def _replace_coalesced(self, event: PendingWatchdogEvent) -> bool:
         for index in range(len(self._items) - 1, -1, -1):
             existing = self._items[index]

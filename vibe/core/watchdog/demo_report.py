@@ -23,6 +23,8 @@ class DemoRunReport(BaseModel):
 
     name: str
     title: str
+    prompt: str | None = None
+    recovery_prompt: str | None = None
     classification: str
     detector: str
     issue: str
@@ -104,7 +106,7 @@ def render_demo_report(report: DemoReport) -> str:
             f"+- incident: {run.incident_state}",
             f"`- artifact: {run.artifacts}",
         ])
-    lines.extend(["```", "", "Re-run: `uv run python scripts/watchcat_demo.py`"])
+    lines.extend(["```", "", "Re-run: `/watchcat demo all`"])
     return "\n".join(lines)
 
 
@@ -139,6 +141,8 @@ def render_demo_runs(runs: list[DemoRunReport]) -> str:
         mitigation = " -> ".join(run.mitigation) or "none"
         sections.extend([
             f"{run.name.upper()} :: {run.outcome.upper()}",
+            f"+- prompt     : {run.prompt or 'deterministic event fixture'}",
+            f"+- recovery   : {run.recovery_prompt or 'none'}",
             f"+- issue      : {run.issue}",
             f"+- detector   : {run.detector}",
             f"+- trigger    : {run.trigger}",

@@ -251,6 +251,10 @@ Interactive controls:
 ```text
 /watchcat           status
 /watchcat report    open the latest demo dashboard pane
+/watchcat demo      open the in-Vibe scenario picker
+/watchcat demo headless run the real Vibe CLI integration canary
+/watchcat demo all  run headless canary + all direct scenarios sequentially
+/watchcat demo stop cancel the active demo
 /watchcat on        enable a new run
 /watchcat off       disable monitoring
 /watchcat pause     observe only; close active incident
@@ -277,7 +281,21 @@ snapshot restores conversation state only; working-tree files are unchanged.
 Watchcat state is stored under `$VIBE_HOME/watchcat/runs/RUN_ID/`. Recovery can
 inject bounded context; it never automatically restores the main checkout.
 
-Deterministic local demo (runs an assertion-backed 11-scenario matrix):
+Primary live demo:
+
+```text
+local fixture API -> real vibe executable -> programmatic runner -> AgentLoop
+                  -> real todo tool -> Watchcat -> recovery -> verification
+```
+
+```bash
+uv run python scripts/watchcat_live_demo.py
+```
+
+The controlled component is the local model response fixture. The application
+path is the real `vibe -p ... --watchcat --auto-approve` CLI path.
+
+Fast fallback/coverage harness (assertion-backed 11-scenario matrix):
 
 ```bash
 uv run python scripts/watchcat_demo.py

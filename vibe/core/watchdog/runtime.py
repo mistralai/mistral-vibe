@@ -34,7 +34,7 @@ class AgentLoopRecoveryPort:
         return IdleResult(succeeded=False, detail="not used for context injection")
 
     async def inject_context(self, content: str) -> None:
-        await self._agent_loop.inject_user_context(content)
+        await self._agent_loop.queue_user_context(content)
 
     async def continue_once(self, prompt: str, incident: Incident) -> None:
         raise RuntimeError("continuation requires a delivery-surface adapter")

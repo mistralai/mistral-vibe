@@ -38,13 +38,34 @@ The pinned `[dependency-groups].build` is what `uv sync --no-dev --group build` 
 
 # Watchcat demo
 
-Run the complete deterministic matrix and persist its traces:
+## Primary: real Vibe executable
+
+```text
+fixture API -> vibe -p ... --watchcat --auto-approve
+            -> programmatic runner -> AgentLoop -> todo tool
+            -> Watchcat recovery -> verified changed action
+```
+
+```bash
+uv run python scripts/watchcat_live_demo.py
+```
+
+In Vibe: `/watchcat demo headless`.
+
+## Exhaustive matrix + live canary
+
+In Vibe: `/watchcat demo all` runs the real headless canary first, then every
+direct deterministic scenario, and opens `/watchcat report`.
+
+## Fast fallback harness
+
+Run the direct assertion-backed matrix and persist its traces:
 
 ```bash
 uv run python scripts/watchcat_demo.py
 ```
 
-Then open Vibe and run `/watchcat report` for the persisted tabbed dashboard.
+Then open Vibe and run `/watchcat report`.
 
 Run one scenario with a paced trace:
 

@@ -205,6 +205,35 @@ async def test_watchcat_report_displays_latest_demo_dashboard(
 
 
 @pytest.mark.asyncio
+async def test_watchcat_demo_all_runs_every_scenario_and_opens_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibe.cli.textual_ui.widgets.watchcat_report import WatchcatReportApp
+    from vibe.core.watchdog.demo_report import load_latest_demo_report
+    from vibe.core.watchdog.demo_runner import SCENARIOS
+
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    app = build_test_vibe_app()
+
+    async with app.run_test() as pilot:
+        assert await app._handle_command("/watchcat demo all")
+        for _ in range(80):
+            await pilot.pause(0.1)
+            if load_latest_demo_report() is not None:
+                break
+
+        report = load_latest_demo_report()
+        errors = [error._error for error in app.query(ErrorMessage)]
+        assert report is not None, errors
+        assert len(report.runs) == len(SCENARIOS) + 1
+        assert [run.name for run in report.runs] == ["headless-cli", *SCENARIOS]
+        assert report.runs[0].incident_state == "closed"
+        assert report.runs[0].recovery_prompt is not None
+        assert "WATCHCAT RECOVERY HANDOFF" in report.runs[0].recovery_prompt
+        assert app.query_one(WatchcatReportApp)
+
+
+@pytest.mark.asyncio
 async def test_watchdog_command_rejects_unknown_control() -> None:
     app = build_test_vibe_app()
 
@@ -215,6 +244,6 @@ async def test_watchdog_command_rejects_unknown_control() -> None:
         errors = app.query(ErrorMessage)
         assert any(
             error._error
-            == "Usage: /watchcat [status|report|on|off|pause|resume|snapshot|recover]"
+            == "Usage: /watchcat [status|demo|report|on|off|pause|resume|snapshot|recover]"
             for error in errors
         )

@@ -146,6 +146,10 @@ from vibe.cli.textual_ui.widgets.vibe_code_project import (
     suggested_default_branch,
 )
 from vibe.cli.textual_ui.widgets.voice_app import VoiceApp
+from vibe.cli.textual_ui.widgets.watchcat_demo import (
+    WatchcatDemoPickerApp,
+    WatchcatDemoProgressApp,
+)
 from vibe.cli.textual_ui.widgets.watchcat_report import WatchcatReportApp
 from vibe.cli.textual_ui.widgets.watchdog_snapshot import (
     WatchdogSnapshotDropApp,
@@ -349,6 +353,8 @@ class BottomApp(StrEnum):
     Voice = auto()
     WatchdogSnapshotDrop = auto()
     WatchdogSnapshotPicker = auto()
+    WatchcatDemoPicker = auto()
+    WatchcatDemoProgress = auto()
     WatchcatReport = auto()
 
 
@@ -613,6 +619,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._watchdog_runtime = opts.watchdog_runtime
         self._last_watchdog_runtime = opts.watchdog_runtime
         self._watchdog_snapshot_store: ConversationSnapshotStore | None = None
+        self._watchcat_demo_worker: Worker[Any] | None = None
         if opts.watchdog_runtime is not None:
             from vibe.core.watchdog.snapshots import ConversationSnapshotStore
 
@@ -2993,7 +3000,9 @@ class VibeApp(App):  # noqa: PLR0904
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
 
-    async def _watchdog_command(self, *, cmd_args: str = "", **kwargs: Any) -> None:
+    async def _watchdog_command(  # noqa: PLR0911
+        self, *, cmd_args: str = "", **kwargs: Any
+    ) -> None:
         del kwargs
         raw_command = cmd_args.strip()
         command, _, arguments = raw_command.partition(" ")
@@ -3007,12 +3016,14 @@ class VibeApp(App):  # noqa: PLR0904
                 report = load_latest_demo_report()
                 if report is None:
                     message = (
-                        "No Watchcat demo report found. Run "
-                        "`uv run python scripts/watchcat_demo.py` first."
+                        "No Watchcat demo report found. Run `/watchcat demo all` first."
                     )
                 else:
                     await self._switch_from_input(WatchcatReportApp(report))
                     return
+            case "demo":
+                await self._watchcat_demo_command(arguments)
+                return
             case "on":
                 message = self._watchdog_on()
             case "off":
@@ -3046,6 +3057,119 @@ class VibeApp(App):  # noqa: PLR0904
                 await self._mount_and_scroll(ErrorMessage(WATCHCAT_USAGE))
                 return
         await self._mount_and_scroll(UserCommandMessage(message))
+
+    async def _watchcat_demo_command(self, arguments: str) -> None:
+        from vibe.core.watchdog.demo_runner import SCENARIOS
+
+        selection = arguments.strip().lower()
+        if selection == "stop":
+            await self._cancel_watchcat_demo()
+            return
+        if (
+            self._watchcat_demo_worker is not None
+            and self._watchcat_demo_worker.is_running
+        ):
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "A Watchcat demo is already running. Use `/watchcat demo stop`."
+                )
+            )
+            return
+        if not selection:
+            await self._switch_from_input(WatchcatDemoPickerApp())
+            return
+        if selection not in {"all", "headless", *SCENARIOS}:
+            choices = "|".join(["all", "headless", *SCENARIOS])
+            await self._mount_and_scroll(
+                ErrorMessage(f"Usage: /watchcat demo [{choices}|stop]")
+            )
+            return
+        await self._start_watchcat_demo(selection)
+
+    async def _start_watchcat_demo(self, selection: str) -> None:
+        progress_app = WatchcatDemoProgressApp(selection)
+        await self._replace_bottom_app(progress_app)
+        self._watchcat_demo_worker = self.run_worker(
+            self._run_watchcat_demo(selection, progress_app),
+            name="watchcat-demo",
+            exclusive=False,
+        )
+
+    async def _run_watchcat_demo(
+        self, selection: str, progress_app: WatchcatDemoProgressApp
+    ) -> None:
+        from vibe.core.watchdog.demo_headless import run_headless_demo
+        from vibe.core.watchdog.demo_report import DemoReport, save_demo_report
+        from vibe.core.watchdog.demo_runner import DemoProgress, run_demo
+
+        async def update(progress: DemoProgress) -> None:
+            if progress_app.parent is not None:
+                progress_app.update_progress(progress)
+
+        try:
+            integration_report = None
+            if selection in {"all", "headless"}:
+                integration_total = 12 if selection == "all" else 1
+                await update(
+                    DemoProgress(1, integration_total, "headless-cli", "running")
+                )
+                integration_report = await asyncio.to_thread(run_headless_demo)
+                await update(
+                    DemoProgress(
+                        1,
+                        integration_total,
+                        "headless-cli",
+                        "completed",
+                        integration_report.classification,
+                    )
+                )
+            if selection == "headless":
+                from datetime import UTC, datetime
+
+                report = DemoReport(
+                    report_id=f"headless-{uuid4().hex[:10]}",
+                    created_at=datetime.now(UTC),
+                    runs=[integration_report] if integration_report is not None else [],
+                )
+                save_demo_report(report)
+            else:
+
+                async def matrix_update(progress: DemoProgress) -> None:
+                    if selection == "all":
+                        progress = DemoProgress(
+                            progress.current + 1,
+                            progress.total + 1,
+                            progress.scenario,
+                            progress.state,
+                            progress.classification,
+                        )
+                    await update(progress)
+
+                execution = await run_demo(selection, progress=matrix_update)
+                report = execution.report
+                if integration_report is not None:
+                    report = report.model_copy(
+                        update={"runs": [integration_report, *report.runs]}
+                    )
+                    save_demo_report(report)
+        except asyncio.CancelledError:
+            return
+        except Exception as error:
+            await self._switch_to_input_app()
+            await self._mount_and_scroll(ErrorMessage(f"Watchcat demo failed: {error}"))
+            return
+        self._watchcat_demo_worker = None
+        await self._replace_bottom_app(WatchcatReportApp(report))
+
+    async def _cancel_watchcat_demo(self) -> None:
+        worker = self._watchcat_demo_worker
+        if worker is None or not worker.is_running:
+            await self._mount_and_scroll(ErrorMessage("No Watchcat demo is running."))
+            return
+        worker.cancel()
+        self._watchcat_demo_worker = None
+        await self._switch_to_input_app()
+        await self._mount_and_scroll(UserCommandMessage("Watchcat demo cancelled."))
 
     async def _watchdog_snapshot_command(self, arguments: str) -> None:
         runtime = await self._require_watchdog_runtime()
@@ -3230,6 +3354,23 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         del message
         await self._switch_to_input_app()
+
+    async def on_watchcat_demo_picker_app_selected(
+        self, message: WatchcatDemoPickerApp.Selected
+    ) -> None:
+        await self._start_watchcat_demo(message.scenario)
+
+    async def on_watchcat_demo_picker_app_closed(
+        self, message: WatchcatDemoPickerApp.Closed
+    ) -> None:
+        del message
+        await self._switch_to_input_app()
+
+    async def on_watchcat_demo_progress_app_cancelled(
+        self, message: WatchcatDemoProgressApp.Cancelled
+    ) -> None:
+        del message
+        await self._cancel_watchcat_demo()
 
     def _watchdog_on(self) -> str:
         if self._watchdog_runtime is not None:
@@ -3897,6 +4038,8 @@ class VibeApp(App):  # noqa: PLR0904
             BottomApp.Approval: ApprovalApp,
             BottomApp.Question: QuestionApp,
             BottomApp.WatchcatReport: WatchcatReportApp,
+            BottomApp.WatchcatDemoPicker: WatchcatDemoPickerApp,
+            BottomApp.WatchcatDemoProgress: WatchcatDemoProgressApp,
             BottomApp.VibeCodeProjectCreate: VibeCodeProjectCreateApp,
             BottomApp.VibeCodeProjectPicker: VibeCodeProjectPickerApp,
             BottomApp.SessionPicker: SessionPickerApp,
@@ -4265,6 +4408,12 @@ class VibeApp(App):  # noqa: PLR0904
             BottomApp.SessionPicker: self._handle_session_picker_app_escape,
             BottomApp.WatchcatReport: lambda: self._handle_bottom_app_close_escape(
                 WatchcatReportApp
+            ),
+            BottomApp.WatchcatDemoPicker: lambda: self._handle_bottom_app_close_escape(
+                WatchcatDemoPickerApp
+            ),
+            BottomApp.WatchcatDemoProgress: lambda: (
+                self._handle_bottom_app_close_escape(WatchcatDemoProgressApp)
             ),
         }
 

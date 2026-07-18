@@ -919,6 +919,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             )
         await self._save_messages()
 
+    async def queue_user_context(self, content: str) -> None:
+        self._pending_injected_messages.append(
+            LLMMessage(role=Role.user, content=content, injected=True)
+        )
+
     async def restore_conversation_snapshot(
         self, messages: Sequence[LLMMessage]
     ) -> None:
@@ -998,6 +1003,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 ):
                     if observer is not None:
                         observer.observe(event)
+                        await observer.synchronize()
                     yield event
         except (asyncio.CancelledError, GeneratorExit):
             if observer is not None:
