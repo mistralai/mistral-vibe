@@ -38,24 +38,28 @@ The pinned `[dependency-groups].build` is what `uv sync --no-dev --group build` 
 
 # Watchcat demo
 
-Run every deterministic scenario with a paced ASCII trace:
+Run the complete deterministic matrix and persist its traces:
 
 ```bash
 uv run python scripts/watchcat_demo.py
 ```
 
-Then open Vibe and run `/watchcat report` for the persisted ASCII dashboard.
+Then open Vibe and run `/watchcat report` for the persisted tabbed dashboard.
 
-Run one scenario instantly:
+Run one scenario with a paced trace:
 
 ```bash
-uv run python scripts/watchcat_demo.py --scenario recovery --delay 0
+uv run python scripts/watchcat_demo.py --scenario recovery --delay 0.05
 ```
 
 | Scenario | Demonstrates |
 | --- | --- |
-| `guarded` | Three exact failures → threshold protection → no incident |
+| `threshold-1..3` | Every below-threshold repeat iteration → no incident |
+| `result-changed` | Fourth result differs → suspected incident closes as false positive |
+| `repository-changed` | Fourth repository fingerprint differs → progress recognized |
 | `recovery` | Four exact failures → one context injection → changed action → closed incident |
 | `signal` | Signal quality degraded → score `92` → deterministic context injection → closed incident |
 | `signal-blocked` | Signal quality degraded → score `40` → intervention blocked |
+| `signal-eval-failed` | Harness scoring error → failure recorded → intervention blocked |
+| `verification-failed` | Same next action → mitigation retried → verification remains open |
 | `degraded` | Recovery delivery failure → persisted degraded incident |

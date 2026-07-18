@@ -250,7 +250,7 @@ Interactive controls:
 
 ```text
 /watchcat           status
-/watchcat report    show the latest demo dashboard
+/watchcat report    open the latest demo dashboard pane
 /watchcat on        enable a new run
 /watchcat off       disable monitoring
 /watchcat pause     observe only; close active incident
@@ -277,20 +277,22 @@ snapshot restores conversation state only; working-tree files are unchanged.
 Watchcat state is stored under `$VIBE_HOME/watchcat/runs/RUN_ID/`. Recovery can
 inject bounded context; it never automatically restores the main checkout.
 
-Deterministic local demo (runs five Watchcat scenarios):
+Deterministic local demo (runs an assertion-backed 11-scenario matrix):
 
 ```bash
 uv run python scripts/watchcat_demo.py
 ```
 
-Then run `/watchcat report` inside Vibe to view the persisted ASCII dashboard.
+Then run `/watchcat report` inside Vibe. The pane groups runs into `Protected`,
+`Mitigated`, `Blocked`, and `Degraded` tabs and includes each full event trace.
 
 ```text
-guarded  : repeat failure ×3 → no incident
-recovery : repeat failure ×4 → confirm → inject once → changed action → close
-signal   : signal quality degraded → LLM score → deterministic recovery policy
-blocked  : degraded signal → low LLM score → intervention blocked
-degraded : delivery failure → degraded incident recorded
+threshold 1/2/3 : every below-threshold iteration → no incident
+false positives : changed result/repository → suspected → closed
+recovery        : repeat ×4 → inject → changed action → verified
+signal          : high / low / evaluator failure branches
+verification    : unchanged next action → bounded retry → remains open
+degraded        : delivery failure → degraded incident recorded
 ```
 
 ### Interactive Mode

@@ -4,9 +4,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from textual.widgets import TabbedContent
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_app
 from vibe.cli.textual_ui.widgets.messages import ErrorMessage, UserCommandMessage
+from vibe.cli.textual_ui.widgets.watchcat_report import WatchcatReportApp
 from vibe.cli.textual_ui.widgets.watchdog_snapshot import (
     WatchdogSnapshotDropApp,
     WatchdogSnapshotPickerApp,
@@ -18,7 +20,12 @@ from vibe.core.watchdog import (
     WatchdogRuntime,
     WatchdogStore,
 )
-from vibe.core.watchdog.demo_report import DemoReport, DemoRunReport, save_demo_report
+from vibe.core.watchdog.demo_report import (
+    DemoReport,
+    DemoRunReport,
+    DemoTraceEntry,
+    save_demo_report,
+)
 
 
 def _runtime(tmp_path: Path):
@@ -152,8 +159,13 @@ async def test_watchcat_report_displays_latest_demo_dashboard(
                 DemoRunReport(
                     name="recovery",
                     title="Repeated failure recovery",
+                    classification="mitigated",
+                    detector="repeated_call",
+                    issue="confirmed_repeated_failure",
                     trigger="4 exact repeated calls",
+                    evidence=["repeat_count=4"],
                     flow=["observe x4", "confirm", "recover", "verify", "close"],
+                    mitigation=["inject context", "verify changed action"],
                     outcome="recovered",
                     signal_quality="healthy",
                     incident_state="closed",
@@ -161,6 +173,15 @@ async def test_watchcat_report_displays_latest_demo_dashboard(
                     injection_attempts=1,
                     context_injections=1,
                     artifacts="/tmp/demo-recovery",
+                    trace=[
+                        DemoTraceEntry(
+                            sequence=1,
+                            event="incident_confirmed",
+                            phase="idle",
+                            signal_quality="healthy",
+                            incident_state="confirmed",
+                        )
+                    ],
                 )
             ],
         )
@@ -171,11 +192,16 @@ async def test_watchcat_report_displays_latest_demo_dashboard(
         assert await app._handle_command("/watchcat report")
         await pilot.pause()
 
-        messages = [message._content for message in app.query(UserCommandMessage)]
-        assert any("WATCHCAT DEMO  demo-report" in message for message in messages)
-        assert any(
-            "observe x4 -> confirm -> recover" in message for message in messages
-        )
+        report_app = app.query_one(WatchcatReportApp)
+        tabs = report_app.query_one(TabbedContent)
+        assert tabs.tab_count == 5
+        assert tabs.active == "watchcat-summary"
+
+        await pilot.press("right")
+        assert tabs.active == "watchcat-protected"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.query(WatchcatReportApp)
 
 
 @pytest.mark.asyncio

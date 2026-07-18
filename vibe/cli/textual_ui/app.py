@@ -73,7 +73,6 @@ from vibe.cli.textual_ui.session_exit import print_session_resume_message
 from vibe.cli.textual_ui.watchdog_command import (
     WATCHCAT_USAGE,
     format_snapshot_list,
-    format_watchcat_demo_report,
     format_watchdog_status,
 )
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
@@ -147,6 +146,7 @@ from vibe.cli.textual_ui.widgets.vibe_code_project import (
     suggested_default_branch,
 )
 from vibe.cli.textual_ui.widgets.voice_app import VoiceApp
+from vibe.cli.textual_ui.widgets.watchcat_report import WatchcatReportApp
 from vibe.cli.textual_ui.widgets.watchdog_snapshot import (
     WatchdogSnapshotDropApp,
     WatchdogSnapshotPickerApp,
@@ -349,6 +349,7 @@ class BottomApp(StrEnum):
     Voice = auto()
     WatchdogSnapshotDrop = auto()
     WatchdogSnapshotPicker = auto()
+    WatchcatReport = auto()
 
 
 class ChatScroll(VerticalScroll):
@@ -3004,12 +3005,14 @@ class VibeApp(App):  # noqa: PLR0904
                 from vibe.core.watchdog.demo_report import load_latest_demo_report
 
                 report = load_latest_demo_report()
-                message = (
-                    format_watchcat_demo_report(report)
-                    if report is not None
-                    else "No Watchcat demo report found. Run "
-                    "`uv run python scripts/watchcat_demo.py` first."
-                )
+                if report is None:
+                    message = (
+                        "No Watchcat demo report found. Run "
+                        "`uv run python scripts/watchcat_demo.py` first."
+                    )
+                else:
+                    await self._switch_from_input(WatchcatReportApp(report))
+                    return
             case "on":
                 message = self._watchdog_on()
             case "off":
@@ -3218,6 +3221,12 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def on_watchdog_snapshot_drop_app_cancelled(
         self, message: WatchdogSnapshotDropApp.Cancelled
+    ) -> None:
+        del message
+        await self._switch_to_input_app()
+
+    async def on_watchcat_report_app_closed(
+        self, message: WatchcatReportApp.Closed
     ) -> None:
         del message
         await self._switch_to_input_app()
@@ -3887,6 +3896,7 @@ class VibeApp(App):  # noqa: PLR0904
             BottomApp.ProxySetup: ProxySetupApp,
             BottomApp.Approval: ApprovalApp,
             BottomApp.Question: QuestionApp,
+            BottomApp.WatchcatReport: WatchcatReportApp,
             BottomApp.VibeCodeProjectCreate: VibeCodeProjectCreateApp,
             BottomApp.VibeCodeProjectPicker: VibeCodeProjectPickerApp,
             BottomApp.SessionPicker: SessionPickerApp,
@@ -4253,6 +4263,9 @@ class VibeApp(App):  # noqa: PLR0904
                 self._handle_vibe_code_project_picker_app_escape
             ),
             BottomApp.SessionPicker: self._handle_session_picker_app_escape,
+            BottomApp.WatchcatReport: lambda: self._handle_bottom_app_close_escape(
+                WatchcatReportApp
+            ),
         }
 
         if handler := handlers.get(self._current_bottom_app):
