@@ -719,15 +719,7 @@ Markdown {
 .smart-auto-decision {
     height: auto;
     margin: 0 2;
-    color: $text-muted;
-
-    &.allow {
-        color: $success;
-    }
-
-    &.ask {
-        color: $warning;
-    }
+    color: $smart_auto;
 }
 
 StatusMessage {
