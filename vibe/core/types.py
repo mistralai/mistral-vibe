@@ -515,7 +515,7 @@ class ToolStreamEvent(BaseEvent):
 
 
 class SmartAutoDecisionEvent(BaseEvent):
-    """A model-authored Smart Auto permission judgment."""
+    """A model-authored Careful YOLO permission judgment."""
 
     tool_name: str
     tool_call_id: str

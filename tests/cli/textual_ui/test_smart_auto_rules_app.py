@@ -148,12 +148,12 @@ async def test_slash_command_panel_opens_and_persists_both_rule_lists() -> None:
             call(
                 "/auto_mode/soft_deny",
                 ["ask before touching production"],
-                reason="Update Smart Auto ASK rules",
+                reason="Update Careful YOLO ASK rules",
             ),
             call(
                 "/auto_mode/allow",
                 ["allow local tests"],
-                reason="Update Smart Auto ALLOW rules",
+                reason="Update Careful YOLO ALLOW rules",
             ),
         ]
         reload_config.assert_awaited_once()

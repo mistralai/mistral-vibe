@@ -116,7 +116,7 @@ Vibe comes with several built-in agent profiles, each designed for different use
 - **`default`**: Standard agent that requires approval for tool executions. Best for general use.
 - **`plan`**: Read-only agent for exploration and planning. Auto-approves safe tools like `grep` and `read`.
 - **`accept-edits`**: Auto-approves file edits only (`write_file`, `edit`). Useful for code refactoring.
-- **`auto` (Smart Auto)**: Auto-runs routine actions while a separate classifier sends uncertain or risky actions to the normal approval prompt.
+- **`careful-yolo` (Careful YOLO)**: Auto-runs routine actions while a separate classifier sends uncertain or risky actions to the normal approval prompt. The legacy `auto` name remains accepted.
 - **`auto-approve`**: Auto-approves all tool executions. Use with caution.
 
 Use the `--agent` flag to select a different agent:
@@ -132,16 +132,17 @@ To change the default agent used when `--agent` is not passed, set
 default_agent = "plan"
 ```
 
-Valid values are `default`, `plan`, `accept-edits`, `auto`, `auto-approve`,
+Valid values are `default`, `plan`, `accept-edits`, `careful-yolo`, `auto-approve`,
 `lean` (only when listed in `installed_agents`), or the name of any
 custom agent file in `~/.vibe/agents/` or the project's `.vibe/agents/`
-directory. Subagents such as `explore` are not accepted.
+directory. The former `auto` value remains accepted as an alias for
+`careful-yolo`. Subagents such as `explore` are not accepted.
 
 > Note: `default_agent` applies in both interactive and programmatic
 > (`-p` / `--prompt`) sessions. Pass `--auto-approve` or `--yolo` with any
 > agent when a run should approve all tool calls without prompting.
 
-Smart Auto uses `mistral-medium-latest` by default. Its built-in deny and allow
+Careful YOLO uses `mistral-medium-latest` by default. Its built-in deny and allow
 rules can be extended—but not removed—in `config.toml`:
 
 ```toml
@@ -152,7 +153,7 @@ allow = ["Allow the repository's signed release script."]
 environment = ["The staging API is inside the trust boundary."]
 ```
 
-Smart Auto is a mitigation, not a safety guarantee. Classifier failures,
+Careful YOLO is a mitigation, not a safety guarantee. Classifier failures,
 unparseable responses, and repeated blocks fall back to normal approval.
 
 ### Subagents and Task Delegation

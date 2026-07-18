@@ -26,7 +26,7 @@ CURATED_ASK_RULES: tuple[str, ...] = (
 
 
 class SmartAutoRulesApp(Container):
-    """Interactive editor for model-classified Smart Auto prose rules."""
+    """Interactive editor for model-classified Careful YOLO prose rules."""
 
     can_focus_children = True
 
@@ -76,7 +76,7 @@ class SmartAutoRulesApp(Container):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="smartautorules-content"):
-            yield NoMarkupStatic("Smart Auto rules", classes="smartautorules-title")
+            yield NoMarkupStatic("Careful YOLO rules", classes="smartautorules-title")
             yield NoMarkupStatic(
                 "ASK rules request approval. ALLOW rules describe routine actions. "
                 "ASK always wins when rules overlap.",

@@ -1304,24 +1304,24 @@ class VibeApp(App):  # noqa: PLR0904
         errors = await self.agent_loop.config_orchestrator.set_field(
             "/auto_mode/soft_deny",
             message.ask_rules,
-            reason="Update Smart Auto ASK rules",
+            reason="Update Careful YOLO ASK rules",
         )
         errors.extend(
             await self.agent_loop.config_orchestrator.set_field(
                 "/auto_mode/allow",
                 message.allow_rules,
-                reason="Update Smart Auto ALLOW rules",
+                reason="Update Careful YOLO ALLOW rules",
             )
         )
         if errors:
             await self._switch_to_input_app()
             await self._mount_and_scroll(
-                ErrorMessage(f"Failed to save Smart Auto rules: {errors[0]}")
+                ErrorMessage(f"Failed to save Careful YOLO rules: {errors[0]}")
             )
             return
         await self._reload_config()
         await self._switch_to_input_app()
-        await self._mount_and_scroll(UserCommandMessage("Smart Auto rules saved."))
+        await self._mount_and_scroll(UserCommandMessage("Careful YOLO rules saved."))
 
     async def on_voice_app_config_closed(self, message: VoiceApp.ConfigClosed) -> None:
         await self._handle_voice_settings_closed(message.changes)

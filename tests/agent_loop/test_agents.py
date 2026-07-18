@@ -12,7 +12,9 @@ from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents._migration import migrate_agent_profile_config
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import (
+    AUTO,
     BUILTIN_AGENTS,
+    CAREFUL_YOLO,
     CHAT,
     AgentProfile,
     AgentSafety,
@@ -122,6 +124,9 @@ class TestAgentSafety:
 
 
 class TestAgentProfile:
+    def test_legacy_auto_profile_constant_aliases_careful_yolo(self) -> None:
+        assert AUTO is CAREFUL_YOLO
+
     def test_all_builtin_agents_have_valid_names(self) -> None:
         acp_only = {BuiltinAgentName.CHAT}
         assert set(BUILTIN_AGENTS.keys()) == set(BuiltinAgentName) - acp_only
@@ -134,6 +139,9 @@ class TestAgentProfile:
         assert BUILTIN_AGENTS[BuiltinAgentName.PLAN].display_name == "Plan"
         assert (
             BUILTIN_AGENTS[BuiltinAgentName.ACCEPT_EDITS].display_name == "Accept Edits"
+        )
+        assert (
+            BUILTIN_AGENTS[BuiltinAgentName.CAREFUL_YOLO].display_name == "Careful YOLO"
         )
 
     def test_description_property(self) -> None:
@@ -654,6 +662,19 @@ class TestPlanAgentToolRestriction:
 
 
 class TestAgentManagerFiltering:
+    def test_legacy_auto_name_selects_careful_yolo(self) -> None:
+        config = build_test_vibe_config()
+
+        manager = AgentManager(LegacyConfigOrchestrator(config), initial_agent="auto")
+
+        assert manager.active_profile.name == BuiltinAgentName.CAREFUL_YOLO
+
+    def test_legacy_auto_name_works_in_enabled_agents(self) -> None:
+        config = build_test_vibe_config(enabled_agents=["auto"])
+        manager = AgentManager(LegacyConfigOrchestrator(config), initial_agent="auto")
+
+        assert set(manager.available_agents) == {BuiltinAgentName.CAREFUL_YOLO}
+
     def test_enabled_agents_filters_to_only_enabled(self) -> None:
         config = build_test_vibe_config(enabled_agents=["default", "plan"])
         manager = AgentManager(LegacyConfigOrchestrator(config))

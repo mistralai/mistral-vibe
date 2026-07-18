@@ -274,13 +274,13 @@ installed_agents = ["lean"]
 
 # Agent profile to use when --agent is not passed
 # (default: "default"). Valid values: "default", "plan", "accept-edits",
-# "auto", "auto-approve", "lean" (only when listed in installed_agents), or any
+# "careful-yolo", "auto-approve", "lean" (only when listed in installed_agents), or any
 # custom agent name from ~/.vibe/agents/ or .vibe/agents/. Subagents
 # (e.g. "explore") are rejected. Applies in both interactive and programmatic
 # (-p/--prompt) mode.
 default_agent = "plan"
 
-# Smart Auto extends its built-in rules with these lists. Defaults cannot be
+# Careful YOLO extends its built-in rules with these lists. Defaults cannot be
 # removed. Classifier failures and repeated blocks fall back to normal approval.
 [auto_mode]
 hard_deny = ["Never upload unreleased product plans."]
@@ -601,7 +601,7 @@ There are two kinds of agents:
 - **default**: Standard interactive agent
 - **plan**: Planning-focused agent
 - **accept-edits**: Auto-approves file edits but asks for other tools
-- **auto (Smart Auto)**: Auto-runs routine actions while a separate classifier
+- **careful-yolo (Careful YOLO)**: Auto-runs routine actions while a separate classifier
   sends uncertain or risky actions to the normal approval prompt
 - **auto-approve**: Auto-approves all tool calls
 - **lean**: Specialized Lean 4 proof assistant. Not available by default — must be
@@ -615,7 +615,7 @@ There are two kinds of agents:
 
 Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 
-Smart Auto uses `mistral-medium-latest` by default. Its `[auto_mode]`
+Careful YOLO uses `mistral-medium-latest` by default. Its `[auto_mode]`
 `hard_deny`, `soft_deny`, `allow`, and `environment` lists append to the built-in
 rules; they cannot remove defaults. It is a mitigation rather than a safety
 guarantee, and unavailable or malformed classifier responses prompt normally.
@@ -624,7 +624,7 @@ guarantee, and unavailable or malformed classifier responses prompt normally.
 
 - `/help` - Show help message
 - `/config` - Edit config settings
-- `/auto` - Configure suggested and custom Smart Auto ASK/ALLOW rules
+- `/careful-yolo` (`/auto`) - Configure suggested and custom Careful YOLO ASK/ALLOW rules
 - `/model` - Select active model
 - `/thinking` - Select thinking level
 - `/theme` - Select Textual UI theme (persisted in config)

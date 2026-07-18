@@ -253,12 +253,10 @@ class EventHandler:
             if tool_call_id in self.tool_calls:
                 del self.tool_calls[tool_call_id]
 
-    async def _handle_smart_auto_decision(
-        self, event: SmartAutoDecisionEvent
-    ) -> None:
+    async def _handle_smart_auto_decision(self, event: SmartAutoDecisionEvent) -> None:
         anchor = self._tool_call_anchors.get(event.tool_call_id)
         message = NoMarkupStatic(
-            f"Smart Auto: {event.verdict} — {event.reason}",
+            f"Careful YOLO: {event.verdict} — {event.reason}",
             classes=f"smart-auto-decision {event.verdict.lower()}",
         )
         await self.mount_callback(message, after=anchor)

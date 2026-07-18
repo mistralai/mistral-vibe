@@ -40,6 +40,7 @@ class AgentManager:
                 " ".join(str(p) for p in self._search_paths),
             )
 
+        initial_agent = self._canonical_agent_name(initial_agent)
         profile = self.available_agents.get(initial_agent)
         if profile is None:
             if initial_agent in self._discovered:
@@ -74,8 +75,10 @@ class AgentManager:
         if profile.install_required and name not in self._config.installed_agents:
             return False
         if enabled := self._config.enabled_agents:
-            return name_matches(name, enabled)
-        return not name_matches(name, self._config.disabled_agents)
+            return name_matches(name, self._canonical_agent_filters(enabled))
+        return not name_matches(
+            name, self._canonical_agent_filters(self._config.disabled_agents)
+        )
 
     @property
     def config(self) -> AnyVibeConfig:
@@ -147,9 +150,19 @@ class AgentManager:
             logger.warning("Failed to migrate agent profiles", exc_info=exc)
 
     def get_agent(self, name: str) -> AgentProfile:
+        name = self._canonical_agent_name(name)
         if agent := self.available_agents.get(name):
             return agent
         raise ValueError(f"Agent '{name}' not found")
+
+    @staticmethod
+    def _canonical_agent_name(name: str) -> str:
+        return BuiltinAgentName.CAREFUL_YOLO if name == "auto" else name
+
+    @classmethod
+    def _canonical_agent_filters(cls, names: list[str]) -> list[str]:
+        """Keep exact legacy `auto` entries working in agent allow/deny lists."""
+        return [cls._canonical_agent_name(name) for name in names]
 
     def get_subagents(self) -> list[AgentProfile]:
         return [
@@ -163,7 +176,7 @@ class AgentManager:
             BuiltinAgentName.DEFAULT,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
-            BuiltinAgentName.AUTO,
+            BuiltinAgentName.CAREFUL_YOLO,
             BuiltinAgentName.AUTO_APPROVE,
         ]
         primary_agents = [

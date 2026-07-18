@@ -8,7 +8,8 @@ class TestCommandRegistry:
         registry = CommandRegistry()
         assert registry.get_command_name("/help") == "help"
         assert registry.get_command_name("/config") == "config"
-        assert registry.get_command_name("/auto") == "auto"
+        assert registry.get_command_name("/careful-yolo") == "careful-yolo"
+        assert registry.get_command_name("/auto") == "careful-yolo"
         assert registry.get_command_name("/model") == "model"
         assert registry.get_command_name("/connectors") == "mcp"
         assert registry.get_command_name("/clear") == "clear"

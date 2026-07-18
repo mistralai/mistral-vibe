@@ -48,9 +48,9 @@ class CommandRegistry:
                 description="Edit config settings",
                 handler="_show_config",
             ),
-            "auto": Command(
-                aliases=frozenset(["/auto"]),
-                description="Configure Smart Auto rules",
+            "careful-yolo": Command(
+                aliases=frozenset(["/careful-yolo", "/auto"]),
+                description="Configure Careful YOLO rules",
                 handler="_show_smart_auto_rules",
             ),
             "model": Command(

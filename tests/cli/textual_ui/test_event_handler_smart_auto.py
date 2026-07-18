@@ -28,16 +28,13 @@ async def test_smart_auto_decision_is_visible(
 
     await handler.handle_event(
         SmartAutoDecisionEvent(
-            tool_name="bash",
-            tool_call_id="call-1",
-            verdict=verdict,
-            reason=reason,
+            tool_name="bash", tool_call_id="call-1", verdict=verdict, reason=reason
         )
     )
 
     assert mount_callback.await_args is not None
     widget = mount_callback.await_args.args[0]
     assert isinstance(widget, NoMarkupStatic)
-    assert str(widget.render()) == f"Smart Auto: {verdict} — {reason}"
+    assert str(widget.render()) == f"Careful YOLO: {verdict} — {reason}"
     assert widget.has_class("smart-auto-decision")
     assert widget.has_class(css_class)
