@@ -243,6 +243,16 @@ vibe --watchdog-replay RUN_ID
 Watchdog state is stored under `$VIBE_HOME/watchdog/runs/RUN_ID/`. Recovery can
 inject bounded context; it never automatically restores the main checkout.
 
+Deterministic local demo (runs the full recovery path three times):
+
+```bash
+uv run pytest -q tests/e2e/watchdog/test_repeated_call_recovery.py
+```
+
+```text
+repeat failure ×2 → confirm → inject once → changed action → close → replay
+```
+
 ### Interactive Mode
 
 Simply run `vibe` to enter the interactive chat loop.

@@ -18,6 +18,19 @@ def render_replay(paths: WatchdogPaths) -> str:
         kind = record.get("kind", "unknown")
         epoch = record.get("epoch")
         suffix = f" epoch={epoch}" if epoch is not None else ""
+        payload = record.get("payload") or {}
+        incident = payload.get("incident") or {}
+        if kind in {"incident_suspected", "incident_confirmed"}:
+            suffix += f" detector={incident.get('owner', 'unknown')}"
+        if kind == "recovery_started":
+            decision = incident.get("decision") or {}
+            suffix += f" strategy={decision.get('strategy', 'unknown')}"
+        if kind == "verification_finished":
+            verification = payload.get("verification") or {}
+            suffix += (
+                f" status={verification.get('status', 'unknown')}"
+                f" reason={verification.get('reason', 'unknown')}"
+            )
         lines.append(f"{sequence:>4} {kind}{suffix}")
     if paths.state.exists():
         state = json.loads(read_safe(paths.state).text)

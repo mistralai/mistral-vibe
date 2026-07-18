@@ -35,7 +35,7 @@ _PHASE_BY_EVENT = {
     EventKind.RECOVERY_FINISHED: RunPhase.VERIFICATION,
     EventKind.RECOVERY_FAILED: RunPhase.IDLE,
     EventKind.VERIFICATION_STARTED: RunPhase.VERIFICATION,
-    EventKind.VERIFICATION_FINISHED: RunPhase.IDLE,
+    EventKind.VERIFICATION_FINISHED: RunPhase.TOOL,
 }
 
 _EPOCH_FENCED_EVENTS = {
@@ -89,6 +89,8 @@ def _event_updates(state: RunState, event: WatchdogEvent) -> dict[str, object]:
         EventKind.RECOVERY_STARTED,
         EventKind.RECOVERY_FINISHED,
         EventKind.RECOVERY_FAILED,
+        EventKind.VERIFICATION_STARTED,
+        EventKind.VERIFICATION_FINISHED,
     }
     if event.kind in incident_kinds and (
         incident_payload := event.payload.get("incident")
