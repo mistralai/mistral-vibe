@@ -36,6 +36,7 @@ class UtilityPrompt(Prompt):
     DANGEROUS_DIRECTORY = auto()
     PROJECT_CONTEXT = auto()
     TURN_SUMMARY = auto()
+    WATCHDOG_TILT_EVAL = auto()
 
 
 class MissingPromptFileError(ValueError):

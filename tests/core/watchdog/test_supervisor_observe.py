@@ -11,6 +11,8 @@ from vibe.core.watchdog import (
     EventKind,
     ObserveOnlySupervisor,
     RecoveryCoordinator,
+    TiltEvaluation,
+    TiltEvaluationRequest,
     WatchdogPaths,
     WatchdogStore,
     observe_stream,
@@ -29,6 +31,16 @@ class InjectionPort:
 
     async def inject_context(self, content: str) -> None:
         self.injected.append(content)
+
+
+class ScoredTiltEvaluator:
+    def __init__(self, score: int) -> None:
+        self.score = score
+        self.requests: list[TiltEvaluationRequest] = []
+
+    async def evaluate(self, request: TiltEvaluationRequest) -> TiltEvaluation:
+        self.requests.append(request)
+        return TiltEvaluation(score=self.score)
 
 
 async def fake_turn() -> AsyncGenerator[AssistantEvent | ToolResultEvent, None]:
@@ -195,6 +207,88 @@ async def test_changed_next_action_closes_recovered_incident(tmp_path: Path) -> 
     assert state.incident.state == IncidentState.CLOSED
     assert [event.kind for event in events].count(EventKind.RECOVERY_STARTED) == 1
     assert [event.kind for event in events].count(EventKind.VERIFICATION_FINISHED) == 1
+
+
+@pytest.mark.parametrize(
+    ("score", "expected_state", "expected_injections"),
+    [(79, IncidentState.CONFIRMED, 0), (80, IncidentState.CLOSED, 1)],
+)
+@pytest.mark.asyncio
+async def test_tilt_llm_score_feeds_deterministic_recovery_policy(
+    tmp_path: Path, score: int, expected_state: IncidentState, expected_injections: int
+) -> None:
+    paths = WatchdogPaths.for_run(f"run-tilt-{score}", root=tmp_path)
+    store = WatchdogStore(paths)
+    port = InjectionPort()
+    evaluator = ScoredTiltEvaluator(score)
+    supervisor = ObserveOnlySupervisor(
+        run_id=f"run-tilt-{score}",
+        session_id="session-tilt",
+        store=store,
+        incident_engine=IncidentEngine((RepeatedCallDetector(threshold=2),)),
+        recovery=RecoveryCoordinator(store=store, port=cast(RecoveryPort, port)),
+        tilt_evaluator=evaluator,
+    )
+    await supervisor.start()
+    supervisor._queue.put_nowait(
+        PendingWatchdogEvent(
+            kind=EventKind.OBSERVER_ANOMALY,
+            observed_at_monotonic=1,
+            payload={"reason": "sequence_gap"},
+            critical=True,
+        )
+    )
+    for call_id in ("a", "b"):
+        supervisor._queue.put_nowait(
+            PendingWatchdogEvent(
+                kind=EventKind.TOOL_STARTED,
+                observed_at_monotonic=2,
+                payload={
+                    "tool_call_id": call_id,
+                    "tool_name": "bash",
+                    "arguments": {"cmd": "false"},
+                },
+                critical=True,
+            )
+        )
+        supervisor._queue.put_nowait(
+            PendingWatchdogEvent(
+                kind=EventKind.TOOL_FINISHED,
+                observed_at_monotonic=3,
+                payload={
+                    "tool_call_id": call_id,
+                    "result": "exit 1",
+                    "repository_fingerprint": "repo-1",
+                },
+                critical=True,
+            )
+        )
+    supervisor._queue.put_nowait(
+        PendingWatchdogEvent(
+            kind=EventKind.TOOL_STARTED,
+            observed_at_monotonic=4,
+            payload={
+                "tool_call_id": "changed",
+                "tool_name": "edit",
+                "arguments": {"path": "parser.py"},
+            },
+            critical=True,
+        )
+    )
+    await supervisor.finish()
+
+    state = await store.load_state()
+    events = await store.load_events()
+
+    assert state is not None and state.incident is not None
+    assert state.incident.state == expected_state
+    assert len(port.injected) == expected_injections
+    assert len(evaluator.requests) == 1
+    assert [event.kind for event in events].count(EventKind.TILT_EVALUATED) == 1
+    evaluation = next(
+        event for event in events if event.kind == EventKind.TILT_EVALUATED
+    )
+    assert evaluation.payload["score"] == score
 
 
 @pytest.mark.asyncio

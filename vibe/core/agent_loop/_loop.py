@@ -72,6 +72,7 @@ from vibe.core.middleware import (
     make_plan_agent_reminder,
 )
 from vibe.core.plan_session import PlanSession
+from vibe.core.prompts import UtilityPrompt
 from vibe.core.review import ReviewManager
 from vibe.core.rewind import RewindManager
 from vibe.core.scratchpad import init_scratchpad
@@ -173,6 +174,11 @@ from vibe.core.utils import (
     get_user_agent,
     get_user_cancellation_message,
     is_user_cancellation_event,
+)
+from vibe.core.watchdog.evaluation import (
+    TiltEvaluation,
+    TiltEvaluationRequest,
+    parse_tilt_evaluation,
 )
 
 
@@ -921,6 +927,38 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self._reset_session()
         self.messages.reset(restored)
         await self._save_messages(allow_empty=True)
+
+    async def evaluate_watchdog_tilt(
+        self, request: TiltEvaluationRequest
+    ) -> TiltEvaluation:
+        transcript_lines: list[str] = []
+        for message in list(self.messages)[-8:]:
+            if not message.content or message.role == Role.system:
+                continue
+            content = message.content[:1_000]
+            transcript_lines.append(f"{message.role.value}: {content}")
+        transcript = "\n".join(transcript_lines)[-8_000:] or "(no recent messages)"
+        messages = [
+            LLMMessage(
+                role=Role.system, content=UtilityPrompt.WATCHDOG_TILT_EVAL.read()
+            ),
+            LLMMessage(
+                role=Role.user,
+                content=(
+                    f"Signals:\n{request.model_dump_json()}\n\n"
+                    f"Recent conversation:\n{transcript}"
+                ),
+            ),
+        ]
+        model = self.config.get_active_model().model_copy(update={"temperature": 0.0})
+        result = await self._complete(
+            model=model,
+            messages=messages,
+            tools=None,
+            tool_choice=None,
+            call_type="secondary_call",
+        )
+        return parse_tilt_evaluation(result.message.content or "")
 
     def set_event_observer(self, observer: WatchdogObserverPort | None) -> None:
         self._event_observer = observer

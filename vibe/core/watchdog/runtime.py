@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from vibe.core.watchdog.detectors import RepeatedCallDetector, TerminalDetector
+from vibe.core.watchdog.evaluation import TiltEvaluation, TiltEvaluationRequest
 from vibe.core.watchdog.incident import IncidentEngine
 from vibe.core.watchdog.models import Incident, RecoveryDecision
 from vibe.core.watchdog.paths import WatchdogPaths
@@ -42,6 +43,14 @@ class AgentLoopRecoveryPort:
         return False
 
 
+class AgentLoopTiltEvaluator:
+    def __init__(self, agent_loop: AgentLoop) -> None:
+        self._agent_loop = agent_loop
+
+    async def evaluate(self, request: TiltEvaluationRequest) -> TiltEvaluation:
+        return await self._agent_loop.evaluate_watchdog_tilt(request)
+
+
 @dataclass(frozen=True, slots=True)
 class WatchdogRuntime:
     run_id: str
@@ -69,6 +78,7 @@ def attach_watchdog(
         store=store,
         incident_engine=IncidentEngine((RepeatedCallDetector(), TerminalDetector())),
         recovery=recovery,
+        tilt_evaluator=AgentLoopTiltEvaluator(agent_loop),
         repository_probe=lambda: repository_fingerprint(root),
     )
     agent_loop.set_event_observer(supervisor)

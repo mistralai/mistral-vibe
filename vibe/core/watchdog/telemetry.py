@@ -30,6 +30,8 @@ class WatchdogMetricKind(StrEnum):
     VERIFICATION_FINISHED = auto()
     TILT_ENTERED = auto()
     TILT_CLEARED = auto()
+    TILT_EVALUATED = auto()
+    TILT_EVALUATION_FAILED = auto()
     SNAPSHOT_CREATED = auto()
     SNAPSHOT_APPLIED = auto()
     SNAPSHOT_DROPPED = auto()

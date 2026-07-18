@@ -22,6 +22,8 @@ from vibe.core.watchdog import (
     RecoveryCoordinator,
     RecoveryDecision,
     RunState,
+    TiltEvaluation,
+    TiltEvaluationRequest,
     WatchdogPaths,
     WatchdogStore,
     apply_event,
@@ -46,8 +48,8 @@ SCENARIOS = {
     ),
     "tilt": Scenario(
         name="tilt",
-        title="Observer anomaly -> TILT -> intervention blocked",
-        intent="Show fail-safe behavior when observation integrity is uncertain.",
+        title="Observer anomaly -> LLM score -> deterministic recovery",
+        intent="Show the harness evaluator scoring evidence without selecting an action.",
     ),
     "degraded": Scenario(
         name="degraded",
@@ -85,6 +87,16 @@ class DemoRecoveryPort:
     async def request_approval(self, decision: RecoveryDecision) -> bool:
         del decision
         return False
+
+
+class DemoTiltEvaluator:
+    def __init__(self, score: int) -> None:
+        self.score = score
+        self.requests: list[TiltEvaluationRequest] = []
+
+    async def evaluate(self, request: TiltEvaluationRequest) -> TiltEvaluation:
+        self.requests.append(request)
+        return TiltEvaluation(score=self.score)
 
 
 def _tool_event(
@@ -138,11 +150,12 @@ def _enqueue_changed_action(supervisor: ObserveOnlySupervisor) -> None:
 
 async def _run_scenario(
     scenario: Scenario, root: Path
-) -> tuple[WatchdogPaths, DemoRecoveryPort, RunState]:
+) -> tuple[WatchdogPaths, DemoRecoveryPort, DemoTiltEvaluator, RunState]:
     run_id = f"demo-{scenario.name}"
     paths = WatchdogPaths.for_run(run_id, root=root)
     store = WatchdogStore(paths)
     port = DemoRecoveryPort(fail_injection=scenario.name == "degraded")
+    evaluator = DemoTiltEvaluator(score=92)
     supervisor = ObserveOnlySupervisor(
         run_id=run_id,
         session_id="watchdog-demo",
@@ -153,6 +166,7 @@ async def _run_scenario(
             port=port,
             objective="Fix the parser without repeating the failed command",
         ),
+        tilt_evaluator=evaluator if scenario.name == "tilt" else None,
     )
     await supervisor.start()
     if scenario.name == "tilt":
@@ -166,7 +180,7 @@ async def _run_scenario(
         )
     for attempt in range(1, 5):
         _enqueue_failed_call(supervisor, f"repeat-{attempt}")
-    if scenario.name == "recovery":
+    if scenario.name in {"recovery", "tilt"}:
         _enqueue_changed_action(supervisor)
     try:
         await supervisor.finish()
@@ -176,28 +190,42 @@ async def _run_scenario(
     state = await store.load_state()
     if state is None:
         raise RuntimeError("demo produced no Watchdog state")
-    _assert_outcome(scenario, state, port)
-    return paths, port, state
+    _assert_outcome(scenario, state, port, evaluator)
+    return paths, port, evaluator, state
 
 
 def _assert_outcome(
-    scenario: Scenario, state: RunState, port: DemoRecoveryPort
+    scenario: Scenario,
+    state: RunState,
+    port: DemoRecoveryPort,
+    evaluator: DemoTiltEvaluator,
 ) -> None:
     incident = state.incident
     if incident is None:
         raise RuntimeError(f"{scenario.name}: no incident detected")
     expected = {
         "recovery": (IncidentState.CLOSED, ObserverState.TRUSTED, 1),
-        "tilt": (IncidentState.CONFIRMED, ObserverState.TILT, 0),
+        "tilt": (IncidentState.CLOSED, ObserverState.TILT, 1),
         "degraded": (IncidentState.DEGRADED, ObserverState.TRUSTED, 1),
     }[scenario.name]
     actual = (incident.state, state.observer_state, len(port.injections))
     if actual != expected:
         raise RuntimeError(f"{scenario.name}: expected {expected}, got {actual}")
+    expected_evaluations = 1 if scenario.name == "tilt" else 0
+    if len(evaluator.requests) != expected_evaluations:
+        raise RuntimeError(
+            f"{scenario.name}: expected {expected_evaluations} evaluations, "
+            f"got {len(evaluator.requests)}"
+        )
 
 
 async def _print_trace(
-    scenario: Scenario, paths: WatchdogPaths, port: DemoRecoveryPort, *, delay: float
+    scenario: Scenario,
+    paths: WatchdogPaths,
+    port: DemoRecoveryPort,
+    evaluator: DemoTiltEvaluator,
+    *,
+    delay: float,
 ) -> None:
     events = await WatchdogStore(paths).load_events()
     state = RunState.new(run_id=events[0].run_id, session_id=events[0].session_id)
@@ -216,6 +244,8 @@ async def _print_trace(
         if delay:
             await asyncio.sleep(delay)
     print("\nRESULT")
+    scores = str([evaluator.score]) if evaluator.requests else "[]"
+    print(f"+- LLM eval scores    : {scores}")
     print(f"+- context injections : {len(port.injections)}")
     print(f"+- observer state     : {state.observer_state.value}")
     print(
@@ -257,8 +287,8 @@ async def _main() -> None:
         SCENARIOS.values() if args.scenario == "all" else [SCENARIOS[args.scenario]]
     )
     for scenario in selected:
-        paths, port, _state = await _run_scenario(scenario, root)
-        await _print_trace(scenario, paths, port, delay=args.delay)
+        paths, port, evaluator, _state = await _run_scenario(scenario, root)
+        await _print_trace(scenario, paths, port, evaluator, delay=args.delay)
     print(f"\nPASS :: artifacts retained at {root}")
 
 

@@ -38,11 +38,21 @@ class RecoveryCoordinator:
         self._claimed: set[tuple[str, int]] = set()
 
     async def recover(
-        self, state: RunState, *, observed_at: float, manual: bool = False
+        self,
+        state: RunState,
+        *,
+        observed_at: float,
+        manual: bool = False,
+        tilt_score_authorized: bool = False,
     ) -> RunState:
         async with self._lock:
             incident = state.incident
-            if incident is None or not self._eligible(state, incident, manual=manual):
+            if incident is None or not self._eligible(
+                state,
+                incident,
+                manual=manual,
+                tilt_score_authorized=tilt_score_authorized,
+            ):
                 return state
             strategy = RecoveryStrategy.INJECT_CONTEXT
             decision = RecoveryDecision(
@@ -50,6 +60,8 @@ class RecoveryCoordinator:
                 reason_code=(
                     "user_requested_recovery"
                     if manual
+                    else "tilt_score_threshold_met"
+                    if tilt_score_authorized
                     else "confirmed_repeated_incident"
                 ),
             )
@@ -90,7 +102,13 @@ class RecoveryCoordinator:
             )
 
     @staticmethod
-    def _eligible(state: RunState, incident: Incident, *, manual: bool) -> bool:
+    def _eligible(
+        state: RunState,
+        incident: Incident,
+        *,
+        manual: bool,
+        tilt_score_authorized: bool,
+    ) -> bool:
         eligible_states = {IncidentState.CONFIRMED}
         if manual:
             eligible_states |= {
@@ -99,10 +117,11 @@ class RecoveryCoordinator:
                 IncidentState.NEEDS_USER,
                 IncidentState.FAILED,
             }
-        return (
-            incident.state in eligible_states
-            and state.observer_state == ObserverState.TRUSTED
-        )
+        if incident.state not in eligible_states:
+            return False
+        if state.observer_state == ObserverState.TRUSTED:
+            return True
+        return tilt_score_authorized and incident.state == IncidentState.CONFIRMED
 
     async def _persist_transition(
         self,

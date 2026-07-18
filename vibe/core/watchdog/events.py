@@ -34,6 +34,8 @@ class EventKind(StrEnum):
     CONTINUATION_STARTED = auto()
     TILT_ENTERED = auto()
     TILT_CLEARED = auto()
+    TILT_EVALUATED = auto()
+    TILT_EVALUATION_FAILED = auto()
 
 
 class WatchdogEvent(BaseModel):

@@ -12,6 +12,13 @@ from vibe.core.watchdog.deadlines import (
     LivenessProbe,
     PhaseDeadlineTracker,
 )
+from vibe.core.watchdog.evaluation import (
+    TiltEvaluation,
+    TiltEvaluationRequest,
+    TiltEvaluator,
+    TiltScorePolicy,
+    parse_tilt_evaluation,
+)
 from vibe.core.watchdog.events import EventKind, WatchdogEvent
 from vibe.core.watchdog.fingerprint import (
     canonical_json,
@@ -52,7 +59,11 @@ from vibe.core.watchdog.reducer import (
     apply_event,
 )
 from vibe.core.watchdog.replay import render_replay
-from vibe.core.watchdog.runtime import WatchdogRuntime, attach_watchdog
+from vibe.core.watchdog.runtime import (
+    AgentLoopTiltEvaluator,
+    WatchdogRuntime,
+    attach_watchdog,
+)
 from vibe.core.watchdog.sentinel import (
     ExitClassification,
     SentinelAction,
@@ -90,6 +101,7 @@ from vibe.core.watchdog.verification import (
 )
 
 __all__ = [
+    "AgentLoopTiltEvaluator",
     "CancelResult",
     "CancellationVerifier",
     "CheckpointRestorePolicy",
@@ -131,6 +143,10 @@ __all__ = [
     "SnapshotError",
     "SnapshotNotFoundError",
     "TestImprovementVerifier",
+    "TiltEvaluation",
+    "TiltEvaluationRequest",
+    "TiltEvaluator",
+    "TiltScorePolicy",
     "TiltTracker",
     "VerificationInput",
     "VerificationResult",
@@ -160,6 +176,7 @@ __all__ = [
     "fingerprint_result",
     "metric_from_event",
     "observe_stream",
+    "parse_tilt_evaluation",
     "render_replay",
     "sanitize_artifact",
 ]

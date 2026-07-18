@@ -275,7 +275,7 @@ uv run python scripts/watchdog_demo.py
 
 ```text
 recovery : repeat failure ×4 → confirm → inject once → changed action → close
-tilt     : observer anomaly → intervention blocked
+tilt     : observer anomaly → LLM score → deterministic recovery policy
 degraded : delivery failure → degraded incident recorded
 ```
 
