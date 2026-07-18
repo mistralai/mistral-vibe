@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from vibe.core.watchdog._port import WatchdogObserverPort
 from vibe.core.watchdog.events import EventKind, WatchdogEvent
 from vibe.core.watchdog.fingerprint import (
     canonical_json,
@@ -22,6 +23,7 @@ from vibe.core.watchdog.models import (
     RunState,
 )
 from vibe.core.watchdog.paths import WatchdogPaths
+from vibe.core.watchdog.queue import QueuePutResult, WatchdogEventQueue
 from vibe.core.watchdog.reducer import (
     EventIdentityError,
     EventOrderError,
@@ -33,6 +35,7 @@ from vibe.core.watchdog.store import (
     WatchdogStorageError,
     WatchdogStore,
 )
+from vibe.core.watchdog.supervisor import ObserveOnlySupervisor, observe_stream
 
 __all__ = [
     "EventIdentityError",
@@ -41,12 +44,16 @@ __all__ = [
     "Evidence",
     "Incident",
     "IncidentState",
+    "ObserveOnlySupervisor",
     "ObserverState",
+    "QueuePutResult",
     "RecoveryDecision",
     "RecoveryStrategy",
     "RunPhase",
     "RunState",
     "WatchdogEvent",
+    "WatchdogEventQueue",
+    "WatchdogObserverPort",
     "WatchdogPaths",
     "WatchdogReducerError",
     "WatchdogSchemaVersionError",
@@ -60,5 +67,6 @@ __all__ = [
     "fingerprint_evidence",
     "fingerprint_repository",
     "fingerprint_result",
+    "observe_stream",
     "sanitize_artifact",
 ]

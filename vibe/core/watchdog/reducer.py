@@ -22,6 +22,7 @@ _PHASE_BY_EVENT = {
     EventKind.RUN_FAILED: RunPhase.IDLE,
     EventKind.RUN_CANCELLED: RunPhase.IDLE,
     EventKind.MODEL_STARTED: RunPhase.MODEL,
+    EventKind.MODEL_ACTIVITY: RunPhase.MODEL,
     EventKind.MODEL_FINISHED: RunPhase.IDLE,
     EventKind.TOOL_STARTED: RunPhase.TOOL,
     EventKind.TOOL_FINISHED: RunPhase.IDLE,
@@ -53,6 +54,8 @@ def apply_event(state: RunState, event: WatchdogEvent) -> RunState:
         )
 
     next_state = state.model_copy(update={"last_applied_sequence": event.sequence})
+    if event.kind == EventKind.OBSERVER_ANOMALY:
+        return next_state.model_copy(update={"observer_state": ObserverState.TILT})
     if event.sequence != state.last_applied_sequence + 1:
         return next_state.model_copy(update={"observer_state": ObserverState.TILT})
 

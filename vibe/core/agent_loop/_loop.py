@@ -210,6 +210,23 @@ if TYPE_CHECKING:
     from vibe.core.tools.mcp.pool import MCPConnectionPool
     from vibe.core.tools.mcp.registry import MCPRegistry
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
+    from vibe.core.watchdog._port import WatchdogObserverPort
+
+
+type WatchdogOutcome = Literal["finished", "failed", "cancelled"]
+
+
+async def _finish_event_observer(
+    observer: WatchdogObserverPort, outcome: WatchdogOutcome
+) -> None:
+    from vibe.core.watchdog.events import EventKind
+
+    event_kind = {
+        "finished": EventKind.RUN_FINISHED,
+        "failed": EventKind.RUN_FAILED,
+        "cancelled": EventKind.RUN_CANCELLED,
+    }[outcome]
+    await observer.finish(event_kind)
 
 
 class ToolExecutionResponse(StrEnum):
@@ -366,12 +383,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         mcp_registry: MCPRegistry | None = None,
         cache_store: VibeCodeCacheStore | None = None,
         force_bypass_tool_permissions: bool = False,
+        event_observer: WatchdogObserverPort | None = None,
     ) -> None:
         self._config_orchestrator = config_orchestrator
         config = config_orchestrator.config
         self._force_bypass_tool_permissions = force_bypass_tool_permissions
         self._apply_forced_bypass()
         self._headless = headless
+        self._event_observer = event_observer
         self.cache_store = cache_store or InMemoryVibeCodeCacheStore()
 
         self._defer_heavy_init = defer_heavy_init
@@ -894,6 +913,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             )
         await self._save_messages()
 
+    def set_event_observer(self, observer: WatchdogObserverPort | None) -> None:
+        self._event_observer = observer
+
     @requires_init
     async def act(
         self,
@@ -904,6 +926,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         images: list[ImageAttachment] | None = None,
         user_display_content: UserDisplayContentMetadata | None = None,
     ) -> AsyncGenerator[BaseEvent, None]:
+        observer = self._event_observer
+        outcome: WatchdogOutcome = "finished"
+        if observer is not None:
+            await observer.start()
         try:
             active_model = self.config.get_active_model()
             model_name = active_model.name
@@ -923,12 +949,24 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     images=images,
                     user_display_content=user_display_content,
                 ):
+                    if observer is not None:
+                        observer.observe(event)
                     yield event
+        except (asyncio.CancelledError, GeneratorExit):
+            if observer is not None:
+                outcome = "cancelled"
+            raise
+        except Exception:
+            if observer is not None:
+                outcome = "failed"
+            raise
         finally:
             # Seal the turn's post-edit boundary so per-turn review can attribute
             # later edits correctly, even if the turn opens then fails, or is
             # cancelled mid-flight.
             self.checkpoint_recorder.seal_turn()
+            if observer is not None:
+                await _finish_event_observer(observer, outcome)
 
     @property
     def teleport_service(self) -> TeleportService:

@@ -11,6 +11,7 @@ class EventKind(StrEnum):
     RUN_FAILED = auto()
     RUN_CANCELLED = auto()
     MODEL_STARTED = auto()
+    MODEL_ACTIVITY = auto()
     MODEL_FINISHED = auto()
     TOOL_STARTED = auto()
     TOOL_PROGRESS = auto()
@@ -24,6 +25,7 @@ class EventKind(StrEnum):
     RECOVERY_FINISHED = auto()
     VERIFICATION_STARTED = auto()
     VERIFICATION_FINISHED = auto()
+    OBSERVER_ANOMALY = auto()
 
 
 class WatchdogEvent(BaseModel):
