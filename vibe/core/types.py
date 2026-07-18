@@ -514,6 +514,15 @@ class ToolStreamEvent(BaseEvent):
     tool_call_id: str
 
 
+class SmartAutoDecisionEvent(BaseEvent):
+    """A model-authored Smart Auto permission judgment."""
+
+    tool_name: str
+    tool_call_id: str
+    verdict: Literal["ALLOW", "ASK"]
+    reason: str
+
+
 class WaitingForInputEvent(BaseEvent):
     task_id: str
     label: str | None = None

@@ -32,6 +32,7 @@ from vibe.core.types import (
     LLMChunk,
     LLMMessage,
     Role,
+    SmartAutoDecisionEvent,
     ToolCall,
     ToolResultEvent,
 )
@@ -233,6 +234,12 @@ def tool_results(events: Sequence[BaseEvent]) -> list[ToolResultEvent]:
     return [e for e in events if isinstance(e, ToolResultEvent)]
 
 
+def smart_auto_decisions(
+    events: Sequence[BaseEvent],
+) -> list[SmartAutoDecisionEvent]:
+    return [e for e in events if isinstance(e, SmartAutoDecisionEvent)]
+
+
 def seed_all_role_messages(agent_loop: AgentLoop) -> None:
     agent_loop.messages.reset([
         LLMMessage(role=Role.system, content="system prompt"),
@@ -380,6 +387,11 @@ async def test_allow_verdict_executes_tool_without_asking_the_human() -> None:
     assert agent_loop.stats.classifier_blocks_consecutive == 0
     assert agent_loop.stats.classifier_blocks_total == 0
 
+    visible_decisions = smart_auto_decisions(events)
+    assert len(visible_decisions) == 1
+    assert visible_decisions[0].verdict == "ALLOW"
+    assert visible_decisions[0].reason == "harmless"
+
 
 @pytest.mark.asyncio
 async def test_allow_verdict_records_always_approval_type_in_telemetry(
@@ -422,6 +434,34 @@ async def test_block_verdict_asks_the_human_and_honors_denial() -> None:
     assert approval.call_count == 1
     assert agent_loop.stats.tool_calls_rejected == 1
     assert agent_loop.stats.tool_calls_succeeded == 0
+
+    visible_decisions = smart_auto_decisions(events)
+    assert len(visible_decisions) == 1
+    assert visible_decisions[0].verdict == "ASK"
+    assert visible_decisions[0].reason == BLOCK_REASON
+
+
+@pytest.mark.asyncio
+async def test_block_decision_is_visible_before_human_approval_opens() -> None:
+    classifier = FakeClassifier([block()])
+    approval = ApprovalSpy(response=ApprovalResponse.NO)
+    agent_loop = make_agent_loop(
+        auto_mode_enabled=True,
+        backend=FakeBackend(turns_calling_todo(1)),
+        approval_callback=approval,
+    )
+    install_classifier(agent_loop, classifier)
+
+    event_stream = agent_loop.act("delete the security test")
+    async for event in event_stream:
+        if isinstance(event, SmartAutoDecisionEvent):
+            assert event.verdict == "ASK"
+            assert approval.call_count == 0
+            break
+
+    remaining_events = [event async for event in event_stream]
+    assert approval.call_count == 1
+    assert tool_results(remaining_events)[0].skipped is True
 
 
 @pytest.mark.asyncio

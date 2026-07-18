@@ -72,6 +72,7 @@ from vibe.core.middleware import (
     make_plan_agent_reminder,
 )
 from vibe.core.permissions.classifier import (
+    ClassifierDecision,
     ClassifierVerdict,
     PermissionClassifier,
     create_permission_classifier,
@@ -160,6 +161,7 @@ from vibe.core.types import (
     ResponseTooLongError,
     Role,
     SessionTitleUpdatedEvent,
+    SmartAutoDecisionEvent,
     StrToolChoice,
     ToolCall,
     ToolCallEvent,
@@ -230,6 +232,33 @@ class ToolDecision(BaseModel):
     verdict: ToolExecutionResponse
     approval_type: ToolPermission
     feedback: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolPermissionReview:
+    """Permission result before a possible human approval."""
+
+    decision: ToolDecision | None
+    approval_context: PermissionContext | None = None
+    classifier_decision: ClassifierDecision | None = None
+
+
+@dataclass(frozen=True)
+class _AcknowledgedToolEvent:
+    """An event the UI must consume before the tool pipeline continues."""
+
+    event: SmartAutoDecisionEvent
+    consumed: asyncio.Event
+
+
+type ToolPipelineEvent = (
+    ToolCallEvent
+    | ToolResultEvent
+    | ToolStreamEvent
+    | SmartAutoDecisionEvent
+    | HookEvent
+)
+type ToolQueueItem = ToolPipelineEvent | _AcknowledgedToolEvent | None
 
 
 class _SwappableConfigSource:
@@ -1627,7 +1656,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def _handle_tool_calls(
         self, resolved: ResolvedMessage
-    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[ToolPipelineEvent]:
         async for event in self._emit_failed_tool_events(resolved.failed_calls):
             yield event
         if not resolved.tool_calls:
@@ -1664,11 +1693,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def _run_tools_concurrently(
         self, tool_calls: list[ResolvedToolCall]
-    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[ToolPipelineEvent]:
         """Execute multiple tool calls concurrently, yielding events as they arrive."""
-        queue: asyncio.Queue[
-            ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent | None
-        ] = asyncio.Queue()
+        queue: asyncio.Queue[ToolQueueItem] = asyncio.Queue()
 
         tasks = [
             asyncio.create_task(self._execute_tool_to_queue(tc, queue))
@@ -1685,10 +1712,16 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         try:
             while True:
-                event = await queue.get()
-                if event is None:
+                queued = await queue.get()
+                if queued is None:
                     break
-                yield event
+                if isinstance(queued, _AcknowledgedToolEvent):
+                    try:
+                        yield queued.event
+                    finally:
+                        queued.consumed.set()
+                    continue
+                yield queued
         except GeneratorExit:
             for t in tasks:
                 if not t.done():
@@ -1709,17 +1742,20 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     async def _execute_tool_to_queue(
         self,
         tc: ResolvedToolCall,
-        queue: asyncio.Queue[
-            ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent | None
-        ],
+        queue: asyncio.Queue[ToolQueueItem],
     ) -> None:
         """Run a single tool call, sending events to the queue."""
         async for event in self._process_one_tool_call(tc):
-            await queue.put(event)
+            if isinstance(event, SmartAutoDecisionEvent):
+                consumed = asyncio.Event()
+                await queue.put(_AcknowledgedToolEvent(event, consumed))
+                await consumed.wait()
+            else:
+                await queue.put(event)
 
     async def _process_one_tool_call(
         self, tool_call: ResolvedToolCall
-    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[ToolPipelineEvent]:
         async with tool_span(
             tool_name=tool_call.tool_name,
             call_id=tool_call.call_id,
@@ -1730,7 +1766,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def _execute_tool_call(
         self, span: trace.Span, tool_call: ResolvedToolCall
-    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[ToolPipelineEvent]:
         try:
             tool_instance = self.tool_manager.get(tool_call.tool_name)
         except Exception as exc:
@@ -1769,9 +1805,31 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         decision: ToolDecision | None = None
         tool_started = False
         try:
-            decision = await self._should_execute_tool(
-                tool_instance, tool_call.validated_args, tool_call.call_id
+            permission_review = await self._should_execute_tool(
+                tool_instance, tool_call.validated_args
             )
+            if permission_review.classifier_decision is not None:
+                classifier_decision = permission_review.classifier_decision
+                yield SmartAutoDecisionEvent(
+                    tool_name=tool_call.tool_name,
+                    tool_call_id=tool_call.call_id,
+                    verdict=(
+                        "ALLOW"
+                        if classifier_decision.verdict is ClassifierVerdict.ALLOW
+                        else "ASK"
+                    ),
+                    reason=classifier_decision.reason,
+                )
+
+            decision = permission_review.decision
+            if decision is None:
+                assert permission_review.approval_context is not None
+                decision = await self._approve_or_ask(
+                    tool_call.tool_name,
+                    tool_call.validated_args,
+                    tool_call.call_id,
+                    permission_review.approval_context,
+                )
 
             if decision.verdict == ToolExecutionResponse.SKIP:
                 async for ev in self._handle_tool_skip(tool_call, decision, span=span):
@@ -1914,12 +1972,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.stats.tool_calls_succeeded += 1
 
     async def _should_execute_tool(
-        self, tool: BaseTool, args: BaseModel, tool_call_id: str
-    ) -> ToolDecision:
+        self, tool: BaseTool, args: BaseModel
+    ) -> ToolPermissionReview:
         if self.bypass_tool_permissions:
-            return ToolDecision(
-                verdict=ToolExecutionResponse.EXECUTE,
-                approval_type=ToolPermission.ALWAYS,
+            return ToolPermissionReview(
+                decision=ToolDecision(
+                    verdict=ToolExecutionResponse.EXECUTE,
+                    approval_type=ToolPermission.ALWAYS,
+                )
             )
 
         tool_name = tool.get_name()
@@ -1933,32 +1993,53 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
             match ctx.permission:
                 case ToolPermission.ALWAYS:
-                    return ToolDecision(
-                        verdict=ToolExecutionResponse.EXECUTE,
-                        approval_type=ToolPermission.ALWAYS,
+                    return ToolPermissionReview(
+                        decision=ToolDecision(
+                            verdict=ToolExecutionResponse.EXECUTE,
+                            approval_type=ToolPermission.ALWAYS,
+                        )
                     )
                 case ToolPermission.NEVER:
-                    return ToolDecision(
-                        verdict=ToolExecutionResponse.SKIP,
-                        approval_type=ToolPermission.NEVER,
-                        feedback=ctx.reason
-                        or f"Tool '{tool_name}' is permanently disabled",
+                    return ToolPermissionReview(
+                        decision=ToolDecision(
+                            verdict=ToolExecutionResponse.SKIP,
+                            approval_type=ToolPermission.NEVER,
+                            feedback=ctx.reason
+                            or f"Tool '{tool_name}' is permanently disabled",
+                        )
                     )
 
             uncovered = self._uncovered_permissions(tool_name, ctx)
             if ctx.required_permissions and not uncovered:
-                return ToolDecision(
-                    verdict=ToolExecutionResponse.EXECUTE,
-                    approval_type=ToolPermission.ALWAYS,
+                return ToolPermissionReview(
+                    decision=ToolDecision(
+                        verdict=ToolExecutionResponse.EXECUTE,
+                        approval_type=ToolPermission.ALWAYS,
+                    )
                 )
 
         # The classifier makes a network call, so it runs with no lock held; nothing
         # it touches may reach self._permission_store or it would deadlock.
-        decision = await self._run_classifier_gate(tool_name, args, uncovered)
-        if decision is not None:
-            return decision
+        classifier_decision = await self._run_classifier_gate(
+            tool_name, args, uncovered
+        )
+        if (
+            classifier_decision is not None
+            and classifier_decision.verdict is ClassifierVerdict.ALLOW
+        ):
+            return ToolPermissionReview(
+                decision=ToolDecision(
+                    verdict=ToolExecutionResponse.EXECUTE,
+                    approval_type=ToolPermission.ALWAYS,
+                ),
+                classifier_decision=classifier_decision,
+            )
 
-        return await self._approve_or_ask(tool_name, args, tool_call_id, ctx)
+        return ToolPermissionReview(
+            decision=None,
+            approval_context=ctx,
+            classifier_decision=classifier_decision,
+        )
 
     async def _approve_or_ask(
         self, tool_name: str, args: BaseModel, tool_call_id: str, ctx: PermissionContext
@@ -2047,7 +2128,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         tool_name: str,
         args: BaseModel,
         required_permissions: list[RequiredPermission],
-    ) -> ToolDecision | None:
+    ) -> ClassifierDecision | None:
         if not self._auto_mode_active():
             return None
 
@@ -2072,17 +2153,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         if decision.verdict is ClassifierVerdict.ALLOW:
             self.stats.classifier_blocks_consecutive = 0
-            return ToolDecision(
-                verdict=ToolExecutionResponse.EXECUTE,
-                approval_type=ToolPermission.ALWAYS,
-            )
+            return decision
 
         self.stats.classifier_blocks_consecutive += 1
         self.stats.classifier_blocks_total += 1
         # BLOCK means the classifier is not confident enough to auto-execute.
         # The normal approval path remains the authority in interactive sessions;
         # headless sessions fail closed because they have no approval callback.
-        return None
+        return decision
 
     async def _ask_approval(
         self,

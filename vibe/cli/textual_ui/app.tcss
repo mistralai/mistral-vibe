@@ -716,6 +716,20 @@ Markdown {
     }
 }
 
+.smart-auto-decision {
+    height: auto;
+    margin: 0 2;
+    color: $text-muted;
+
+    &.allow {
+        color: $success;
+    }
+
+    &.ask {
+        color: $warning;
+    }
+}
+
 StatusMessage {
     width: 100%;
     height: auto;
