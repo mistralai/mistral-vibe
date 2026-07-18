@@ -107,6 +107,14 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "watchdog": Command(
+                aliases=frozenset(["/watchdog"]),
+                description=(
+                    "Control Watchdog: status, on, off, pause, resume, "
+                    "snapshot, recover, replay"
+                ),
+                handler="_watchdog_command",
+            ),
             "teleport": Command(
                 aliases=frozenset(["/teleport"]),
                 description="Teleport session to Vibe Code Web",

@@ -36,6 +36,12 @@ class RepeatedCallDetector:
         self._completions: dict[str, _Completion] = {}
         self._suspected: set[str] = set()
 
+    def reset(self) -> None:
+        self._calls.clear()
+        self._counts.clear()
+        self._completions.clear()
+        self._suspected.clear()
+
     def observe(
         self, event: WatchdogEvent, state: RunState
     ) -> list[DetectorObservation]:

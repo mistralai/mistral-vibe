@@ -85,6 +85,24 @@ async def test_context_injection_is_persisted_before_execution(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_manual_recovery_advances_verifying_incident_epoch(
+    tmp_path: Path,
+) -> None:
+    store = WatchdogStore(WatchdogPaths.for_run("run-1", root=tmp_path))
+    port = FakeRecoveryPort()
+    coordinator = RecoveryCoordinator(store=store, port=port)
+    first = await coordinator.recover(confirmed_state(), observed_at=1)
+
+    second = await coordinator.recover(first, observed_at=2, manual=True)
+
+    assert second.incident is not None
+    assert second.incident.state == IncidentState.VERIFYING
+    assert second.incident.epoch == 2
+    assert len(port.injected) == 2
+    assert "user_requested_recovery" in store.paths.decisions.read_text()
+
+
+@pytest.mark.asyncio
 async def test_concurrent_recovery_triggers_inject_exactly_once(tmp_path: Path) -> None:
     store = WatchdogStore(WatchdogPaths.for_run("run-1", root=tmp_path))
     port = FakeRecoveryPort()

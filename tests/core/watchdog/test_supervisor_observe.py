@@ -198,6 +198,60 @@ async def test_changed_next_action_closes_recovered_incident(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_pause_resume_requires_fresh_repeated_call_baseline(
+    tmp_path: Path,
+) -> None:
+    paths = WatchdogPaths.for_run("run-pause", root=tmp_path)
+    store = WatchdogStore(paths)
+    supervisor = ObserveOnlySupervisor(
+        run_id="run-pause",
+        session_id="session-pause",
+        store=store,
+        incident_engine=IncidentEngine((RepeatedCallDetector(threshold=2),)),
+    )
+
+    async def observe_failed_call(call_id: str) -> None:
+        await supervisor.start()
+        supervisor._queue.put_nowait(
+            PendingWatchdogEvent(
+                kind=EventKind.TOOL_STARTED,
+                observed_at_monotonic=1,
+                payload={
+                    "tool_call_id": call_id,
+                    "tool_name": "bash",
+                    "arguments": {"cmd": "false"},
+                },
+                critical=True,
+            )
+        )
+        supervisor._queue.put_nowait(
+            PendingWatchdogEvent(
+                kind=EventKind.TOOL_FINISHED,
+                observed_at_monotonic=2,
+                payload={
+                    "tool_call_id": call_id,
+                    "result": "exit 1",
+                    "repository_fingerprint": "repo-1",
+                },
+                critical=True,
+            )
+        )
+        await supervisor.finish()
+
+    await observe_failed_call("before-pause")
+    await supervisor.pause()
+    supervisor.resume()
+    await observe_failed_call("fresh-1")
+
+    assert supervisor.state.incident is None
+
+    await observe_failed_call("fresh-2")
+
+    assert supervisor.state.incident is not None
+    assert supervisor.state.incident.state == IncidentState.CONFIRMED
+
+
+@pytest.mark.asyncio
 async def test_attached_runtime_survives_multiple_agent_turns(
     tmp_path: Path, agent_loop, monkeypatch: pytest.MonkeyPatch
 ) -> None:

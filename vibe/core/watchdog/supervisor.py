@@ -47,6 +47,45 @@ class ObserveOnlySupervisor:
         self._queue = WatchdogEventQueue(capacity=queue_capacity)
         self._worker: asyncio.Task[None] | None = None
         self._integrity_lost = False
+        self._interventions_enabled = True
+
+    @property
+    def interventions_enabled(self) -> bool:
+        return self._interventions_enabled
+
+    async def pause(self) -> None:
+        self._require_idle_control()
+        self._interventions_enabled = False
+        if self._incident_engine is not None:
+            self._incident_engine.reset()
+        incident = self.state.incident
+        if incident is None or incident.state == IncidentState.CLOSED:
+            return
+        await self._persist_incident(
+            EventKind.INCIDENT_CLOSED,
+            incident.model_copy(update={"state": IncidentState.CLOSED}),
+            time.monotonic(),
+        )
+
+    def resume(self) -> None:
+        self._require_idle_control()
+        if self._incident_engine is not None:
+            self._incident_engine.reset()
+        self._interventions_enabled = True
+
+    async def request_recovery(self) -> bool:
+        self._require_idle_control()
+        if not self._interventions_enabled or self._recovery is None:
+            return False
+        previous_sequence = self.state.last_applied_sequence
+        self.state = await self._recovery.recover(
+            self.state, observed_at=time.monotonic(), manual=True
+        )
+        return self.state.last_applied_sequence > previous_sequence
+
+    def _require_idle_control(self) -> None:
+        if self._worker is not None and not self._worker.done():
+            raise RuntimeError("Watchdog controls require an idle agent turn")
 
     async def start(self) -> None:
         if self._worker is not None and not self._worker.done():
@@ -110,24 +149,32 @@ class ObserveOnlySupervisor:
         )
         self.state = apply_event(self.state, event)
         await self.store.persist(event, self.state)
-        await self._verify_next_action(event)
-        if self._incident_engine is None:
+        if self._interventions_enabled:
+            await self._verify_next_action(event)
+        if self._incident_engine is None or not self._interventions_enabled:
             return
         for transition in self._incident_engine.observe(event, self.state):
-            transition_event = WatchdogEvent(
-                run_id=self.run_id,
-                session_id=self.session_id,
-                sequence=self.state.last_applied_sequence + 1,
-                observed_at_monotonic=pending.observed_at_monotonic,
-                kind=transition.kind,
-                payload={"incident": transition.incident.model_dump(mode="json")},
+            await self._persist_incident(
+                transition.kind, transition.incident, pending.observed_at_monotonic
             )
-            self.state = apply_event(self.state, transition_event)
-            await self.store.persist(transition_event, self.state)
             if self._recovery is not None:
                 self.state = await self._recovery.recover(
                     self.state, observed_at=pending.observed_at_monotonic
                 )
+
+    async def _persist_incident(
+        self, kind: EventKind, incident: Incident, observed_at: float
+    ) -> None:
+        transition_event = WatchdogEvent(
+            run_id=self.run_id,
+            session_id=self.session_id,
+            sequence=self.state.last_applied_sequence + 1,
+            observed_at_monotonic=observed_at,
+            kind=kind,
+            payload={"incident": incident.model_dump(mode="json")},
+        )
+        self.state = apply_event(self.state, transition_event)
+        await self.store.persist(transition_event, self.state)
 
     async def _verify_next_action(self, event: WatchdogEvent) -> None:
         incident = self.state.incident

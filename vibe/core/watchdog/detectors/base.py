@@ -27,6 +27,8 @@ class DetectorObservation(BaseModel):
 class Detector(Protocol):
     detector_id: str
 
+    def reset(self) -> None: ...
+
     def observe(
         self, event: WatchdogEvent, state: RunState
     ) -> list[DetectorObservation]: ...

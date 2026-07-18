@@ -9,6 +9,9 @@ from vibe.core.watchdog.models import Evidence, RunState
 class TerminalDetector:
     detector_id = "typed_terminal"
 
+    def reset(self) -> None:
+        pass
+
     def observe(
         self, event: WatchdogEvent, state: RunState
     ) -> list[DetectorObservation]:

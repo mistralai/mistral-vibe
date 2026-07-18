@@ -70,6 +70,7 @@ from vibe.cli.textual_ui.notifications import (
 from vibe.cli.textual_ui.quit_manager import QuitManager
 from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopRunner
 from vibe.cli.textual_ui.session_exit import print_session_resume_message
+from vibe.cli.textual_ui.watchdog_command import WATCHDOG_USAGE, format_watchdog_status
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
@@ -281,6 +282,7 @@ if TYPE_CHECKING:
     from vibe.cli.textual_ui.widgets.mcp_app import MCPApp
     from vibe.cli.textual_ui.widgets.mcp_oauth_app import MCPOAuthApp
     from vibe.core.agent_loop import AgentLoop
+    from vibe.core.watchdog.runtime import WatchdogRuntime
 
 
 def _get_connector_auth_app_class() -> type[ConnectorAuthApp]:
@@ -449,6 +451,7 @@ class StartupOptions:
     teleport_on_start: bool = False
     show_resume_picker: bool = False
     is_resuming_session: bool = False
+    watchdog_runtime: WatchdogRuntime | None = None
 
 
 _REJECT_HINT_BUSY = "wait for the current job to finish."
@@ -594,6 +597,8 @@ class VibeApp(App):  # noqa: PLR0904
         )
         self._show_resume_picker = opts.show_resume_picker
         self._is_resuming_session = opts.is_resuming_session
+        self._watchdog_runtime = opts.watchdog_runtime
+        self._last_watchdog_runtime = opts.watchdog_runtime
         self._startup_prompt_processed = False
         self._startup_command_availability_ready = asyncio.Event()
 
@@ -2967,6 +2972,87 @@ class VibeApp(App):  # noqa: PLR0904
 - **Cost**: ${stats.session_cost:.4f}
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
+
+    async def _watchdog_command(self, *, cmd_args: str = "", **kwargs: Any) -> None:
+        del kwargs
+        command = cmd_args.strip().lower() or "status"
+        match command:
+            case "status":
+                message = format_watchdog_status(self._watchdog_runtime)
+            case "on":
+                message = self._watchdog_on()
+            case "off":
+                message = self._watchdog_off()
+            case "pause":
+                runtime = await self._require_watchdog_runtime()
+                if runtime is None:
+                    return
+                await runtime.supervisor.pause()
+                message = format_watchdog_status(runtime)
+            case "resume":
+                runtime = await self._require_watchdog_runtime()
+                if runtime is None:
+                    return
+                runtime.supervisor.resume()
+                message = format_watchdog_status(runtime)
+            case "snapshot":
+                runtime = await self._require_watchdog_runtime()
+                if runtime is None:
+                    return
+                path = await runtime.supervisor.store.snapshot(runtime.supervisor.state)
+                message = f"Watchdog snapshot: `{path}`"
+            case "recover":
+                runtime = await self._require_watchdog_runtime()
+                if runtime is None:
+                    return
+                recovered = await runtime.supervisor.request_recovery()
+                message = (
+                    format_watchdog_status(runtime)
+                    if recovered
+                    else "No confirmed recoverable Watchdog incident."
+                )
+            case "replay":
+                runtime = self._watchdog_runtime or self._last_watchdog_runtime
+                if runtime is None:
+                    await self._mount_and_scroll(
+                        ErrorMessage("No Watchdog run is available to replay.")
+                    )
+                    return
+                from vibe.core.watchdog.replay import render_replay
+
+                message = await asyncio.to_thread(render_replay, runtime.paths)
+            case _:
+                await self._mount_and_scroll(ErrorMessage(WATCHDOG_USAGE))
+                return
+        await self._mount_and_scroll(UserCommandMessage(message))
+
+    def _watchdog_on(self) -> str:
+        if self._watchdog_runtime is not None:
+            return format_watchdog_status(self._watchdog_runtime)
+        from vibe.core.watchdog.runtime import attach_watchdog
+
+        runtime = attach_watchdog(
+            self.agent_loop,
+            objective=self._initial_prompt or "Continue the current user task",
+        )
+        self._watchdog_runtime = runtime
+        self._last_watchdog_runtime = runtime
+        return format_watchdog_status(runtime)
+
+    def _watchdog_off(self) -> str:
+        if self._watchdog_runtime is None:
+            return format_watchdog_status(None)
+        self.agent_loop.set_event_observer(None)
+        self._last_watchdog_runtime = self._watchdog_runtime
+        self._watchdog_runtime = None
+        return format_watchdog_status(None)
+
+    async def _require_watchdog_runtime(self) -> WatchdogRuntime | None:
+        if self._watchdog_runtime is None:
+            await self._mount_and_scroll(
+                ErrorMessage("Watchdog is disabled. Run `/watchdog on`.")
+            )
+        return self._watchdog_runtime
 
     async def _show_config(self, **kwargs: Any) -> None:
         """Switch to the configuration app in the bottom panel."""

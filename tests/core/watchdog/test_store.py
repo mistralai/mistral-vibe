@@ -80,3 +80,15 @@ async def test_audit_artifact_redacts_secret_payload(tmp_path: Path) -> None:
     replay = render_replay(paths)
     assert "private-value" not in replay
     assert "run_started" in replay
+
+
+@pytest.mark.asyncio
+async def test_snapshot_writes_atomic_state_copy(tmp_path: Path) -> None:
+    paths = WatchdogPaths.for_run("run-1", root=tmp_path)
+    store = WatchdogStore(paths)
+    state = RunState.new(run_id="run-1", session_id="session-1")
+
+    snapshot = await store.snapshot(state)
+
+    assert snapshot == paths.snapshots / "state-000000.json"
+    assert RunState.model_validate_json(snapshot.read_text()) == state

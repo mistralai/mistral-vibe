@@ -352,16 +352,17 @@ def _run_interactive_mode(
     if loaded_session:
         _resume_previous_session(agent_loop, *loaded_session)
 
+    watchdog_runtime = None
     if getattr(args, "watchdog", False):
         from vibe.core.watchdog.runtime import attach_watchdog
 
-        runtime = attach_watchdog(
+        watchdog_runtime = attach_watchdog(
             agent_loop,
             objective=args.initial_prompt or stdin_prompt or "Continue the user task",
         )
         rprint(
-            f"[cyan]Watchdog enabled[/] run={runtime.run_id} "
-            f"artifacts={runtime.paths.run_dir}"
+            f"[cyan]Watchdog enabled[/] run={watchdog_runtime.run_id} "
+            f"artifacts={watchdog_runtime.paths.run_dir}"
         )
 
     run_textual_ui(
@@ -372,6 +373,7 @@ def _run_interactive_mode(
             teleport_on_start=args.teleport,
             show_resume_picker=args.resume is True,
             is_resuming_session=loaded_session is not None,
+            watchdog_runtime=watchdog_runtime,
         ),
     )
 

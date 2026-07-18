@@ -62,6 +62,10 @@ class WatchdogStore:
             state = apply_event(state, event)
         return state
 
+    async def snapshot(self, state: RunState) -> Path:
+        async with self._write_lock:
+            return await asyncio.to_thread(self._snapshot_sync, state)
+
     def _persist_sync(
         self, event: WatchdogEvent, state: RunState, decision: RecoveryDecision | None
     ) -> None:
@@ -104,6 +108,19 @@ class WatchdogStore:
         record = cast(
             dict[str, JsonValue], sanitize_artifact(state.model_dump(mode="json"))
         )
+        self._write_json_atomic(self.paths.state, record)
+
+    def _snapshot_sync(self, state: RunState) -> Path:
+        self.paths.snapshots.mkdir(parents=True, exist_ok=True)
+        path = self.paths.snapshots / f"state-{state.last_applied_sequence:06d}.json"
+        record = cast(
+            dict[str, JsonValue], sanitize_artifact(state.model_dump(mode="json"))
+        )
+        self._write_json_atomic(path, record)
+        return path
+
+    @staticmethod
+    def _write_json_atomic(path: Path, record: dict[str, JsonValue]) -> None:
         payload = json.dumps(
             record, ensure_ascii=False, separators=(",", ":"), sort_keys=True
         )
@@ -112,7 +129,7 @@ class WatchdogStore:
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
-                dir=self.paths.run_dir,
+                dir=path.parent,
                 prefix=".state.",
                 suffix=".tmp",
                 delete=False,
@@ -121,7 +138,7 @@ class WatchdogStore:
                 temp.write(payload)
                 temp.flush()
                 os.fsync(temp.fileno())
-            os.replace(temp_path, self.paths.state)
+            os.replace(temp_path, path)
         except OSError as error:
             raise WatchdogStorageError("failed to atomically persist state") from error
         finally:

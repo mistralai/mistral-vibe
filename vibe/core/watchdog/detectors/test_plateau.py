@@ -11,6 +11,9 @@ class TestPlateauDetector:
     def __init__(self, *, enabled: bool = False) -> None:
         self.enabled = enabled
 
+    def reset(self) -> None:
+        pass
+
     def observe(
         self, event: WatchdogEvent, state: RunState
     ) -> list[DetectorObservation]:

@@ -13,6 +13,7 @@ class TestCommandRegistry:
         assert registry.get_command_name("/clear") == "clear"
         assert registry.get_command_name("/exit") == "exit"
         assert registry.get_command_name("/data-retention") == "data-retention"
+        assert registry.get_command_name("/watchdog") == "watchdog"
 
     def test_get_command_name_normalizes_input(self) -> None:
         registry = CommandRegistry()
@@ -166,6 +167,27 @@ class TestCommandRegistry:
         assert cmd_name == "loop"
         assert cmd.handler == "_loop_command"
         assert cmd_args == "30s ping"
+
+    def test_watchdog_command_registration_lists_all_controls(self) -> None:
+        registry = CommandRegistry()
+        result = registry.parse_command("/watchdog snapshot")
+
+        assert result is not None
+        cmd_name, command, cmd_args = result
+        assert cmd_name == "watchdog"
+        assert command.handler == "_watchdog_command"
+        assert cmd_args == "snapshot"
+        for control in (
+            "status",
+            "on",
+            "off",
+            "pause",
+            "resume",
+            "snapshot",
+            "recover",
+            "replay",
+        ):
+            assert control in command.description
 
     def test_exit_command_accepts_bare_synonyms(self) -> None:
         registry = CommandRegistry()

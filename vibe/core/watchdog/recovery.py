@@ -37,14 +37,21 @@ class RecoveryCoordinator:
         self._lock = asyncio.Lock()
         self._claimed: set[tuple[str, int]] = set()
 
-    async def recover(self, state: RunState, *, observed_at: float) -> RunState:
+    async def recover(
+        self, state: RunState, *, observed_at: float, manual: bool = False
+    ) -> RunState:
         async with self._lock:
             incident = state.incident
-            if incident is None or not self._eligible(state, incident):
+            if incident is None or not self._eligible(state, incident, manual=manual):
                 return state
             strategy = RecoveryStrategy.INJECT_CONTEXT
             decision = RecoveryDecision(
-                strategy=strategy, reason_code="confirmed_repeated_incident"
+                strategy=strategy,
+                reason_code=(
+                    "user_requested_recovery"
+                    if manual
+                    else "confirmed_repeated_incident"
+                ),
             )
             if self._authorization.authorize(strategy) != AuthorizationVerdict.ALLOW:
                 return state
@@ -83,9 +90,17 @@ class RecoveryCoordinator:
             )
 
     @staticmethod
-    def _eligible(state: RunState, incident: Incident) -> bool:
+    def _eligible(state: RunState, incident: Incident, *, manual: bool) -> bool:
+        eligible_states = {IncidentState.CONFIRMED}
+        if manual:
+            eligible_states |= {
+                IncidentState.DEGRADED,
+                IncidentState.VERIFYING,
+                IncidentState.NEEDS_USER,
+                IncidentState.FAILED,
+            }
         return (
-            incident.state == IncidentState.CONFIRMED
+            incident.state in eligible_states
             and state.observer_state == ObserverState.TRUSTED
         )
 

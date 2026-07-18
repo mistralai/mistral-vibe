@@ -459,10 +459,14 @@ def build_test_vibe_app(
         CORE_VERSION if current_version is None else current_version
     )
     voice_manager = kwargs.pop("voice_manager", FakeVoiceManager())
+    watchdog_runtime = kwargs.pop("watchdog_runtime", None)
 
     return VibeApp(
         agent_loop=resolved_agent_loop,
-        startup=StartupOptions(initial_prompt=kwargs.pop("initial_prompt", None)),
+        startup=StartupOptions(
+            initial_prompt=kwargs.pop("initial_prompt", None),
+            watchdog_runtime=watchdog_runtime,
+        ),
         current_version=resolved_current_version,
         update_notifier=resolved_update_notifier,
         update_cache_repository=resolved_update_cache_repository,

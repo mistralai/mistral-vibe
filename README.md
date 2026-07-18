@@ -240,6 +240,19 @@ Vibe prints the Watchdog run ID and artifact directory at startup. Replay a run:
 vibe --watchdog-replay RUN_ID
 ```
 
+Interactive controls:
+
+```text
+/watchdog           status
+/watchdog on        enable a new run
+/watchdog off       disable; keep the last replay available
+/watchdog pause     observe only; close active incident
+/watchdog resume    enable intervention with a fresh detector baseline
+/watchdog snapshot  persist the current state snapshot
+/watchdog recover   request the next authorized recovery
+/watchdog replay    show the current or last run replay
+```
+
 Watchdog state is stored under `$VIBE_HOME/watchdog/runs/RUN_ID/`. Recovery can
 inject bounded context; it never automatically restores the main checkout.
 

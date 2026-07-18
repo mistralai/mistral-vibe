@@ -21,6 +21,10 @@ class IncidentEngine:
     def __init__(self, detectors: tuple[Detector, ...]) -> None:
         self._detectors = detectors
 
+    def reset(self) -> None:
+        for detector in self._detectors:
+            detector.reset()
+
     def observe(
         self, event: WatchdogEvent, state: RunState
     ) -> list[IncidentTransition]:
