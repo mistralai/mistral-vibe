@@ -55,6 +55,8 @@ class AgentStats(BaseModel):
     tool_calls_hook_denied: int = 0
     tool_calls_failed: int = 0
     tool_calls_succeeded: int = 0
+    classifier_blocks_consecutive: int = 0
+    classifier_blocks_total: int = 0
 
     context_tokens: int = 0
 

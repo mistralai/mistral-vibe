@@ -71,6 +71,11 @@ from vibe.core.middleware import (
     TurnLimitMiddleware,
     make_plan_agent_reminder,
 )
+from vibe.core.permissions.classifier import (
+    ClassifierVerdict,
+    PermissionClassifier,
+    create_permission_classifier,
+)
 from vibe.core.plan_session import PlanSession
 from vibe.core.review import ReviewManager
 from vibe.core.rewind import RewindManager
@@ -210,6 +215,10 @@ if TYPE_CHECKING:
     from vibe.core.tools.mcp.pool import MCPConnectionPool
     from vibe.core.tools.mcp.registry import MCPRegistry
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
+
+
+AUTO_MODE_MAX_CONSECUTIVE_BLOCKS = 3
+AUTO_MODE_MAX_TOTAL_BLOCKS = 20
 
 
 class ToolExecutionResponse(StrEnum):
@@ -385,6 +394,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._ready_telemetry_pending: bool = defer_heavy_init
 
         self._permission_store = permission_store or PermissionStore()
+        self._permission_classifier: PermissionClassifier | None = None
+        self._permission_classifier_resolved = False
 
         self.mcp_registry: MCPRegistry | None = (
             mcp_registry
@@ -1908,8 +1919,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 approval_type=ToolPermission.ALWAYS,
             )
 
+        tool_name = tool.get_name()
+
         async with self._permission_store.lock:
-            tool_name = tool.get_name()
             ctx = tool.resolve_permission(args)
 
             if ctx is None:
@@ -1929,20 +1941,126 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                         feedback=ctx.reason
                         or f"Tool '{tool_name}' is permanently disabled",
                     )
-                case _:
-                    uncovered = [
-                        rp
-                        for rp in ctx.required_permissions
-                        if not self._permission_store.covers(tool_name, rp)
-                    ]
-                    if ctx.required_permissions and not uncovered:
-                        return ToolDecision(
-                            verdict=ToolExecutionResponse.EXECUTE,
-                            approval_type=ToolPermission.ALWAYS,
-                        )
-                    return await self._ask_approval(
-                        tool_name, args, tool_call_id, uncovered
-                    )
+
+            uncovered = self._uncovered_permissions(tool_name, ctx)
+            if ctx.required_permissions and not uncovered:
+                return ToolDecision(
+                    verdict=ToolExecutionResponse.EXECUTE,
+                    approval_type=ToolPermission.ALWAYS,
+                )
+
+        # The classifier makes a network call, so it runs with no lock held; nothing
+        # it touches may reach self._permission_store or it would deadlock.
+        decision = await self._run_classifier_gate(tool_name, args, uncovered)
+        if decision is not None:
+            return decision
+
+        return await self._approve_or_ask(tool_name, args, tool_call_id, ctx)
+
+    async def _approve_or_ask(
+        self, tool_name: str, args: BaseModel, tool_call_id: str, ctx: PermissionContext
+    ) -> ToolDecision:
+        # Coverage is recomputed: a concurrent "always allow" may have landed while
+        # the classifier was in flight.
+        async with self._permission_store.lock:
+            uncovered = self._uncovered_permissions(tool_name, ctx)
+            if ctx.required_permissions and not uncovered:
+                return ToolDecision(
+                    verdict=ToolExecutionResponse.EXECUTE,
+                    approval_type=ToolPermission.ALWAYS,
+                )
+            return await self._ask_approval(tool_name, args, tool_call_id, uncovered)
+
+    def _uncovered_permissions(
+        self, tool_name: str, ctx: PermissionContext
+    ) -> list[RequiredPermission]:
+        return [
+            rp
+            for rp in ctx.required_permissions
+            if not self._permission_store.covers(tool_name, rp)
+        ]
+
+    def _auto_mode_active(self) -> bool:
+        return (
+            self.config.auto_mode.enabled
+            and self.stats.classifier_blocks_consecutive
+            < AUTO_MODE_MAX_CONSECUTIVE_BLOCKS
+            and self.stats.classifier_blocks_total < AUTO_MODE_MAX_TOTAL_BLOCKS
+        )
+
+    def _get_permission_classifier(self) -> PermissionClassifier | None:
+        if self._permission_classifier_resolved:
+            return self._permission_classifier
+        self._permission_classifier = create_permission_classifier(self.config)
+        self._permission_classifier_resolved = True
+        return self._permission_classifier
+
+    def _classifier_transcript(self) -> list[LLMMessage]:
+        # Tool results are attacker-controlled (file contents, command output,
+        # fetched pages) and must never reach the classifier. Dropping them would
+        # orphan the assistant tool_calls they answered, which the API rejects, so
+        # those are flattened into text instead.
+        transcript: list[LLMMessage] = []
+        for message in self.messages:
+            if message.role == Role.tool:
+                continue
+            if not message.tool_calls:
+                transcript.append(message)
+                continue
+            called = ", ".join(
+                tc.function.name for tc in message.tool_calls if tc.function.name
+            )
+            content = message.content or ""
+            transcript.append(
+                message.model_copy(
+                    update={
+                        "content": f"{content}\n[called tools: {called}]".strip(),
+                        "tool_calls": None,
+                    }
+                )
+            )
+        return transcript
+
+    async def _run_classifier_gate(
+        self,
+        tool_name: str,
+        args: BaseModel,
+        required_permissions: list[RequiredPermission],
+    ) -> ToolDecision | None:
+        if not self._auto_mode_active():
+            return None
+
+        classifier = self._get_permission_classifier()
+        if classifier is None:
+            return None
+
+        decision = await classifier.classify(
+            auto_mode=self.config.auto_mode,
+            tool_name=tool_name,
+            args=args,
+            required_permissions=required_permissions,
+            transcript=self._classifier_transcript(),
+            metadata=self._build_backend_metadata(
+                call_type="secondary_call"
+            ).model_dump(exclude_none=True),
+        )
+        if decision is None:
+            return None
+
+        if decision.verdict is ClassifierVerdict.ALLOW:
+            self.stats.classifier_blocks_consecutive = 0
+            return ToolDecision(
+                verdict=ToolExecutionResponse.EXECUTE,
+                approval_type=ToolPermission.ALWAYS,
+            )
+
+        self.stats.classifier_blocks_consecutive += 1
+        self.stats.classifier_blocks_total += 1
+        return ToolDecision(
+            verdict=ToolExecutionResponse.SKIP,
+            approval_type=ToolPermission.ASK,
+            feedback=decision.reason,
+        )
 
     async def _ask_approval(
         self,
