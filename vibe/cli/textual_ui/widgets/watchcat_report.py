@@ -48,12 +48,6 @@ class WatchcatReportApp(Container):
             with TabbedContent(initial="watchcat-summary", id="watchcat-report-tabs"):
                 with TabPane("Overview", id="watchcat-summary"):
                     yield from self._compose_overview(categories)
-                with TabPane("Details", id="watchcat-details"):
-                    with VerticalScroll(classes="watchcat-report-scroll"):
-                        yield NoMarkupStatic(
-                            self._details_header(), classes="watchcat-details-header"
-                        )
-                        yield NoMarkupStatic(render_demo_runs(self._report.runs))
                 for classification, runs in categories.items():
                     title = f"{classification.title()} ({len(runs)})"
                     with TabPane(title, id=f"watchcat-{classification}"):
@@ -66,6 +60,12 @@ class WatchcatReportApp(Container):
                                     f"\n  No {classification} runs.",
                                     classes="watchcat-empty-state",
                                 )
+                with TabPane("Details", id="watchcat-details"):
+                    with VerticalScroll(classes="watchcat-report-scroll"):
+                        yield NoMarkupStatic(
+                            self._details_header(), classes="watchcat-details-header"
+                        )
+                        yield NoMarkupStatic(render_demo_runs(self._report.runs))
             yield NoMarkupStatic(
                 shortcut_hint(
                     f"{shortcut('←→')} Change tab  {shortcut('↑↓')} Scroll  "

@@ -200,10 +200,12 @@ async def test_watchcat_report_displays_latest_demo_dashboard(
         assert report_app.query(".watchcat-pipeline-visual")
 
         await pilot.press("right")
-        assert tabs.active == "watchcat-details"
-        await pilot.press("right", "right")
+        assert tabs.active == "watchcat-protected"
+        await pilot.press("right")
         assert tabs.active == "watchcat-mitigated"
         assert report_app.query(".watchcat-run-card")
+        await pilot.press("right", "right", "right")
+        assert tabs.active == "watchcat-details"
         await pilot.press("escape")
         await pilot.pause()
         assert not app.query(WatchcatReportApp)
