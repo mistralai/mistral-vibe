@@ -71,6 +71,12 @@ from vibe.core.middleware import (
     TurnLimitMiddleware,
     make_plan_agent_reminder,
 )
+from vibe.core.permissions.classifier import (
+    ClassifierDecision,
+    ClassifierVerdict,
+    PermissionClassifier,
+    create_permission_classifier,
+)
 from vibe.core.plan_session import PlanSession
 from vibe.core.review import ReviewManager
 from vibe.core.rewind import RewindManager
@@ -155,6 +161,7 @@ from vibe.core.types import (
     ResponseTooLongError,
     Role,
     SessionTitleUpdatedEvent,
+    SmartAutoDecisionEvent,
     StrToolChoice,
     ToolCall,
     ToolCallEvent,
@@ -212,6 +219,10 @@ if TYPE_CHECKING:
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
 
 
+AUTO_MODE_MAX_CONSECUTIVE_BLOCKS = 3
+AUTO_MODE_MAX_TOTAL_BLOCKS = 20
+
+
 class ToolExecutionResponse(StrEnum):
     SKIP = auto()
     EXECUTE = auto()
@@ -221,6 +232,34 @@ class ToolDecision(BaseModel):
     verdict: ToolExecutionResponse
     approval_type: ToolPermission
     feedback: str | None = None
+    classifier_verdict: Literal["allow", "ask"] | None = None
+
+
+@dataclass(frozen=True)
+class ToolPermissionReview:
+    """Permission result before a possible human approval."""
+
+    decision: ToolDecision | None
+    approval_context: PermissionContext | None = None
+    classifier_decision: ClassifierDecision | None = None
+
+
+@dataclass(frozen=True)
+class _AcknowledgedToolEvent:
+    """An event the UI must consume before the tool pipeline continues."""
+
+    event: SmartAutoDecisionEvent
+    consumed: asyncio.Event
+
+
+type ToolPipelineEvent = (
+    ToolCallEvent
+    | ToolResultEvent
+    | ToolStreamEvent
+    | SmartAutoDecisionEvent
+    | HookEvent
+)
+type ToolQueueItem = ToolPipelineEvent | _AcknowledgedToolEvent | None
 
 
 class _SwappableConfigSource:
@@ -385,6 +424,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._ready_telemetry_pending: bool = defer_heavy_init
 
         self._permission_store = permission_store or PermissionStore()
+        self._permission_classifier: PermissionClassifier | None = None
+        self._permission_classifier_resolved = False
+        self._permission_classifier_lock = asyncio.Lock()
 
         self.mcp_registry: MCPRegistry | None = (
             mcp_registry
@@ -615,6 +657,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     async def refresh_config(self) -> None:
         await self._config_orchestrator.reload()
         self._apply_forced_bypass()
+        await self._discard_permission_classifier()
         self.agent_manager.invalidate_config()
         if self.mcp_registry is not None:
             self.mcp_registry.sync_active_servers(self.config.mcp_servers)
@@ -731,6 +774,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 await self._mcp_pool.aclose()
         with contextlib.suppress(Exception):
             await self.backend.__aexit__(None, None, None)
+        await self._discard_permission_classifier()
         with contextlib.suppress(Exception):
             await self.experiment_manager.aclose()
 
@@ -1613,7 +1657,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def _handle_tool_calls(
         self, resolved: ResolvedMessage
-    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[ToolPipelineEvent]:
         async for event in self._emit_failed_tool_events(resolved.failed_calls):
             yield event
         if not resolved.tool_calls:
@@ -1650,11 +1694,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def _run_tools_concurrently(
         self, tool_calls: list[ResolvedToolCall]
-    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[ToolPipelineEvent]:
         """Execute multiple tool calls concurrently, yielding events as they arrive."""
-        queue: asyncio.Queue[
-            ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent | None
-        ] = asyncio.Queue()
+        queue: asyncio.Queue[ToolQueueItem] = asyncio.Queue()
 
         tasks = [
             asyncio.create_task(self._execute_tool_to_queue(tc, queue))
@@ -1671,10 +1713,16 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         try:
             while True:
-                event = await queue.get()
-                if event is None:
+                queued = await queue.get()
+                if queued is None:
                     break
-                yield event
+                if isinstance(queued, _AcknowledgedToolEvent):
+                    try:
+                        yield queued.event
+                    finally:
+                        queued.consumed.set()
+                    continue
+                yield queued
         except GeneratorExit:
             for t in tasks:
                 if not t.done():
@@ -1693,19 +1741,20 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     await monitor
 
     async def _execute_tool_to_queue(
-        self,
-        tc: ResolvedToolCall,
-        queue: asyncio.Queue[
-            ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent | None
-        ],
+        self, tc: ResolvedToolCall, queue: asyncio.Queue[ToolQueueItem]
     ) -> None:
         """Run a single tool call, sending events to the queue."""
         async for event in self._process_one_tool_call(tc):
-            await queue.put(event)
+            if isinstance(event, SmartAutoDecisionEvent):
+                consumed = asyncio.Event()
+                await queue.put(_AcknowledgedToolEvent(event, consumed))
+                await consumed.wait()
+            else:
+                await queue.put(event)
 
     async def _process_one_tool_call(
         self, tool_call: ResolvedToolCall
-    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[ToolPipelineEvent]:
         async with tool_span(
             tool_name=tool_call.tool_name,
             call_id=tool_call.call_id,
@@ -1714,9 +1763,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             async for event in self._execute_tool_call(span, tool_call):
                 yield event
 
-    async def _execute_tool_call(
+    async def _execute_tool_call(  # noqa: PLR0912, PLR0915
         self, span: trace.Span, tool_call: ResolvedToolCall
-    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[ToolPipelineEvent]:
         try:
             tool_instance = self.tool_manager.get(tool_call.tool_name)
         except Exception as exc:
@@ -1755,9 +1804,33 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         decision: ToolDecision | None = None
         tool_started = False
         try:
-            decision = await self._should_execute_tool(
-                tool_instance, tool_call.validated_args, tool_call.call_id
+            permission_review = await self._should_execute_tool(
+                tool_instance, tool_call.validated_args
             )
+            if permission_review.classifier_decision is not None:
+                classifier_decision = permission_review.classifier_decision
+                yield SmartAutoDecisionEvent(
+                    tool_name=tool_call.tool_name,
+                    tool_call_id=tool_call.call_id,
+                    verdict=(
+                        "ALLOW"
+                        if classifier_decision.verdict is ClassifierVerdict.ALLOW
+                        else "ASK"
+                    ),
+                    reason=classifier_decision.reason,
+                )
+
+            decision = permission_review.decision
+            if decision is None:
+                assert permission_review.approval_context is not None
+                decision = await self._approve_or_ask(
+                    tool_call.tool_name,
+                    tool_call.validated_args,
+                    tool_call.call_id,
+                    permission_review.approval_context,
+                )
+                if permission_review.classifier_decision is not None:
+                    decision = decision.model_copy(update={"classifier_verdict": "ask"})
 
             if decision.verdict == ToolExecutionResponse.SKIP:
                 async for ev in self._handle_tool_skip(tool_call, decision, span=span):
@@ -1899,17 +1972,20 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             yield ev
         self.stats.tool_calls_succeeded += 1
 
-    async def _should_execute_tool(
-        self, tool: BaseTool, args: BaseModel, tool_call_id: str
-    ) -> ToolDecision:
+    async def _should_execute_tool(  # noqa: PLR0911
+        self, tool: BaseTool, args: BaseModel
+    ) -> ToolPermissionReview:
         if self.bypass_tool_permissions:
-            return ToolDecision(
-                verdict=ToolExecutionResponse.EXECUTE,
-                approval_type=ToolPermission.ALWAYS,
+            return ToolPermissionReview(
+                decision=ToolDecision(
+                    verdict=ToolExecutionResponse.EXECUTE,
+                    approval_type=ToolPermission.ALWAYS,
+                )
             )
 
+        tool_name = tool.get_name()
+
         async with self._permission_store.lock:
-            tool_name = tool.get_name()
             ctx = tool.resolve_permission(args)
 
             if ctx is None:
@@ -1918,31 +1994,229 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
             match ctx.permission:
                 case ToolPermission.ALWAYS:
-                    return ToolDecision(
-                        verdict=ToolExecutionResponse.EXECUTE,
-                        approval_type=ToolPermission.ALWAYS,
-                    )
-                case ToolPermission.NEVER:
-                    return ToolDecision(
-                        verdict=ToolExecutionResponse.SKIP,
-                        approval_type=ToolPermission.NEVER,
-                        feedback=ctx.reason
-                        or f"Tool '{tool_name}' is permanently disabled",
-                    )
-                case _:
-                    uncovered = [
-                        rp
-                        for rp in ctx.required_permissions
-                        if not self._permission_store.covers(tool_name, rp)
-                    ]
-                    if ctx.required_permissions and not uncovered:
-                        return ToolDecision(
+                    return ToolPermissionReview(
+                        decision=ToolDecision(
                             verdict=ToolExecutionResponse.EXECUTE,
                             approval_type=ToolPermission.ALWAYS,
                         )
-                    return await self._ask_approval(
-                        tool_name, args, tool_call_id, uncovered
                     )
+                case ToolPermission.NEVER:
+                    return ToolPermissionReview(
+                        decision=ToolDecision(
+                            verdict=ToolExecutionResponse.SKIP,
+                            approval_type=ToolPermission.NEVER,
+                            feedback=ctx.reason
+                            or f"Tool '{tool_name}' is permanently disabled",
+                        )
+                    )
+
+            uncovered = self._uncovered_permissions(tool_name, ctx)
+            if ctx.required_permissions and not uncovered:
+                return ToolPermissionReview(
+                    decision=ToolDecision(
+                        verdict=ToolExecutionResponse.EXECUTE,
+                        approval_type=ToolPermission.ALWAYS,
+                    )
+                )
+
+        # The classifier makes a network call, so it runs with no lock held; nothing
+        # it touches may reach self._permission_store or it would deadlock.
+        classifier_decision = await self._run_classifier_gate(
+            tool_name, args, uncovered
+        )
+
+        # Re-resolve the complete permission contract after the classifier's
+        # network await. A profile switch, tool override, or new session rule may
+        # have changed both the permission level and the required scopes.
+        async with self._permission_store.lock:
+            if self.bypass_tool_permissions:
+                return ToolPermissionReview(
+                    decision=ToolDecision(
+                        verdict=ToolExecutionResponse.EXECUTE,
+                        approval_type=ToolPermission.ALWAYS,
+                    )
+                )
+
+            refreshed_ctx = tool.resolve_permission(args)
+            if refreshed_ctx is None:
+                refreshed_permission = self.tool_manager.get_tool_config(
+                    tool_name
+                ).permission
+                refreshed_ctx = PermissionContext(permission=refreshed_permission)
+
+            match refreshed_ctx.permission:
+                case ToolPermission.ALWAYS:
+                    return ToolPermissionReview(
+                        decision=ToolDecision(
+                            verdict=ToolExecutionResponse.EXECUTE,
+                            approval_type=ToolPermission.ALWAYS,
+                        )
+                    )
+                case ToolPermission.NEVER:
+                    return ToolPermissionReview(
+                        decision=ToolDecision(
+                            verdict=ToolExecutionResponse.SKIP,
+                            approval_type=ToolPermission.NEVER,
+                            feedback=refreshed_ctx.reason
+                            or f"Tool '{tool_name}' is permanently disabled",
+                        )
+                    )
+
+            refreshed_uncovered = self._uncovered_permissions(tool_name, refreshed_ctx)
+            if refreshed_ctx.required_permissions and not refreshed_uncovered:
+                return ToolPermissionReview(
+                    decision=ToolDecision(
+                        verdict=ToolExecutionResponse.EXECUTE,
+                        approval_type=ToolPermission.ALWAYS,
+                    )
+                )
+
+            contract_unchanged = (
+                refreshed_ctx == ctx and refreshed_uncovered == uncovered
+            )
+
+        if not contract_unchanged:
+            return ToolPermissionReview(decision=None, approval_context=refreshed_ctx)
+
+        if (
+            classifier_decision is not None
+            and classifier_decision.verdict is ClassifierVerdict.ALLOW
+        ):
+            return ToolPermissionReview(
+                decision=ToolDecision(
+                    verdict=ToolExecutionResponse.EXECUTE,
+                    approval_type=ToolPermission.ALWAYS,
+                    classifier_verdict="allow",
+                ),
+                classifier_decision=classifier_decision,
+            )
+
+        return ToolPermissionReview(
+            decision=None,
+            approval_context=refreshed_ctx,
+            classifier_decision=classifier_decision,
+        )
+
+    async def _approve_or_ask(
+        self, tool_name: str, args: BaseModel, tool_call_id: str, ctx: PermissionContext
+    ) -> ToolDecision:
+        # Coverage is recomputed: a concurrent "always allow" may have landed while
+        # the classifier was in flight.
+        async with self._permission_store.lock:
+            uncovered = self._uncovered_permissions(tool_name, ctx)
+            if ctx.required_permissions and not uncovered:
+                return ToolDecision(
+                    verdict=ToolExecutionResponse.EXECUTE,
+                    approval_type=ToolPermission.ALWAYS,
+                )
+            return await self._ask_approval(tool_name, args, tool_call_id, uncovered)
+
+    def _uncovered_permissions(
+        self, tool_name: str, ctx: PermissionContext
+    ) -> list[RequiredPermission]:
+        return [
+            rp
+            for rp in ctx.required_permissions
+            if not self._permission_store.covers(tool_name, rp)
+        ]
+
+    def _auto_mode_active(self) -> bool:
+        return (
+            self.config.auto_mode.enabled
+            and self.stats.classifier_blocks_consecutive
+            < AUTO_MODE_MAX_CONSECUTIVE_BLOCKS
+            and self.stats.classifier_blocks_total < AUTO_MODE_MAX_TOTAL_BLOCKS
+        )
+
+    async def _discard_permission_classifier(self) -> None:
+        # The classifier captures its model and provider when it is built, so a
+        # config or profile change has to drop it for the next call to rebuild.
+        async with self._permission_classifier_lock:
+            classifier, self._permission_classifier = (
+                self._permission_classifier,
+                None,
+            )
+            self._permission_classifier_resolved = False
+        if classifier is not None:
+            with contextlib.suppress(Exception):
+                await classifier.aclose()
+
+    async def _get_permission_classifier(self) -> PermissionClassifier | None:
+        if self._permission_classifier_resolved:
+            return self._permission_classifier
+        async with self._permission_classifier_lock:
+            if self._permission_classifier_resolved:
+                return self._permission_classifier
+            self._permission_classifier = await asyncio.to_thread(
+                create_permission_classifier, self.config
+            )
+            self._permission_classifier_resolved = True
+            return self._permission_classifier
+
+    def _classifier_transcript(self) -> list[LLMMessage]:
+        # Only genuine human messages may establish explicit authorization.
+        # System context, injected user messages, and tool results can all contain
+        # repository-controlled text, so none may reach the classifier. Assistant
+        # tool calls are flattened because unresolved calls are rejected by the API.
+        transcript: list[LLMMessage] = []
+        for message in self.messages:
+            if message.role in {Role.system, Role.tool} or message.injected:
+                continue
+            if not message.tool_calls:
+                transcript.append(message)
+                continue
+            called = ", ".join(
+                tc.function.name for tc in message.tool_calls if tc.function.name
+            )
+            content = message.content or ""
+            transcript.append(
+                message.model_copy(
+                    update={
+                        "content": f"{content}\n[called tools: {called}]".strip(),
+                        "tool_calls": None,
+                    }
+                )
+            )
+        return transcript
+
+    async def _run_classifier_gate(
+        self,
+        tool_name: str,
+        args: BaseModel,
+        required_permissions: list[RequiredPermission],
+    ) -> ClassifierDecision | None:
+        if not self._auto_mode_active():
+            return None
+
+        classifier = await self._get_permission_classifier()
+        if classifier is None:
+            return None
+
+        decision = await classifier.classify(
+            auto_mode=self.config.auto_mode,
+            tool_name=tool_name,
+            args=args,
+            required_permissions=required_permissions,
+            transcript=self._classifier_transcript(),
+            metadata=self._build_backend_metadata(
+                call_type="secondary_call"
+            ).model_dump(exclude_none=True),
+        )
+        # Auto mode may have been switched off, or a concurrent call may have hit a
+        # pause threshold, while this classification was in flight.
+        if decision is None or not self._auto_mode_active():
+            return None
+
+        if decision.verdict is ClassifierVerdict.ALLOW:
+            self.stats.classifier_blocks_consecutive = 0
+            return decision
+
+        self.stats.classifier_blocks_consecutive += 1
+        self.stats.classifier_blocks_total += 1
+        # BLOCK means the classifier is not confident enough to auto-execute.
+        # The normal approval path remains the authority in interactive sessions;
+        # headless sessions fail closed because they have no approval callback.
+        return decision
 
     async def _ask_approval(
         self,
@@ -2497,6 +2771,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         # Synchronous swap: no await, so an in-flight turn can't observe a partial
         # update. Keep it that way -- don't make it async or move it off-thread.
         self._commit_reload(prepared, reset_middleware, switch_to_agent)
+
+        # Dropped after the swap so the next classification picks up the new config.
+        await self._discard_permission_classifier()
 
     def _prepare_reload(self, target_config: AnyVibeConfig) -> _PreparedReload:
         config_source = _SwappableConfigSource(lambda: target_config)

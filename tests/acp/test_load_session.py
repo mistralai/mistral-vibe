@@ -144,6 +144,7 @@ class TestLoadSession:
         assert modes_ids == {
             BuiltinAgentName.DEFAULT,
             BuiltinAgentName.CHAT,
+            BuiltinAgentName.AUTO,
             BuiltinAgentName.AUTO_APPROVE,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
@@ -154,11 +155,12 @@ class TestLoadSession:
         assert response.config_options[0].id == "mode"
         assert response.config_options[0].category == "mode"
         assert response.config_options[0].current_value == BuiltinAgentName.DEFAULT
-        assert len(response.config_options[0].options) == 5
+        assert len(response.config_options[0].options) == 6
         mode_option_values = {opt.value for opt in response.config_options[0].options}
         assert mode_option_values == {
             BuiltinAgentName.DEFAULT,
             BuiltinAgentName.CHAT,
+            BuiltinAgentName.AUTO,
             BuiltinAgentName.AUTO_APPROVE,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,

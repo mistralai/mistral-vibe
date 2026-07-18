@@ -48,6 +48,11 @@ class CommandRegistry:
                 description="Edit config settings",
                 handler="_show_config",
             ),
+            "careful-yolo": Command(
+                aliases=frozenset(["/careful-yolo", "/auto"]),
+                description="Configure Careful YOLO rules",
+                handler="_show_smart_auto_rules",
+            ),
             "model": Command(
                 aliases=frozenset(["/model"]),
                 description="Select active model",

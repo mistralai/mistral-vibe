@@ -371,6 +371,7 @@ class TestTelemetryClient:
 
         assert telemetry_events[0]["properties"]["decision"] is None
         assert telemetry_events[0]["properties"]["approval_type"] is None
+        assert telemetry_events[0]["properties"]["careful_yolo_verdict"] is None
 
     def test_send_user_copied_text_payload(
         self, telemetry_events: list[dict[str, Any]]

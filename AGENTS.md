@@ -18,6 +18,7 @@ Before architecture-affecting changes, read the matching ADRs. If a change fits 
 | Session logging, resume, rewind, transcript metadata, or migrations | [0006 Local Sessions](docs/adr/0006-local-sessions.md) |
 | Skills, agents, subagents, hooks, MCP, connectors, custom tools, or discovery | [0007 Extension Mechanisms](docs/adr/0007-extension-mechanisms.md) |
 | Adding or changing analytics instrumentation, telemetry events, or event properties | [0008 Feature Instrumentation](docs/adr/0008-feature-instrumentation.md) |
+| Auto mode, permission classifier rules, or classifier-gated tool approval | [0009 Classifier Gated Permissions](docs/adr/0009-classifier-gated-permissions.md) |
 
 ## Commands
 

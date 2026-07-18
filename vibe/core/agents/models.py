@@ -29,6 +29,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 class AgentSafety(StrEnum):
     SAFE = auto()
     NEUTRAL = auto()
+    GUARDED = auto()
     DESTRUCTIVE = auto()
     YOLO = auto()
 
@@ -43,6 +44,8 @@ class BuiltinAgentName(StrEnum):
     CHAT = "chat"
     PLAN = "plan"
     ACCEPT_EDITS = "accept-edits"
+    CAREFUL_YOLO = "careful-yolo"
+    AUTO = "careful-yolo"  # Source-compatible alias for integrations.
     AUTO_APPROVE = "auto-approve"
     EXPLORE = "explore"
     LEAN = "lean"
@@ -131,6 +134,15 @@ ACCEPT_EDITS = AgentProfile(
         },
     },
 )
+CAREFUL_YOLO = AgentProfile(
+    BuiltinAgentName.CAREFUL_YOLO,
+    "Careful YOLO",
+    "Auto-runs routine actions; asks approval for uncertain or risky actions",
+    AgentSafety.GUARDED,
+    overrides={"disabled_tools": ["exit_plan_mode"], "auto_mode": {"enabled": True}},
+)
+# Source-compatible alias for integrations importing the former profile constant.
+AUTO = CAREFUL_YOLO
 AUTO_APPROVE = AgentProfile(
     BuiltinAgentName.AUTO_APPROVE,
     "Auto Approve",
@@ -192,6 +204,7 @@ BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.DEFAULT: DEFAULT,
     BuiltinAgentName.PLAN: PLAN,
     BuiltinAgentName.ACCEPT_EDITS: ACCEPT_EDITS,
+    BuiltinAgentName.CAREFUL_YOLO: CAREFUL_YOLO,
     BuiltinAgentName.AUTO_APPROVE: AUTO_APPROVE,
     BuiltinAgentName.EXPLORE: EXPLORE,
     BuiltinAgentName.LEAN: LEAN,

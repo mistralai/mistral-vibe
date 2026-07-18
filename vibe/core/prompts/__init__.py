@@ -34,6 +34,7 @@ class UtilityPrompt(Prompt):
     COMPACT_SUMMARY_PREFIX = auto()
     COMPACT_SYSTEM = auto()
     DANGEROUS_DIRECTORY = auto()
+    PERMISSION_CLASSIFIER = auto()
     PROJECT_CONTEXT = auto()
     TURN_SUMMARY = auto()
 

@@ -37,6 +37,7 @@ from vibe.core.types import (
     PlanReviewRequestedEvent,
     ReasoningEvent,
     SessionTitleUpdatedEvent,
+    SmartAutoDecisionEvent,
     ToolCallEvent,
     ToolResultEvent,
     ToolStreamEvent,
@@ -153,6 +154,9 @@ class EventHandler:
             case ToolCallEvent():
                 await self.finalize_streaming()
                 return await self._handle_tool_call(event, loading_widget)
+            case SmartAutoDecisionEvent():
+                await self.finalize_streaming()
+                await self._handle_smart_auto_decision(event)
             case ToolResultEvent():
                 await self.finalize_streaming()
                 sanitized_event = self._sanitize_event(event)
@@ -248,6 +252,15 @@ class EventHandler:
             self._tool_call_anchors[tool_call_id] = tool_result
             if tool_call_id in self.tool_calls:
                 del self.tool_calls[tool_call_id]
+
+    async def _handle_smart_auto_decision(self, event: SmartAutoDecisionEvent) -> None:
+        anchor = self._tool_call_anchors.get(event.tool_call_id)
+        message = NoMarkupStatic(
+            f"Careful YOLO: {event.verdict} — {event.reason}",
+            classes=f"smart-auto-decision {event.verdict.lower()}",
+        )
+        await self.mount_callback(message, after=anchor)
+        self._tool_call_anchors[event.tool_call_id] = message
 
     def _resolve_pending_errors(self, *, escalate: bool) -> None:
         if escalate:

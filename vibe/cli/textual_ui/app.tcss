@@ -1,4 +1,5 @@
 $mistral_orange: #FF8205;
+$smart_auto: #7B5CFF;
 
 * {
     scrollbar-size: 1 1;
@@ -194,6 +195,12 @@ OptionList, OptionList:focus {
         border-top: solid $warning;
         border-bottom: solid $warning;
         border-title-color: $warning;
+    }
+
+    &.border-guarded {
+        border-top: solid $smart_auto;
+        border-bottom: solid $smart_auto;
+        border-title-color: $smart_auto;
     }
 
     &.border-safe {
@@ -707,6 +714,12 @@ Markdown {
     &:ansi {
         text-style: dim;
     }
+}
+
+.smart-auto-decision {
+    height: auto;
+    margin: 0 2;
+    color: $smart_auto;
 }
 
 StatusMessage {
@@ -1232,6 +1245,63 @@ StatusMessage {
     border: solid $foreground-muted;
     padding: 0 1;
     margin: 0;
+}
+
+#smartautorules-app {
+    width: 100%;
+    height: auto;
+    max-height: 70vh;
+    background: transparent;
+    border: solid $foreground-muted;
+    padding: 0 1;
+    margin: 0;
+}
+
+#smartautorules-content,
+#smartautorules-editor {
+    width: 100%;
+    height: auto;
+}
+
+.smartautorules-title,
+#smartautorules-editor-title {
+    height: auto;
+    color: $smart_auto;
+    text-style: bold;
+}
+
+.smartautorules-description {
+    height: auto;
+    color: $text-muted;
+    margin-bottom: 1;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
+#smartautorules-options {
+    width: 100%;
+    height: auto;
+    max-height: 45vh;
+    border: none;
+}
+
+#smartautorules-input {
+    width: 100%;
+    height: auto;
+    background: transparent;
+    border: solid $smart_auto;
+    margin: 1 0;
+}
+
+.smartautorules-help {
+    height: auto;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
 }
 
 #question-content {

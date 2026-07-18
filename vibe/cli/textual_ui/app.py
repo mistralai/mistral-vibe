@@ -126,6 +126,7 @@ from vibe.cli.textual_ui.widgets.proxy_setup_app import ProxySetupApp
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.widgets.rewind_app import RewindApp
 from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
+from vibe.cli.textual_ui.widgets.smart_auto_rules_app import SmartAutoRulesApp
 from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.cli.textual_ui.widgets.theme_picker import ThemePickerApp, sorted_theme_names
 from vibe.cli.textual_ui.widgets.thinking_picker import ThinkingPickerApp
@@ -334,6 +335,7 @@ class BottomApp(StrEnum):
     VibeCodeProjectPicker = auto()
     VibeCodeProjectCreate = auto()
     SessionPicker = auto()
+    SmartAutoRules = auto()
     Voice = auto()
 
 
@@ -1295,6 +1297,28 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         await self._handle_config_settings_closed(message.changes)
         await self._switch_to_input_app()
+
+    async def on_smart_auto_rules_app_rules_closed(
+        self, message: SmartAutoRulesApp.RulesClosed
+    ) -> None:
+        current_auto_mode = self.agent_loop.config_orchestrator.config.auto_mode
+        updated_auto_mode = current_auto_mode.model_copy(
+            update={"soft_deny": message.ask_rules, "allow": message.allow_rules}
+        )
+        errors = await self.agent_loop.config_orchestrator.set_field(
+            "/auto_mode",
+            updated_auto_mode.model_dump(mode="json"),
+            reason="Update Careful YOLO rules",
+        )
+        if errors:
+            await self._switch_to_input_app()
+            await self._mount_and_scroll(
+                ErrorMessage(f"Failed to save Careful YOLO rules: {errors[0]}")
+            )
+            return
+        await self._reload_config()
+        await self._switch_to_input_app()
+        await self._mount_and_scroll(UserCommandMessage("Careful YOLO rules saved."))
 
     async def on_voice_app_config_closed(self, message: VoiceApp.ConfigClosed) -> None:
         await self._handle_voice_settings_closed(message.changes)
@@ -2974,6 +2998,11 @@ class VibeApp(App):  # noqa: PLR0904
             return
         await self._switch_to_config_app()
 
+    async def _show_smart_auto_rules(self, **kwargs: Any) -> None:
+        if self._current_bottom_app == BottomApp.SmartAutoRules:
+            return
+        await self._switch_from_input(SmartAutoRulesApp(self.config))
+
     async def _show_model(self, **kwargs: Any) -> None:
         """Switch to the model picker in the bottom panel."""
         if self._current_bottom_app == BottomApp.ModelPicker:
@@ -3607,6 +3636,7 @@ class VibeApp(App):  # noqa: PLR0904
             BottomApp.VibeCodeProjectCreate: VibeCodeProjectCreateApp,
             BottomApp.VibeCodeProjectPicker: VibeCodeProjectPickerApp,
             BottomApp.SessionPicker: SessionPickerApp,
+            BottomApp.SmartAutoRules: SmartAutoRulesApp,
             BottomApp.MCP: _get_mcp_app_class(),
             BottomApp.ConnectorAuth: _get_connector_auth_app_class(),
             BottomApp.MCPOAuth: _get_mcp_oauth_app_class(),
@@ -3970,6 +4000,9 @@ class VibeApp(App):  # noqa: PLR0904
                 self._handle_vibe_code_project_picker_app_escape
             ),
             BottomApp.SessionPicker: self._handle_session_picker_app_escape,
+            BottomApp.SmartAutoRules: lambda: self._handle_bottom_app_close_escape(
+                SmartAutoRulesApp
+            ),
         }
 
         if handler := handlers.get(self._current_bottom_app):

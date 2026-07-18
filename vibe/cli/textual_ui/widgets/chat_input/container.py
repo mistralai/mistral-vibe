@@ -23,6 +23,7 @@ from vibe.core.autocompletion.completers import CommandCompleter, PathCompleter
 
 SAFETY_BORDER_CLASSES: dict[AgentSafety, str] = {
     AgentSafety.SAFE: "border-safe",
+    AgentSafety.GUARDED: "border-guarded",
     AgentSafety.DESTRUCTIVE: "border-warning",
     AgentSafety.YOLO: "border-error",
 }

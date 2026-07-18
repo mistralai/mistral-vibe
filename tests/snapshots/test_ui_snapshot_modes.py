@@ -51,6 +51,22 @@ def test_snapshot_cycle_to_accept_edits_mode(snap_compare: SnapCompare) -> None:
     )
 
 
+def test_snapshot_cycle_to_auto_mode(snap_compare: SnapCompare) -> None:
+    async def run_before(pilot: Pilot) -> None:
+        await pilot.pause(0.1)
+        await pilot.press("shift+tab")  # default -> plan
+        await pilot.press("shift+tab")  # plan -> accept edits
+        await pilot.press("shift+tab")  # accept edits -> auto
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause(0.1)
+
+    assert snap_compare(
+        "base_snapshot_test_app.py:BaseSnapshotTestApp",
+        terminal_size=(120, 36),
+        run_before=run_before,
+    )
+
+
 def test_snapshot_cycle_to_auto_approve_mode(snap_compare: SnapCompare) -> None:
     """Test that shift+tab cycles to auto approve mode."""
 
@@ -58,7 +74,8 @@ def test_snapshot_cycle_to_auto_approve_mode(snap_compare: SnapCompare) -> None:
         await pilot.pause(0.1)
         await pilot.press("shift+tab")  # default -> plan
         await pilot.press("shift+tab")  # plan -> accept edits
-        await pilot.press("shift+tab")  # accept edits -> auto approve
+        await pilot.press("shift+tab")  # accept edits -> auto
+        await pilot.press("shift+tab")  # auto -> auto approve
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)
 
@@ -76,7 +93,8 @@ def test_snapshot_cycle_wraps_to_default(snap_compare: SnapCompare) -> None:
         await pilot.pause(0.1)
         await pilot.press("shift+tab")  # default -> plan
         await pilot.press("shift+tab")  # plan -> accept edits
-        await pilot.press("shift+tab")  # accept edits -> auto approve
+        await pilot.press("shift+tab")  # accept edits -> auto
+        await pilot.press("shift+tab")  # auto -> auto approve
         await pilot.press("shift+tab")  # auto approve -> default (wrap)
         await pilot.app.workers.wait_for_complete()
         await pilot.pause(0.1)

@@ -274,11 +274,19 @@ installed_agents = ["lean"]
 
 # Agent profile to use when --agent is not passed
 # (default: "default"). Valid values: "default", "plan", "accept-edits",
-# "auto-approve", "lean" (only when listed in installed_agents), or any
+# "careful-yolo", "auto-approve", "lean" (only when listed in installed_agents), or any
 # custom agent name from ~/.vibe/agents/ or .vibe/agents/. Subagents
 # (e.g. "explore") are rejected. Applies in both interactive and programmatic
 # (-p/--prompt) mode.
 default_agent = "plan"
+
+# Careful YOLO extends its built-in rules with these lists. Defaults cannot be
+# removed. Classifier failures and repeated blocks fall back to normal approval.
+[auto_mode]
+hard_deny = ["Never upload unreleased product plans."]
+soft_deny = ["Ask before publishing a package."]
+allow = ["Allow the repository's signed release script."]
+environment = ["The staging API is inside the trust boundary."]
 ```
 
 ### MCP Servers
@@ -593,6 +601,8 @@ There are two kinds of agents:
 - **default**: Standard interactive agent
 - **plan**: Planning-focused agent
 - **accept-edits**: Auto-approves file edits but asks for other tools
+- **careful-yolo (Careful YOLO)**: Auto-runs routine actions while a separate classifier
+  sends uncertain or risky actions to the normal approval prompt
 - **auto-approve**: Auto-approves all tool calls
 - **lean**: Specialized Lean 4 proof assistant. Not available by default — must be
   installed with `/leanstall` (removed with `/unleanstall`). Use `--agent lean
@@ -605,10 +615,16 @@ There are two kinds of agents:
 
 Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 
+Careful YOLO uses `mistral-medium-latest` by default. Its `[auto_mode]`
+`hard_deny`, `soft_deny`, `allow`, and `environment` lists append to the built-in
+rules; they cannot remove defaults. It is a mitigation rather than a safety
+guarantee, and unavailable or malformed classifier responses prompt normally.
+
 ## Built-in Slash Commands
 
 - `/help` - Show help message
 - `/config` - Edit config settings
+- `/careful-yolo` (`/auto`) - Configure suggested and custom Careful YOLO ASK/ALLOW rules
 - `/model` - Select active model
 - `/thinking` - Select thinking level
 - `/theme` - Select Textual UI theme (persisted in config)

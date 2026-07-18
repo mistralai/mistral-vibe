@@ -37,6 +37,7 @@ from vibe.core.config._settings import (
     resolve_theme_name,
 )
 from vibe.core.config.models import (
+    AutoModeConfig,
     ConnectorConfig,
     ExperimentsConfig,
     MCPServer,
@@ -236,7 +237,8 @@ class VibeConfigSchema(ConfigSchema):
         default=BuiltinAgentName.DEFAULT,
         description=(
             "Agent profile to use when no --agent flag is passed. "
-            "Builtin: default, plan, accept-edits, auto-approve. "
+            "Builtin: default, plan, accept-edits, careful-yolo, auto-approve. "
+            "The legacy auto name selects careful-yolo. "
             "Applies in both interactive and programmatic (-p/--prompt) mode."
         ),
     )
@@ -346,6 +348,9 @@ class VibeConfigSchema(ConfigSchema):
     )
     experiments: Annotated[ExperimentsConfig, WithReplaceMerge()] = Field(
         default_factory=ExperimentsConfig
+    )
+    auto_mode: Annotated[AutoModeConfig, WithReplaceMerge()] = Field(
+        default_factory=AutoModeConfig
     )
 
     def get_active_model(self) -> ModelConfig:
