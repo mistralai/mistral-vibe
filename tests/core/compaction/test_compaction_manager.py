@@ -336,3 +336,67 @@ async def test_terminal_failure_reports_empty_when_primary_empty() -> None:
 
     assert summary == "(no summary available)"
     assert telemetry.failures == ["empty_summary"]
+
+
+def _mid_generation_conversation() -> MessageList:
+    """Conversation captured mid-turn: the tool results are in, but the
+    assistant has not replied to them yet (auto-compaction's trigger point).
+    """
+    return MessageList([
+        LLMMessage(role=Role.system, content="sys"),
+        LLMMessage(role=Role.user, content="run the tests"),
+        LLMMessage(
+            role=Role.assistant,
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="t1", index=0, function=FunctionCall(name="bash", arguments="{}")
+                )
+            ],
+        ),
+        LLMMessage(role=Role.tool, content="tests passed", tool_call_id="t1"),
+    ])
+
+
+@pytest.mark.asyncio
+async def test_primary_never_sends_user_after_tool() -> None:
+    # Regression: auto-compaction fires mid-turn, so the snapshot can end on a
+    # tool result. Appending the summary request verbatim produced
+    # `tool -> user`, which strict backends reject with
+    # "Unexpected role 'user' after role 'tool'".
+    messages = _mid_generation_conversation()
+    stats = AgentStats()
+    manager, complete, _ = _build_manager(
+        [mock_llm_chunk(content="<summary>done</summary>")],
+        messages=messages,
+        stats=stats,
+    )
+
+    await manager.compact()
+
+    sent = complete.calls[0]["messages"]
+    roles = [m.role for m in sent]
+    for previous, current in zip(roles, roles[1:], strict=False):
+        assert not (previous == Role.tool and current == Role.user), (
+            f"invalid role sequence sent to backend: {[r.value for r in roles]}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_tool_round_closer_does_not_leak_into_fallback_transcript() -> None:
+    # The closer exists only to keep the primary call's role sequence valid; it
+    # is not part of the conversation, so the fallback transcript must not
+    # attribute it to the assistant.
+    messages = _mid_generation_conversation()
+    stats = AgentStats()
+    manager, complete, _ = _build_manager(
+        [_tool_call_chunk(), mock_llm_chunk(content="<summary>recovered</summary>")],
+        messages=messages,
+        stats=stats,
+    )
+
+    summary = await manager.compact()
+
+    assert summary == "recovered"
+    fallback_prompt = complete.calls[1]["messages"][-1].content or ""
+    assert "Tool results received." not in fallback_prompt
