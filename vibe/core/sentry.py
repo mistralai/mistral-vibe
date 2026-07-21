@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from enum import StrEnum, auto
+import errno
 import platform
 from typing import TYPE_CHECKING, Any, cast
 
 from vibe import __version__
-from vibe.core.config import AnyVibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.pii import scrub_paths
 from vibe.core.telemetry.types import LaunchContext
 
@@ -39,11 +40,34 @@ class SentryTarget(StrEnum):
                 return "vibe-acp"
 
 
-# Benign exceptions to drop before reporting (e.g. clean Ctrl-C quit).
-_FILTERED_EXCEPTIONS: tuple[type[BaseException], ...] = (KeyboardInterrupt,)
+# Benign exceptions to drop before reporting: clean Ctrl-C quit, and a broken
+# stdout/stderr pipe (headless output consumer closed the pipe).
+_FILTERED_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    KeyboardInterrupt,
+    BrokenPipeError,
+)
+
+# Benign exception class names to drop without importing their modules.
+_FILTERED_EXCEPTION_NAMES: frozenset[str] = frozenset({
+    "RealtimeTranscriptionException"
+})
 
 # Benign log-message prefixes to drop (e.g. asyncio GC'ing a pending task on teardown).
 _FILTERED_LOG_PREFIXES: tuple[str, ...] = ("Task was destroyed but it is pending!",)
+
+
+def _is_benign_exception(exc: BaseException) -> bool:
+    if isinstance(exc, _FILTERED_EXCEPTIONS):
+        return True
+    if type(exc).__name__ in _FILTERED_EXCEPTION_NAMES:
+        return True
+    # Clean exits (sys.exit(0) / sys.exit(None)) propagating through asyncio tasks.
+    if isinstance(exc, SystemExit) and exc.code in {0, None}:
+        return True
+    # EIO on stdio when the terminal/pty is already gone.
+    if isinstance(exc, OSError) and exc.errno == errno.EIO and exc.filename is None:
+        return True
+    return False
 
 
 def _scrub_pii(event: Event) -> None:
@@ -65,7 +89,7 @@ def _scrub_pii(event: Event) -> None:
 
 def _before_send(event: Event, hint: Hint) -> Event | None:
     exc_info = hint.get("exc_info")
-    if exc_info is not None and isinstance(exc_info[1], _FILTERED_EXCEPTIONS):
+    if exc_info is not None and _is_benign_exception(exc_info[1]):
         return None
 
     log_record = hint.get("log_record")
@@ -79,7 +103,7 @@ def _before_send(event: Event, hint: Hint) -> Event | None:
 
 
 def init_sentry(
-    config: AnyVibeConfig,
+    config: VibeConfigSchema,
     *,
     headless: bool,
     launch_context: LaunchContext,

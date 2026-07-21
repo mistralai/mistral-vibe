@@ -22,7 +22,7 @@ from vibe.core.utils import get_server_url_from_api_base
 if TYPE_CHECKING:
     from opentelemetry import trace
 
-    from vibe.core.config import AnyVibeConfig, ProviderConfig
+    from vibe.core.config import ProviderConfig, VibeConfigSchema
 
 from vibe.core.logger import logger
 
@@ -68,7 +68,7 @@ def build_otel_span_exporter_config(
     )
 
 
-def setup_tracing(config: AnyVibeConfig) -> None:
+def setup_tracing(config: VibeConfigSchema) -> None:
     if not config.enable_telemetry or not config.enable_otel:
         return
 

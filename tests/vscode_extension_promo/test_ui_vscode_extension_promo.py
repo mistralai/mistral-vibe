@@ -27,17 +27,17 @@ from vibe.cli.vscode_extension_promo import (
     VscodeExtensionPromo,
     VscodeExtensionPromoState,
 )
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 
 
 @pytest.fixture
-def vibe_config() -> VibeConfig:
+def vibe_config() -> VibeConfigSchema:
     return build_test_vibe_config(enable_update_checks=True)
 
 
 def _build_app(
     *,
-    config: VibeConfig,
+    config: VibeConfigSchema,
     promo: VscodeExtensionPromo | None,
     update_cache_repository: FakeUpdateCacheRepository,
     current_version: str = "1.0.0",
@@ -75,7 +75,7 @@ def _bypass_promo_gates() -> object:
 
 @pytest.mark.asyncio
 async def test_promo_appears_as_standalone_chat_message_when_no_whats_new(
-    vibe_config: VibeConfig, tmp_path: Path
+    vibe_config: VibeConfigSchema, tmp_path: Path
 ) -> None:
     repository = FakeVscodeExtensionPromoRepository()
     promo = VscodeExtensionPromo(repository=repository, initial_state=None)
@@ -101,7 +101,7 @@ async def test_promo_appears_as_standalone_chat_message_when_no_whats_new(
 
 @pytest.mark.asyncio
 async def test_promo_is_merged_into_whats_new_message_when_both_shown(
-    vibe_config: VibeConfig, tmp_path: Path
+    vibe_config: VibeConfigSchema, tmp_path: Path
 ) -> None:
     repository = FakeVscodeExtensionPromoRepository()
     promo = VscodeExtensionPromo(repository=repository, initial_state=None)
@@ -135,7 +135,7 @@ async def test_promo_is_merged_into_whats_new_message_when_both_shown(
 
 @pytest.mark.asyncio
 async def test_promo_does_not_appear_when_no_promo_dependency_provided(
-    vibe_config: VibeConfig, tmp_path: Path
+    vibe_config: VibeConfigSchema, tmp_path: Path
 ) -> None:
     cache = UpdateCache(
         latest_version="1.0.0",

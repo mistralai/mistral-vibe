@@ -51,7 +51,7 @@ from vibe.core.utils import is_windows
 from vibe.core.utils.io import decode_safe
 
 if TYPE_CHECKING:
-    from vibe.core.config import AnyVibeConfig
+    from vibe.core.config import VibeConfigSchema
 
 Status = Literal["running", "completed", "killed", "timed_out", "orphaned"]
 LogAction = Literal["read", "write", "append"]
@@ -969,10 +969,10 @@ def _manager() -> TerminalSessionManager:
     return _MANAGER
 
 
-def _experimental_bash_enabled(config: AnyVibeConfig | None) -> bool:
+def _experimental_bash_enabled(config: VibeConfigSchema | None) -> bool:
     return bool(
         config
-        and config.experimental_bash_tool
+        and getattr(config, "experimental_bash_tool", False)
         and managed_bash_backend.managed_bash_supported()
     )
 
@@ -1363,7 +1363,7 @@ class ExperimentalBash(
         return "bash"
 
     @classmethod
-    def is_available(cls, config: AnyVibeConfig | None = None) -> bool:
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
         return _experimental_bash_enabled(config)
 
     @classmethod
@@ -1569,7 +1569,7 @@ class BashOutput(
     description: ClassVar[str] = "Poll output from a running or completed bash session."
 
     @classmethod
-    def is_available(cls, config: AnyVibeConfig | None = None) -> bool:
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
         return _experimental_bash_enabled(config)
 
     @classmethod
@@ -1640,7 +1640,7 @@ class BashStdin(
     description: ClassVar[str] = "Send input to an interactive bash session."
 
     @classmethod
-    def is_available(cls, config: AnyVibeConfig | None = None) -> bool:
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
         return _experimental_bash_enabled(config)
 
     @classmethod
@@ -1707,7 +1707,7 @@ class BashSessions(
     description: ClassVar[str] = "List, inspect, kill, or reset managed bash sessions."
 
     @classmethod
-    def is_available(cls, config: AnyVibeConfig | None = None) -> bool:
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
         return _experimental_bash_enabled(config)
 
     @classmethod
@@ -1809,7 +1809,7 @@ class BashLogFile(
     description: ClassVar[str] = "Read or annotate managed bash output files."
 
     @classmethod
-    def is_available(cls, config: AnyVibeConfig | None = None) -> bool:
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
         return _experimental_bash_enabled(config)
 
     @classmethod

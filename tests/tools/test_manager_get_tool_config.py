@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from tests.conftest import build_test_vibe_config
+from vibe.core.config import VibeConfigSchema
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
+from vibe.core.tools.builtins.experimental_bash import _experimental_bash_enabled
 from vibe.core.tools.manager import NoSuchToolError, ToolManager
 
 
@@ -82,6 +86,27 @@ def test_experimental_bash_falls_back_when_backend_is_unsupported(monkeypatch):
         experimental_bash_tool=True,
     )
     manager = ToolManager(lambda: vibe_config)
+    tools = manager.available_tools
+
+    assert "bash" in tools
+    assert "bash_output" not in tools
+    assert "bash_stdin" not in tools
+    assert "bash_sessions" not in tools
+    assert "bash_log_file" not in tools
+    assert tools["bash"].__name__ == "Bash"
+
+
+def test_experimental_bash_enabled_returns_false_when_config_lacks_attribute():
+    stale_config = cast(VibeConfigSchema, SimpleNamespace())
+    assert _experimental_bash_enabled(stale_config) is False
+
+
+def test_experimental_bash_falls_back_when_config_lacks_attribute(build_config):
+    config = build_config(system_prompt_id="tests", include_project_context=False)
+    del config.__dict__["experimental_bash_tool"]
+    assert not hasattr(config, "experimental_bash_tool")
+
+    manager = ToolManager(lambda: config)
     tools = manager.available_tools
 
     assert "bash" in tools

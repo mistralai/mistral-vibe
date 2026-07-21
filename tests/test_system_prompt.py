@@ -5,9 +5,9 @@ import sys
 
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import ConfigBuilder, OrchestratorLoader
 from vibe.core.agents import AgentManager
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.config import VibeConfigSchema
 from vibe.core.scratchpad import init_scratchpad
 from vibe.core.skills.manager import SkillManager
 from vibe.core.system_prompt import get_universal_system_prompt
@@ -22,6 +22,8 @@ def _hide_standard_git_installs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_get_universal_system_prompt_uses_cmd_rules_without_bash(
     monkeypatch: pytest.MonkeyPatch,
+    build_config: ConfigBuilder,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     _hide_standard_git_installs(monkeypatch)
@@ -31,14 +33,14 @@ def test_get_universal_system_prompt_uses_cmd_rules_without_bash(
         "vibe.core.utils.platform.shutil.which", lambda name, path=None: None
     )
 
-    config = build_test_vibe_config(
+    config = build_config(
         include_prompt_detail=True,
         include_model_info=False,
         include_commit_signature=False,
     )
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
-    agent_manager = AgentManager(LegacyConfigOrchestrator(config))
+    agent_manager = AgentManager(load_orchestrator(config))
 
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager
@@ -61,6 +63,8 @@ def test_get_universal_system_prompt_uses_cmd_rules_without_bash(
 
 def test_get_universal_system_prompt_uses_cmd_rules_when_comspec_is_powershell(
     monkeypatch: pytest.MonkeyPatch,
+    build_config: ConfigBuilder,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     _hide_standard_git_installs(monkeypatch)
@@ -73,16 +77,14 @@ def test_get_universal_system_prompt_uses_cmd_rules_when_comspec_is_powershell(
         "vibe.core.utils.platform.shutil.which", lambda name, path=None: None
     )
 
-    config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
+    config = build_config(
         include_prompt_detail=True,
         include_model_info=False,
         include_commit_signature=False,
     )
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
-    agent_manager = AgentManager(LegacyConfigOrchestrator(config))
+    agent_manager = AgentManager(load_orchestrator(config))
 
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager
@@ -100,6 +102,8 @@ def test_get_universal_system_prompt_uses_cmd_rules_when_comspec_is_powershell(
 
 def test_get_universal_system_prompt_uses_bash_rules_when_bash_available(
     monkeypatch: pytest.MonkeyPatch,
+    build_config: ConfigBuilder,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("COMSPEC", "C:\\Windows\\System32\\cmd.exe")
@@ -111,16 +115,14 @@ def test_get_universal_system_prompt_uses_bash_rules_when_bash_available(
         ),
     )
 
-    config = build_test_vibe_config(
-        system_prompt_id="tests",
-        include_project_context=False,
+    config = build_config(
         include_prompt_detail=True,
         include_model_info=False,
         include_commit_signature=False,
     )
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
-    agent_manager = AgentManager(LegacyConfigOrchestrator(config))
+    agent_manager = AgentManager(load_orchestrator(config))
 
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager
@@ -138,16 +140,18 @@ def test_get_universal_system_prompt_uses_bash_rules_when_bash_available(
     assert "Discard output with `2>nul`" not in prompt
 
 
-def test_scratchpad_section_included_when_passed() -> None:
+def test_scratchpad_section_included_when_passed(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
     sp = init_scratchpad("test-session")
-    config = build_test_vibe_config(
+    config = build_config(
         include_prompt_detail=True,
         include_model_info=False,
         include_commit_signature=False,
     )
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
-    agent_manager = AgentManager(LegacyConfigOrchestrator(config))
+    agent_manager = AgentManager(load_orchestrator(config))
 
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, scratchpad_dir=sp
@@ -158,15 +162,17 @@ def test_scratchpad_section_included_when_passed() -> None:
     assert str(sp) in prompt
 
 
-def test_scratchpad_section_absent_when_not_passed() -> None:
-    config = build_test_vibe_config(
+def test_scratchpad_section_absent_when_not_passed(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    config = build_config(
         include_prompt_detail=True,
         include_model_info=False,
         include_commit_signature=False,
     )
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
-    agent_manager = AgentManager(LegacyConfigOrchestrator(config))
+    agent_manager = AgentManager(load_orchestrator(config))
 
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager
@@ -175,13 +181,13 @@ def test_scratchpad_section_absent_when_not_passed() -> None:
     assert "Scratchpad Directory" not in prompt
 
 
-def test_headless_section_included_when_enabled() -> None:
-    config = build_test_vibe_config(
-        include_model_info=False, include_commit_signature=False
-    )
+def test_headless_section_included_when_enabled(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    config = build_config(include_model_info=False, include_commit_signature=False)
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
-    agent_manager = AgentManager(LegacyConfigOrchestrator(config))
+    agent_manager = AgentManager(load_orchestrator(config))
 
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, headless=True
@@ -191,13 +197,13 @@ def test_headless_section_included_when_enabled() -> None:
     assert "no human is available to respond" in prompt
 
 
-def test_headless_section_absent_by_default() -> None:
-    config = build_test_vibe_config(
-        include_model_info=False, include_commit_signature=False
-    )
+def test_headless_section_absent_by_default(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    config = build_config(include_model_info=False, include_commit_signature=False)
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
-    agent_manager = AgentManager(LegacyConfigOrchestrator(config))
+    agent_manager = AgentManager(load_orchestrator(config))
 
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager
@@ -206,13 +212,15 @@ def test_headless_section_absent_by_default() -> None:
     assert "Headless Mode" not in prompt
 
 
-def test_current_date_placeholder_substituted_in_prompt() -> None:
-    config = build_test_vibe_config(
+def test_current_date_placeholder_substituted_in_prompt(
+    build_config: ConfigBuilder, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> None:
+    config = build_config(
         system_prompt_id="cli", include_model_info=False, include_commit_signature=False
     )
     tool_manager = ToolManager(lambda: config)
     skill_manager = SkillManager(lambda: config)
-    agent_manager = AgentManager(LegacyConfigOrchestrator(config))
+    agent_manager = AgentManager(load_orchestrator(config))
 
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager

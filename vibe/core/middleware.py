@@ -9,7 +9,7 @@ from vibe.core.agents import AgentProfile
 from vibe.core.utils import VIBE_WARNING_TAG
 
 if TYPE_CHECKING:
-    from vibe.core.config import AnyVibeConfig
+    from vibe.core.config import VibeConfigSchema
     from vibe.core.types import AgentStats, MessageList
 
 
@@ -29,7 +29,7 @@ class ResetReason(StrEnum):
 class ConversationContext:
     messages: MessageList
     stats: AgentStats
-    config: AnyVibeConfig
+    config: VibeConfigSchema
 
 
 @dataclass

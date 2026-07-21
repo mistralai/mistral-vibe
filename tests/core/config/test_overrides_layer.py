@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from vibe.core.config.layers.overrides import OverridesLayer
-from vibe.core.config.patch import AddOperationPatch, ConfigPatch
+from vibe.core.config.patch import AddOperationPatch, ConfigPatch, ReplaceOperationPatch
 from vibe.core.config.types import ConflictStrategy
 
 
@@ -67,6 +67,47 @@ async def test_output_isolated_from_internal_data() -> None:
     result.model_extra["key"] = "mutated"
     result2 = await layer.load(force=True)
     assert result2.model_extra == {"key": "value"}
+
+
+@pytest.mark.asyncio
+async def test_apply_persists_patch_and_refreshes_cache() -> None:
+    layer = OverridesLayer(data={"active_model": "old"})
+
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    await layer.apply(
+        ConfigPatch(
+            ReplaceOperationPatch(path="/active_model", value="new"),
+            AddOperationPatch(path="/api_timeout", value=30.0),
+            fingerprint=fingerprint,
+        )
+    )
+
+    result = await layer.load(force=True)
+    assert result.model_extra == {"active_model": "new", "api_timeout": 30.0}
+    assert layer.fingerprint != fingerprint
+
+
+@pytest.mark.asyncio
+async def test_apply_fingerprint_matches_rebuilt_snapshot() -> None:
+    layer = OverridesLayer(data={"active_model": "old"})
+
+    await layer.load()
+    fingerprint = layer.fingerprint
+    assert isinstance(fingerprint, str)
+
+    await layer.apply(
+        ConfigPatch(
+            ReplaceOperationPatch(path="/active_model", value="new"),
+            fingerprint=fingerprint,
+        )
+    )
+    fingerprint_after_apply = layer.fingerprint
+
+    await layer.load(force=True)
+    assert layer.fingerprint == fingerprint_after_apply
 
 
 @pytest.mark.asyncio

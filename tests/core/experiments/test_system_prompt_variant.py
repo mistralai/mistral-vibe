@@ -5,9 +5,9 @@ from string import Template
 
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import OrchestratorLoader, build_test_vibe_config
 from vibe.core.agents import AgentManager
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.config import VibeConfigSchema
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
@@ -37,16 +37,20 @@ class _StubClient(RemoteEvalClient):
         pass
 
 
-def _build_managers(config):
+def _build_managers(
+    config: VibeConfigSchema, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+):
     return (
         ToolManager(lambda: config),
         SkillManager(lambda: config),
-        AgentManager(LegacyConfigOrchestrator(config)),
+        AgentManager(load_orchestrator(config)),
     )
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_uses_assigned_variant() -> None:
+async def test_system_prompt_uses_assigned_variant(
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> None:
     config = build_test_vibe_config(
         system_prompt_id="cli", include_model_info=False, include_commit_signature=False
     )
@@ -65,7 +69,9 @@ async def test_system_prompt_uses_assigned_variant() -> None:
         )
     )
 
-    tool_manager, skill_manager, agent_manager = _build_managers(config)
+    tool_manager, skill_manager, agent_manager = _build_managers(
+        config, load_orchestrator
+    )
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, experiment_manager=manager
     )
@@ -73,7 +79,9 @@ async def test_system_prompt_uses_assigned_variant() -> None:
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_falls_back_to_default_when_variant_unknown() -> None:
+async def test_system_prompt_falls_back_to_default_when_variant_unknown(
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> None:
     config = build_test_vibe_config(
         system_prompt_id="cli", include_model_info=False, include_commit_signature=False
     )
@@ -92,7 +100,9 @@ async def test_system_prompt_falls_back_to_default_when_variant_unknown() -> Non
         )
     )
 
-    tool_manager, skill_manager, agent_manager = _build_managers(config)
+    tool_manager, skill_manager, agent_manager = _build_managers(
+        config, load_orchestrator
+    )
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, experiment_manager=manager
     )
@@ -100,18 +110,24 @@ async def test_system_prompt_falls_back_to_default_when_variant_unknown() -> Non
     assert "You are Mistral Vibe" in prompt or "You are Vibe" in prompt
 
 
-def test_system_prompt_uses_default_when_no_manager() -> None:
+def test_system_prompt_uses_default_when_no_manager(
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> None:
     config = build_test_vibe_config(
         system_prompt_id="cli", include_model_info=False, include_commit_signature=False
     )
-    tool_manager, skill_manager, agent_manager = _build_managers(config)
+    tool_manager, skill_manager, agent_manager = _build_managers(
+        config, load_orchestrator
+    )
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager
     )
     assert "You are Mistral Vibe" in prompt or "You are Vibe" in prompt
 
 
-def test_system_prompt_honors_user_config_when_manager_uninitialized() -> None:
+def test_system_prompt_honors_user_config_when_manager_uninitialized(
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> None:
     config = build_test_vibe_config(
         system_prompt_id="lean",
         include_model_info=False,
@@ -119,7 +135,9 @@ def test_system_prompt_honors_user_config_when_manager_uninitialized() -> None:
     )
     manager = ExperimentManager(client=_StubClient(None))
 
-    tool_manager, skill_manager, agent_manager = _build_managers(config)
+    tool_manager, skill_manager, agent_manager = _build_managers(
+        config, load_orchestrator
+    )
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, experiment_manager=manager
     )
@@ -127,7 +145,9 @@ def test_system_prompt_honors_user_config_when_manager_uninitialized() -> None:
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_honors_user_config_when_no_remote_assignment() -> None:
+async def test_system_prompt_honors_user_config_when_no_remote_assignment(
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> None:
     config = build_test_vibe_config(
         system_prompt_id="lean",
         include_model_info=False,
@@ -143,7 +163,9 @@ async def test_system_prompt_honors_user_config_when_no_remote_assignment() -> N
         )
     )
 
-    tool_manager, skill_manager, agent_manager = _build_managers(config)
+    tool_manager, skill_manager, agent_manager = _build_managers(
+        config, load_orchestrator
+    )
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, experiment_manager=manager
     )
@@ -151,7 +173,9 @@ async def test_system_prompt_honors_user_config_when_no_remote_assignment() -> N
 
 
 @pytest.mark.asyncio
-async def test_user_config_overrides_assigned_experiment_variant() -> None:
+async def test_user_config_overrides_assigned_experiment_variant(
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> None:
     config = build_test_vibe_config(
         system_prompt_id="lean",
         include_model_info=False,
@@ -172,7 +196,9 @@ async def test_user_config_overrides_assigned_experiment_variant() -> None:
         )
     )
 
-    tool_manager, skill_manager, agent_manager = _build_managers(config)
+    tool_manager, skill_manager, agent_manager = _build_managers(
+        config, load_orchestrator
+    )
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, experiment_manager=manager
     )

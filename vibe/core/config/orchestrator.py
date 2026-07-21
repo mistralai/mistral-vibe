@@ -20,7 +20,11 @@ from vibe.core.config.patch import (
     ensure_parent_paths,
 )
 from vibe.core.config.schema import ConfigSchema
-from vibe.core.config.types import ConfigChangeCallback, ConflictStrategy
+from vibe.core.config.types import (
+    ConfigChangeCallback,
+    ConfigChangeEvent,
+    ConflictStrategy,
+)
 
 
 class ConfigPatchValidationError(Exception):
@@ -132,6 +136,8 @@ class ConfigOrchestrator[S: ConfigSchema]:
         if not operations:
             return []
 
+        before = self._config.model_dump(mode="json")
+
         # Simulate and validate final config
         try:
             self.config.model_validate(
@@ -169,8 +175,17 @@ class ConfigOrchestrator[S: ConfigSchema]:
             )
         results = await asyncio.gather(*tasks, return_exceptions=True)
         failures = [r for r in results if isinstance(r, BaseException)]
+        has_success = any(not isinstance(r, BaseException) for r in results)
 
         await self.reload()
+        after = self._config.model_dump(mode="json")
+        changed_keys = _changed_keys_between(before, after)
+        if has_success and changed_keys:
+            self._bus.publish(
+                ConfigChangeEvent(
+                    changed_keys=changed_keys, before=before, after=after, reason=reason
+                )
+            )
 
         return failures
 
@@ -214,3 +229,33 @@ class ConfigOrchestrator[S: ConfigSchema]:
                 every change (wildcard).
         """
         return self._bus.subscribe(callback, keys=keys)
+
+
+_MISSING = object()
+
+
+def _changed_keys_between(
+    before: dict[str, Any], after: dict[str, Any]
+) -> frozenset[str]:
+    changed: set[str] = set()
+    _collect_changed_keys(before, after, (), changed)
+    return frozenset(changed)
+
+
+def _collect_changed_keys(
+    before: Any, after: Any, path: tuple[str, ...], changed: set[str]
+) -> None:
+    if before == after:
+        return
+
+    if isinstance(before, dict) and isinstance(after, dict):
+        for key in sorted(before.keys() | after.keys()):
+            _collect_changed_keys(
+                before.get(key, _MISSING),
+                after.get(key, _MISSING),
+                (*path, key),
+                changed,
+            )
+        return
+
+    changed.add("/".join(path))

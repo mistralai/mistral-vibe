@@ -14,11 +14,18 @@ from tests.backend.data.reasoning import (
     reasoning_tool_use,
 )
 from tests.conftest import build_test_vibe_config
-from vibe.core.config import ModelConfig, ProviderConfig, ThinkingLevel, VibeConfig
+from vibe.core.config import (
+    ModelConfig,
+    ProviderConfig,
+    ThinkingLevel,
+    VibeConfigSchema,
+)
 from vibe.core.types import Backend
 
 
-def e2e_config(*, thinking: ThinkingLevel = "off", **overrides: Any) -> VibeConfig:
+def e2e_config(
+    *, thinking: ThinkingLevel = "off", **overrides: Any
+) -> VibeConfigSchema:
     provider = ProviderConfig(
         name="reasoning",
         api_base=c.REASONING_BASE_URL,

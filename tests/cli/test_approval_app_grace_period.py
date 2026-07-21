@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from unittest.mock import patch
 
 from pydantic import BaseModel
@@ -7,7 +8,7 @@ import pytest
 from textual import events
 
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 
 _TEST_GRACE_PERIOD_S = 0.5
 
@@ -17,12 +18,14 @@ class FakeArgs(BaseModel):
 
 
 @pytest.fixture
-def approval_app(monkeypatch: pytest.MonkeyPatch):
+def approval_app(
+    monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., VibeConfigSchema]
+):
     monkeypatch.setattr(
         "vibe.cli.textual_ui.widgets.approval_app._INPUT_GRACE_PERIOD_S",
         _TEST_GRACE_PERIOD_S,
     )
-    config = VibeConfig()
+    config = make_config()
     app = ApprovalApp(tool_name="bash", tool_args=FakeArgs(), config=config)
     app._mount_time = 100.0
     return app

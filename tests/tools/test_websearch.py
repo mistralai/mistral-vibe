@@ -16,7 +16,7 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.mock.utils import collect_result
-from vibe.core.config import ProviderConfig, VibeConfig
+from vibe.core.config import ProviderConfig, VibeConfigSchema
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.web_search import (
     WebSearch,
@@ -33,11 +33,11 @@ if TYPE_CHECKING:
 
 
 class InMemoryAgentManager:
-    def __init__(self, config: VibeConfig) -> None:
+    def __init__(self, config: VibeConfigSchema) -> None:
         self.config = config
 
 
-def _ctx_with_config(config: VibeConfig) -> InvokeContext:
+def _ctx_with_config(config: VibeConfigSchema) -> InvokeContext:
     return InvokeContext(
         tool_call_id="t1",
         agent_manager=cast("AgentManager", InMemoryAgentManager(config)),

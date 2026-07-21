@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+from typing import cast
 
 from acp import CreateTerminalResponse
 from acp.schema import EnvVariable, TerminalOutputResponse, WaitForTerminalExitResponse
@@ -554,3 +556,10 @@ class TestAcpBashToolResultSessionUpdate:
 
         assert update is not None
         assert update.status == "failed"
+
+
+def test_is_available_returns_true_when_config_lacks_attribute():
+    from vibe.core.config import VibeConfigSchema
+
+    stale_config = cast(VibeConfigSchema, SimpleNamespace())
+    assert Bash.is_available(stale_config) is True

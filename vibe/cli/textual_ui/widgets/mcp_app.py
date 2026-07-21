@@ -17,7 +17,7 @@ from textual.worker import Worker
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import AnyVibeConfig, ConnectorConfig
+from vibe.core.config import ConnectorConfig, VibeConfigSchema
 from vibe.core.tools.connectors import ConnectorAuthAction, ConnectorRegistry
 from vibe.core.tools.mcp_settings import updated_tool_list
 from vibe.core.tools.remote import MCPTool
@@ -139,7 +139,7 @@ class MCPApp(Container):
         initial_server: str = "",
         connector_registry: ConnectorRegistry | None = None,
         mcp_registry: MCPRegistry | None = None,
-        get_vibe_config: Callable[[], AnyVibeConfig] | None = None,
+        get_vibe_config: Callable[[], VibeConfigSchema] | None = None,
         refresh_callback: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         super().__init__(id="mcp-app")

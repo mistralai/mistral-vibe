@@ -5,7 +5,11 @@ from typing import TYPE_CHECKING, final
 
 from pydantic import BaseModel, Field
 
-from vibe.core.config import DEFAULT_MISTRAL_API_ENV_KEY, AnyVibeConfig, resolve_api_key
+from vibe.core.config import (
+    DEFAULT_MISTRAL_API_ENV_KEY,
+    VibeConfigSchema,
+    resolve_api_key,
+)
 from vibe.core.config.models import Backend
 from vibe.core.telemetry.build_metadata import build_request_metadata
 from vibe.core.tools.base import (
@@ -60,7 +64,7 @@ class WebSearch(
     ToolUIData[WebSearchArgs, WebSearchResult],
 ):
     @classmethod
-    def is_available(cls, config: AnyVibeConfig | None = None) -> bool:
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
         if config is None:
             return bool(resolve_api_key(DEFAULT_MISTRAL_API_ENV_KEY))
 
@@ -129,13 +133,13 @@ class WebSearch(
             return None
         return get_server_url_from_api_base(provider.api_base)
 
-    def _resolve_config(self, ctx: InvokeContext | None) -> AnyVibeConfig | None:
+    def _resolve_config(self, ctx: InvokeContext | None) -> VibeConfigSchema | None:
         if not ctx or not ctx.agent_manager:
             return None
         return ctx.agent_manager.config
 
     @classmethod
-    def _api_key_env_var(cls, config: AnyVibeConfig | None) -> str:
+    def _api_key_env_var(cls, config: VibeConfigSchema | None) -> str:
         if config is None:
             return DEFAULT_MISTRAL_API_ENV_KEY
         provider = config.get_mistral_provider()

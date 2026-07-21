@@ -12,19 +12,19 @@ from vibe.core.agents.models import (
     BuiltinAgentName,
 )
 from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.logger import logger
 from vibe.core.paths import dedup_paths
 from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
-    from vibe.core.config import AnyVibeConfig
-    from vibe.core.config.orchestrator_port import ConfigOrchestratorPort
+    from vibe.core.config import VibeConfigSchema
 
 
 class AgentManager:
     def __init__(
         self,
-        orchestrator: ConfigOrchestratorPort[AnyVibeConfig],
+        orchestrator: ConfigOrchestrator[VibeConfigSchema],
         initial_agent: str = BuiltinAgentName.DEFAULT,
         allow_subagent: bool = False,
     ) -> None:
@@ -56,10 +56,10 @@ class AgentManager:
                 f" with --agent."
             )
         self.active_profile = profile
-        self._cached_config: AnyVibeConfig | None = None
+        self._cached_config: VibeConfigSchema | None = None
 
     @property
-    def _config(self) -> AnyVibeConfig:
+    def _config(self) -> VibeConfigSchema:
         return self._orchestrator.config
 
     @property
@@ -78,16 +78,18 @@ class AgentManager:
         return not name_matches(name, self._config.disabled_agents)
 
     @property
-    def config(self) -> AnyVibeConfig:
+    def config(self) -> VibeConfigSchema:
         if self._cached_config is None:
-            self._cached_config = self.active_profile.apply_to_config(self._config)
+            self._cached_config = self.active_profile.apply_to_config(
+                self._orchestrator.config
+            )
         return self._cached_config
 
     def switch_profile(self, name: str) -> None:
         self.active_profile = self.get_agent(name)
         self._cached_config = None
 
-    def preview_config(self, name: str) -> AnyVibeConfig:
+    def preview_config(self, name: str) -> VibeConfigSchema:
         return self.get_agent(name).apply_to_config(self._config)
 
     def register_agent(self, profile: AgentProfile) -> None:
@@ -98,7 +100,7 @@ class AgentManager:
         self._cached_config = None
 
     @staticmethod
-    def _compute_search_paths(config: AnyVibeConfig) -> list[Path]:
+    def _compute_search_paths(config: VibeConfigSchema) -> list[Path]:
         mgr = get_harness_files_manager()
         return dedup_paths([
             *(p for p in config.agent_paths if p.is_dir()),

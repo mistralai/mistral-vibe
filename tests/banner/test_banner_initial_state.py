@@ -3,16 +3,17 @@ from __future__ import annotations
 from unittest.mock import Mock
 
 from vibe.cli.textual_ui.widgets.banner.banner import Banner, BannerState, _pluralize
-from vibe.core.config import ModelConfig, ThinkingLevel, VibeConfig
+from vibe.core.config import ModelConfig, ThinkingLevel, VibeConfigSchemaType
 from vibe.core.skills.manager import SkillManager
 
 
 def _make_mock_config(
+    config_cls: VibeConfigSchemaType,
     active_model: str = "test-model",
     thinking: ThinkingLevel = "off",
     mcp_servers: list | None = None,
 ) -> Mock:
-    config = Mock(spec=VibeConfig)
+    config = Mock(spec=config_cls)
     config.active_model = active_model
     config.models = [active_model]
     config.mcp_servers = mcp_servers or []
@@ -36,12 +37,14 @@ class TestBannerInitialState:
         assert _pluralize(1, "MCP server") == "1 MCP server"
         assert _pluralize(2, "connector") == "2 connectors"
 
-    def test_banner_initial_state_includes_connectors(self) -> None:
+    def test_banner_initial_state_includes_connectors(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
         banner = Banner(
-            config=_make_mock_config(),
+            config=_make_mock_config(config_cls),
             skill_manager=skill_manager,
             connectors_connected=5,
             connectors_total=5,
@@ -57,30 +60,41 @@ class TestBannerInitialState:
         assert banner._initial_state.connectors_total == 5
         assert banner._initial_state.skills_count == 0
 
-    def test_banner_initial_state_with_no_connectors(self) -> None:
-        skill_manager = Mock(spec=SkillManager)
-        skill_manager.custom_skills_count = 0
-
-        banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
-
-        assert banner._initial_state.connectors_connected == 0
-        assert banner._initial_state.connectors_total == 0
-
-    def test_banner_shows_thinking_level(self) -> None:
+    def test_banner_initial_state_with_no_connectors(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
         banner = Banner(
-            config=_make_mock_config(thinking="max"), skill_manager=skill_manager
+            config=_make_mock_config(config_cls), skill_manager=skill_manager
+        )
+
+        assert banner._initial_state.connectors_connected == 0
+        assert banner._initial_state.connectors_total == 0
+
+    def test_banner_shows_thinking_level(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
+        skill_manager = Mock(spec=SkillManager)
+        skill_manager.custom_skills_count = 0
+
+        banner = Banner(
+            config=_make_mock_config(config_cls, thinking="max"),
+            skill_manager=skill_manager,
         )
 
         assert banner._initial_state.active_model == "test-model[max]"
 
-    def test_format_meta_counts_includes_connectors(self) -> None:
+    def test_format_meta_counts_includes_connectors(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
-        banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
+        banner = Banner(
+            config=_make_mock_config(config_cls), skill_manager=skill_manager
+        )
 
         # Now test _format_meta_counts by setting state with x/y format
         banner.state = BannerState(
@@ -116,7 +130,9 @@ class TestBannerInitialState:
 class TestBannerMCPServersCount:
     """Test that banner correctly counts MCP servers regardless of tool discovery."""
 
-    def test_banner_counts_enabled_mcp_servers(self) -> None:
+    def test_banner_counts_enabled_mcp_servers(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         """Test that banner counts all enabled MCP servers, not just those with tools."""
         from vibe.core.config import MCPServer
 
@@ -141,7 +157,7 @@ class TestBannerMCPServersCount:
 
         banner = Banner(
             config=_make_mock_config(
-                mcp_servers=[mock_server1, mock_server2, mock_server3]
+                config_cls, mcp_servers=[mock_server1, mock_server2, mock_server3]
             ),
             skill_manager=skill_manager,
         )
@@ -150,19 +166,24 @@ class TestBannerMCPServersCount:
         assert banner._initial_state.mcp_servers_enabled == 2
         assert banner._initial_state.mcp_servers_total == 3
 
-    def test_banner_shows_zero_mcp_servers(self) -> None:
+    def test_banner_shows_zero_mcp_servers(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         """Test that banner correctly shows 0 when no MCP servers are configured."""
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
         banner = Banner(
-            config=_make_mock_config(mcp_servers=[]), skill_manager=skill_manager
+            config=_make_mock_config(config_cls, mcp_servers=[]),
+            skill_manager=skill_manager,
         )
 
         assert banner._initial_state.mcp_servers_enabled == 0
         assert banner._initial_state.mcp_servers_total == 0
 
-    def test_banner_shows_disabled_count_in_xy_format(self) -> None:
+    def test_banner_shows_disabled_count_in_xy_format(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         """Test that banner shows x/y format with disabled servers."""
         from vibe.core.config import MCPServer
 
@@ -171,11 +192,12 @@ class TestBannerMCPServersCount:
 
         banner = Banner(
             config=_make_mock_config(
+                config_cls,
                 mcp_servers=[
                     Mock(spec=MCPServer, name="s1", disabled=False),
                     Mock(spec=MCPServer, name="s2", disabled=False),
                     Mock(spec=MCPServer, name="s3", disabled=True),
-                ]
+                ],
             ),
             skill_manager=skill_manager,
         )
@@ -187,7 +209,9 @@ class TestBannerMCPServersCount:
         result = banner._format_meta_counts()
         assert "2/3 MCP servers" in result
 
-    def test_banner_shows_simple_count_when_all_enabled(self) -> None:
+    def test_banner_shows_simple_count_when_all_enabled(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         """Test that banner shows simple count when all MCP servers are enabled."""
         from vibe.core.config import MCPServer
 
@@ -196,10 +220,11 @@ class TestBannerMCPServersCount:
 
         banner = Banner(
             config=_make_mock_config(
+                config_cls,
                 mcp_servers=[
                     Mock(spec=MCPServer, name="s1", disabled=False),
                     Mock(spec=MCPServer, name="s2", disabled=False),
-                ]
+                ],
             ),
             skill_manager=skill_manager,
         )
@@ -214,12 +239,14 @@ class TestBannerMCPServersCount:
 
 
 class TestBannerConnectorsCount:
-    def test_connectors_count_passed_through(self) -> None:
+    def test_connectors_count_passed_through(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
         banner = Banner(
-            config=_make_mock_config(),
+            config=_make_mock_config(config_cls),
             skill_manager=skill_manager,
             connectors_connected=3,
             connectors_total=5,
@@ -230,64 +257,88 @@ class TestBannerConnectorsCount:
 
 
 class TestBannerHooksCount:
-    def test_hooks_count_passed_through(self) -> None:
+    def test_hooks_count_passed_through(self, config_cls: VibeConfigSchemaType) -> None:
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
         banner = Banner(
-            config=_make_mock_config(), skill_manager=skill_manager, hooks_count=4
+            config=_make_mock_config(config_cls),
+            skill_manager=skill_manager,
+            hooks_count=4,
         )
 
         assert banner._initial_state.hooks_count == 4
 
-    def test_hooks_count_defaults_to_zero(self) -> None:
+    def test_hooks_count_defaults_to_zero(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
-        banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
+        banner = Banner(
+            config=_make_mock_config(config_cls), skill_manager=skill_manager
+        )
 
         assert banner._initial_state.hooks_count == 0
 
-    def test_format_meta_counts_shows_hooks_when_present(self) -> None:
+    def test_format_meta_counts_shows_hooks_when_present(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
-        banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
+        banner = Banner(
+            config=_make_mock_config(config_cls), skill_manager=skill_manager
+        )
         banner.state = BannerState(models_count=1, skills_count=0, hooks_count=3)
 
         result = banner._format_meta_counts()
         assert "3 hooks" in result
 
-    def test_format_meta_counts_singular_hook(self) -> None:
+    def test_format_meta_counts_singular_hook(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
-        banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
+        banner = Banner(
+            config=_make_mock_config(config_cls), skill_manager=skill_manager
+        )
         banner.state = BannerState(models_count=1, skills_count=0, hooks_count=1)
 
         result = banner._format_meta_counts()
         assert "1 hook" in result
         assert "1 hooks" not in result
 
-    def test_format_meta_counts_hides_hooks_when_zero(self) -> None:
+    def test_format_meta_counts_hides_hooks_when_zero(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
-        banner = Banner(config=_make_mock_config(), skill_manager=skill_manager)
+        banner = Banner(
+            config=_make_mock_config(config_cls), skill_manager=skill_manager
+        )
         banner.state = BannerState(models_count=1, skills_count=0, hooks_count=0)
 
         result = banner._format_meta_counts()
         assert "hook" not in result
 
-    def test_set_state_updates_hooks_count(self) -> None:
+    def test_set_state_updates_hooks_count(
+        self, config_cls: VibeConfigSchemaType
+    ) -> None:
         skill_manager = Mock(spec=SkillManager)
         skill_manager.custom_skills_count = 0
 
         banner = Banner(
-            config=_make_mock_config(), skill_manager=skill_manager, hooks_count=0
+            config=_make_mock_config(config_cls),
+            skill_manager=skill_manager,
+            hooks_count=0,
         )
         banner.set_state(
-            config=_make_mock_config(), skill_manager=skill_manager, hooks_count=7
+            config=_make_mock_config(config_cls),
+            skill_manager=skill_manager,
+            hooks_count=7,
         )
 
         assert banner.state.hooks_count == 7

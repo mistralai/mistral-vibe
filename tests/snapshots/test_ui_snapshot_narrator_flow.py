@@ -5,9 +5,8 @@ from typing import Any, cast
 
 from textual.pilot import Pilot
 
-from tests.conftest import build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
-from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
+from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
 from tests.stubs.fake_audio_player import FakeAudioPlayer
 from tests.stubs.fake_backend import FakeBackend
@@ -27,11 +26,7 @@ _TEST_MODEL = ModelConfig(name="test-model", provider="test", alias="test-model"
 
 
 def _narrator_config():
-    return build_test_vibe_config(
-        narrator_enabled=True,
-        disable_welcome_banner_animation=True,
-        displayed_workdir="/test/workdir",
-    )
+    return default_config(narrator_enabled=True)
 
 
 class GatedBackend(FakeBackend):

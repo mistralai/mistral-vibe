@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+import copy
 from pathlib import Path
 import tomllib
 from typing import Annotated, Any
@@ -314,6 +315,149 @@ async def test_set_field_uses_default_layer_resolver() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_patch_publishes_change_event_after_reload() -> None:
+    layer = RawWritableLayer(name="user-toml", data={"value": "hello"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    received: list[ConfigChangeEvent] = []
+    orch.subscribe(received.append)
+
+    result = await orch.apply_patch(
+        [ReplaceOperationPatch(path="/value", value="updated")], reason="test update"
+    )
+
+    assert result == []
+    assert len(received) == 1
+    event = received[0]
+    assert event.changed_keys == frozenset({"value"})
+    assert event.before == {"value": "hello"}
+    assert event.after == {"value": "updated"}
+    assert event.reason == "test update"
+    assert orch.config.value == "updated"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_does_not_publish_when_merged_value_is_unchanged() -> None:
+    layer = RawWritableLayer(name="user-toml", data={"value": "hello"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    received: list[ConfigChangeEvent] = []
+    orch.subscribe(received.append)
+
+    result = await orch.apply_patch(
+        [ReplaceOperationPatch(path="/value", value="hello")], reason="no-op update"
+    )
+
+    assert result == []
+    assert received == []
+    assert orch.config.value == "hello"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_does_not_publish_when_higher_priority_layer_masks_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
+    user_layer = RawWritableLayer(name="user-toml", data={})
+    orch = await ConfigOrchestrator.create(
+        schema=RoutingSchema,
+        layers=[user_layer, EnvironmentLayer(schema=RoutingSchema)],
+        default_layer_resolver=lambda: user_layer,
+    )
+    received: list[ConfigChangeEvent] = []
+    orch.subscribe(received.append)
+
+    result = await orch.apply_patch(
+        [AddOperationPatch(path="/active_model", value="persisted-in-user-file")],
+        reason="masked update",
+    )
+
+    assert result == []
+    assert received == []
+    assert user_layer._data == {"active_model": "persisted-in-user-file"}
+    assert orch.config.active_model == "env-model"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_publishes_only_successful_layer_operations() -> None:
+    first_layer = FieldWritableLayer(
+        name="first-layer", field_name="first", data={"first": "one"}
+    )
+    second_layer = FailingSaveLayer(name="second-layer", data={"second": "two"})
+    orch = await ConfigOrchestrator.create(
+        schema=MultiValueSchema,
+        layers=[first_layer, second_layer],
+        default_layer_resolver=lambda: first_layer,
+    )
+    wildcard_events: list[ConfigChangeEvent] = []
+    second_events: list[ConfigChangeEvent] = []
+    orch.subscribe(wildcard_events.append)
+    orch.subscribe(second_events.append, keys={"second"})
+
+    result = await orch.apply_patch(
+        [
+            ReplaceOperationPatch(
+                path="/first", value="updated-one", target_layer_name="first-layer"
+            ),
+            ReplaceOperationPatch(
+                path="/second", value="updated-two", target_layer_name="second-layer"
+            ),
+        ],
+        reason="test partial apply",
+    )
+
+    assert_single_failure(result, LayerImplementationError)
+    assert len(wildcard_events) == 1
+    assert second_events == []
+    event = wildcard_events[0]
+    assert event.changed_keys == frozenset({"first"})
+    assert event.before == {"first": "one", "second": "two"}
+    assert event.after == {"first": "updated-one", "second": "two"}
+    assert event.reason == "test partial apply"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_publishes_changed_list_field_as_subscribable_key() -> None:
+    layer = RawWritableLayer(
+        name="user-toml", data={"tools": {"enabled_tools": ["read"]}}
+    )
+    orch = await ConfigOrchestrator.create(
+        schema=ToolSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    received: list[ConfigChangeEvent] = []
+    orch.subscribe(received.append, keys={"tools/enabled_tools"})
+
+    result = await orch.apply_patch(
+        [AddOperationPatch(path="/tools/enabled_tools/-", value="grep")],
+        reason="append tool",
+    )
+
+    assert result == []
+    assert len(received) == 1
+    assert received[0].changed_keys == frozenset({"tools/enabled_tools"})
+    assert orch.config.tools.enabled_tools == ["read", "grep"]
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_does_not_publish_when_all_layers_fail() -> None:
+    layer = ApplyErrorLayer(name="test", data={"value": "hello"}, error=RuntimeError())
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    received: list[ConfigChangeEvent] = []
+    orch.subscribe(received.append)
+
+    result = await orch.apply_patch(
+        [ReplaceOperationPatch(path="/value", value="updated")], reason="failed update"
+    )
+
+    assert_single_failure(result, RuntimeError)
+    assert received == []
+
+
+@pytest.mark.asyncio
 async def test_copy_preserves_default_layer_resolution() -> None:
     layer = RawWritableLayer(name="user-toml", data={})
     orch = await ConfigOrchestrator.create(
@@ -520,6 +664,32 @@ async def test_apply_patch_creates_user_file_when_it_is_missing(
 
 
 @pytest.mark.asyncio
+async def test_set_field_appends_to_concat_list_without_rebuilding_from_merged(
+    tmp_working_directory: Path,
+) -> None:
+    toml_path = tmp_working_directory / "config.toml"
+    toml_path.write_text(
+        'active_model = "old"\n\n[tools]\nenabled_tools = ["read"]\n', encoding="utf-8"
+    )
+
+    user_layer = UserConfigLayer(path=toml_path)
+    orch = await ConfigOrchestrator.create(
+        schema=ToolSchema,
+        layers=[user_layer],
+        default_layer_resolver=lambda: user_layer,
+    )
+
+    assert await orch.set_field("/tools/enabled_tools/-", "grep") == []
+
+    with toml_path.open("rb") as file:
+        assert tomllib.load(file) == {
+            "active_model": "old",
+            "tools": {"enabled_tools": ["read", "grep"]},
+        }
+    assert orch.config.tools.enabled_tools == ["read", "grep"]
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_end_to_end_falls_back_to_user_layer_when_no_target_is_provided(
     monkeypatch: pytest.MonkeyPatch, tmp_working_directory: Path
 ) -> None:
@@ -712,3 +882,27 @@ async def test_subscribe_registers_on_the_bus() -> None:
     bus.publish(event)
 
     assert received == [event]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_deepcopies_and_stays_functional() -> None:
+    """IMPORTANT: If this test fails, care about the deep copy made in fork() in agent loop.
+    Either fix the deepcopy or remove it and implement a proper clone() method on the orchestrator.
+    """
+    layer = FakeLayer(name="test", data={"value": "hello"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+
+    forked = copy.deepcopy(orch)
+
+    assert forked.config.value == "hello"
+    forked_layer = forked.get_layer("test")
+    assert forked_layer is not layer
+    assert isinstance(forked_layer, FakeLayer)
+
+    forked_layer._data = {"value": "forked"}
+    await forked.reload()
+
+    assert forked.config.value == "forked"
+    assert orch.config.value == "hello"

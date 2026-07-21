@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import ConfigBuilder, OrchestratorLoader
 from tests.mock.mock_backend_factory import mock_backend_factory
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core import run_programmatic
 from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.config import VibeConfigSchema
 from vibe.core.types import Backend, LLMMessage, OutputFormat, Role
 
 
@@ -26,7 +27,10 @@ class SpyStreamingFormatter:
 
 
 def test_run_programmatic_preload_streaming_is_batched(
-    monkeypatch: pytest.MonkeyPatch, telemetry_events: list[dict]
+    monkeypatch: pytest.MonkeyPatch,
+    telemetry_events: list[dict],
+    build_config: ConfigBuilder,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     spy = SpyStreamingFormatter()
     monkeypatch.setattr(
@@ -41,9 +45,7 @@ def test_run_programmatic_preload_streaming_is_batched(
             )
         ),
     ):
-        cfg = build_test_vibe_config(
-            include_model_info=False, include_commit_signature=False
-        )
+        cfg = build_config(include_model_info=False, include_commit_signature=False)
 
         previous = [
             LLMMessage(
@@ -59,7 +61,7 @@ def test_run_programmatic_preload_streaming_is_batched(
         ]
 
         run_programmatic(
-            config=cfg,
+            load_orchestrator(cfg),
             prompt="Can you summarize what decorators are?",
             output_format=OutputFormat.STREAMING,
             previous_messages=previous,
@@ -101,6 +103,8 @@ def test_run_programmatic_preload_streaming_is_batched(
 
 def test_run_programmatic_ignores_system_messages_in_previous(
     monkeypatch: pytest.MonkeyPatch,
+    build_config: ConfigBuilder,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     spy = SpyStreamingFormatter()
     monkeypatch.setattr(
@@ -111,12 +115,10 @@ def test_run_programmatic_ignores_system_messages_in_previous(
         Backend.MISTRAL,
         lambda provider, **kwargs: FakeBackend([mock_llm_chunk(content="Understood.")]),
     ):
-        cfg = build_test_vibe_config(
-            include_model_info=False, include_commit_signature=False
-        )
+        cfg = build_config(include_model_info=False, include_commit_signature=False)
 
         run_programmatic(
-            config=cfg,
+            load_orchestrator(cfg),
             prompt="Let's move on to practical examples.",
             output_format=OutputFormat.STREAMING,
             previous_messages=[
@@ -145,6 +147,8 @@ def test_run_programmatic_ignores_system_messages_in_previous(
 
 def test_run_programmatic_teleport_ignored_when_nuage_disabled(
     monkeypatch: pytest.MonkeyPatch,
+    build_config: ConfigBuilder,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     spy = SpyStreamingFormatter()
     monkeypatch.setattr(
@@ -157,14 +161,14 @@ def test_run_programmatic_teleport_ignored_when_nuage_disabled(
             mock_llm_chunk(content="Normal response.")
         ]),
     ):
-        cfg = build_test_vibe_config(
+        cfg = build_config(
             include_model_info=False,
             include_commit_signature=False,
             vibe_code_enabled=False,
         )
 
         run_programmatic(
-            config=cfg,
+            load_orchestrator(cfg),
             prompt="Hello",
             output_format=OutputFormat.STREAMING,
             teleport=True,

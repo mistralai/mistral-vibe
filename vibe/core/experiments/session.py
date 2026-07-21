@@ -10,14 +10,14 @@ from vibe.core.telemetry.send import get_mistral_provider_and_api_key
 from vibe.core.utils import get_platform_id
 
 if TYPE_CHECKING:
-    from vibe.core.config import AnyVibeConfig
+    from vibe.core.config import VibeConfigSchema
     from vibe.core.session.session_logger import SessionLogger
     from vibe.core.telemetry.types import LaunchContext
 
 
 async def initialize_experiments(
     *,
-    config: AnyVibeConfig,
+    config: VibeConfigSchema,
     manager: ExperimentManager,
     session_logger: SessionLogger,
     launch_context: LaunchContext | None,
@@ -42,7 +42,10 @@ async def initialize_experiments(
 
 
 async def hydrate_experiments_from_session(
-    *, config: AnyVibeConfig, manager: ExperimentManager, session_logger: SessionLogger
+    *,
+    config: VibeConfigSchema,
+    manager: ExperimentManager,
+    session_logger: SessionLogger,
 ) -> bool:
     if not config.enable_telemetry or not config.experiments.enable:
         return False
@@ -54,16 +57,16 @@ async def hydrate_experiments_from_session(
 
 
 def _build_attributes(
-    config: AnyVibeConfig, api_key: str, launch_context: LaunchContext | None
+    config: VibeConfigSchema, api_key: str, launch_context: LaunchContext | None
 ) -> ExperimentAttributes:
-    from vibe.core.config import VibeConfig as _VibeConfig
+    from vibe.core.config import VibeConfigSchema
 
     entrypoint = launch_context.agent_entrypoint if launch_context else "unknown"
     client_name = launch_context.client_name if launch_context else None
     client_version = launch_context.client_version if launch_context else None
     agent_version = launch_context.agent_version if launch_context else __version__
     terminal_emulator = launch_context.terminal_emulator if launch_context else None
-    default_prompt_id = _VibeConfig.model_fields["system_prompt_id"].default
+    default_prompt_id = VibeConfigSchema.model_fields["system_prompt_id"].default
     return ExperimentAttributes(
         userId=hash_api_key(api_key),
         entrypoint=entrypoint,

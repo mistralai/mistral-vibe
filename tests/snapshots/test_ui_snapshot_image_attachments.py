@@ -11,14 +11,14 @@ from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_
 from tests.snapshots.snap_compare import SnapCompare
 from tests.stubs.fake_backend import FakeBackend
 from vibe.cli.textual_ui.widgets.chat_input import paste_path
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.types import Backend
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 SNAP_ROOT = "/snap"
 
 
-def _vision_config() -> VibeConfig:
+def _vision_config() -> VibeConfigSchema:
     base = default_config()
     models = [
         ModelConfig(

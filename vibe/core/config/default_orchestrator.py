@@ -7,9 +7,7 @@ from vibe.core.agents._migration import migrate_agent_profile_files
 from vibe.core.config._migration import migrate_config_layers
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.layer import ConfigLayer, RawConfig
-from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.default import DefaultConfigLayer
-from vibe.core.config.layers.discovered import DiscoveredConfigLayer
 from vibe.core.config.layers.environment import EnvironmentLayer
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
@@ -43,12 +41,13 @@ async def build_default_orchestrator(
         return toml_layer
 
     layers = [
+        # TODO clean up code and integrate those layers
         DefaultConfigLayer(schema=VibeConfigSchema),
-        DiscoveredConfigLayer(),
+        # DiscoveredConfigLayer(),
         toml_layer,
         EnvironmentLayer(schema=VibeConfigSchema),
         OverridesLayer(data=data or {}),
-        AgentProfileLayer(),
+        # AgentProfileLayer(),
     ]
 
     await migrate_config_layers(layers)

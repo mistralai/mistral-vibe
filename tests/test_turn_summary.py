@@ -15,7 +15,7 @@ from vibe.cli.turn_summary import (
     TurnSummaryTracker,
     create_narrator_backend,
 )
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.llm.backend.mistral import MistralBackend
 from vibe.core.types import AssistantEvent, Backend, ToolStreamEvent, UserMessageEvent
 
@@ -27,16 +27,20 @@ def _noop_callback(result: TurnSummaryResult) -> None:
 
 
 class TestCreateNarratorBackend:
-    def test_uses_mistral_provider(self, monkeypatch):
+    def test_uses_mistral_provider(
+        self, monkeypatch, make_config: Callable[..., VibeConfigSchema]
+    ):
         monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
-        config = VibeConfig()
+        config = make_config()
         result = create_narrator_backend(config)
         assert result is not None
         backend, model = result
         assert isinstance(backend, MistralBackend)
         assert model is NARRATOR_MODEL
 
-    def test_uses_custom_provider_base_url(self, monkeypatch):
+    def test_uses_custom_provider_base_url(
+        self, monkeypatch, make_config: Callable[..., VibeConfigSchema]
+    ):
         monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
         custom_provider = ProviderConfig(
             name="mistral",
@@ -44,21 +48,25 @@ class TestCreateNarratorBackend:
             api_key_env_var="MISTRAL_API_KEY",
             backend=Backend.MISTRAL,
         )
-        config = VibeConfig(providers=[custom_provider])
+        config = make_config(providers=[custom_provider])
         result = create_narrator_backend(config)
         assert result is not None
         backend, model = result
         assert isinstance(backend, MistralBackend)
         assert backend._provider.api_base == custom_provider.api_base
 
-    def test_returns_none_when_api_key_missing(self, monkeypatch):
+    def test_returns_none_when_api_key_missing(
+        self, monkeypatch, make_config: Callable[..., VibeConfigSchema]
+    ):
         monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
-        config = VibeConfig()
+        config = make_config()
         monkeypatch.delenv("MISTRAL_API_KEY")
         assert create_narrator_backend(config) is None
 
-    def test_returns_none_when_provider_missing(self):
-        config = VibeConfig(providers=[])
+    def test_returns_none_when_provider_missing(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ):
+        config = make_config(providers=[])
         assert create_narrator_backend(config) is None
 
 

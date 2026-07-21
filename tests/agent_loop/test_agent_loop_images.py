@@ -4,17 +4,21 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_config,
+    set_agent_config,
+)
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agent_loop import ImagesNotSupportedError
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.types import Backend, FileImageSource, ImageAttachment, LLMMessage, Role
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
 
-def _config_with_vision_flag(*, supports_images: bool) -> VibeConfig:
+def _config_with_vision_flag(*, supports_images: bool) -> VibeConfigSchema:
     models = [
         ModelConfig(
             name="mistral-vibe-cli-latest",
@@ -36,7 +40,7 @@ def _config_with_vision_flag(*, supports_images: bool) -> VibeConfig:
     )
 
 
-def _config_with_both_models() -> VibeConfig:
+def _config_with_both_models() -> VibeConfigSchema:
     models = [
         ModelConfig(
             name="vision-model",
@@ -115,6 +119,10 @@ def _seed_history_image(agent, png_attachment: ImageAttachment) -> None:
     agent.messages.append(LLMMessage(role=Role.assistant, content="seen"))
 
 
+def _set_active_model(agent, config: VibeConfigSchema, alias: str) -> None:
+    set_agent_config(agent, config.model_copy(update={"active_model": alias}))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enable_streaming", [False, True])
 async def test_history_images_stripped_from_backend_payload_on_non_vision_model(
@@ -126,7 +134,7 @@ async def test_history_images_stripped_from_backend_payload_on_non_vision_model(
         config=config, backend=backend, enable_streaming=enable_streaming
     )
     _seed_history_image(agent, png_attachment)
-    agent.config.active_model = "text-alias"
+    _set_active_model(agent, config, "text-alias")
 
     [_ async for _ in agent.act("hi")]
 
@@ -151,9 +159,9 @@ async def test_switch_back_to_vision_model_restores_images_in_payload(
     )
     _seed_history_image(agent, png_attachment)
 
-    agent.config.active_model = "text-alias"
+    _set_active_model(agent, config, "text-alias")
     [_ async for _ in agent.act("hi")]
-    agent.config.active_model = "vision-alias"
+    _set_active_model(agent, config, "vision-alias")
     [_ async for _ in agent.act("hi again")]
 
     sent_messages = backend.requests_messages[-1]
@@ -172,7 +180,7 @@ def test_count_history_images_unsupported_by_active_model(
     # active model still supports images
     assert agent.count_history_images_unsupported_by_active_model() == 0
 
-    agent.config.active_model = "text-alias"
+    _set_active_model(agent, config, "text-alias")
     assert agent.count_history_images_unsupported_by_active_model() == 1
 
     agent.messages.append(
@@ -188,7 +196,7 @@ async def test_new_images_with_non_vision_model_still_raises(
     config = _config_with_both_models()
     backend = FakeBackend([mock_llm_chunk(content="ok")])
     agent = build_test_agent_loop(config=config, backend=backend)
-    agent.config.active_model = "text-alias"
+    _set_active_model(agent, config, "text-alias")
 
     with pytest.raises(ImagesNotSupportedError):
         async for _ in agent.act("look", images=[png_attachment]):

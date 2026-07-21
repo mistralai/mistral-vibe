@@ -18,7 +18,7 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
-from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp, VibeConfig
+from vibe.core.config import MCPHttp, MCPStdio, MCPStreamableHttp, VibeConfigSchema
 from vibe.core.tools.base import BaseToolConfig, BaseToolState, InvokeContext
 from vibe.core.tools.mcp import (
     AuthStatus,
@@ -938,7 +938,7 @@ class TestMCPDisableFiltering:
     @staticmethod
     def _make_config(
         mcp_servers: list[MCPHttp | MCPStdio | MCPStreamableHttp] | None = None,
-    ) -> VibeConfig:
+    ) -> VibeConfigSchema:
         return build_test_vibe_config(mcp_servers=mcp_servers or [])
 
     def test_disabled_server_excludes_all_tools(self):

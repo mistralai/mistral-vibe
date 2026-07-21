@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_config,
+    stub_config_reload,
+)
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
-from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp, VibeConfig
+from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp
 from vibe.core.tools.mcp import AuthStatus
 
 
@@ -21,7 +25,7 @@ async def test_refresh_config_reconciles_mcp_registry_status(
     )
     refreshed_config = build_test_vibe_config(mcp_servers=[kept])
 
-    monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
+    stub_config_reload(monkeypatch, refreshed_config)
     await agent_loop.refresh_config()
 
     assert registry.status() == {"kept": AuthStatus.STATIC}
@@ -40,7 +44,7 @@ async def test_refresh_config_preserves_forced_bypass_tool_permissions(
     assert agent_loop.bypass_tool_permissions is True
 
     refreshed_config = build_test_vibe_config(bypass_tool_permissions=False)
-    monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
+    stub_config_reload(monkeypatch, refreshed_config)
     await agent_loop.refresh_config()
 
     assert agent_loop.bypass_tool_permissions is True
@@ -58,7 +62,7 @@ async def test_refresh_config_drops_disk_bypass_when_not_forced(
     assert agent_loop.bypass_tool_permissions is True
 
     refreshed_config = build_test_vibe_config(bypass_tool_permissions=False)
-    monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
+    stub_config_reload(monkeypatch, refreshed_config)
     await agent_loop.refresh_config()
 
     assert agent_loop.bypass_tool_permissions is False
@@ -80,7 +84,7 @@ async def test_refresh_config_does_not_mark_undiscovered_oauth_server_ok(
     )
     refreshed_config = build_test_vibe_config(mcp_servers=[oauth])
 
-    monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
+    stub_config_reload(monkeypatch, refreshed_config)
     await agent_loop.refresh_config()
 
     assert registry.status() == {"linear": AuthStatus.NEEDS_AUTH}

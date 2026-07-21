@@ -4,8 +4,7 @@ from pathlib import Path
 
 from textual.pilot import Pilot
 
-from tests.conftest import build_test_vibe_config
-from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
+from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
 from vibe.core.hooks.models import HookConfigIssue
 from vibe.core.skills.models import SkillConfigIssue
@@ -35,13 +34,7 @@ class SnapshotTestAppWithHookConfigIssue(BaseSnapshotTestApp):
 
 class SnapshotTestAppWithActiveModelWarning(BaseSnapshotTestApp):
     def __init__(self) -> None:
-        super().__init__(
-            config=build_test_vibe_config(
-                disable_welcome_banner_animation=True,
-                displayed_workdir="/test/workdir",
-                active_model="does-not-exist",
-            )
-        )
+        super().__init__(config=default_config(active_model="does-not-exist"))
 
 
 def test_snapshot_shows_config_issue_notification(snap_compare: SnapCompare) -> None:

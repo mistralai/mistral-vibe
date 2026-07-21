@@ -23,7 +23,7 @@ from vibe.core.tools.builtins.bash import Bash as CoreBashTool, BashArgs, BashRe
 from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 
 if TYPE_CHECKING:
-    from vibe.core.config import AnyVibeConfig
+    from vibe.core.config import VibeConfigSchema
 
 _TERMINAL_CLEANUP_TIMEOUT = 10
 
@@ -41,8 +41,8 @@ class Bash(CoreBashTool, BaseAcpTool[AcpBashState]):
         return AcpBashState
 
     @classmethod
-    def is_available(cls, config: AnyVibeConfig | None = None) -> bool:
-        return not bool(config and config.experimental_bash_tool)
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
+        return not bool(config and getattr(config, "experimental_bash_tool", False))
 
     async def run(
         self, args: BashArgs, ctx: InvokeContext | None = None

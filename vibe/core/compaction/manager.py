@@ -13,7 +13,7 @@ from vibe.core.prompts import UtilityPrompt
 from vibe.core.types import ContextTooLongError, LLMMessage, Role
 
 if TYPE_CHECKING:
-    from vibe.core.config import AnyVibeConfig, ModelConfig
+    from vibe.core.config import ModelConfig, VibeConfigSchema
     from vibe.core.telemetry.send import TelemetryClient
     from vibe.core.telemetry.types import TelemetryCallType
     from vibe.core.types import (
@@ -65,7 +65,7 @@ class CompactionManager:
         *,
         messages: MessageList,
         stats_getter: Callable[[], AgentStats],
-        config_getter: Callable[[], AnyVibeConfig],
+        config_getter: Callable[[], VibeConfigSchema],
         complete: CompletionFn,
         available_tools: Callable[[], list[AvailableTool]],
         tool_choice: Callable[[], StrToolChoice | AvailableTool],

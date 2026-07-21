@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
     from vibe.cli.turn_summary import TurnSummaryPort
     from vibe.core.audio_player.audio_player_port import AudioPlayerPort
-    from vibe.core.config import AnyVibeConfig
+    from vibe.core.config import VibeConfigSchema
     from vibe.core.telemetry.send import TelemetryClient
     from vibe.core.tts.tts_client_port import TTSClientPort
     from vibe.core.types import BaseEvent
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 class NarratorManager:
     def __init__(
         self,
-        config_getter: Callable[[], AnyVibeConfig],
+        config_getter: Callable[[], VibeConfigSchema],
         audio_player: AudioPlayerPort,
         telemetry_client: TelemetryClient | None = None,
     ) -> None:
@@ -131,7 +131,7 @@ class NarratorManager:
 
     @staticmethod
     def _make_turn_summary(
-        config: AnyVibeConfig, telemetry_client: TelemetryClient | None = None
+        config: VibeConfigSchema, telemetry_client: TelemetryClient | None = None
     ) -> NoopTurnSummary | TurnSummaryTracker:
         if not config.narrator_enabled:
             return NoopTurnSummary()
@@ -150,7 +150,7 @@ class NarratorManager:
         )
 
     @staticmethod
-    def _make_tts_client(config: AnyVibeConfig) -> TTSClientPort | None:
+    def _make_tts_client(config: VibeConfigSchema) -> TTSClientPort | None:
         if not config.narrator_enabled:
             return None
         try:

@@ -4,7 +4,7 @@ import pytest
 
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from vibe.core.agents.models import BUILTIN_AGENTS, CHAT, AgentProfile, BuiltinAgentName
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.middleware import (
     CHAT_AGENT_EXIT,
     CHAT_AGENT_REMINDER,
@@ -34,7 +34,7 @@ def _build_middleware(
 
 
 @pytest.fixture
-def ctx(vibe_config: VibeConfig) -> ConversationContext:
+def ctx(vibe_config: VibeConfigSchema) -> ConversationContext:
     return ConversationContext(
         messages=MessageList(), stats=AgentStats(), config=vibe_config
     )

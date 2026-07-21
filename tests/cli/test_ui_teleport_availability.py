@@ -7,14 +7,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
-from tests.conftest import build_test_vibe_app, build_test_vibe_config
+from tests.conftest import build_test_vibe_app, build_test_vibe_config, set_agent_config
 from tests.constants import OPENAI_BASE_URL
 from vibe import __version__
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.messages import ErrorMessage
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.types import Backend
 from vibe.core.utils import get_platform_id, get_platform_version
 
@@ -29,7 +29,7 @@ def _chat_plan_gateway(*, prompt_switching_to_pro_plan: bool) -> FakeWhoAmIGatew
     )
 
 
-def _vibe_code_enabled_config() -> VibeConfig:
+def _vibe_code_enabled_config() -> VibeConfigSchema:
     return build_test_vibe_config(vibe_code_enabled=True)
 
 
@@ -277,7 +277,7 @@ async def test_teleport_command_errors_after_switching_to_non_mistral_model(
     )
 
     async def fake_reload_with_initial_messages() -> None:
-        app.agent_loop.agent_manager.invalidate_config()
+        set_agent_config(app.agent_loop, non_mistral_config)
 
     async with app.run_test() as pilot:
         await _wait_until(
@@ -285,16 +285,10 @@ async def test_teleport_command_errors_after_switching_to_non_mistral_model(
             lambda: app.commands.get_command_name("/teleport") == "teleport",
         )
 
-        with (
-            patch(
-                "vibe.core.config.orchestrator_legacy.VibeConfig.load",
-                return_value=non_mistral_config,
-            ),
-            patch.object(
-                app.agent_loop,
-                "reload_with_initial_messages",
-                new=AsyncMock(side_effect=fake_reload_with_initial_messages),
-            ),
+        with patch.object(
+            app.agent_loop,
+            "reload_with_initial_messages",
+            new=AsyncMock(side_effect=fake_reload_with_initial_messages),
         ):
             await app._reload_config()
 

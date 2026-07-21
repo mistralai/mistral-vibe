@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
+import os
 from pathlib import Path
+import tomllib
 from typing import Annotated, Any
 
+from dotenv import dotenv_values
 from pydantic import (
     AfterValidator,
     BeforeValidator,
@@ -11,6 +14,7 @@ from pydantic import (
     PrivateAttr,
     model_validator,
 )
+from textual.theme import BUILTIN_THEMES
 
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config._defaults import (
@@ -19,23 +23,13 @@ from vibe.core.config._defaults import (
     DEFAULT_AUTO_COMPACT_THRESHOLD,
     DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_API_ENV_KEY,
+    DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
+    DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+    DEFAULT_MISTRAL_SERVER_URL,
     DEFAULT_THEME,
     DEFAULT_VIBE_BASE_URL,
 )
-from vibe.core.config._settings import (
-    DEFAULT_ACTIVE_MODEL_CONFIG,
-    DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG,
-    DEFAULT_ACTIVE_TTS_MODEL_CONFIG,
-    DEFAULT_MODELS,
-    DEFAULT_PROVIDERS,
-    DEFAULT_TRANSCRIBE_MODELS,
-    DEFAULT_TRANSCRIBE_PROVIDERS,
-    DEFAULT_TTS_MODELS,
-    DEFAULT_TTS_PROVIDERS,
-    _strip_bash_pattern_wildcard,
-    resolve_api_key,
-    resolve_theme_name,
-)
+from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.models import (
     ConnectorConfig,
     ExperimentsConfig,
@@ -51,7 +45,7 @@ from vibe.core.config.models import (
     TTSModelConfig,
     TTSProviderConfig,
     normalize_model_configs,
-    normalize_model_configs_with_defaults,
+    serialize_model_configs,
 )
 from vibe.core.config.schema import (
     ConfigSchema,
@@ -61,6 +55,7 @@ from vibe.core.config.schema import (
     WithUnionMerge,
 )
 from vibe.core.logger import logger
+from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.prompts import (
     SystemPrompt,
     UtilityPrompt,
@@ -68,6 +63,141 @@ from vibe.core.prompts import (
     load_system_prompt,
 )
 from vibe.core.types import Backend
+from vibe.core.utils.keyring import get_api_key_from_keyring
+
+
+def _strip_bash_pattern_wildcard(pattern: str) -> str:
+    if pattern.endswith(" *"):
+        return pattern[:-2]
+    return pattern
+
+
+def load_dotenv_values(
+    env_path: Path = GLOBAL_ENV_FILE.path,
+    environ: MutableMapping[str, str] = os.environ,
+) -> None:
+    # We allow FIFO path to support some environment management solutions (e.g. https://developer.1password.com/docs/environments/local-env-file/)
+    if not env_path.is_file() and not env_path.is_fifo():
+        return
+
+    env_vars = dotenv_values(env_path)
+    for key, value in env_vars.items():
+        if not value:
+            continue
+        if environ.get(key):
+            # An explicit non-empty process/shell value wins over the .env file.
+            continue
+        environ[key] = value
+
+
+def resolve_api_key(env_key: str) -> str | None:
+    """Resolve an API key value: process/.env environment first, then OS keyring."""
+    if not env_key:
+        return None
+    value = os.environ.get(env_key)
+    if value:
+        return value
+    return get_api_key_from_keyring(env_key)
+
+
+DEFAULT_PROVIDERS = [
+    ProviderConfig(
+        name="mistral",
+        api_base=f"{DEFAULT_MISTRAL_SERVER_URL}/v1",
+        api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
+        browser_auth_base_url=DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+        browser_auth_api_base_url=DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
+        backend=Backend.MISTRAL,
+    ),
+    ProviderConfig(
+        name="llamacpp",
+        api_base="http://127.0.0.1:8080/v1",
+        api_key_env_var="",  # NOTE: if you wish to use --api-key in llama-server, change this value
+    ),
+]
+
+DEFAULT_ACTIVE_MODEL_CONFIG = ModelConfig(
+    name="mistral-vibe-cli-latest",
+    provider="mistral",
+    alias="mistral-medium-3.5",
+    temperature=1.0,
+    input_price=1.5,
+    output_price=7.5,
+    thinking="high",
+    supports_images=True,
+)
+
+DEFAULT_MODELS = [
+    DEFAULT_ACTIVE_MODEL_CONFIG,
+    ModelConfig(
+        name="devstral-small-latest",
+        provider="mistral",
+        alias="devstral-small",
+        input_price=0.1,
+        output_price=0.3,
+    ),
+    ModelConfig(
+        name="devstral",
+        provider="llamacpp",
+        alias="local",
+        input_price=0.0,
+        output_price=0.0,
+    ),
+]
+
+DEFAULT_TRANSCRIBE_PROVIDERS = [
+    TranscribeProviderConfig(
+        name="mistral",
+        api_base="wss://api.mistral.ai",
+        api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
+    )
+]
+
+DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG = TranscribeModelConfig(
+    name="voxtral-mini-transcribe-realtime-2602",
+    provider="mistral",
+    alias="voxtral-realtime",
+)
+
+DEFAULT_TRANSCRIBE_MODELS = [DEFAULT_ACTIVE_TRANSCRIBE_MODEL_CONFIG]
+
+DEFAULT_TTS_PROVIDERS = [
+    TTSProviderConfig(
+        name="mistral",
+        api_base="https://api.mistral.ai",
+        api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
+    )
+]
+
+DEFAULT_ACTIVE_TTS_MODEL_CONFIG = TTSModelConfig(
+    name="voxtral-mini-tts-latest", provider="mistral", alias="voxtral-tts"
+)
+
+DEFAULT_TTS_MODELS = [DEFAULT_ACTIVE_TTS_MODEL_CONFIG]
+
+
+def get_persisted_config() -> dict[str, Any]:
+    file = get_harness_files_manager().config_file
+    if file is None:
+        return {}
+    try:
+        with file.open("rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return {}
+    except tomllib.TOMLDecodeError as e:
+        raise RuntimeError(f"Invalid TOML in {file}: {e}") from e
+    except OSError as e:
+        raise RuntimeError(f"Cannot read {file}: {e}") from e
+
+
+def resolve_theme_name(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return DEFAULT_THEME
+    if value not in BUILTIN_THEMES:
+        logger.warning("Unknown theme=%s; falling back to %s", value, DEFAULT_THEME)
+        return DEFAULT_THEME
+    return value
 
 
 def _unique_by(key: str) -> Callable[[list[Any]], list[Any]]:
@@ -103,13 +233,6 @@ def _normalize_tool_configs(v: Any) -> dict[str, dict[str, Any]]:
     return {name: cfg if isinstance(cfg, dict) else {} for name, cfg in v.items()}
 
 
-def _normalize_models(v: Any) -> Any:
-    """Bridge sparse default-model overrides until DefaultConfigLayer owns them."""
-    # TODO(config-orchestrator): remove this after all config loads go through
-    # DefaultConfigLayer, which can provide required model fields itself.
-    return normalize_model_configs_with_defaults(v, DEFAULT_MODELS)
-
-
 class VibeConfigSchema(ConfigSchema):
     _validation_warnings: list[str] = PrivateAttr(default_factory=list)
 
@@ -125,8 +248,10 @@ class VibeConfigSchema(ConfigSchema):
     models: Annotated[
         dict[str, ModelConfig],
         # Keyed by alias internally so per-model patches can deep-merge.
+        # Sparse default-model overrides are completed by DefaultConfigLayer at
+        # merge time; here we only normalize the list / alias map into the map shape.
         WithDeepMerge(),
-        BeforeValidator(_normalize_models),
+        BeforeValidator(normalize_model_configs),
         AfterValidator(_non_empty),
     ] = Field(default_factory=lambda: normalize_model_configs(DEFAULT_MODELS))
     compaction_model: Annotated[ModelConfig | None, WithReplaceMerge()] = None
@@ -287,7 +412,6 @@ class VibeConfigSchema(ConfigSchema):
         OtelRedactionMode.DEFAULT
     )
     console_base_url: Annotated[str, WithReplaceMerge()] = DEFAULT_CONSOLE_BASE_URL
-    experimental_teleport_context_summary: Annotated[bool, WithReplaceMerge()] = False
     experimental_bash_tool: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
         description=(
@@ -295,7 +419,6 @@ class VibeConfigSchema(ConfigSchema):
             "legacy one-off bash tool."
         ),
     )
-    enable_config_orchestrator: Annotated[bool, WithReplaceMerge()] = False
 
     # Top-level scalars
     theme: Annotated[str, WithReplaceMerge(), BeforeValidator(resolve_theme_name)] = (
@@ -540,3 +663,16 @@ class VibeConfigSchema(ConfigSchema):
     def _check_compaction_prompt(self) -> VibeConfigSchema:
         _ = self.compaction_prompt
         return self
+
+
+def create_default_config() -> dict[str, Any]:
+    from vibe.core.tools.manager import ToolManager
+
+    config_dict = VibeConfigSchema.model_construct().model_dump(
+        mode="json", exclude_none=True
+    )
+    if isinstance(config_dict.get("models"), dict):
+        config_dict["models"] = serialize_model_configs(config_dict["models"])
+    if tool_defaults := ToolManager.discover_tool_defaults():
+        config_dict["tools"] = tool_defaults
+    return config_dict

@@ -28,7 +28,6 @@ from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.acp.teleport import TELEPORT_PUSH_OPTION_ID
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.config import SessionLoggingConfig
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.teleport import TeleportService
 from vibe.core.teleport.types import (
@@ -114,8 +113,8 @@ def _make_patched_agent_loop(
         def __init__(self, *args, **kwargs) -> None:
             orchestrator = kwargs.get("config_orchestrator")
             if config_updates and orchestrator is not None:
-                kwargs["config_orchestrator"] = LegacyConfigOrchestrator(
-                    orchestrator.config.model_copy(update=config_updates)
+                orchestrator._config = orchestrator.config.model_copy(
+                    update=config_updates
                 )
             super().__init__(*args, **{**kwargs, "backend": backend})
 
@@ -298,7 +297,7 @@ class TestHandleTeleport:
         session_id = await _new_session_and_clear(acp_agent_loop)
 
         with patch(
-            "vibe.core.config._settings.VibeConfig.is_active_model_mistral",
+            "vibe.core.config.vibe_schema.VibeConfigSchema.is_active_model_mistral",
             return_value=False,
         ):
             response = await _prompt(acp_agent_loop, session_id, "/teleport")

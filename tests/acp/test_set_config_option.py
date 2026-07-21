@@ -1,24 +1,30 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+import tomllib
 from unittest.mock import patch
 
 import pytest
 
 from tests.acp.conftest import _create_acp_agent
-from tests.conftest import build_test_vibe_config
+from tests.conftest import ConfigBuilder, OrchestratorLoader
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import ModelConfig, VibeConfig
+from vibe.core.config import ModelConfig, VibeConfigSchema
 from vibe.core.middleware import TurnLimitMiddleware
 
 
 @pytest.fixture
-def acp_agent_loop(backend) -> VibeAcpAgentLoop:
-    config = build_test_vibe_config(
-        active_model="devstral-latest",
-        models=[
+def acp_agent_loop(
+    backend,
+    build_config: ConfigBuilder,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> VibeAcpAgentLoop:
+    toml_config = {
+        "active_model": "devstral-latest",
+        "models": [
             ModelConfig(
                 name="devstral-latest",
                 provider="mistral",
@@ -34,14 +40,15 @@ def acp_agent_loop(backend) -> VibeAcpAgentLoop:
                 output_price=0.3,
             ),
         ],
-    )
-
-    VibeConfig.dump_config(config.model_dump())
+    }
+    orchestrator = load_orchestrator(build_config(**toml_config))
+    config = orchestrator.config
+    for field, value in toml_config.items():
+        asyncio.run(orchestrator.set_field(f"/{field}", value))
 
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
             try:
                 active_model = config.get_active_model()
@@ -253,37 +260,37 @@ class TestACPSetConfigOptionModel:
 
     @pytest.mark.asyncio
     async def test_set_config_option_model_saves_to_config(
-        self, acp_agent_loop: VibeAcpAgentLoop
+        self, acp_agent_loop: VibeAcpAgentLoop, config_dir: Path
     ) -> None:
         session_response = await acp_agent_loop.new_session(
             cwd=str(Path.cwd()), mcp_servers=[]
         )
         session_id = session_response.session_id
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.save_updates") as mock_save:
-            response = await acp_agent_loop.set_config_option(
-                session_id=session_id, config_id="model", value="devstral-small"
-            )
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value="devstral-small"
+        )
 
-            assert response is not None
-            mock_save.assert_called_once_with({"active_model": "devstral-small"})
+        assert response is not None
+        with (config_dir / "config.toml").open("rb") as file:
+            assert tomllib.load(file)["active_model"] == "devstral-small"
 
     @pytest.mark.asyncio
     async def test_set_config_option_model_does_not_save_on_invalid(
-        self, acp_agent_loop: VibeAcpAgentLoop
+        self, acp_agent_loop: VibeAcpAgentLoop, config_dir: Path
     ) -> None:
         session_response = await acp_agent_loop.new_session(
             cwd=str(Path.cwd()), mcp_servers=[]
         )
         session_id = session_response.session_id
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.save_updates") as mock_save:
-            response = await acp_agent_loop.set_config_option(
-                session_id=session_id, config_id="model", value="non-existent-model"
-            )
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value="non-existent-model"
+        )
 
-            assert response is None
-            mock_save.assert_not_called()
+        assert response is None
+        with (config_dir / "config.toml").open("rb") as file:
+            assert tomllib.load(file)["active_model"] == "devstral-latest"
 
 
 class TestACPSetConfigOptionInvalidConfigId:
@@ -332,15 +339,26 @@ class TestACPSetConfigOptionThinking:
         )
         assert acp_session is not None
         assert acp_session.agent_loop.config.get_active_model().thinking == "off"
+        active_model = acp_session.agent_loop.config.get_active_model()
+        expected_model = active_model.model_copy(
+            update={"thinking": "high"}
+        ).model_dump(mode="json")
+        orchestrator = acp_session.agent_loop.config_orchestrator
 
-        response = await acp_agent_loop.set_config_option(
-            session_id=session_id, config_id="thinking", value="high"
-        )
+        with patch.object(
+            orchestrator, "set_field", wraps=orchestrator.set_field
+        ) as set_field:
+            response = await acp_agent_loop.set_config_option(
+                session_id=session_id, config_id="thinking", value="high"
+            )
 
         assert response is not None
         assert response.config_options is not None
         assert len(response.config_options) == 3
         assert acp_session.agent_loop.config.get_active_model().thinking == "high"
+        set_field.assert_awaited_once_with(
+            f"/models/{active_model.alias}", expected_model
+        )
 
         thinking_config = response.config_options[2]
         assert thinking_config.id == "thinking"

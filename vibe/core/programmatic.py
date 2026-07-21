@@ -6,8 +6,8 @@ from contextlib import aclosing
 from vibe import __version__
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import VibeConfig
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.config import VibeConfigSchema
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.hooks.models import HookConfigResult
 from vibe.core.logger import logger
 from vibe.core.output_formatters import create_formatter
@@ -26,7 +26,7 @@ _DEFAULT_CLIENT_METADATA = ClientMetadata(name="vibe_programmatic", version=__ve
 
 
 def run_programmatic(  # noqa: PLR0913, PLR0917
-    config: VibeConfig,
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
     prompt: str,
     max_turns: int | None = None,
     max_price: float | None = None,
@@ -44,7 +44,7 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
     formatter = create_formatter(output_format)
 
     agent_loop = AgentLoop(
-        LegacyConfigOrchestrator(config),
+        orchestrator,
         agent_name=agent_name,
         message_observer=formatter.on_message_added,
         max_turns=max_turns,
@@ -77,7 +77,7 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
                 await agent_loop.initialize_experiments()
                 agent_loop.emit_new_session_telemetry()
 
-            if teleport and config.vibe_code_enabled:
+            if teleport and orchestrator.config.vibe_code_enabled:
                 gen = agent_loop.teleport_to_vibe_code(
                     prompt or None, project_id=teleport_project_id
                 )

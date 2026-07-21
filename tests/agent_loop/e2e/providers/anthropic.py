@@ -13,11 +13,11 @@ from tests.backend.data.anthropic import (
     anthropic_tool_use,
 )
 from tests.conftest import build_test_vibe_config
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.types import Backend
 
 
-def e2e_config(**overrides: Any) -> VibeConfig:
+def e2e_config(**overrides: Any) -> VibeConfigSchema:
     provider = ProviderConfig(
         name="anthropic",
         api_base=c.ANTHROPIC_BASE_URL,

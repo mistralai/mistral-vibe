@@ -10,7 +10,7 @@ from uuid import uuid4
 import httpx
 import zstandard
 
-from vibe.core.config import AnyVibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.git import GitRepoInfo, GitRepository
@@ -46,7 +46,7 @@ class TeleportService:
         vibe_code_api_key: str,
         workdir: Path | None = None,
         *,
-        vibe_config: AnyVibeConfig | None = None,
+        vibe_config: VibeConfigSchema | None = None,
         client: VibeAsyncHTTPClient | None = None,
         project_store: VibeProjectsStore | None = None,
         timeout: float = 60.0,

@@ -5,12 +5,14 @@ import os
 from dotenv import set_key, unset_key
 from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 
-from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig, VibeConfig
+from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig
+from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import LaunchContext
 from vibe.core.types import Backend
+from vibe.core.utils.concurrency import run_sync
 from vibe.core.utils.keyring import delete_api_key_from_keyring, set_api_key_in_keyring
 
 
@@ -74,8 +76,9 @@ def persist_api_key(
             )
     if provider.backend == Backend.MISTRAL:
         try:
+            orchestrator = run_sync(build_default_orchestrator())
             telemetry = TelemetryClient(
-                config_getter=VibeConfig, launch_context=launch_context
+                config_getter=lambda: orchestrator.config, launch_context=launch_context
             )
             telemetry.send_onboarding_api_key_added()
         except Exception:

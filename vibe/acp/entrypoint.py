@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from dataclasses import dataclass
 import os
 import sys
 
-import tomli_w
-
 from vibe import __version__
-from vibe.core.config import VibeConfig
-from vibe.core.config.harness_files import (
-    get_harness_files_manager,
-    init_harness_files_manager,
-)
+from vibe.core.config.default_orchestrator import build_default_orchestrator
+from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.telemetry.build_metadata import build_launch_context
@@ -40,17 +36,6 @@ def parse_arguments() -> Arguments:
 
 
 def bootstrap_config_files() -> None:
-    mgr = get_harness_files_manager()
-    config_file = mgr.user_config_file
-    if not config_file.exists():
-        try:
-            config_file.parent.mkdir(parents=True, exist_ok=True)
-            with config_file.open("wb") as f:
-                tomli_w.dump(VibeConfig.create_default(), f)
-        except Exception as e:
-            logger.error(f"Could not create default config file: {e}")
-            raise
-
     history_file = HISTORY_FILE.path
     if not history_file.exists():
         try:
@@ -83,7 +68,7 @@ def main() -> None:
     init_harness_files_manager("user", "project")
 
     from vibe.acp.acp_agent_loop import run_acp_server
-    from vibe.core.config import VibeConfig, load_dotenv_values
+    from vibe.core.config import load_dotenv_values
     from vibe.core.sentry import SentryTarget, init_sentry
     from vibe.core.tracing import setup_tracing
     from vibe.setup.onboarding import run_onboarding
@@ -104,7 +89,8 @@ def main() -> None:
         sys.exit(0)
 
     try:
-        config = VibeConfig.load()
+        orchestrator = asyncio.run(build_default_orchestrator())
+        config = orchestrator.config
     except Exception:
         config = None
 

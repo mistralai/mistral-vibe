@@ -4,12 +4,11 @@ import pytest
 from textual import events
 
 from vibe.cli.textual_ui.widgets.voice_app import VoiceApp
-from vibe.core.config import VibeConfig
 
 
 @pytest.fixture
-def app(monkeypatch: pytest.MonkeyPatch) -> VoiceApp:
-    widget = VoiceApp(VibeConfig())
+def app(monkeypatch: pytest.MonkeyPatch, config_cls) -> VoiceApp:
+    widget = VoiceApp(config_cls())
     monkeypatch.setattr(widget, "_update_display", lambda: None)
     return widget
 

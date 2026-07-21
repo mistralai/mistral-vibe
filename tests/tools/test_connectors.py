@@ -12,7 +12,7 @@ from tests.conftest import build_test_vibe_config
 from tests.constants import CONNECTORS_BOOTSTRAP_PATH, MISTRAL_BASE_URL
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
-from vibe.core.config import ConnectorConfig, VibeConfig
+from vibe.core.config import ConnectorConfig, VibeConfigSchema
 from vibe.core.tools.base import BaseToolConfig, ToolError
 from vibe.core.tools.connectors import (
     compute_connector_counts,
@@ -161,7 +161,9 @@ class TestFakeConnectorRegistry:
 
 class TestToolManagerConnectorIntegration:
     @staticmethod
-    def _make_config(connectors: list[ConnectorConfig] | None = None) -> VibeConfig:
+    def _make_config(
+        connectors: list[ConnectorConfig] | None = None,
+    ) -> VibeConfigSchema:
         return build_test_vibe_config(connectors=connectors or [])
 
     def test_connector_tools_registered(self) -> None:
@@ -389,7 +391,9 @@ class TestConnectorProxyToolRun:
 
 class TestConnectorDisableFiltering:
     @staticmethod
-    def _make_config(connectors: list[ConnectorConfig] | None = None) -> VibeConfig:
+    def _make_config(
+        connectors: list[ConnectorConfig] | None = None,
+    ) -> VibeConfigSchema:
         return build_test_vibe_config(connectors=connectors or [])
 
     def test_disabled_connector_excludes_all_tools(self) -> None:

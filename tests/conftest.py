@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Awaitable, Callable, Generator
 import os
 from pathlib import Path
 import sys
@@ -14,6 +14,7 @@ import tomli_w
 
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
 from tests.stubs.fake_backend import FakeBackend
+from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from tests.stubs.fake_voice_manager import FakeVoiceManager
 from tests.update_notifier.adapters.fake_update_cache_repository import (
@@ -26,19 +27,18 @@ from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
     DEFAULT_MODELS,
-    AnyVibeConfig,
     ModelConfig,
     SessionLoggingConfig,
-    VibeConfig,
+    VibeConfigSchema,
+    VibeConfigSchemaType,
+    build_default_orchestrator,
 )
-from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
     init_harness_files_manager,
     reset_harness_files_manager,
 )
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
-from vibe.core.config.vibe_schema import VibeConfigSchema
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.llm.types import BackendLike
 from vibe.core.utils import keyring as keyring_utils
 from vibe.core.utils.concurrency import run_sync
@@ -91,7 +91,7 @@ def _isolate_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
 def _disable_os_keyring(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Keep the suite off the real OS keyring.
 
-    ``resolve_api_key`` and ``VibeConfig._check_api_key`` now consult the keyring, so
+    ``resolve_api_key`` and ``VibeConfigSchema`` API-key validation now consult the keyring, so
     without this every config construction would touch the real Keychain. We install an
     empty backend (rather than patching ``keyring.get_password``) so tests that swap in
     their own backend via ``keyring.set_keyring`` still work. Tests that exercise keyring
@@ -316,8 +316,37 @@ def agent_loop() -> AgentLoop:
 
 
 @pytest.fixture
-def vibe_config() -> VibeConfig:
+def vibe_config() -> VibeConfigSchema:
     return build_test_vibe_config()
+
+
+@pytest.fixture(params=[VibeConfigSchema], ids=["vibe_config_schema"])
+def config_cls(request: pytest.FixtureRequest) -> VibeConfigSchemaType:
+    return request.param
+
+
+@pytest.fixture
+def make_config(config_cls: VibeConfigSchemaType) -> Callable[..., VibeConfigSchema]:
+    def _make(**kwargs: Any) -> VibeConfigSchema:
+        return build_test_vibe_config(config_cls=config_cls, **kwargs)
+
+    return _make
+
+
+@pytest.fixture
+def make_orchestrator() -> Callable[
+    [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
+]:
+    """Build the default config orchestrator lazily.
+
+    The factory is async because the orchestrator builds its layer stack lazily;
+    call it after seeding the on-disk config.
+    """
+
+    async def _make() -> ConfigOrchestrator[VibeConfigSchema]:
+        return await build_default_orchestrator()
+
+    return _make
 
 
 def make_test_models(auto_compact_threshold: int) -> list[ModelConfig]:
@@ -325,6 +354,28 @@ def make_test_models(auto_compact_threshold: int) -> list[ModelConfig]:
         m.model_copy(update={"auto_compact_threshold": auto_compact_threshold})
         for m in DEFAULT_MODELS
     ]
+
+
+def set_agent_config(agent: AgentLoop, config: VibeConfigSchema) -> None:
+    orchestrator = agent.config_orchestrator
+    match orchestrator:
+        case ConfigOrchestrator() | FakeConfigOrchestrator():
+            orchestrator._config = config
+        case _:
+            raise TypeError(f"unexpected orchestrator {orchestrator!r}")
+    agent.agent_manager.invalidate_config()
+
+
+def stub_config_reload(
+    monkeypatch: pytest.MonkeyPatch, config: VibeConfigSchema
+) -> None:
+    """Make orchestrator reloads resolve to ``config`` instead of reading disk."""
+
+    async def _reload(self: Any) -> None:
+        self._config = config
+
+    monkeypatch.setattr(ConfigOrchestrator, "reload", _reload)
+    monkeypatch.setattr(FakeConfigOrchestrator, "reload", _reload)
 
 
 def _prepare_test_config_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -346,6 +397,9 @@ def _prepare_test_config_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     # Connectors trigger a real HTTP discovery on agent construction; off by
     # default so tests don't pay for it. Connector tests pass enable_connectors=True.
     kwargs.setdefault("enable_connectors", False)
+    # Telemetry gates the remote experiment fetch (experiments.mistral.services);
+    # off by default so a leaked MISTRAL_API_KEY never triggers an unmocked call.
+    kwargs.setdefault("enable_telemetry", False)
     # Use the lightweight test system prompt unless a test asks for a real one.
     kwargs.setdefault("system_prompt_id", "tests")
     # Keep the test prompt minimal: skip project-context discovery and prompt
@@ -355,58 +409,61 @@ def _prepare_test_config_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
-def build_test_vibe_config(**kwargs) -> VibeConfig:
-    return VibeConfig(**_prepare_test_config_kwargs(kwargs))
+def build_test_vibe_config(
+    config_cls: VibeConfigSchemaType = VibeConfigSchema, **kwargs
+) -> VibeConfigSchema:
+    return config_cls(**_prepare_test_config_kwargs(kwargs))
 
 
 def build_test_vibe_config_schema(**kwargs) -> VibeConfigSchema:
     return VibeConfigSchema(**_prepare_test_config_kwargs(kwargs))
 
 
-type ConfigBuilder = Callable[..., AnyVibeConfig]
+type ConfigBuilder = Callable[..., VibeConfigSchema]
 
 
-@pytest.fixture(
-    params=[build_test_vibe_config, build_test_vibe_config_schema],
-    ids=["vibe_config", "vibe_config_schema"],
-)
+@pytest.fixture(params=[build_test_vibe_config_schema], ids=["vibe_config_schema"])
 def build_config(request: pytest.FixtureRequest) -> ConfigBuilder:
-    """Parametrized builder that yields both the legacy VibeConfig and the schema.
-
-    Use in tests exercising the shared API surface so each assertion runs against
-    both config types.
-    """
     return request.param
 
 
-type ConfigLoader = Callable[[], AnyVibeConfig]
-
-
-def _load_vibe_config() -> VibeConfig:
-    return VibeConfig.load()
+type ConfigLoader = Callable[[], VibeConfigSchema]
 
 
 def _load_vibe_config_schema() -> VibeConfigSchema:
     return run_sync(build_default_orchestrator()).config
 
 
-@pytest.fixture(
-    params=[_load_vibe_config, _load_vibe_config_schema],
-    ids=["vibe_config", "vibe_config_schema"],
-)
+@pytest.fixture(params=[_load_vibe_config_schema], ids=["vibe_config_schema"])
 def load_config(request: pytest.FixtureRequest) -> ConfigLoader:
-    """Parametrized loader that reads the persisted config for both types.
-
-    ``VibeConfig`` reads TOML via ``load``; the schema is built through the
-    standard orchestrator layer stack. Use when a test wants the config to
-    reflect on-disk state rather than in-memory construction.
-    """
+    """Loader that reads the persisted config through the orchestrator layer stack."""
     return request.param
+
+
+type OrchestratorLoader[C: VibeConfigSchema] = Callable[[C], ConfigOrchestrator[C]]
+
+
+async def _load_orchestrator(
+    config: VibeConfigSchema,
+) -> ConfigOrchestrator[VibeConfigSchema]:
+    return FakeConfigOrchestrator(config)
+
+
+@pytest.fixture
+def load_orchestrator() -> OrchestratorLoader[VibeConfigSchema]:
+    """Wraps a config into the default orchestrator by injecting its set fields
+    into the highest-priority OverridesLayer, exposed via ConfigOrchestrator.
+    """
+
+    def load(config: VibeConfigSchema) -> ConfigOrchestrator[VibeConfigSchema]:
+        return run_sync(_load_orchestrator(config))
+
+    return load
 
 
 def build_test_agent_loop(
     *,
-    config: VibeConfig | None = None,
+    config: VibeConfigSchema | None = None,
     agent_name: str = BuiltinAgentName.DEFAULT,
     backend: BackendLike | None = None,
     enable_streaming: bool = False,
@@ -414,9 +471,9 @@ def build_test_agent_loop(
 ) -> AgentLoop:
 
     resolved_config = config or build_test_vibe_config()
-
+    orchestrator = run_sync(_load_orchestrator(resolved_config))
     return AgentLoop(
-        config_orchestrator=LegacyConfigOrchestrator(resolved_config),
+        config_orchestrator=orchestrator,
         agent_name=agent_name,
         backend=backend or FakeBackend(),
         enable_streaming=enable_streaming,
@@ -426,7 +483,10 @@ def build_test_agent_loop(
 
 
 def build_test_vibe_app(
-    *, config: VibeConfig | None = None, agent_loop: AgentLoop | None = None, **kwargs
+    *,
+    config: VibeConfigSchema | None = None,
+    agent_loop: AgentLoop | None = None,
+    **kwargs,
 ) -> VibeApp:
     app_config = config or build_test_vibe_config()
 

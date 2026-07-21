@@ -24,13 +24,13 @@ from vibe.cli.textual_ui.widgets.messages import (
 )
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
 from vibe.cli.update_notifier import UpdateCache
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.types import FunctionCall, LLMMessage, Role, ToolCall
 
 
 @pytest.mark.asyncio
 async def test_ui_displays_messages_when_resuming_session(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ) -> None:
     """Test that messages are properly displayed when resuming a session."""
     agent_loop = build_test_agent_loop(config=vibe_config)
@@ -89,7 +89,7 @@ async def test_ui_displays_messages_when_resuming_session(
 
 @pytest.mark.asyncio
 async def test_ui_does_not_display_messages_when_only_system_messages_exist(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ) -> None:
     """Test that no messages are displayed when only system messages exist."""
     agent_loop = build_test_agent_loop(config=vibe_config)
@@ -113,7 +113,7 @@ async def test_ui_does_not_display_messages_when_only_system_messages_exist(
 
 @pytest.mark.asyncio
 async def test_ui_displays_multiple_user_assistant_turns(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ) -> None:
     """Test that multiple conversation turns are properly displayed."""
     agent_loop = build_test_agent_loop(config=vibe_config)
@@ -147,7 +147,7 @@ async def test_ui_displays_multiple_user_assistant_turns(
 
 @pytest.mark.asyncio
 async def test_ui_displays_messages_when_resuming_in_dangerous_directory(
-    monkeypatch: pytest.MonkeyPatch, vibe_config: VibeConfig
+    monkeypatch: pytest.MonkeyPatch, vibe_config: VibeConfigSchema
 ) -> None:
     monkeypatch.setattr(
         "vibe.cli.textual_ui.app.is_dangerous_directory",

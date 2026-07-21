@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vibe.core.config import AnyVibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.session.session_id import shorten_session_id
 from vibe.core.session.session_loader import SessionLoader
 
@@ -24,7 +24,7 @@ class ResumeSessionInfo:
 
 
 def list_local_resume_sessions(
-    config: AnyVibeConfig, cwd: str | None
+    config: VibeConfigSchema, cwd: str | None
 ) -> list[ResumeSessionInfo]:
     return [
         ResumeSessionInfo(
@@ -38,7 +38,7 @@ def list_local_resume_sessions(
 
 
 def session_latest_messages(
-    sessions: list[ResumeSessionInfo], config: AnyVibeConfig
+    sessions: list[ResumeSessionInfo], config: VibeConfigSchema
 ) -> dict[str, str]:
     messages: dict[str, str] = {}
     for session in sessions:

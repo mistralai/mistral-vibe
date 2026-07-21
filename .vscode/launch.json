@@ -36,7 +36,9 @@
         "${input:test_identifier}",
         "-vvv",
         "-s",
-        "--no-header"
+        "--no-header",
+        "-n",
+        "0"
       ],
       "console": "integratedTerminal",
       "justMyCode": false,

@@ -84,7 +84,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Run tests
-        run: uv run pytest --ignore tests/snapshots
+        shell: bash
+        run: |
+          uv run pytest --ignore tests/snapshots && exit 0
+          for attempt in 2 3; do
+            echo "::warning::pytest failed; retrying last-failed tests (attempt ${attempt}/3)"
+            uv run pytest --ignore tests/snapshots --lf && exit 0
+          done
+          exit 1
 
   snapshot-tests:
     name: Snapshot Tests

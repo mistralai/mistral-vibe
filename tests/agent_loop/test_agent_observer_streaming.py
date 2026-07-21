@@ -14,7 +14,7 @@ from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.llm.exceptions import BackendError, BackendErrorBuilder
 from vibe.core.middleware import (
     ConversationContext,
@@ -58,7 +58,7 @@ def make_config(
     enabled_tools: list[str] | None = None,
     tools: dict[str, dict] | None = None,
     raise_on_compaction_failure: bool = False,
-) -> VibeConfig:
+) -> VibeConfigSchema:
     return build_test_vibe_config(
         include_model_info=False,
         include_commit_signature=False,

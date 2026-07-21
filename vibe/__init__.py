@@ -9,4 +9,4 @@ from pathlib import Path
 os.environ.setdefault("PYDANTIC_ERRORS_INCLUDE_URL", "0")
 
 VIBE_ROOT = Path(__file__).parent
-__version__ = "2.21.0"
+__version__ = "2.22.0"

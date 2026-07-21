@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 import sys
 from typing import Any
@@ -8,7 +9,9 @@ from rich import print as rprint
 from textual.app import App
 
 from vibe.cli.clipboard import try_copy_text_to_clipboard
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
+from vibe.core.config.default_orchestrator import build_default_orchestrator
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.telemetry.types import LaunchContext
 from vibe.setup.auth import BrowserSignInService, HttpBrowserSignInGateway
@@ -32,7 +35,7 @@ class OnboardingApp(App[str | None]):
 
     def __init__(
         self,
-        config: OnboardingContext | VibeConfig | None = None,
+        config: OnboardingContext | VibeConfigSchema | None = None,
         browser_sign_in_service_factory: Callable[[], BrowserSignInService]
         | None = None,
         launch_context: LaunchContext | None = None,
@@ -44,7 +47,7 @@ class OnboardingApp(App[str | None]):
         super().__init__(**kwargs)
         if config is None:
             config = OnboardingContext.load()
-        elif isinstance(config, VibeConfig):
+        elif isinstance(config, VibeConfigSchema):
             config = OnboardingContext.from_config(config)
 
         self._config = config
@@ -126,8 +129,9 @@ class OnboardingApp(App[str | None]):
 
 def run_onboarding(
     app: App | None = None, *, launch_context: LaunchContext | None = None
-) -> None:
-    result = (app or OnboardingApp(launch_context=launch_context)).run()
+) -> ConfigOrchestrator[VibeConfigSchema]:
+    onboarding_app = app or OnboardingApp(launch_context=launch_context)
+    result = onboarding_app.run()
     match result:
         case None:
             rprint("\n[yellow]Setup cancelled. See you next time![/]")
@@ -152,3 +156,8 @@ def run_onboarding(
             rprint(
                 '\nSetup complete 🎉. Run "vibe" to start using the Mistral Vibe CLI.\n'
             )
+    theme = onboarding_app.theme
+    orchestrator = asyncio.run(build_default_orchestrator())
+    if theme is not None:
+        asyncio.run(orchestrator.set_field("/theme", theme, reason="onboarding"))
+    return orchestrator

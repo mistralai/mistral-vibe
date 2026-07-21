@@ -7,12 +7,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
-from vibe.core.config._settings import (
+from vibe.core.config import (
     DEFAULT_ACTIVE_MODEL_CONFIG,
     DEFAULT_MODELS,
     DEFAULT_PROVIDERS,
     DEFAULT_VIBE_BASE_URL,
+    ModelConfig,
+    ProviderConfig,
+    VibeConfigSchema,
 )
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.models import normalize_model_configs
@@ -206,7 +208,7 @@ class OnboardingContext:
         return self.provider.supports_browser_sign_in
 
     @classmethod
-    def from_config(cls, config: VibeConfig) -> OnboardingContext:
+    def from_config(cls, config: VibeConfigSchema) -> OnboardingContext:
         return cls(
             provider=config.get_active_provider(), vibe_base_url=config.vibe_base_url
         )
@@ -227,4 +229,4 @@ class OnboardingContext:
             logger.warning(
                 "Onboarding config fallback activated; using defaults", exc_info=True
             )
-            return cls.from_config(VibeConfig.model_construct())
+            return cls.from_config(VibeConfigSchema.model_construct())

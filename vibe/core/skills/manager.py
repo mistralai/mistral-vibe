@@ -19,11 +19,11 @@ from vibe.core.utils import name_matches
 from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
-    from vibe.core.config import AnyVibeConfig
+    from vibe.core.config import VibeConfigSchema
 
 
 class SkillManager:
-    def __init__(self, config_getter: Callable[[], AnyVibeConfig]) -> None:
+    def __init__(self, config_getter: Callable[[], VibeConfigSchema]) -> None:
         self._config_getter = config_getter
         self._search_paths = self._compute_search_paths(self._config)
         self._config_issues: list[SkillConfigIssue] = []
@@ -39,7 +39,7 @@ class SkillManager:
             )
 
     @property
-    def _config(self) -> AnyVibeConfig:
+    def _config(self) -> VibeConfigSchema:
         return self._config_getter()
 
     @property
@@ -62,7 +62,7 @@ class SkillManager:
         return dict(skills)
 
     @staticmethod
-    def _compute_search_paths(config: AnyVibeConfig) -> list[Path]:
+    def _compute_search_paths(config: VibeConfigSchema) -> list[Path]:
         paths: list[Path] = []
 
         for path in config.skill_paths:

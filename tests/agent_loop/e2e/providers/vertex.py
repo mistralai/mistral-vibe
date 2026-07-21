@@ -11,13 +11,13 @@ from tests import constants as c
 from tests.agent_loop.e2e.providers.anthropic import Mocks
 from tests.agent_loop.e2e.providers.base import ProviderAPI
 from tests.conftest import build_test_vibe_config
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.types import Backend
 
 __all__ = ["API", "Mocks", "e2e_config"]
 
 
-def e2e_config(**overrides: Any) -> VibeConfig:
+def e2e_config(**overrides: Any) -> VibeConfigSchema:
     provider = ProviderConfig(
         name="vertex",
         api_base="",

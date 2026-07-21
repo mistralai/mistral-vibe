@@ -7,10 +7,11 @@ from pathlib import Path
 from git import Repo
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import OrchestratorLoader, build_test_vibe_config
 from vibe.cli import cli as cli_mod, entrypoint as entrypoint_mod
 from vibe.core import programmatic as programmatic_mod
-from vibe.core.config import MissingAPIKeyError, VibeConfig, harness_files
+from vibe.core.config import MissingAPIKeyError, VibeConfigSchema, harness_files
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.tools.manager import ToolManager
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.worktree import prepare_worktree_session
@@ -56,10 +57,10 @@ def _init_repo(workdir: Path) -> Repo:
 def test_programmatic_mode_does_not_run_onboarding_on_missing_api_key(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def boom() -> None:
+    async def boom() -> ConfigOrchestrator[VibeConfigSchema]:
         raise MissingAPIKeyError("MISTRAL_API_KEY", "mistral")
 
-    monkeypatch.setattr(cli_mod.VibeConfig, "load", staticmethod(boom))
+    monkeypatch.setattr(cli_mod, "build_default_orchestrator", boom)
 
     sentinel: dict[str, bool] = {"called": False}
 
@@ -69,7 +70,7 @@ def test_programmatic_mode_does_not_run_onboarding_on_missing_api_key(
     monkeypatch.setattr(onboarding_mod, "run_onboarding", fail_onboarding)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.load_config_or_exit(interactive=False)
+        cli_mod.load_config_orchestrator_or_exit(interactive=False)
 
     assert exc_info.value.code == 1
     assert sentinel["called"] is False
@@ -80,26 +81,30 @@ def test_programmatic_mode_does_not_run_onboarding_on_missing_api_key(
 
 def test_interactive_mode_still_runs_onboarding_on_missing_api_key(
     monkeypatch: pytest.MonkeyPatch,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
-    # Replace VibeConfig.load with a stub that fails the first time.
-    state = {"raised": False}
+    # The initial config load fails; onboarding then builds and returns the
+    # orchestrator itself (persisting the chosen theme through it).
+    sentinel_config = build_test_vibe_config(displayed_workdir="/sentinel/workdir")
 
-    def fake_load() -> object:
-        if not state["raised"]:
-            state["raised"] = True
-            raise MissingAPIKeyError("MISTRAL_API_KEY", "mistral")
-        return "config-sentinel"
+    async def fake_load() -> ConfigOrchestrator[VibeConfigSchema]:
+        raise MissingAPIKeyError("MISTRAL_API_KEY", "mistral")
 
-    monkeypatch.setattr(cli_mod.VibeConfig, "load", staticmethod(fake_load))
+    monkeypatch.setattr(cli_mod, "build_default_orchestrator", fake_load)
 
     onboarding_called: list[bool] = []
-    monkeypatch.setattr(
-        onboarding_mod, "run_onboarding", lambda *a, **k: onboarding_called.append(True)
-    )
 
-    result = cli_mod.load_config_or_exit(interactive=True)
+    def fake_onboarding(
+        *a: object, **k: object
+    ) -> ConfigOrchestrator[VibeConfigSchema]:
+        onboarding_called.append(True)
+        return load_orchestrator(sentinel_config)
+
+    monkeypatch.setattr(onboarding_mod, "run_onboarding", fake_onboarding)
+
+    result = cli_mod.load_config_orchestrator_or_exit(interactive=True)
     assert onboarding_called == [True]
-    assert result == "config-sentinel"
+    assert result.config.displayed_workdir == "/sentinel/workdir"
 
 
 def test_warn_if_workdir_untrusted_writes_stderr_when_project_config_present(
@@ -540,13 +545,18 @@ def test_session_trust_does_not_write_to_disk(
 
 def test_run_cli_passes_max_tokens_to_run_programmatic(
     monkeypatch: pytest.MonkeyPatch,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     args = _make_args(max_tokens=123)
     call: dict[str, object] = {}
     config = build_test_vibe_config()
 
     monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
-    monkeypatch.setattr(cli_mod, "load_config_or_exit", lambda interactive: config)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_config_orchestrator_or_exit",
+        lambda interactive: load_orchestrator(config),
+    )
     monkeypatch.setattr(cli_mod, "load_hooks_from_fs", lambda: None)
     monkeypatch.setattr(cli_mod, "setup_tracing", lambda _config: None)
     monkeypatch.setattr(cli_mod, "load_session", lambda _args, _config: None)
@@ -569,13 +579,17 @@ def test_run_cli_passes_max_tokens_to_run_programmatic(
 
 def test_run_cli_auto_approve_sets_config_without_changing_agent(
     monkeypatch: pytest.MonkeyPatch,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     args = _make_args(agent="lean", auto_approve=True)
     call: dict[str, object] = {}
     config = build_test_vibe_config(default_agent="plan")
+    orchestrator = load_orchestrator(config)
 
     monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
-    monkeypatch.setattr(cli_mod, "load_config_or_exit", lambda interactive: config)
+    monkeypatch.setattr(
+        cli_mod, "load_config_orchestrator_or_exit", lambda interactive: orchestrator
+    )
     monkeypatch.setattr(cli_mod, "load_hooks_from_fs", lambda: None)
     monkeypatch.setattr(cli_mod, "setup_tracing", lambda _config: None)
     monkeypatch.setattr(cli_mod, "load_session", lambda _args, _config: None)
@@ -593,14 +607,19 @@ def test_run_cli_auto_approve_sets_config_without_changing_agent(
 
     assert exc_info.value.code == 0
     assert call["agent_name"] == "lean"
-    assert config.bypass_tool_permissions is True
+    assert orchestrator.config.bypass_tool_permissions is True
 
 
 def _patch_run_cli_for_config(
-    monkeypatch: pytest.MonkeyPatch, config: VibeConfig
-) -> None:
+    monkeypatch: pytest.MonkeyPatch,
+    config: VibeConfigSchema,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> ConfigOrchestrator[VibeConfigSchema]:
+    orchestrator = load_orchestrator(config)
     monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
-    monkeypatch.setattr(cli_mod, "load_config_or_exit", lambda interactive: config)
+    monkeypatch.setattr(
+        cli_mod, "load_config_orchestrator_or_exit", lambda *, interactive: orchestrator
+    )
     monkeypatch.setattr(cli_mod, "load_hooks_from_fs", lambda: None)
     monkeypatch.setattr(cli_mod, "setup_tracing", lambda _config: None)
     monkeypatch.setattr(cli_mod, "load_session", lambda _args, _config: None)
@@ -608,34 +627,38 @@ def _patch_run_cli_for_config(
     monkeypatch.setattr(cli_mod, "warn_if_workdir_trust_is_unset", lambda: None)
     monkeypatch.setattr(cli_mod, "get_initial_agent_name", lambda _args, _config: "x")
     monkeypatch.setattr(programmatic_mod, "run_programmatic", lambda **kwargs: "done")
+    return orchestrator
 
 
 def test_run_cli_disabled_tools_filter_enabled_tools(
     monkeypatch: pytest.MonkeyPatch,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     args = _make_args(enabled_tools=["bash"], disabled_tools=["bash"])
     config = build_test_vibe_config()
-    _patch_run_cli_for_config(monkeypatch, config)
+    orchestrator = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
 
     with pytest.raises(SystemExit):
         cli_mod.run_cli(args)
 
-    assert config.enabled_tools == ["bash"]
-    assert "bash" in config.disabled_tools
-    assert ToolManager(lambda: config).available_tools == {}
+    final_config = orchestrator.config
+    assert final_config.enabled_tools == ["bash"]
+    assert "bash" in final_config.disabled_tools
+    assert ToolManager(lambda: final_config).available_tools == {}
 
 
 def test_run_cli_programmatic_disabled_tools_filter_enabled_tools(
     monkeypatch: pytest.MonkeyPatch,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     args = _make_args(enabled_tools=["ask_user_question", "exit_plan_mode", "grep"])
     config = build_test_vibe_config()
-    _patch_run_cli_for_config(monkeypatch, config)
+    orchestrator = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
 
     with pytest.raises(SystemExit):
         cli_mod.run_cli(args)
 
-    available_tools = ToolManager(lambda: config).available_tools
+    available_tools = ToolManager(lambda: orchestrator.config).available_tools
     assert "ask_user_question" not in available_tools
     assert "exit_plan_mode" not in available_tools
     assert "grep" in available_tools
@@ -643,28 +666,35 @@ def test_run_cli_programmatic_disabled_tools_filter_enabled_tools(
 
 def test_run_cli_disabled_tools_concatenated_when_no_enabled_tools(
     monkeypatch: pytest.MonkeyPatch,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     args = _make_args(disabled_tools=["bash"])
     config = build_test_vibe_config(disabled_tools=["webfetch"])
-    _patch_run_cli_for_config(monkeypatch, config)
+    orchestrator = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
 
     with pytest.raises(SystemExit):
         cli_mod.run_cli(args)
 
-    assert config.enabled_tools == []
-    assert "webfetch" in config.disabled_tools
-    assert "bash" in config.disabled_tools
+    final_config = orchestrator.config
+    assert final_config.enabled_tools == []
+    assert "webfetch" in final_config.disabled_tools
+    assert "bash" in final_config.disabled_tools
 
 
 def test_run_cli_runs_update_prompt_before_trust_resolver(
     monkeypatch: pytest.MonkeyPatch,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
     args = _make_args(prompt=None)
     config = build_test_vibe_config()
     calls: list[str] = []
 
     monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
-    monkeypatch.setattr(cli_mod, "load_config_or_exit", lambda interactive: config)
+    monkeypatch.setattr(
+        cli_mod,
+        "load_config_orchestrator_or_exit",
+        lambda interactive: load_orchestrator(config),
+    )
     monkeypatch.setattr(
         cli_mod,
         "_maybe_run_startup_update_prompt",
@@ -691,7 +721,7 @@ def test_run_cli_check_upgrade_exits_before_loading_config(
     monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
     monkeypatch.setattr(
         cli_mod,
-        "load_config_or_exit",
+        "load_config_orchestrator_or_exit",
         lambda interactive: pytest.fail("check-upgrade should not load config"),
     )
     monkeypatch.setattr(

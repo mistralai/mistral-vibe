@@ -16,7 +16,7 @@ from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
-from vibe.core.config import AnyVibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.tools.permissions import RequiredPermission
 
 _INPUT_GRACE_PERIOD_S = 0.5
@@ -80,7 +80,7 @@ class ApprovalApp(VimNavigationMixin, Container):
         self,
         tool_name: str,
         tool_args: BaseModel,
-        config: AnyVibeConfig,
+        config: VibeConfigSchema,
         required_permissions: list[RequiredPermission] | None = None,
     ) -> None:
         super().__init__(id="approval-app")

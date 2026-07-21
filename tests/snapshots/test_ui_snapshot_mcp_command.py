@@ -40,24 +40,26 @@ class SnapshotTestAppNoMcpServers(BaseSnapshotTestApp):
 
 class SnapshotTestAppWithBrokenMcpServer(BaseSnapshotTestApp):
     def __init__(self) -> None:
-        config = default_config()
-        config.mcp_servers = [
-            MCPStdio(name="filesystem", transport="stdio", command="npx"),
-            MCPStdio(
-                name="broken-server", transport="stdio", command="nonexistent-cmd"
-            ),
-            MCPHttp(name="search", transport="http", url="http://localhost:8080"),
-        ]
+        config = default_config(
+            mcp_servers=[
+                MCPStdio(name="filesystem", transport="stdio", command="npx"),
+                MCPStdio(
+                    name="broken-server", transport="stdio", command="nonexistent-cmd"
+                ),
+                MCPHttp(name="search", transport="http", url="http://localhost:8080"),
+            ]
+        )
         super().__init__(config=config, mcp_registry=FakeMCPRegistryWithBrokenServer())
 
 
 class SnapshotTestAppWithMcpServers(BaseSnapshotTestApp):
     def __init__(self) -> None:
-        config = default_config()
-        config.mcp_servers = [
-            MCPStdio(name="filesystem", transport="stdio", command="npx"),
-            MCPHttp(name="search", transport="http", url="http://localhost:8080"),
-        ]
+        config = default_config(
+            mcp_servers=[
+                MCPStdio(name="filesystem", transport="stdio", command="npx"),
+                MCPHttp(name="search", transport="http", url="http://localhost:8080"),
+            ]
+        )
         super().__init__(config=config)
 
 
@@ -179,15 +181,14 @@ class SnapshotTestAppWithConnectors(BaseSnapshotTestApp):
     def __init__(self) -> None:
         from vibe.core.config import ConnectorConfig
 
-        config = default_config()
-        config.mcp_servers = [
-            MCPStdio(name="filesystem", transport="stdio", command="npx")
-        ]
-        # Explicitly enable all fake connectors so they appear enabled in snapshots
-        config.connectors = [
-            ConnectorConfig(name="gmail", disabled=False),
-            ConnectorConfig(name="slack", disabled=False),
-        ]
+        config = default_config(
+            mcp_servers=[MCPStdio(name="filesystem", transport="stdio", command="npx")],
+            # Explicitly enable all fake connectors so they appear enabled in snapshots
+            connectors=[
+                ConnectorConfig(name="gmail", disabled=False),
+                ConnectorConfig(name="slack", disabled=False),
+            ],
+        )
         super().__init__(config=config)
         registry = FakeConnectorRegistry(connectors=_FAKE_CONNECTORS)
         self.agent_loop.connector_registry = registry
@@ -199,13 +200,14 @@ class SnapshotTestAppConnectorsOnly(BaseSnapshotTestApp):
     def __init__(self) -> None:
         from vibe.core.config import ConnectorConfig
 
-        config = default_config()
-        config.mcp_servers = []
-        # Explicitly enable all fake connectors so they appear enabled in snapshots
-        config.connectors = [
-            ConnectorConfig(name="gmail", disabled=False),
-            ConnectorConfig(name="slack", disabled=False),
-        ]
+        config = default_config(
+            mcp_servers=[],
+            # Explicitly enable all fake connectors so they appear enabled in snapshots
+            connectors=[
+                ConnectorConfig(name="gmail", disabled=False),
+                ConnectorConfig(name="slack", disabled=False),
+            ],
+        )
         super().__init__(config=config)
         registry = FakeConnectorRegistry(connectors=_FAKE_CONNECTORS)
         self.agent_loop.connector_registry = registry
@@ -217,15 +219,16 @@ class SnapshotTestAppConnectorsMixedState(BaseSnapshotTestApp):
     def __init__(self) -> None:
         from vibe.core.config import ConnectorConfig
 
-        config = default_config()
-        config.mcp_servers = []
-        # Explicitly enable connectors that should appear connected in snapshots
-        # alpha is connected, beta and zeta are disconnected
-        config.connectors = [
-            ConnectorConfig(name="alpha", disabled=False),
-            ConnectorConfig(name="beta", disabled=False),
-            ConnectorConfig(name="zeta", disabled=False),
-        ]
+        config = default_config(
+            mcp_servers=[],
+            # Explicitly enable connectors that should appear connected in snapshots
+            # alpha is connected, beta and zeta are disconnected
+            connectors=[
+                ConnectorConfig(name="alpha", disabled=False),
+                ConnectorConfig(name="beta", disabled=False),
+                ConnectorConfig(name="zeta", disabled=False),
+            ],
+        )
         super().__init__(config=config)
         registry = FakeConnectorRegistry(
             connectors=_FAKE_CONNECTORS_MIXED_CONNECTION,

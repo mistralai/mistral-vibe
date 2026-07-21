@@ -13,7 +13,7 @@ from vibe.core.agents._migration import (
 from vibe.core.paths import PLANS_DIR
 
 if TYPE_CHECKING:
-    from vibe.core.config import VibeConfigT
+    from vibe.core.config import VibeConfigSchema
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -58,7 +58,7 @@ class AgentProfile:
     overrides: dict[str, Any] = field(default_factory=dict)
     install_required: bool = False
 
-    def apply_to_config(self, base: VibeConfigT) -> VibeConfigT:
+    def apply_to_config(self, base: VibeConfigSchema) -> VibeConfigSchema:
         merged = _deep_merge(base.model_dump(), self.overrides)
         profile_disabled_tools = self.overrides.get("disabled_tools")
         if isinstance(profile_disabled_tools, list):
@@ -93,6 +93,7 @@ def _plan_overrides() -> dict[str, Any]:
         "tools": {
             "write_file": {"permission": "never", "allowlist": [plans_pattern]},
             "edit": {"permission": "never", "allowlist": [plans_pattern]},
+            "read_file": {"allowlist": [plans_pattern]},
         }
     }
 

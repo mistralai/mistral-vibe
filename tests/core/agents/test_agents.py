@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import ConfigBuilder, OrchestratorLoader
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import BUILTIN_AGENTS, EXPLORE, AgentSafety, AgentType
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.config import VibeConfigSchema
 
 
 class TestAgentProfile:
@@ -31,9 +31,13 @@ class TestAgentProfile:
 
 class TestAgentManager:
     @pytest.fixture
-    def manager(self) -> AgentManager:
-        config = build_test_vibe_config()
-        return AgentManager(LegacyConfigOrchestrator(config))
+    def manager(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> AgentManager:
+        config = build_config()
+        return AgentManager(load_orchestrator(config))
 
     def test_get_subagents_returns_only_subagents(self, manager: AgentManager) -> None:
         """Test that only SUBAGENT type agents are returned."""
@@ -78,88 +82,113 @@ class TestAgentManager:
         assert agent.name == "default"
         assert agent.agent_type == AgentType.AGENT
 
-    def test_initial_agent_rejects_subagent(self) -> None:
+    def test_initial_agent_rejects_subagent(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
         """Test that creating AgentManager with a subagent as initial_agent raises."""
-        config = build_test_vibe_config()
+        config = build_config()
         with pytest.raises(ValueError, match="cannot be used as the primary agent"):
-            AgentManager(LegacyConfigOrchestrator(config), initial_agent="explore")
+            AgentManager(load_orchestrator(config), initial_agent="explore")
 
-    def test_initial_agent_accepts_subagent_when_allowed(self) -> None:
+    def test_initial_agent_accepts_subagent_when_allowed(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
         """Test that allow_subagent=True permits subagent as initial_agent."""
-        config = build_test_vibe_config()
+        config = build_config()
         manager = AgentManager(
-            LegacyConfigOrchestrator(config),
-            initial_agent="explore",
-            allow_subagent=True,
+            load_orchestrator(config), initial_agent="explore", allow_subagent=True
         )
         assert manager.active_profile.name == "explore"
 
-    def test_initial_agent_accepts_agent_type(self) -> None:
+    def test_initial_agent_accepts_agent_type(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
         """Test that creating AgentManager with an agent-type agent works."""
-        config = build_test_vibe_config()
-        manager = AgentManager(LegacyConfigOrchestrator(config), initial_agent="plan")
+        config = build_config()
+        manager = AgentManager(load_orchestrator(config), initial_agent="plan")
         assert manager.active_profile.name == "plan"
 
-    def test_initial_agent_raises_when_agent_is_disabled(self) -> None:
-        config = build_test_vibe_config(disabled_agents=["plan"])
+    def test_initial_agent_raises_when_agent_is_disabled(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        config = build_config(disabled_agents=["plan"])
         with pytest.raises(ValueError, match="disabled_agents") as exc_info:
-            AgentManager(LegacyConfigOrchestrator(config), initial_agent="plan")
+            AgentManager(load_orchestrator(config), initial_agent="plan")
         message = str(exc_info.value)
         assert "default_agent" not in message
         assert message.startswith("Agent 'plan'")
 
     def test_explicit_agent_excluded_by_enabled_agents_does_not_blame_default(
         self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = build_test_vibe_config(enabled_agents=["default"])
+        config = build_config(enabled_agents=["default"])
         with pytest.raises(ValueError, match="enabled_agents") as exc_info:
-            AgentManager(LegacyConfigOrchestrator(config), initial_agent="plan")
+            AgentManager(load_orchestrator(config), initial_agent="plan")
         message = str(exc_info.value)
         assert "default_agent" not in message
         assert message.startswith("Agent 'plan'")
 
-    def test_initial_agent_raises_when_agent_does_not_exist(self) -> None:
-        config = build_test_vibe_config()
+    def test_initial_agent_raises_when_agent_does_not_exist(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        config = build_config()
         with pytest.raises(ValueError, match="not found"):
-            AgentManager(
-                LegacyConfigOrchestrator(config), initial_agent="nonexistent-agent"
-            )
+            AgentManager(load_orchestrator(config), initial_agent="nonexistent-agent")
 
     def test_default_agent_excluded_by_enabled_agents_raises_config_contradiction(
         self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = build_test_vibe_config(enabled_agents=["plan"])
+        config = build_config(enabled_agents=["plan"])
         with pytest.raises(ValueError, match="enabled_agents") as exc_info:
-            AgentManager(LegacyConfigOrchestrator(config))
+            AgentManager(load_orchestrator(config))
         message = str(exc_info.value)
         assert "default" in message
         assert "default_agent" in message
 
     def test_default_agent_excluded_by_disabled_agents_raises_config_contradiction(
         self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = build_test_vibe_config(disabled_agents=["default"])
+        config = build_config(disabled_agents=["default"])
         with pytest.raises(ValueError, match="disabled_agents") as exc_info:
-            AgentManager(LegacyConfigOrchestrator(config))
+            AgentManager(load_orchestrator(config))
         assert "default_agent" in str(exc_info.value)
 
     def test_disabled_agents_ignored_entirely_when_enabled_agents_set(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = build_test_vibe_config(
-            enabled_agents=["plan"], disabled_agents=["plan"]
-        )
+        config = build_config(enabled_agents=["plan"], disabled_agents=["plan"])
         with caplog.at_level("WARNING"):
-            manager = AgentManager(
-                LegacyConfigOrchestrator(config), initial_agent="plan"
-            )
+            manager = AgentManager(load_orchestrator(config), initial_agent="plan")
         assert manager.active_profile.name == "plan"
         assert caplog.text == ""
 
-    def test_install_required_agent_reports_install_not_disabled_agents(self) -> None:
+    def test_install_required_agent_reports_install_not_disabled_agents(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
         # 'lean' is install_required and enabled but not installed: the message
         # must point to installation, not blame disabled_agents.
-        config = build_test_vibe_config(enabled_agents=["lean"])
+        config = build_config(enabled_agents=["lean"])
         with pytest.raises(ValueError, match="requires installation") as exc_info:
-            AgentManager(LegacyConfigOrchestrator(config), initial_agent="lean")
+            AgentManager(load_orchestrator(config), initial_agent="lean")
         assert "disabled_agents" not in str(exc_info.value)

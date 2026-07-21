@@ -4,25 +4,39 @@ from rich.style import Style
 from textual.widgets.text_area import TextAreaTheme
 
 from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_config,
+    get_base_config,
+)
 from tests.stubs.fake_backend import FakeBackend
 from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.widgets.chat_input import ChatTextArea
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 
 
-def default_config() -> VibeConfig:
+def default_config(**kwargs) -> VibeConfigSchema:
     """Default configuration for snapshot testing.
     Remove as much interference as possible from the snapshot comparison, in order to get a clean pixel-to-pixel comparison.
     - Injects a fake backend to prevent (or stub) LLM calls.
     - Disables the banner animation.
     - Forces a value for the displayed workdir
     - Hides the chat input cursor (as the blinking animation is not deterministic).
+    - Pins the model set to the shared on-disk test seed so the banner renders a
+      stable single model regardless of the schema's evolving built-in defaults.
     """
+    seed = get_base_config()
+    kwargs.setdefault("active_model", seed["active_model"])
+    kwargs.setdefault("models", [ModelConfig.model_validate(m) for m in seed["models"]])
+    kwargs.setdefault(
+        "providers", [ProviderConfig.model_validate(p) for p in seed["providers"]]
+    )
     return build_test_vibe_config(
-        disable_welcome_banner_animation=True, displayed_workdir="/test/workdir"
+        disable_welcome_banner_animation=True,
+        displayed_workdir="/test/workdir",
+        **kwargs,
     )
 
 
@@ -32,7 +46,7 @@ class BaseSnapshotTestApp(VibeApp):
 
     def __init__(
         self,
-        config: VibeConfig | None = None,
+        config: VibeConfigSchema | None = None,
         backend: FakeBackend | None = None,
         **kwargs,
     ):

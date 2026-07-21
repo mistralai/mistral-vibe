@@ -41,6 +41,17 @@ async def test_popup_hides_when_input_cleared(vibe_app: VibeApp) -> None:
 
 
 @pytest.mark.asyncio
+async def test_new_alias_is_suggested(vibe_app: VibeApp) -> None:
+    async with vibe_app.run_test() as pilot:
+        popup = vibe_app.query_one(CompletionPopup)
+
+        await pilot.press(*"/new")
+
+        assert popup.styles.display == "block"
+        assert "/new" in popup.content_text
+
+
+@pytest.mark.asyncio
 async def test_pressing_tab_completes_command_and_hides_popup_when_exact_match(
     vibe_app: VibeApp,
 ) -> None:

@@ -21,7 +21,7 @@ from vibe.core.utils import name_matches, run_sync
 from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
-    from vibe.core.config import AnyVibeConfig
+    from vibe.core.config import VibeConfigSchema
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
     from vibe.core.tools.mcp.registry import MCPRegistry
 
@@ -73,7 +73,7 @@ class ToolManager:
 
     def __init__(
         self,
-        config_getter: Callable[[], AnyVibeConfig],
+        config_getter: Callable[[], VibeConfigSchema],
         mcp_registry: MCPRegistry | None = None,
         connector_registry: ConnectorRegistry | None = None,
         *,
@@ -117,11 +117,11 @@ class ToolManager:
         return self._mcp_registry
 
     @property
-    def _config(self) -> AnyVibeConfig:
+    def _config(self) -> VibeConfigSchema:
         return self._config_getter()
 
     @staticmethod
-    def _compute_search_paths(config: AnyVibeConfig) -> list[Path]:
+    def _compute_search_paths(config: VibeConfigSchema) -> list[Path]:
         paths: list[Path] = [DEFAULT_TOOL_DIR.path]
 
         paths.extend(config.tool_paths)

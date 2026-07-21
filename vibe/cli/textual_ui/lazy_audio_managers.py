@@ -18,7 +18,7 @@ from vibe.core.audio_recorder.audio_recorder_port import RecordingMode
 from vibe.core.logger import logger
 
 if TYPE_CHECKING:
-    from vibe.core.config import AnyVibeConfig
+    from vibe.core.config import VibeConfigSchema
     from vibe.core.telemetry.send import TelemetryClient
     from vibe.core.types import BaseEvent
 
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 class LazyVoiceManager:
     def __init__(
         self,
-        config_getter: Callable[[], AnyVibeConfig],
+        config_getter: Callable[[], VibeConfigSchema],
         factory: Callable[[], VoiceManagerPort],
     ) -> None:
         self._config_getter = config_getter
@@ -97,7 +97,7 @@ class LazyVoiceManager:
 class LazyNarratorManager:
     def __init__(
         self,
-        config_getter: Callable[[], AnyVibeConfig],
+        config_getter: Callable[[], VibeConfigSchema],
         factory: Callable[[], NarratorManagerPort],
     ) -> None:
         self._config_getter = config_getter
@@ -177,7 +177,8 @@ class LazyNarratorManager:
 
 
 def create_default_voice_manager(
-    config_getter: Callable[[], AnyVibeConfig], telemetry_client: TelemetryClient | None
+    config_getter: Callable[[], VibeConfigSchema],
+    telemetry_client: TelemetryClient | None,
 ) -> VoiceManagerPort:
     return LazyVoiceManager(
         config_getter,
@@ -186,7 +187,8 @@ def create_default_voice_manager(
 
 
 def create_default_narrator_manager(
-    config_getter: Callable[[], AnyVibeConfig], telemetry_client: TelemetryClient | None
+    config_getter: Callable[[], VibeConfigSchema],
+    telemetry_client: TelemetryClient | None,
 ) -> NarratorManagerPort:
     return LazyNarratorManager(
         config_getter,
@@ -195,7 +197,8 @@ def create_default_narrator_manager(
 
 
 def _create_real_voice_manager(
-    config_getter: Callable[[], AnyVibeConfig], telemetry_client: TelemetryClient | None
+    config_getter: Callable[[], VibeConfigSchema],
+    telemetry_client: TelemetryClient | None,
 ) -> VoiceManagerPort:
     from vibe.cli.voice_manager.voice_manager import VoiceManager
     from vibe.core.audio_recorder.audio_recorder import AudioRecorder
@@ -222,7 +225,8 @@ def _create_real_voice_manager(
 
 
 def _create_real_narrator_manager(
-    config_getter: Callable[[], AnyVibeConfig], telemetry_client: TelemetryClient | None
+    config_getter: Callable[[], VibeConfigSchema],
+    telemetry_client: TelemetryClient | None,
 ) -> NarratorManagerPort:
     from vibe.cli.narrator_manager.narrator_manager import NarratorManager
     from vibe.core.audio_player.audio_player import AudioPlayer

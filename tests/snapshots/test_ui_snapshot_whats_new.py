@@ -24,7 +24,6 @@ class SnapshotTestAppWithWhatsNew(BaseSnapshotTestApp):
         os.environ["MISTRAL_API_KEY"] = "snapshot-api-key"
 
         config = default_config()
-        config.enable_update_checks = False
         update_notifier = FakeUpdateGateway(update=None)
         cache = UpdateCache(
             latest_version="1.0.0",

@@ -3,18 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from acp.schema import TextContentBlock, UsageUpdate
 import pytest
 
 from tests.acp.conftest import _create_acp_agent
-from tests.conftest import build_test_vibe_config
+from tests.conftest import ConfigBuilder, OrchestratorLoader
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import SessionLoggingConfig
+from vibe.core.config import SessionLoggingConfig, VibeConfigSchema
 from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
 
 
@@ -30,12 +30,9 @@ def _make_backend(prompt_tokens: int = 100, completion_tokens: int = 50) -> Fake
 
 
 def _make_acp_agent(backend: FakeBackend) -> VibeAcpAgentLoop:
-    config = build_test_vibe_config()
-
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()
@@ -222,28 +219,40 @@ class TestLoadSessionUsageUpdate:
         return session_folder
 
     def _make_agent_with_session_logging(
-        self, backend: FakeBackend, session_dir: Path
+        self,
+        backend: FakeBackend,
+        session_dir: Path,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> VibeAcpAgentLoop:
         session_config = SessionLoggingConfig(
             save_dir=str(session_dir), session_prefix="session", enabled=True
         )
-        config = build_test_vibe_config(session_logging=session_config)
+        orchestrator = load_orchestrator(build_config(session_logging=session_config))
 
         class PatchedAgentLoop(AgentLoop):
             def __init__(self, *args, **kwargs) -> None:
                 super().__init__(*args, **{**kwargs, "backend": backend})
-                self._replace_base_config(config)
                 self.agent_manager.invalidate_config()
 
         patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()
         agent = _create_acp_agent()
-        patch.object(agent, "_load_config", return_value=config).start()
+        patch.object(
+            agent, "_load_orchestrator", AsyncMock(return_value=orchestrator)
+        ).start()
         return agent
 
     @pytest.mark.asyncio
-    async def test_load_session_sends_usage_update(self, tmp_path: Path) -> None:
+    async def test_load_session_sends_usage_update(
+        self,
+        tmp_path: Path,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
         backend = _make_backend()
-        agent = self._make_agent_with_session_logging(backend, tmp_path)
+        agent = self._make_agent_with_session_logging(
+            backend, tmp_path, build_config, load_orchestrator
+        )
         session_id = "test-session-load-usage"
         self._make_session_dir(tmp_path, session_id, str(Path.cwd()))
 

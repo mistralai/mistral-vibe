@@ -1,34 +1,45 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from tests.acp.conftest import _create_acp_agent
-from vibe.core.config import MissingAPIKeyError, SessionLoggingConfig
+from tests.conftest import OrchestratorLoader, build_test_vibe_config
+from vibe.acp.exceptions import UnauthenticatedError
+from vibe.core.config import MissingAPIKeyError, SessionLoggingConfig, VibeConfigSchema
 
 
 class TestListSessions:
     @pytest.mark.asyncio
-    async def test_list_sessions_empty(self, temp_session_dir: Path) -> None:
+    async def test_list_sessions_empty(
+        self,
+        temp_session_dir: Path,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
         acp_agent = _create_acp_agent()
 
         session_config = SessionLoggingConfig(
             save_dir=str(temp_session_dir), session_prefix="session", enabled=True
         )
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.load") as mock_load:
-            mock_config = mock_load.return_value
-            mock_config.session_logging = session_config
-
+        orchestrator = load_orchestrator(
+            build_test_vibe_config(session_logging=session_config)
+        )
+        with patch.object(
+            acp_agent, "_load_orchestrator", AsyncMock(return_value=orchestrator)
+        ):
             response = await acp_agent.list_sessions()
 
         assert response.sessions == []
 
     @pytest.mark.asyncio
     async def test_list_sessions_returns_all_sessions(
-        self, temp_session_dir: Path, create_test_session
+        self,
+        temp_session_dir: Path,
+        create_test_session,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         acp_agent = _create_acp_agent()
 
@@ -51,10 +62,12 @@ class TestListSessions:
             save_dir=str(temp_session_dir), session_prefix="session", enabled=True
         )
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.load") as mock_load:
-            mock_config = mock_load.return_value
-            mock_config.session_logging = session_config
-
+        orchestrator = load_orchestrator(
+            build_test_vibe_config(session_logging=session_config)
+        )
+        with patch.object(
+            acp_agent, "_load_orchestrator", AsyncMock(return_value=orchestrator)
+        ):
             response = await acp_agent.list_sessions()
 
         assert len(response.sessions) == 2
@@ -64,7 +77,10 @@ class TestListSessions:
 
     @pytest.mark.asyncio
     async def test_list_sessions_filters_by_cwd(
-        self, temp_session_dir: Path, create_test_session
+        self,
+        temp_session_dir: Path,
+        create_test_session,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         acp_agent = _create_acp_agent()
 
@@ -91,10 +107,12 @@ class TestListSessions:
             save_dir=str(temp_session_dir), session_prefix="session", enabled=True
         )
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.load") as mock_load:
-            mock_config = mock_load.return_value
-            mock_config.session_logging = session_config
-
+        orchestrator = load_orchestrator(
+            build_test_vibe_config(session_logging=session_config)
+        )
+        with patch.object(
+            acp_agent, "_load_orchestrator", AsyncMock(return_value=orchestrator)
+        ):
             response = await acp_agent.list_sessions(cwd="/home/user/project1")
 
         assert len(response.sessions) == 2
@@ -103,7 +121,10 @@ class TestListSessions:
 
     @pytest.mark.asyncio
     async def test_list_sessions_sorted_by_updated_at(
-        self, temp_session_dir: Path, create_test_session
+        self,
+        temp_session_dir: Path,
+        create_test_session,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         acp_agent = _create_acp_agent()
 
@@ -133,10 +154,12 @@ class TestListSessions:
             save_dir=str(temp_session_dir), session_prefix="session", enabled=True
         )
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.load") as mock_load:
-            mock_config = mock_load.return_value
-            mock_config.session_logging = session_config
-
+        orchestrator = load_orchestrator(
+            build_test_vibe_config(session_logging=session_config)
+        )
+        with patch.object(
+            acp_agent, "_load_orchestrator", AsyncMock(return_value=orchestrator)
+        ):
             response = await acp_agent.list_sessions()
 
         assert len(response.sessions) == 3
@@ -147,7 +170,10 @@ class TestListSessions:
 
     @pytest.mark.asyncio
     async def test_list_sessions_includes_session_info_fields(
-        self, temp_session_dir: Path, create_test_session
+        self,
+        temp_session_dir: Path,
+        create_test_session,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         acp_agent = _create_acp_agent()
 
@@ -163,10 +189,12 @@ class TestListSessions:
             save_dir=str(temp_session_dir), session_prefix="session", enabled=True
         )
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.load") as mock_load:
-            mock_config = mock_load.return_value
-            mock_config.session_logging = session_config
-
+        orchestrator = load_orchestrator(
+            build_test_vibe_config(session_logging=session_config)
+        )
+        with patch.object(
+            acp_agent, "_load_orchestrator", AsyncMock(return_value=orchestrator)
+        ):
             response = await acp_agent.list_sessions()
 
         assert len(response.sessions) == 1
@@ -180,7 +208,10 @@ class TestListSessions:
 
     @pytest.mark.asyncio
     async def test_list_sessions_skips_invalid_sessions(
-        self, temp_session_dir: Path, create_test_session
+        self,
+        temp_session_dir: Path,
+        create_test_session,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
         acp_agent = _create_acp_agent()
 
@@ -205,27 +236,33 @@ class TestListSessions:
             save_dir=str(temp_session_dir), session_prefix="session", enabled=True
         )
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.load") as mock_load:
-            mock_config = mock_load.return_value
-            mock_config.session_logging = session_config
-
+        orchestrator = load_orchestrator(
+            build_test_vibe_config(session_logging=session_config)
+        )
+        with patch.object(
+            acp_agent, "_load_orchestrator", AsyncMock(return_value=orchestrator)
+        ):
             response = await acp_agent.list_sessions()
 
         assert len(response.sessions) == 1
         assert response.sessions[0].session_id == "valid-se"
 
     @pytest.mark.asyncio
-    async def test_list_sessions_nonexistent_save_dir(self) -> None:
+    async def test_list_sessions_nonexistent_save_dir(
+        self, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+    ) -> None:
         acp_agent = _create_acp_agent()
 
         session_config = SessionLoggingConfig(
             save_dir="/nonexistent/path", session_prefix="session", enabled=True
         )
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.load") as mock_load:
-            mock_config = mock_load.return_value
-            mock_config.session_logging = session_config
-
+        orchestrator = load_orchestrator(
+            build_test_vibe_config(session_logging=session_config)
+        )
+        with patch.object(
+            acp_agent, "_load_orchestrator", AsyncMock(return_value=orchestrator)
+        ):
             response = await acp_agent.list_sessions()
 
         assert response.sessions == []
@@ -234,9 +271,15 @@ class TestListSessions:
     async def test_list_sessions_without_api_key(self) -> None:
         acp_agent = _create_acp_agent()
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.load") as mock_load:
-            mock_load.side_effect = MissingAPIKeyError("api_key", "mistral")
-
+        with patch.object(
+            acp_agent,
+            "_load_orchestrator",
+            AsyncMock(
+                side_effect=UnauthenticatedError.from_missing_api_key(
+                    MissingAPIKeyError("api_key", "mistral")
+                )
+            ),
+        ):
             response = await acp_agent.list_sessions()
 
         assert response.sessions == []

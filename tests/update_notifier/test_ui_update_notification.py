@@ -23,20 +23,20 @@ from vibe.cli.update_notifier import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 
 TEST_CURRENT_VERSION = "0.1.0"
 
 
 @pytest.fixture
 def build_update_test_app(
-    vibe_config_with_update_checks_enabled: VibeConfig,
+    vibe_config_with_update_checks_enabled: VibeConfigSchema,
 ) -> Callable[..., VibeApp]:
     def _build(
         *,
         update_notifier: UpdateGateway | None = None,
         update_cache_repository: UpdateCacheRepository | None = None,
-        config: VibeConfig | None = None,
+        config: VibeConfigSchema | None = None,
         current_version: str = TEST_CURRENT_VERSION,
     ) -> VibeApp:
         return build_test_vibe_app(
@@ -64,7 +64,7 @@ async def _assert_no_notifications(
 
 
 @pytest.fixture
-def vibe_config_with_update_checks_enabled() -> VibeConfig:
+def vibe_config_with_update_checks_enabled() -> VibeConfigSchema:
     return build_test_vibe_config(enable_update_checks=True)
 
 
@@ -113,7 +113,7 @@ async def test_ui_does_not_notify_when_gateway_errors(
 
 @pytest.mark.asyncio
 async def test_ui_does_not_invoke_gateway_nor_show_error_notification_when_update_checks_are_disabled(
-    build_update_test_app: Callable[..., VibeApp], vibe_config: VibeConfig
+    build_update_test_app: Callable[..., VibeApp], vibe_config: VibeConfigSchema
 ) -> None:
     notifier = FakeUpdateGateway(update=Update(latest_version="0.2.0"))
     app = build_update_test_app(update_notifier=notifier, config=vibe_config)

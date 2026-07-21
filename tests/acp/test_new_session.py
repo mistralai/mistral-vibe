@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from acp import NewSessionResponse
 import pytest
 import tomli_w
 
 from tests.acp.conftest import _create_acp_agent
-from tests.conftest import build_test_vibe_config, get_base_config
+from tests.conftest import ConfigBuilder, OrchestratorLoader, get_base_config
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import ModelConfig
+from vibe.core.config import ModelConfig, SessionLoggingConfig, VibeConfigSchema
 from vibe.core.feedback import _CACHE_SECTION, _LAST_SHOWN_KEY, record_feedback_asked
 from vibe.core.trusted_folders import trusted_folders_manager
 
@@ -33,27 +33,38 @@ def _workspace_trust_meta(session_response: NewSessionResponse) -> dict:
 
 
 @pytest.fixture
-def acp_agent_loop(backend) -> VibeAcpAgentLoop:
-    config = build_test_vibe_config(
-        active_model="devstral-latest",
-        include_project_context=True,
-        models=[
-            ModelConfig(
-                name="devstral-latest", provider="mistral", alias="devstral-latest"
-            ),
-            ModelConfig(
-                name="devstral-small", provider="mistral", alias="devstral-small"
-            ),
-        ],
+def acp_agent_loop(
+    backend,
+    monkeypatch: pytest.MonkeyPatch,
+    build_config: ConfigBuilder,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> VibeAcpAgentLoop:
+    orchestrator = load_orchestrator(
+        build_config(
+            active_model="devstral-latest",
+            include_project_context=True,
+            session_logging=SessionLoggingConfig(enabled=True),
+            models=[
+                ModelConfig(
+                    name="devstral-latest", provider="mistral", alias="devstral-latest"
+                ),
+                ModelConfig(
+                    name="devstral-small", provider="mistral", alias="devstral-small"
+                ),
+            ],
+        )
     )
 
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
-    patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()
+    async def _load_orchestrator(self: VibeAcpAgentLoop):
+        return orchestrator
+
+    monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)
+    monkeypatch.setattr(VibeAcpAgentLoop, "_load_orchestrator", _load_orchestrator)
 
     return _create_acp_agent()
 
@@ -383,25 +394,32 @@ class TestACPNewSession:
 
 @pytest.mark.asyncio
 async def test_new_session_honors_default_agent(
-    backend, monkeypatch: pytest.MonkeyPatch
+    backend,
+    monkeypatch: pytest.MonkeyPatch,
+    build_config: ConfigBuilder,
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
-    config = build_test_vibe_config(
-        default_agent=BuiltinAgentName.PLAN,
-        models=[
-            ModelConfig(
-                name="devstral-latest", provider="mistral", alias="devstral-latest"
-            )
-        ],
+    orchestrator = load_orchestrator(
+        build_config(
+            default_agent=BuiltinAgentName.PLAN,
+            models=[
+                ModelConfig(
+                    name="devstral-latest", provider="mistral", alias="devstral-latest"
+                )
+            ],
+        )
     )
 
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
+    async def _load_orchestrator(self: VibeAcpAgentLoop):
+        return orchestrator
+
     monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)
-    monkeypatch.setattr(VibeAcpAgentLoop, "_load_config", lambda self: config)
+    monkeypatch.setattr(VibeAcpAgentLoop, "_load_orchestrator", _load_orchestrator)
 
     acp_agent_loop = _create_acp_agent()
 

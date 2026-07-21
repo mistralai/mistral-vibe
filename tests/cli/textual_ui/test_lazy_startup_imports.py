@@ -122,12 +122,26 @@ def test_constructing_deferred_agent_loop_does_not_import_mcp_package(
 import sys
 
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.config import SessionLoggingConfig, VibeConfigSchema
 from vibe.core.config.harness_files import (
     init_harness_files_manager,
     reset_harness_files_manager,
 )
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+
+
+class _Orchestrator:
+    def __init__(self, config):
+        self._config = config
+
+    @property
+    def config(self):
+        return self._config
+
+    async def set_field(self, *args, **kwargs):
+        return []
+
+    async def reload(self):
+        return None
 
 
 class Backend:
@@ -140,12 +154,12 @@ class Backend:
 
 init_harness_files_manager("user", "project")
 try:
-    config = VibeConfig(
+    config = VibeConfigSchema(
         enable_connectors=False,
         session_logging=SessionLoggingConfig(enabled=False),
     )
     loop = AgentLoop(
-        config_orchestrator=LegacyConfigOrchestrator(config),
+        _Orchestrator(config),
         backend=Backend(),
         defer_heavy_init=True,
         headless=True,

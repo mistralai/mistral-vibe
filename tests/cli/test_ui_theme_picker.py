@@ -23,8 +23,7 @@ async def test_theme_opens_theme_picker() -> None:
 
 @pytest.mark.asyncio
 async def test_theme_picker_lists_themes_and_marks_current() -> None:
-    config = build_test_vibe_config()
-    config.theme = "dracula"
+    config = build_test_vibe_config(theme="dracula")
     app = build_test_vibe_app(config=config)
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
@@ -39,8 +38,7 @@ async def test_theme_picker_lists_themes_and_marks_current() -> None:
 
 @pytest.mark.asyncio
 async def test_theme_picker_escape_restores_original_theme() -> None:
-    config = build_test_vibe_config()
-    config.theme = "ansi-dark"
+    config = build_test_vibe_config(theme="ansi-dark")
     app = build_test_vibe_app(config=config)
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
@@ -68,8 +66,7 @@ async def test_theme_picker_escape_restores_original_theme() -> None:
 
 @pytest.mark.asyncio
 async def test_theme_picker_select_persists_and_applies() -> None:
-    config = build_test_vibe_config()
-    config.theme = "ansi-dark"
+    config = build_test_vibe_config(theme="ansi-dark")
     app = build_test_vibe_app(config=config)
     async with app.run_test() as pilot:
         await pilot.pause(0.1)
@@ -97,14 +94,14 @@ async def test_theme_picker_select_persists_and_applies() -> None:
         assert len(app.query(ThemePickerApp)) == 0
         assert app.config.theme == target
         assert app.theme == target
+        assert app.agent_loop.config_orchestrator.config.theme == target
 
 
 @pytest.mark.asyncio
 async def test_theme_picker_jk_moves_cursor() -> None:
     from textual.widgets import OptionList
 
-    config = build_test_vibe_config()
-    config.theme = "ansi-dark"
+    config = build_test_vibe_config(theme="ansi-dark")
     app = build_test_vibe_app(config=config)
     async with app.run_test() as pilot:
         await pilot.pause(0.1)

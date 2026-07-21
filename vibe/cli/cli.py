@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 from rich import print as rprint
 from rich.console import Console
-import tomli_w
 
 from vibe import __version__
 from vibe.cli.terminal_detect import detect_terminal
@@ -26,9 +25,10 @@ from vibe.cli.update_notifier import (
 )
 from vibe.core.agent_loop import AgentLoop, TeleportError
 from vibe.core.cache_store import FileSystemVibeCodeCacheStore
-from vibe.core.config import MissingAPIKeyError, VibeConfig, load_dotenv_values
-from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.config import MissingAPIKeyError, VibeConfigSchema, load_dotenv_values
+from vibe.core.config.default_orchestrator import build_default_orchestrator
+from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.patch import AddOperationPatch, PatchOp
 from vibe.core.hooks.config import HookConfigResult, load_hooks_from_fs
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE, WORKTREES_DIR
@@ -60,7 +60,7 @@ def _build_cli_launch_context() -> LaunchContext:
     )
 
 
-def get_initial_agent_name(args: argparse.Namespace, config: VibeConfig) -> str:
+def get_initial_agent_name(args: argparse.Namespace, config: VibeConfigSchema) -> str:
     return args.agent or config.default_agent
 
 
@@ -88,9 +88,11 @@ def _format_config_validation_error(exc: ValidationError) -> str:
     return "\n".join(lines)
 
 
-def load_config_or_exit(*, interactive: bool) -> VibeConfig:
+def load_config_orchestrator_or_exit(
+    *, interactive: bool
+) -> ConfigOrchestrator[VibeConfigSchema]:
     try:
-        return VibeConfig.load()
+        return asyncio.run(build_default_orchestrator())
     except MissingAPIKeyError as e:
         if not interactive:
             print(
@@ -102,8 +104,7 @@ def load_config_or_exit(*, interactive: bool) -> VibeConfig:
 
         from vibe.setup.onboarding import run_onboarding
 
-        run_onboarding(launch_context=_build_cli_launch_context())
-        return VibeConfig.load()
+        return run_onboarding(launch_context=_build_cli_launch_context())
     except ValidationError as e:
         rprint(f"[yellow]{_format_config_validation_error(e)}[/]")
         sys.exit(1)
@@ -133,16 +134,6 @@ def warn_if_workdir_trust_is_unset() -> None:
 
 
 def bootstrap_config_files() -> None:
-    mgr = get_harness_files_manager()
-    config_file = mgr.user_config_file
-    if not config_file.exists():
-        try:
-            config_file.parent.mkdir(parents=True, exist_ok=True)
-            with config_file.open("wb") as f:
-                tomli_w.dump(VibeConfig.create_default(), f)
-        except Exception as e:
-            rprint(f"[yellow]Could not create default config file: {e}[/]")
-
     history_file = HISTORY_FILE.path
     if not history_file.exists():
         try:
@@ -153,7 +144,7 @@ def bootstrap_config_files() -> None:
 
 
 def load_session(
-    args: argparse.Namespace, config: VibeConfig
+    args: argparse.Namespace, config: VibeConfigSchema
 ) -> tuple[list[LLMMessage], Path] | None:
     if not args.continue_session and not args.resume:
         return None
@@ -226,7 +217,7 @@ def _resume_previous_session(
     )
 
 
-async def _resolve_programmatic_teleport_project(config: VibeConfig) -> str:
+async def _resolve_programmatic_teleport_project(config: VibeConfigSchema) -> str:
     from vibe.core.teleport.git import GitRepository
     from vibe.core.vibe_code_project import (
         VibeCodeProjectApiError,
@@ -251,25 +242,31 @@ async def _resolve_programmatic_teleport_project(config: VibeConfig) -> str:
 
 def _run_programmatic_mode(
     args: argparse.Namespace,
-    config: VibeConfig,
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
     initial_agent_name: str,
     hook_config_result: HookConfigResult,
     loaded_session: tuple[list[LLMMessage], Path] | None,
     stdin_prompt: str | None,
 ) -> None:
     warn_if_workdir_trust_is_unset()
-    config.disabled_tools = [
-        *config.disabled_tools,
-        "ask_user_question",
-        "exit_plan_mode",
-    ]
+    asyncio.run(
+        orchestrator.set_field(
+            "/disabled_tools",
+            [
+                *orchestrator.config.disabled_tools,
+                "ask_user_question",
+                "exit_plan_mode",
+            ],
+            target_layer="overrides",
+        )
+    )
     programmatic_prompt = args.prompt or stdin_prompt
     if not programmatic_prompt:
         print("Error: No prompt provided for programmatic mode", file=sys.stderr)
         sys.exit(1)
     output_format = OutputFormat(args.output if hasattr(args, "output") else "text")
 
-    teleport = args.teleport and config.vibe_code_enabled
+    teleport = args.teleport and orchestrator.config.vibe_code_enabled
     teleport_project_id: str | None = None
     if teleport:
         from vibe.core.teleport.errors import ServiceTeleportError
@@ -280,7 +277,7 @@ def _run_programmatic_mode(
 
         try:
             teleport_project_id = asyncio.run(
-                _resolve_programmatic_teleport_project(config)
+                _resolve_programmatic_teleport_project(orchestrator.config)
             )
         except (
             VibeCodeProjectApiError,
@@ -294,7 +291,7 @@ def _run_programmatic_mode(
 
     try:
         final_response = run_programmatic(
-            config=config,
+            orchestrator=orchestrator,
             prompt=programmatic_prompt or "",
             max_turns=args.max_turns,
             max_price=args.max_price,
@@ -324,7 +321,7 @@ def _run_programmatic_mode(
 
 def _run_interactive_mode(
     args: argparse.Namespace,
-    config: VibeConfig,
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
     initial_agent_name: str,
     hook_config_result: HookConfigResult,
     loaded_session: tuple[list[LLMMessage], Path] | None,
@@ -335,7 +332,7 @@ def _run_interactive_mode(
 
     try:
         agent_loop = AgentLoop(
-            LegacyConfigOrchestrator(config),
+            orchestrator,
             agent_name=initial_agent_name,
             enable_streaming=True,
             launch_context=_build_cli_launch_context(),
@@ -405,7 +402,7 @@ def _show_update_prompt(
 
 
 def _maybe_run_startup_update_prompt(
-    config: VibeConfig, repository: UpdateCacheRepository
+    config: VibeConfigSchema, repository: UpdateCacheRepository
 ) -> None:
     if not config.enable_update_checks:
         return
@@ -498,29 +495,55 @@ def run_cli(
             sys.exit(0)
 
         is_interactive = args.prompt is None
-        config = load_config_or_exit(interactive=is_interactive)
-
+        orchestrator = load_config_orchestrator_or_exit(interactive=is_interactive)
         if is_interactive:
-            _maybe_run_startup_update_prompt(config, update_cache_repository)
+            _maybe_run_startup_update_prompt(
+                orchestrator.config, update_cache_repository
+            )
             if resolve_trusted_folder is not None:
                 resolve_trusted_folder()
-                config = load_config_or_exit(interactive=True)
-
+                orchestrator = load_config_orchestrator_or_exit(interactive=True)
+        config = orchestrator.config
         sentry_enabled = init_sentry(
             config,
             headless=not is_interactive,
             launch_context=_build_cli_launch_context(),
         )
         initial_agent_name = get_initial_agent_name(args, config)
+
+        override_ops: list[PatchOp] = []
         if args.auto_approve:
-            config.bypass_tool_permissions = True
+            override_ops.append(
+                AddOperationPatch(
+                    path="/bypass_tool_permissions",
+                    value=True,
+                    target_layer_name="overrides",
+                )
+            )
+        if args.enabled_tools:
+            override_ops.append(
+                AddOperationPatch(
+                    path="/enabled_tools",
+                    value=args.enabled_tools,
+                    target_layer_name="overrides",
+                )
+            )
+        if args.disabled_tools:
+            override_ops.append(
+                AddOperationPatch(
+                    path="/disabled_tools",
+                    value=[*config.disabled_tools, *args.disabled_tools],
+                    target_layer_name="overrides",
+                )
+            )
+        if override_ops:
+            asyncio.run(
+                orchestrator.apply_patch(override_ops, reason="cli startup overrides")
+            )
+
+        config = orchestrator.config
         hook_config_result = load_hooks_from_fs()
         setup_tracing(config)
-
-        if args.enabled_tools:
-            config.enabled_tools = args.enabled_tools
-        if args.disabled_tools:
-            config.disabled_tools = [*config.disabled_tools, *args.disabled_tools]
 
         loaded_session = load_session(args, config)
 
@@ -528,7 +551,7 @@ def run_cli(
         if is_interactive:
             _run_interactive_mode(
                 args=args,
-                config=config,
+                orchestrator=orchestrator,
                 initial_agent_name=initial_agent_name,
                 hook_config_result=hook_config_result,
                 loaded_session=loaded_session,
@@ -538,7 +561,7 @@ def run_cli(
         else:
             _run_programmatic_mode(
                 args=args,
-                config=config,
+                orchestrator=orchestrator,
                 initial_agent_name=initial_agent_name,
                 hook_config_result=hook_config_result,
                 loaded_session=loaded_session,

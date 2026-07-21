@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import OrchestratorLoader, build_test_vibe_config
 from vibe.core.agents import AgentManager
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.config import VibeConfigSchema
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
@@ -137,16 +137,20 @@ def test_session_metadata_round_trips_experiments_field() -> None:
     assert restored.experiments == response
 
 
-def _build_managers(config):
+def _build_managers(
+    config: VibeConfigSchema, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+):
     return (
         ToolManager(lambda: config),
         SkillManager(lambda: config),
-        AgentManager(LegacyConfigOrchestrator(config)),
+        AgentManager(load_orchestrator(config)),
     )
 
 
 @pytest.mark.asyncio
-async def test_graduated_experiment_with_deleted_variant_file_falls_back() -> None:
+async def test_graduated_experiment_with_deleted_variant_file_falls_back(
+    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+) -> None:
     config = build_test_vibe_config(
         system_prompt_id="cli", include_model_info=False, include_commit_signature=False
     )
@@ -154,7 +158,9 @@ async def test_graduated_experiment_with_deleted_variant_file_falls_back() -> No
     manager = ExperimentManager(client=_StubClient(None))
     manager.hydrate(response)
 
-    tool_manager, skill_manager, agent_manager = _build_managers(config)
+    tool_manager, skill_manager, agent_manager = _build_managers(
+        config, load_orchestrator
+    )
     prompt = get_universal_system_prompt(
         tool_manager, config, skill_manager, agent_manager, experiment_manager=manager
     )

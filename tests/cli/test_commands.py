@@ -11,6 +11,7 @@ class TestCommandRegistry:
         assert registry.get_command_name("/model") == "model"
         assert registry.get_command_name("/connectors") == "mcp"
         assert registry.get_command_name("/clear") == "clear"
+        assert registry.get_command_name("/new") == "clear"
         assert registry.get_command_name("/exit") == "exit"
         assert registry.get_command_name("/data-retention") == "data-retention"
 
@@ -38,6 +39,14 @@ class TestCommandRegistry:
     def test_parse_command_returns_none_when_no_match(self) -> None:
         registry = CommandRegistry()
         assert registry.parse_command("/nonexistent") is None
+
+    def test_new_alias_clears_conversation_history(self) -> None:
+        registry = CommandRegistry()
+
+        result = registry.parse_command("/new")
+
+        assert result == ("clear", registry.commands["clear"], "")
+        assert registry.commands["clear"].handler == "_clear_history"
 
     def test_parse_command_uses_get_command_name(self) -> None:
         """parse_command and get_command_name stay in sync for same input."""

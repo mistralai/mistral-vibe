@@ -30,7 +30,7 @@ from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
-    from vibe.core.config import AnyVibeConfig
+    from vibe.core.config import VibeConfigSchema
     from vibe.core.hooks.models import HookConfigResult
     from vibe.core.skills.manager import SkillManager
     from vibe.core.telemetry.types import LaunchContext
@@ -370,7 +370,7 @@ class BaseTool[
         return snake_case
 
     @classmethod
-    def is_available(cls, config: AnyVibeConfig | None = None) -> bool:
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
         return True
 
     @classmethod

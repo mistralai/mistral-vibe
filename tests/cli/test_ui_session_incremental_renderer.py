@@ -20,13 +20,13 @@ from vibe.cli.textual_ui.windowing import (
     HISTORY_RESUME_TAIL_MESSAGES,
     LOAD_MORE_BATCH_SIZE,
 )
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.config import SessionLoggingConfig, VibeConfigSchema
 from vibe.core.types import LLMMessage, Role
 
 
 @pytest.fixture
-def vibe_config() -> VibeConfig:
-    return VibeConfig(
+def vibe_config(make_config) -> VibeConfigSchema:
+    return make_config(
         session_logging=SessionLoggingConfig(enabled=False), enable_update_checks=False
     )
 
@@ -65,7 +65,7 @@ def _load_more_remaining(app: VibeApp) -> int:
 
 @pytest.mark.asyncio
 async def test_ui_mount_defers_history_resume(
-    vibe_config: VibeConfig, monkeypatch: pytest.MonkeyPatch
+    vibe_config: VibeConfigSchema, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
     app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
@@ -109,7 +109,7 @@ async def test_ui_mount_defers_history_resume(
 
 @pytest.mark.asyncio
 async def test_ui_session_incremental_loader_shows_tail_and_load_more(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ) -> None:
     agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
     agent_loop.messages.extend([
@@ -134,7 +134,7 @@ async def test_ui_session_incremental_loader_shows_tail_and_load_more(
 
 @pytest.mark.asyncio
 async def test_ui_session_incremental_loader_load_more_shows_remaining_count(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ) -> None:
     total_messages = 31
     agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
@@ -167,7 +167,7 @@ async def test_ui_session_incremental_loader_load_more_shows_remaining_count(
 
 @pytest.mark.asyncio
 async def test_ui_session_incremental_loader_load_more_batches_until_done(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ) -> None:
     agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
     agent_loop.messages.extend([
@@ -202,7 +202,7 @@ async def test_ui_session_incremental_loader_load_more_batches_until_done(
 
 @pytest.mark.asyncio
 async def test_ui_session_incremental_loader_keeps_top_alignment_when_not_scrollable(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ) -> None:
     agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
     agent_loop.messages.extend([
@@ -229,7 +229,7 @@ async def test_ui_session_incremental_loader_keeps_top_alignment_when_not_scroll
 
 @pytest.mark.asyncio
 async def test_chat_scroll_does_not_reanchor_during_text_selection(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ) -> None:
     agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
     agent_loop.messages.extend([

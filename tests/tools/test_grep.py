@@ -7,6 +7,7 @@ import pytest
 from tests.mock.utils import collect_result
 from vibe.core.tools.base import BaseToolState, ToolError
 from vibe.core.tools.builtins.grep import Grep, GrepArgs, GrepBackend, GrepToolConfig
+from vibe.core.utils import io as io_utils
 
 
 @pytest.fixture
@@ -94,7 +95,18 @@ async def test_returns_empty_on_no_matches(grep, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_preserves_accents_when_matching_latin1_encoded_file(grep, tmp_path):
+async def test_preserves_accents_when_matching_latin1_encoded_file(
+    grep, tmp_path, monkeypatch
+):
+    # Pin a UTF-8 locale (production reality on Linux CI) and a deterministic
+    # charset_normalizer result. Without this, decode_safe falls back to
+    # charset_normalizer's heuristic, which is unreliable for the single
+    # non-ASCII byte ripgrep emits — it can misdetect (e.g. cp1006, which
+    # decodes \xe9 to ﻠ instead of é) depending on the platform wheel.
+    monkeypatch.setattr(
+        io_utils.locale, "getpreferredencoding", lambda _do_setlocale: "utf-8"
+    )
+    monkeypatch.setattr(io_utils, "_encoding_from_best_match", lambda _raw: "cp1252")
     (tmp_path / "menu.txt").write_bytes("café au lait\nthé glacé\n".encode("latin-1"))
 
     result = await collect_result(

@@ -14,7 +14,7 @@ from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_tool import FakeTool
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.hooks.manager import HooksManager
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.builtins.todo import TodoItem
@@ -37,7 +37,9 @@ async def act_and_collect_events(agent_loop: AgentLoop, prompt: str) -> list[Bas
     return [ev async for ev in agent_loop.act(prompt)]
 
 
-def make_config(todo_permission: ToolPermission = ToolPermission.ALWAYS) -> VibeConfig:
+def make_config(
+    todo_permission: ToolPermission = ToolPermission.ALWAYS,
+) -> VibeConfigSchema:
     return build_test_vibe_config(
         enabled_tools=["todo"], tools={"todo": {"permission": todo_permission.value}}
     )

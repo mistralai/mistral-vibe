@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.conftest import build_test_agent_loop
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe.core.agent_loop import AgentLoop, TeleportError
@@ -35,9 +35,7 @@ def _set_teleport_service(agent_loop: AgentLoop, service: object) -> None:
 class TestTeleportAgentLoopTelemetry:
     @pytest.mark.asyncio
     async def test_teleport_to_vibe_code_summarizes_context(
-        self,
-        agent_loop_with_context_summary: AgentLoop,
-        telemetry_events: list[dict[str, Any]],
+        self, agent_loop: AgentLoop, telemetry_events: list[dict[str, Any]]
     ) -> None:
         class FakeTeleportService:
             message_context: TeleportMessageContext | None = None
@@ -59,23 +57,14 @@ class TestTeleportAgentLoopTelemetry:
                 yield TeleportCompleteEvent(url="https://chat.example.com/123")
 
         service = FakeTeleportService()
-        agent_loop_with_context_summary.messages.append(
-            LLMMessage(role=Role.user, content="hello")
-        )
-        agent_loop_with_context_summary.messages.append(
-            LLMMessage(role=Role.assistant, content="done")
-        )
-        agent_loop_with_context_summary._summarize_teleport_context = AsyncMock(
+        agent_loop.messages.append(LLMMessage(role=Role.user, content="hello"))
+        agent_loop.messages.append(LLMMessage(role=Role.assistant, content="done"))
+        agent_loop._summarize_teleport_context = AsyncMock(
             return_value="Prior CLI context"
         )
-        _set_teleport_service(agent_loop_with_context_summary, service)
+        _set_teleport_service(agent_loop, service)
 
-        events = [
-            event
-            async for event in agent_loop_with_context_summary.teleport_to_vibe_code(
-                None
-            )
-        ]
+        events = [event async for event in agent_loop.teleport_to_vibe_code(None)]
 
         assert isinstance(events[0], TeleportSummarizingContextEvent)
         assert service.message_context is not None
@@ -88,7 +77,7 @@ class TestTeleportAgentLoopTelemetry:
             "nb_session_messages": 2,
             "context_summary": "generated",
             "context_summary_chars": 17,
-            "session_id": agent_loop_with_context_summary.session_id,
+            "session_id": agent_loop.session_id,
         }.items() <= telemetry_events[-1]["properties"].items()
 
     @pytest.mark.asyncio
@@ -115,13 +104,12 @@ class TestTeleportAgentLoopTelemetry:
                 yield TeleportCompleteEvent(url="https://chat.example.com/123")
 
         agent_loop = build_test_agent_loop(
-            config=build_test_vibe_config(experimental_teleport_context_summary=True),
             launch_context=LaunchContext(
                 agent_entrypoint="acp",
                 agent_version="1.0.0",
                 client_name="mistral-vibe-vscode",
                 client_version="2.19.1",
-            ),
+            )
         )
         service = FakeTeleportService()
         agent_loop.messages.append(LLMMessage(role=Role.user, content="hello"))
@@ -140,7 +128,7 @@ class TestTeleportAgentLoopTelemetry:
 
     @pytest.mark.asyncio
     async def test_teleport_to_vibe_code_summarizes_image_only_context(
-        self, agent_loop_with_context_summary: AgentLoop
+        self, agent_loop: AgentLoop
     ) -> None:
         class FakeTeleportService:
             message_context: TeleportMessageContext | None = None
@@ -167,26 +155,17 @@ class TestTeleportAgentLoopTelemetry:
             alias="screenshot.png",
             mime_type="image/png",
         )
-        agent_loop_with_context_summary.messages.append(
+        agent_loop.messages.append(
             LLMMessage(role=Role.user, content="", images=[image])
         )
-        agent_loop_with_context_summary.messages.append(
-            LLMMessage(role=Role.assistant, content="done")
-        )
-        agent_loop_with_context_summary.messages.append(
-            LLMMessage(role=Role.user, content="continue")
-        )
-        agent_loop_with_context_summary._summarize_teleport_context = AsyncMock(
+        agent_loop.messages.append(LLMMessage(role=Role.assistant, content="done"))
+        agent_loop.messages.append(LLMMessage(role=Role.user, content="continue"))
+        agent_loop._summarize_teleport_context = AsyncMock(
             return_value="Prior image context"
         )
-        _set_teleport_service(agent_loop_with_context_summary, service)
+        _set_teleport_service(agent_loop, service)
 
-        events = [
-            event
-            async for event in agent_loop_with_context_summary.teleport_to_vibe_code(
-                None
-            )
-        ]
+        events = [event async for event in agent_loop.teleport_to_vibe_code(None)]
 
         assert isinstance(events[0], TeleportSummarizingContextEvent)
         assert service.message_context is not None
@@ -194,9 +173,7 @@ class TestTeleportAgentLoopTelemetry:
 
     @pytest.mark.asyncio
     async def test_teleport_to_vibe_code_continues_without_overlong_summary(
-        self,
-        agent_loop_with_context_summary: AgentLoop,
-        telemetry_events: list[dict[str, Any]],
+        self, agent_loop: AgentLoop, telemetry_events: list[dict[str, Any]]
     ) -> None:
         class FakeTeleportService:
             message_context: TeleportMessageContext | None = None
@@ -218,23 +195,14 @@ class TestTeleportAgentLoopTelemetry:
                 yield TeleportCompleteEvent(url="https://chat.example.com/123")
 
         service = FakeTeleportService()
-        agent_loop_with_context_summary.messages.append(
-            LLMMessage(role=Role.user, content="hello")
-        )
-        agent_loop_with_context_summary.messages.append(
-            LLMMessage(role=Role.assistant, content="done")
-        )
-        agent_loop_with_context_summary._summarize_teleport_context = AsyncMock(
+        agent_loop.messages.append(LLMMessage(role=Role.user, content="hello"))
+        agent_loop.messages.append(LLMMessage(role=Role.assistant, content="done"))
+        agent_loop._summarize_teleport_context = AsyncMock(
             return_value="x" * (TELEPORT_MESSAGE_CONTEXT_MAX_LENGTH + 1)
         )
-        _set_teleport_service(agent_loop_with_context_summary, service)
+        _set_teleport_service(agent_loop, service)
 
-        events = [
-            event
-            async for event in agent_loop_with_context_summary.teleport_to_vibe_code(
-                None
-            )
-        ]
+        events = [event async for event in agent_loop.teleport_to_vibe_code(None)]
 
         assert isinstance(events[0], TeleportSummarizingContextEvent)
         assert isinstance(events[-1], TeleportCompleteEvent)
@@ -243,7 +211,7 @@ class TestTeleportAgentLoopTelemetry:
         assert {
             "context_summary": "failed",
             "context_summary_chars": None,
-            "session_id": agent_loop_with_context_summary.session_id,
+            "session_id": agent_loop.session_id,
         }.items() <= telemetry_events[-1]["properties"].items()
 
     @pytest.mark.asyncio

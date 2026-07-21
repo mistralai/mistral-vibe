@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import signal
 import sys
-from typing import Any, Protocol, cast, override
+from typing import Annotated, Any, Literal, Protocol, cast, override
 from uuid import uuid4
 
 from acp import (
@@ -134,17 +134,19 @@ from vibe.core.agent_loop import (
 from vibe.core.agents.models import CHAT as CHAT_AGENT
 from vibe.core.auth import MCPOAuthError
 from vibe.core.cache_store import FileSystemVibeCodeCacheStore
+from vibe.core.checkpoints import AgentTurn, Decision, ManualEdit, OpaqueReason, Owner
 from vibe.core.config import (
-    AnyVibeConfig,
     MissingAPIKeyError,
     ProviderConfig,
     SessionLoggingConfig,
-    VibeConfig,
     VibeConfigSchema,
+    get_persisted_config,
     load_dotenv_values,
 )
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
-from vibe.core.config.patch import escape_json_pointer_token
+from vibe.core.config.default_orchestrator import build_default_orchestrator
+from vibe.core.config.layers.overrides import OverridesLayer
+from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.patch import AddOperationPatch, PatchOp, escape_json_pointer_token
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.feedback import record_feedback_asked, should_show_feedback
 from vibe.core.hooks.config import load_hooks_from_fs
@@ -154,6 +156,22 @@ from vibe.core.proxy_setup import (
     parse_proxy_command,
     set_proxy_var,
     unset_proxy_var,
+)
+from vibe.core.review import (
+    AllTarget,
+    FileTarget,
+    LastTurnsTarget,
+    OpaqueReviewRegion,
+    RegionsTarget,
+    RegionTarget,
+    ReviewError,
+    ReviewFileStatus,
+    ReviewHunk,
+    ReviewRegion,
+    ReviewState,
+    ReviewTarget,
+    ScopeFileTarget,
+    ScopeTarget,
 )
 from vibe.core.rewind import RewindError
 from vibe.core.sentry import capture_sentry_exception
@@ -243,12 +261,6 @@ def _mcp_tui_login_message(alias: str) -> str:
         f"`/mcp login {alias}` there. Tokens are stored in the OS keyring; "
         "run `/reload` in this ACP session afterward if the tools are not visible."
     )
-
-
-def _merge_non_interactive_disabled_tools(config: AnyVibeConfig) -> None:
-    for tool in NON_INTERACTIVE_DISABLED_TOOLS:
-        if tool not in config.disabled_tools:
-            config.disabled_tools.append(tool)
 
 
 class ForkSessionParams(BaseModel):
@@ -345,12 +357,334 @@ class RewindToResponse(BaseModel):
     restored_paths: list[str] = Field(alias="restoredPaths")
 
 
+class ReviewStateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    session_id: str = Field(alias="sessionId")
+
+
+class ReviewBaselineRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    session_id: str = Field(alias="sessionId")
+    path: str
+
+
+class ReviewBaselineResponse(BaseModel):
+    content: str
+
+
+class AgentTurnOwnerResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: Literal["agent"] = "agent"
+    turn_id: int = Field(alias="turnId")
+
+
+class ManualEditOwnerResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: Literal["manual"] = "manual"
+    index: int
+
+
+OwnerResponse = Annotated[
+    AgentTurnOwnerResponse | ManualEditOwnerResponse, Field(discriminator="kind")
+]
+
+
+class ReviewScopeDiffRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    session_id: str = Field(alias="sessionId")
+    path: str
+    owner: OwnerResponse
+
+
+class ReviewFileDiffResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    status: ReviewFileStatus
+    baseline: str
+    current: str
+
+
+class RegionRefResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    version_index: int = Field(alias="versionIndex")
+    ordinal: int
+
+
+class ReviewHunksRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    session_id: str = Field(alias="sessionId")
+    path: str
+    owner: OwnerResponse | None = None
+
+
+class ReviewHunkResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    side: Literal["additions", "deletions"]
+    line: int
+    regions: list[RegionRefResponse]
+
+
+class ReviewHunksResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    hunks: list[ReviewHunkResponse]
+
+
+class TextReviewRegionResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: Literal["text"] = "text"
+    version_index: int = Field(alias="versionIndex")
+    ordinal: int
+    owner: OwnerResponse
+    baseline_start: int = Field(alias="baselineStart")
+    baseline_line_count: int = Field(alias="baselineLineCount")
+    current_start: int = Field(alias="currentStart")
+    current_line_count: int = Field(alias="currentLineCount")
+    decision: Decision
+    depends_on: list[RegionRefResponse] = Field(alias="dependsOn")
+
+
+class OpaqueReviewRegionResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: Literal["opaque"] = "opaque"
+    version_index: int = Field(alias="versionIndex")
+    ordinal: int
+    owner: OwnerResponse
+    reason: OpaqueReason
+    decision: Decision
+    depends_on: list[RegionRefResponse] = Field(alias="dependsOn")
+
+
+ReviewRegionResponse = Annotated[
+    TextReviewRegionResponse | OpaqueReviewRegionResponse, Field(discriminator="kind")
+]
+
+
+class ReviewFileResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    path: str
+    status: ReviewFileStatus
+    regions: list[ReviewRegionResponse]
+
+
+class ReviewScopeFileResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    path: str
+    status: ReviewFileStatus
+    region_count: int = Field(alias="regionCount")
+
+
+class ReviewScopeResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    owner: OwnerResponse
+    files: list[ReviewScopeFileResponse]
+
+
+class ReviewStateResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    files: list[ReviewFileResponse]
+    scopes: list[ReviewScopeResponse]
+
+
+class RegionTargetInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    kind: Literal["region"]
+    path: str
+    version_index: int = Field(alias="versionIndex")
+    ordinal: int
+
+
+class RegionsTargetInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    kind: Literal["regions"]
+    path: str
+    regions: list[RegionRefResponse]
+
+
+class ScopeTargetInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    kind: Literal["scope"]
+    owner: OwnerResponse
+
+
+class FileTargetInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    kind: Literal["file"]
+    path: str
+
+
+class ScopeFileTargetInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    kind: Literal["scopeFile"]
+    owner: OwnerResponse
+    path: str
+
+
+class AllTargetInput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    kind: Literal["all"]
+
+
+class LastTurnsTargetInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    kind: Literal["lastTurns"]
+    count: int
+
+
+ReviewTargetInput = Annotated[
+    RegionTargetInput
+    | RegionsTargetInput
+    | ScopeTargetInput
+    | ScopeFileTargetInput
+    | FileTargetInput
+    | AllTargetInput
+    | LastTurnsTargetInput,
+    Field(discriminator="kind"),
+]
+
+
+class ReviewMutationRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    session_id: str = Field(alias="sessionId")
+    target: ReviewTargetInput
+
+
 class AuthStatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     authenticated: bool
     auth_state: AuthStateKind = Field(alias="authState")
     sign_out_available: bool = Field(alias="signOutAvailable")
+
+
+def _owner_response(owner: Owner) -> OwnerResponse:
+    if isinstance(owner, AgentTurn):
+        return AgentTurnOwnerResponse(turnId=owner.turn_id)
+    return ManualEditOwnerResponse(index=owner.index)
+
+
+def _owner_from_input(owner: OwnerResponse) -> Owner:
+    if isinstance(owner, AgentTurnOwnerResponse):
+        return AgentTurn(owner.turn_id)
+    return ManualEdit(owner.index)
+
+
+def _review_region_response(
+    region: ReviewRegion,
+) -> TextReviewRegionResponse | OpaqueReviewRegionResponse:
+    depends_on = [
+        RegionRefResponse(versionIndex=version_index, ordinal=ordinal)
+        for version_index, ordinal in region.depends_on
+    ]
+    if isinstance(region, OpaqueReviewRegion):
+        return OpaqueReviewRegionResponse(
+            versionIndex=region.version_index,
+            ordinal=region.ordinal,
+            owner=_owner_response(region.owner),
+            reason=region.reason,
+            decision=region.decision,
+            dependsOn=depends_on,
+        )
+    return TextReviewRegionResponse(
+        versionIndex=region.version_index,
+        ordinal=region.ordinal,
+        owner=_owner_response(region.owner),
+        baselineStart=region.baseline_start,
+        baselineLineCount=region.baseline_line_count,
+        currentStart=region.current_start,
+        currentLineCount=region.current_line_count,
+        decision=region.decision,
+        dependsOn=depends_on,
+    )
+
+
+def _review_state_response(review_state: ReviewState) -> ReviewStateResponse:
+    return ReviewStateResponse(
+        files=[
+            ReviewFileResponse(
+                path=file.path,
+                status=file.status,
+                regions=[_review_region_response(region) for region in file.regions],
+            )
+            for file in review_state.files
+        ],
+        scopes=[
+            ReviewScopeResponse(
+                owner=_owner_response(scope.owner),
+                files=[
+                    ReviewScopeFileResponse(
+                        path=scope_file.path,
+                        status=scope_file.status,
+                        regionCount=scope_file.region_count,
+                    )
+                    for scope_file in scope.files
+                ],
+            )
+            for scope in review_state.scopes
+        ],
+    )
+
+
+def _review_target(target: ReviewTargetInput) -> ReviewTarget:  # noqa: PLR0911
+    match target:
+        case RegionTargetInput():
+            return RegionTarget(
+                path=target.path,
+                version_index=target.version_index,
+                ordinal=target.ordinal,
+            )
+        case RegionsTargetInput():
+            return RegionsTarget(
+                path=target.path,
+                regions=tuple(
+                    (ref.version_index, ref.ordinal) for ref in target.regions
+                ),
+            )
+        case ScopeTargetInput():
+            return ScopeTarget(owner=_owner_from_input(target.owner))
+        case FileTargetInput():
+            return FileTarget(path=target.path)
+        case ScopeFileTargetInput():
+            return ScopeFileTarget(
+                owner=_owner_from_input(target.owner), path=target.path
+            )
+        case AllTargetInput():
+            return AllTarget()
+        case LastTurnsTargetInput():
+            return LastTurnsTarget(count=target.count)
+
+
+def _review_hunk_response(hunk: ReviewHunk) -> ReviewHunkResponse:
+    return ReviewHunkResponse(
+        side=hunk.side,
+        line=hunk.line,
+        regions=[
+            RegionRefResponse(versionIndex=version_index, ordinal=ordinal)
+            for version_index, ordinal in hunk.regions
+        ],
+    )
 
 
 def _auth_status_response_from_auth_state(auth_state: AuthState) -> AuthStatusResponse:
@@ -725,16 +1059,37 @@ class VibeAcpAgentLoop(AcpAgent):
             client_version=self.client_info.version if self.client_info else "",
         )
 
-    def _load_config(self) -> VibeConfig:
+    async def _load_orchestrator(self) -> ConfigOrchestrator[VibeConfigSchema]:
         try:
-            config = VibeConfig.load()
-            _merge_non_interactive_disabled_tools(config)
-            config.tool_paths.extend(self._get_acp_tool_overrides())
-            return config
+            orchestrator = await build_default_orchestrator()
+            await self._apply_acp_config_overrides(orchestrator)
+            return orchestrator
         except MissingAPIKeyError as e:
             raise UnauthenticatedError.from_missing_api_key(e) from e
         except Exception as e:
             raise ConfigurationError(str(e)) from e
+
+    async def _apply_acp_config_overrides(
+        self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
+    ) -> None:
+        # tool_paths and disabled_tools both use concat merge, so injecting them into
+        # the overrides layer appends them onto the user config and survives reloads.
+        ops: list[PatchOp] = [
+            AddOperationPatch(
+                path="/disabled_tools",
+                value=NON_INTERACTIVE_DISABLED_TOOLS,
+                target_layer_name=OverridesLayer.NAME,
+            )
+        ]
+        if overrides := self._get_acp_tool_overrides():
+            ops.append(
+                AddOperationPatch(
+                    path="/tool_paths",
+                    value=overrides,
+                    target_layer_name=OverridesLayer.NAME,
+                )
+            )
+        await orchestrator.apply_patch(ops, reason="acp config overrides")
 
     async def _create_acp_session(
         self, session_id: str, agent_loop: AgentLoop
@@ -827,10 +1182,13 @@ class VibeAcpAgentLoop(AcpAgent):
         )
 
     def _create_agent_loop(
-        self, config: VibeConfig, agent_name: str, hook_config_result: Any = None
+        self,
+        orchestrator: ConfigOrchestrator[VibeConfigSchema],
+        agent_name: str,
+        hook_config_result: Any = None,
     ) -> AgentLoop:
         agent_loop = AgentLoop(
-            config_orchestrator=LegacyConfigOrchestrator(config),
+            config_orchestrator=orchestrator,
             agent_name=agent_name,
             enable_streaming=True,
             launch_context=self._build_launch_context(),
@@ -979,12 +1337,14 @@ class VibeAcpAgentLoop(AcpAgent):
         load_dotenv_values()
         os.chdir(cwd)
 
-        config = self._load_config()
+        orchestrator = await self._load_orchestrator()
         hook_config_result = load_hooks_from_fs()
 
         try:
             agent_loop = self._create_agent_loop(
-                config, config.default_agent, hook_config_result=hook_config_result
+                orchestrator,
+                orchestrator.config.default_agent,
+                hook_config_result=hook_config_result,
             )
             # NOTE: For now, we pin session.id to agent_loop.session_id right after init time.
             # We should just use agent_loop.session_id everywhere, but it can still change during
@@ -1116,12 +1476,13 @@ class VibeAcpAgentLoop(AcpAgent):
             session_id
         ) or self._find_acp_session_by_vibe_session_id(session_id)
 
-    def _load_session_logging_config(self) -> SessionLoggingConfig:
+    async def _load_session_logging_config(self) -> SessionLoggingConfig:
         try:
-            return VibeConfig.load().session_logging
-        except MissingAPIKeyError:
+            orchestrator = await self._load_orchestrator()
+            return orchestrator.config.session_logging
+        except UnauthenticatedError:
             try:
-                persisted_config = VibeConfig.get_persisted_config()
+                persisted_config = get_persisted_config()
                 return SessionLoggingConfig.model_validate(
                     persisted_config.get("session_logging", {})
                 )
@@ -1266,7 +1627,8 @@ class VibeAcpAgentLoop(AcpAgent):
         load_dotenv_values()
         os.chdir(cwd)
 
-        config = self._load_config()
+        orchestrator = await self._load_orchestrator()
+        config = orchestrator.config
         hook_config_result = load_hooks_from_fs()
 
         session_dir = SessionLoader.find_session_by_id(
@@ -1282,7 +1644,9 @@ class VibeAcpAgentLoop(AcpAgent):
 
         try:
             agent_loop = self._create_agent_loop(
-                config, config.default_agent, hook_config_result=hook_config_result
+                orchestrator,
+                config.default_agent,
+                hook_config_result=hook_config_result,
             )
         except Exception as e:
             raise ConfigurationError(str(e)) from e
@@ -1337,7 +1701,9 @@ class VibeAcpAgentLoop(AcpAgent):
         if model_id not in model_aliases:
             return False
 
-        VibeConfig.save_updates({"active_model": model_id})
+        await session.agent_loop.config_orchestrator.set_field(
+            "/active_model", model_id
+        )
         await self._reload_config(session)
         return True
 
@@ -1345,8 +1711,11 @@ class VibeAcpAgentLoop(AcpAgent):
         self, session: AcpSessionLoop, level: ThinkingLevel
     ) -> bool:
         active_model = session.agent_loop.config.get_active_model()
+        updated_model = active_model.model_copy(update={"thinking": level}).model_dump(
+            mode="json"
+        )
         await session.agent_loop.config_orchestrator.set_field(
-            f"/models/{escape_json_pointer_token(active_model.alias)}/thinking", level
+            f"/models/{escape_json_pointer_token(active_model.alias)}", updated_model
         )
         await self._reload_config(session)
         return True
@@ -1408,9 +1777,10 @@ class VibeAcpAgentLoop(AcpAgent):
         self, cwd: str | None = None, cursor: str | None = None, **kwargs: Any
     ) -> ListSessionsResponse:
         try:
-            config = VibeConfig.load()
+            orchestrator = await self._load_orchestrator()
+            config = orchestrator.config
             session_logging_config = config.session_logging
-        except MissingAPIKeyError:
+        except UnauthenticatedError:
             session_logging_config = SessionLoggingConfig()
 
         session_data = SessionLoader.list_sessions(session_logging_config, cwd=cwd)
@@ -1903,7 +2273,9 @@ class VibeAcpAgentLoop(AcpAgent):
 
     async def _delete_saved_session(self, session_id: str) -> None:
         try:
-            await delete_saved_session(session_id, self._load_session_logging_config())
+            await delete_saved_session(
+                session_id, await self._load_session_logging_config()
+            )
         except ValueError as exc:
             raise SessionNotFoundError(session_id) from exc
 
@@ -1966,7 +2338,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
         try:
             await delete_saved_session(
-                saved_session_id, self._load_session_logging_config()
+                saved_session_id, await self._load_session_logging_config()
             )
         except ValueError as exc:
             raise _internal_error(
@@ -1993,7 +2365,7 @@ class VibeAcpAgentLoop(AcpAgent):
                 metadata = await update_saved_session_title(
                     request.session_id,
                     request.title,
-                    self._load_session_logging_config(),
+                    await self._load_session_logging_config(),
                 )
             except ValueError as exc:
                 raise SessionNotFoundError(request.session_id) from exc
@@ -2029,6 +2401,96 @@ class VibeAcpAgentLoop(AcpAgent):
         if live_session is None:
             raise SessionNotFoundError(session_id)
         return live_session
+
+    async def _handle_review_state(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request = ReviewStateRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP review state request: {exc}"
+            ) from exc
+
+        session = self._live_session_for_rewind(request.session_id)
+        review_state = session.agent_loop.review_manager.review_state()
+        response = _review_state_response(review_state)
+        return response.model_dump(mode="json", by_alias=True)
+
+    async def _handle_review_approve(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._handle_review_mutation(params, approve=True)
+
+    async def _handle_review_revert(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._handle_review_mutation(params, approve=False)
+
+    async def _handle_review_mutation(
+        self, params: dict[str, Any], *, approve: bool
+    ) -> dict[str, Any]:
+        try:
+            request = ReviewMutationRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP review mutation request: {exc}"
+            ) from exc
+
+        session = self._live_session_for_rewind(request.session_id)
+        manager = session.agent_loop.review_manager
+        target = _review_target(request.target)
+        operation = "approve the review" if approve else "revert the review"
+        try:
+            async with session.mutating(operation):
+                if approve:
+                    manager.approve_review(target)
+                else:
+                    manager.revert_review(target)
+        except ReviewError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+        return {}
+
+    async def _handle_review_baseline(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request = ReviewBaselineRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP review baseline request: {exc}"
+            ) from exc
+
+        session = self._live_session_for_rewind(request.session_id)
+        response = ReviewBaselineResponse(
+            content=session.agent_loop.review_manager.baseline_text(request.path)
+        )
+        return response.model_dump(mode="json", by_alias=True)
+
+    async def _handle_review_turn_diff(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request = ReviewScopeDiffRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP review scope diff request: {exc}"
+            ) from exc
+
+        session = self._live_session_for_rewind(request.session_id)
+        diff = session.agent_loop.review_manager.scope_file_diff(
+            request.path, _owner_from_input(request.owner)
+        )
+        response = ReviewFileDiffResponse(
+            status=diff.status, baseline=diff.baseline, current=diff.current
+        )
+        return response.model_dump(mode="json", by_alias=True)
+
+    async def _handle_review_hunks(self, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request = ReviewHunksRequest.model_validate(params)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                f"Invalid ACP review hunks request: {exc}"
+            ) from exc
+
+        session = self._live_session_for_rewind(request.session_id)
+        owner = _owner_from_input(request.owner) if request.owner else None
+        hunks = session.agent_loop.review_manager.file_hunks(request.path, owner)
+        response = ReviewHunksResponse(
+            hunks=[_review_hunk_response(hunk) for hunk in hunks]
+        )
+        return response.model_dump(mode="json", by_alias=True)
 
     async def _handle_rewind_preview(self, params: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -2129,6 +2591,12 @@ class VibeAcpAgentLoop(AcpAgent):
             "session/delete": self._handle_session_delete,
             "trust/status": self._handle_workspace_trust_status,
             "trust/decision": self._handle_workspace_trust_decision,
+            "review/baseline": self._handle_review_baseline,
+            "review/turnDiff": self._handle_review_turn_diff,
+            "review/hunks": self._handle_review_hunks,
+            "review/state": self._handle_review_state,
+            "review/approve": self._handle_review_approve,
+            "review/revert": self._handle_review_revert,
             "rewind/preview": self._handle_rewind_preview,
             "rewind/to": self._handle_rewind_to,
         }
@@ -2358,11 +2826,9 @@ class VibeAcpAgentLoop(AcpAgent):
 
     async def _reload_session_config(self, session: AcpSessionLoop) -> None:
         """Reload config from disk and reinitialize the agent loop."""
-        tool_paths = session.agent_loop.config.tool_paths
-        await session.agent_loop.config_orchestrator.reload()
-        new_config = session.agent_loop.config_orchestrator.config
-        new_config.tool_paths = tool_paths
-        _merge_non_interactive_disabled_tools(new_config)
+        orchestrator = session.agent_loop.config_orchestrator
+        await orchestrator.reload()
+        new_config = orchestrator.config
         await session.agent_loop.reload_with_initial_messages()
         if command_registry := getattr(session, "command_registry", None):
             command_registry.refresh(
@@ -2490,7 +2956,9 @@ class VibeAcpAgentLoop(AcpAgent):
                 session, "Lean agent is already installed.", message_id
             )
 
-        VibeConfig.save_updates({"installed_agents": [*current, "lean"]})
+        await session.agent_loop.config_orchestrator.set_field(
+            "/installed_agents/-", "lean"
+        )
         await self._reload_session_config(session)
         await self._send_config_option_update(session)
         return await self._command_reply(
@@ -2508,9 +2976,9 @@ class VibeAcpAgentLoop(AcpAgent):
                 session, "Lean agent is not installed.", message_id
             )
 
-        VibeConfig.save_updates({
-            "installed_agents": [a for a in current if a != "lean"]
-        })
+        await session.agent_loop.config_orchestrator.set_field(
+            "/installed_agents", [a for a in current if a != "lean"]
+        )
         await self._reload_session_config(session)
         await self._send_config_option_update(session)
         return await self._command_reply(session, "Lean agent uninstalled.", message_id)
@@ -2528,7 +2996,16 @@ def run_acp_server(
     *, environ_before_dotenv_load: Mapping[str, str] | None = None
 ) -> None:
     agent = VibeAcpAgentLoop(environ_before_dotenv_load=environ_before_dotenv_load)
-    install_sigterm_flush = TelemetryClient(config_getter=VibeConfig.load).is_active()
+    try:
+        orchestrator = asyncio.run(build_default_orchestrator())
+        config = orchestrator.config
+        install_sigterm_flush = TelemetryClient(
+            config_getter=lambda: config
+        ).is_active()
+    except Exception:
+        # A broken config must not crash the server; per-request handlers still
+        # surface structured errors. Skip the telemetry sigterm flush in that case.
+        install_sigterm_flush = False
     received_sigterm = False
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 

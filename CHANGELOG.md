@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.22.0] - 2026-07-21
+
+### Added
+
+- `/new` command as an alias for `/clear`
+- ACP review support: approve or revert agent changes from ACP clients, with live refresh
+
+### Changed
+
+- Full migration to ConfigOrchestrator for configuration handling
+- Defaults now filled at merge time via `DefaultConfigLayer`; `config.toml` stores only user-set values
+
+### Fixed
+
+- `read_file` no longer prompts for approval on plan files in plan mode
+- Benign Sentry noise suppressed (EIO, clean exits, broken pipe, transcription 401)
+- Exception on unsafe configuration read
+
+### Removed
+
+- Teleport context summary flag
+
+
 ## [2.21.0] - 2026-07-17
 
 ### Added
@@ -38,7 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- `set_thinking` removed from the CLI
 - `enable_experimental_hooks` config flag (and `VIBE_ENABLE_EXPERIMENTAL_HOOKS` env var); hooks now load unconditionally when declared
 
 

@@ -17,10 +17,11 @@ from acp.schema import (
 )
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import OrchestratorLoader, build_test_vibe_config
 from vibe import __version__
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
-from vibe.core.config import ProviderConfig
+from vibe.core.config import ProviderConfig, VibeConfigSchema
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.types import Backend
 from vibe.setup.onboarding.context import OnboardingContext
 
@@ -28,6 +29,15 @@ BROWSER_AUTH_NAME = "Sign in through Mistral AI Studio"
 BROWSER_AUTH_DESCRIPTION = (
     "Sign into Mistral Vibe through your Mistral AI Studio account."
 )
+
+
+def _stub_load_orchestrator(
+    monkeypatch: pytest.MonkeyPatch, orchestrator: ConfigOrchestrator[VibeConfigSchema]
+) -> None:
+    async def _load(*_args, **_kwargs) -> ConfigOrchestrator[VibeConfigSchema]:
+        return orchestrator
+
+    monkeypatch.setattr("vibe.acp.acp_agent_loop.build_default_orchestrator", _load)
 
 
 def build_mistral_provider() -> ProviderConfig:
@@ -87,18 +97,20 @@ class TestACPInitialize:
     @pytest.mark.parametrize(
         "reload_method_name", ["_reload_config", "_reload_session_config"]
     )
-    async def test_reload_config_preserves_reloaded_config_without_project_name_mutation(
-        self, monkeypatch: pytest.MonkeyPatch, reload_method_name: str
+    async def test_reload_config_reloads_orchestrator(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        reload_method_name: str,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        config = build_test_vibe_config()
-        monkeypatch.setattr(
-            "vibe.acp.acp_agent_loop.VibeConfig.load", lambda *args, **kwargs: config
+        _stub_load_orchestrator(
+            monkeypatch, load_orchestrator(build_test_vibe_config())
         )
         acp_agent_loop = build_acp_agent_loop()
-        mock_config_orchestrator = SimpleNamespace(reload=AsyncMock(), config=config)
+        orchestrator = load_orchestrator(build_test_vibe_config())
         agent_loop = SimpleNamespace(
-            config=SimpleNamespace(tool_paths=[]),
-            config_orchestrator=mock_config_orchestrator,
+            config_orchestrator=orchestrator,
+            config=orchestrator.config,
             reload_with_initial_messages=AsyncMock(),
         )
         session = cast(Any, SimpleNamespace(agent_loop=agent_loop))
@@ -109,7 +121,6 @@ class TestACPInitialize:
         )
         await getattr(acp_agent_loop, reload_method_name)(session)
 
-        mock_config_orchestrator.reload.assert_awaited_once()
         agent_loop.reload_with_initial_messages.assert_awaited_once()
         assert agent_loop.reload_with_initial_messages.await_args.kwargs == {}
 

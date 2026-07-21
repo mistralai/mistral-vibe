@@ -22,7 +22,7 @@ from tests.agent_loop.e2e.providers.base import (
 from tests.backend.data import ANSWER_CONTEXT_TOKENS
 from tests.backend.data.anthropic import anthropic_message
 from tests.backend.data.reasoning import reasoning_thinking_message
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.types import ToolResultEvent
 
 
@@ -34,7 +34,7 @@ class ProviderScenario:
     """
 
     id: str
-    config: Callable[..., VibeConfig]
+    config: Callable[..., VibeConfigSchema]
     api_cls: type[ProviderAPI]
     mocks: ProviderMocks
 

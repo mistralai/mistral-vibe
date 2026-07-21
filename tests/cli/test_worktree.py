@@ -7,7 +7,7 @@ from pathlib import Path
 from git import Repo
 import pytest
 
-from vibe.core.config._settings import SessionLoggingConfig
+from vibe.core.config.models import SessionLoggingConfig
 from vibe.core.paths import VIBE_HOME
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.worktree import (

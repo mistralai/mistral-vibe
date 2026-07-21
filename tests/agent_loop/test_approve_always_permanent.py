@@ -5,7 +5,11 @@ import tomllib
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_config,
+    build_test_vibe_config_schema,
+)
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.permissions import PermissionScope, RequiredPermission
 
@@ -109,6 +113,71 @@ class TestApproveAlwaysPermanentWithGranularPermissions:
 
         persisted = _read_persisted_config(config_dir)
         assert persisted["tools"]["bash"]["allowlist"] == ["git", "npm install"]
+
+    @pytest.mark.asyncio
+    async def test_allowlist_survives_later_config_change(self, config_dir: Path):
+        # With the orchestrator backend, the allowlist write and a later config
+        # change both go through set_field; the second must not clobber the first.
+        agent = build_test_agent_loop(config=build_test_vibe_config_schema())
+        perms = self._make_permissions()
+
+        await agent.approve_always("bash", perms, save_permanently=True)
+        await agent.config_orchestrator.set_field("/autocopy_to_clipboard", False)
+
+        persisted = _read_persisted_config(config_dir)
+        assert persisted["tools"]["bash"]["allowlist"] == ["npm install"]
+        assert persisted["autocopy_to_clipboard"] is False
+
+    @pytest.mark.asyncio
+    async def test_persisting_permission_preserves_other_tool_allowlist(
+        self, config_dir: Path
+    ):
+        # Persisting a tool permission must patch only that tool's leaf, not
+        # replace the whole /tools table and drop another tool's allowlist.
+        agent = build_test_agent_loop(config=build_test_vibe_config_schema())
+
+        await agent.approve_always(
+            "bash", self._make_permissions(), save_permanently=True
+        )
+        await agent.set_tool_permission(
+            "edit", ToolPermission.ALWAYS, save_permanently=True
+        )
+
+        persisted = _read_persisted_config(config_dir)
+        assert persisted["tools"]["bash"]["allowlist"] == ["npm install"]
+        assert persisted["tools"]["edit"]["permission"] == "always"
+
+    @pytest.mark.asyncio
+    async def test_persisting_permission_preserves_same_tool_allowlist(
+        self, config_dir: Path
+    ):
+        agent = build_test_agent_loop(config=build_test_vibe_config_schema())
+
+        await agent.approve_always(
+            "bash", self._make_permissions(), save_permanently=True
+        )
+        await agent.set_tool_permission(
+            "bash", ToolPermission.ALWAYS, save_permanently=True
+        )
+
+        persisted = _read_persisted_config(config_dir)
+        assert persisted["tools"]["bash"]["allowlist"] == ["npm install"]
+        assert persisted["tools"]["bash"]["permission"] == "always"
+
+    @pytest.mark.asyncio
+    async def test_allowlist_persists_on_config_without_tools_table(
+        self, config_dir: Path
+    ):
+        # No [tools.bash] table exists: the leaf-targeted write must auto-create
+        # the missing parents instead of failing.
+        agent = build_test_agent_loop(config=build_test_vibe_config_schema())
+
+        await agent.approve_always(
+            "bash", self._make_permissions(), save_permanently=True
+        )
+
+        persisted = _read_persisted_config(config_dir)
+        assert persisted["tools"]["bash"]["allowlist"] == ["npm install"]
 
     @pytest.mark.asyncio
     async def test_multiple_permissions_persisted(self, config_dir: Path):

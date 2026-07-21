@@ -9,7 +9,7 @@ from string import Template
 import subprocess
 from typing import TYPE_CHECKING
 
-from vibe.core.config import AnyVibeConfig, VibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.experiments import ExperimentName
 from vibe.core.logger import logger
@@ -285,9 +285,9 @@ def _get_scratchpad_section(scratchpad_dir: Path | None) -> str | None:
 
 
 def _resolve_system_prompt(
-    config: AnyVibeConfig, experiment_manager: ExperimentManager | None
+    config: VibeConfigSchema, experiment_manager: ExperimentManager | None
 ) -> str:
-    default_prompt_id = VibeConfig.model_fields["system_prompt_id"].default
+    default_prompt_id = VibeConfigSchema.model_fields["system_prompt_id"].default
     if config.system_prompt_id != default_prompt_id:
         logger.info(
             "System prompt loaded: id=%s (user config overrides experiments)",
@@ -337,7 +337,7 @@ def _get_headless_section() -> str:
 
 def get_universal_system_prompt(
     tool_manager: ToolManager,
-    config: AnyVibeConfig,
+    config: VibeConfigSchema,
     skill_manager: SkillManager,
     agent_manager: AgentManager,
     *,

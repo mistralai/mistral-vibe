@@ -11,7 +11,7 @@ from textual.widgets import Static
 from vibe import __version__
 from vibe.cli.textual_ui.widgets.banner.petit_chat import PetitChat
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import AnyVibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.skills.manager import SkillManager
 
 
@@ -37,7 +37,7 @@ class Banner(Static):
 
     def __init__(
         self,
-        config: AnyVibeConfig,
+        config: VibeConfigSchema,
         skill_manager: SkillManager,
         connectors_connected: int = 0,
         connectors_total: int = 0,
@@ -92,7 +92,7 @@ class Banner(Static):
 
     def set_state(
         self,
-        config: AnyVibeConfig,
+        config: VibeConfigSchema,
         skill_manager: SkillManager,
         connectors_connected: int = 0,
         connectors_total: int = 0,
@@ -110,7 +110,7 @@ class Banner(Static):
 
     @staticmethod
     def _build_state(
-        config: AnyVibeConfig,
+        config: VibeConfigSchema,
         skill_manager: SkillManager,
         connectors_connected: int = 0,
         connectors_total: int = 0,

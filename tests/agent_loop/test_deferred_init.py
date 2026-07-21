@@ -8,15 +8,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
+from tests.conftest import (
+    ConfigBuilder,
+    OrchestratorLoader,
+    build_test_agent_loop,
+    build_test_vibe_config,
+    set_agent_config,
+)
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
 from vibe.core.agent_loop import AgentLoop
 import vibe.core.agent_loop._loop as agent_loop_module
-from vibe.core.config import MCPStdio
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.config import MCPStdio, VibeConfigSchema
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.mcp import AuthStatus
@@ -78,14 +83,14 @@ class TestCompleteInit:
         assert isinstance(loop._init_error, RuntimeError)
         assert str(loop._init_error) == "mcp discovery boom"
 
-    def test_delays_connector_registry_until_deferred_init(self) -> None:
-        config = build_test_vibe_config(enable_connectors=True)
+    def test_delays_connector_registry_until_deferred_init(
+        self,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        orchestrator = load_orchestrator(build_config(enable_connectors=True))
         with patch.object(AgentLoop, "_start_deferred_init"):
-            loop = AgentLoop(
-                config_orchestrator=LegacyConfigOrchestrator(config),
-                backend=FakeBackend(),
-                defer_heavy_init=True,
-            )
+            loop = AgentLoop(orchestrator, backend=FakeBackend(), defer_heavy_init=True)
 
         assert loop.connector_registry is None
 
@@ -260,8 +265,8 @@ class TestDeferredInitPublicMethods:
         mcp_server = MCPStdio(name="srv", transport="stdio", command="echo")
         config = build_test_vibe_config(mcp_servers=[mcp_server])
         registry = FakeMCPRegistry()
+        set_agent_config(loop, config)
 
-        loop._replace_base_config(config)
         with (
             patch.object(AgentLoop, "_create_mcp_registry", return_value=registry),
             patch.object(ToolManager, "integrate_all"),

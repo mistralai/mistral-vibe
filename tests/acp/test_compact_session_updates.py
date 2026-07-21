@@ -7,22 +7,24 @@ from unittest.mock import AsyncMock, patch
 from acp.schema import TextContentBlock, ToolCallProgress, ToolCallStart
 import pytest
 
-from tests.conftest import build_test_vibe_config, make_test_models
+from tests.conftest import OrchestratorLoader, build_test_vibe_config, make_test_models
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.acp.exceptions import CompactionError
 from vibe.core.agent_loop import AgentLoop, CompactionFailedError
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.config import VibeConfigSchema
 from vibe.core.session.session_id import shorten_session_id
 from vibe.core.types import LLMMessage, Role
 
 
 @pytest.fixture
-def acp_agent_loop(backend: FakeBackend) -> VibeAcpAgentLoop:
+def acp_agent_loop(
+    backend: FakeBackend, load_orchestrator: OrchestratorLoader[VibeConfigSchema]
+) -> VibeAcpAgentLoop:
     class PatchedAgent(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
-            kwargs["config_orchestrator"] = LegacyConfigOrchestrator(
+            kwargs["config_orchestrator"] = load_orchestrator(
                 build_test_vibe_config(
                     models=make_test_models(auto_compact_threshold=1)
                 )

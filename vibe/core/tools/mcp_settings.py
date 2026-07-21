@@ -6,22 +6,23 @@ tied to a particular UI layer.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from ipaddress import ip_address
 import re
 from typing import Any, Literal, cast
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from vibe.core.config import (
-    AnyVibeConfig,
     MCPHttp,
     MCPOAuth,
     MCPServer,
     MCPStreamableHttp,
-    VibeConfig,
+    VibeConfigSchema,
 )
+from vibe.core.config.orchestrator import ConfigOrchestrator
 
 MCPAddTransport = Literal["http", "streamable-http"]
 
@@ -50,8 +51,8 @@ def updated_tool_list(tools: list[str], name: str, disabled: bool) -> list[str]:
     return [t for t in tools if t != name]
 
 
-def persist_mcp_toggle(
-    config: AnyVibeConfig,
+async def persist_mcp_toggle(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
     *,
     name: str,
     is_connector: bool,
@@ -60,14 +61,23 @@ def persist_mcp_toggle(
 ) -> None:
     """Save an MCP server/connector or individual tool toggle to the config file."""
     if is_connector:
-        _persist_connector_toggle(name=name, disabled=disabled, tool_name=tool_name)
+        await _persist_connector_toggle(
+            orchestrator, name=name, disabled=disabled, tool_name=tool_name
+        )
     else:
-        _persist_server_toggle(name=name, disabled=disabled, tool_name=tool_name)
+        await _persist_server_toggle(
+            orchestrator, name=name, disabled=disabled, tool_name=tool_name
+        )
 
 
-def _persist_server_toggle(*, name: str, disabled: bool, tool_name: str | None) -> None:
-    persisted = VibeConfig.get_persisted_config()
-    servers: list[dict[str, Any]] = list(persisted.get("mcp_servers", []))
+async def _persist_server_toggle(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    *,
+    name: str,
+    disabled: bool,
+    tool_name: str | None,
+) -> None:
+    servers = _dump_persisted(orchestrator.config.mcp_servers)
     for s in servers:
         if s.get("name") == name:
             if tool_name is not None:
@@ -80,14 +90,17 @@ def _persist_server_toggle(*, name: str, disabled: bool, tool_name: str | None) 
     else:
         # Server not in base config (profile-only) -- nothing to persist.
         return
-    VibeConfig.save_updates({"mcp_servers": servers})
+    await orchestrator.set_field("/mcp_servers", servers)
 
 
-def _persist_connector_toggle(
-    *, name: str, disabled: bool, tool_name: str | None
+async def _persist_connector_toggle(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    *,
+    name: str,
+    disabled: bool,
+    tool_name: str | None,
 ) -> None:
-    persisted = VibeConfig.get_persisted_config()
-    connectors: list[dict[str, Any]] = list(persisted.get("connectors", []))
+    connectors = _dump_persisted(orchestrator.config.connectors)
     for c in connectors:
         if c.get("name") == name:
             if tool_name is not None:
@@ -104,11 +117,11 @@ def _persist_connector_toggle(
         else:
             entry["disabled"] = disabled
         connectors.append(entry)
-    VibeConfig.save_updates({"connectors": connectors})
+    await orchestrator.set_field("/connectors", connectors)
 
 
-def persist_oauth_mcp_server(
-    config: AnyVibeConfig,
+async def persist_oauth_mcp_server(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
     *,
     url: str,
     name: str | None = None,
@@ -121,13 +134,13 @@ def persist_oauth_mcp_server(
     if name is not None and not requested_name:
         raise MCPServerAddError("MCP server name must contain letters or numbers.")
 
-    active_servers = list(config.mcp_servers)
+    active_servers = list(orchestrator.config.mcp_servers)
     if result := _find_active_url_match(
         active_servers, normalized_url_key, requested_name
     ):
         return result
 
-    raw_servers = _load_persisted_mcp_servers()
+    raw_servers = _dump_persisted(orchestrator.config.mcp_servers)
     if result := _find_persisted_url_match(
         raw_servers, normalized_url_key, requested_name
     ):
@@ -149,7 +162,7 @@ def persist_oauth_mcp_server(
     except ValidationError as exc:
         raise MCPServerAddError(f"Invalid MCP server configuration: {exc}") from exc
 
-    VibeConfig.save_updates({"mcp_servers": [*raw_servers, entry]})
+    await orchestrator.set_field("/mcp_servers", [*raw_servers, entry])
     return MCPServerAddResult(name=server_name, url=normalized_url, created=True)
 
 
@@ -187,11 +200,10 @@ def _find_active_url_match(
     return None
 
 
-def _load_persisted_mcp_servers() -> list[dict[str, Any]]:
-    raw_servers = VibeConfig.get_persisted_config().get("mcp_servers", [])
-    if not isinstance(raw_servers, list):
-        raise MCPServerAddError("Cannot add MCP server: mcp_servers is not a list.")
-    return [server for server in raw_servers if isinstance(server, dict)]
+def _dump_persisted(items: Iterable[BaseModel]) -> list[dict[str, Any]]:
+    # NOTE: reads the merged config, not just the persisted TOML layer, so entries
+    # injected via env/args leak in. Acceptable for now; revisit if that matters.
+    return [item.model_dump(mode="json", exclude_none=True) for item in items]
 
 
 def _find_persisted_url_match(

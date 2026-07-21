@@ -10,6 +10,7 @@ from tests.acp.conftest import _create_acp_agent
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
+from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
@@ -43,8 +44,8 @@ def acp_agent_loop_with_reasoning(
 
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
+            kwargs["config_orchestrator"] = FakeConfigOrchestrator(config)
             super().__init__(*args, **{**kwargs, "backend": backend_with_reasoning})
-            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
     patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgentLoop).start()

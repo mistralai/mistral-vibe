@@ -73,7 +73,7 @@ class TestGetTranscribeProviderForModel:
 
 class TestTranscribeModelUniqueness:
     def test_duplicate_aliases_raise(self) -> None:
-        with pytest.raises(ValueError, match="Duplicate transcribe model alias"):
+        with pytest.raises(ValueError, match="Duplicate alias"):
             build_test_vibe_config(
                 transcribe_models=[
                     TranscribeModelConfig(

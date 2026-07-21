@@ -1,26 +1,16 @@
 from __future__ import annotations
 
-from typing import TypeVar
-
 from vibe.core.config._defaults import (
+    DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
+    DEFAULT_API_TIMEOUT,
+    DEFAULT_AUTO_COMPACT_THRESHOLD,
     DEFAULT_CONSOLE_BASE_URL,
     DEFAULT_MISTRAL_API_ENV_KEY,
+    DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
+    DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
     DEFAULT_MISTRAL_SERVER_URL,
     DEFAULT_THEME,
     DEFAULT_VIBE_BASE_URL,
-)
-from vibe.core.config._settings import (
-    DEFAULT_MODELS,
-    DEFAULT_PROVIDERS,
-    DEFAULT_TRANSCRIBE_MODELS,
-    DEFAULT_TRANSCRIBE_PROVIDERS,
-    DEFAULT_TTS_MODELS,
-    DEFAULT_TTS_PROVIDERS,
-    TomlFileSettingsSource,
-    VibeConfig,
-    load_dotenv_values,
-    resolve_api_key,
-    resolve_theme_name,
 )
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.layer import (
@@ -89,16 +79,34 @@ from vibe.core.config.types import (
     ConfigChangeEvent,
     LayerConfigSnapshot,
 )
-from vibe.core.config.vibe_schema import VibeConfigSchema
+from vibe.core.config.vibe_schema import (
+    DEFAULT_ACTIVE_MODEL_CONFIG,
+    DEFAULT_MODELS,
+    DEFAULT_PROVIDERS,
+    DEFAULT_TRANSCRIBE_MODELS,
+    DEFAULT_TRANSCRIBE_PROVIDERS,
+    DEFAULT_TTS_MODELS,
+    DEFAULT_TTS_PROVIDERS,
+    VibeConfigSchema,
+    create_default_config,
+    get_persisted_config,
+    load_dotenv_values,
+    resolve_api_key,
+    resolve_theme_name,
+)
 from vibe.core.prompts import MissingPromptFileError
 
-AnyVibeConfig = VibeConfig | VibeConfigSchema
-
-VibeConfigT = TypeVar("VibeConfigT", bound=AnyVibeConfig)
+VibeConfigSchemaType = type[VibeConfigSchema]
 
 __all__ = [
+    "DEFAULT_ACTIVE_MODEL_CONFIG",
+    "DEFAULT_API_RETRY_MAX_ELAPSED_TIME",
+    "DEFAULT_API_TIMEOUT",
+    "DEFAULT_AUTO_COMPACT_THRESHOLD",
     "DEFAULT_CONSOLE_BASE_URL",
     "DEFAULT_MISTRAL_API_ENV_KEY",
+    "DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL",
+    "DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL",
     "DEFAULT_MISTRAL_SERVER_URL",
     "DEFAULT_MODELS",
     "DEFAULT_PROVIDERS",
@@ -112,7 +120,6 @@ __all__ = [
     "THINKING_LEVELS",
     "AddOperationPatch",
     "AgentProfileLayer",
-    "AnyVibeConfig",
     "ConfigChangeCallback",
     "ConfigChangeEvent",
     "ConfigDefinitionError",
@@ -154,16 +161,14 @@ __all__ = [
     "TTSModelConfig",
     "TTSProviderConfig",
     "ThinkingLevel",
-    "TomlFileSettingsSource",
     "TranscribeClient",
     "TranscribeModelConfig",
     "TranscribeProviderConfig",
     "TrustNotResolvedError",
     "TrustResolutionError",
     "UntrustedLayerError",
-    "VibeConfig",
     "VibeConfigSchema",
-    "VibeConfigT",
+    "VibeConfigSchemaType",
     "WithConcatMerge",
     "WithConflictMerge",
     "WithDeepMerge",
@@ -171,6 +176,8 @@ __all__ = [
     "WithShallowMerge",
     "WithUnionMerge",
     "build_default_orchestrator",
+    "create_default_config",
+    "get_persisted_config",
     "load_dotenv_values",
     "resolve_api_key",
     "resolve_theme_name",

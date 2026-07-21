@@ -65,7 +65,7 @@ class TestGetTTSProviderForModel:
 
 class TestTTSModelUniqueness:
     def test_duplicate_aliases_raise(self) -> None:
-        with pytest.raises(ValueError, match="Duplicate TTS model alias"):
+        with pytest.raises(ValueError, match="Duplicate alias"):
             build_test_vibe_config(
                 tts_models=[
                     TTSModelConfig(

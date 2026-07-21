@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.core.config import AnyVibeConfig, ModelConfig, resolve_api_key
+from vibe.core.config import ModelConfig, VibeConfigSchema, resolve_api_key
 from vibe.core.llm.backend.factory import create_backend
 from vibe.core.llm.types import BackendLike
 
@@ -14,7 +14,7 @@ NARRATOR_MODEL = ModelConfig(
 
 
 def create_narrator_backend(
-    config: AnyVibeConfig,
+    config: VibeConfigSchema,
 ) -> tuple[BackendLike, ModelConfig] | None:
     try:
         provider = config.get_provider_for_model(NARRATOR_MODEL)

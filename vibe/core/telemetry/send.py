@@ -9,7 +9,7 @@ from urllib.parse import urljoin
 import httpx
 
 from vibe import __version__
-from vibe.core.config import AnyVibeConfig, ProviderConfig, resolve_api_key
+from vibe.core.config import ProviderConfig, VibeConfigSchema, resolve_api_key
 from vibe.core.llm.format import ResolvedToolCall
 from vibe.core.logger import logger
 from vibe.core.telemetry.build_metadata import build_base_metadata
@@ -34,7 +34,7 @@ _DATALAKE_EVENTS_PATH = "/v1/datalake/events"
 
 
 def get_mistral_provider_and_api_key(
-    config: AnyVibeConfig,
+    config: VibeConfigSchema,
 ) -> tuple[ProviderConfig, str] | None:
     """Resolve a Mistral provider and its API key, or None.
 
@@ -67,7 +67,7 @@ def _extract_file_extension(path: object) -> str | None:
 class TelemetryClient:
     def __init__(
         self,
-        config_getter: Callable[[], AnyVibeConfig],
+        config_getter: Callable[[], VibeConfigSchema],
         session_id_getter: Callable[[], str | None] | None = None,
         parent_session_id_getter: Callable[[], str | None] | None = None,
         launch_context: LaunchContext | None = None,

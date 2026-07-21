@@ -4,7 +4,6 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-import tomllib
 from typing import cast
 
 import keyring
@@ -25,16 +24,18 @@ from tests.browser_sign_in.stubs import (
 from tests.conftest import build_test_vibe_config
 from vibe.cli.textual_ui.shortcut_hints import SHORTCUT_STYLE
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
-from vibe.core.config._settings import (
+from vibe.core.config import (
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
+    ModelConfig,
+    ProviderConfig,
+    VibeConfigSchema,
 )
 from vibe.core.config.harness_files import (
     init_harness_files_manager,
     reset_harness_files_manager,
 )
-from vibe.core.paths import GLOBAL_ENV_FILE, VIBE_HOME
+from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import TerminalEmulator
@@ -101,7 +102,7 @@ def _build_onboarding_config(
     browser_auth_base_url: str | None = None,
     browser_auth_api_base_url: str | None = None,
     vibe_base_url: str = "https://chat.mistral.ai",
-) -> VibeConfig:
+) -> VibeConfigSchema:
     provider = ProviderConfig(
         name=provider_name,
         api_base="https://api.mistral.ai/v1",
@@ -1194,11 +1195,9 @@ async def test_ui_can_pick_a_theme_and_saves_selection() -> None:
         await pilot.press("enter")
         await _wait_for(lambda: isinstance(app.screen, AuthMethodScreen), pilot)
 
-    config_path = VIBE_HOME.path / "config.toml"
-    assert config_path.is_file()
-    config_contents = config_path.read_text(encoding="utf-8")
-    config_dict = tomllib.loads(config_contents)
-    assert config_dict.get("theme") == target_theme
+    # Persistence is the caller's job; the app carries the selection out via its
+    # live theme for the caller to persist through its orchestrator.
+    assert app.theme == target_theme
 
 
 def test_api_key_screen_falls_back_to_mistral_for_provider_without_env_key() -> None:

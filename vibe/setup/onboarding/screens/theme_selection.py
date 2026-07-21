@@ -10,8 +10,6 @@ from textual.widgets import Markdown, Static
 
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.theme_picker import sorted_theme_names
-from vibe.core.config import MissingAPIKeyError, VibeConfig
-from vibe.core.logger import logger
 from vibe.setup.onboarding.base import OnboardingScreen
 
 THEMES = sorted_theme_names()
@@ -139,9 +137,6 @@ class ThemeSelectionScreen(OnboardingScreen):
         self._navigate(-1)
 
     def action_next(self) -> None:
-        theme = THEMES[self._theme_index]
-        try:
-            VibeConfig.save_updates({"theme": theme})
-        except (OSError, MissingAPIKeyError) as e:
-            logger.warning("Failed to persist theme=%s: %s", theme, e)
+        # The live theme is carried out via ``app.theme``; ``run_onboarding``
+        # persists it through the config orchestrator after setup completes.
         super().action_next()

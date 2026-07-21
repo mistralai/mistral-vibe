@@ -26,7 +26,7 @@ from vibe.core.utils.io import read_safe, read_safe_async
 
 if TYPE_CHECKING:
     from vibe.core.agents.models import AgentProfile
-    from vibe.core.config import AnyVibeConfig, SessionLoggingConfig
+    from vibe.core.config import SessionLoggingConfig, VibeConfigSchema
     from vibe.core.experiments.models import EvalResponse
     from vibe.core.tools.manager import ToolManager
 
@@ -307,7 +307,7 @@ class SessionLogger:
         self,
         messages: Sequence[LLMMessage],
         stats: AgentStats,
-        base_config: AnyVibeConfig,
+        base_config: VibeConfigSchema,
         tool_manager: ToolManager,
         agent_profile: AgentProfile,
         *,
@@ -348,7 +348,7 @@ class SessionLogger:
         self,
         messages: list[LLMMessage],
         stats: AgentStats,
-        base_config: AnyVibeConfig,
+        base_config: VibeConfigSchema,
         tool_manager: ToolManager,
         agent_profile: AgentProfile,
         title: str | None,

@@ -10,7 +10,7 @@ from tests.agent_loop.e2e.providers import MistralAPI
 from tests.conftest import build_test_agent_loop, build_test_vibe_config
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfigSchema
 from vibe.core.llm.backend.factory import BACKEND_FACTORY
 
 
@@ -35,7 +35,10 @@ def mistral_api(mock_mistral: respx.MockRouter) -> MistralAPI:
 
 
 def build_e2e_agent_loop(
-    *, config: VibeConfig | None = None, enable_streaming: bool = False, **kwargs: Any
+    *,
+    config: VibeConfigSchema | None = None,
+    enable_streaming: bool = False,
+    **kwargs: Any,
 ) -> AgentLoop:
     resolved_config = config or build_test_vibe_config()
     provider = resolved_config.providers[0]

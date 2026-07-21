@@ -10,7 +10,7 @@ import pytest
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.agents.models import AgentProfile, AgentSafety
-from vibe.core.config import SessionLoggingConfig, VibeConfig
+from vibe.core.config import SessionLoggingConfig, VibeConfigSchema
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.loop import ScheduledLoop
 from vibe.core.session.session_loader import SessionLoader
@@ -64,7 +64,7 @@ def mock_tool_manager() -> ToolManager:
 
 
 @pytest.fixture
-def mock_vibe_config() -> VibeConfig:
+def mock_vibe_config() -> VibeConfigSchema:
     """Create a mock vibe config for testing."""
     return build_test_vibe_config()
 
@@ -312,7 +312,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_success(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -362,7 +362,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_system_prompt_in_metadata(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -411,7 +411,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_with_existing_messages(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -476,7 +476,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_no_new_messages_is_noop(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -533,7 +533,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_no_user_messages(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -580,7 +580,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_long_user_message(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -625,7 +625,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_preserves_preset_auto_title(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -666,7 +666,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_preserves_manual_title(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -710,7 +710,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_throttles_tmp_cleanup(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -765,7 +765,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_rewrites_log_when_history_shrinks(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -805,7 +805,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_replaces_tail_after_shrink_and_regrow(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -853,7 +853,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_skips_system_only_history_then_reprompt_replaces_it(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -899,7 +899,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_rewrites_log_when_last_message_changes_at_same_count(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -939,7 +939,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_rewrites_log_for_legacy_session_without_fingerprint(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -984,7 +984,7 @@ class TestSessionLoggerSaveInteraction:
     async def test_save_interaction_persists_empty_conversation_only_when_allowed(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -1253,7 +1253,7 @@ class TestPersistLoops:
     async def test_writes_into_existing_metadata(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -1333,7 +1333,7 @@ class TestPersistLoops:
     async def test_subsequent_save_interaction_preserves_loops(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -1411,7 +1411,7 @@ class TestPersistExperiments:
     async def test_writes_field_into_existing_metadata(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
         sample_response: EvalResponse,
@@ -1443,7 +1443,7 @@ class TestPersistExperiments:
     async def test_persists_none_as_null(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
     ) -> None:
@@ -1496,7 +1496,7 @@ class TestPersistExperiments:
     async def test_first_save_interaction_includes_in_memory_experiments(
         self,
         session_config: SessionLoggingConfig,
-        mock_vibe_config: VibeConfig,
+        mock_vibe_config: VibeConfigSchema,
         mock_tool_manager: ToolManager,
         mock_agent_profile: AgentProfile,
         sample_response: EvalResponse,

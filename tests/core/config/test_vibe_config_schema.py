@@ -11,20 +11,7 @@ from vibe.core.config import (
     ModelConfig,
     ProviderConfig,
 )
-from vibe.core.config._settings import VibeConfig
 from vibe.core.config.vibe_schema import VibeConfigSchema
-
-
-def test_vibe_config_schema_covers_all_vibe_config_fields() -> None:
-    legacy_fields = set(VibeConfig.model_fields.keys())
-    schema_fields = set(VibeConfigSchema.model_fields.keys())
-    missing = legacy_fields - schema_fields
-    assert not missing, (
-        f"VibeConfigSchema is missing {len(missing)} field(s) that exist in VibeConfig: "
-        f"{sorted(missing)}. "
-        f"When you add a new field to VibeConfig, also add it to VibeConfigSchema "
-        f"(vibe/core/config/vibe_schema.py) with the appropriate merge annotation."
-    )
 
 
 @pytest.mark.asyncio
@@ -51,12 +38,9 @@ provider = "mistral"
     from vibe.core.config.layers.user import UserConfigLayer
     from vibe.core.config.orchestrator import ConfigOrchestrator
 
-    class VibeConfig(VibeConfigSchema):
-        pass
-
     layer = UserConfigLayer(path=toml_path)
-    orchestrator = await ConfigOrchestrator[VibeConfig].create(
-        schema=VibeConfig, layers=[layer], default_layer_resolver=lambda: layer
+    orchestrator = await ConfigOrchestrator[VibeConfigSchema].create(
+        schema=VibeConfigSchema, layers=[layer], default_layer_resolver=lambda: layer
     )
     config = orchestrator.config
 

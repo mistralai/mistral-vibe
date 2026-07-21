@@ -18,7 +18,7 @@ from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionLis
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 
 if TYPE_CHECKING:
-    from vibe.core.config import AnyVibeConfig
+    from vibe.core.config import VibeConfigSchema
 
 
 class ConfigOptionKind(StrEnum):
@@ -64,7 +64,7 @@ class ConfigApp(Container):
     class OpenThinkingPicker(Message):
         pass
 
-    def __init__(self, config: AnyVibeConfig) -> None:
+    def __init__(self, config: VibeConfigSchema) -> None:
         super().__init__(id="config-app")
         self.config = config
         self.changes: dict[str, str] = {}

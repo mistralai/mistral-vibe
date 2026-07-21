@@ -35,8 +35,13 @@ from vibe.core.compaction.context import (
     extract_summary,
     render_teleport_summary_request,
 )
-from vibe.core.config import AnyVibeConfig, ModelConfig, ProviderConfig, resolve_api_key
-from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.config import (
+    ModelConfig,
+    ProviderConfig,
+    VibeConfigSchema,
+    resolve_api_key,
+)
+from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.experiments import ExperimentManager
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.session import (
@@ -203,7 +208,6 @@ def _load_teleport_service() -> type[TeleportService]:
 if TYPE_CHECKING:
     from opentelemetry import trace
 
-    from vibe.core.config.orchestrator_port import ConfigOrchestratorPort
     from vibe.core.teleport.teleport import TeleportService
     from vibe.core.teleport.types import TeleportPushResponseEvent, TeleportYieldEvent
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
@@ -232,13 +236,13 @@ class _SwappableConfigSource:
     turn only ever observes the live getter.
     """
 
-    def __init__(self, getter: Callable[[], AnyVibeConfig]) -> None:
+    def __init__(self, getter: Callable[[], VibeConfigSchema]) -> None:
         self._getter = getter
 
-    def get(self) -> AnyVibeConfig:
+    def get(self) -> VibeConfigSchema:
         return self._getter()
 
-    def point_to(self, getter: Callable[[], AnyVibeConfig]) -> None:
+    def point_to(self, getter: Callable[[], VibeConfigSchema]) -> None:
         self._getter = getter
 
 
@@ -347,7 +351,7 @@ def requires_init(fn: Callable[..., Any]) -> Callable[..., Any]:
 class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def __init__(  # noqa: PLR0913, PLR0915
         self,
-        config_orchestrator: ConfigOrchestratorPort[AnyVibeConfig],
+        config_orchestrator: ConfigOrchestrator[VibeConfigSchema],
         *,
         agent_name: str = BuiltinAgentName.DEFAULT,
         message_observer: Callable[[LLMMessage], None] | None = None,
@@ -368,9 +372,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         force_bypass_tool_permissions: bool = False,
     ) -> None:
         self._config_orchestrator = config_orchestrator
-        config = config_orchestrator.config
         self._force_bypass_tool_permissions = force_bypass_tool_permissions
-        self._apply_forced_bypass()
         self._headless = headless
         self.cache_store = cache_store or InMemoryVibeCodeCacheStore()
 
@@ -447,7 +449,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.approval_callback: ApprovalCallback | None = None
         self.user_input_callback: UserInputCallback | None = None
         self.launch_context = launch_context
-
+        config = self.config
         try:
             active_model = config.get_active_model()
             self.stats.input_price_per_million = active_model.input_price
@@ -587,34 +589,25 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         return self.agent_manager.active_profile
 
     @property
-    def config_orchestrator(self) -> ConfigOrchestratorPort[AnyVibeConfig]:
+    def config_orchestrator(self) -> ConfigOrchestrator[VibeConfigSchema]:
         return self._config_orchestrator
 
     @property
-    def base_config(self) -> AnyVibeConfig:
+    def base_config(self) -> VibeConfigSchema:
         return self._config_orchestrator.config
 
     @property
-    def config(self) -> AnyVibeConfig:
+    def config(self) -> VibeConfigSchema:
         return self.agent_manager.config
 
     @property
     def bypass_tool_permissions(self) -> bool:
-        return self.config.bypass_tool_permissions
-
-    def _apply_forced_bypass(self) -> None:
-        if self._force_bypass_tool_permissions:
-            self.base_config.bypass_tool_permissions = True
-
-    def _replace_base_config(self, config: AnyVibeConfig) -> None:
-        # Sync bridge: swap the config on the shared orchestrator in place so
-        # AgentManager sees it. PR5 construction sites always wrap a legacy
-        # config; PR6 replaces these writes with async orchestrator calls.
-        cast(LegacyConfigOrchestrator, self._config_orchestrator).replace_config(config)
+        return (
+            self._force_bypass_tool_permissions or self.config.bypass_tool_permissions
+        )
 
     async def refresh_config(self) -> None:
         await self._config_orchestrator.reload()
-        self._apply_forced_bypass()
         self.agent_manager.invalidate_config()
         if self.mcp_registry is not None:
             self.mcp_registry.sync_active_servers(self.config.mcp_servers)
@@ -637,7 +630,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self, tool_name: str, permission: ToolPermission, save_permanently: bool = False
     ) -> None:
         if save_permanently:
-            await self._config_orchestrator.set_field(
+            await self.config_orchestrator.set_field(
                 f"/tools/{tool_name}/permission", permission.value
             )
 
@@ -660,14 +653,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                     )
                 )
             if save_permanently and (
-                allowlist_update := self.config.build_tool_allowlist_update(
+                update := self.config.build_tool_allowlist_update(
                     tool_name, [rp.session_pattern for rp in required_permissions]
                 )
             ):
-                # Extract the allowlist from the update dict
-                allowlist = allowlist_update["tools"][tool_name]["allowlist"]
-                await self._config_orchestrator.set_field(
-                    f"/tools/{tool_name}/allowlist", allowlist
+                await self.config_orchestrator.set_field(
+                    f"/tools/{tool_name}/allowlist",
+                    update["tools"][tool_name]["allowlist"],
                 )
         else:
             await self.set_tool_permission(
@@ -780,7 +772,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def _create_sampling_handler(
         *,
         backend_getter: Callable[[], BackendLike],
-        config_getter: Callable[[], AnyVibeConfig],
+        config_getter: Callable[[], VibeConfigSchema],
         metadata_getter: Callable[[], dict[str, Any]],
         extra_headers_getter: Callable[[], dict[str, str]],
     ) -> MCPSamplingHandler:
@@ -806,7 +798,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self,
         tool_manager: ToolManager,
         skill_manager: SkillManager,
-        config: AnyVibeConfig | None = None,
+        config: VibeConfigSchema | None = None,
     ) -> str:
         return get_universal_system_prompt(
             tool_manager,
@@ -826,10 +818,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         """Rebuild and replace the system prompt with current tool/skill state."""
         self.messages.update_system_prompt(self._build_system_prompt())
 
-    def backend_factory(self, config: AnyVibeConfig | None = None) -> BackendLike:
+    def backend_factory(self, config: VibeConfigSchema | None = None) -> BackendLike:
         return self._injected_backend or self._select_backend(config)
 
-    def _select_backend(self, config: AnyVibeConfig | None = None) -> BackendLike:
+    def _select_backend(self, config: VibeConfigSchema | None = None) -> BackendLike:
         config = config or self.config
         provider = config.get_active_provider()
         return create_backend(
@@ -1038,8 +1030,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         return message_context
 
     def _should_summarize_teleport_context(self, prompt: str | None) -> bool:
-        if not self.config.experimental_teleport_context_summary:
-            return False
         return any(
             self._is_teleport_context_message(message)
             for message in self._teleport_context_messages(prompt)
@@ -2298,9 +2288,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def fork(self, message_id: str | None = None) -> AgentLoop:
         messages = self._messages_for_fork(message_id)
+        new_orch = self._config_orchestrator.copy()
         forked = AgentLoop(
-            # Temporary (PR5): deepcopy is safe for the legacy adapter (config only); PR6 must revisit for the real orchestrator (locks/subscriptions).
-            config_orchestrator=copy.deepcopy(self._config_orchestrator),
+            config_orchestrator=new_orch,
             agent_name=self.agent_profile.name,
             max_turns=self._max_turns,
             max_price=self._max_price,
@@ -2463,10 +2453,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if generation != self._reload_generation:
             return
 
-        # Cheap on-loop setup; warm the config cache so the worker thread only reads it.
-        # Callers mutate the orchestrator (reload / set_field) before reinit, so we just
-        # re-read base_config and re-invalidate.
-        self._apply_forced_bypass()
+        # Callers mutate the orchestrator (reload / set_field) before reinit; pick
+        # up whatever config it now holds.
         self.agent_manager.invalidate_config()
         if max_turns is not None:
             self._max_turns = max_turns
@@ -2498,7 +2486,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         # update. Keep it that way -- don't make it async or move it off-thread.
         self._commit_reload(prepared, reset_middleware, switch_to_agent)
 
-    def _prepare_reload(self, target_config: AnyVibeConfig) -> _PreparedReload:
+    def _prepare_reload(self, target_config: VibeConfigSchema) -> _PreparedReload:
         config_source = _SwappableConfigSource(lambda: target_config)
         tool_manager = ToolManager(
             config_source.get,

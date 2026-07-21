@@ -11,15 +11,16 @@ from mcp.types import (
 import pytest
 
 from tests.conftest import (
+    ConfigBuilder,
     build_test_agent_loop,
-    build_test_vibe_config,
     make_test_models,
+    set_agent_config,
 )
 from tests.mock.utils import mock_llm_chunk
 from tests.stubs.fake_backend import FakeBackend
 from vibe import __version__
 from vibe.core.agents.models import BuiltinAgentName
-from vibe.core.config import ModelConfig, ProviderConfig, VibeConfig
+from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
 from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.types import (
@@ -36,8 +37,10 @@ from vibe.core.types import (
 from vibe.core.utils import get_platform_id, get_platform_version
 
 
-def _two_model_vibe_config(active_model: str) -> VibeConfig:
-    """VibeConfig with two models so we can switch active_model."""
+def _two_model_vibe_config(
+    active_model: str, build_config: ConfigBuilder
+) -> VibeConfigSchema:
+    """VibeConfigSchema with two models so we can switch active_model."""
     models = [
         ModelConfig(
             name="mistral-vibe-cli-latest", provider="mistral", alias="devstral-latest"
@@ -54,9 +57,7 @@ def _two_model_vibe_config(active_model: str) -> VibeConfig:
             backend=Backend.MISTRAL,
         )
     ]
-    return build_test_vibe_config(
-        active_model=active_model, models=models, providers=providers
-    )
+    return build_config(active_model=active_model, models=models, providers=providers)
 
 
 def _make_sampling_params() -> CreateMessageRequestParams:
@@ -71,7 +72,9 @@ def _make_sampling_params() -> CreateMessageRequestParams:
 
 
 @pytest.mark.asyncio
-async def test_passes_x_affinity_header_when_asking_an_answer(vibe_config: VibeConfig):
+async def test_passes_x_affinity_header_when_asking_an_answer(
+    vibe_config: VibeConfigSchema,
+):
     backend = FakeBackend([mock_llm_chunk(content="Response")])
     agent = build_test_agent_loop(config=vibe_config, backend=backend)
 
@@ -86,7 +89,7 @@ async def test_passes_x_affinity_header_when_asking_an_answer(vibe_config: VibeC
 
 @pytest.mark.asyncio
 async def test_passes_x_affinity_header_when_asking_an_answer_streaming(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ):
     backend = FakeBackend([mock_llm_chunk(content="Response")])
     agent = build_test_agent_loop(
@@ -103,7 +106,7 @@ async def test_passes_x_affinity_header_when_asking_an_answer_streaming(
 
 
 @pytest.mark.asyncio
-async def test_max_tokens_is_passed_to_backend(vibe_config: VibeConfig):
+async def test_max_tokens_is_passed_to_backend(vibe_config: VibeConfigSchema):
     backend = FakeBackend([mock_llm_chunk(content="Response")])
     agent = build_test_agent_loop(config=vibe_config, backend=backend)
 
@@ -114,7 +117,7 @@ async def test_max_tokens_is_passed_to_backend(vibe_config: VibeConfig):
 
 
 @pytest.mark.asyncio
-async def test_max_tokens_is_passed_to_streaming_backend(vibe_config: VibeConfig):
+async def test_max_tokens_is_passed_to_streaming_backend(vibe_config: VibeConfigSchema):
     backend = FakeBackend([mock_llm_chunk(content="Response")])
     agent = build_test_agent_loop(
         config=vibe_config, backend=backend, enable_streaming=True
@@ -127,7 +130,9 @@ async def test_max_tokens_is_passed_to_streaming_backend(vibe_config: VibeConfig
 
 
 @pytest.mark.asyncio
-async def test_updates_tokens_stats_based_on_backend_response(vibe_config: VibeConfig):
+async def test_updates_tokens_stats_based_on_backend_response(
+    vibe_config: VibeConfigSchema,
+):
     chunk = mock_llm_chunk(content="Response", prompt_tokens=100, completion_tokens=50)
     backend = FakeBackend([chunk])
     agent = build_test_agent_loop(config=vibe_config, backend=backend)
@@ -139,7 +144,7 @@ async def test_updates_tokens_stats_based_on_backend_response(vibe_config: VibeC
 
 @pytest.mark.asyncio
 async def test_updates_tokens_stats_based_on_backend_response_streaming(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ):
     final_chunk = mock_llm_chunk(
         content="Complete", prompt_tokens=200, completion_tokens=75
@@ -155,7 +160,7 @@ async def test_updates_tokens_stats_based_on_backend_response_streaming(
 
 
 @pytest.mark.asyncio
-async def test_passes_session_id_to_backend(vibe_config: VibeConfig):
+async def test_passes_session_id_to_backend(vibe_config: VibeConfigSchema):
     backend = FakeBackend([mock_llm_chunk(content="Response")])
     agent = build_test_agent_loop(config=vibe_config, backend=backend)
 
@@ -172,7 +177,9 @@ async def test_passes_session_id_to_backend(vibe_config: VibeConfig):
 
 
 @pytest.mark.asyncio
-async def test_passes_parent_session_id_to_backend_after_reset(vibe_config: VibeConfig):
+async def test_passes_parent_session_id_to_backend_after_reset(
+    vibe_config: VibeConfigSchema,
+):
     backend = FakeBackend([
         [mock_llm_chunk(content="Response")],
         [mock_llm_chunk(content="Response after reset")],
@@ -193,7 +200,7 @@ async def test_passes_parent_session_id_to_backend_after_reset(vibe_config: Vibe
 
 
 @pytest.mark.asyncio
-async def test_passes_launch_context_to_backend(vibe_config: VibeConfig):
+async def test_passes_launch_context_to_backend(vibe_config: VibeConfigSchema):
     launch_context = LaunchContext(
         agent_entrypoint="acp",
         agent_version="2.0.0",
@@ -232,11 +239,13 @@ async def test_passes_launch_context_to_backend(vibe_config: VibeConfig):
 
 
 @pytest.mark.asyncio
-async def test_mcp_sampling_handler_uses_updated_backend_when_agent_backend_changes():
+async def test_mcp_sampling_handler_uses_updated_backend_when_agent_backend_changes(
+    build_config: ConfigBuilder,
+):
     """AgentLoop's MCP sampling handler uses current backend when backend is reassigned."""
     backend1 = FakeBackend([mock_llm_chunk(content="from-backend-1")])
     backend2 = FakeBackend([mock_llm_chunk(content="from-backend-2")])
-    config = _two_model_vibe_config("devstral-latest")
+    config = _two_model_vibe_config("devstral-latest", build_config)
     agent = build_test_agent_loop(config=config, backend=backend1)
     handler = agent._sampling_handler
     params = _make_sampling_params()
@@ -259,11 +268,13 @@ async def test_mcp_sampling_handler_uses_updated_backend_when_agent_backend_chan
 
 
 @pytest.mark.asyncio
-async def test_mcp_sampling_handler_uses_updated_config_when_agent_config_changes():
+async def test_mcp_sampling_handler_uses_updated_config_when_agent_config_changes(
+    build_config: ConfigBuilder,
+):
     chunk = mock_llm_chunk(content="ok")
     backend = FakeBackend([chunk])
-    config1 = _two_model_vibe_config("devstral-latest")
-    config2 = _two_model_vibe_config("devstral-small")
+    config1 = _two_model_vibe_config("devstral-latest", build_config)
+    config2 = _two_model_vibe_config("devstral-small", build_config)
     agent = build_test_agent_loop(config=config1, backend=backend)
     handler = agent._sampling_handler
     params = _make_sampling_params()
@@ -273,15 +284,16 @@ async def test_mcp_sampling_handler_uses_updated_config_when_agent_config_change
     assert isinstance(result1, CreateMessageResult)
     assert result1.model == "mistral-vibe-cli-latest"
 
-    agent._replace_base_config(config2)
-    agent.agent_manager.invalidate_config()
+    set_agent_config(agent, config2)
     result2 = await handler(context, params)
     assert isinstance(result2, CreateMessageResult)
     assert result2.model == "devstral-small-latest"
 
 
 @pytest.mark.asyncio
-async def test_mcp_sampling_handler_sends_secondary_call_telemetry_metadata():
+async def test_mcp_sampling_handler_sends_secondary_call_telemetry_metadata(
+    build_config: ConfigBuilder,
+):
     launch_context = LaunchContext(
         agent_entrypoint="acp",
         agent_version="2.0.0",
@@ -294,7 +306,7 @@ async def test_mcp_sampling_handler_sends_secondary_call_telemetry_metadata():
         [mock_llm_chunk(content="Sampled response")],
     ])
     agent = build_test_agent_loop(
-        config=_two_model_vibe_config("devstral-latest"),
+        config=_two_model_vibe_config("devstral-latest", build_config),
         backend=backend,
         launch_context=launch_context,
     )
@@ -334,8 +346,8 @@ async def test_mcp_sampling_handler_sends_secondary_call_telemetry_metadata():
     assert sampling_headers["x-affinity"] == agent.session_id
 
 
-def _generic_provider_vibe_config() -> VibeConfig:
-    """VibeConfig with generic backend so no metadata header is sent."""
+def _generic_provider_vibe_config(build_config: ConfigBuilder) -> VibeConfigSchema:
+    """VibeConfigSchema with generic backend so no metadata header is sent."""
     providers = [
         ProviderConfig(
             name="mistral",
@@ -344,14 +356,14 @@ def _generic_provider_vibe_config() -> VibeConfig:
             backend=Backend.GENERIC,
         )
     ]
-    return build_test_vibe_config(providers=providers)
+    return build_config(providers=providers)
 
 
 @pytest.mark.asyncio
-async def test_mistral_metadata_includes_user_plan() -> None:
+async def test_mistral_metadata_includes_user_plan(build_config: ConfigBuilder) -> None:
     backend = FakeBackend([mock_llm_chunk(content="Response")])
     agent = build_test_agent_loop(
-        config=_two_model_vibe_config("devstral-latest"), backend=backend
+        config=_two_model_vibe_config("devstral-latest", build_config), backend=backend
     )
     agent.set_user_plan("Team")
 
@@ -364,7 +376,9 @@ async def test_mistral_metadata_includes_user_plan() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mistral_metadata_header_call_type_per_turn() -> None:
+async def test_mistral_metadata_header_call_type_per_turn(
+    build_config: ConfigBuilder,
+) -> None:
     """First LLM call in a turn is main_call; second call (after tools) is secondary_call."""
     tool_call = ToolCall(
         id="call_1",
@@ -375,7 +389,7 @@ async def test_mistral_metadata_header_call_type_per_turn() -> None:
         [mock_llm_chunk(content="Checking todos.", tool_calls=[tool_call])],
         [mock_llm_chunk(content="Here are your todos.")],
     ])
-    config = build_test_vibe_config(
+    config = build_config(
         providers=[
             ProviderConfig(
                 name="mistral",
@@ -403,13 +417,15 @@ async def test_mistral_metadata_header_call_type_per_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_compact_emits_summary_and_next_turn_metadata() -> None:
+async def test_auto_compact_emits_summary_and_next_turn_metadata(
+    build_config: ConfigBuilder,
+) -> None:
     """Compact emits summary then user-turn backend metadata in order."""
     backend = FakeBackend([
         [mock_llm_chunk(content="<summary>done</summary>")],
         [mock_llm_chunk(content="<final>")],
     ])
-    config = build_test_vibe_config(
+    config = build_config(
         models=make_test_models(auto_compact_threshold=1),
         providers=[
             ProviderConfig(
@@ -448,10 +464,12 @@ async def test_auto_compact_emits_summary_and_next_turn_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generic_provider_has_no_metadata_header() -> None:
+async def test_generic_provider_has_no_metadata_header(
+    build_config: ConfigBuilder,
+) -> None:
     """Non-Mistral provider does not send the metadata header."""
     backend = FakeBackend([mock_llm_chunk(content="Response")])
-    config = _generic_provider_vibe_config()
+    config = _generic_provider_vibe_config(build_config)
     agent = build_test_agent_loop(config=config, backend=backend)
 
     [_ async for _ in agent.act("Hello")]
@@ -463,7 +481,9 @@ async def test_generic_provider_has_no_metadata_header() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_extra_headers_are_forwarded() -> None:
+async def test_provider_extra_headers_are_forwarded(
+    build_config: ConfigBuilder,
+) -> None:
     backend = FakeBackend([mock_llm_chunk(content="Response")])
     providers = [
         ProviderConfig(
@@ -473,9 +493,7 @@ async def test_provider_extra_headers_are_forwarded() -> None:
         )
     ]
     models = [ModelConfig(name="test-model", provider="custom", alias="test")]
-    config = build_test_vibe_config(
-        active_model="test", models=models, providers=providers
-    )
+    config = build_config(active_model="test", models=models, providers=providers)
     agent = build_test_agent_loop(config=config, backend=backend)
 
     [_ async for _ in agent.act("Hello")]
@@ -496,7 +514,7 @@ def _refusal_chunk() -> LLMChunk:
 
 
 @pytest.mark.asyncio
-async def test_refusal_stop_reason_raises_refusal_error(vibe_config: VibeConfig):
+async def test_refusal_stop_reason_raises_refusal_error(vibe_config: VibeConfigSchema):
     backend = FakeBackend([_refusal_chunk()])
     agent = build_test_agent_loop(config=vibe_config, backend=backend)
 
@@ -506,7 +524,7 @@ async def test_refusal_stop_reason_raises_refusal_error(vibe_config: VibeConfig)
 
 @pytest.mark.asyncio
 async def test_refusal_stop_reason_raises_refusal_error_streaming(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ):
     backend = FakeBackend([_refusal_chunk()])
     agent = build_test_agent_loop(
@@ -530,7 +548,9 @@ def _refusal_chunk_with_details() -> LLMChunk:
 
 
 @pytest.mark.asyncio
-async def test_refusal_error_carries_category_and_explanation(vibe_config: VibeConfig):
+async def test_refusal_error_carries_category_and_explanation(
+    vibe_config: VibeConfigSchema,
+):
     backend = FakeBackend([_refusal_chunk_with_details()])
     agent = build_test_agent_loop(config=vibe_config, backend=backend)
 
@@ -546,7 +566,7 @@ async def test_refusal_error_carries_category_and_explanation(vibe_config: VibeC
 
 @pytest.mark.asyncio
 async def test_refusal_error_carries_category_and_explanation_streaming(
-    vibe_config: VibeConfig,
+    vibe_config: VibeConfigSchema,
 ):
     backend = FakeBackend([_refusal_chunk_with_details()])
     agent = build_test_agent_loop(

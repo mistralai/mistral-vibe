@@ -10,6 +10,7 @@ from tests.conftest import (
     build_test_agent_loop,
     build_test_vibe_app,
     build_test_vibe_config,
+    stub_config_reload,
 )
 from tests.stubs.fake_voice_manager import FakeVoiceManager
 from vibe.cli.narrator_manager.narrator_manager_port import (
@@ -21,7 +22,6 @@ from vibe.cli.textual_ui.lazy_audio_managers import (
     LazyVoiceManager,
 )
 from vibe.cli.voice_manager.voice_manager_port import TranscribeState
-from vibe.core.config import VibeConfig
 from vibe.core.types import BaseEvent
 
 
@@ -146,7 +146,7 @@ def test_lazy_narrator_manager_sync_materializes_after_enable() -> None:
     factory = MagicMock(return_value=narrator)
     manager = LazyNarratorManager(lambda: config, factory)
 
-    config.narrator_enabled = True
+    config = config.model_copy(update={"narrator_enabled": True})
     manager.sync()
 
     factory.assert_called_once()
@@ -164,7 +164,7 @@ async def test_tui_config_refresh_syncs_lazy_narrator(
     factory = MagicMock(return_value=narrator)
     narrator_manager = LazyNarratorManager(lambda: agent_loop.config, factory)
     app = build_test_vibe_app(agent_loop=agent_loop, narrator_manager=narrator_manager)
-    monkeypatch.setattr(VibeConfig, "load", staticmethod(lambda: refreshed_config))
+    stub_config_reload(monkeypatch, refreshed_config)
 
     await app._refresh_config_from_disk()
 

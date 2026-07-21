@@ -34,7 +34,7 @@ Always go through `uv` — never invoke bare `python` or `pip`.
 
 - `__init__.py` exposes the public API via an explicit `__all__`.
 - Private modules are prefixed with `_` (e.g. `_settings.py`, `_config.py`).
-- Pydantic models live in `models.py`; configuration in `_settings.py` / `_config.py`.
+- Pydantic config models live in `models.py`; shared config defaults live in `_defaults.py`; the effective config schema lives in `vibe_schema.py`.
 - Abstract interfaces use the `_port.py` suffix (hexagonal-style ports).
 - Tests mirror the source layout: a test lives in the directory mirroring its source module's package. Tests for a `vibe/core` subpackage go under the matching `tests/core/<subpackage>/` (e.g. `vibe/core/utils/http.py` → `tests/core/utils/test_http_client.py`); tests for modules that sit directly in `vibe/core/` (e.g. `loop.py`, `types.py`) stay flat in `tests/core/`. No `__init__.py` is needed in test subdirectories — pytest runs in `--import-mode=importlib`. Test doubles in `tests/stubs/` are named `Fake*`.
 

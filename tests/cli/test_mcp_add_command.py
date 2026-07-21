@@ -8,7 +8,8 @@ from tests.conftest import build_test_vibe_app, build_test_vibe_config
 from vibe.cli.textual_ui.app import VibeApp
 from vibe.cli.textual_ui.mcp_commands import parse_mcp_add_args, parse_mcp_subcommand
 from vibe.cli.textual_ui.widgets.messages import ErrorMessage, UserCommandMessage
-from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp, VibeConfig
+from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp
+from vibe.core.config.default_orchestrator import build_default_orchestrator
 
 
 def _capture_mounted_widgets(
@@ -85,7 +86,7 @@ async def test_mcp_add_saves_oauth_server_and_prints_next_steps(
 
     await app._mcp_add("https://mcp.linear.app/mcp --no-login")
 
-    server = VibeConfig.load().mcp_servers[0]
+    server = (await build_default_orchestrator()).config.mcp_servers[0]
     assert isinstance(server, MCPStreamableHttp)
     assert server.name == "linear"
     assert isinstance(server.auth, MCPOAuth)
@@ -107,7 +108,7 @@ async def test_mcp_add_saves_name_and_scopes(monkeypatch: pytest.MonkeyPatch) ->
         "https://mcp.example.com/mcp --name docs --scope read --scope write --no-login"
     )
 
-    server = VibeConfig.load().mcp_servers[0]
+    server = (await build_default_orchestrator()).config.mcp_servers[0]
     assert isinstance(server, MCPStreamableHttp)
     assert server.name == "docs"
     assert isinstance(server.auth, MCPOAuth)
@@ -126,7 +127,7 @@ async def test_mcp_add_saves_http_transport(monkeypatch: pytest.MonkeyPatch) -> 
 
     await app._mcp_add("https://mcp.example.com/mcp --transport http --no-login")
 
-    server = VibeConfig.load().mcp_servers[0]
+    server = (await build_default_orchestrator()).config.mcp_servers[0]
     assert isinstance(server, MCPHttp)
     assert server.transport == "http"
     assert isinstance(server.auth, MCPOAuth)

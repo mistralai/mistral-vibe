@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from acp.schema import TextContentBlock
 import pytest
@@ -10,6 +10,24 @@ import pytest
 from tests.stubs.fake_client import FakeClient
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.acp.exceptions import InvalidRequestError, SessionNotFoundError
+from vibe.core.checkpoints import AgentTurn, Decision, OpaqueReason
+from vibe.core.review import (
+    AllTarget,
+    FileTarget,
+    LastTurnsTarget,
+    OpaqueReviewRegion,
+    RegionsTarget,
+    RegionTarget,
+    ReviewFile,
+    ReviewFileStatus,
+    ReviewScope,
+    ReviewScopeFile,
+    ReviewState,
+    ScopeFileTarget,
+    ScopeTarget,
+    TextReviewRegion,
+    TurnFileDiff,
+)
 from vibe.core.rewind import RewindError
 from vibe.core.types import LLMMessage, Role
 
@@ -21,6 +39,334 @@ async def _new_session_id(acp_agent: VibeAcpAgentLoop) -> str:
 
 @pytest.mark.asyncio
 class TestRewindAcp:
+    async def test_review_state_returns_pending_files(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        review_manager = acp_agent.sessions[session_id].agent_loop.review_manager
+        review_manager.review_state = Mock(
+            return_value=ReviewState(
+                files=[
+                    ReviewFile(
+                        path="a.py",
+                        status=ReviewFileStatus.MODIFIED,
+                        regions=[
+                            TextReviewRegion(
+                                version_index=0,
+                                ordinal=0,
+                                owner=AgentTurn(2),
+                                baseline_start=1,
+                                baseline_line_count=2,
+                                current_start=1,
+                                current_line_count=3,
+                                decision=Decision.PENDING,
+                                depends_on=(),
+                            )
+                        ],
+                    ),
+                    ReviewFile(
+                        path="image.bin",
+                        status=ReviewFileStatus.BINARY_OR_UNDECODABLE,
+                        regions=[
+                            OpaqueReviewRegion(
+                                version_index=0,
+                                ordinal=0,
+                                owner=AgentTurn(2),
+                                reason=OpaqueReason.BINARY_OR_UNDECODABLE,
+                                decision=Decision.PENDING,
+                                depends_on=(),
+                            )
+                        ],
+                    ),
+                ],
+                scopes=[
+                    ReviewScope(
+                        owner=AgentTurn(2),
+                        files=[
+                            ReviewScopeFile(
+                                path="a.py",
+                                status=ReviewFileStatus.MODIFIED,
+                                region_count=1,
+                            )
+                        ],
+                    )
+                ],
+            )
+        )
+
+        result = await acp_agent.ext_method("review/state", {"sessionId": session_id})
+
+        assert result == {
+            "files": [
+                {
+                    "path": "a.py",
+                    "status": "modified",
+                    "regions": [
+                        {
+                            "kind": "text",
+                            "versionIndex": 0,
+                            "ordinal": 0,
+                            "owner": {"kind": "agent", "turnId": 2},
+                            "baselineStart": 1,
+                            "baselineLineCount": 2,
+                            "currentStart": 1,
+                            "currentLineCount": 3,
+                            "decision": "pending",
+                            "dependsOn": [],
+                        }
+                    ],
+                },
+                {
+                    "path": "image.bin",
+                    "status": "binary_or_undecodable",
+                    "regions": [
+                        {
+                            "kind": "opaque",
+                            "versionIndex": 0,
+                            "ordinal": 0,
+                            "owner": {"kind": "agent", "turnId": 2},
+                            "reason": "binary_or_undecodable",
+                            "decision": "pending",
+                            "dependsOn": [],
+                        }
+                    ],
+                },
+            ],
+            "scopes": [
+                {
+                    "owner": {"kind": "agent", "turnId": 2},
+                    "files": [{"path": "a.py", "status": "modified", "regionCount": 1}],
+                }
+            ],
+        }
+        review_manager.review_state.assert_called_once_with()
+
+    async def test_review_baseline_returns_content(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        review_manager = acp_agent.sessions[session_id].agent_loop.review_manager
+        review_manager.baseline_text = Mock(return_value="before")
+
+        result = await acp_agent.ext_method(
+            "review/baseline", {"sessionId": session_id, "path": "a.py"}
+        )
+
+        assert result == {"content": "before"}
+        review_manager.baseline_text.assert_called_once_with("a.py")
+
+    async def test_review_turn_diff_returns_turn_change(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        review_manager = acp_agent.sessions[session_id].agent_loop.review_manager
+        review_manager.scope_file_diff = Mock(
+            return_value=TurnFileDiff(
+                status=ReviewFileStatus.MODIFIED, baseline="before", current="after"
+            )
+        )
+
+        result = await acp_agent.ext_method(
+            "review/turnDiff",
+            {
+                "sessionId": session_id,
+                "path": "a.py",
+                "owner": {"kind": "agent", "turnId": 3},
+            },
+        )
+
+        assert result == {
+            "status": "modified",
+            "baseline": "before",
+            "current": "after",
+        }
+        review_manager.scope_file_diff.assert_called_once_with("a.py", AgentTurn(3))
+
+    async def test_review_approve_region_delegates_to_manager(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        review_manager = acp_agent.sessions[session_id].agent_loop.review_manager
+        review_manager.approve_review = Mock(return_value=["a.py"])
+
+        result = await acp_agent.ext_method(
+            "review/approve",
+            {
+                "sessionId": session_id,
+                "target": {
+                    "kind": "region",
+                    "path": "a.py",
+                    "versionIndex": 1,
+                    "ordinal": 0,
+                },
+            },
+        )
+
+        assert result == {}
+        review_manager.approve_review.assert_called_once_with(
+            RegionTarget(path="a.py", version_index=1, ordinal=0)
+        )
+
+    async def test_review_revert_turn_delegates_to_manager(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        review_manager = acp_agent.sessions[session_id].agent_loop.review_manager
+        review_manager.revert_review = Mock(return_value=["a.py"])
+
+        result = await acp_agent.ext_method(
+            "review/revert",
+            {
+                "sessionId": session_id,
+                "target": {"kind": "scope", "owner": {"kind": "agent", "turnId": 3}},
+            },
+        )
+
+        assert result == {}
+        review_manager.revert_review.assert_called_once_with(
+            ScopeTarget(owner=AgentTurn(3))
+        )
+
+    async def test_review_revert_turn_file_delegates_to_manager(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        review_manager = acp_agent.sessions[session_id].agent_loop.review_manager
+        review_manager.revert_review = Mock(return_value=["a.py"])
+
+        result = await acp_agent.ext_method(
+            "review/revert",
+            {
+                "sessionId": session_id,
+                "target": {
+                    "kind": "scopeFile",
+                    "owner": {"kind": "agent", "turnId": 3},
+                    "path": "a.py",
+                },
+            },
+        )
+
+        assert result == {}
+        review_manager.revert_review.assert_called_once_with(
+            ScopeFileTarget(owner=AgentTurn(3), path="a.py")
+        )
+
+    async def test_review_approve_regions_delegates_to_manager(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        review_manager = acp_agent.sessions[session_id].agent_loop.review_manager
+        review_manager.approve_review = Mock(return_value=["a.py"])
+
+        result = await acp_agent.ext_method(
+            "review/approve",
+            {
+                "sessionId": session_id,
+                "target": {
+                    "kind": "regions",
+                    "path": "a.py",
+                    "regions": [
+                        {"versionIndex": 0, "ordinal": 0},
+                        {"versionIndex": 1, "ordinal": 0},
+                    ],
+                },
+            },
+        )
+
+        assert result == {}
+        review_manager.approve_review.assert_called_once_with(
+            RegionsTarget(path="a.py", regions=((0, 0), (1, 0)))
+        )
+
+    async def test_review_revert_file_delegates_to_manager(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        review_manager = acp_agent.sessions[session_id].agent_loop.review_manager
+        review_manager.revert_review = Mock(return_value=["a.py"])
+
+        result = await acp_agent.ext_method(
+            "review/revert",
+            {"sessionId": session_id, "target": {"kind": "file", "path": "a.py"}},
+        )
+
+        assert result == {}
+        review_manager.revert_review.assert_called_once_with(FileTarget(path="a.py"))
+
+    async def test_review_revert_all_delegates_to_manager(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        review_manager = acp_agent.sessions[session_id].agent_loop.review_manager
+        review_manager.revert_review = Mock(return_value=[])
+
+        result = await acp_agent.ext_method(
+            "review/revert", {"sessionId": session_id, "target": {"kind": "all"}}
+        )
+
+        assert result == {}
+        review_manager.revert_review.assert_called_once_with(AllTarget())
+
+    async def test_review_approve_last_turns_delegates_to_manager(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        review_manager = acp_agent.sessions[session_id].agent_loop.review_manager
+        review_manager.approve_review = Mock(return_value=[])
+
+        result = await acp_agent.ext_method(
+            "review/approve",
+            {"sessionId": session_id, "target": {"kind": "lastTurns", "count": 2}},
+        )
+
+        assert result == {}
+        review_manager.approve_review.assert_called_once_with(LastTurnsTarget(count=2))
+
+    async def test_review_mutation_invalid_target_raises(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+
+        with pytest.raises(InvalidRequestError):
+            await acp_agent.ext_method(
+                "review/approve", {"sessionId": session_id, "target": {"kind": "bogus"}}
+            )
+
+    async def test_review_mutation_rejects_active_prompt(
+        self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
+    ) -> None:
+        acp_agent = acp_agent_with_session_config[0]
+        session_id = await _new_session_id(acp_agent)
+        session = acp_agent.sessions[session_id]
+        review_manager = session.agent_loop.review_manager
+        review_manager.revert_review = Mock(return_value=[])
+
+        async def pending_prompt() -> None:
+            await asyncio.Event().wait()
+
+        session.set_prompt_task(pending_prompt())
+
+        try:
+            with pytest.raises(InvalidRequestError, match="agent loop is running"):
+                await acp_agent.ext_method(
+                    "review/revert",
+                    {"sessionId": session_id, "target": {"kind": "all"}},
+                )
+            review_manager.revert_review.assert_not_called()
+        finally:
+            await session.cancel_prompt()
+
     async def test_rewind_preview_returns_restorable_paths(
         self, acp_agent_with_session_config: tuple[VibeAcpAgentLoop, FakeClient]
     ) -> None:
@@ -418,6 +764,10 @@ class TestRewindAcp:
     ) -> None:
         acp_agent = acp_agent_with_session_config[0]
 
+        with pytest.raises(InvalidRequestError):
+            await acp_agent.ext_method("review/state", {})
+        with pytest.raises(InvalidRequestError):
+            await acp_agent.ext_method("review/baseline", {"sessionId": "x"})
         with pytest.raises(InvalidRequestError):
             await acp_agent.ext_method("rewind/preview", {"sessionId": "x"})
         with pytest.raises(InvalidRequestError):

@@ -8,6 +8,7 @@ import pytest
 from tests.acp.conftest import _create_acp_agent
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_backend import FakeBackend
+from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.acp.exceptions import InvalidRequestError, SessionNotFoundError
 from vibe.core.agent_loop import AgentLoop
@@ -35,6 +36,7 @@ def acp_agent_loop(
 ) -> VibeAcpAgentLoop:
     config = build_test_vibe_config(
         active_model="devstral-latest",
+        include_project_context=True,
         models=[
             ModelConfig(
                 name="devstral-latest", provider="mistral", alias="devstral-latest"
@@ -47,8 +49,8 @@ def acp_agent_loop(
 
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
+            kwargs["config_orchestrator"] = FakeConfigOrchestrator(config)
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
 
     monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)

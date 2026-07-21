@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+import tomllib
 from unittest.mock import patch
 
 import pytest
@@ -9,7 +11,8 @@ from tests.acp.conftest import _create_acp_agent
 from tests.conftest import build_test_vibe_config
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import ModelConfig, VibeConfig
+from vibe.core.config import ModelConfig
+from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.types import LLMMessage, Role
 
 
@@ -35,12 +38,22 @@ def acp_agent_loop(backend) -> VibeAcpAgentLoop:
         ],
     )
 
-    VibeConfig.dump_config(config.model_dump())
+    async def _seed_config() -> None:
+        orchestrator = await build_default_orchestrator()
+        await orchestrator.set_field(
+            "/models",
+            [
+                m.model_dump(mode="json", exclude_none=True)
+                for m in config.models.values()
+            ],
+        )
+        await orchestrator.set_field("/active_model", config.active_model)
+
+    asyncio.run(_seed_config())
 
     class PatchedAgentLoop(AgentLoop):
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **{**kwargs, "backend": backend})
-            self._replace_base_config(config)
             self.agent_manager.invalidate_config()
             try:
                 active_model = config.get_active_model()
@@ -121,37 +134,37 @@ class TestACPSetConfigOptionModelCompat:
 
     @pytest.mark.asyncio
     async def test_set_config_option_model_saves_to_config(
-        self, acp_agent_loop: VibeAcpAgentLoop
+        self, acp_agent_loop: VibeAcpAgentLoop, config_dir: Path
     ) -> None:
         session_response = await acp_agent_loop.new_session(
             cwd=str(Path.cwd()), mcp_servers=[]
         )
         session_id = session_response.session_id
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.save_updates") as mock_save:
-            response = await acp_agent_loop.set_config_option(
-                session_id=session_id, config_id="model", value="devstral-small"
-            )
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value="devstral-small"
+        )
 
-            assert response is not None
-            mock_save.assert_called_once_with({"active_model": "devstral-small"})
+        assert response is not None
+        with (config_dir / "config.toml").open("rb") as file:
+            assert tomllib.load(file)["active_model"] == "devstral-small"
 
     @pytest.mark.asyncio
     async def test_set_config_option_model_does_not_save_on_invalid_model(
-        self, acp_agent_loop: VibeAcpAgentLoop
+        self, acp_agent_loop: VibeAcpAgentLoop, config_dir: Path
     ) -> None:
         session_response = await acp_agent_loop.new_session(
             cwd=str(Path.cwd()), mcp_servers=[]
         )
         session_id = session_response.session_id
 
-        with patch("vibe.acp.acp_agent_loop.VibeConfig.save_updates") as mock_save:
-            response = await acp_agent_loop.set_config_option(
-                session_id=session_id, config_id="model", value="non-existent-model"
-            )
+        response = await acp_agent_loop.set_config_option(
+            session_id=session_id, config_id="model", value="non-existent-model"
+        )
 
-            assert response is None
-            mock_save.assert_not_called()
+        assert response is None
+        with (config_dir / "config.toml").open("rb") as file:
+            assert tomllib.load(file)["active_model"] == "devstral-latest"
 
     @pytest.mark.asyncio
     async def test_set_config_option_model_with_empty_string(
@@ -226,7 +239,9 @@ class TestACPSetConfigOptionModelCompat:
             )
 
             assert response is not None
-            mock_orch_reload.assert_awaited_once()
+            # The orchestrator reloads on its own during set_field and again on the
+            # explicit config reload, so only assert it happened, not the exact count.
+            assert mock_orch_reload.await_count >= 1
             mock_reload.assert_awaited_once()
             assert mock_reload.call_args.kwargs == {}
             # reload() re-reads from disk, picking up the persisted model change

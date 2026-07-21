@@ -179,7 +179,7 @@ from vibe.core.autocompletion.path_prompt import (
     build_title_segments,
 )
 from vibe.core.autocompletion.path_prompt_adapter import extract_image_resources
-from vibe.core.config import DEFAULT_THEME, AnyVibeConfig, ModelConfig
+from vibe.core.config import DEFAULT_THEME, ModelConfig, VibeConfigSchema
 from vibe.core.config.patch import escape_json_pointer_token
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.hooks.models import HookStartEvent
@@ -266,7 +266,6 @@ from vibe.core.vibe_code_project import (
 )
 
 _VSCODE_FAMILY_TERMINALS = {Terminal.VSCODE, Terminal.VSCODE_INSIDERS, Terminal.CURSOR}
-
 
 # Expected turn outcomes with bespoke user messages; not worth reporting to Sentry.
 _BENIGN_TURN_ERRORS: tuple[type[Exception], ...] = (
@@ -598,7 +597,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._startup_command_availability_ready = asyncio.Event()
 
     @property
-    def config(self) -> AnyVibeConfig:
+    def config(self) -> VibeConfigSchema:
         return self.agent_loop.config
 
     @property
@@ -1616,9 +1615,11 @@ class VibeApp(App):  # noqa: PLR0904
         self, message: ThinkingPickerApp.ThinkingSelected
     ) -> None:
         active_model = self.config.get_active_model()
+        updated_model = active_model.model_copy(
+            update={"thinking": message.level}
+        ).model_dump(mode="json")
         await self.agent_loop.config_orchestrator.set_field(
-            f"/models/{escape_json_pointer_token(active_model.alias)}/thinking",
-            message.level,
+            f"/models/{escape_json_pointer_token(active_model.alias)}", updated_model
         )
         await self._reload_config()
         await self._switch_to_input_app()
@@ -1665,8 +1666,8 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_mcpapp_mcptoggled(self, message: MCPApp.MCPToggled) -> None:
         from vibe.cli.textual_ui.widgets.mcp_app import MCPSourceKind
 
-        persist_mcp_toggle(
-            self.agent_loop.config,
+        await persist_mcp_toggle(
+            self.agent_loop.config_orchestrator,
             name=message.name,
             is_connector=message.kind == MCPSourceKind.CONNECTOR,
             disabled=message.disabled,
@@ -2173,7 +2174,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> tuple[ApprovalResponse, str | None]:
         # Auto-approve only if parent is in auto-approve mode AND tool is enabled
         # This ensures subagents respect the main agent's tool restrictions
-        if self.agent_loop and self.agent_loop.config.bypass_tool_permissions:
+        if self.agent_loop and self.agent_loop.bypass_tool_permissions:
             if self._is_tool_enabled_in_main_agent(tool):
                 return (ApprovalResponse.YES, None)
 
@@ -2873,8 +2874,8 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         try:
-            result = persist_oauth_mcp_server(
-                self.agent_loop.config,
+            result = await persist_oauth_mcp_server(
+                self.agent_loop.config_orchestrator,
                 url=args.url,
                 name=args.name,
                 scopes=args.scopes,
@@ -3195,6 +3196,7 @@ class VibeApp(App):  # noqa: PLR0904
             self._reset_ui_state()
             await self._load_more.hide()
             await self.agent_loop.config_orchestrator.reload()
+            base_config = self.agent_loop.config_orchestrator.config
 
             await self.agent_loop.reload_with_initial_messages()
             await self._resolve_plan()
@@ -3202,10 +3204,10 @@ class VibeApp(App):  # noqa: PLR0904
 
             if self._banner:
                 cc, ct = compute_connector_counts(
-                    self.agent_loop.base_config, self.agent_loop.connector_registry
+                    base_config, self.agent_loop.connector_registry
                 )
                 self._banner.set_state(
-                    self.agent_loop.base_config,
+                    base_config,
                     self.agent_loop.skill_manager,
                     connectors_connected=cc,
                     connectors_total=ct,
@@ -3248,7 +3250,7 @@ class VibeApp(App):  # noqa: PLR0904
             )
             return
         await self.agent_loop.config_orchestrator.set_field(
-            "/installed_agents", sorted([*current, "lean"])
+            "/installed_agents/-", "lean"
         )
         await self._reload_config()
 

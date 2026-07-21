@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from textual.pilot import Pilot
 
-from tests.conftest import build_test_vibe_config
 from tests.mock.utils import mock_llm_chunk
-from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp
+from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_voice_manager import FakeVoiceManager
@@ -18,11 +17,7 @@ class VoiceEnableApp(BaseSnapshotTestApp):
 
 class VoiceDisableApp(BaseSnapshotTestApp):
     def __init__(self) -> None:
-        config = build_test_vibe_config(
-            disable_welcome_banner_animation=True,
-            displayed_workdir="/test/workdir",
-            voice_mode_enabled=True,
-        )
+        config = default_config(voice_mode_enabled=True)
         super().__init__(
             config=config, voice_manager=FakeVoiceManager(is_voice_ready=True)
         )
