@@ -29,6 +29,7 @@ from pydantic import (
 )
 
 from vibe.core.experiments.models import EvalResponse
+from vibe.core.pawgress.goal import Goal
 
 
 class ScheduledLoop(BaseModel):
@@ -57,6 +58,10 @@ class AgentStats(BaseModel):
     tool_calls_succeeded: int = 0
 
     context_tokens: int = 0
+
+    rate_limit_tokens_limit: int = 0
+    rate_limit_tokens_remaining: int = 0
+    rate_limit_captured_at: float = 0.0
 
     last_turn_prompt_tokens: int = 0
     last_turn_completion_tokens: int = 0
@@ -162,6 +167,7 @@ class SessionMetadata(BaseModel):
     title: str | None = None
     title_source: Literal["auto", "manual"] = "auto"
     experiments: EvalResponse | None = None
+    goal: Goal | None = None
 
 
 StrToolChoice = Literal["auto", "none", "any", "required"]
@@ -438,11 +444,19 @@ class StopInfo(BaseModel):
         return self.reason == StopReason.REFUSAL
 
 
+class RateLimitInfo(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    limit_tokens: int
+    remaining_tokens: int
+
+
 class LLMChunk(BaseModel):
     model_config = ConfigDict(frozen=True)
     message: LLMMessage
     usage: LLMUsage | None = None
     correlation_id: str | None = None
+    rate_limit: RateLimitInfo | None = None
     stop: StopInfo | None = None
 
     def __add__(self, other: LLMChunk) -> LLMChunk:
@@ -454,6 +468,7 @@ class LLMChunk(BaseModel):
             message=self.message + other.message,
             usage=new_usage,
             correlation_id=other.correlation_id or self.correlation_id,
+            rate_limit=other.rate_limit or self.rate_limit,
             stop=other.stop or self.stop,
         )
 

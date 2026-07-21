@@ -155,6 +155,7 @@ from vibe.core.types import (
     PlanReviewEndedEvent,
     PlanReviewRequestedEvent,
     RateLimitError,
+    RateLimitInfo,
     ReasoningEvent,
     RefusalError,
     ResponseTooLongError,
@@ -2157,6 +2158,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             start_time = time.perf_counter()
             usage = LLMUsage()
             chunk_agg: LLMChunk | None = None
+            rate_limit: RateLimitInfo | None = None
             async for chunk in self.backend.complete_streaming(
                 model=active_model,
                 messages=self._messages_for_backend(self.messages, active_model),
@@ -2169,6 +2171,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             ):
                 if chunk.correlation_id:
                     self.telemetry_client.last_correlation_id = chunk.correlation_id
+                if chunk.rate_limit is not None:
+                    rate_limit = chunk.rate_limit
                 processed_message = self.format_handler.process_api_response_message(
                     chunk.message
                 )
@@ -2188,7 +2192,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 raise AgentLoopLLMResponseError(
                     "Usage data missing in final chunk of streamed completion"
                 )
-            self._update_stats(usage=usage, time_seconds=end_time - start_time)
+            self._update_stats(
+                usage=usage, time_seconds=end_time - start_time, rate_limit=rate_limit
+            )
 
             self.messages.append(chunk_agg.message)
             if chunk_agg.stop and chunk_agg.stop.is_refusal:
@@ -2210,12 +2216,21 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 f"API error from {provider.name} (model: {active_model.name}): {e}"
             ) from e
 
-    def _update_stats(self, usage: LLMUsage, time_seconds: float) -> None:
+    def _update_stats(
+        self,
+        usage: LLMUsage,
+        time_seconds: float,
+        rate_limit: RateLimitInfo | None = None,
+    ) -> None:
         self.stats.last_turn_duration = time_seconds
         self.stats.last_turn_prompt_tokens = usage.prompt_tokens
         self.stats.last_turn_completion_tokens = usage.completion_tokens
         self.stats.session_prompt_tokens += usage.prompt_tokens
         self.stats.session_completion_tokens += usage.completion_tokens
+        if rate_limit is not None:
+            self.stats.rate_limit_tokens_limit = rate_limit.limit_tokens
+            self.stats.rate_limit_tokens_remaining = rate_limit.remaining_tokens
+            self.stats.rate_limit_captured_at = time.monotonic()
         self.stats.context_tokens = usage.prompt_tokens + usage.completion_tokens
         if time_seconds > 0 and usage.completion_tokens > 0:
             self.stats.tokens_per_second = usage.completion_tokens / time_seconds

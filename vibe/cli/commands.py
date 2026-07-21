@@ -172,6 +172,15 @@ class CommandRegistry:
                 ),
                 handler="_loop_command",
             ),
+            "pawgress": Command(
+                aliases=frozenset(["/pawgress", "/goal"]),
+                description=(
+                    "Set a persistent goal Vibe keeps working on until it verifies. "
+                    'Use `/pawgress <description> [--verify "<cmd>"] [--repeat N] '
+                    '[--constraint "<c>"]` or `/pawgress status`'
+                ),
+                handler="_pawgress_command",
+            ),
             "data-retention": Command(
                 aliases=frozenset(["/data-retention"]),
                 description="Show data retention information",

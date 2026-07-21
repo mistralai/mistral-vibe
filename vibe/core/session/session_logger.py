@@ -13,6 +13,7 @@ import tempfile
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal
 
+from vibe.core.pawgress.goal import Goal
 from vibe.core.session.session_id import shorten_session_id
 from vibe.core.session.session_loader import (
     MESSAGES_FILENAME,
@@ -469,6 +470,21 @@ class SessionLogger:
                 loop.model_dump(mode="json") for loop in session_metadata.loops
             ]
             await SessionLogger.persist_metadata(metadata, session_dir)
+
+    @staticmethod
+    async def persist_goal(goal: Goal, session_dir: Path) -> None:
+        metadata_path = session_dir / METADATA_FILENAME
+        if not metadata_path.exists():
+            return
+        try:
+            raw = (await read_safe_async(metadata_path)).text
+            metadata = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as e:
+            raise RuntimeError(
+                f"Failed to read session metadata at {metadata_path}: {e}"
+            ) from e
+        metadata["goal"] = goal.model_dump(mode="json")
+        await SessionLogger.persist_metadata(metadata, session_dir)
 
     async def persist_experiments(self, response: EvalResponse | None) -> None:
         session_info = self._get_session_info()

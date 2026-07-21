@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 import json
 import types
 from typing import TYPE_CHECKING, Literal, NamedTuple, cast
@@ -43,6 +43,7 @@ from vibe.core.types import (
     LLMChunk,
     LLMMessage,
     LLMUsage,
+    RateLimitInfo,
     Role,
     StrToolChoice,
     ToolCall,
@@ -52,6 +53,27 @@ from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
+
+
+_RATE_LIMIT_KEY_PAIRS: tuple[tuple[str, str], ...] = (
+    ("x-ratelimit-limit-tokens", "x-ratelimit-remaining-tokens"),
+    ("x-ratelimitbysize-limit", "x-ratelimitbysize-remaining"),
+)
+
+
+def parse_rate_limit_headers(headers: Mapping[str, str]) -> RateLimitInfo | None:
+    for limit_key, remaining_key in _RATE_LIMIT_KEY_PAIRS:
+        limit_raw = headers.get(limit_key)
+        remaining_raw = headers.get(remaining_key)
+        if limit_raw is None or remaining_raw is None:
+            continue
+        try:
+            return RateLimitInfo(
+                limit_tokens=int(limit_raw), remaining_tokens=int(remaining_raw)
+            )
+        except ValueError:
+            continue
+    return None
 
 
 class ParsedContent(NamedTuple):
@@ -411,6 +433,7 @@ class MistralBackend:
                 reasoning_effort=reasoning_effort,
             )
             correlation_id = stream.response.headers.get("mistral-correlation-id")
+            rate_limit = parse_rate_limit_headers(stream.response.headers)
             async for chunk in stream:
                 parsed = (
                     self._mapper.parse_content(chunk.data.choices[0].delta.content)
@@ -437,6 +460,7 @@ class MistralBackend:
                         else 0,
                     ),
                     correlation_id=correlation_id,
+                    rate_limit=rate_limit,
                 )
 
         except SDKError as e:
