@@ -122,7 +122,8 @@ class IgnoreRules:
                 if not raw or raw.startswith("#"):
                     continue
 
-                if "#" in raw:
+                hash_index = raw.find("#")
+                if hash_index > 0 and raw[hash_index - 1].isspace():
                     raw = raw.split("#", 1)[0].rstrip()
                     if not raw:
                         continue
