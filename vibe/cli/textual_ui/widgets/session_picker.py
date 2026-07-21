@@ -6,13 +6,14 @@ from typing import Any, ClassVar, Literal
 
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.content import Content
 from textual.binding import Binding, BindingType
 from textual.containers import Container, Vertical
 from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
-from vibe.cli.textual_ui.shortcut_hints import SHORTCUT_STYLE, shortcut, shortcut_hint
+from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.core.session.resume_sessions import ResumeSessionInfo, short_session_id
@@ -151,7 +152,7 @@ class SessionPickerApp(Container):
     def _normal_option_text(self, session: ResumeSessionInfo) -> Text:
         return _build_option_text(session, self._session_message(session))
 
-    def _option_text(self, session: ResumeSessionInfo) -> Text:
+    def _option_text(self, session: ResumeSessionInfo) -> Text | Content:
         state = self._delete_state
         if state is None or state.option_id != session.option_id:
             return self._normal_option_text(session)
@@ -163,12 +164,13 @@ class SessionPickerApp(Container):
             case "pending":
                 return self._delete_pending_option_text(session)
 
-    def _delete_confirmation_option_text(self, session: ResumeSessionInfo) -> Text:
-        text = _build_option_text(session, "")
-        text.append("Press ")
-        text.append("d", style=SHORTCUT_STYLE)
-        text.append(" again to delete")
-        return text
+    def _delete_confirmation_option_text(self, session: ResumeSessionInfo) -> Content:
+        time_str = _format_relative_time(session.end_time)
+        session_id = short_session_id(session.session_id)
+        return Content.from_markup(
+            f"[dim]{time_str:10}[/]  [dim]{session_id}  [/]"
+            f"Press {shortcut('d')} again to delete"
+        )
 
     def _delete_feedback_option_text(self, session: ResumeSessionInfo) -> Text:
         text = _build_option_text(session, "")
@@ -215,7 +217,7 @@ class SessionPickerApp(Container):
             self._restore_option_text(session)
 
     def _show_delete_state(
-        self, session: ResumeSessionInfo, kind: _DeleteStateKind, prompt: Text
+        self, session: ResumeSessionInfo, kind: _DeleteStateKind, prompt: Text | Content
     ) -> None:
         self._clear_delete_state()
         self._delete_state = _DeleteState(kind=kind, option_id=session.option_id)
