@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -75,6 +75,58 @@ def _extract_commands(command: str) -> list[str]:
 
     find_commands(tree.root_node)
     return commands
+
+
+def _extract_redirect_targets(command: str) -> list[str]:
+    """Collect the file targets of redirections that can write.
+
+    Redirections write through *any* binary — including read-only allowlisted
+    ones like ``cat`` — so their targets must be permission-checked like the
+    path arguments of file-manipulating commands. A redirect writes when its
+    operator contains ``>`` (``>``, ``>>``, ``&>``, ``>|``, ``>&``, and the
+    read-write ``<>``, which tree-sitter tokenizes as ``<`` plus an ERROR
+    node holding ``>``). Pure input redirections (``<``) stay out of scope,
+    and process substitutions are not file targets (their inner command is
+    permission-checked as a command). Bare fd duplications (``2>&1``) are
+    collected here and skipped downstream by the digit check.
+    """
+    parser = _get_parser()
+    tree = parser.parse(command.encode("utf-8"))
+    targets: list[str] = []
+
+    def find_redirects(node: Node) -> None:
+        if node.type == "file_redirect":
+            destination = node.child_by_field_name("destination")
+            writes = any(
+                b">" in (child.text or b"")
+                for child in node.children
+                if child is not destination
+            )
+            if (
+                writes
+                and destination is not None
+                and destination.type != "process_substitution"
+                and destination.text is not None
+            ):
+                targets.append(destination.text.decode("utf-8"))
+        for child in node.children:
+            find_redirects(child)
+
+    find_redirects(tree.root_node)
+    return targets
+
+
+_QUOTE_PAIR_LEN = 2
+
+
+def _unquote(token: str) -> str:
+    if (
+        len(token) >= _QUOTE_PAIR_LEN
+        and token[0] == token[-1]
+        and token[0] in {'"', "'"}
+    ):
+        return token[1:-1]
+    return token
 
 
 def _get_shell_executable() -> str | None:
@@ -287,7 +339,9 @@ def _normalize_bash_path_token(token: str) -> str:
     return f"{drive.upper()}:{suffix or '/'}"
 
 
-def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
+def _collect_outside_dirs(
+    command_parts: list[str], redirect_targets: Sequence[str] = ()
+) -> set[str]:
     """Collect parent directories referenced outside the workdir.
 
     Iterates file-manipulating commands (see _PATH_COMMANDS) and inspects
@@ -337,6 +391,31 @@ def _collect_outside_dirs(command_parts: list[str]) -> set[str]:
             # For a directory target use the dir itself; for a file use its parent
             parent = str(resolved) if resolved.is_dir() else str(resolved.parent)
             dirs.add(parent)
+
+    return dirs | _redirect_outside_dirs(redirect_targets)
+
+
+def _redirect_outside_dirs(redirect_targets: Sequence[str]) -> set[str]:
+    dirs: set[str] = set()
+    for raw_target in redirect_targets:
+        target = _unquote(raw_target)
+        # File-descriptor duplication (2>&1) and the null device never write
+        # to project files.
+        if not target or target.startswith(("&", "/dev/")) or target.isdigit():
+            continue
+        if "$" in target or "`" in target:
+            # The shell expands this to a path we cannot resolve statically:
+            # require approval rather than guess.
+            dirs.add(target)
+            continue
+        path_token = _normalize_bash_path_token(target)
+        if is_path_within_workdir(path_token) or is_scratchpad_path(path_token):
+            continue
+        resolved = Path(path_token).expanduser()
+        if not resolved.is_absolute():
+            resolved = Path.cwd() / resolved
+        resolved = resolved.resolve()
+        dirs.add(str(resolved) if resolved.is_dir() else str(resolved.parent))
     return dirs
 
 
@@ -564,7 +643,9 @@ class Bash(
             and guardrail_permission.permission == ToolPermission.NEVER
         ):
             return guardrail_permission
-        outside_dirs = _collect_outside_dirs(command_parts)
+        outside_dirs = _collect_outside_dirs(
+            command_parts, _extract_redirect_targets(args.command)
+        )
         if (
             self._is_unconditionally_allowed(command_parts, outside_dirs)
             and not guardrail_permission
