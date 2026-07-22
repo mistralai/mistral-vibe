@@ -488,7 +488,8 @@ Markdown {
 .interrupt-message,
 .error-message,
 .warning-message,
-.user-command-message {
+.user-command-message,
+.btw-message {
     margin-top: 0;
     margin-bottom: 0;
     height: auto;
@@ -527,7 +528,8 @@ Markdown {
 .interrupt-container,
 .error-container,
 .warning-container,
-.user-command-container {
+.user-command-container,
+.btw-container {
     width: 100%;
     height: auto;
     margin: 0;
@@ -537,7 +539,8 @@ Markdown {
 .interrupt-border,
 .error-border,
 .warning-border,
-.user-command-border {
+.user-command-border,
+.btw-border {
     width: auto;
     height: 100%;
     padding: 0 1 0 2;
@@ -568,7 +571,8 @@ Markdown {
     color: $warning;
 }
 
-.user-command-content {
+.user-command-content,
+.btw-content {
     width: 1fr;
     height: auto;
     margin: 0;

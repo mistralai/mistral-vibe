@@ -325,7 +325,10 @@ Vibe provides several built-in slash commands. Use slash commands by typing them
 
 ```
 > /help
+> /btw what does this function do?
 ```
+
+`/btw <question>` asks a one-shot side question using the current session context. Neither the question nor the answer is added to the conversation history (interactive mode only).
 
 ### Custom Slash Commands via Skills
 

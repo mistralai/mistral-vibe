@@ -72,6 +72,7 @@ from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopRunner
 from vibe.cli.textual_ui.session_exit import print_session_resume_message
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
+from vibe.cli.textual_ui.widgets.btw import BtwMessage
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.chat_input.input_kinds import (
     Bash,
@@ -3372,6 +3373,49 @@ class VibeApp(App):  # noqa: PLR0904
             self._run_compact(compact_msg, old_session_id, cmd_args.strip())
         )
 
+    async def _btw_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        question = cmd_args.strip()
+        if not question:
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    "Usage: `/btw <question>`\n\n"
+                    "Ask a side question without adding it to the conversation."
+                )
+            )
+            return
+
+        if self._agent_running:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Cannot run /btw while the agent is processing. Please wait.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        btw_msg = BtwMessage()
+        await self._mount_and_scroll(btw_msg)
+        self._agent_task = asyncio.create_task(self._run_btw(btw_msg, question))
+
+    async def _run_btw(self, btw_msg: BtwMessage, question: str) -> None:
+        self._agent_running = True
+        try:
+            await self._ensure_loading_widget()
+            async for chunk in self.agent_loop.btw(question):
+                await btw_msg.append_content(chunk)
+            await btw_msg.stop_stream()
+        except asyncio.CancelledError:
+            await btw_msg.stop_stream()
+            btw_msg.set_error("Interrupted")
+            raise
+        except Exception as e:
+            await btw_msg.stop_stream()
+            btw_msg.set_error(str(e))
+        finally:
+            await self._remove_loading_widget()
+            self._agent_running = False
+            self._agent_task = None
+
     async def _run_compact(
         self,
         compact_msg: CompactMessage,
@@ -4003,6 +4047,9 @@ class VibeApp(App):  # noqa: PLR0904
             self._last_escape_time = None
             return True
 
+        if self._dismiss_last_btw_message():
+            return True
+
         if self._try_interrupt_bottom_app_escape():
             return True
 
@@ -4013,6 +4060,13 @@ class VibeApp(App):  # noqa: PLR0904
             self._narrator_manager.cancel()
             return True
 
+        return False
+
+    def _dismiss_last_btw_message(self) -> bool:
+        for child in reversed(self._messages_area.children):
+            if isinstance(child, BtwMessage):
+                child.remove()
+                return True
         return False
 
     def _try_interrupt_running_job(self) -> bool:

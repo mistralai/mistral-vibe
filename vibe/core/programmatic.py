@@ -65,6 +65,11 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
 
     async def _async_run() -> str | None:
         try:
+            if prompt.strip().lower().startswith("/btw"):
+                message = "/btw is only available in interactive mode."
+                logger.info(message)
+                return message
+
             if previous_messages:
                 non_system_messages = [
                     msg for msg in previous_messages if not (msg.role == Role.system)
