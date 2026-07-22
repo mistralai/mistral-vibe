@@ -102,6 +102,37 @@ async def test_handles_timeout(bash):
 
 
 @pytest.mark.asyncio
+async def test_streams_progress_events_for_long_running_command(bash):
+    from vibe.core.tools.base import InvokeContext
+    from vibe.core.types import ToolStreamEvent
+
+    ctx = InvokeContext(tool_call_id="call-1")
+    command = (
+        "echo line1 && sleep 0.2 && echo line2 && sleep 0.2 && echo line3"
+    )
+
+    events: list[ToolStreamEvent] = []
+    result = None
+    async for item in bash.run(BashArgs(command=command), ctx=ctx):
+        if isinstance(item, ToolStreamEvent):
+            events.append(item)
+        else:
+            result = item
+
+    assert result is not None
+    assert result.returncode == 0
+    assert "line1" in result.stdout
+    assert "line3" in result.stdout
+    # At least one live-progress event should have been emitted before the
+    # command finished, and each message should be a short single-line preview.
+    assert len(events) >= 1
+    for event in events:
+        assert "\n" not in event.message
+        assert len(event.message) <= 200
+        assert event.tool_call_id == "call-1"
+
+
+@pytest.mark.asyncio
 async def test_windows_cmd_spawn_ignores_non_cmd_comspec(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     _hide_standard_git_installs(monkeypatch)
