@@ -608,6 +608,8 @@ Custom agents are TOML files in `~/.vibe/agents/NAME.toml`.
 ## Built-in Slash Commands
 
 - `/help` - Show help message
+- `/btw <question>` - Ask a side question using session context without adding
+  it to the conversation (interactive mode only; ignored in `-p` / ACP)
 - `/config` - Edit config settings
 - `/model` - Select active model
 - `/thinking` - Select thinking level

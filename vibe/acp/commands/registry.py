@@ -121,4 +121,10 @@ def _build_commands() -> dict[str, AcpCommand]:
             description="Show data retention information",
             handler="_handle_data_retention",
         ),
+        "btw": AcpCommand(
+            name="btw",
+            description="Ask a side question (interactive mode only)",
+            handler="_handle_btw",
+            input_hint="question",
+        ),
     }

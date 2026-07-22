@@ -107,6 +107,14 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
+            "btw": Command(
+                aliases=frozenset(["/btw"]),
+                description=(
+                    "Ask a side question using session context without adding "
+                    "it to the conversation"
+                ),
+                handler="_btw_command",
+            ),
             "teleport": Command(
                 aliases=frozenset(["/teleport"]),
                 description="Teleport session to Vibe Code Web",

@@ -238,6 +238,30 @@ class TestHandleCompact:
             mock_compact.assert_called_once()
 
 
+class TestHandleBtw:
+    @pytest.mark.asyncio
+    async def test_btw_replies_interactive_only(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_id = await _new_session_and_clear(acp_agent_loop)
+        session = acp_agent_loop.sessions[session_id]
+        before = [
+            m.model_dump(mode="json", exclude_none=True)
+            for m in session.agent_loop.messages
+        ]
+
+        response = await _prompt(acp_agent_loop, session_id, "/btw what is this?")
+
+        assert response.stop_reason == "end_turn"
+        assert _get_message_texts(acp_agent_loop) == [
+            "`/btw` is only available in interactive mode."
+        ]
+        assert [
+            m.model_dump(mode="json", exclude_none=True)
+            for m in session.agent_loop.messages
+        ] == before
+
+
 class TestHandleTeleport:
     @pytest.mark.asyncio
     async def test_available_commands_includes_teleport(

@@ -2130,26 +2130,39 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             raise _refusal_error(provider.name, active_model.name, result)
         return result
 
-    async def _chat_streaming(self) -> AsyncGenerator[LLMChunk]:
-        active_model = self.config.get_active_model()
-        provider = self.config.get_active_provider()
-        backend_metadata = self._build_backend_metadata()
+    async def _complete_streaming(
+        self,
+        *,
+        model: ModelConfig,
+        messages: Sequence[LLMMessage],
+        tools: list[AvailableTool] | None,
+        tool_choice: StrToolChoice | AvailableTool | None,
+        call_type: TelemetryCallType | None,
+    ) -> AsyncGenerator[LLMChunk]:
+        """Make one accounted, streaming model call.
 
-        available_tools = self.format_handler.get_available_tools(self.tool_manager)
-        tool_choice = self.format_handler.get_tool_choice()
+        Sends request telemetry, streams the backend, updates stats, and maps
+        backend errors. Does NOT append to self.messages or raise on refusal —
+        those are the caller's concern.
+        """
+        provider = self.config.get_provider_for_model(model)
+        backend_metadata = self._build_backend_metadata(call_type)
 
-        last_user_message = self._last_user_message()
+        last_user_message = next(
+            (m for m in reversed(messages) if m.role == Role.user and not m.injected),
+            None,
+        )
         self.telemetry_client.send_request_sent(
-            model=active_model.alias,
-            nb_context_chars=sum(len(m.content or "") for m in self.messages),
-            nb_context_messages=len(self.messages),
+            model=model.alias,
+            nb_context_chars=sum(len(m.content or "") for m in messages),
+            nb_context_messages=len(messages),
             nb_prompt_chars=len(last_user_message.content or "")
             if last_user_message
             else 0,
             call_type=backend_metadata.call_type,
             message_id=backend_metadata.message_id,
             attachment_counts=build_attachment_counts(
-                last_user_message, supports_images=active_model.supports_images
+                last_user_message, supports_images=model.supports_images
             ),
         )
 
@@ -2158,12 +2171,12 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             usage = LLMUsage()
             chunk_agg: LLMChunk | None = None
             async for chunk in self.backend.complete_streaming(
-                model=active_model,
-                messages=self._messages_for_backend(self.messages, active_model),
-                temperature=active_model.temperature,
-                tools=available_tools,
+                model=model,
+                messages=self._messages_for_backend(messages, model),
+                temperature=model.temperature,
+                tools=tools,
                 tool_choice=tool_choice,
-                extra_headers=self._get_extra_headers(),
+                extra_headers=self._get_extra_headers(provider),
                 max_tokens=self._max_tokens,
                 metadata=backend_metadata.model_dump(exclude_none=True),
             ):
@@ -2190,25 +2203,43 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 )
             self._update_stats(usage=usage, time_seconds=end_time - start_time)
 
-            self.messages.append(chunk_agg.message)
-            if chunk_agg.stop and chunk_agg.stop.is_refusal:
-                raise _refusal_error(provider.name, active_model.name, chunk_agg)
-
         except Exception as e:
             if isinstance(e, RefusalError):
                 raise
             if _should_raise_rate_limit_error(e):
-                raise RateLimitError(provider.name, active_model.name) from e
+                raise RateLimitError(provider.name, model.name) from e
             if _is_context_too_long_error(e):
-                raise ContextTooLongError(provider.name, active_model.name) from e
+                raise ContextTooLongError(provider.name, model.name) from e
             if _is_response_too_long_error(e):
-                raise ResponseTooLongError(provider.name, active_model.name) from e
+                raise ResponseTooLongError(provider.name, model.name) from e
             if _is_non_retryable_error(e):
                 raise
 
             raise RuntimeError(
-                f"API error from {provider.name} (model: {active_model.name}): {e}"
+                f"API error from {provider.name} (model: {model.name}): {e}"
             ) from e
+
+    async def _chat_streaming(self) -> AsyncGenerator[LLMChunk]:
+        active_model = self.config.get_active_model()
+        provider = self.config.get_active_provider()
+        chunk_agg: LLMChunk | None = None
+        async for chunk in self._complete_streaming(
+            model=active_model,
+            messages=self.messages,
+            tools=self.format_handler.get_available_tools(self.tool_manager),
+            tool_choice=self.format_handler.get_tool_choice(),
+            call_type=None,
+        ):
+            chunk_agg = chunk if chunk_agg is None else chunk_agg + chunk
+            yield chunk
+
+        if chunk_agg is None:
+            raise AgentLoopLLMResponseError(
+                "Usage data missing in final chunk of streamed completion"
+            )
+        self.messages.append(chunk_agg.message)
+        if chunk_agg.stop and chunk_agg.stop.is_refusal:
+            raise _refusal_error(provider.name, active_model.name, chunk_agg)
 
     def _update_stats(self, usage: LLMUsage, time_seconds: float) -> None:
         self.stats.last_turn_duration = time_seconds
@@ -2383,6 +2414,42 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         except Exception:
             await self._save_messages()
             raise
+
+    @requires_init
+    async def btw(self, question: str) -> AsyncGenerator[str, None]:
+        """One-shot side question using session context without mutating history.
+
+        Reuses the current system prompt and message list as read-only context,
+        calls the active model with no tools, and yields assistant text. Usage is
+        counted in session stats; neither the question nor the answer is appended
+        to ``self.messages``.
+        """
+        active_model = self.config.get_active_model()
+        fork_messages: list[LLMMessage] = [
+            *self.messages,
+            LLMMessage(role=Role.user, content=question),
+        ]
+        if self.enable_streaming:
+            async for chunk in self._complete_streaming(
+                model=active_model,
+                messages=fork_messages,
+                tools=[],
+                tool_choice=None,
+                call_type="secondary_call",
+            ):
+                if chunk.message.content:
+                    yield chunk.message.content
+            return
+
+        result = await self._complete(
+            model=active_model,
+            messages=fork_messages,
+            tools=[],
+            tool_choice=None,
+            call_type="secondary_call",
+        )
+        if result.message.content:
+            yield result.message.content
 
     async def _request_clear_context(self) -> None:
         """Signal that the context should be cleared at the next turn boundary.

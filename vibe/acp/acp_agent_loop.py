@@ -2988,6 +2988,13 @@ class VibeAcpAgentLoop(AcpAgent):
     ) -> PromptResponse:
         return await self._command_reply(session, DATA_RETENTION_MESSAGE, message_id)
 
+    async def _handle_btw(
+        self, session: AcpSessionLoop, text_prompt: str, message_id: str
+    ) -> PromptResponse:
+        return await self._command_reply(
+            session, "`/btw` is only available in interactive mode.", message_id
+        )
+
 
 SESSION_CLOSED_FLUSH_TIMEOUT_SECONDS = 1.0
 
