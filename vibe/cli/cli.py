@@ -210,6 +210,7 @@ def _resume_previous_session(
     session_id = metadata.get("session_id", agent_loop.session_id)
     agent_loop.session_id = session_id
     agent_loop.parent_session_id = metadata.get("parent_session_id")
+    agent_loop.stats.restore_from_session(metadata.get("stats"))
     agent_loop.session_logger.resume_existing_session(session_id, session_path)
 
     logger.info(

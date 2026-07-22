@@ -790,3 +790,39 @@ class TestStatsEdgeCases:
         await agent.reload_with_initial_messages()
 
         assert agent.config.active_model == "devstral-small"
+
+
+class TestRestoreFromSession:
+    def test_restores_persisted_fields(self) -> None:
+        stats = AgentStats()
+        persisted = AgentStats(
+            steps=7,
+            session_prompt_tokens=1200,
+            session_completion_tokens=340,
+            context_tokens=45_000,
+        ).model_dump()
+
+        stats.restore_from_session(persisted)
+
+        assert stats.steps == 7
+        assert stats.session_prompt_tokens == 1200
+        assert stats.session_completion_tokens == 340
+        assert stats.context_tokens == 45_000
+
+    def test_fires_registered_listeners(self) -> None:
+        stats = AgentStats()
+        seen: list[int] = []
+        stats.add_listener("context_tokens", lambda s: seen.append(s.context_tokens))
+
+        stats.restore_from_session(AgentStats(context_tokens=999).model_dump())
+
+        assert seen[-1] == 999
+
+    def test_ignores_invalid_payloads(self) -> None:
+        stats = AgentStats(context_tokens=5)
+
+        stats.restore_from_session(None)
+        stats.restore_from_session("garbage")
+        stats.restore_from_session({"context_tokens": "not-an-int"})
+
+        assert stats.context_tokens == 5

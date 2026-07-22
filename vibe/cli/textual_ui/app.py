@@ -3168,6 +3168,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.agent_loop.session_id = session.session_id
         self.agent_loop.parent_session_id = metadata.get("parent_session_id")
+        self.agent_loop.stats.restore_from_session(metadata.get("stats"))
         self.agent_loop.session_logger.resume_existing_session(
             session.session_id, session_path
         )
