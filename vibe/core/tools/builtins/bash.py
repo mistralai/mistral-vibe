@@ -408,6 +408,44 @@ async def _drain_stream_for_preview(
         await queue.put(("eof", tag))
 
 
+async def _iter_preview_updates(
+    queue: asyncio.Queue[tuple[str, str]], reader_count: int, deadline: float
+) -> AsyncGenerator[str, None]:
+    """Yield deduplicated preview lines until every reader reports EOF.
+
+    Raises ``TimeoutError`` when ``deadline`` (event-loop time) passes before
+    the readers finish.
+    """
+    loop = asyncio.get_running_loop()
+    done_readers = 0
+    last_preview: str | None = None
+    while done_readers < reader_count:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError
+        kind, payload = await asyncio.wait_for(queue.get(), timeout=remaining)
+        if kind == "eof":
+            done_readers += 1
+        elif payload and payload != last_preview:
+            last_preview = payload
+            yield payload
+
+
+async def _settle_reader_tasks(reader_tasks: list[asyncio.Task[None]]) -> None:
+    # On the success path both readers have already observed EOF, so this
+    # settles immediately. On the timeout or cancellation paths a reader may
+    # still be blocked reading a live pipe; cancel it rather than awaiting,
+    # or an external cancellation could hang here until the process exits.
+    for task in reader_tasks:
+        if not task.done():
+            task.cancel()
+    for task in reader_tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 class BashToolConfig(BaseToolConfig):
     permission: ToolPermission = ToolPermission.ASK
     max_output_bytes: int = Field(
@@ -691,28 +729,17 @@ class Bash(
 
             loop = asyncio.get_running_loop()
             deadline = loop.time() + timeout
-            done_readers = 0
-            last_preview: str | None = None
 
             try:
-                while done_readers < len(reader_tasks):
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
-                        raise TimeoutError
-                    kind, payload = await asyncio.wait_for(
-                        queue.get(), timeout=remaining
-                    )
-                    if kind == "eof":
-                        done_readers += 1
-                        continue
-                    if payload and payload != last_preview:
-                        last_preview = payload
-                        if ctx is not None:
-                            yield ToolStreamEvent(
-                                tool_name=self.get_name(),
-                                tool_call_id=ctx.tool_call_id,
-                                message=payload,
-                            )
+                async for preview in _iter_preview_updates(
+                    queue, len(reader_tasks), deadline
+                ):
+                    if ctx is not None:
+                        yield ToolStreamEvent(
+                            tool_name=self.get_name(),
+                            tool_call_id=ctx.tool_call_id,
+                            message=preview,
+                        )
 
                 remaining = deadline - loop.time()
                 if remaining <= 0:
@@ -724,15 +751,7 @@ class Bash(
                 await kill_async_subprocess(proc)
                 raise self._build_timeout_error(args.command, timeout)
             finally:
-                # Readers finish essentially immediately once EOF is observed
-                # (or are cancelled above on the timeout path); this just
-                # ensures buffers are fully settled before we read them.
-                for task in reader_tasks:
-                    if not task.done():
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
+                await _settle_reader_tasks(reader_tasks)
 
             stdout = (
                 decode_safe(bytes(stdout_buf), from_subprocess=True).text[:max_bytes]

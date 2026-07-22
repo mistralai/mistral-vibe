@@ -9,7 +9,7 @@ from pydantic import ValidationError
 import pytest
 
 from tests.mock.utils import collect_result
-from vibe.core.tools.base import BaseToolState, ToolError, ToolPermission
+from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError, ToolPermission
 import vibe.core.tools.builtins.bash as bash_module
 from vibe.core.tools.builtins.bash import (
     Bash,
@@ -45,7 +45,7 @@ from vibe.core.tools.builtins.experimental_bash import (
 from vibe.core.tools.builtins.managed_bash.backend import ManagedBashBackend
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolUIDataAdapter
-from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import is_windows
 
 
@@ -103,13 +103,8 @@ async def test_handles_timeout(bash):
 
 @pytest.mark.asyncio
 async def test_streams_progress_events_for_long_running_command(bash):
-    from vibe.core.tools.base import InvokeContext
-    from vibe.core.types import ToolStreamEvent
-
     ctx = InvokeContext(tool_call_id="call-1")
-    command = (
-        "echo line1 && sleep 0.2 && echo line2 && sleep 0.2 && echo line3"
-    )
+    command = "echo line1 && sleep 0.2 && echo line2 && sleep 0.2 && echo line3"
 
     events: list[ToolStreamEvent] = []
     result = None
