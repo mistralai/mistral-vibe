@@ -76,7 +76,7 @@ def _make_sampling_params() -> CreateMessageRequestParams:
 async def test_passes_distinct_idempotency_keys_for_each_completion(
     vibe_config: VibeConfigSchema, enable_streaming: bool
 ) -> None:
-    vibe_config.get_active_provider().extra_headers["idempotency-key"] = "configured"
+    vibe_config.get_active_provider().extra_headers["Idempotency-Key"] = "configured"
     backend = FakeBackend([
         [mock_llm_chunk(content="First response")],
         [mock_llm_chunk(content="Second response")],
@@ -94,10 +94,10 @@ async def test_passes_distinct_idempotency_keys_for_each_completion(
     assert second_headers is not None
     assert first_headers["x-affinity"] == agent.session_id
     assert second_headers["x-affinity"] == agent.session_id
-    assert "idempotency-key" not in first_headers
-    assert "idempotency-key" not in second_headers
-    assert first_headers["Idempotency-Key"] != "configured"
-    assert first_headers["Idempotency-Key"] != second_headers["Idempotency-Key"]
+    assert "Idempotency-Key" not in first_headers
+    assert "Idempotency-Key" not in second_headers
+    assert first_headers["idempotency-key"] != "configured"
+    assert first_headers["idempotency-key"] != second_headers["idempotency-key"]
 
 
 @pytest.mark.asyncio

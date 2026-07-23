@@ -1257,7 +1257,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         }
         headers["user-agent"] = get_user_agent(provider.backend)
         headers["x-affinity"] = self.session_id
-        headers["Idempotency-Key"] = uuid4().hex
+        headers["idempotency-key"] = uuid4().hex
         return headers
 
     async def _open_user_turn(
