@@ -87,6 +87,41 @@ class TestThinkingBlocksConversion:
             {"type": "text", "text": "Answer"},
         ]
 
+    def test_reasoning_dropped_when_thinking_off(self, adapter, provider):
+        messages = [
+            LLMMessage(role=Role.user, content="Hi"),
+            LLMMessage(
+                role=Role.assistant,
+                content="Answer",
+                reasoning_content="Let me think...",
+            ),
+        ]
+        payload = _prepare(adapter, provider, messages, thinking="off")
+        assert payload["messages"][1]["content"] == "Answer"
+
+    def test_reasoning_dropped_when_thinking_off_keeps_tool_calls(
+        self, adapter, provider
+    ):
+        messages = [
+            LLMMessage(role=Role.user, content="Hi"),
+            LLMMessage(
+                role=Role.assistant,
+                content="Let me search.",
+                reasoning_content="I should look this up.",
+                tool_calls=[
+                    ToolCall(
+                        id="tc_1",
+                        index=0,
+                        function=FunctionCall(name="search", arguments='{"q": "test"}'),
+                    )
+                ],
+            ),
+        ]
+        payload = _prepare(adapter, provider, messages, thinking="off")
+        msg = payload["messages"][1]
+        assert msg["content"] == "Let me search."
+        assert msg["tool_calls"][0]["id"] == "tc_1"
+
     def test_assistant_without_reasoning_is_plain_string(self, adapter, provider):
         messages = [
             LLMMessage(role=Role.user, content="Hi"),
