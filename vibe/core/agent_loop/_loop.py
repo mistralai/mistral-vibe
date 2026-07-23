@@ -1250,9 +1250,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self, provider: ProviderConfig | None = None
     ) -> dict[str, str]:
         provider = self.config.get_active_provider() if provider is None else provider
-        headers: dict[str, str] = {**provider.extra_headers}
+        headers = {
+            name: value
+            for name, value in provider.extra_headers.items()
+            if name.lower() != "idempotency-key"
+        }
         headers["user-agent"] = get_user_agent(provider.backend)
         headers["x-affinity"] = self.session_id
+        headers["Idempotency-Key"] = uuid4().hex
         return headers
 
     async def _open_user_turn(

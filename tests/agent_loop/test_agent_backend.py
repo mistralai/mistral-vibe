@@ -72,37 +72,32 @@ def _make_sampling_params() -> CreateMessageRequestParams:
 
 
 @pytest.mark.asyncio
-async def test_passes_x_affinity_header_when_asking_an_answer(
-    vibe_config: VibeConfigSchema,
-):
-    backend = FakeBackend([mock_llm_chunk(content="Response")])
-    agent = build_test_agent_loop(config=vibe_config, backend=backend)
-
-    [_ async for _ in agent.act("Hello")]
-
-    assert len(backend.requests_extra_headers) > 0
-    headers = backend.requests_extra_headers[0]
-    assert headers is not None
-    assert "x-affinity" in headers
-    assert headers["x-affinity"] == agent.session_id
-
-
-@pytest.mark.asyncio
-async def test_passes_x_affinity_header_when_asking_an_answer_streaming(
-    vibe_config: VibeConfigSchema,
-):
-    backend = FakeBackend([mock_llm_chunk(content="Response")])
+@pytest.mark.parametrize("enable_streaming", [False, True])
+async def test_passes_distinct_idempotency_keys_for_each_completion(
+    vibe_config: VibeConfigSchema, enable_streaming: bool
+) -> None:
+    vibe_config.get_active_provider().extra_headers["idempotency-key"] = "configured"
+    backend = FakeBackend([
+        [mock_llm_chunk(content="First response")],
+        [mock_llm_chunk(content="Second response")],
+    ])
     agent = build_test_agent_loop(
-        config=vibe_config, backend=backend, enable_streaming=True
+        config=vibe_config, backend=backend, enable_streaming=enable_streaming
     )
 
-    [_ async for _ in agent.act("Hello")]
+    [_ async for _ in agent.act("First request")]
+    [_ async for _ in agent.act("Second request")]
 
-    assert len(backend.requests_extra_headers) > 0
-    headers = backend.requests_extra_headers[0]
-    assert headers is not None
-    assert "x-affinity" in headers
-    assert headers["x-affinity"] == agent.session_id
+    assert len(backend.requests_extra_headers) == 2
+    first_headers, second_headers = backend.requests_extra_headers
+    assert first_headers is not None
+    assert second_headers is not None
+    assert first_headers["x-affinity"] == agent.session_id
+    assert second_headers["x-affinity"] == agent.session_id
+    assert "idempotency-key" not in first_headers
+    assert "idempotency-key" not in second_headers
+    assert first_headers["Idempotency-Key"] != "configured"
+    assert first_headers["Idempotency-Key"] != second_headers["Idempotency-Key"]
 
 
 @pytest.mark.asyncio
