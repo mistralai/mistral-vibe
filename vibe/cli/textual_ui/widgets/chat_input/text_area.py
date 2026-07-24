@@ -75,6 +75,15 @@ class ChatTextArea(TextArea):
 
     DEFAULT_MODE: ClassVar[Literal[">"]] = ">"
 
+    def check_action(self, action: str, parameters: Any) -> bool | None:
+        if (
+            action in {"cursor_left", "cursor_right"}
+            and not self.text
+            and getattr(self.app, "calm_mode_enabled", False)
+        ):
+            return False
+        return True
+
     class Submitted(Message):
         def __init__(self, value: str) -> None:
             self.value = value

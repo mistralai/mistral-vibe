@@ -152,6 +152,13 @@ voice_mode_enabled = false
 narrator_enabled = false
 active_transcribe_model = "voxtral-realtime"
 active_tts_model = "voxtral-tts"
+
+# Calm mode (paced, block-by-block text reveal)
+calm_mode_enabled = false       # Route assistant text through a fading block-by-block reveal
+calm_pace_label = "Calm"        # Zen | Calm | Normal | Swift | Instant (fade duration preset)
+calm_motion_enabled = true      # Animate fades; false snaps instantly (reduced motion)
+# Toggle at runtime: /calm (on/off), /calm pace (cycle speed), /calm motion (toggle animation)
+# Navigate: -> next block, <- prev block, Esc reveal all
 ```
 
 ### Providers

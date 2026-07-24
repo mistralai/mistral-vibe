@@ -25,6 +25,7 @@ from textual.widgets._markdown import MarkdownStream
 from watchfiles import awatch
 
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
+from vibe.cli.textual_ui.widgets.calm_reveal import CalmRevealContainer, split_blocks
 from vibe.cli.textual_ui.widgets.collapsible import (
     ClickWithoutDragMixin,
     CollapsibleSection,
@@ -306,14 +307,40 @@ class StreamingMessageBase(Static):
 
 
 class AssistantMessage(StreamingMessageBase):
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, *, calm_mode: bool = False) -> None:
         super().__init__(content)
         self.add_class("assistant-message")
+        self._calm_mode = calm_mode
+        self._calm_container: CalmRevealContainer | None = None
+
+    @property
+    def calm_mode(self) -> bool:
+        return self._calm_mode
+
+    @property
+    def calm_container(self) -> CalmRevealContainer | None:
+        return self._calm_container
+
+    def _should_write_content(self) -> bool:
+        return not self._calm_mode
 
     def compose(self) -> ComposeResult:
+        if self._calm_mode:
+            return
         markdown = Markdown("")
         self._markdown = markdown
         yield markdown
+
+    async def build_calm_reveal(self) -> CalmRevealContainer | None:
+        if self._calm_container is not None:
+            return self._calm_container
+        blocks = split_blocks(self._content)
+        if not blocks:
+            return None
+        container = CalmRevealContainer(blocks)
+        self._calm_container = container
+        await self.mount(container)
+        return container
 
 
 class ReasoningMessage(ClickWithoutDragMixin, SpinnerMixin, StreamingMessageBase):

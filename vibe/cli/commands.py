@@ -182,6 +182,14 @@ class CommandRegistry:
                 description="Select theme",
                 handler="_show_theme",
             ),
+            "calm": Command(
+                aliases=frozenset(["/calm"]),
+                description=(
+                    "Toggle calm mode (paced block-by-block text reveal). "
+                    "Subcommands: pace, motion, off"
+                ),
+                handler="_calm_command",
+            ),
         }
 
     @property

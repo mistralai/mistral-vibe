@@ -45,6 +45,17 @@ TextArea > .text-area--cursor {
     align: left middle;
 }
 
+.calm-status {
+    width: auto;
+    height: 1;
+    margin-left: 2;
+    color: $text-muted;
+
+    &:ansi {
+        text-style: dim;
+    }
+}
+
 #clipboard-notice {
     width: auto;
     height: 1;
@@ -411,6 +422,30 @@ Markdown {
         & > MarkdownBlock:last-child {
             margin-bottom: 0;
         }
+    }
+}
+
+.calm-reveal-container {
+    width: 100%;
+    height: auto;
+    layout: vertical;
+}
+
+.calm-block {
+    width: 100%;
+    height: auto;
+    padding: 0;
+    margin: 0;
+}
+
+.calm-progress {
+    color: $text-muted;
+    text-style: italic;
+    height: 1;
+    margin-top: 0;
+
+    &:ansi {
+        text-style: dim;
     }
 }
 

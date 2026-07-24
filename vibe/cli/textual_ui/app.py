@@ -72,6 +72,12 @@ from vibe.cli.textual_ui.scheduled_loop_runner import ScheduledLoopRunner
 from vibe.cli.textual_ui.session_exit import print_session_resume_message
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
+from vibe.cli.textual_ui.widgets.calm_reveal import (
+    CalmRevealContainer,
+    next_pace_label,
+    pace_duration,
+)
+from vibe.cli.textual_ui.widgets.calm_status import CalmStatus
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.chat_input.input_kinds import (
     Bash,
@@ -482,6 +488,8 @@ class VibeApp(App):  # noqa: PLR0904
             "ctrl+g", "open_plan_in_editor", "Edit Plan", show=False, priority=False
         ),
         Binding("ctrl+backslash", "toggle_debug_console", "Debug Console", show=False),
+        Binding("left", "calm_prev", "Calm Prev", show=False),
+        Binding("right", "calm_next", "Calm Next", show=False),
     ]
 
     def get_driver_class(self) -> type[Driver]:
@@ -564,6 +572,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._cached_loading_area: Widget | None = None
         self._log_reader = LogReader()
         self._debug_console: DebugConsole | None = None
+        self._calm_status: CalmStatus | None = None
         self._desired_agent: str | None = None
         self._agent_switch_active = False
         self._narrator_manager: NarratorManagerPort = (
@@ -599,6 +608,121 @@ class VibeApp(App):  # noqa: PLR0904
     @property
     def config(self) -> VibeConfigSchema:
         return self.agent_loop.config
+
+    @property
+    def calm_mode_enabled(self) -> bool:
+        return getattr(self.config, "calm_mode_enabled", False)
+
+    @property
+    def calm_pace_label(self) -> str:
+        return getattr(self.config, "calm_pace_label", "Calm")
+
+    @property
+    def calm_motion_enabled(self) -> bool:
+        return getattr(self.config, "calm_motion_enabled", True)
+
+    @property
+    def calm_duration(self) -> float:
+        return pace_duration(self.calm_pace_label)
+
+    def _active_calm_reveal(self) -> CalmRevealContainer | None:
+        containers = list(self.query(CalmRevealContainer))
+        if not containers:
+            return None
+        for container in reversed(containers):
+            if container.has_unrevealed():
+                return container
+        return containers[-1]
+
+    def _calm_reveal_all_if_active(self) -> bool:
+        if not self.calm_mode_enabled:
+            return False
+        container = self._active_calm_reveal()
+        if container is None or not container.has_unrevealed():
+            return False
+        container.reveal_all()
+        self._refresh_calm_status()
+        return True
+
+    def action_calm_next(self) -> None:
+        if not self.calm_mode_enabled:
+            return
+        container = self._active_calm_reveal()
+        if container is not None:
+            container.calm_next()
+        self._refresh_calm_status()
+
+    def action_calm_prev(self) -> None:
+        if not self.calm_mode_enabled:
+            return
+        container = self._active_calm_reveal()
+        if container is not None:
+            container.calm_prev()
+        self._refresh_calm_status()
+
+    async def action_calm_cycle_pace(self) -> None:
+        new_label = next_pace_label(self.calm_pace_label)
+        await self._persist_config_changes({"calm_pace_label": new_label})
+        await self._refresh_config_from_disk()
+        self._refresh_calm_status()
+
+    async def action_calm_toggle_motion(self) -> None:
+        await self._persist_config_changes(
+            {"calm_motion_enabled": not self.calm_motion_enabled}
+        )
+        await self._refresh_config_from_disk()
+        self._refresh_calm_status()
+
+    async def action_calm_toggle_mode(self) -> None:
+        await self._persist_config_changes(
+            {"calm_mode_enabled": not self.calm_mode_enabled}
+        )
+        await self._refresh_config_from_disk()
+        self._refresh_calm_status()
+
+    async def _calm_command(self, cmd_args: str = "") -> None:
+        sub = cmd_args.strip().lower()
+        match sub:
+            case "pace":
+                await self.action_calm_cycle_pace()
+                label = self.calm_pace_label
+                await self._mount_and_scroll(
+                    UserCommandMessage(f"Calm pace: **{label}**")
+                )
+            case "motion":
+                await self.action_calm_toggle_motion()
+                state = "on" if self.calm_motion_enabled else "off"
+                await self._mount_and_scroll(
+                    UserCommandMessage(f"Calm motion: **{state}**")
+                )
+            case "off":
+                if self.calm_mode_enabled:
+                    await self.action_calm_toggle_mode()
+                await self._mount_and_scroll(UserCommandMessage("Calm mode **off**."))
+            case "":
+                if not self.calm_mode_enabled:
+                    await self.action_calm_toggle_mode()
+                state = "on" if self.calm_mode_enabled else "off"
+                pace = self.calm_pace_label
+                motion = "on" if self.calm_motion_enabled else "off"
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        f"Calm mode **{state}** — pace: {pace}, motion: {motion}. "
+                        "Use **->** / **<-** to navigate blocks, **Esc** to reveal all. "
+                        "`/calm pace` cycles speed, `/calm motion` toggles animation, `/calm off` disables."
+                    )
+                )
+            case _:
+                await self._mount_and_scroll(
+                    UserCommandMessage(
+                        f"Unknown calm subcommand: `{sub}`. "
+                        "Use `/calm`, `/calm pace`, `/calm motion`, or `/calm off`."
+                    )
+                )
+
+    def _refresh_calm_status(self) -> None:
+        if self._calm_status is not None:
+            self._calm_status.set_enabled(self.calm_mode_enabled)
 
     @property
     def _input_queue(self) -> MessageQueue:
@@ -759,6 +883,8 @@ class VibeApp(App):  # noqa: PLR0904
 
         with Horizontal(id="bottom-bar"):
             yield PathDisplay(self.config.displayed_workdir or Path.cwd())
+            self._calm_status = CalmStatus()
+            yield self._calm_status
             yield NoMarkupStatic(id="spacer")
             yield ContextProgress()
 
@@ -791,6 +917,7 @@ class VibeApp(App):  # noqa: PLR0904
             get_tools_collapsed=lambda: self._tools_collapsed,
             on_profile_changed=self._on_profile_changed,
             on_context_cleared=self._on_context_cleared,
+            get_calm_mode=lambda: self.calm_mode_enabled,
         )
 
         self._chat_input_container = self.query_one(ChatInputContainer)
@@ -811,6 +938,7 @@ class VibeApp(App):  # noqa: PLR0904
 
         chat_input_container = self.query_one(ChatInputContainer)
         chat_input_container.focus_input()
+        self._refresh_calm_status()
         await self._show_dangerous_directory_warning()
         self.run_worker(self._deferred_resume_and_start(), exclusive=False)
 
@@ -2316,6 +2444,7 @@ class VibeApp(App):  # noqa: PLR0904
             if self.event_handler:
                 await self.event_handler.finalize_streaming()
                 self.event_handler.escalate_unresolved_errors()
+            self._refresh_calm_status()
             self._queue.notify_busy_changed()
             self._queue.start_drain_if_needed()
             await self._refresh_windowing_from_history()
@@ -4044,6 +4173,8 @@ class VibeApp(App):  # noqa: PLR0904
         return interrupted
 
     def action_interrupt(self) -> None:
+        if self._calm_reveal_all_if_active():
+            return
         self._try_interrupt()
 
     async def on_history_load_more_requested(self, _: HistoryLoadMoreRequested) -> None:

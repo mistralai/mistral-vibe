@@ -56,11 +56,13 @@ class EventHandler:
         get_tools_collapsed: Callable[[], bool],
         on_profile_changed: Callable[[], None] | None = None,
         on_context_cleared: Callable[[Path | None], Awaitable[None]] | None = None,
+        get_calm_mode: Callable[[], bool] | None = None,
     ) -> None:
         self.mount_callback = mount_callback
         self.get_tools_collapsed = get_tools_collapsed
         self.on_profile_changed = on_profile_changed
         self.on_context_cleared = on_context_cleared
+        self.get_calm_mode = get_calm_mode or (lambda: False)
         self.tool_calls: dict[str, ToolCallMessage] = {}
         self.current_compact: CompactMessage | None = None
         self.current_streaming_message: AssistantMessage | None = None
@@ -271,7 +273,7 @@ class EventHandler:
             self.current_streaming_reasoning = None
 
         if self.current_streaming_message is None:
-            msg = AssistantMessage(event.content)
+            msg = AssistantMessage(event.content, calm_mode=self.get_calm_mode())
             self.current_streaming_message = msg
             await self.mount_callback(msg)
         else:
@@ -313,7 +315,11 @@ class EventHandler:
             await self.current_streaming_reasoning.stop_stream()
             self.current_streaming_reasoning = None
         if self.current_streaming_message is not None:
-            await self.current_streaming_message.stop_stream()
+            msg = self.current_streaming_message
+            if msg.calm_mode:
+                await msg.build_calm_reveal()
+            else:
+                await msg.stop_stream()
             self.current_streaming_message = None
 
     def stop_current_tool_call(
