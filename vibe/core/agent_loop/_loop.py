@@ -842,7 +842,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,
-            self.base_config,
+            self.config,
             self.tool_manager,
             self.agent_profile,
             allow_empty=allow_empty,
@@ -2311,7 +2311,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await forked.session_logger.save_interaction(
             forked.messages,
             forked.stats,
-            forked.base_config,
+            forked.config,
             forked.tool_manager,
             forked.agent_profile,
         )
@@ -2349,7 +2349,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,
-            self.base_config,
+            self.config,
             self.tool_manager,
             self.agent_profile,
         )
@@ -2444,7 +2444,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         await self.session_logger.save_interaction(
             self.messages,
             self.stats,
-            self.base_config,
+            self.config,
             self.tool_manager,
             self.agent_profile,
         )
