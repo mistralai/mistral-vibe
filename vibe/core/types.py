@@ -46,6 +46,15 @@ class Backend(StrEnum):
     GENERIC = auto()
 
 
+class PerModelTokenUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_price_per_million: float = 0.0
+    output_price_per_million: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
 class AgentStats(BaseModel):
     steps: int = 0
     session_prompt_tokens: int = 0
@@ -65,6 +74,10 @@ class AgentStats(BaseModel):
 
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
+
+    # Per-model token and pricing breakdown for accurate cost when models
+    # change mid-session. Keyed by model name (e.g. "deepseek-chat").
+    per_model: dict[str, PerModelTokenUsage] = Field(default_factory=dict)
 
     _listeners: dict[str, Callable[[AgentStats], None]] = PrivateAttr(
         default_factory=dict
@@ -105,10 +118,31 @@ class AgentStats(BaseModel):
     def session_cost(self) -> float:
         """Calculate the total session cost in dollars based on token usage and pricing.
 
-        NOTE: This is a rough estimate and is worst-case scenario.
-        The actual cost may be lower due to prompt caching.
-        If the model changes mid-session, this uses current pricing for all tokens.
+        Uses per-model breakdown when available for accurate cost across model
+        switches. Falls back to single-model estimate for legacy sessions.
+
+        Each turn reports the full context prompt_tokens the API billed for,
+        not just the incremental delta. When a model switch occurs mid-session,
+        the new model's turn includes the cost of re-encoding the entire
+        conversation history at that model's rate -- so the per-model total
+        correctly reflects what each model was actually charged, including the
+        re-processing premium on switch.
+
+        Prompt caching discounts and cross-model tokenization differences are
+        provider-side optimisations not reflected in the usage API response,
+        so they cannot be factored in here.
         """
+        if self.per_model:
+            total = 0.0
+            for usage in self.per_model.values():
+                total += (
+                    usage.prompt_tokens / 1_000_000
+                ) * usage.input_price_per_million
+                total += (
+                    usage.completion_tokens / 1_000_000
+                ) * usage.output_price_per_million
+            return total
+        # Fallback to old single-model calculation for legacy sessions
         input_cost = (
             self.session_prompt_tokens / 1_000_000
         ) * self.input_price_per_million
@@ -117,16 +151,40 @@ class AgentStats(BaseModel):
         ) * self.output_price_per_million
         return input_cost + output_cost
 
+    def _ensure_per_model(self, model_name: str | None) -> PerModelTokenUsage:
+        """Get or create per-model tracking entry.
+
+        Uses ``input_price_per_million`` / ``output_price_per_million`` as
+        defaults when the model is unnamed (legacy caller).
+        """
+        key = model_name or "__default__"
+        if key not in self.per_model:
+            self.per_model[key] = PerModelTokenUsage(
+                input_price_per_million=self.input_price_per_million,
+                output_price_per_million=self.output_price_per_million,
+            )
+        return self.per_model[key]
+
     def update_pricing(self, input_price: float, output_price: float) -> None:
         """Update pricing info when model changes.
 
-        NOTE: session_cost will be recalculated using new pricing for all
-        accumulated tokens. This is a known approximation when models change.
-        This should not be a big issue, pricing is only used for max_price which is in
-        programmatic mode, so user should not update models there.
+        Stores the current pricing so future token attributions use the
+        correct rate. Past tokens attributed to earlier models are preserved.
         """
         self.input_price_per_million = input_price
         self.output_price_per_million = output_price
+
+    def add_tokens_for_model(
+        self,
+        prompt_tokens: int,
+        completion_tokens: int,
+        *,
+        model_name: str | None = None,
+    ) -> None:
+        """Attribute token usage to a specific model for accurate cost tracking."""
+        entry = self._ensure_per_model(model_name)
+        entry.prompt_tokens += prompt_tokens
+        entry.completion_tokens += completion_tokens
 
     def reset_context_state(self) -> None:
         """Reset context-related fields while preserving cumulative session stats.
@@ -306,6 +364,10 @@ class LLMMessage(BaseModel):
     tool_call_id: str | None = None
     message_id: str | None = None
     user_display_content: UserDisplayContentMetadata | None = None
+    # Model attribution — set on assistant messages so each message records
+    # which model generated it. Empty on user/tool/system messages.
+    model: str | None = None
+    provider: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -335,6 +397,8 @@ class LLMMessage(BaseModel):
             "message_id": getattr(v, "message_id", None)
             or (str(uuid4()) if role != "tool" else None),
             "user_display_content": getattr(v, "user_display_content", None),
+            "model": getattr(v, "model", None),
+            "provider": getattr(v, "provider", None),
         }
 
     def __add__(self, other: LLMMessage) -> LLMMessage:
@@ -408,6 +472,8 @@ class LLMMessage(BaseModel):
             user_display_content=self.user_display_content
             if self.user_display_content is not None
             else other.user_display_content,
+            model=self.model or other.model,
+            provider=self.provider or other.provider,
         )
 
 

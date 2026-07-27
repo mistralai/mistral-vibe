@@ -2082,7 +2082,11 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 raise AgentLoopLLMResponseError(
                     "Usage data missing in non-streaming completion response"
                 )
-            self._update_stats(usage=result.usage, time_seconds=end_time - start_time)
+            self._update_stats(
+                usage=result.usage,
+                time_seconds=end_time - start_time,
+                model_name=model.name,
+            )
 
             if result.correlation_id:
                 self.telemetry_client.last_correlation_id = result.correlation_id
@@ -2090,6 +2094,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             processed_message = self.format_handler.process_api_response_message(
                 result.message
             )
+            processed_message.model = model.name
+            processed_message.provider = provider.name
             return LLMChunk(
                 message=processed_message, usage=result.usage, stop=result.stop
             )
@@ -2188,7 +2194,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 raise AgentLoopLLMResponseError(
                     "Usage data missing in final chunk of streamed completion"
                 )
-            self._update_stats(usage=usage, time_seconds=end_time - start_time)
+            self._update_stats(
+                usage=usage,
+                time_seconds=end_time - start_time,
+                model_name=active_model.name,
+            )
+
+            chunk_agg.message.model = active_model.name
+            chunk_agg.message.provider = provider.name
 
             self.messages.append(chunk_agg.message)
             if chunk_agg.stop and chunk_agg.stop.is_refusal:
@@ -2210,7 +2223,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 f"API error from {provider.name} (model: {active_model.name}): {e}"
             ) from e
 
-    def _update_stats(self, usage: LLMUsage, time_seconds: float) -> None:
+    def _update_stats(
+        self, usage: LLMUsage, time_seconds: float, *, model_name: str | None = None
+    ) -> None:
         self.stats.last_turn_duration = time_seconds
         self.stats.last_turn_prompt_tokens = usage.prompt_tokens
         self.stats.last_turn_completion_tokens = usage.completion_tokens
@@ -2219,6 +2234,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.stats.context_tokens = usage.prompt_tokens + usage.completion_tokens
         if time_seconds > 0 and usage.completion_tokens > 0:
             self.stats.tokens_per_second = usage.completion_tokens / time_seconds
+        self.stats.add_tokens_for_model(
+            usage.prompt_tokens, usage.completion_tokens, model_name=model_name
+        )
 
     def _clean_message_history(self) -> None:
         ACCEPTABLE_HISTORY_SIZE = 2
