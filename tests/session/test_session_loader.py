@@ -978,7 +978,7 @@ class TestSessionLoaderListSessions:
         result = SessionLoader.list_sessions(bad_config)
         assert result == []
 
-    def test_list_sessions_handles_missing_environment(
+    def test_list_sessions_handles_missing_and_null_environment(
         self, session_config: SessionLoggingConfig
     ) -> None:
         session_dir = Path(session_config.save_dir)
@@ -991,12 +991,57 @@ class TestSessionLoaderListSessions:
         (session_folder / "meta.json").write_text(
             '{"session_id": "noenv000", "end_time": "2024-01-01T12:00:00Z"}'
         )
+        null_environment_session = session_dir / "test_20240101_120001_nullenv0"
+        null_environment_session.mkdir()
+        (null_environment_session / "messages.jsonl").write_text(
+            '{"role": "user", "content": "Hello"}\n'
+        )
+        (null_environment_session / "meta.json").write_text(
+            '{"session_id": "nullenv0", "environment": null}'
+        )
 
         result = SessionLoader.list_sessions(session_config)
 
-        assert len(result) == 1
-        assert result[0]["session_id"] == "noenv000"
-        assert result[0]["cwd"] == ""  # Empty string when no working_directory
+        assert {session["session_id"] for session in result} == {"noenv000", "nullenv0"}
+        assert all(session["cwd"] == "" for session in result)
+
+    def test_list_sessions_skips_non_object_environment(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        create_test_session_with_cwd(
+            session_dir, "valid-se", "/home/user/project", title="Valid Session"
+        )
+        invalid_session = create_test_session_with_cwd(
+            session_dir, "invalid-se", "/home/user/project"
+        )
+        (invalid_session / "meta.json").write_text(
+            '{"session_id": "invalid-se", "environment": "broken"}'
+        )
+
+        result = SessionLoader.list_sessions(session_config)
+
+        assert [session["session_id"] for session in result] == ["valid-se"]
+
+    def test_find_latest_session_skips_non_object_environment_with_cwd_filter(
+        self, session_config: SessionLoggingConfig, create_test_session_with_cwd
+    ) -> None:
+        session_dir = Path(session_config.save_dir)
+        valid_session = create_test_session_with_cwd(
+            session_dir, "valid-se", "/home/user/project"
+        )
+        time.sleep(0.01)
+        invalid_session = create_test_session_with_cwd(
+            session_dir, "invalid-se", "/home/user/project"
+        )
+        (invalid_session / "meta.json").write_text(
+            '{"session_id": "invalid-se", "environment": "broken"}'
+        )
+        result = SessionLoader.find_latest_session(
+            session_config, working_directory=Path("/home/user/project")
+        )
+
+        assert result == valid_session
 
     def test_list_sessions_handles_none_title(
         self, session_config: SessionLoggingConfig, create_test_session_with_cwd
