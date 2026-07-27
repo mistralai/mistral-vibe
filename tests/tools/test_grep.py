@@ -163,11 +163,11 @@ async def test_truncates_to_max_output_bytes(grep, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     config = GrepToolConfig(max_output_bytes=100)
     grep_tool = Grep(config_getter=lambda: config, state=BaseToolState())
-    (tmp_path / "test.py").write_text("\n".join("x" * 100 for _ in range(10)))
+    (tmp_path / "test.py").write_text("é" * 100)
 
-    result = await collect_result(grep_tool.run(GrepArgs(pattern="x")))
+    result = await collect_result(grep_tool.run(GrepArgs(pattern="é")))
 
-    assert len(result.matches) <= 100
+    assert len(result.matches.encode("utf-8")) <= 100
     assert result.was_truncated
 
 

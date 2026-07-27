@@ -155,6 +155,21 @@ async def test_truncates_output_to_max_bytes(bash):
     assert result.returncode == 0
 
 
+@pytest.mark.asyncio
+async def test_truncates_multibyte_stdout_and_stderr_to_max_bytes(bash):
+    config = BashToolConfig(max_output_bytes=5)
+    bash_tool = Bash(config_getter=lambda: config, state=BaseToolState())
+
+    result = await collect_result(
+        bash_tool.run(BashArgs(command="printf 'ééé'; printf 'ééé' >&2"))
+    )
+
+    assert result.stdout == "éé"
+    assert result.stderr == "éé"
+    assert len(result.stdout.encode("utf-8")) <= 5
+    assert len(result.stderr.encode("utf-8")) <= 5
+
+
 @pytest.mark.skipif(is_windows(), reason="managed bash requires a POSIX-like platform")
 @pytest.mark.asyncio
 async def test_experimental_bash_keeps_compatibility_stderr_empty():

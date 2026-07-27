@@ -12,6 +12,13 @@ from vibe.core.tools.permissions import (
 )
 
 
+def truncate_utf8_bytes(text: str, max_bytes: int) -> tuple[str, bool]:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
 def _make_absolute(path_str: str) -> Path:
     path = Path(path_str).expanduser()
     if not path.is_absolute():

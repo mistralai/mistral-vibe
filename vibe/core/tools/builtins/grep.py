@@ -19,7 +19,7 @@ from vibe.core.tools.base import (
 )
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import resolve_file_tool_permission
+from vibe.core.tools.utils import resolve_file_tool_permission, truncate_utf8_bytes
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import kill_async_subprocess
 from vibe.core.utils.io import decode_safe, read_safe
@@ -319,13 +319,11 @@ class Grep(
 
         truncated_lines = output_lines[:max_matches]
         truncated_output = "\n".join(truncated_lines)
-
-        was_truncated = (
-            len(output_lines) > max_matches
-            or len(truncated_output) > self.config.max_output_bytes
+        final_output, output_was_truncated = truncate_utf8_bytes(
+            truncated_output, self.config.max_output_bytes
         )
 
-        final_output = truncated_output[: self.config.max_output_bytes]
+        was_truncated = len(output_lines) > max_matches or output_was_truncated
 
         return GrepResult(
             matches=final_output,
