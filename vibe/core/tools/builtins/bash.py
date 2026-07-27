@@ -28,7 +28,7 @@ from vibe.core.tools.permissions import (
     RequiredPermission,
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
-from vibe.core.tools.utils import is_path_within_workdir
+from vibe.core.tools.utils import is_path_within_workdir, truncate_utf8_bytes
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
 from vibe.core.utils import (
     WindowsShellKind,
@@ -621,12 +621,16 @@ class Bash(
                 raise self._build_timeout_error(args.command, timeout)
 
             stdout = (
-                decode_safe(stdout_bytes, from_subprocess=True).text[:max_bytes]
+                truncate_utf8_bytes(
+                    decode_safe(stdout_bytes, from_subprocess=True).text, max_bytes
+                )[0]
                 if stdout_bytes
                 else ""
             )
             stderr = (
-                decode_safe(stderr_bytes, from_subprocess=True).text[:max_bytes]
+                truncate_utf8_bytes(
+                    decode_safe(stderr_bytes, from_subprocess=True).text, max_bytes
+                )[0]
                 if stderr_bytes
                 else ""
             )
