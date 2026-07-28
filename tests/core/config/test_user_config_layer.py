@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from vibe.core.config._migration import migrate_config_layers
+from vibe.core.config._migration import MODEL_RENAME_MIGRATION, migrate_config_layers
 from vibe.core.config.fingerprint import create_file_fingerprint
 from vibe.core.config.layer import LayerImplementationError, LayerNotLoadedError
 from vibe.core.config.layers.user import UserConfigLayer
@@ -17,7 +17,10 @@ from vibe.core.config.patch import (
     RemoveOperationPatch,
     ReplaceOperationPatch,
 )
-from vibe.core.config.types import MISSING_BACKING_STORE_DATA_FINGERPRINT
+from vibe.core.config.types import (
+    MISSING_BACKING_STORE_DATA_FINGERPRINT,
+    ConcurrencyConflictError,
+)
 
 
 def random_config_file_name() -> str:
@@ -378,9 +381,54 @@ provider = "mistral"
         persisted = tomllib.load(file)
     assert persisted["active_model"] == "mistral-medium-3.5"
     assert persisted["models"][0]["alias"] == "mistral-medium-3.5"
+    assert persisted["applied_migrations"] == [MODEL_RENAME_MIGRATION]
     migrated_data = await layer.load()
     assert migrated_data.model_extra is not None
     assert migrated_data.model_extra["active_model"] == "mistral-medium-3.5"
+    assert migrated_data.model_extra["models"] == {
+        "mistral-medium-3.5": {
+            "name": "mistral-vibe-cli-latest",
+            "alias": "mistral-medium-3.5",
+            "provider": "mistral",
+            "temperature": 1.0,
+            "input_price": 1.5,
+            "output_price": 7.5,
+            "thinking": "high",
+            "supports_images": True,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_propagates_fingerprint_conflict(
+    tmp_working_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('active_model = "devstral-2"\n')
+    layer = UserConfigLayer(path=path)
+    original_apply = layer.apply
+
+    async def apply_after_concurrent_change(patch: ConfigPatch) -> None:
+        fingerprint = layer.fingerprint
+        assert isinstance(fingerprint, str)
+        await original_apply(
+            ConfigPatch(
+                AddOperationPatch(path="/concurrent_edit", value=True),
+                fingerprint=fingerprint,
+            )
+        )
+        await original_apply(patch)
+
+    monkeypatch.setattr(layer, "apply", apply_after_concurrent_change)
+
+    with pytest.raises(ConcurrencyConflictError):
+        await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        assert tomllib.load(file) == {
+            "active_model": "devstral-2",
+            "concurrent_edit": True,
+        }
 
 
 @pytest.mark.asyncio
