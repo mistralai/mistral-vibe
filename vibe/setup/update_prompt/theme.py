@@ -6,10 +6,11 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-from vibe.core.config import DEFAULT_THEME, resolve_theme_name
+from vibe.cli.theme import resolve_theme_name
+from vibe.config_values import DEFAULT_THEME
 from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.logger import logger
-from vibe.core.utils.io import read_safe
+from vibe.observability.logging import logger
+from vibe.utils.io import read_safe
 
 
 def _read_config_theme(config_file: Path) -> Any:

@@ -17,7 +17,7 @@ from vibe.core.checkpoints import (
     TurnRegion,
     TurnStateError,
 )
-from vibe.core.utils.io import decode_safe
+from vibe.utils.io import decode_safe
 
 
 class ReviewError(Exception):

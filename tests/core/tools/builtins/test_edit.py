@@ -211,6 +211,10 @@ def test_format_call_display() -> None:
 
     assert isinstance(display, ToolCallDisplay)
     assert display.summary == "Editing foo.py"
+    assert display.verb == "Editing"
+    assert display.message == "foo.py"
+    assert display.settled_verb == "Edited"
+    assert display.settled_message == "foo.py"
 
 
 def test_get_result_display() -> None:

@@ -5,12 +5,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.stubs.app_config import build_test_app_config
 from tests.stubs.fake_audio_player import FakeAudioPlayer
+from tests.stubs.fake_summary_generator import FakeSummaryGenerator
 from tests.stubs.fake_tts_client import FakeTTSClient
 from vibe.cli.narrator_manager import NarratorManager, NarratorState
+from vibe.cli.tts.tts_client_port import TTSResult
 from vibe.cli.turn_summary import TurnSummaryResult
-from vibe.core.tts.tts_client_port import TTSResult
 
 
 def _make_manager(
@@ -19,11 +20,12 @@ def _make_manager(
     telemetry_client: MagicMock | None = None,
     tts_client: FakeTTSClient | None = None,
 ) -> tuple[NarratorManager, FakeAudioPlayer]:
-    config = build_test_vibe_config(narrator_enabled=narrator_enabled)
+    config = build_test_app_config(narrator_enabled=narrator_enabled)
     audio_player = FakeAudioPlayer()
     manager = NarratorManager(
         config_getter=lambda: config,
         audio_player=audio_player,
+        summary_generator=FakeSummaryGenerator(),
         telemetry_client=telemetry_client,
     )
     manager._tts_client = tts_client or FakeTTSClient(

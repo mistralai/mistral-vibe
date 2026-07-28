@@ -23,7 +23,8 @@ from vibe.core.tools.permissions import (
 )
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolStreamEvent
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolCallEvent, ToolResultEvent
@@ -81,6 +82,8 @@ class WebFetch(
     BaseTool[WebFetchArgs, WebFetchResult, WebFetchConfig, BaseToolState],
     ToolUIData[WebFetchArgs, WebFetchResult],
 ):
+    effect_kind = ToolEffectKind.WEB_FETCH
+
     @staticmethod
     def _normalize_url(url: str) -> str:
         """Normalise a URL to always have an http(s) scheme.
@@ -212,18 +215,36 @@ class WebFetch(
     @classmethod
     def get_call_display(cls, event: ToolCallEvent) -> ToolCallDisplay:
         if event.args is None:
-            return ToolCallDisplay(summary="web_fetch")
+            return ToolCallDisplay(
+                summary="web_fetch",
+                verb="Running",
+                message="web_fetch",
+                settled_verb="Ran",
+                settled_message="web_fetch",
+            )
         if not isinstance(event.args, WebFetchArgs):
-            return ToolCallDisplay(summary="web_fetch")
+            return ToolCallDisplay(
+                summary="web_fetch",
+                verb="Running",
+                message="web_fetch",
+                settled_verb="Ran",
+                settled_message="web_fetch",
+            )
 
         parsed = urlparse(event.args.url)
         domain = parsed.netloc or event.args.url[:50]
-        summary = f"Fetching: {domain}"
+        message = domain
 
         if event.args.timeout:
-            summary += f" (timeout {event.args.timeout}s)"
+            message += f" (timeout {event.args.timeout}s)"
 
-        return ToolCallDisplay(summary=summary)
+        return ToolCallDisplay(
+            summary=f"Fetching: {message}",
+            verb="Fetching",
+            message=message,
+            settled_verb="Fetched",
+            settled_message=message,
+        )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -234,11 +255,12 @@ class WebFetch(
 
         content_len = len(event.result.content)
         content_type = event.result.content_type.split(";")[0]
-        message = f"Fetched {event.result.url} ({content_len:,} chars, {content_type})"
-        if event.result.was_truncated:
-            message += " [truncated]"
+        message = f"{event.result.url} ({content_len:,} chars, {content_type})"
+        suffix = "(truncated)" if event.result.was_truncated else ""
 
-        return ToolResultDisplay(success=True, message=message)
+        return ToolResultDisplay(
+            success=True, verb="Fetched", message=message, suffix=suffix
+        )
 
     @classmethod
     def get_status_text(cls) -> str:

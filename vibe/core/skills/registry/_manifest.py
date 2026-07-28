@@ -8,9 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import tomli_w
 
 from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.logger import logger
 from vibe.core.paths import VIBE_HOME
 from vibe.core.skills.models import REGISTRY_LATEST_ALIAS
+from vibe.observability.logging import logger
 
 
 class ManifestEntry(BaseModel):

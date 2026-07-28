@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -18,8 +18,8 @@ from vibe.core.paths import (
     dedup_paths,
     find_local_config_dirs,
 )
-from vibe.core.trusted_folders import trusted_folders_manager
-from vibe.core.utils.io import read_safe
+from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
+from vibe.utils.io import read_safe
 
 FileSource = Literal["user", "project"]
 
@@ -29,10 +29,32 @@ class HarnessFilesManager:
     sources: tuple[FileSource, ...] = ("user",)
     cwd: Path | None = field(default=None)
     _additional_dirs: tuple[Path, ...] = ()
+    trust_store: TrustedFoldersManager = field(
+        default_factory=lambda: trusted_folders_manager, compare=False, repr=False
+    )
+
+    def for_session(
+        self, cwd: Path, *, workspace_roots: list[Path] | None = None
+    ) -> HarnessFilesManager:
+        return replace(
+            self,
+            cwd=cwd,
+            _additional_dirs=tuple(
+                dedup_paths([*self._additional_dirs, *(workspace_roots or [])])
+            ),
+        )
 
     @property
     def _effective_cwd(self) -> Path:
         return self.cwd or Path.cwd()
+
+    @property
+    def workspace_roots(self) -> list[Path]:
+        cwd = self._effective_cwd.resolve()
+        return [
+            cwd,
+            *(root for root in dedup_paths(self._additional_dirs) if root != cwd),
+        ]
 
     @property
     def _trusted_workdir(self) -> Path | None:
@@ -40,7 +62,7 @@ class HarnessFilesManager:
         if "project" not in self.sources:
             return None
         cwd = self._effective_cwd
-        if trusted_folders_manager.is_trusted(cwd) is not True:
+        if self.trust_store.is_trusted(cwd) is not True:
             return None
         return cwd
 
@@ -222,7 +244,7 @@ class HarnessFilesManager:
         """
         by_dir: dict[Path, tuple[Path, str]] = {}
         for root in self.project_roots:
-            stop = trusted_folders_manager.find_trust_root(root) or root
+            stop = self.trust_store.find_trust_root(root) or root
             for d, content in self._collect_agents_md(root, stop, stop_inclusive=True):
                 by_dir.setdefault(d.resolve(), (d, content))
         return list(by_dir.values())

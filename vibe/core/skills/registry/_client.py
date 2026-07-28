@@ -12,7 +12,7 @@ from vibe.core.skills.registry.models import (
     RegistrySkillItem,
     SkillVersionInfo,
 )
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 _MAX_PAGES = 50
 

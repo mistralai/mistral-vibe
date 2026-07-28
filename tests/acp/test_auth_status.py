@@ -8,7 +8,7 @@ import keyring
 from keyring.errors import KeyringError
 import pytest
 
-from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
+from vibe.acp.agent import VibeAcpAgent as VibeAcpAgentLoop
 from vibe.acp.exceptions import InternalError, InvalidRequestError
 from vibe.core.config import (
     DEFAULT_MISTRAL_API_ENV_KEY,

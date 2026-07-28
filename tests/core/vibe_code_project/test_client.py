@@ -5,8 +5,8 @@ import json
 import httpx
 import pytest
 
-from vibe.core.utils.http import VibeAsyncHTTPClient
 from vibe.core.vibe_code_project import VibeCodeProjectApiError, VibeCodeProjectClient
+from vibe.utils.http import VibeAsyncHTTPClient
 
 
 @pytest.mark.asyncio

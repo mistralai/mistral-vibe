@@ -15,7 +15,7 @@ Attributes:
     messages         (MessageList)
 
 Methods:
-    _handle_tool_response(tool_call, text, status, decision, result, span)
+    _handle_tool_response(tool_call, text, status, decision, result, persisted_result, span)
     _serialize_tool_input(tool_call) -> dict[str, Any]
 """
 
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
@@ -42,14 +43,15 @@ from vibe.core.hooks.models import (
     ToolStatus,
 )
 from vibe.core.llm.format import ResolvedToolCall
-from vibe.core.logger import logger
-from vibe.core.types import ToolResultEvent
+from vibe.core.types import PersistedToolResult, ToolResultEvent
 from vibe.core.utils import (
     CANCELLATION_TAG,
     TOOL_ERROR_TAG,
     CancellationReason,
     get_user_cancellation_message,
 )
+from vibe.observability.logging import logger
+from vibe.utils.tool_presentation import ToolResultPresentation
 
 if TYPE_CHECKING:
     from opentelemetry import trace
@@ -70,6 +72,20 @@ class _PreToolResolution(NamedTuple):
     denial_event: ToolResultEvent | None
 
 
+@dataclass(frozen=True, slots=True)
+class PostToolFinalization:
+    tool_input: dict[str, Any]
+    tool_status: ToolStatus
+    response_status: Literal["success", "failure", "skipped"]
+    decision: ToolDecision | None
+    span: trace.Span
+    tool_output: dict[str, Any] | None = None
+    tool_presentation: ToolResultPresentation | None = None
+    tool_error: str | None = None
+    duration_ms: float = 0.0
+    initial_text: str = ""
+
+
 class AgentLoopHooksMixin:
     """Mixin that adds hook orchestration to AgentLoop.
 
@@ -83,6 +99,7 @@ class AgentLoopHooksMixin:
     session_logger: SessionLogger
     stats: AgentStats
     messages: MessageList
+    cwd: Path
 
     def _handle_tool_response(
         self,
@@ -91,6 +108,7 @@ class AgentLoopHooksMixin:
         status: Literal["success", "failure", "skipped"],
         decision: ToolDecision | None = None,
         result: dict[str, Any] | None = None,
+        persisted_result: PersistedToolResult | None = None,
         span: trace.Span | None = None,
     ) -> None: ...
 
@@ -108,7 +126,7 @@ class AgentLoopHooksMixin:
         return HookSessionContext(
             session_id=self.session_id,
             transcript_path=transcript,
-            cwd=str(Path.cwd().resolve()),
+            cwd=str(self.cwd),
             parent_session_id=self.parent_session_id,
         )
 
@@ -189,18 +207,7 @@ class AgentLoopHooksMixin:
         return final_text, events
 
     async def _run_post_tool_and_finalize(
-        self,
-        tool_call: ResolvedToolCall,
-        *,
-        tool_input: dict[str, Any],
-        tool_status: ToolStatus,
-        response_status: Literal["success", "failure", "skipped"],
-        decision: ToolDecision | None = None,
-        span: trace.Span,
-        tool_output: dict[str, Any] | None = None,
-        tool_error: str | None = None,
-        duration_ms: float = 0.0,
-        initial_text: str = "",
+        self, tool_call: ResolvedToolCall, finalization: PostToolFinalization
     ) -> AsyncGenerator[HookEvent]:
         """Run post-tool hooks, apply text replacements, and record the response.
 
@@ -209,22 +216,39 @@ class AgentLoopHooksMixin:
         ``_handle_tool_response`` together with the given *response_status*
         and *decision*.
         """
-        final_text = initial_text
+        final_text = finalization.initial_text
         async for ev in self._run_post_tool_hooks(
             tool_call,
-            tool_input=tool_input,
-            tool_status=tool_status,
-            tool_output=tool_output,
-            tool_error=tool_error,
-            duration_ms=duration_ms,
-            initial_text=initial_text,
+            tool_input=finalization.tool_input,
+            tool_status=finalization.tool_status,
+            tool_output=finalization.tool_output,
+            tool_error=finalization.tool_error,
+            duration_ms=finalization.duration_ms,
+            initial_text=finalization.initial_text,
         ):
             if isinstance(ev, HookTextReplacement):
                 final_text = ev.text
             else:
                 yield ev
+        persisted_result = (
+            PersistedToolResult(
+                output=finalization.tool_output,
+                duration=finalization.duration_ms / 1000.0,
+                cancelled=finalization.tool_status == "cancelled",
+                presentation=finalization.tool_presentation,
+            )
+            if finalization.response_status == "success"
+            and finalization.tool_output is not None
+            else None
+        )
         self._handle_tool_response(
-            tool_call, final_text, response_status, decision, tool_output, span=span
+            tool_call,
+            final_text,
+            finalization.response_status,
+            finalization.decision,
+            finalization.tool_output,
+            persisted_result,
+            span=finalization.span,
         )
 
     # ------------------------------------------------------------------

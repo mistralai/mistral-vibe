@@ -5,8 +5,6 @@ import time
 import tomllib
 from unittest.mock import MagicMock, patch
 
-from vibe.cli.textual_ui.widgets.feedback_bar_manager import FeedbackBarManager
-from vibe.core.cache_store import FileSystemVibeCodeCacheStore
 from vibe.core.feedback import (
     _CACHE_SECTION,
     _LAST_SHOWN_KEY,
@@ -16,8 +14,39 @@ from vibe.core.feedback import (
     FEEDBACK_RESPONDED_COOLDOWN_SECONDS,
     FEEDBACK_SNOOZED_COOLDOWN_SECONDS,
     MIN_USER_MESSAGES_FOR_FEEDBACK,
+    record_feedback_asked,
+    record_feedback_given,
+    record_feedback_snoozed,
+    should_show_feedback,
 )
 from vibe.core.types import LLMMessage, Role
+from vibe.utils.cache_store import FileSystemCacheStore
+
+
+class FeedbackBarManager:
+    def should_show(self, agent_loop: MagicMock) -> bool:
+        user_message_count = (
+            sum(
+                message.role is Role.user and not message.injected
+                for message in agent_loop.messages
+            )
+            + 1
+        )
+        return should_show_feedback(
+            telemetry_active=agent_loop.telemetry_client.is_active(),
+            is_mistral_model=agent_loop.config.is_active_model_mistral(),
+            user_message_count=user_message_count,
+            cache_store=agent_loop.cache_store,
+        )
+
+    def record_feedback_asked(self, agent_loop: MagicMock) -> None:
+        record_feedback_asked(agent_loop.cache_store)
+
+    def record_feedback_given(self, agent_loop: MagicMock) -> None:
+        record_feedback_given(agent_loop.cache_store)
+
+    def record_feedback_snoozed(self, agent_loop: MagicMock) -> None:
+        record_feedback_snoozed(agent_loop.cache_store)
 
 
 def _patch_probability(value: float):
@@ -31,7 +60,7 @@ def _make_agent_loop(
 ) -> MagicMock:
     loop = MagicMock()
     loop.telemetry_client.is_active.return_value = telemetry_active
-    loop.cache_store = FileSystemVibeCodeCacheStore(cache_path)
+    loop.cache_store = FileSystemCacheStore(cache_path)
     messages = [
         LLMMessage(role=Role.user, content=f"msg {i}")
         for i in range(user_message_count)

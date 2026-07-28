@@ -7,7 +7,7 @@ from threading import Lock
 from textual import events
 
 from vibe.cli.autocompletion.base import CompletionResult, CompletionView
-from vibe.core.autocompletion.completers import PathCompleter
+from vibe.cli.autocompletion.completers import PathCompleter
 
 MAX_SUGGESTIONS_COUNT = 10
 

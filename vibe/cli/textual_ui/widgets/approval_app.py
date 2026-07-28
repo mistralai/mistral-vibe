@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import ClassVar
 
-from pydantic import BaseModel
+from pydantic import JsonValue
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -12,12 +12,12 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
 
+from vibe.app_server.config import ConfigView
+from vibe.app_server.models import EffectDetail, RequiredPermission, effect_input_json
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tool_widgets import get_approval_widget
 from vibe.cli.textual_ui.widgets.vim_navigation import VimNavigationMixin
-from vibe.core.config import VibeConfigSchema
-from vibe.core.tools.permissions import RequiredPermission
 
 _INPUT_GRACE_PERIOD_S = 0.5
 
@@ -41,7 +41,7 @@ class ApprovalApp(VimNavigationMixin, Container):
     ]
 
     class ApprovalGranted(Message):
-        def __init__(self, tool_name: str, tool_args: BaseModel) -> None:
+        def __init__(self, tool_name: str, tool_args: JsonValue) -> None:
             super().__init__()
             self.tool_name = tool_name
             self.tool_args = tool_args
@@ -50,7 +50,7 @@ class ApprovalApp(VimNavigationMixin, Container):
         def __init__(
             self,
             tool_name: str,
-            tool_args: BaseModel,
+            tool_args: JsonValue,
             required_permissions: list[RequiredPermission],
         ) -> None:
             super().__init__()
@@ -62,7 +62,7 @@ class ApprovalApp(VimNavigationMixin, Container):
         def __init__(
             self,
             tool_name: str,
-            tool_args: BaseModel,
+            tool_args: JsonValue,
             required_permissions: list[RequiredPermission],
         ) -> None:
             super().__init__()
@@ -71,21 +71,21 @@ class ApprovalApp(VimNavigationMixin, Container):
             self.required_permissions = required_permissions
 
     class ApprovalRejected(Message):
-        def __init__(self, tool_name: str, tool_args: BaseModel) -> None:
+        def __init__(self, tool_name: str, tool_args: JsonValue) -> None:
             super().__init__()
             self.tool_name = tool_name
             self.tool_args = tool_args
 
     def __init__(
         self,
-        tool_name: str,
-        tool_args: BaseModel,
-        config: VibeConfigSchema,
+        effect: EffectDetail,
+        config: ConfigView,
         required_permissions: list[RequiredPermission] | None = None,
     ) -> None:
         super().__init__(id="approval-app")
-        self.tool_name = tool_name
-        self.tool_args = tool_args
+        self.effect = effect
+        self.tool_name = effect.tool_name
+        self.tool_args = effect_input_json(effect)
         self.config = config
         self.required_permissions = required_permissions or []
         self.selected_option = 0
@@ -169,7 +169,7 @@ class ApprovalApp(VimNavigationMixin, Container):
         if not self.tool_info_container:
             return
 
-        approval_widget = get_approval_widget(self.tool_name, self.tool_args)
+        approval_widget = get_approval_widget(self.effect)
         await self.tool_info_container.remove_children()
         await self.tool_info_container.mount(approval_widget)
 

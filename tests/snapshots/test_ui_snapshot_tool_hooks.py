@@ -8,6 +8,7 @@ from textual.pilot import Pilot
 from textual.widget import Widget
 
 from tests.snapshots.snap_compare import SnapCompare
+from tests.stubs.app_server import CoreEventProjection
 from tests.stubs.fake_tool import FakeTool, FakeToolArgs, FakeToolResult
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.widgets.collapsible import CollapsibleSection
@@ -30,6 +31,7 @@ class ToolHooksApp(App):
         super().__init__()
         self._scroll: VerticalScroll | None = None
         self._handler: EventHandler | None = None
+        self._projection = CoreEventProjection()
 
     def compose(self) -> ComposeResult:
         self._scroll = VerticalScroll(id="messages")
@@ -37,14 +39,20 @@ class ToolHooksApp(App):
 
     def on_mount(self) -> None:
         async def mount_callback(
-            widget: Widget, *, after: Widget | None = None, before: Widget | None = None
+            widget: Widget,
+            *,
+            after: Widget | None = None,
+            before: Widget | None = None,
+            container: Widget | None = None,
         ) -> None:
             if self._scroll is None:
                 return
-            if before is not None and before.parent is self._scroll:
-                await self._scroll.mount(widget, before=before)
-            elif after is not None and after.parent is self._scroll:
-                await self._scroll.mount(widget, after=after)
+            if before is not None and before.parent is not None:
+                await cast(Widget, before.parent).mount(widget, before=before)
+            elif after is not None and after.parent is not None:
+                await cast(Widget, after.parent).mount(widget, after=after)
+            elif container is not None:
+                await container.mount(widget)
             else:
                 await self._scroll.mount(widget)
 
@@ -67,62 +75,82 @@ class ToolHooksApp(App):
             return
         call_id = "call_1"
 
-        # pre_tool hooks
-        await self._handler.handle_event(
+        # before_tool hooks
+        await self._projection.dispatch(
             ToolCallEvent(
                 tool_call_id=call_id,
                 tool_name="stub_tool",
                 tool_class=FakeTool,
                 args=FakeToolArgs(),
-            )
+            ),
+            self._handler.handle_event,
         )
-        await self._handler.handle_event(
+        await self._projection.dispatch(
             HookRunStartEvent(
                 scope=HookType.PRE_TOOL, tool_name="stub_tool", tool_call_id=call_id
-            )
+            ),
+            self._handler.handle_event,
         )
-        await self._handler.handle_event(HookStartEvent(hook_name="guard-bash"))
-        await self._handler.handle_event(
+        await self._projection.dispatch(
+            HookStartEvent(
+                hook_name="guard-bash", scope=HookType.PRE_TOOL, tool_call_id=call_id
+            ),
+            self._handler.handle_event,
+        )
+        await self._projection.dispatch(
             HookEndEvent(
                 hook_name="guard-bash",
                 status=HookMessageSeverity.OK,
                 content="Command allowed",
                 scope=HookType.PRE_TOOL,
                 tool_call_id=call_id,
-            )
+            ),
+            self._handler.handle_event,
         )
-        await self._handler.handle_event(
-            HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id=call_id)
+        await self._projection.dispatch(
+            HookRunEndEvent(scope=HookType.PRE_TOOL, tool_call_id=call_id),
+            self._handler.handle_event,
         )
 
         # tool result
-        await self._handler.handle_event(
+        await self._projection.dispatch(
             ToolResultEvent(
                 tool_name="stub_tool",
                 tool_class=FakeTool,
                 result=FakeToolResult(message="fake tool executed"),
                 tool_call_id=call_id,
-            )
+            ),
+            self._handler.handle_event,
         )
 
-        # post_tool hooks
-        await self._handler.handle_event(
+        # after_tool hooks
+        await self._projection.dispatch(
             HookRunStartEvent(
                 scope=HookType.POST_TOOL, tool_name="stub_tool", tool_call_id=call_id
-            )
+            ),
+            self._handler.handle_event,
         )
-        await self._handler.handle_event(HookStartEvent(hook_name="redact-secrets"))
-        await self._handler.handle_event(
+        await self._projection.dispatch(
+            HookStartEvent(
+                hook_name="redact-secrets",
+                scope=HookType.POST_TOOL,
+                tool_call_id=call_id,
+            ),
+            self._handler.handle_event,
+        )
+        await self._projection.dispatch(
             HookEndEvent(
                 hook_name="redact-secrets",
                 status=HookMessageSeverity.WARNING,
                 content="Replaced tool result (42 chars)",
                 scope=HookType.POST_TOOL,
                 tool_call_id=call_id,
-            )
+            ),
+            self._handler.handle_event,
         )
-        await self._handler.handle_event(
-            HookRunEndEvent(scope=HookType.POST_TOOL, tool_call_id=call_id)
+        await self._projection.dispatch(
+            HookRunEndEvent(scope=HookType.POST_TOOL, tool_call_id=call_id),
+            self._handler.handle_event,
         )
 
 

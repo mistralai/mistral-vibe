@@ -206,7 +206,9 @@ class PetitChat(Static):
         self._dots -= transition["remove"]
         self._dots |= transition["add"]
         self._transition_index = (self._transition_index + 1) % len(TRANSITIONS)
-        self._inner.update(render_braille(self._dots, WIDTH, HEIGHT))
+        # render_braille always emits the full WIDTH x HEIGHT grid, so frames
+        # never change size.
+        self._inner.update(render_braille(self._dots, WIDTH, HEIGHT), layout=False)
 
         if not self._may_stop():
             return

@@ -10,6 +10,7 @@ from textual.widgets import Markdown, Static
 
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.theme_picker import sorted_theme_names
+from vibe.cli.theme import resolve_theme
 from vibe.setup.onboarding.base import OnboardingScreen
 
 THEMES = sorted_theme_names()
@@ -54,10 +55,10 @@ class ThemeSelectionScreen(OnboardingScreen):
 
     NEXT_SCREEN = "api_key"
 
-    def __init__(self, next_screen: str = "api_key") -> None:
+    def __init__(self, *, initial_theme: str, next_screen: str = "api_key") -> None:
         super().__init__()
         self.NEXT_SCREEN = next_screen
-        self._theme_index = 0
+        self._theme_index = THEMES.index(initial_theme)
         self._theme_widgets: list[Static] = []
 
     def _compose_theme_list(self) -> ComposeResult:
@@ -90,9 +91,6 @@ class ThemeSelectionScreen(OnboardingScreen):
                         yield Container(Markdown(PREVIEW_MARKDOWN), id="preview-inner")
 
     def on_mount(self) -> None:
-        current_theme = self.app.theme
-        if current_theme in THEMES:
-            self._theme_index = THEMES.index(current_theme)
         self._update_display()
         self._update_preview_height()
         self.focus()
@@ -127,8 +125,12 @@ class ThemeSelectionScreen(OnboardingScreen):
 
     def _navigate(self, direction: int) -> None:
         self._theme_index = (self._theme_index + direction) % len(THEMES)
-        self.app.theme = THEMES[self._theme_index]
+        self.app.theme = resolve_theme(self.selected_theme)
         self._update_display()
+
+    @property
+    def selected_theme(self) -> str:
+        return THEMES[self._theme_index]
 
     def action_next_theme(self) -> None:
         self._navigate(1)

@@ -33,8 +33,8 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.paths import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import Backend
-from vibe.core.utils.http import build_ssl_context, configure_ssl_context
 from vibe.setup.onboarding.context import OnboardingContext
+from vibe.utils.http import build_ssl_context, configure_ssl_context
 
 
 class _ProviderConfigOverrides(TypedDict, total=False):
@@ -263,8 +263,7 @@ class TestSystemTrustStoreConfig:
 
             default_ctx = MagicMock(spec=ssl.SSLContext)
             with patch(
-                "vibe.core.utils.http.ssl.create_default_context",
-                return_value=default_ctx,
+                "vibe.utils.http.ssl.create_default_context", return_value=default_ctx
             ):
                 await make_orchestrator()
                 assert build_ssl_context() is default_ctx
@@ -275,8 +274,7 @@ class TestSystemTrustStoreConfig:
 
             truststore_ctx = MagicMock(spec=ssl.SSLContext)
             with patch(
-                "vibe.core.utils.http.truststore.SSLContext",
-                return_value=truststore_ctx,
+                "vibe.utils.http.truststore.SSLContext", return_value=truststore_ctx
             ):
                 await make_orchestrator()
                 assert build_ssl_context() is truststore_ctx

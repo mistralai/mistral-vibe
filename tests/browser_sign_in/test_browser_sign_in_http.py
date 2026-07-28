@@ -9,12 +9,12 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 
-from vibe.core.utils.http import VibeAsyncHTTPClient
 from vibe.setup.auth import (
     BrowserSignInError,
     BrowserSignInErrorCode,
     HttpBrowserSignInGateway,
 )
+from vibe.utils.http import VibeAsyncHTTPClient
 
 AUTH_ORIGIN = "https://console.mistral.ai"
 AUTH_BROWSER_BASE_URL = "https://console.mistral.ai"

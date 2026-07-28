@@ -10,7 +10,7 @@ from vibe.cli.update_notifier.ports.update_gateway import (
     UpdateGatewayCause,
     UpdateGatewayError,
 )
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 _STATUS_CAUSES: dict[int, UpdateGatewayCause] = {
     httpx.codes.NOT_FOUND: UpdateGatewayCause.NOT_FOUND,

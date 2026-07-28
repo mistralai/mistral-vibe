@@ -11,7 +11,8 @@ from vibe.core.session.image_snapshot import (
     snapshot_image,
     snapshot_image_bytes,
 )
-from vibe.core.types import MAX_IMAGE_BYTES, FileImageSource, InlineImageSource
+from vibe.core.types import FileImageSource, InlineImageSource
+from vibe.utils.images import MAX_IMAGE_BYTES
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 

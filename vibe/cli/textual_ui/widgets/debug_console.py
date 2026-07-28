@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import bisect
 from collections.abc import Callable
+from typing import Protocol
 
 from rich.markup import escape
 from rich.segment import Segment
@@ -16,8 +17,8 @@ from textual.scroll_view import ScrollView
 from textual.strip import Strip
 from textual.widgets import Static
 
-from vibe.core.log_reader import LogEntry, LogReader
-from vibe.core.logger import decode_log_message
+from vibe.app_server.models import DebugLogEntry, DebugLogPage
+from vibe.observability.logging import decode_log_message
 
 LOG_LEVEL_COLORS: dict[str, str] = {
     "DEBUG": "dim",
@@ -28,7 +29,12 @@ LOG_LEVEL_COLORS: dict[str, str] = {
 }
 
 DEFAULT_LOG_PAGE_SIZE = 30
+LOG_POLL_INTERVAL = 0.5
 _EMPTY_STYLE = Style()
+
+
+class DebugLogSource(Protocol):
+    async def read_logs(self, *, limit: int = 100, offset: int = 0) -> DebugLogPage: ...
 
 
 class _LogView(ScrollView, can_focus=True):
@@ -181,45 +187,84 @@ class _LogView(ScrollView, can_focus=True):
 
 class DebugConsole(Vertical):
     def __init__(
-        self, log_reader: LogReader, page_size: int = DEFAULT_LOG_PAGE_SIZE
+        self, log_source: DebugLogSource, page_size: int = DEFAULT_LOG_PAGE_SIZE
     ) -> None:
         super().__init__(id="debug-console")
-        self._log_reader = log_reader
+        self._log_source = log_source
         self._log_view: _LogView | None = None
         self._cursor: int | None = None
         self._has_more: bool = True
         self._page_size = page_size
+        self._seen_entry_ids: set[str] = set()
+        self._reading = False
 
     def compose(self) -> ComposeResult:
         yield Static(
             "Debug Console  [dim](ctrl+\\ to close)[/dim]", id="debug-console-header"
         )
         self._log_view = _LogView(
-            load_page=self._load_page,
+            load_page=self._schedule_load_page,
             has_more=lambda: self._has_more and self._cursor is not None,
             id="debug-console-log",
         )
         yield self._log_view
 
     def on_mount(self) -> None:
-        self._fill_viewport()
-        self._log_reader.set_consumer(self._on_log_entry)
-        self._log_reader.start_watching()
+        self._schedule_load_page()
+        self.set_interval(LOG_POLL_INTERVAL, self._schedule_poll)
 
-    def on_unmount(self) -> None:
-        self._log_reader.set_consumer(None)
-        self._log_reader.stop_watching()
-
-    def _load_page(self) -> None:
-        if self._log_view is None:
+    def _schedule_load_page(self) -> None:
+        if self._reading:
             return
-        result = self._log_reader.get_logs(
-            limit=self._page_size, offset=self._cursor or 0
-        )
-        self._cursor = result.cursor
-        self._has_more = result.has_more
-        markups = [self._format_entry(e) for e in reversed(result.entries)]
-        self._log_view.prepend_lines(markups)
+        self.run_worker(self._load_page())
+
+    async def _load_page(self) -> None:
+        if self._log_view is None or self._reading:
+            return
+        self._reading = True
+        try:
+            result = await self._log_source.read_logs(
+                limit=self._page_size, offset=self._cursor or 0
+            )
+            self._cursor = result.cursor
+            self._has_more = result.has_more
+            entries = [
+                entry
+                for entry in result.entries
+                if entry.id not in self._seen_entry_ids
+            ]
+            self._seen_entry_ids.update(entry.id for entry in entries)
+            markups = [self._format_entry(entry) for entry in reversed(entries)]
+            self._log_view.prepend_lines(markups)
+            self._fill_viewport()
+        finally:
+            self._reading = False
+
+    def _schedule_poll(self) -> None:
+        if self._reading:
+            return
+        self.run_worker(self._poll_latest())
+
+    async def _poll_latest(self) -> None:
+        if self._log_view is None or self._reading:
+            return
+        self._reading = True
+        try:
+            result = await self._log_source.read_logs(limit=500)
+            entries = [
+                entry
+                for entry in result.entries
+                if entry.id not in self._seen_entry_ids
+            ]
+            if not entries:
+                return
+            self._seen_entry_ids.update(entry.id for entry in entries)
+            if self._cursor is not None:
+                self._cursor += len(entries)
+            for entry in reversed(entries):
+                self._log_view.write_line(self._format_entry(entry))
+        finally:
+            self._reading = False
 
     def _fill_viewport(self) -> None:
         """Load enough logs to fill the viewport, then scroll to the bottom."""
@@ -231,21 +276,12 @@ class DebugConsole(Vertical):
         if self._log_view is None or not self._has_more:
             return
         if self._log_view.virtual_size.height <= self._log_view.size.height:
-            self._load_page()
-            self._fill_viewport()
+            self._schedule_load_page()
         else:
             self._log_view.scroll_end(animate=False)
 
-    def _on_log_entry(self, entry: LogEntry) -> None:
-        self.app.call_from_thread(self._append_log_entry, entry)
-
-    def _append_log_entry(self, entry: LogEntry) -> None:
-        if self._log_view is None:
-            return
-        self._log_view.write_line(self._format_entry(entry))
-
     @staticmethod
-    def _format_entry(entry: LogEntry) -> str:
+    def _format_entry(entry: DebugLogEntry) -> str:
         color = LOG_LEVEL_COLORS.get(entry.level, "dim")
         ts = entry.timestamp.astimezone().strftime("%Y-%m-%d %H:%M:%S")
         message = decode_log_message(entry.message)

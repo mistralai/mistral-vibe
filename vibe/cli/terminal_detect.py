@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from vibe.core.telemetry.types import TerminalEmulator
+from vibe.utils.terminal import TerminalEmulator
 
 Terminal = TerminalEmulator
 

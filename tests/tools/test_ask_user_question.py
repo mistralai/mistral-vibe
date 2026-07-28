@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.core.tools.base import BaseToolState, ToolError
+from tests.stubs.fake_interaction_requests import FakeInteractionRequests
+from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError
 from vibe.core.tools.builtins.ask_user_question import (
-    Answer,
     AskUserQuestion,
     AskUserQuestionArgs,
     AskUserQuestionConfig,
     AskUserQuestionResult,
-    Choice,
-    Question,
 )
 from vibe.core.types import ToolCallEvent, ToolResultEvent
+from vibe.questions import (
+    QuestionChoice as Choice,
+    UserAnswer as Answer,
+    UserQuestion as Question,
+)
 
 
 @pytest.fixture
@@ -55,10 +58,11 @@ def multi_question_args():
     )
 
 
-async def run_tool_with_callback(tool, args, callback):
-    from vibe.core.tools.base import InvokeContext
-
-    ctx = InvokeContext(user_input_callback=callback, tool_call_id="123")
+async def run_tool_with_requests(tool, args, handler):
+    ctx = InvokeContext(
+        interaction_requests=FakeInteractionRequests(user_input=handler),
+        tool_call_id="123",
+    )
     result = None
     async for item in tool.run(args, ctx):
         result = item
@@ -66,7 +70,7 @@ async def run_tool_with_callback(tool, args, callback):
 
 
 @pytest.mark.asyncio
-async def test_raises_error_without_callback(tool, single_question_args):
+async def test_raises_error_without_interaction_requests(tool, single_question_args):
     with pytest.raises(ToolError) as err:
         async for _ in tool.run(single_question_args, ctx=None):
             pass
@@ -75,7 +79,7 @@ async def test_raises_error_without_callback(tool, single_question_args):
 
 
 @pytest.mark.asyncio
-async def test_calls_callback_and_returns_result(tool, single_question_args):
+async def test_requests_user_input_and_returns_result(tool, single_question_args):
     expected_result = AskUserQuestionResult(
         answers=[
             Answer(question="Which database?", answer="PostgreSQL", is_other=False)
@@ -83,11 +87,11 @@ async def test_calls_callback_and_returns_result(tool, single_question_args):
         cancelled=False,
     )
 
-    async def mock_callback(args):
+    async def respond(args):
         assert args == single_question_args
         return expected_result
 
-    result = await run_tool_with_callback(tool, single_question_args, mock_callback)
+    result = await run_tool_with_requests(tool, single_question_args, respond)
 
     assert result is not None
     assert result == expected_result
@@ -98,10 +102,10 @@ async def test_calls_callback_and_returns_result(tool, single_question_args):
 async def test_handles_cancelled_result(tool, single_question_args):
     expected_result = AskUserQuestionResult(answers=[], cancelled=True)
 
-    async def mock_callback(args):
+    async def respond(args):
         return expected_result
 
-    result = await run_tool_with_callback(tool, single_question_args, mock_callback)
+    result = await run_tool_with_requests(tool, single_question_args, respond)
 
     assert result is not None
     assert result.cancelled is True
@@ -115,10 +119,10 @@ async def test_handles_other_response(tool, single_question_args):
         cancelled=False,
     )
 
-    async def mock_callback(args):
+    async def respond(args):
         return expected_result
 
-    result = await run_tool_with_callback(tool, single_question_args, mock_callback)
+    result = await run_tool_with_requests(tool, single_question_args, respond)
 
     assert result is not None
     assert result.answers[0].is_other is True
@@ -135,6 +139,10 @@ class TestToolUIDisplay:
         )
         display = AskUserQuestion.get_call_display(event)
         assert "Which database?" in display.summary
+        assert display.verb == "Asking"
+        assert display.message == "Which database?"
+        assert display.settled_verb == "Asked"
+        assert display.settled_message == "Which database?"
 
     def test_get_call_display_multiple_questions(self, multi_question_args):
         event = ToolCallEvent(
@@ -145,6 +153,10 @@ class TestToolUIDisplay:
         )
         display = AskUserQuestion.get_call_display(event)
         assert "2 questions" in display.summary
+        assert display.verb == "Asking"
+        assert display.message == "2 questions"
+        assert display.settled_verb == "Asked"
+        assert display.settled_message == "2 questions"
 
     def test_get_result_display_success(self):
         result = AskUserQuestionResult(
@@ -170,7 +182,7 @@ class TestToolUIDisplay:
         )
         display = AskUserQuestion.get_result_display(event)
         assert display.success is False
-        assert "cancelled" in display.message.lower()
+        assert display.verb.lower() == "cancelled"
 
     def test_get_result_display_other(self):
         result = AskUserQuestionResult(

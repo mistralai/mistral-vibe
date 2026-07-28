@@ -4,35 +4,34 @@ from asyncio import CancelledError, create_task, wait_for
 import contextlib
 from typing import TYPE_CHECKING
 
-from vibe.cli.voice_manager.telemetry import TranscriptionTrackingState
-from vibe.cli.voice_manager.voice_manager_port import (
-    RecordingStartError,
-    TranscribeState,
-    VoiceToggleResult,
-)
-from vibe.core.audio_recorder.audio_recorder_port import (
+from vibe.app_server.config import ConfigView
+from vibe.cli.audio_recorder.audio_recorder_port import (
     AlreadyRecordingError,
     AudioBackendUnavailableError,
+    AudioRecorderPort,
     NoAudioInputDeviceError,
     RecordingMode,
 )
-from vibe.core.config import VibeConfigSchema
-from vibe.core.logger import logger
-from vibe.core.transcribe.transcribe_client_port import (
+from vibe.cli.transcribe.transcribe_client_port import (
+    TranscribeClientPort,
     TranscribeDone,
     TranscribeError,
     TranscribeSessionCreated,
     TranscribeTextDelta,
 )
+from vibe.cli.voice_manager.telemetry import TranscriptionTrackingState
+from vibe.cli.voice_manager.voice_manager_port import (
+    RecordingStartError,
+    TranscribeState,
+)
+from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from asyncio import Task
     from collections.abc import Callable
 
+    from vibe.cli.telemetry import ClientTelemetry
     from vibe.cli.voice_manager.voice_manager_port import VoiceManagerListener
-    from vibe.core.audio_recorder import AudioRecorderPort
-    from vibe.core.telemetry.send import TelemetryClient
-    from vibe.core.transcribe.transcribe_client_port import TranscribeClientPort
 
 TRANSCRIPTION_DRAIN_TIMEOUT = 10.0
 
@@ -40,10 +39,10 @@ TRANSCRIPTION_DRAIN_TIMEOUT = 10.0
 class VoiceManager:
     def __init__(
         self,
-        config_getter: Callable[[], VibeConfigSchema],
+        config_getter: Callable[[], ConfigView],
         audio_recorder: AudioRecorderPort,
         transcribe_client: TranscribeClientPort | None,
-        telemetry_client: TelemetryClient | None = None,
+        telemetry_client: ClientTelemetry | None = None,
     ) -> None:
         self._config_getter = config_getter
         self._audio_recorder = audio_recorder
@@ -66,18 +65,15 @@ class VoiceManager:
     def peak(self) -> float:
         return self._audio_recorder.peak
 
-    def toggle_voice_mode(self) -> VoiceToggleResult:
-        new_state = not self.is_enabled
-        if not new_state:
+    def apply_enabled(self, enabled: bool) -> None:
+        if not enabled:
             self.cancel_recording()
 
         for listener in self._listeners:
             try:
-                listener.on_voice_mode_change(new_state)
+                listener.on_voice_mode_change(enabled)
             except Exception:
                 logger.error("Listener raised during voice mode change", exc_info=True)
-
-        return VoiceToggleResult(enabled=new_state)
 
     def start_recording(self, mode: RecordingMode = RecordingMode.STREAM) -> None:
         if self._transcribe_state != TranscribeState.IDLE:
@@ -89,7 +85,7 @@ class VoiceManager:
             )
             raise RecordingStartError("Transcribe client is not available")
 
-        model = self._config_getter().get_active_transcribe_model()
+        model = self._config_getter().transcription.model
 
         try:
             self._audio_recorder.start(mode, sample_rate=model.sample_rate)

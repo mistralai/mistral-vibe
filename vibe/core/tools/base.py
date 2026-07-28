@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable
-from dataclasses import dataclass, field
-from enum import StrEnum, auto
+from dataclasses import dataclass, field, replace
 import functools
 import inspect
 from pathlib import Path
@@ -14,6 +13,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    Protocol,
     Union,
     cast,
     get_args,
@@ -24,27 +24,52 @@ from typing import (
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from vibe.core.checkpoints import FileSnapshot, FileState
-from vibe.core.logger import logger
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
+from vibe.core.tools.models import (
+    ToolPermission,
+    ToolPermissionError as ToolPermissionError,
+)
+from vibe.core.tools.terminal_runtime import TerminalRuntime
 from vibe.core.types import ToolStreamEvent
-from vibe.core.utils.io import read_safe
+from vibe.observability.logging import logger
+from vibe.utils.io import read_safe
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
     from vibe.core.config import VibeConfigSchema
     from vibe.core.hooks.models import HookConfigResult
     from vibe.core.skills.manager import SkillManager
+    from vibe.core.subagents import SubagentRunnerPort
     from vibe.core.telemetry.types import LaunchContext
+    from vibe.core.tools.io_port import ToolIOPort
     from vibe.core.tools.mcp.pool import MCPConnectionPool
     from vibe.core.tools.mcp_sampling import MCPSamplingHandler
+    from vibe.core.tools.models import RequiredPermission
     from vibe.core.tools.permissions import PermissionContext, PermissionStore
     from vibe.core.types import (
-        ApprovalCallback,
+        ApprovalResponse,
         ClearContextCallback,
         SwitchAgentCallback,
-        UserInputCallback,
     )
 
 ARGS_COUNT = 4
+
+
+class InteractionRequestPort(Protocol):
+    async def request_approval(
+        self,
+        tool_name: str,
+        args: BaseModel,
+        tool_call_id: str,
+        required_permissions: list[RequiredPermission] | None,
+    ) -> tuple[ApprovalResponse, str | None]: ...
+
+    async def request_user_input(
+        self, args: BaseModel, tool_call_id: str
+    ) -> BaseModel: ...
 
 
 @dataclass
@@ -52,9 +77,9 @@ class InvokeContext:
     """Context passed to tools during invocation."""
 
     tool_call_id: str
-    approval_callback: ApprovalCallback | None = field(default=None)
     agent_manager: AgentManager | None = field(default=None)
-    user_input_callback: UserInputCallback | None = field(default=None)
+    interaction_requests: InteractionRequestPort | None = field(default=None)
+    subagent_runner: SubagentRunnerPort | None = field(default=None)
     sampling_callback: MCPSamplingHandler | None = field(default=None)
     session_dir: Path | None = field(default=None)
     launch_context: LaunchContext | None = field(default=None)
@@ -68,6 +93,7 @@ class InvokeContext:
     hook_config_result: HookConfigResult | None = field(default=None)
     session_id: str | None = field(default=None)
     mcp_pool: MCPConnectionPool | None = field(default=None)
+    tool_io: ToolIOPort | None = field(default=None)
 
 
 class ToolError(Exception):
@@ -93,25 +119,6 @@ class ToolInfo(BaseModel):
     name: str
     description: str
     parameters: dict[str, Any]
-
-
-class ToolPermissionError(Exception):
-    """Raised when a tool permission is not allowed."""
-
-
-class ToolPermission(StrEnum):
-    ALWAYS = auto()
-    NEVER = auto()
-    ASK = auto()
-
-    @classmethod
-    def by_name(cls, name: str) -> ToolPermission:
-        try:
-            return ToolPermission(name.upper())
-        except ValueError:
-            raise ToolPermissionError(
-                f"Invalid tool permission: {name}. Must be one of {list(cls)}"
-            )
 
 
 class BaseToolConfig(BaseModel):
@@ -152,11 +159,32 @@ class BaseTool[
     # variant is the available one with the greatest priority.
     selection_priority: ClassVar[int] = 0
 
+    # Optional gate for the managed-shell GrowthBook rollout. Keep this on the
+    # builtin shell tools only so custom tool availability stays config-only.
+    shell_rollout: ClassVar[str | None] = None
+    local_managed_shell_only: ClassVar[bool] = False
+
     def __init__(
-        self, config_getter: Callable[[], ToolConfig], state: ToolState
+        self,
+        config_getter: Callable[[], ToolConfig],
+        state: ToolState,
+        *,
+        cwd: Path | None = None,
+        harness_files: HarnessFilesManager | None = None,
+        scratchpad_dir: Path | None = None,
+        terminal_runtime: TerminalRuntime | None = None,
     ) -> None:
         self._config_getter = config_getter
         self.state = state
+        self.cwd = (cwd or Path.cwd()).resolve()
+        if harness_files is None:
+            try:
+                harness_files = get_harness_files_manager()
+            except RuntimeError:
+                harness_files = HarnessFilesManager(sources=(), cwd=self.cwd)
+        self.harness_files = replace(harness_files, cwd=self.cwd)
+        self.scratchpad_dir = scratchpad_dir
+        self.terminal_runtime = terminal_runtime or TerminalRuntime()
 
     @property
     def config(self) -> ToolConfig:
@@ -217,12 +245,35 @@ class BaseTool[
             yield item
 
     @classmethod
+    def validate_arguments(cls, value: Any) -> BaseModel:
+        args_model, _ = cls._get_tool_args_results()
+        return args_model.model_validate(value)
+
+    @classmethod
+    def validate_result(cls, value: Any) -> BaseModel:
+        _, result_model = cls._get_tool_args_results()
+        return result_model.model_validate(value)
+
+    @classmethod
     def from_config(
-        cls, config_getter: Callable[[], ToolConfig]
+        cls,
+        config_getter: Callable[[], ToolConfig],
+        *,
+        cwd: Path | None = None,
+        harness_files: HarnessFilesManager | None = None,
+        scratchpad_dir: Path | None = None,
+        terminal_runtime: TerminalRuntime | None = None,
     ) -> BaseTool[ToolArgs, ToolResult, ToolConfig, ToolState]:
         state_class = cls._get_tool_state_class()
         initial_state = state_class()
-        return cls(config_getter=config_getter, state=initial_state)
+        return cls(
+            config_getter=config_getter,
+            state=initial_state,
+            cwd=cwd,
+            harness_files=harness_files,
+            scratchpad_dir=scratchpad_dir,
+            terminal_runtime=terminal_runtime,
+        )
 
     @classmethod
     def _get_tool_config_class(cls) -> type[ToolConfig]:
@@ -400,11 +451,10 @@ class BaseTool[
         """
         return None
 
-    @staticmethod
-    def get_file_snapshot_for_path(path: str) -> FileSnapshot:
+    def get_file_snapshot_for_path(self, path: str) -> FileSnapshot:
         file_path = Path(path).expanduser()
         if not file_path.is_absolute():
-            file_path = Path.cwd() / file_path
+            file_path = self.cwd / file_path
         file_path = file_path.resolve()
         try:
             content: bytes | None = file_path.read_bytes()

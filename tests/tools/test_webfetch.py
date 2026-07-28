@@ -296,6 +296,7 @@ def test_get_result_display_includes_url():
     display = WebFetch.get_result_display(event)
 
     assert display.success is True
+    assert display.verb == "Fetched"
     assert url in display.message
     assert "14,837 chars" in display.message
     assert "text/html" in display.message
@@ -314,4 +315,4 @@ def test_get_result_display_marks_truncated():
 
     display = WebFetch.get_result_display(event)
 
-    assert "[truncated]" in display.message
+    assert display.suffix == "(truncated)"

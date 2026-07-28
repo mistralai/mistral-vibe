@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING, final
 from humanize import naturalsize
 from pydantic import BaseModel, Field
 
-from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.scratchpad import is_scratchpad_path
+from vibe.core.scratchpad import is_scratchpad_display_path
 from vibe.core.tools.base import (
     BaseTool,
     BaseToolConfig,
@@ -17,12 +16,14 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.io_port import ToolIOPort
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.tools.utils import resolve_file_tool_permission
 from vibe.core.types import ToolStreamEvent
 from vibe.core.utils import VIBE_WARNING_TAG
-from vibe.core.utils.io import read_lines_safe_async
+from vibe.utils.io import read_lines_safe_async
+from vibe.utils.tool_presentation import ToolEffectKind
 
 if TYPE_CHECKING:
     from vibe.core.types import ToolResultEvent
@@ -95,6 +96,8 @@ class ReadFile(
     BaseTool[ReadFileArgs, ReadFileResult, ReadFileConfig, ReadFileState],
     ToolUIData[ReadFileArgs, ReadFileResult],
 ):
+    effect_kind = ToolEffectKind.FILE_READ
+
     def resolve_permission(self, args: ReadFileArgs) -> PermissionContext | None:
         return resolve_file_tool_permission(
             args.file_path,
@@ -103,14 +106,13 @@ class ReadFile(
             denylist=self.config.denylist,
             config_permission=self.config.permission,
             sensitive_patterns=self.config.sensitive_patterns,
+            cwd=self.cwd,
+            project_roots=self.harness_files.project_roots,
+            scratchpad_dir=self.scratchpad_dir,
         )
 
     def _find_undiscovered_agents_md(self, file_path: Path) -> list[tuple[Path, str]]:
-        try:
-            mgr = get_harness_files_manager()
-        except RuntimeError:
-            return []
-        docs = mgr.find_subdirectory_agents_md(file_path)
+        docs = self.harness_files.find_subdirectory_agents_md(file_path)
         return [
             (d, c)
             for d, c in docs
@@ -130,17 +132,25 @@ class ReadFile(
         return f"<{VIBE_WARNING_TAG}>\n{'\n\n'.join(sections)}\n</{VIBE_WARNING_TAG}>"
 
     async def _read_file(
-        self, args: ReadFileArgs, file_path: Path
+        self, args: ReadFileArgs, file_path: Path, tool_io: ToolIOPort | None = None
     ) -> tuple[list[str], int | None, bool]:
         start_line = args.offset or 1
         try:
-            result = await read_lines_safe_async(
-                file_path,
-                start_line=start_line,
-                limit=args.limit,
-                max_bytes=self.config.max_read_bytes,
-            )
-        except OSError as exc:
+            if tool_io is not None and tool_io.supports_read:
+                result = await tool_io.read_lines(
+                    file_path,
+                    start_line=start_line,
+                    limit=args.limit,
+                    max_bytes=self.config.max_read_bytes,
+                )
+            else:
+                result = await read_lines_safe_async(
+                    file_path,
+                    start_line=start_line,
+                    limit=args.limit,
+                    max_bytes=self.config.max_read_bytes,
+                )
+        except Exception as exc:
             raise ToolError(f"Error reading {file_path}: {exc}") from exc
         return result.lines, result.total_lines, result.was_truncated
 
@@ -152,7 +162,9 @@ class ReadFile(
 
         start_line = args.offset or 1
 
-        selected, total_lines, was_truncated = await self._read_file(args, file_path)
+        selected, total_lines, was_truncated = await self._read_file(
+            args, file_path, ctx.tool_io if ctx is not None else None
+        )
 
         if selected:
             content = _add_line_numbers(selected, start=start_line)
@@ -177,8 +189,9 @@ class ReadFile(
         if ctx is not None:
             new_docs = self._find_undiscovered_agents_md(file_path)
             if new_docs:
-                cwd = Path.cwd()
-                parts = [f"{_display_relative(d, cwd)}/AGENTS.md" for d, _ in new_docs]
+                parts = [
+                    f"{_display_relative(d, self.cwd)}/AGENTS.md" for d, _ in new_docs
+                ]
                 yield ToolStreamEvent(
                     tool_name=self.get_name(),
                     tool_call_id=ctx.tool_call_id,
@@ -202,7 +215,7 @@ class ReadFile(
 
         path = Path(raw_path).expanduser()
         if not path.is_absolute():
-            path = Path.cwd() / path
+            path = self.cwd / path
         path = path.resolve()
 
         if not path.exists():
@@ -213,16 +226,23 @@ class ReadFile(
 
     @classmethod
     def format_call_display(cls, args: ReadFileArgs) -> ToolCallDisplay:
-        suffix = "(scratchpad)" if is_scratchpad_path(args.file_path) else ""
-        summary = f"Reading {args.file_path}"
+        suffix = "(scratchpad)" if is_scratchpad_display_path(args.file_path) else ""
+        message = args.file_path
         extras: list[str] = []
         if args.offset:
             extras.append(f"from line {args.offset}")
         if args.limit != DEFAULT_LINE_LIMIT:
             extras.append(f"limit {args.limit} lines")
         if extras:
-            summary += f" ({', '.join(extras)})"
-        return ToolCallDisplay(summary=summary, suffix=suffix)
+            message += f" ({', '.join(extras)})"
+        return ToolCallDisplay(
+            summary=f"Reading {message}",
+            suffix=suffix,
+            verb="Reading",
+            message=message,
+            settled_verb="Read",
+            settled_message=message,
+        )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -232,9 +252,11 @@ class ReadFile(
             )
 
         path_obj = Path(event.result.file_path)
-        message = f"Read from {path_obj.name}"
+        n = event.result.num_lines
+        word = "line" if n == 1 else "lines"
+        message = f"{n} {word} from {path_obj.name}"
         suffix_parts: list[str] = []
-        if is_scratchpad_path(event.result.file_path):
+        if is_scratchpad_display_path(event.result.file_path):
             suffix_parts.append("(scratchpad)")
         if event.result.was_truncated or (
             event.result.total_lines is not None
@@ -244,7 +266,7 @@ class ReadFile(
             suffix_parts.append("(truncated)")
 
         return ToolResultDisplay(
-            success=True, message=message, suffix=" ".join(suffix_parts)
+            success=True, verb="Read", message=message, suffix=" ".join(suffix_parts)
         )
 
     @classmethod

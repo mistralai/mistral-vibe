@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
 from pathlib import Path
 
 from git import Repo
 import pytest
 
 from tests.conftest import OrchestratorLoader, build_test_vibe_config
-from vibe.cli import cli as cli_mod, entrypoint as entrypoint_mod
-from vibe.core import programmatic as programmatic_mod
+from vibe.app_server.local import LocalHarnessOptions
+from vibe.cli import (
+    cli as cli_mod,
+    entrypoint as entrypoint_mod,
+    programmatic as programmatic_mod,
+)
 from vibe.core.config import MissingAPIKeyError, VibeConfigSchema, harness_files
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.tools.manager import ToolManager
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.worktree import prepare_worktree_session
 from vibe.setup import onboarding as onboarding_mod, update_prompt as update_prompt_mod
@@ -107,50 +109,7 @@ def test_interactive_mode_still_runs_onboarding_on_missing_api_key(
     assert result.config.displayed_workdir == "/sentinel/workdir"
 
 
-def test_warn_if_workdir_untrusted_writes_stderr_when_project_config_present(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    project = tmp_path / "proj"
-    project.mkdir()
-    (project / "AGENTS.md").write_text("hello", encoding="utf-8")
-    monkeypatch.chdir(project)
-
-    cli_mod.warn_if_workdir_trust_is_unset()
-
-    err = " ".join(capsys.readouterr().err.split())
-    assert "not trusted" in err
-    assert "AGENTS.md" in err
-    assert "--trust" in err
-
-
-def test_warn_if_workdir_untrusted_silent_when_already_trusted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    project = tmp_path / "proj"
-    project.mkdir()
-    (project / "AGENTS.md").write_text("hello", encoding="utf-8")
-    monkeypatch.chdir(project)
-
-    trusted_folders_manager.add_trusted(project)
-
-    cli_mod.warn_if_workdir_trust_is_unset()
-
-    assert capsys.readouterr().err == ""
-
-
-def test_warn_if_workdir_untrusted_silent_when_no_project_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    project = tmp_path / "proj"
-    project.mkdir()
-    monkeypatch.chdir(project)
-
-    cli_mod.warn_if_workdir_trust_is_unset()
-
-    assert capsys.readouterr().err == ""
-
-
-def test_trust_flag_trusts_cwd_for_session_only(
+def test_interactive_trust_flag_is_delegated_without_launcher_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = tmp_path / "proj"
@@ -165,6 +124,7 @@ def test_trust_flag_trusts_cwd_for_session_only(
 
     # Stop main() before it runs the actual CLI.
     def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        assert _args.trust is True
         raise SystemExit(0)
 
     monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
@@ -173,13 +133,12 @@ def test_trust_flag_trusts_cwd_for_session_only(
         entrypoint_mod.main()
     assert exc_info.value.code == 0
 
-    assert trusted_folders_manager.is_trusted(project) is True
-    # --trust must NOT persist to trusted_folders.toml.
+    assert trusted_folders_manager.is_trusted(project) is None
     assert trusted_folders_manager._trusted == []
-    assert str(project.resolve()) in trusted_folders_manager._session_trusted
+    assert trusted_folders_manager._session_trusted == []
 
 
-def test_trust_flag_works_in_programmatic_mode(
+def test_programmatic_trust_flag_is_delegated_without_launcher_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = tmp_path / "proj"
@@ -189,15 +148,11 @@ def test_trust_flag_works_in_programmatic_mode(
     args = _make_args(trust=True, prompt="run")
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod,
-        "check_and_resolve_trusted_folder",
-        lambda _cwd: pytest.fail("must not prompt in -p mode"),
-    )
-    monkeypatch.setattr(
         harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
     def fake_run_cli(_args: argparse.Namespace, **_kwargs: object) -> None:
+        assert _args.trust is True
         raise SystemExit(0)
 
     monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
@@ -205,11 +160,11 @@ def test_trust_flag_works_in_programmatic_mode(
     with pytest.raises(SystemExit):
         entrypoint_mod.main()
 
-    assert trusted_folders_manager.is_trusted(project) is True
+    assert trusted_folders_manager.is_trusted(project) is None
     assert trusted_folders_manager._trusted == []
 
 
-def test_check_upgrade_does_not_pass_trust_resolver(
+def test_check_upgrade_does_not_start_interactive_trust(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = tmp_path / "proj"
@@ -220,20 +175,10 @@ def test_check_upgrade_does_not_pass_trust_resolver(
     args = _make_args(prompt=None, check_upgrade=True)
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
     monkeypatch.setattr(
-        entrypoint_mod,
-        "check_and_resolve_trusted_folder",
-        lambda _cwd: pytest.fail("check-upgrade must not prompt for trust"),
-    )
-    monkeypatch.setattr(
         harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
-    def fake_run_cli(
-        _args: argparse.Namespace,
-        *,
-        resolve_trusted_folder: Callable[[], None] | None = None,
-    ) -> None:
-        assert resolve_trusted_folder is None
+    def fake_run_cli(_args: argparse.Namespace) -> None:
         raise SystemExit(0)
 
     monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
@@ -492,7 +437,7 @@ def test_attached_branch_is_kept_on_cleanup_by_default(
     assert "feature" in (h.name for h in repo.heads)
 
 
-def test_interactive_start_passes_trust_resolver_to_cli(
+def test_interactive_start_delegates_trust_to_textual(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = tmp_path / "proj"
@@ -500,24 +445,12 @@ def test_interactive_start_passes_trust_resolver_to_cli(
     monkeypatch.chdir(project)
 
     args = _make_args(prompt=None)
-    calls: list[str] = []
     monkeypatch.setattr(entrypoint_mod, "parse_arguments", lambda: args)
-    monkeypatch.setattr(
-        entrypoint_mod,
-        "check_and_resolve_trusted_folder",
-        lambda _cwd: calls.append("trust"),
-    )
     monkeypatch.setattr(
         harness_files, "init_harness_files_manager", lambda *a, **k: None
     )
 
-    def fake_run_cli(
-        _args: argparse.Namespace,
-        *,
-        resolve_trusted_folder: Callable[[], None] | None = None,
-    ) -> None:
-        assert callable(resolve_trusted_folder)
-        resolve_trusted_folder()
+    def fake_run_cli(_args: argparse.Namespace) -> None:
         raise SystemExit(0)
 
     monkeypatch.setattr("vibe.cli.cli.run_cli", fake_run_cli)
@@ -526,7 +459,6 @@ def test_interactive_start_passes_trust_resolver_to_cli(
         entrypoint_mod.main()
 
     assert exc_info.value.code == 0
-    assert calls == ["trust"]
 
 
 def test_session_trust_does_not_write_to_disk(
@@ -557,12 +489,7 @@ def test_run_cli_passes_max_tokens_to_run_programmatic(
         "load_config_orchestrator_or_exit",
         lambda interactive: load_orchestrator(config),
     )
-    monkeypatch.setattr(cli_mod, "load_hooks_from_fs", lambda: None)
-    monkeypatch.setattr(cli_mod, "setup_tracing", lambda _config: None)
-    monkeypatch.setattr(cli_mod, "load_session", lambda _args, _config: None)
     monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
-    monkeypatch.setattr(cli_mod, "warn_if_workdir_trust_is_unset", lambda: None)
-    monkeypatch.setattr(cli_mod, "get_initial_agent_name", lambda _args, _config: "x")
 
     def fake_run_programmatic(**kwargs: object) -> str:
         call.update(kwargs)
@@ -574,14 +501,16 @@ def test_run_cli_passes_max_tokens_to_run_programmatic(
         cli_mod.run_cli(args)
 
     assert exc_info.value.code == 0
-    assert call["max_session_tokens"] == 123
+    options = call["harness_options"]
+    assert isinstance(options, LocalHarnessOptions)
+    assert options.session_options.max_session_tokens == 123
 
 
-def test_run_cli_auto_approve_sets_config_without_changing_agent(
+def test_run_cli_auto_approve_is_a_harness_option_without_changing_agent(
     monkeypatch: pytest.MonkeyPatch,
     load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
-    args = _make_args(agent="lean", auto_approve=True)
+    args = _make_args(agent="lean", auto_approve=True, trust=True)
     call: dict[str, object] = {}
     config = build_test_vibe_config(default_agent="plan")
     orchestrator = load_orchestrator(config)
@@ -590,11 +519,7 @@ def test_run_cli_auto_approve_sets_config_without_changing_agent(
     monkeypatch.setattr(
         cli_mod, "load_config_orchestrator_or_exit", lambda interactive: orchestrator
     )
-    monkeypatch.setattr(cli_mod, "load_hooks_from_fs", lambda: None)
-    monkeypatch.setattr(cli_mod, "setup_tracing", lambda _config: None)
-    monkeypatch.setattr(cli_mod, "load_session", lambda _args, _config: None)
     monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
-    monkeypatch.setattr(cli_mod, "warn_if_workdir_trust_is_unset", lambda: None)
 
     def fake_run_programmatic(**kwargs: object) -> str:
         call.update(kwargs)
@@ -606,28 +531,33 @@ def test_run_cli_auto_approve_sets_config_without_changing_agent(
         cli_mod.run_cli(args)
 
     assert exc_info.value.code == 0
-    assert call["agent_name"] == "lean"
-    assert orchestrator.config.bypass_tool_permissions is True
+    options = call["harness_options"]
+    assert isinstance(options, LocalHarnessOptions)
+    assert options.session_options.agent == "lean"
+    assert options.session_options.auto_approve is True
+    assert options.session_options.trust_workspace is True
+    assert config.bypass_tool_permissions is False
 
 
 def _patch_run_cli_for_config(
     monkeypatch: pytest.MonkeyPatch,
     config: VibeConfigSchema,
     load_orchestrator: OrchestratorLoader[VibeConfigSchema],
-) -> ConfigOrchestrator[VibeConfigSchema]:
+) -> dict[str, object]:
+    call: dict[str, object] = {}
     orchestrator = load_orchestrator(config)
     monkeypatch.setattr(cli_mod, "bootstrap_config_files", lambda: None)
     monkeypatch.setattr(
         cli_mod, "load_config_orchestrator_or_exit", lambda *, interactive: orchestrator
     )
-    monkeypatch.setattr(cli_mod, "load_hooks_from_fs", lambda: None)
-    monkeypatch.setattr(cli_mod, "setup_tracing", lambda _config: None)
-    monkeypatch.setattr(cli_mod, "load_session", lambda _args, _config: None)
     monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
-    monkeypatch.setattr(cli_mod, "warn_if_workdir_trust_is_unset", lambda: None)
-    monkeypatch.setattr(cli_mod, "get_initial_agent_name", lambda _args, _config: "x")
-    monkeypatch.setattr(programmatic_mod, "run_programmatic", lambda **kwargs: "done")
-    return orchestrator
+
+    def fake_run_programmatic(**kwargs: object) -> str:
+        call.update(kwargs)
+        return "done"
+
+    monkeypatch.setattr(programmatic_mod, "run_programmatic", fake_run_programmatic)
+    return call
 
 
 def test_run_cli_disabled_tools_filter_enabled_tools(
@@ -636,15 +566,15 @@ def test_run_cli_disabled_tools_filter_enabled_tools(
 ) -> None:
     args = _make_args(enabled_tools=["bash"], disabled_tools=["bash"])
     config = build_test_vibe_config()
-    orchestrator = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
+    call = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
 
     with pytest.raises(SystemExit):
         cli_mod.run_cli(args)
 
-    final_config = orchestrator.config
-    assert final_config.enabled_tools == ["bash"]
-    assert "bash" in final_config.disabled_tools
-    assert ToolManager(lambda: final_config).available_tools == {}
+    options = call["harness_options"]
+    assert isinstance(options, LocalHarnessOptions)
+    assert options.session_options.enabled_tools == ["bash"]
+    assert "bash" in options.session_options.disabled_tools
 
 
 def test_run_cli_programmatic_disabled_tools_filter_enabled_tools(
@@ -653,15 +583,20 @@ def test_run_cli_programmatic_disabled_tools_filter_enabled_tools(
 ) -> None:
     args = _make_args(enabled_tools=["ask_user_question", "exit_plan_mode", "grep"])
     config = build_test_vibe_config()
-    orchestrator = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
+    call = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
 
     with pytest.raises(SystemExit):
         cli_mod.run_cli(args)
 
-    available_tools = ToolManager(lambda: orchestrator.config).available_tools
-    assert "ask_user_question" not in available_tools
-    assert "exit_plan_mode" not in available_tools
-    assert "grep" in available_tools
+    options = call["harness_options"]
+    assert isinstance(options, LocalHarnessOptions)
+    assert options.session_options.enabled_tools == [
+        "ask_user_question",
+        "exit_plan_mode",
+        "grep",
+    ]
+    assert "ask_user_question" in options.session_options.disabled_tools
+    assert "exit_plan_mode" in options.session_options.disabled_tools
 
 
 def test_run_cli_disabled_tools_concatenated_when_no_enabled_tools(
@@ -670,18 +605,18 @@ def test_run_cli_disabled_tools_concatenated_when_no_enabled_tools(
 ) -> None:
     args = _make_args(disabled_tools=["bash"])
     config = build_test_vibe_config(disabled_tools=["webfetch"])
-    orchestrator = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
+    call = _patch_run_cli_for_config(monkeypatch, config, load_orchestrator)
 
     with pytest.raises(SystemExit):
         cli_mod.run_cli(args)
 
-    final_config = orchestrator.config
-    assert final_config.enabled_tools == []
-    assert "webfetch" in final_config.disabled_tools
-    assert "bash" in final_config.disabled_tools
+    options = call["harness_options"]
+    assert isinstance(options, LocalHarnessOptions)
+    assert options.session_options.enabled_tools is None
+    assert "bash" in options.session_options.disabled_tools
 
 
-def test_run_cli_runs_update_prompt_before_trust_resolver(
+def test_run_cli_runs_update_prompt_before_interactive_start(
     monkeypatch: pytest.MonkeyPatch,
     load_orchestrator: OrchestratorLoader[VibeConfigSchema],
 ) -> None:
@@ -695,21 +630,24 @@ def test_run_cli_runs_update_prompt_before_trust_resolver(
         "load_config_orchestrator_or_exit",
         lambda interactive: load_orchestrator(config),
     )
+    monkeypatch.setattr(cli_mod, "get_prompt_from_stdin", lambda: None)
     monkeypatch.setattr(
         cli_mod,
         "_maybe_run_startup_update_prompt",
         lambda _config, _repository: calls.append("update"),
     )
 
-    def resolve_trusted_folder() -> None:
-        calls.append("trust")
+    def run_interactive(**_kwargs: object) -> None:
+        calls.append("interactive")
         raise SystemExit(0)
 
+    monkeypatch.setattr(cli_mod, "_run_interactive_mode", run_interactive)
+
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.run_cli(args, resolve_trusted_folder=resolve_trusted_folder)
+        cli_mod.run_cli(args)
 
     assert exc_info.value.code == 0
-    assert calls == ["update", "trust"]
+    assert calls == ["update", "interactive"]
 
 
 def test_run_cli_check_upgrade_exits_before_loading_config(
@@ -734,12 +672,7 @@ def test_run_cli_check_upgrade_exits_before_loading_config(
     monkeypatch.setattr(cli_mod, "_run_check_upgrade", fake_run_check_upgrade)
 
     with pytest.raises(SystemExit) as exc_info:
-        cli_mod.run_cli(
-            args,
-            resolve_trusted_folder=lambda: pytest.fail(
-                "check-upgrade should not prompt for trust"
-            ),
-        )
+        cli_mod.run_cli(args)
 
     assert exc_info.value.code == 0
     assert call["theme"] == "dracula"

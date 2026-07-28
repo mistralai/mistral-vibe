@@ -2,52 +2,25 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import Any
 
 from vibe.cli.turn_summary.port import (
     TurnSummaryData,
+    TurnSummaryGenerator,
     TurnSummaryPort,
     TurnSummaryResult,
 )
-from vibe.core.config import ModelConfig
-from vibe.core.config.models import Backend
-from vibe.core.llm.types import BackendLike
-from vibe.core.logger import logger
-from vibe.core.prompts import UtilityPrompt
-from vibe.core.telemetry.build_metadata import build_request_metadata
-from vibe.core.types import (
-    AssistantEvent,
-    BaseEvent,
-    LLMMessage,
-    Role,
-    UserMessageEvent,
-)
-from vibe.core.utils.http import get_user_agent
-
-
-def _empty_session_metadata() -> dict[str, Any]:
-    return {}
+from vibe.observability.logging import logger
 
 
 class TurnSummaryTracker(TurnSummaryPort):
     def __init__(
         self,
-        backend: BackendLike,
-        model: ModelConfig,
+        generator: TurnSummaryGenerator,
         on_summary: Callable[[TurnSummaryResult], None] | None = None,
-        max_tokens: int = 512,
-        session_metadata_getter: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
-        self._backend = backend
-        self._model = model
+        self._generator = generator
         self._on_summary = on_summary
-        self._max_tokens = max_tokens
-        self._session_metadata_getter: Callable[[], dict[str, Any]] = (
-            _empty_session_metadata
-            if session_metadata_getter is None
-            else session_metadata_getter
-        )
-        self._tasks: set[asyncio.Task[Any]] = set()
+        self._tasks: set[asyncio.Task[None]] = set()
         self._data: TurnSummaryData | None = None
         self._generation: int = 0
 
@@ -67,14 +40,14 @@ class TurnSummaryTracker(TurnSummaryPort):
         self._generation += 1
         self._data = TurnSummaryData(user_message=user_message)
 
-    def track(self, event: BaseEvent) -> None:
+    def track_user_message(self, message_id: str) -> None:
         if self._data is None:
             return
-        match event:
-            case UserMessageEvent(message_id=message_id):
-                self._data.message_id = message_id
-            case AssistantEvent(content=c) if c:
-                self._data.assistant_fragments.append(c)
+        self._data.message_id = message_id
+
+    def track_assistant_text(self, content: str) -> None:
+        if self._data is not None and content:
+            self._data.assistant_fragments.append(content)
 
     def set_error(self, message: str) -> None:
         if self._data is not None:
@@ -99,51 +72,17 @@ class TurnSummaryTracker(TurnSummaryPort):
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
 
-    def _build_metadata(self, data: TurnSummaryData) -> dict[str, str]:
-        default_metadata = build_request_metadata(
-            launch_context=None,
-            session_id=None,
-            call_type="secondary_call",
-            message_id=data.message_id,
-        ).model_dump(exclude_none=True)
-        return default_metadata | self._session_metadata_getter()
-
     async def _generate_summary(self, data: TurnSummaryData, gen: int) -> None:
         try:
-            prompt_text = UtilityPrompt.TURN_SUMMARY.read()
-
-            sections: list[str] = []
-            sections.append(f"## User Request\n{data.user_message}")
-
-            full_text = "".join(data.assistant_fragments)
-            if full_text:
-                sections.append(f"## Assistant Response\n{full_text}")
-
-            if data.error:
-                sections.append(f"## Error\n{data.error}")
-
-            extraction_text = "\n\n".join(sections)
-
-            summary_messages = [
-                LLMMessage(role=Role.system, content=prompt_text),
-                LLMMessage(role=Role.user, content=extraction_text),
-            ]
-
-            result = await self._backend.complete(
-                model=self._model,
-                messages=summary_messages,
-                temperature=0.0,
-                tools=None,
-                tool_choice=None,
-                max_tokens=self._max_tokens,
-                extra_headers={"user-agent": get_user_agent(Backend.MISTRAL)},
-                metadata=self._build_metadata(data),
+            summary = await self._generator.summarize(
+                user_message=data.user_message,
+                assistant_text="".join(data.assistant_fragments),
+                error=data.error,
+                message_id=data.message_id,
             )
-
-            summary = result.message.content or ""
             if self._on_summary is not None:
                 self._on_summary(TurnSummaryResult(generation=gen, summary=summary))
-        except Exception:
-            logger.warning("Turn summary generation failed", exc_info=True)
+        except Exception as exc:
+            logger.warning("Turn summary request failed", exc_info=exc)
             if self._on_summary is not None:
                 self._on_summary(TurnSummaryResult(generation=gen, summary=None))

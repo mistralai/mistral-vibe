@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 import logging
+from pathlib import Path
 
 from vibe.core.hooks._handler import (
     HookExternalAttrs,
@@ -47,11 +48,11 @@ class HooksManager:
     ``action.next_invocation``.
     """
 
-    def __init__(self, hooks: list[HookConfig]) -> None:
+    def __init__(self, hooks: list[HookConfig], *, cwd: Path | None = None) -> None:
         self._hooks_by_type: dict[HookType, list[HookConfig]] = {}
         for hook in hooks:
             self._hooks_by_type.setdefault(hook.type, []).append(hook)
-        self._executor = HookExecutor()
+        self._executor = HookExecutor(cwd=cwd)
         self._retry_state = HookRetryState()
 
     def has_hooks(self, hook_type: HookType) -> bool:

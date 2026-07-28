@@ -6,8 +6,8 @@ from pathlib import Path
 import tempfile
 from threading import Lock
 
-from vibe.core.logger import logger
-from vibe.core.utils.io import read_safe
+from vibe.observability.logging import logger
+from vibe.utils.io import read_safe
 
 
 class HistoryManager:

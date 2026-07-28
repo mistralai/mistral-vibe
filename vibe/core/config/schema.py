@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 from pydantic.fields import FieldInfo
@@ -23,15 +24,20 @@ class ConfigSchema(BaseModel):
 
     _origins: dict[str, str] = PrivateAttr(default_factory=dict)
 
-    def __init__(
-        self, *, origins: dict[str, str] | None = None, **data: object
-    ) -> None:
-        super().__init__(**data)
-        if origins:
-            self._origins = origins
-
     def origin_of(self, key: str) -> str | None:
         return self._origins.get(key)
+
+    @classmethod
+    def validate_merged(
+        cls,
+        data: dict[str, Any],
+        *,
+        origins: dict[str, str],
+        context: dict[str, Any] | None = None,
+    ) -> Self:
+        config = cls.model_validate(data, context=context)
+        config._origins = origins
+        return config
 
     @classmethod
     def __pydantic_on_complete__(cls) -> None:

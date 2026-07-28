@@ -142,21 +142,21 @@ async def test_plain_prompt_does_not_inject_file(tmp_working_directory: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_inject_user_context_injects_file_via_callback(
+async def test_inject_user_context_returns_injected_file_events(
     tmp_working_directory: Path,
 ) -> None:
     (tmp_working_directory / "notes.md").write_text("queued file body")
     agent_loop = _make_loop()
-    events: list[BaseEvent] = []
 
-    async def capture(event: BaseEvent) -> None:
-        events.append(event)
-
-    await agent_loop.inject_user_context(
-        "read @notes.md", as_message=True, inject_implicit=True, on_event=capture
+    events = await agent_loop.inject_user_context(
+        "read @notes.md", as_message=True, inject_implicit=True
     )
 
-    assert [type(e) for e in events] == [ToolCallEvent, ToolResultEvent]
+    assert [type(e) for e in events] == [
+        UserMessageEvent,
+        ToolCallEvent,
+        ToolResultEvent,
+    ]
     tool_msg = next(m for m in agent_loop.messages if m.role == Role.tool)
     assert tool_msg.name == "read_file"
     assert "queued file body" in (tool_msg.content or "")

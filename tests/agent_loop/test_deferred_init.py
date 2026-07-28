@@ -390,16 +390,19 @@ class TestStartInitializeExperiments:
             )
         )
         refresh_mock = AsyncMock()
+        refresh_config_mock = AsyncMock()
         init_mock = AsyncMock(return_value=True)
 
         with (
             patch.object(
                 agent_loop_module, "session_initialize_experiments", new=init_mock
             ),
+            patch.object(loop, "refresh_config", new=refresh_config_mock),
             patch.object(loop, "refresh_system_prompt", new=refresh_mock),
         ):
             await loop.initialize_experiments()
 
+        refresh_config_mock.assert_awaited_once()
         refresh_mock.assert_awaited_once()
         init_mock.assert_awaited_once()
         init_args = init_mock.await_args
@@ -620,11 +623,15 @@ class TestCycleAgentDuringInit:
                 # Unblock experiments so switch_agent can complete.
                 gate.set()
 
-                # wait_for_complete raises WorkerFailed if the thread worker
-                # crashed — which is exactly what happened before the fix.
-                await pilot.app.workers.wait_for_complete()
+                workers = [
+                    worker
+                    for worker in pilot.app.workers
+                    if worker.group == "mode_switch"
+                ]
+                if workers:
+                    await pilot.app.workers.wait_for_complete(workers)
 
-            assert agent_loop.agent_profile.name == "plan"
+            assert app.app_server.resources.agents.active.name == "plan"
 
 
 class TestActGatesOnExperiments:

@@ -9,15 +9,10 @@ from textual.containers import Container, Vertical
 from textual.message import Message
 from textual.widgets import Input, Static
 
+from vibe.app_server.config import ProxySettingsView
 from vibe.cli.textual_ui.shortcut_hints import shortcut, shortcut_hint
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
-from vibe.core.proxy_setup import (
-    SUPPORTED_PROXY_VARS,
-    get_current_proxy_settings,
-    set_proxy_var,
-    unset_proxy_var,
-)
 
 
 class ProxySetupApp(Container):
@@ -30,26 +25,26 @@ class ProxySetupApp(Container):
     ]
 
     class ProxySetupClosed(Message):
-        def __init__(self, saved: bool, error: str | None = None) -> None:
+        def __init__(
+            self, saved: bool, changes: dict[str, str | None] | None = None
+        ) -> None:
             super().__init__()
             self.saved = saved
-            self.error = error
+            self.changes = changes or {}
 
-    def __init__(self) -> None:
+    def __init__(self, settings: ProxySettingsView) -> None:
         super().__init__(id="proxysetup-app")
+        self._settings = settings
         self.inputs: dict[str, Input] = {}
-        self.initial_values: dict[str, str | None] = {}
 
     def compose(self) -> ComposeResult:
-        self.initial_values = get_current_proxy_settings()
-
         with Vertical(id="proxysetup-content"):
             yield NoMarkupStatic("Proxy Configuration", classes="settings-title")
 
-            for key, description in SUPPORTED_PROXY_VARS.items():
+            for key, description in self._settings.descriptions.items():
                 yield Static(f"[bold $primary]{key}[/]", classes="proxy-label-line")
 
-                initial_value = self.initial_values.get(key) or ""
+                initial_value = self._settings.values.get(key) or ""
                 input_widget = VscodeCompatInput(
                     value=initial_value,
                     placeholder=description,
@@ -107,21 +102,13 @@ class ProxySetupApp(Container):
         self.focus()
 
     def _save_and_close(self) -> None:
-        try:
-            for key, input_widget in self.inputs.items():
-                new_value = input_widget.value.strip()
-                old_value = self.initial_values.get(key) or ""
-
-                if new_value != old_value:
-                    if new_value:
-                        set_proxy_var(key, new_value)
-                    else:
-                        unset_proxy_var(key)
-        except Exception as e:
-            self.post_message(self.ProxySetupClosed(saved=False, error=str(e)))
-            return
-
-        self.post_message(self.ProxySetupClosed(saved=True))
+        changes = {
+            key: value or None
+            for key, input_widget in self.inputs.items()
+            if (value := input_widget.value.strip())
+            != (self._settings.values.get(key) or "")
+        }
+        self.post_message(self.ProxySetupClosed(saved=True, changes=changes))
 
     def action_close(self) -> None:
         self.post_message(self.ProxySetupClosed(saved=False))

@@ -67,11 +67,24 @@ class MergeStrategy(StrEnum):
             return True, base
         return False, None
 
+    def _empty_mapping_as_absent(self, value: Any) -> Any:
+        """Treat an empty mapping as absent for list strategies.
+
+        An empty TOML table (e.g. ``[installed_agents]``) deserializes to ``{}``
+        and reaches the merge untyped via ``RawConfig`` (extra="allow"). Coalescing
+        it away avoids crashing CONCAT/UNION on an otherwise-list field.
+        """
+        if isinstance(value, dict) and not value:
+            return None
+        return value
+
     def _replace(self, base: Any, override: Any) -> Any:
         resolved, value = self._coalesce(base, override)
         return value if resolved else override
 
     def _concat(self, base: Any, override: Any) -> Any:
+        base = self._empty_mapping_as_absent(base)
+        override = self._empty_mapping_as_absent(override)
         resolved, value = self._coalesce(base, override)
         if resolved:
             return value
@@ -84,6 +97,8 @@ class MergeStrategy(StrEnum):
     def _union(
         self, base: Any, override: Any, key_fn: Callable[[Any], str] | None
     ) -> Any:
+        base = self._empty_mapping_as_absent(base)
+        override = self._empty_mapping_as_absent(override)
         resolved, value = self._coalesce(base, override)
         if resolved:
             return value

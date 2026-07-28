@@ -28,8 +28,11 @@ class _LayerData:
 class ConfigBuilder[S: ConfigSchema]:
     """Collects layers and merges them into an immutable Config[S]."""
 
-    def __init__(self, schema: type[S]) -> None:
+    def __init__(
+        self, schema: type[S], *, validation_context: dict[str, Any] | None = None
+    ) -> None:
         self._schema = schema
+        self._validation_context = validation_context
         self._layers: list[ConfigLayer[RawConfig]] = []
         self._lock = asyncio.Lock()
 
@@ -45,9 +48,14 @@ class ConfigBuilder[S: ConfigSchema]:
 
     def copy(self) -> ConfigBuilder[S]:
         """Return a new builder for the same schema with deep-copied layers."""
-        new_builder = ConfigBuilder(self._schema)
+        new_builder = ConfigBuilder(
+            self._schema, validation_context=copy.deepcopy(self._validation_context)
+        )
         new_builder.add_layers([copy.deepcopy(layer) for layer in self._layers])
         return new_builder
+
+    def validate(self, data: dict[str, Any]) -> S:
+        return self._schema.model_validate(data, context=self._validation_context)
 
     async def build(self, force_load: bool = False) -> S:
         """Merge all layers and return a validated schema.
@@ -69,13 +77,15 @@ class ConfigBuilder[S: ConfigSchema]:
                     continue
 
             merged, origins = self._merge_fields(self._schema, layer_dicts)
-            return self._schema(origins=origins, **merged)
+            return self._schema.validate_merged(
+                merged, origins=origins, context=self._validation_context
+            )
 
     def _merge_fields(
         self, schema: type[S], layer_dicts: list[_LayerData]
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         accumulated: dict[str, Any] = defaultdict(dict)
-        origins: dict[str, Any] = {}
+        origins: dict[str, str] = {}
 
         for ld in layer_dicts:
             for key, value in ld.data.items():

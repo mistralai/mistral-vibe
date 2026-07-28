@@ -4,24 +4,20 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.containers import Container
 
+from vibe.app_server.models import QuestionChoice, UserQuestion, UserQuestionRequest
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
-from vibe.core.tools.builtins.ask_user_question import (
-    AskUserQuestionArgs,
-    Choice,
-    Question,
-)
 
 
 @pytest.fixture
 def single_question_args():
-    return AskUserQuestionArgs(
+    return UserQuestionRequest(
         questions=[
-            Question(
+            UserQuestion(
                 question="Which database?",
                 header="DB",
                 options=[
-                    Choice(label="PostgreSQL", description="Relational DB"),
-                    Choice(label="MongoDB", description="Document DB"),
+                    QuestionChoice(label="PostgreSQL", description="Relational DB"),
+                    QuestionChoice(label="MongoDB", description="Document DB"),
                 ],
             )
         ]
@@ -30,17 +26,23 @@ def single_question_args():
 
 @pytest.fixture
 def multi_question_args():
-    return AskUserQuestionArgs(
+    return UserQuestionRequest(
         questions=[
-            Question(
+            UserQuestion(
                 question="Which database?",
                 header="DB",
-                options=[Choice(label="PostgreSQL"), Choice(label="MongoDB")],
+                options=[
+                    QuestionChoice(label="PostgreSQL"),
+                    QuestionChoice(label="MongoDB"),
+                ],
             ),
-            Question(
+            UserQuestion(
                 question="Which framework?",
                 header="Framework",
-                options=[Choice(label="FastAPI"), Choice(label="Django")],
+                options=[
+                    QuestionChoice(label="FastAPI"),
+                    QuestionChoice(label="Django"),
+                ],
             ),
         ]
     )
@@ -48,15 +50,15 @@ def multi_question_args():
 
 @pytest.fixture
 def multi_select_args():
-    return AskUserQuestionArgs(
+    return UserQuestionRequest(
         questions=[
-            Question(
+            UserQuestion(
                 question="Which features?",
                 header="Features",
                 options=[
-                    Choice(label="Auth"),
-                    Choice(label="Caching"),
-                    Choice(label="Logging"),
+                    QuestionChoice(label="Auth"),
+                    QuestionChoice(label="Caching"),
+                    QuestionChoice(label="Logging"),
                 ],
                 multi_select=True,
             )
@@ -78,17 +80,17 @@ class TestQuestionAppState:
     def test_more_than_four_options_accepted_and_rendered(self):
         from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 
-        args = AskUserQuestionArgs(
+        args = UserQuestionRequest(
             questions=[
-                Question(
+                UserQuestion(
                     question="Pick an analysis type",
                     header="Analysis",
                     options=[
-                        Choice(label="Financial"),
-                        Choice(label="Operational"),
-                        Choice(label="Strategic"),
-                        Choice(label="Competitive"),
-                        Choice(label="Multi-source"),
+                        QuestionChoice(label="Financial"),
+                        QuestionChoice(label="Operational"),
+                        QuestionChoice(label="Strategic"),
+                        QuestionChoice(label="Competitive"),
+                        QuestionChoice(label="Multi-source"),
                     ],
                 )
             ]
@@ -374,14 +376,19 @@ class TestQuestionAppActions:
     def test_switch_question_restores_cursor_multi_select(self):
         from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 
-        args = AskUserQuestionArgs(
+        args = UserQuestionRequest(
             questions=[
-                Question(
-                    question="Q1?", options=[Choice(label="A"), Choice(label="B")]
+                UserQuestion(
+                    question="Q1?",
+                    options=[QuestionChoice(label="A"), QuestionChoice(label="B")],
                 ),
-                Question(
+                UserQuestion(
                     question="Q2?",
-                    options=[Choice(label="X"), Choice(label="Y"), Choice(label="Z")],
+                    options=[
+                        QuestionChoice(label="X"),
+                        QuestionChoice(label="Y"),
+                        QuestionChoice(label="Z"),
+                    ],
                     multi_select=True,
                 ),
             ]
@@ -838,12 +845,12 @@ class TestVimKeybindings:
 
         from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 
-        args = AskUserQuestionArgs(
+        args = UserQuestionRequest(
             questions=[
-                Question(
+                UserQuestion(
                     question="Only question?",
                     header="Q",
-                    options=[Choice(label="A"), Choice(label="B")],
+                    options=[QuestionChoice(label="A"), QuestionChoice(label="B")],
                 )
             ]
         )
@@ -858,7 +865,7 @@ class TestVimKeybindings:
 class _HostApp(App[None]):
     CSS_PATH = "../../vibe/cli/textual_ui/app.tcss"
 
-    def __init__(self, args: AskUserQuestionArgs) -> None:
+    def __init__(self, args: UserQuestionRequest) -> None:
         super().__init__()
         self._args = args
 

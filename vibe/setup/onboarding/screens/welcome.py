@@ -115,7 +115,7 @@ class WelcomeScreen(OnboardingScreen):
 
     def _animate_gradient(self) -> None:
         self._gradient_offset = (self._gradient_offset + 1) % len(GRADIENT_COLORS)
-        self._welcome_text.update(self._render_text(self._char_index))
+        self._welcome_text.update(self._render_text(self._char_index), layout=False)
 
     def action_next(self) -> None:
         if self._typing_done:

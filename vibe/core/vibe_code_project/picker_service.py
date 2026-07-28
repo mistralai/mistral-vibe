@@ -17,10 +17,10 @@ from vibe.core.vibe_code_project.selection import (
     VibeCodeProject,
     VibeCodeProjectLink,
     is_project_linked_to_repo,
-    normalize_repo_url,
     suggested_project_name,
 )
 from vibe.core.vibe_code_project.telemetry import count_multi_repo_matches
+from vibe.utils.repository import normalize_repo_url
 
 VIBE_CODE_PROJECT_PICKER_PAGE_LIMIT = 100
 
@@ -244,6 +244,31 @@ class VibeCodeProjectPickerService:
 
     def clear_project_link(self, context: ProjectPickerContext) -> None:
         self._project_store.delete_remote_project(repo_root=context.repo_root)
+
+    async def find_linkable_project(
+        self, *, project_id: str, repo_url: str
+    ) -> VibeCodeProject:
+        """Fetch and validate a project the caller intends to link.
+
+        Mirrors the interactive picker's `select` checks so a stateless caller
+        can't persist an arbitrary link: the project must exist, be writable, and
+        be linked to the current repo. Raises VibeCodeProjectResolverError
+        otherwise.
+        """
+        projects = await self._fetch_all_projects()
+        project = next(
+            (candidate for candidate in projects if candidate.project_id == project_id),
+            None,
+        )
+        if project is None:
+            raise VibeCodeProjectResolverError(
+                f"Unknown Vibe Code project: {project_id}"
+            )
+        if project.is_read_only or not is_project_linked_to_repo(project, repo_url):
+            raise VibeCodeProjectResolverError(
+                "The selected Vibe Code project is not available for this repository"
+            )
+        return project
 
     async def _save_project_link_async(
         self, *, context: ProjectPickerContext, project_id: str, project_name: str

@@ -5,10 +5,11 @@ from keyring.errors import KeyringError
 import pytest
 
 from tests.conftest import ConfigBuilder, build_test_vibe_config
-from vibe.core.config import MissingAPIKeyError, ProviderConfig, resolve_api_key
+from vibe.core.config import MissingAPIKeyError, ProviderConfig
 from vibe.core.llm.backend.mistral import MistralBackend
 from vibe.core.types import Backend
-from vibe.core.utils.keyring import clear_api_key_keyring_cache
+from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.keyring import clear_api_key_keyring_cache
 
 
 def test_resolve_returns_env_value_without_consulting_keyring(

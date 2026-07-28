@@ -7,10 +7,14 @@ from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import httpx
 
-from vibe.core.config import resolve_api_key
 from vibe.core.llm.backend._image import to_data_uri as _to_data_uri
 from vibe.core.llm.backend.anthropic import AnthropicAdapter
-from vibe.core.llm.backend.base import APIAdapter, PreparedRequest
+from vibe.core.llm.backend.base import (
+    APIAdapter,
+    PreparedRequest,
+    build_chat_payload,
+    finalize_chat_request,
+)
 from vibe.core.llm.backend.openai_responses import OpenAIResponsesAdapter
 from vibe.core.llm.backend.reasoning_adapter import ReasoningAdapter
 from vibe.core.llm.exceptions import BackendErrorBuilder
@@ -23,8 +27,9 @@ from vibe.core.types import (
     StrToolChoice,
 )
 from vibe.core.utils import async_generator_retry, async_retry
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.core.utils.sse import iter_sse_lines
+from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 if TYPE_CHECKING:
     from vibe.core.config import ModelConfig, ProviderConfig
@@ -32,40 +37,6 @@ if TYPE_CHECKING:
 
 class OpenAIAdapter(APIAdapter):
     endpoint: ClassVar[str] = "/chat/completions"
-
-    def build_payload(
-        self,
-        model_name: str,
-        converted_messages: list[dict[str, Any]],
-        temperature: float,
-        tools: list[AvailableTool] | None,
-        max_tokens: int | None,
-        tool_choice: StrToolChoice | AvailableTool | None,
-    ) -> dict[str, Any]:
-        payload = {
-            "model": model_name,
-            "messages": converted_messages,
-            "temperature": temperature,
-        }
-
-        if tools:
-            payload["tools"] = [tool.model_dump(exclude_none=True) for tool in tools]
-        if tool_choice:
-            payload["tool_choice"] = (
-                tool_choice
-                if isinstance(tool_choice, str)
-                else tool_choice.model_dump()
-            )
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
-
-        return payload
-
-    def build_headers(self, api_key: str | None = None) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        return headers
 
     def _reasoning_to_api(
         self, msg_dict: dict[str, Any], field_name: str
@@ -97,6 +68,36 @@ class OpenAIAdapter(APIAdapter):
         msg_dict["content"] = parts
         return msg_dict
 
+    def _convert_messages(
+        self, messages: Sequence[LLMMessage], provider: ProviderConfig
+    ) -> list[dict[str, Any]]:
+        field_name = provider.reasoning_field_name
+        return [
+            self._user_with_images_to_parts(
+                self._reasoning_to_api(
+                    msg.model_dump(
+                        exclude_none=True,
+                        exclude={
+                            "message_id": True,
+                            "reasoning_message_id": True,
+                            "reasoning_state": True,
+                            "injected": True,
+                            "images": True,
+                            "tool_result": True,
+                            "user_display_content": True,
+                            "input_text": True,
+                            "resources": True,
+                            "manual_shell": True,
+                            "tool_calls": {"__all__": {"presentation"}},
+                        },
+                    ),
+                    field_name,
+                ),
+                msg,
+            )
+            for msg in messages
+        ]
+
     def prepare_request(
         self,
         *,
@@ -111,43 +112,29 @@ class OpenAIAdapter(APIAdapter):
         api_key: str | None = None,
         thinking: str = "off",
     ) -> PreparedRequest:
-        field_name = provider.reasoning_field_name
-        converted_messages = [
-            self._user_with_images_to_parts(
-                self._reasoning_to_api(
-                    msg.model_dump(
-                        exclude_none=True,
-                        exclude={
-                            "message_id",
-                            "reasoning_message_id",
-                            "reasoning_state",
-                            "injected",
-                            "images",
-                            "user_display_content",
-                        },
-                    ),
-                    field_name,
-                ),
-                msg,
-            )
-            for msg in messages
-        ]
+        converted_messages = self._convert_messages(messages, provider)
 
-        payload = self.build_payload(
-            model_name, converted_messages, temperature, tools, max_tokens, tool_choice
+        payload = build_chat_payload(
+            model_name=model_name,
+            messages=converted_messages,
+            temperature=temperature,
+            tools=tools,
+            max_tokens=max_tokens,
+            tool_choice=tool_choice,
+            thinking=thinking,
         )
 
-        if enable_streaming:
-            payload["stream"] = True
-            stream_options = {"include_usage": True}
-            if provider.name == "mistral":
-                stream_options["stream_tool_calls"] = True
-            payload["stream_options"] = stream_options
+        stream_options: dict[str, Any] = {"include_usage": True}
+        if provider.name == "mistral":
+            stream_options["stream_tool_calls"] = True
 
-        headers = self.build_headers(api_key)
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
-        return PreparedRequest(self.endpoint, headers, body)
+        return finalize_chat_request(
+            payload=payload,
+            enable_streaming=enable_streaming,
+            stream_options=stream_options,
+            api_key=api_key,
+            endpoint=self.endpoint,
+        )
 
     def _parse_message(
         self, data: dict[str, Any], field_name: str

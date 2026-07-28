@@ -23,6 +23,21 @@ class WordSelectScreen(Screen[None]):
     (the paragraph) rather than the wider container.
     """
 
+    def get_widget_and_offset_at(
+        self, x: int, y: int
+    ) -> tuple[Widget | None, Offset | None]:
+        widget, offset = super().get_widget_and_offset_at(x, y)
+        # HACK: drop DOM-detached widgets so Screen._forward_event doesn't
+        # crash on widget.parent.region. Remove once Textualize/textual#6643
+        # is fixed upstream.
+        if (
+            widget is not None
+            and widget.parent is None
+            and not isinstance(widget, Screen)
+        ):
+            return None, None
+        return widget, offset
+
     async def on_click(self, event: events.Click) -> None:
         if event.chain not in {_DOUBLE_CLICK, _TRIPLE_CLICK}:
             return

@@ -21,8 +21,8 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAu
 from pydantic import AnyUrl, BaseModel, ConfigDict
 
 from vibe.core.config import MCPHttp, MCPOAuth, MCPStreamableHttp
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
-from vibe.core.utils.keyring import (
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.keyring import (
     delete_api_key_from_keyring,
     get_api_key_from_keyring,
     set_api_key_in_keyring,
@@ -107,6 +107,19 @@ class MCPOAuthLoginFailed(MCPOAuthError):
         return (
             f"OAuth login failed for MCP server {self.server_alias!r}: {self.reason}. "
             f"Run `/mcp login {self.server_alias}` to retry."
+        )
+
+
+class MCPOAuthCredentialCleanupFailed(MCPOAuthError):
+    def __init__(self, *, server_alias: str, reason: str) -> None:
+        self.server_alias = server_alias
+        self.reason = reason
+        super().__init__(self._fmt())
+
+    def _fmt(self) -> str:
+        return (
+            f"Failed to remove OAuth credentials for MCP server "
+            f"{self.server_alias!r}: {self.reason}."
         )
 
 
@@ -217,6 +230,24 @@ class KeyringTokenStorage(TokenStorage):
 
     async def delete_client_info(self) -> None:
         await _kr_delete(_kr_username(self._alias, "client_info"))
+
+
+async def delete_oauth_credentials(alias: str) -> None:
+    try:
+        storage = KeyringTokenStorage(alias=alias)
+        await storage.delete_tokens()
+        await storage.delete_client_info()
+        await Fingerprint.delete(alias)
+    except MCPOAuthHeadlessError:
+        # No usable keyring backend means nothing was ever stored, so there is
+        # nothing to delete. Deleting is a no-op rather than a failure.
+        return
+    except MCPOAuthError:
+        raise
+    except keyring.errors.KeyringError as exc:
+        raise MCPOAuthCredentialCleanupFailed(
+            server_alias=alias, reason=str(exc)
+        ) from exc
 
 
 _LOGO_SVG: Final = (
@@ -556,19 +587,23 @@ async def perform_oauth_login(
         server, redirect_handler=on_url, callback_handler=handler.serve_once
     )
     try:
-        async with VibeAsyncHTTPClient(
-            auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
-        ) as client:
-            await client.get(server.url)
-    except (OAuthTokenError, OAuthFlowError) as exc:
-        raise MCPOAuthLoginFailed(server_alias=server.name, reason=str(exc)) from exc
-    except MCPOAuthInvalidGrant:
-        async with VibeAsyncHTTPClient(
-            auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
-        ) as client:
-            await client.get(server.url)
+        try:
+            await _request_oauth_login(server, provider)
+        except MCPOAuthInvalidGrant:
+            await _request_oauth_login(server, provider)
     except MCPOAuthTransientRefreshError as exc:
         raise MCPOAuthLoginFailed(
             server_alias=server.name, reason=f"Transient error: {exc.reason}"
         ) from exc
+    except (OAuthTokenError, OAuthFlowError, httpx.HTTPError, OSError) as exc:
+        raise MCPOAuthLoginFailed(server_alias=server.name, reason=str(exc)) from exc
     await Fingerprint.compute(server).save(server.name)
+
+
+async def _request_oauth_login(
+    server: MCPHttp | MCPStreamableHttp, provider: OAuthClientProvider
+) -> None:
+    async with VibeAsyncHTTPClient(
+        auth=provider, timeout=_LOGIN_TIMEOUT_SECONDS, verify=build_ssl_context()
+    ) as client:
+        await client.get(server.url)

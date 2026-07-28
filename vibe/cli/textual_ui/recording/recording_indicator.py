@@ -53,7 +53,8 @@ class RecordingIndicator(VoiceManagerListener, Static):
         index = min(
             int(self._voice_manager.peak * len(PEAK_BLOCKS)), len(PEAK_BLOCKS) - 1
         )
-        self.update(PEAK_BLOCKS[index])
+        # Frames are all one cell wide, no need for a relayout.
+        self.update(PEAK_BLOCKS[index], layout=False)
 
     def _stop_peak_polling(self) -> None:
         if self._peak_timer:
@@ -71,7 +72,7 @@ class RecordingIndicator(VoiceManagerListener, Static):
         if self._voice_manager.transcribe_state != TranscribeState.FLUSHING:
             return
         self._processing_index = (self._processing_index + 1) % len(FILL_BLOCKS)
-        self.update(FILL_BLOCKS[self._processing_index])
+        self.update(FILL_BLOCKS[self._processing_index], layout=False)
 
     def _stop_flushing_animation_timer(self) -> None:
         if self._flushing_animation_timer:

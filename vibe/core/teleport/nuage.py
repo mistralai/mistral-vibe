@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from vibe.core.telemetry.types import TeleportFailureDetails
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.types import TeleportMessageContext
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 _AMBIGUOUS_CREATE_STATUS_CODES = frozenset({504})
 _AMBIGUOUS_REQUEST_ERRORS: tuple[type[httpx.RequestError], ...] = (
@@ -69,6 +69,9 @@ class NuageRequest(BaseModel):
     project_id: str = Field(serialization_alias="projectId")
     source: str = "vibe_code_cli"
     idempotency_key: str = Field(serialization_alias="idempotencyKey")
+    conversation_id: str | None = Field(
+        default=None, serialization_alias="conversationId"
+    )
     message: NuageMessage
     context: NuageContext
 

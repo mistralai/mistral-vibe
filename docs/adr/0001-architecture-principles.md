@@ -20,7 +20,10 @@ Ports are useful when they protect a real boundary or make tests simpler. They a
 
 ## Agent Guidance
 
-- Keep orchestration, state transitions, and domain models in `vibe/core`.
+- Keep model execution, tool execution, and surface-neutral domain state in
+  `vibe/core`.
+- Keep cross-surface session, runtime, resource, and protocol orchestration in
+  `vibe.app_server`; delivery surfaces consume its public client API.
 - Put adapters for Textual, ACP, HTTP, files, subprocesses, provider SDKs, and local platform behavior outside the pure decision-making path when practical.
 - Prefer small edits in one owning module over scattered updates across many files.
 - Add an abstraction only when it reduces coupling, replaces duplication, or matches an existing boundary.
@@ -29,5 +32,7 @@ Ports are useful when they protect a real boundary or make tests simpler. They a
 ## Flag To User When
 
 - A change is easy in the current code only by coupling two surfaces or spreading behavior across many files.
+- A delivery surface needs a live core object instead of an app-server request,
+  event, or public resource view.
 - A new dependency would run on startup, global import, or every turn without a clear need.
 - A shortcut makes future replacement of a provider, tool, UI, or storage layer harder.

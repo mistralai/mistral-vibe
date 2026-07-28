@@ -10,7 +10,7 @@ from vibe.core.config import SessionLoggingConfig
 from vibe.core.session import last_session_pointer
 from vibe.core.session.session_loader import METADATA_FILENAME, SessionLoader
 from vibe.core.session.session_logger import SessionLogger
-from vibe.core.utils.io import read_safe
+from vibe.utils.io import read_safe
 
 
 def _normalize_session_title(title: str) -> str:

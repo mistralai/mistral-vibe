@@ -410,6 +410,7 @@ def test_get_result_display_includes_query_and_pluralizes_sources():
     display = WebSearch.get_result_display(event)
 
     assert display.success is True
+    assert display.verb == "Searched"
     assert "python async" in display.message
     assert "2 sources" in display.message
 

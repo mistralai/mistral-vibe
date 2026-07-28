@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from vibe.core.checkpoints.checkpointer import Checkpointer
 from vibe.core.checkpoints.file_store import FileStore
 from vibe.core.checkpoints.models import FileState
-from vibe.core.logger import logger
+from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.core.types import MessageList

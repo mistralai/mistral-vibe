@@ -42,15 +42,3 @@ def test_update_system_prompt_inserts_into_empty_list() -> None:
 
     assert len(messages) == 1
     assert messages[0].role == Role.system
-
-
-def test_update_system_prompt_notifies_only_when_requested() -> None:
-    observed: list[LLMMessage] = []
-    messages = MessageList(observer=observed.append)
-
-    messages.update_system_prompt("silent")
-    assert observed == []
-
-    messages.update_system_prompt("loud", notify=True)
-    assert len(observed) == 1
-    assert observed[0].content == "loud"

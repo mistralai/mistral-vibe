@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import StrEnum, auto
+import logging
 import os
 from pathlib import Path
 import re
 import shlex
-from typing import Annotated, Any, Literal, get_args
+from string import Formatter
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -18,6 +20,12 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from vibe.config_values import (
+    THINKING_LEVELS as THINKING_LEVELS,
+    SpeechOutputFormat,
+    ThinkingLevel,
+    TranscriptionEncoding,
+)
 from vibe.core.config._defaults import (
     DEFAULT_AUTO_COMPACT_THRESHOLD,
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
@@ -25,6 +33,8 @@ from vibe.core.config._defaults import (
 )
 from vibe.core.paths import SESSION_LOG_DIR
 from vibe.core.types import Backend
+
+logger = logging.getLogger(__name__)
 
 
 class MissingAPIKeyError(RuntimeError):
@@ -126,6 +136,13 @@ class TranscribeProviderConfig(BaseModel):
     client: TranscribeClient = TranscribeClient.MISTRAL
 
 
+def normalize_mcp_server_name(value: str | None) -> str:
+    if not value:
+        return ""
+    normalized = re.sub(r"[^a-zA-Z0-9_-]", "_", value)
+    return normalized.strip("_-")[:256]
+
+
 class _MCPBase(BaseModel):
     name: str = Field(description="Short alias used to prefix tool names")
     prompt: str | None = Field(
@@ -158,9 +175,10 @@ class _MCPBase(BaseModel):
     @field_validator("name", mode="after")
     @classmethod
     def normalize_name(cls, v: str) -> str:
-        normalized = re.sub(r"[^a-zA-Z0-9_-]", "_", v)
-        normalized = normalized.strip("_-")
-        return normalized[:256]
+        normalized = normalize_mcp_server_name(v)
+        if not normalized:
+            raise ValueError("MCP server name must contain letters or numbers")
+        return normalized
 
 
 _LEGACY_STATIC_AUTH_KEYS = (
@@ -169,6 +187,8 @@ _LEGACY_STATIC_AUTH_KEYS = (
     "api_key_header",
     "api_key_format",
 )
+_ENV_VAR_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_HEADER_NAME_PATTERN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
 class MCPStaticAuth(BaseModel):
@@ -198,17 +218,78 @@ class MCPStaticAuth(BaseModel):
         ),
     )
 
+    @field_validator("headers")
+    @classmethod
+    def _validate_headers(cls, headers: dict[str, str]) -> dict[str, str]:
+        normalized_names: set[str] = set()
+        for name in headers:
+            if not _HEADER_NAME_PATTERN.fullmatch(name):
+                raise ValueError(f"Invalid HTTP header name {name!r}")
+            normalized_name = name.lower()
+            if normalized_name in normalized_names:
+                raise ValueError(f"Duplicate HTTP header {name!r}")
+            normalized_names.add(normalized_name)
+        return headers
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _validate_api_key_env(cls, value: str) -> str:
+        if value and not _ENV_VAR_PATTERN.fullmatch(value):
+            raise ValueError("api_key_env must be a valid environment variable name")
+        return value
+
+    @field_validator("api_key_header")
+    @classmethod
+    def _validate_api_key_header(cls, value: str) -> str:
+        if not _HEADER_NAME_PATTERN.fullmatch(value):
+            raise ValueError("api_key_header must be a valid HTTP header name")
+        return value
+
+    @field_validator("api_key_format")
+    @classmethod
+    def _validate_api_key_format(cls, value: str) -> str:
+        # Enumerate the real replacement fields rather than substring-matching
+        # `{token}`: escaped braces (`{{token}}`) contain that substring but
+        # yield no field, and a format spec (`{token:>5}`) is valid but omits it.
+        try:
+            fields = [
+                name for _, name, _, _ in Formatter().parse(value) if name is not None
+            ]
+        except ValueError as exc:
+            raise ValueError("api_key_format must be a valid format string") from exc
+        if any(name != "token" for name in fields):
+            raise ValueError("api_key_format may only reference the token placeholder")
+        if "token" not in fields:
+            raise ValueError("api_key_format must contain the `{token}` placeholder")
+        return value
+
+    @model_validator(mode="after")
+    def _warn_inert_api_key_fields(self) -> MCPStaticAuth:
+        if not self.api_key_env and (
+            self.api_key_header != "Authorization"
+            or self.api_key_format != "Bearer {token}"
+        ):
+            logger.warning(
+                "MCP static auth sets api_key_header/api_key_format without "
+                "api_key_env; these fields are ignored.",
+                extra={
+                    "api_key_header": self.api_key_header,
+                    "api_key_format": self.api_key_format,
+                },
+            )
+        return self
+
     def http_headers(self) -> dict[str, str]:
-        hdrs = dict(self.headers or {})
-        env_var = (self.api_key_env or "").strip()
-        if env_var and (token := os.getenv(env_var)):
-            target = (self.api_key_header or "").strip() or "Authorization"
-            if not any(h.lower() == target.lower() for h in hdrs):
-                try:
-                    value = (self.api_key_format or "{token}").format(token=token)
-                except Exception:
-                    value = token
-                hdrs[target] = value
+        hdrs = dict(self.headers)
+        has_explicit_api_key_header = any(
+            name.lower() == self.api_key_header.lower() for name in hdrs
+        )
+        if (
+            not has_explicit_api_key_header
+            and self.api_key_env
+            and (token := os.getenv(self.api_key_env))
+        ):
+            hdrs[self.api_key_header] = self.api_key_format.format(token=token)
         return hdrs
 
 
@@ -329,10 +410,6 @@ def _default_alias_to_name(data: Any) -> Any:
         if "alias" not in data or data["alias"] is None:
             data["alias"] = data.get("name")
     return data
-
-
-ThinkingLevel = Literal["off", "low", "medium", "high", "max"]
-THINKING_LEVELS: list[str] = list(get_args(ThinkingLevel))
 
 
 class ModelConfig(BaseModel):
@@ -479,17 +556,11 @@ class TranscribeModelConfig(BaseModel):
     provider: str
     alias: str
     sample_rate: int = 16000
-    encoding: Literal["pcm_s16le"] = "pcm_s16le"
+    encoding: TranscriptionEncoding = "pcm_s16le"
     language: str = "en"
     target_streaming_delay_ms: int = 500
 
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
-
-
-# Mirrors mistralai.client.models.SpeechOutputFormat, declared locally so the
-# config models don't pull the mistralai SDK into CLI startup. Compatibility
-# is type-checked where the value is passed to the SDK (MistralTTSClient).
-type SpeechOutputFormat = Literal["pcm", "wav", "mp3", "flac", "opus"]
 
 
 class TTSClient(StrEnum):

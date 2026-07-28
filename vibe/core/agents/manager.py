@@ -11,11 +11,14 @@ from vibe.core.agents.models import (
     AgentType,
     BuiltinAgentName,
 )
-from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.logger import logger
 from vibe.core.paths import dedup_paths
 from vibe.core.utils import name_matches
+from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -27,8 +30,10 @@ class AgentManager:
         orchestrator: ConfigOrchestrator[VibeConfigSchema],
         initial_agent: str = BuiltinAgentName.DEFAULT,
         allow_subagent: bool = False,
+        harness_files: HarnessFilesManager | None = None,
     ) -> None:
         self._orchestrator = orchestrator
+        self._harness_files = harness_files or get_harness_files_manager()
         self._search_paths = self._compute_search_paths(self._config)
         self._migrate_agent_profiles()
         self._discovered: dict[str, AgentProfile] = self._discover_agents()
@@ -99,9 +104,8 @@ class AgentManager:
     def invalidate_config(self) -> None:
         self._cached_config = None
 
-    @staticmethod
-    def _compute_search_paths(config: VibeConfigSchema) -> list[Path]:
-        mgr = get_harness_files_manager()
+    def _compute_search_paths(self, config: VibeConfigSchema) -> list[Path]:
+        mgr = self._harness_files
         return dedup_paths([
             *(p for p in config.agent_paths if p.is_dir()),
             *mgr.project_agents_dirs,

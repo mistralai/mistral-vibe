@@ -69,6 +69,8 @@ def test_interactive_launch_loads_bundled_assets(binary: Path) -> None:
         master_fd, slave_fd = pty.openpty()
         env = _isolated_env(tmp_path / "home")
         env["MISTRAL_API_KEY"] = "smoke-test-mock-key"
+        env["GIT_PYTHON_GIT_EXECUTABLE"] = str(tmp_path / "missing-git")
+        env["GIT_PYTHON_REFRESH"] = "raise"
         proc = subprocess.Popen(
             [str(binary), "--trust", "--workdir", str(workdir)],
             stdin=slave_fd,

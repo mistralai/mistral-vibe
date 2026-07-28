@@ -167,7 +167,8 @@ class SpinnerMixin:
     def _update_spinner_frame(self) -> None:
         if not self._is_spinning or not self._indicator_widget:
             return
-        self._indicator_widget.update(self._spinner.next_frame())
+        # Frames are all the same size, so skip the relayout.
+        self._indicator_widget.update(self._spinner.next_frame(), layout=False)
 
     def refresh_spinner(self) -> None:
         if self._indicator_widget:

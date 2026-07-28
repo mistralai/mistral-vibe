@@ -1,41 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum, auto
+from enum import StrEnum
 from pathlib import Path
 import tomllib
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from vibe.agents import AgentSafety, AgentType
 from vibe.core.agents._migration import (
     LEGACY_BASE_DISABLED_KEY,
     migrate_agent_profile_config,
 )
 from vibe.core.paths import PLANS_DIR
+from vibe.core.utils.merge import MergeStrategy
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
-
-
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    result = base.copy()
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
-class AgentSafety(StrEnum):
-    SAFE = auto()
-    NEUTRAL = auto()
-    DESTRUCTIVE = auto()
-    YOLO = auto()
-
-
-class AgentType(StrEnum):
-    AGENT = auto()
-    SUBAGENT = auto()
 
 
 class BuiltinAgentName(StrEnum):
@@ -59,7 +39,10 @@ class AgentProfile:
     install_required: bool = False
 
     def apply_to_config(self, base: VibeConfigSchema) -> VibeConfigSchema:
-        merged = _deep_merge(base.model_dump(), self.overrides)
+        merged = cast(
+            dict[str, Any],
+            MergeStrategy.DEEP_MERGE.apply(base.model_dump(), self.overrides),
+        )
         profile_disabled_tools = self.overrides.get("disabled_tools")
         if isinstance(profile_disabled_tools, list):
             merged["disabled_tools"] = list(

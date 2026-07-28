@@ -201,7 +201,7 @@ async def test_vibe_acp_initialize_and_new_session(vibe_home_dir: Path) -> None:
         config_schema = await asyncio.wait_for(
             conn.ext_method("config/schema", {}), timeout=10
         )
-        assert config_schema["version"] == initialize_response.agent_info.version
+        assert config_schema["version"].startswith("sha256:")
         assert config_schema["schema"]["title"] == "VibeConfigSchema"
 
         session = await asyncio.wait_for(
@@ -335,6 +335,7 @@ def test_vibe_acp_setup_shows_onboarding_and_exits_on_cancel(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
 async def test_vibe_acp_survives_broken_config(vibe_home_dir: Path) -> None:
     vibe_home_dir.mkdir(parents=True, exist_ok=True)
     (vibe_home_dir / "config.toml").write_text("{{{{invalid toml content!!")
@@ -360,7 +361,7 @@ async def test_vibe_acp_survives_broken_config(vibe_home_dir: Path) -> None:
         await _terminate_process(proc)
 
 
-def test_acp_agent_loop_import_does_not_load_gitpython() -> None:
+def test_acp_agent_import_does_not_load_gitpython() -> None:
     # GitPython probes for a git executable on import and raises when none is
     # found. The ACP startup path (e.g. `vibe-acp --version`) must not import it,
     # so binaries run on machines without git. See teleport lazy import.
@@ -368,7 +369,7 @@ def test_acp_agent_loop_import_does_not_load_gitpython() -> None:
         [
             sys.executable,
             "-c",
-            "import sys, vibe.acp.acp_agent_loop; "
+            "import sys, vibe.acp.agent; "
             "assert 'git' not in sys.modules, 'gitpython imported on ACP module load'",
         ],
         capture_output=True,

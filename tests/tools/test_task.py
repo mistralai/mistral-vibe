@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
 import pytest
 
 from tests.conftest import ConfigBuilder, OrchestratorLoader
 from tests.mock.utils import collect_result
+from tests.stubs.fake_interaction_requests import FakeInteractionRequests
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import BUILTIN_AGENTS, AgentType
 from vibe.core.config import VibeConfigSchema
@@ -13,7 +12,7 @@ from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
 from vibe.core.tools.base import BaseToolState, InvokeContext, ToolError, ToolPermission
 from vibe.core.tools.builtins.task import Task, TaskArgs, TaskResult, TaskToolConfig
 from vibe.core.tools.permissions import PermissionContext
-from vibe.core.types import AssistantEvent, LLMMessage, Role
+from vibe.core.types import ToolStreamEvent
 
 
 @pytest.fixture
@@ -148,9 +147,19 @@ class TestTaskToolExecution:
     ) -> InvokeContext:
         config = build_config()
         manager = AgentManager(load_orchestrator(config))
+        runner = FakeSubagentRunner([
+            ToolStreamEvent(
+                tool_name="task",
+                message="read_file: completed",
+                tool_call_id="test-call-id",
+            ),
+            TaskResult(response="done", turns_used=1, completed=True),
+        ])
         return InvokeContext(
             tool_call_id="test-call-id",
             agent_manager=manager,
+            interaction_requests=FakeInteractionRequests(),
+            subagent_runner=runner,
             launch_context=LaunchContext(
                 agent_entrypoint="cli",
                 agent_version="1.0.0",
@@ -164,127 +173,34 @@ class TestTaskToolExecution:
     async def test_happy_path_returns_subagent_response(
         self, task_tool: Task, ctx: InvokeContext
     ) -> None:
-        """Test that task tool successfully runs a subagent and returns its response."""
-        mock_messages = [
-            LLMMessage(role=Role.system, content="system"),
-            LLMMessage(role=Role.user, content="task"),
-            LLMMessage(role=Role.assistant, content="response 1"),
-            LLMMessage(role=Role.assistant, content="response 2"),
-        ]
+        args = TaskArgs(task="explore the codebase", agent="explore")
+        events = [event async for event in task_tool.run(args, ctx)]
 
-        async def mock_act(task: str):
-            yield AssistantEvent(content="Hello from subagent!")
-            yield AssistantEvent(content=" More content.")
+        assert isinstance(events[0], ToolStreamEvent)
+        assert events[0].message == "read_file: completed"
+        assert events[1] == TaskResult(response="done", turns_used=1, completed=True)
+        runner = ctx.subagent_runner
+        assert isinstance(runner, FakeSubagentRunner)
+        assert runner.calls == [(args, ctx)]
 
-        with patch("vibe.core.tools.builtins.task.AgentLoop") as mock_agent_loop_class:
-            mock_agent_loop = MagicMock()
-            mock_agent_loop.act = mock_act
-            mock_agent_loop.messages = mock_messages
-            mock_agent_loop.set_approval_callback = MagicMock()
-            mock_agent_loop_class.return_value = mock_agent_loop
+    @pytest.mark.asyncio
+    async def test_requires_subagent_runner(
+        self, task_tool: Task, ctx: InvokeContext
+    ) -> None:
+        ctx.subagent_runner = None
 
-            args = TaskArgs(task="explore the codebase", agent="explore")
-            result = await collect_result(task_tool.run(args, ctx))
-
-            assert isinstance(result, TaskResult)
-            assert result.response == "Hello from subagent! More content."
-            assert result.turns_used == 2  # 2 assistant messages in mock_messages
-            assert result.completed is True
-            assert (
-                mock_agent_loop_class.call_args.kwargs[
-                    "launch_context"
-                ].terminal_emulator
-                is TerminalEmulator.VSCODE
+        with pytest.raises(ToolError, match="subagent runner"):
+            await collect_result(
+                task_tool.run(TaskArgs(task="do something", agent="explore"), ctx)
             )
 
-    @pytest.mark.asyncio
-    async def test_handles_stopped_by_middleware(
-        self, task_tool: Task, ctx: InvokeContext
-    ) -> None:
-        """Test that task tool reports incomplete when stopped by middleware."""
-        mock_messages = [
-            LLMMessage(role=Role.system, content="system"),
-            LLMMessage(role=Role.assistant, content="partial"),
-        ]
 
-        async def mock_act(task: str):
-            yield AssistantEvent(content="Partial response", stopped_by_middleware=True)
+class FakeSubagentRunner:
+    def __init__(self, events: list[ToolStreamEvent | TaskResult]) -> None:
+        self.events = events
+        self.calls: list[tuple[TaskArgs, InvokeContext]] = []
 
-        with patch("vibe.core.tools.builtins.task.AgentLoop") as mock_agent_loop_class:
-            mock_agent_loop = MagicMock()
-            mock_agent_loop.act = mock_act
-            mock_agent_loop.messages = mock_messages
-            mock_agent_loop.set_approval_callback = MagicMock()
-            mock_agent_loop_class.return_value = mock_agent_loop
-
-            args = TaskArgs(task="do something", agent="explore")
-            result = await collect_result(task_tool.run(args, ctx))
-
-            assert isinstance(result, TaskResult)
-            assert result.completed is False
-
-    @pytest.mark.asyncio
-    async def test_handles_subagent_exception(
-        self, task_tool: Task, ctx: InvokeContext
-    ) -> None:
-        """Test that task tool gracefully handles exceptions from subagent."""
-        mock_messages = [LLMMessage(role=Role.system, content="system")]
-
-        async def mock_act(task: str):
-            yield AssistantEvent(content="Starting...")
-            raise RuntimeError("Simulated error")
-
-        with patch("vibe.core.tools.builtins.task.AgentLoop") as mock_agent_loop_class:
-            mock_agent_loop = MagicMock()
-            mock_agent_loop.act = mock_act
-            mock_agent_loop.messages = mock_messages
-            mock_agent_loop.set_approval_callback = MagicMock()
-            mock_agent_loop_class.return_value = mock_agent_loop
-
-            args = TaskArgs(task="do something", agent="explore")
-            result = await collect_result(task_tool.run(args, ctx))
-
-            assert isinstance(result, TaskResult)
-            assert result.completed is False
-            assert "Simulated error" in result.response
-
-    @pytest.mark.asyncio
-    async def test_closes_subagent_loop_on_success(
-        self, task_tool: Task, ctx: InvokeContext
-    ) -> None:
-        async def mock_act(task: str):
-            yield AssistantEvent(content="done")
-
-        with patch("vibe.core.tools.builtins.task.AgentLoop") as mock_agent_loop_class:
-            mock_agent_loop = MagicMock()
-            mock_agent_loop.act = mock_act
-            mock_agent_loop.messages = [LLMMessage(role=Role.assistant, content="a")]
-            mock_agent_loop.set_approval_callback = MagicMock()
-            mock_agent_loop.aclose = AsyncMock()
-            mock_agent_loop_class.return_value = mock_agent_loop
-
-            args = TaskArgs(task="do something", agent="explore")
-            await collect_result(task_tool.run(args, ctx))
-
-            mock_agent_loop.aclose.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_closes_subagent_loop_on_exception(
-        self, task_tool: Task, ctx: InvokeContext
-    ) -> None:
-        async def mock_act(task: str):
-            yield AssistantEvent(content="starting")
-            raise RuntimeError("boom")
-
-        with patch("vibe.core.tools.builtins.task.AgentLoop") as mock_agent_loop_class:
-            mock_agent_loop = MagicMock()
-            mock_agent_loop.act = mock_act
-            mock_agent_loop.messages = [LLMMessage(role=Role.assistant, content="a")]
-            mock_agent_loop.set_approval_callback = MagicMock()
-            mock_agent_loop.aclose = AsyncMock()
-            mock_agent_loop_class.return_value = mock_agent_loop
-
-            args = TaskArgs(task="do something", agent="explore")
-            await collect_result(task_tool.run(args, ctx))
-
-            mock_agent_loop.aclose.assert_awaited_once()
+    async def run(self, args: TaskArgs, ctx: InvokeContext):
+        self.calls.append((args, ctx))
+        for event in self.events:
+            yield event

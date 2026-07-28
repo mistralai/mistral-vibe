@@ -8,38 +8,34 @@ from textual.pilot import Pilot
 from tests.mock.utils import mock_llm_chunk
 from tests.snapshots.base_snapshot_test_app import BaseSnapshotTestApp, default_config
 from tests.snapshots.snap_compare import SnapCompare
+from tests.stubs.app_config import build_test_app_config
 from tests.stubs.fake_audio_player import FakeAudioPlayer
 from tests.stubs.fake_backend import FakeBackend
+from tests.stubs.fake_summary_generator import FakeSummaryGenerator
 from tests.stubs.fake_tts_client import FakeTTSClient
 from vibe.cli.narrator_manager import NarratorManager, NarratorState
 import vibe.cli.textual_ui.widgets.narrator_status as narrator_status_mod
 from vibe.cli.textual_ui.widgets.narrator_status import NarratorStatus
-from vibe.cli.turn_summary import TurnSummaryTracker
 
 narrator_status_mod.SHRINK_FRAMES = "█"
 narrator_status_mod.BAR_FRAMES = ["▂▅▇"]
-from vibe.core.config import ModelConfig
-from vibe.core.tts.tts_client_port import TTSResult
-from vibe.core.types import LLMChunk
-
-_TEST_MODEL = ModelConfig(name="test-model", provider="test", alias="test-model")
+from vibe.cli.tts.tts_client_port import TTSResult
 
 
 def _narrator_config():
-    return default_config(narrator_enabled=True)
+    config = build_test_app_config(narrator_enabled=True)
+    config.disable_welcome_banner_animation = True
+    return config
 
 
-class GatedBackend(FakeBackend):
-    def __init__(self, chunks: LLMChunk) -> None:
-        super().__init__(chunks)
+class GatedSummaryGenerator(FakeSummaryGenerator):
+    def __init__(self) -> None:
+        super().__init__("Summary of the conversation")
         self._gate = asyncio.Event()
+        self.gate = self._gate
 
     def release(self) -> None:
         self._gate.set()
-
-    async def complete(self, **kwargs: Any) -> LLMChunk:
-        await self._gate.wait()
-        return await super().complete(**kwargs)
 
 
 class GatedTTSClient(FakeTTSClient):
@@ -57,22 +53,17 @@ class GatedTTSClient(FakeTTSClient):
 
 class NarratorFlowApp(BaseSnapshotTestApp):
     def __init__(self) -> None:
-        self.summary_gate = GatedBackend(
-            mock_llm_chunk(content="Summary of the conversation")
-        )
+        self.summary_gate = GatedSummaryGenerator()
         self.tts_gate = GatedTTSClient()
         self.fake_audio_player = FakeAudioPlayer()
         narrator_manager = NarratorManager(
-            config_getter=_narrator_config, audio_player=self.fake_audio_player
+            config_getter=_narrator_config,
+            audio_player=self.fake_audio_player,
+            summary_generator=self.summary_gate,
         )
-        # Override turn_summary and tts_client with gated test doubles.
-        narrator_manager._turn_summary = TurnSummaryTracker(
-            backend=self.summary_gate, model=_TEST_MODEL
-        )
-        narrator_manager._turn_summary.on_summary = narrator_manager._on_turn_summary
         narrator_manager._tts_client = self.tts_gate
         super().__init__(
-            config=_narrator_config(),
+            config=default_config(narrator_enabled=True),
             backend=FakeBackend(
                 mock_llm_chunk(
                     content="Hello! I can help you.",

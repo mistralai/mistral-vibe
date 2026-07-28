@@ -12,7 +12,8 @@ import keyring.errors
 import pytest
 import tomli_w
 
-from tests.cli.plan_offer.adapters.fake_whoami_gateway import FakeWhoAmIGateway
+from tests.stubs.app_server import create_test_app_server_session
+from tests.stubs.fake_account_gateway import FakeAccountGateway
 from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from tests.stubs.fake_mcp_registry import FakeMCPRegistry
@@ -21,8 +22,10 @@ from tests.update_notifier.adapters.fake_update_cache_repository import (
     FakeUpdateCacheRepository,
 )
 from tests.update_notifier.adapters.fake_update_gateway import FakeUpdateGateway
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIPlanType, WhoAmIResponse
+from vibe.app_server._account import WhoAmIResult
+from vibe.app_server.models import AccountPlanKind
 from vibe.cli.textual_ui.app import CORE_VERSION, StartupOptions, VibeApp
+from vibe.cli.theme import resolve_auto_theme
 from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config import (
@@ -40,9 +43,9 @@ from vibe.core.config.harness_files import (
 )
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.llm.types import BackendLike
-from vibe.core.utils import keyring as keyring_utils
 from vibe.core.utils.concurrency import run_sync
-from vibe.core.utils.platform import resolve_windows_shell
+from vibe.utils import keyring as keyring_utils
+from vibe.utils.platform import resolve_windows_shell
 
 
 class _EmptyKeyring(KeyringBackend):
@@ -151,7 +154,7 @@ def config_dir(
     config_file = config_dir / "config.toml"
     config_file.write_text(tomli_w.dumps(get_base_config()), encoding="utf-8")
 
-    monkeypatch.setattr("vibe.core.paths._vibe_home._DEFAULT_VIBE_HOME", config_dir)
+    monkeypatch.setattr("vibe.utils.paths._DEFAULT_VIBE_HOME", config_dir)
     agents_dir = tmp_path / ".agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr("vibe.core.paths._agents_home._DEFAULT_AGENTS_HOME", agents_dir)
@@ -193,10 +196,6 @@ def _init_harness_files_manager():
 def _scratchpad_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> Generator[Path]:
-    import vibe.core.scratchpad as scratchpad_mod
-
-    scratchpad_mod._active_scratchpads.clear()
-
     scratchpad_root = tmp_path_factory.mktemp("scratchpad")
     _counter = 0
 
@@ -210,8 +209,6 @@ def _scratchpad_dir(
     monkeypatch.setattr("vibe.core.scratchpad.tempfile.mkdtemp", _fake_mkdtemp)
 
     yield scratchpad_root
-
-    scratchpad_mod._active_scratchpads.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -232,6 +229,11 @@ def _mock_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("SHELL", "/bin/sh")
+    resolve_auto_theme.cache_clear()
+    monkeypatch.setattr("vibe.cli._theme_detection.detect_terminal_dark", lambda: None)
+    monkeypatch.setattr(
+        "vibe.cli._theme_detection.detect_system_preferred_dark", lambda: None
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -502,31 +504,36 @@ def build_test_vibe_app(
         if update_cache_repository is None
         else update_cache_repository
     )
-    plan_offer_gateway = kwargs.pop("plan_offer_gateway", None)
-    resolved_plan_offer_gateway = (
-        FakeWhoAmIGateway(
-            WhoAmIResponse(
-                plan_type=WhoAmIPlanType.CHAT,
-                plan_name="INDIVIDUAL",
-                prompt_switching_to_pro_plan=False,
-            )
+    account_gateway = kwargs.pop("account_gateway", None)
+    resolved_account_gateway = account_gateway or FakeAccountGateway(
+        WhoAmIResult(
+            plan_type=AccountPlanKind.CHAT,
+            plan_name="INDIVIDUAL",
+            prompt_switching_to_pro_plan=False,
         )
-        if plan_offer_gateway is None
-        else plan_offer_gateway
     )
     current_version = kwargs.pop("current_version", None)
     resolved_current_version = (
         CORE_VERSION if current_version is None else current_version
     )
     voice_manager = kwargs.pop("voice_manager", FakeVoiceManager())
+    app_server = kwargs.pop("app_server", None)
+    app_server_source = (
+        app_server
+        if app_server is not None
+        else lambda: create_test_app_server_session(
+            resolved_agent_loop, account_gateway=resolved_account_gateway
+        )
+    )
+    history_file = kwargs.pop("history_file", Path(".vibehistory"))
 
     return VibeApp(
-        agent_loop=resolved_agent_loop,
+        app_server=app_server_source,
+        history_file=history_file,
         startup=StartupOptions(initial_prompt=kwargs.pop("initial_prompt", None)),
         current_version=resolved_current_version,
         update_notifier=resolved_update_notifier,
         update_cache_repository=resolved_update_cache_repository,
-        plan_offer_gateway=resolved_plan_offer_gateway,
         voice_manager=voice_manager,
         **kwargs,
     )

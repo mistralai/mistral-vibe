@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-import vibe.core.autocompletion.completers as completers_module
-from vibe.core.autocompletion.completers import PathCompleter
-from vibe.core.autocompletion.fuzzy import fuzzy_match as real_fuzzy_match
+import vibe.cli.autocompletion.completers as completers_module
+from vibe.cli.autocompletion.completers import PathCompleter
+from vibe.cli.autocompletion.fuzzy import fuzzy_match as real_fuzzy_match
 
 
 @pytest.fixture()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from textual.pilot import Pilot
 
+from tests.snapshots.base_snapshot_test_app import wait_for_agent_switch
 from tests.snapshots.snap_compare import SnapCompare
 
 
@@ -24,7 +25,7 @@ def test_snapshot_cycle_to_plan_mode(snap_compare: SnapCompare) -> None:
     async def run_before(pilot: Pilot) -> None:
         await pilot.pause(0.1)
         await pilot.press("shift+tab")  # default -> plan
-        await pilot.app.workers.wait_for_complete()
+        await wait_for_agent_switch(pilot, "plan")
         await pilot.pause(0.1)
 
     assert snap_compare(
@@ -41,7 +42,7 @@ def test_snapshot_cycle_to_accept_edits_mode(snap_compare: SnapCompare) -> None:
         await pilot.pause(0.1)
         await pilot.press("shift+tab")  # default -> plan
         await pilot.press("shift+tab")  # plan -> accept edits
-        await pilot.app.workers.wait_for_complete()
+        await wait_for_agent_switch(pilot, "accept-edits")
         await pilot.pause(0.1)
 
     assert snap_compare(
@@ -59,7 +60,7 @@ def test_snapshot_cycle_to_auto_approve_mode(snap_compare: SnapCompare) -> None:
         await pilot.press("shift+tab")  # default -> plan
         await pilot.press("shift+tab")  # plan -> accept edits
         await pilot.press("shift+tab")  # accept edits -> auto approve
-        await pilot.app.workers.wait_for_complete()
+        await wait_for_agent_switch(pilot, "auto-approve")
         await pilot.pause(0.1)
 
     assert snap_compare(
@@ -78,7 +79,7 @@ def test_snapshot_cycle_wraps_to_default(snap_compare: SnapCompare) -> None:
         await pilot.press("shift+tab")  # plan -> accept edits
         await pilot.press("shift+tab")  # accept edits -> auto approve
         await pilot.press("shift+tab")  # auto approve -> default (wrap)
-        await pilot.app.workers.wait_for_complete()
+        await wait_for_agent_switch(pilot, "default")
         await pilot.pause(0.1)
 
     assert snap_compare(

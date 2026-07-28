@@ -8,6 +8,7 @@ from textual.pilot import Pilot
 from textual.widget import Widget
 
 from tests.snapshots.snap_compare import SnapCompare
+from tests.stubs.app_server import CoreEventProjection
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage
 from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs, ReadFileResult
@@ -21,6 +22,7 @@ class ParallelToolCallsApp(App):
         super().__init__()
         self._scroll: VerticalScroll | None = None
         self._handler: EventHandler | None = None
+        self._projection = CoreEventProjection()
 
     def compose(self) -> ComposeResult:
         self._scroll = VerticalScroll(id="messages")
@@ -28,12 +30,17 @@ class ParallelToolCallsApp(App):
 
     def on_mount(self) -> None:
         async def mount_callback(
-            widget: Widget, *, after: Widget | None = None
+            widget: Widget,
+            *,
+            after: Widget | None = None,
+            container: Widget | None = None,
         ) -> None:
             if self._scroll is None:
                 return
-            if after is not None and after.parent is self._scroll:
-                await self._scroll.mount(widget, after=after)
+            if after is not None and after.parent is not None:
+                await cast(Widget, after.parent).mount(widget, after=after)
+            elif container is not None:
+                await container.mount(widget)
             else:
                 await self._scroll.mount(widget)
 
@@ -45,14 +52,15 @@ class ParallelToolCallsApp(App):
         if self._handler is None:
             return
         for i in range(3):
-            await self._handler.handle_event(
+            await self._projection.dispatch(
                 ToolCallEvent(
                     tool_call_id=f"tc_{i}",
                     tool_call_index=i,
-                    tool_name="read",
+                    tool_name="read_file",
                     tool_class=ReadFile,
                     args=ReadFileArgs(file_path=f"/src/file_{i}.py"),
-                )
+                ),
+                self._handler.handle_event,
             )
 
     def freeze_spinners(self) -> None:
@@ -69,9 +77,9 @@ class ParallelToolCallsApp(App):
         if self._handler is None:
             return
         for i in range(3):
-            await self._handler.handle_event(
+            await self._projection.dispatch(
                 ToolResultEvent(
-                    tool_name="read",
+                    tool_name="read_file",
                     tool_class=ReadFile,
                     result=ReadFileResult(
                         file_path=f"/src/file_{i}.py",
@@ -81,7 +89,8 @@ class ParallelToolCallsApp(App):
                         total_lines=1,
                     ),
                     tool_call_id=f"tc_{i}",
-                )
+                ),
+                self._handler.handle_event,
             )
 
 

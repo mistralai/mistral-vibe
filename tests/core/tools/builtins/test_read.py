@@ -225,6 +225,10 @@ def test_format_call_display() -> None:
 
     assert isinstance(display, ToolCallDisplay)
     assert "file.py" in display.summary
+    assert display.verb == "Reading"
+    assert display.message == "/some/file.py"
+    assert display.settled_verb == "Read"
+    assert display.settled_message == "/some/file.py"
 
 
 def test_format_call_display_with_offset_limit() -> None:
@@ -233,6 +237,8 @@ def test_format_call_display_with_offset_limit() -> None:
 
     assert "from line 10" in display.summary
     assert "limit 50" in display.summary
+    assert display.message == "/some/file.py (from line 10, limit 50 lines)"
+    assert display.settled_message == "/some/file.py (from line 10, limit 50 lines)"
 
 
 def test_get_result_display() -> None:

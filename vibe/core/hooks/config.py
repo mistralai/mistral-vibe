@@ -6,9 +6,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
 from vibe.core.hooks.models import HookConfig, HookConfigIssue, HookConfigResult
-from vibe.core.utils.io import read_safe
+from vibe.utils.io import read_safe
 
 
 class _HooksTomlRoot(BaseModel):
@@ -73,11 +76,13 @@ def _load_hooks_file(path: Path) -> HookConfigResult:
     return HookConfigResult(hooks=hooks, issues=issues)
 
 
-def load_hooks_from_fs() -> HookConfigResult:
+def load_hooks_from_fs(
+    *, harness_files: HarnessFilesManager | None = None
+) -> HookConfigResult:
     all_hooks: list[HookConfig] = []
     all_issues: list[HookConfigIssue] = []
     seen_names: set[str] = set()
-    mgr = get_harness_files_manager()
+    mgr = harness_files or get_harness_files_manager()
 
     for path in mgr.hook_files:
         result = _load_hooks_file(path)

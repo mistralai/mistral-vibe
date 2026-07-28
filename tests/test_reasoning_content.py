@@ -21,13 +21,8 @@ from vibe.core.config import ModelConfig, ProviderConfig, VibeConfigSchema
 from vibe.core.llm.backend.generic import GenericBackend, OpenAIAdapter
 from vibe.core.llm.backend.mistral import MistralBackend, MistralMapper, ParsedContent
 from vibe.core.llm.format import APIToolFormatHandler
-from vibe.core.types import (
-    AssistantEvent,
-    LLMMessage,
-    ReasoningEvent,
-    Role,
-    UserDisplayContentMetadata,
-)
+from vibe.core.types import AssistantEvent, LLMMessage, ReasoningEvent, Role
+from vibe.user_content import UserDisplayContent
 
 
 def make_config() -> VibeConfigSchema:
@@ -475,7 +470,7 @@ class TestReasoningFieldNameConversion:
                 LLMMessage(
                     role=Role.user,
                     content="Look at app.ts",
-                    user_display_content=UserDisplayContentMetadata(
+                    user_display_content=UserDisplayContent(
                         version="1.0.0",
                         host="mistral-vscode",
                         content=[

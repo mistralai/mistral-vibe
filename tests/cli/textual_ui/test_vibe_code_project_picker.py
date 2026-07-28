@@ -1,29 +1,38 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import cast
 
 from rich.text import Text
 from textual.widgets import OptionList
 
+from vibe.app_server.models import (
+    VibeCodePickerContext,
+    VibeCodeProject,
+    VibeCodeProjectLink,
+    VibeCodeRepository,
+)
 from vibe.cli.textual_ui.widgets.vibe_code_project import (
     VibeCodeProjectCreateApp,
     VibeCodeProjectPickerApp,
 )
-from vibe.core.vibe_code_project import (
-    ProjectPickerContext,
-    ProjectRepository,
-    VibeCodeProject,
+from vibe.cli.textual_ui.widgets.vibe_code_project.picker import (
+    ProjectMatchKind,
+    ProjectPickerCreateItem,
+    ProjectPickerLoadMoreItem,
+    ProjectPickerProjectItem,
+    ProjectPickerUnlinkItem,
+    build_project_picker_items,
 )
 
 CURRENT_REPO_URL = "https://github.com/mistralai/mistral-vibe.git"
 
 
-def _context() -> ProjectPickerContext:
-    return ProjectPickerContext(
-        repo_root=Path("/repo/mistral-vibe"),
+def _context(saved_link: VibeCodeProjectLink | None = None) -> VibeCodePickerContext:
+    return VibeCodePickerContext(
+        repo_root="/repo/mistral-vibe",
         repo_url=CURRENT_REPO_URL,
         repo_name="mistral-vibe",
+        saved_link=saved_link,
     )
 
 
@@ -31,8 +40,63 @@ def _project(project_id: str, name: str, *repo_urls: str) -> VibeCodeProject:
     return VibeCodeProject(
         project_id=project_id,
         name=name,
-        repositories=tuple(ProjectRepository(repo_url=url) for url in repo_urls),
+        repositories=[VibeCodeRepository(repo_url=url) for url in repo_urls],
     )
+
+
+def _link(project_id: str, repo_url: str = CURRENT_REPO_URL) -> VibeCodeProjectLink:
+    return VibeCodeProjectLink(
+        repo_root="/repo/mistral-vibe",
+        repo_url=repo_url,
+        project_id=project_id,
+        project_name="Mistral Vibe",
+    )
+
+
+def test_picker_items_have_one_client_side_owner() -> None:
+    items = build_project_picker_items(
+        context=_context(saved_link=_link("linked")),
+        projects=[
+            _project("other", "Internal Tools", "https://github.com/mistralai/tools"),
+            _project(
+                "multi",
+                "Mistral Vibe + Docs",
+                CURRENT_REPO_URL,
+                "https://github.com/mistralai/docs",
+            ),
+            _project("exact", "Mistral Vibe API", CURRENT_REPO_URL),
+            _project("linked", "Mistral Vibe", CURRENT_REPO_URL),
+        ],
+        has_more=True,
+        include_unlink=True,
+    )
+
+    assert [item.option_id for item in items] == [
+        "project:linked",
+        "project:exact",
+        "project:multi",
+        "action:load_more",
+        "action:create",
+        "action:unlink",
+    ]
+    assert isinstance(items[0], ProjectPickerProjectItem)
+    assert items[0].match_kind == ProjectMatchKind.CURRENT_LINK
+    assert items[0].recommended is True
+    assert isinstance(items[-3], ProjectPickerLoadMoreItem)
+    assert isinstance(items[-2], ProjectPickerCreateItem)
+    assert isinstance(items[-1], ProjectPickerUnlinkItem)
+
+
+def test_changed_remote_is_not_a_current_link() -> None:
+    items = build_project_picker_items(
+        context=_context(
+            saved_link=_link("mistral-vibe", "https://github.com/mistralai/old")
+        ),
+        projects=[_project("mistral-vibe", "Mistral Vibe", CURRENT_REPO_URL)],
+    )
+
+    assert isinstance(items[0], ProjectPickerProjectItem)
+    assert items[0].match_kind == ProjectMatchKind.EXACT_REPO
 
 
 class TestVibeCodeProjectPickerAppInit:

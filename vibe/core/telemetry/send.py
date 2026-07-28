@@ -9,9 +9,8 @@ from urllib.parse import urljoin
 import httpx
 
 from vibe import __version__
-from vibe.core.config import ProviderConfig, VibeConfigSchema, resolve_api_key
+from vibe.core.config import ProviderConfig, VibeConfigSchema
 from vibe.core.llm.format import ResolvedToolCall
-from vibe.core.logger import logger
 from vibe.core.telemetry.build_metadata import build_base_metadata
 from vibe.core.telemetry.types import (
     AttachmentKind,
@@ -23,8 +22,14 @@ from vibe.core.telemetry.types import (
     TeleportFailureDetails,
     TeleportFailureStage,
 )
-from vibe.core.utils import get_server_url_from_api_base, get_user_agent
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.observability.logging import logger
+from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.http import (
+    VibeAsyncHTTPClient,
+    build_ssl_context,
+    get_server_url_from_api_base,
+    get_user_agent,
+)
 
 if TYPE_CHECKING:
     from vibe.core.agent_loop import ToolDecision
@@ -144,12 +149,6 @@ class TelemetryClient:
             user_plan=self.user_plan,
         )
 
-    def _is_experimental_bash_tool_enabled(self) -> bool:
-        try:
-            return self._config_getter().experimental_bash_tool
-        except Exception:
-            return False
-
     def send_telemetry_event(
         self,
         event_name: str,
@@ -229,6 +228,17 @@ class TelemetryClient:
                     )
         return nb_files_created, nb_files_modified, file_extension
 
+    def _extract_bash_background(
+        self, tool_call: ResolvedToolCall, result: dict[str, Any] | None
+    ) -> bool | None:
+        # Result reports the actual mode (a sync command that soft-timed-out
+        # becomes background); fall back to the requested mode on the failure
+        # path where no result is available.
+        if result is not None and isinstance(result.get("background"), bool):
+            return result["background"]
+        requested = tool_call.args_dict.get("background")
+        return requested if isinstance(requested, bool) else None
+
     def send_tool_call_finished(
         self,
         *,
@@ -246,8 +256,9 @@ class TelemetryClient:
         nb_files_created, nb_files_modified, file_extension = (
             self._calculate_file_metrics(tool_call, status, result)
         )
+        bash_background = self._extract_bash_background(tool_call, result)
 
-        payload = {
+        payload: dict[str, Any] = {
             "tool_name": tool_call.tool_name,
             "status": status,
             "decision": verdict_value,
@@ -259,6 +270,8 @@ class TelemetryClient:
             "file_extension": file_extension,
             "message_id": message_id,
         }
+        if bash_background is not None:
+            payload["bash_background"] = bash_background
         self.send_telemetry_event("vibe.tool_call_finished", payload)
 
     def send_user_copied_text(self, text: str) -> None:
@@ -325,7 +338,6 @@ class TelemetryClient:
                 if lc and lc.terminal_emulator is not None
                 else None
             ),
-            "experimental_bash_tool": self._is_experimental_bash_tool_enabled(),
         }
         self.send_telemetry_event("vibe.new_session", payload)
 

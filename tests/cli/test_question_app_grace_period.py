@@ -5,12 +5,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from textual import events
 
+from vibe.app_server.models import QuestionChoice, UserQuestion, UserQuestionRequest
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
-from vibe.core.tools.builtins.ask_user_question import (
-    AskUserQuestionArgs,
-    Choice,
-    Question,
-)
 
 _TEST_GRACE_PERIOD_S = 0.5
 
@@ -21,12 +17,12 @@ def question_app(monkeypatch: pytest.MonkeyPatch):
         "vibe.cli.textual_ui.widgets.question_app._INPUT_GRACE_PERIOD_S",
         _TEST_GRACE_PERIOD_S,
     )
-    args = AskUserQuestionArgs(
+    args = UserQuestionRequest(
         questions=[
-            Question(
+            UserQuestion(
                 question="Pick one",
                 header="Pick",
-                options=[Choice(label="A"), Choice(label="B")],
+                options=[QuestionChoice(label="A"), QuestionChoice(label="B")],
             )
         ]
     )

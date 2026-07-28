@@ -22,7 +22,7 @@ async def test_copy_command_copies_last_assistant_message() -> None:
                 return_value=stripped_second_reply,
             ) as mock_copy,
             patch.object(
-                app.agent_loop.telemetry_client, "send_user_copied_text"
+                app.app_server.resources.telemetry, "record"
             ) as mock_telemetry,
         ):
             handled = await app._handle_command("/copy")
@@ -34,7 +34,9 @@ async def test_copy_command_copies_last_assistant_message() -> None:
         stripped_second_reply,
         success_message="Last agent message copied to clipboard",
     )
-    mock_telemetry.assert_called_once_with(stripped_second_reply)
+    mock_telemetry.assert_any_call(
+        "vibe.user_copied_text", {"text_length": len(stripped_second_reply)}
+    )
 
 
 @pytest.mark.asyncio

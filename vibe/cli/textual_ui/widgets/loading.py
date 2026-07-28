@@ -79,6 +79,7 @@ class LoadingWidget(SpinnerMixin, Static):
         super().__init__(classes="loading-widget")
         self.init_spinner()
         self.status = status or self._get_default_status()
+        self._base_status = status or DEFAULT_LOADING_STATUS
         self.current_color_index = 0
         self._color_direction = 1
         self.transition_progress = 0
@@ -89,6 +90,7 @@ class LoadingWidget(SpinnerMixin, Static):
         self.debounce_widget: Static | None = None
         self.start_time: float | None = None
         self._last_elapsed: int = -1
+        self._last_hint_width: int = -1
         self._paused_total: float = 0.0
         self._pause_start: float | None = None
         self._queued_count: int = 0
@@ -135,6 +137,12 @@ class LoadingWidget(SpinnerMixin, Static):
             self._pause_start = None
 
     def set_status(self, status: str) -> None:
+        # Idempotent on the semantic status: re-setting the same status is a
+        # no-op so callers can drive it on every event without re-rolling the
+        # easter egg or flickering the label.
+        if status == self._base_status:
+            return
+        self._base_status = status
         self.status = self._apply_easter_egg(status)
         if self._status_widget:
             self._status_widget.update(self._build_status_text())
@@ -143,10 +151,18 @@ class LoadingWidget(SpinnerMixin, Static):
         if count == self._queued_count:
             return
         self._queued_count = count
-        if self.hint_widget is not None:
-            self.hint_widget.update(
-                shortcut_hint(self._format_hint(max(self._last_elapsed, 0)))
-            )
+        self._update_hint(max(self._last_elapsed, 0))
+
+    def _update_hint(self, elapsed: int) -> None:
+        if self.hint_widget is None:
+            return
+        hint = shortcut_hint(self._format_hint(elapsed))
+        # Only relayout when the width changes (e.g. 9s -> 10s). This assumes
+        # that the line never wraps; equal width does not imply equal rendered
+        # size for wrapped text.
+        layout = hint.cell_length != self._last_hint_width
+        self._last_hint_width = hint.cell_length
+        self.hint_widget.update(hint, layout=layout)
 
     def _format_hint(self, elapsed: int) -> str:
         elapsed_str = _format_elapsed(elapsed)
@@ -164,14 +180,17 @@ class LoadingWidget(SpinnerMixin, Static):
             )
             yield self._indicator_widget
 
-            self._status_widget = Static("", classes="loading-status")
+            self._status_widget = Static(
+                self._build_status_text(), classes="loading-status"
+            )
             yield self._status_widget
 
             if self._show_hint:
-                self.hint_widget = NoMarkupStatic(
-                    shortcut_hint(f"(0s {shortcut('Esc/Ctrl+C')} to interrupt)"),
-                    classes="loading-hint",
+                initial_hint = shortcut_hint(
+                    f"(0s {shortcut('Esc/Ctrl+C')} to interrupt)"
                 )
+                self._last_hint_width = initial_hint.cell_length
+                self.hint_widget = NoMarkupStatic(initial_hint, classes="loading-hint")
                 yield self.hint_widget
 
             self.debounce_widget = Static("", classes="loading-debounce")
@@ -214,13 +233,15 @@ class LoadingWidget(SpinnerMixin, Static):
     def _update_animation(self) -> None:
         total_elements = 1 + len(self.status) + 1
 
+        # Both the spinner frame and status gradient keep the same width from
+        # tick to tick, so skip the whole-screen relayout.
         if self._indicator_widget:
             spinner_char = self._spinner.next_frame()
             color = self._get_color_for_position(0)
-            self._indicator_widget.update(f"[{color}]{spinner_char}[/]")
+            self._indicator_widget.update(f"[{color}]{spinner_char}[/]", layout=False)
 
         if self._status_widget:
-            self._status_widget.update(self._build_status_text())
+            self._status_widget.update(self._build_status_text(), layout=False)
 
         self.transition_progress += 1
         if self.transition_progress > total_elements:
@@ -236,7 +257,7 @@ class LoadingWidget(SpinnerMixin, Static):
             elapsed = int(time() - self.start_time - paused)
             if elapsed != self._last_elapsed:
                 self._last_elapsed = elapsed
-                self.hint_widget.update(shortcut_hint(self._format_hint(elapsed)))
+                self._update_hint(elapsed)
 
 
 @contextmanager

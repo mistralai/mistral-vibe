@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vibe.core.utils.text import line_contexts
+from vibe.utils.text import line_contexts
 
 
 class TestLineContexts:

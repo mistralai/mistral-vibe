@@ -16,6 +16,7 @@ from vibe.core.tools.base import (
 from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolResultEvent, ToolStreamEvent
+from vibe.utils.tool_presentation import ToolEffectKind
 
 _MAX_LISTED_FILES = 10
 
@@ -107,9 +108,17 @@ class Skill(
     BaseTool[SkillArgs, SkillResult, SkillToolConfig, BaseToolState],
     ToolUIData[SkillArgs, SkillResult],
 ):
+    effect_kind = ToolEffectKind.SKILL
+
     @classmethod
     def format_call_display(cls, args: SkillArgs) -> ToolCallDisplay:
-        return ToolCallDisplay(summary=f"Loading skill: {args.name}")
+        return ToolCallDisplay(
+            summary=f"Loading skill: {args.name}",
+            verb="Loading",
+            message=f"skill: {args.name}",
+            settled_verb="Loaded",
+            settled_message=f"skill: {args.name}",
+        )
 
     @classmethod
     def get_result_display(cls, event: ToolResultEvent) -> ToolResultDisplay:
@@ -118,7 +127,7 @@ class Skill(
         if not isinstance(event.result, SkillResult):
             return ToolResultDisplay(success=True, message="Skill loaded")
         return ToolResultDisplay(
-            success=True, message=f"Loaded skill: {event.result.name}"
+            success=True, verb="Loaded", message=f"skill: {event.result.name}"
         )
 
     @classmethod
